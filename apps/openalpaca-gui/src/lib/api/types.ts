@@ -558,19 +558,114 @@ export interface AgentConfigResponse {
   config_version: number;
 }
 
-// ── Plugins / connectors / skills ───────────────────────────────────────────
+// ── Extensions / tools / connectors / skills ────────────────────────────────
 
-export interface PluginInfo {
-  name: string;
-  version: string;
-  status: string;
-  tools: string[];
-  connector: string | null;
-  provider: string | null;
-  models: string[];
+/** The two ENABLE-axis extension kinds (ADR-030 §1). */
+export type ExtensionKind = "mcp" | "plugin";
+
+/** `ExtensionState::word()` — reported literally, never as a target state. */
+export type ExtensionStateWord =
+  | "enabled"
+  | "disabled"
+  | "unapproved"
+  | "failed"
+  | "orphaned"
+  | "enabling"
+  | "disabling";
+
+/** `UnapprovedReason::word()` ∪ `FailureReason::word()` (ADR-030 §8). */
+export type ExtensionReason =
+  | "never_seen"
+  | "denied"
+  | "capabilities_grew"
+  | "needs_authorization"
+  | "needs_config"
+  | "config_invalid"
+  | "unreachable"
+  | "crashed";
+
+export type ExtensionConsent = "approved" | "pending" | "denied";
+
+/**
+ * What `plugin.toml` declares, read at scan — **static**, never a cache of
+ * runtime discovery (ADR-030 §8, X-19). It is what an `unapproved` row shows,
+ * because a plugin that has never run has no runtime `tools` to show.
+ */
+export interface DeclaredContributions {
+  capabilities: string[];
+  virtual_capabilities: string[];
+  /** `plugin.toml`'s `[types]` table, as declared. */
+  types: Record<string, boolean>;
 }
 
-export type PluginAction = "approve" | "deny" | "enable" | "disable";
+/** One row of `GET /v1/extensions` (ADR-030 §8). */
+export interface ExtensionRow {
+  kind: ExtensionKind;
+  id: string;
+  version: string | null;
+  /** MCP only — `stdio` | `streamable-http`. */
+  transport: string | null;
+  /**
+   * The **persisted disposition** — the toggle binds here, never to the state
+   * word. `null` on the two rows whose bit nobody can read (§4, §8): a plugin
+   * while `.permissions.toml` is unreadable, and the `config/mcp.toml`
+   * pseudo-record.
+   */
+  enabled: boolean | null;
+  /** Plugins only; `null` for MCP. */
+  consent: ExtensionConsent | null;
+  state: ExtensionStateWord;
+  reason: ExtensionReason | null;
+  /** `FailureReason::actionable()` — drives the tone and the CTA (§9.2). */
+  actionable: boolean;
+  detail: string | null;
+  hint: string | null;
+  missing_config_keys: string[];
+  /** `Unapproved{CapabilitiesGrew}` — the DELTA, not the whole list. */
+  added_capabilities: string[];
+  /** Live when `enabled`; empty otherwise — never a cache (§10). */
+  tools: string[];
+  skipped_tools: string[];
+  withdrawn_by_server: string[];
+  tools_changed_at: string | null;
+  declared: DeclaredContributions | null;
+  skills: string[];
+  agents: string[];
+  connector: string | null;
+  provider: string | null;
+  /** When the record entered its **current** state — every state, not just failed. */
+  since: string;
+  /** Present only on the verb that produced one (`disable` / `reload`). */
+  warnings?: string[];
+}
+
+export type ExtensionVerb =
+  "enable" | "disable" | "reload" | "approve" | "deny";
+
+/**
+ * Where an extension tool came from (`GET /v1/tools`). `null` for builtins and
+ * for `config/tools/*.toml` tools — a builtin row carries no enable field at
+ * all, because there is no per-tool enable state anywhere (S1, §8).
+ */
+export interface ToolOrigin {
+  kind: ExtensionKind;
+  id: string;
+  enabled: boolean;
+  state: ExtensionStateWord;
+}
+
+/** One row of `GET /v1/tools` (ADR-030 §8, GAP-18's tool half). */
+export interface ToolCatalogEntry {
+  name: string;
+  description: string;
+  source: "builtin" | "mcp" | "plugin" | "config";
+  origin: ToolOrigin | null;
+  provides_capabilities: string[];
+  requires_confirmation: boolean;
+  invocations_today: number;
+  version: string;
+  author: string;
+}
 
 /** `ConnectorStatus` — id/name/status/configured and nothing else (GAP-17). */
 export interface Connector {
@@ -582,7 +677,10 @@ export interface Connector {
 
 export type ConnectorAction = "enable" | "disable" | "delete";
 
-/** Health only — no name, description, `asks` badge, or enabled flag (GAP-18). */
+/**
+ * Health only — metrics keyed by `skill_id`, with no name and no description:
+ * `GET /v1/skills/health` is still the only skill route (GAP-18's skill half).
+ */
 export interface SkillHealthMetrics {
   skill_id: string;
   total_invocations: number;

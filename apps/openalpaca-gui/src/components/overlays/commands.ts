@@ -159,11 +159,11 @@ export function buildCommands(input: CommandCatalogInput): Command[] {
       run: input.toggleDense,
     },
     {
-      id: "go.settings.skills",
+      id: "go.settings.tools",
       group: "Go",
-      label: "Settings — skills & plugins",
+      label: "Settings — tools & extensions",
       shortcut: { key: ",", meta: true },
-      run: () => input.goSettingsSection("skills"),
+      run: () => input.goSettingsSection("tools"),
     },
   );
 

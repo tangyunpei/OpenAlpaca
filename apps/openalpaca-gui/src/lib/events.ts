@@ -1,13 +1,10 @@
 /**
  * WebSocket client for the daemon's `/v1/events` firehose (API_MAP §4.2).
  *
- * The `ServerEvent` union below is ported verbatim from the retired SvelteKit
- * client (`.daemon-legacy-reference.ts`), which tracks
- * `crates/openalpaca_api/src/events/mod.rs`. One quirk is preserved because
- * it is real: the six `plugin_*` variants carry no `ts`/`instance_id`
- * (GAP-22). `task_status.title` / `agent_status.name` used to arrive empty on
- * updates (GAP-07, closed) — the daemon now fills both at every producer
- * site, so the wire shape below was already correct and needed no change.
+ * The `ServerEvent` union below tracks `crates/openalpaca_api/src/events/mod.rs`.
+ * `task_status.title` / `agent_status.name` used to arrive empty on updates
+ * (GAP-07, closed) — the daemon now fills both at every producer site, so the
+ * wire shape below was already correct and needed no change.
  *
  * **The socket is best-effort.** On `RecvError::Lagged(n)` the server logs and
  * continues, so a slow client silently loses `n` events with no notification,
@@ -59,17 +56,13 @@ export type ServerEvent =
   | { type: "workflow_steered"; task_id: string; lane_key: string; ts: string; instance_id: string; _id: number }
   | { type: "workflow_progress"; task_id: string; lane_key: string; message: string; ts: string; instance_id: string; _id: number }
   | { type: "followup_queued"; lane_key: string; followup_id: number; kind: string; ts: string; instance_id: string; _id: number }
-  // The extension family (ADR-030). Unlike the six plugin variants below, every
-  // one of these carries `ts` and `instance_id`, so its rows are orderable.
+  // The extension family (ADR-030) — the only lifecycle events there are since
+  // C7 deleted the six `plugin_*` variants with `/v1/plugins*`. Every one of
+  // these carries `ts` and `instance_id`, which is what the deleted six lacked
+  // (the former GAP-22), so extension rows in the event log are orderable.
+  | { type: "extension_state_changed"; kind: string; id: string; state: string; generation: number; tools_changed: boolean; ts: string; instance_id: string; _id: number }
   | { type: "extension_capability_withheld"; kind: string; id: string; subject: string; moment: string; state: string; scope: string; stale: boolean; ts: string; instance_id: string; _id: number }
-  | { type: "extension_capability_withdrawn"; kind: string; id: string; state: string; cause: string; capabilities: string[]; tools: string[]; affected_templates: string[]; affected_skills: string[]; affected_cron_skills: string[]; notice_lane: string; ts: string; instance_id: string; _id: number }
-  // GAP-22: the six plugin variants carry neither `ts` nor `instance_id`.
-  | { type: "plugin_loaded"; plugin_id: string; tools: string[]; _id: number }
-  | { type: "plugin_unloaded"; plugin_id: string; _id: number }
-  | { type: "plugin_crashed"; plugin_id: string; error: string; restart_in_secs: number; _id: number }
-  | { type: "plugin_disabled"; plugin_id: string; reason: string; _id: number }
-  | { type: "plugin_pending_approval"; plugin_id: string; capabilities: string[]; _id: number }
-  | { type: "plugin_needs_config"; plugin_id: string; missing_keys: string[]; _id: number };
+  | { type: "extension_capability_withdrawn"; kind: string; id: string; state: string; cause: string; capabilities: string[]; tools: string[]; affected_templates: string[]; affected_skills: string[]; affected_cron_skills: string[]; notice_lane: string; ts: string; instance_id: string; _id: number };
 
 export type ServerEventType = ServerEvent["type"];
 

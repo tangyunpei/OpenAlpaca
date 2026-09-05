@@ -8,44 +8,6 @@
 #[cfg(test)]
 mod unit_tests {
     use crate::manager::*;
-    use openalpaca_core::tools::extensions::UnapprovedReason;
-
-    /// The legacy status vocabulary the plugins route and the GUI still parse
-    /// (design §4.3). C7 deletes this mapping with the route.
-    #[test]
-    fn the_legacy_status_shim_keeps_the_words_the_gui_parses() {
-        assert_eq!(legacy_status_word(&ExtensionState::Enabled), "running");
-        assert_eq!(legacy_status_word(&ExtensionState::Disabled), "disabled");
-        assert_eq!(legacy_status_word(&ExtensionState::Enabling), "loading");
-        assert_eq!(legacy_status_word(&ExtensionState::Disabling), "stopped");
-        for reason in [
-            UnapprovedReason::NeverSeen,
-            UnapprovedReason::Denied,
-            UnapprovedReason::CapabilitiesGrew {
-                added: vec!["fs_write".into()],
-            },
-        ] {
-            assert_eq!(
-                legacy_status_word(&ExtensionState::Unapproved { reason }),
-                "waiting-approval",
-                "every consent state renders as the one word the GUI knows"
-            );
-        }
-        let needs = ExtensionState::Failed {
-            reason: FailureReason::NeedsConfig {
-                missing: vec!["api_key".into(), "secret".into()],
-            },
-            detail: "missing configuration".into(),
-            since: chrono::Utc::now(),
-        };
-        assert_eq!(legacy_status_word(&needs), "needs-config (api_key, secret)");
-        let crashed = ExtensionState::Failed {
-            reason: FailureReason::Crashed,
-            detail: "segfault".into(),
-            since: chrono::Utc::now(),
-        };
-        assert_eq!(legacy_status_word(&crashed), "crashed: segfault");
-    }
 
     /// Design §10 case 5: a plugin skill can never carry a cron expression.
     ///
@@ -160,153 +122,6 @@ mod unit_tests {
     }
 }
 
-#[cfg(test)]
-mod event_sink_tests {
-    use crate::manager::*;
-    use openalpaca_core::tools::ToolRegistry;
-    use std::sync::Mutex as StdMutex;
-
-    /// Unconditional, not incidental: these tests write `.permissions.toml`
-    /// through `atomic_write_toml`, whose backup rotation resolves through
-    /// `OPENALPACA_HOME_STORE`. They happen to write a not-yet-existing file
-    /// exactly once each — the one case that rotates nothing — but a second
-    /// write in any of them would land a backup in the real `~/.openalpaca`.
-    use crate::permission_gate::tests::HomeStoreGuard;
-
-    /// Stub sink that records every emitted event.
-    fn recording_sink() -> (PluginEventSink, Arc<StdMutex<Vec<ServerEvent>>>) {
-        let events: Arc<StdMutex<Vec<ServerEvent>>> = Arc::new(StdMutex::new(Vec::new()));
-        let events_clone = Arc::clone(&events);
-        let sink: PluginEventSink = Arc::new(move |event| {
-            events_clone
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .push(event);
-        });
-        (sink, events)
-    }
-
-    fn write_manifest(plugin_dir: &Path, name: &str, extra: &str) {
-        std::fs::create_dir_all(plugin_dir).unwrap();
-        std::fs::write(
-            plugin_dir.join("plugin.toml"),
-            format!(
-                r#"
-[plugin]
-name = "{name}"
-version = "0.1.0"
-entry = "./nonexistent-entry"
-{extra}
-"#
-            ),
-        )
-        .unwrap();
-    }
-
-    fn manager_with_sink(root: &Path) -> (PluginManager, Arc<StdMutex<Vec<ServerEvent>>>) {
-        let (sink, events) = recording_sink();
-        let manager = PluginManager::new(
-            root.to_path_buf(),
-            Arc::new(ToolRegistry::new().unwrap()),
-            None,
-            None,
-        )
-        .with_event_sink(sink);
-        (manager, events)
-    }
-
-    /// The legacy producers keep firing until C7 (design §7.3).
-    #[tokio::test]
-    async fn emits_pending_approval_on_first_scan() {
-        let tmp = tempfile::tempdir().unwrap();
-        let _home = HomeStoreGuard::set(&tmp.path().join(".home"));
-        write_manifest(&tmp.path().join("my-plugin"), "my-plugin", "");
-
-        let (manager, events) = manager_with_sink(tmp.path());
-        manager.start().await.unwrap();
-
-        let recorded = events.lock().unwrap();
-        assert_eq!(recorded.len(), 1);
-        match &recorded[0] {
-            ServerEvent::PluginPendingApproval { plugin_id, .. } => {
-                assert_eq!(plugin_id, "my-plugin");
-            }
-            other => panic!("expected PluginPendingApproval, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn emits_needs_config_when_required_keys_missing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let _home = HomeStoreGuard::set(&tmp.path().join(".home"));
-        write_manifest(
-            &tmp.path().join("cfg-plugin"),
-            "cfg-plugin",
-            r#"
-[config.api_key]
-type = "secret"
-required = true
-"#,
-        );
-
-        let (manager, events) = manager_with_sink(tmp.path());
-        manager.permission_gate.approve("cfg-plugin", &[]).unwrap();
-        manager.start().await.unwrap();
-
-        let recorded = events.lock().unwrap();
-        assert_eq!(recorded.len(), 1);
-        match &recorded[0] {
-            ServerEvent::PluginNeedsConfig {
-                plugin_id,
-                missing_keys,
-            } => {
-                assert_eq!(plugin_id, "cfg-plugin");
-                assert_eq!(missing_keys, &vec!["api_key".to_string()]);
-            }
-            other => panic!("expected PluginNeedsConfig, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn emits_disabled_on_deny() {
-        let tmp = tempfile::tempdir().unwrap();
-        let _home = HomeStoreGuard::set(&tmp.path().join(".home"));
-        write_manifest(&tmp.path().join("deny-plugin"), "deny-plugin", "");
-
-        let (manager, events) = manager_with_sink(tmp.path());
-        manager.start().await.unwrap();
-        manager.deny_plugin("deny-plugin").await.unwrap();
-
-        let recorded = events.lock().unwrap();
-        let disabled = recorded.iter().find_map(|e| match e {
-            ServerEvent::PluginDisabled { plugin_id, reason } => {
-                Some((plugin_id.clone(), reason.clone()))
-            }
-            _ => None,
-        });
-        assert_eq!(
-            disabled,
-            Some(("deny-plugin".to_string(), "denied by user".to_string()))
-        );
-    }
-
-    #[tokio::test]
-    async fn no_sink_is_a_noop() {
-        let tmp = tempfile::tempdir().unwrap();
-        let _home = HomeStoreGuard::set(&tmp.path().join(".home"));
-        write_manifest(&tmp.path().join("silent-plugin"), "silent-plugin", "");
-
-        let manager = PluginManager::new(
-            tmp.path().to_path_buf(),
-            Arc::new(ToolRegistry::new().unwrap()),
-            None,
-            None,
-        );
-        // Must not panic without a sink attached.
-        manager.start().await.unwrap();
-    }
-}
-
 /// Supervisor tests that drive a real child process.
 ///
 /// The committed stub plugin at `tests/fixtures/echo-plugin/` is what makes
@@ -325,6 +140,15 @@ mod lifecycle_tests {
     /// whole crate, because both modules re-point `OPENALPACA_HOME_STORE` and a
     /// lock each would serialize only against itself.
     use crate::permission_gate::tests::HomeStoreGuard;
+
+    /// What one plugin has live on the supervisor's surfaces right now.
+    #[derive(Debug)]
+    struct Registered {
+        tools: Vec<String>,
+        skills: Vec<String>,
+        agents: Vec<String>,
+        models: Vec<String>,
+    }
 
     /// The committed stub: Content-Length-framed JSON-RPC over stdio, answers
     /// `tools/list` with one `echo` tool and every other method with an empty
@@ -471,13 +295,20 @@ mcp_compatible = true
             }
         }
 
-        async fn info(&self, name: &str) -> PluginInfo {
-            self.manager
-                .list_plugins()
-                .await
-                .into_iter()
-                .find(|p| p.name == name)
-                .unwrap_or_else(|| panic!("plugin '{name}' is not tracked"))
+        /// One plugin's **live** registrations, read straight from
+        /// `PluginState` — what E4 published, as distinct from the ledger's
+        /// retained (attribution) set, which survives a teardown on purpose.
+        async fn registered(&self, name: &str) -> Registered {
+            let plugins = self.manager.plugins.read().await;
+            let state = plugins
+                .get(name)
+                .unwrap_or_else(|| panic!("plugin '{name}' is not tracked"));
+            Registered {
+                tools: state.registered_tools.clone(),
+                skills: state.registered_skills.clone(),
+                agents: state.registered_agents.clone(),
+                models: state.registered_models.clone(),
+            }
         }
 
         /// The extension row, as `GET /v1/extensions` will read it.
@@ -569,7 +400,7 @@ mcp_compatible = true
             .status()
             .unwrap();
         for _ in 0..200 {
-            let _ = h.manager.list_plugins().await;
+            h.manager.sweep().await;
             if matches!(
                 h.state(name).await,
                 ExtensionState::Failed {
@@ -586,14 +417,14 @@ mcp_compatible = true
 
     /// Approve the stub and bring it up through the scan, asserting it came up
     /// running with its tool registered and its child alive.
-    async fn load_running_stub(h: &Harness, name: &str) -> PluginInfo {
+    async fn load_running_stub(h: &Harness, name: &str) -> Registered {
         load_running_stub_with_caps(h, name, &[]).await
     }
 
     /// The same, for a stub whose manifest declares `capabilities.provides`:
     /// consent has to be recorded against that list or E1's drift check parks
     /// it at `Unapproved{CapabilitiesGrew}` instead of loading it.
-    async fn load_running_stub_with_caps(h: &Harness, name: &str, caps: &[&str]) -> PluginInfo {
+    async fn load_running_stub_with_caps(h: &Harness, name: &str, caps: &[&str]) -> Registered {
         let caps: Vec<String> = caps.iter().map(|c| c.to_string()).collect();
         h.manager
             .permission_gate
@@ -601,11 +432,15 @@ mcp_compatible = true
             .expect("approve the stub");
         h.scan().await;
 
-        let info = h.info(name).await;
-        assert_eq!(info.status, "running", "stub plugin failed to start");
-        assert_eq!(info.tools, vec![format!("{name}::echo")]);
+        assert_eq!(
+            h.state(name).await,
+            ExtensionState::Enabled,
+            "stub plugin failed to start"
+        );
+        let registered = h.registered(name).await;
+        assert_eq!(registered.tools, vec![format!("{name}::echo")]);
         assert!(h.holds_process(name).await, "no child is held");
-        info
+        registered
     }
 
     fn ext(name: &str) -> ExtensionId {
@@ -645,10 +480,10 @@ mcp_compatible = true
         assert!(row.disposition.0, "deny cleared the owner's toggle");
 
         // Nothing of the plugin is left on any surface.
-        let info = h.info("echo-test").await;
-        assert!(info.tools.is_empty(), "tools survived deny: {:?}", info.tools);
-        assert!(info.skills.is_empty(), "skills survived deny");
-        assert!(info.agents.is_empty(), "agents survived deny");
+        let live = h.registered("echo-test").await;
+        assert!(live.tools.is_empty(), "tools survived deny: {:?}", live.tools);
+        assert!(live.skills.is_empty(), "skills survived deny");
+        assert!(live.agents.is_empty(), "agents survived deny");
         assert!(!h.has_tool("echo-test::echo"), "the tool is still registered");
         assert!(h.skills.get("echo-test").is_none(), "skill still catalogued");
         assert!(
@@ -956,7 +791,10 @@ mcp_compatible = true
             h.skills.get_by_command("Mixed").is_some(),
             "the mixed-case skill is unreachable by /slash"
         );
-        assert_eq!(h.info("echo-test").await.skills, vec!["mixedcase".to_string()]);
+        assert_eq!(
+            h.registered("echo-test").await.skills,
+            vec!["mixedcase".to_string()]
+        );
 
         h.manager.disable(&ext("echo-test")).await.unwrap();
         assert!(
@@ -1443,7 +1281,7 @@ mcp_compatible = true
         assert!(row.connector.is_some(), "the stub declared a connector");
         assert_eq!(row.provider.as_deref(), Some("echo-provider"));
         assert_eq!(
-            h.info("echo-test").await.models,
+            h.registered("echo-test").await.models,
             vec!["echo-small".to_string(), "echo-large".to_string()],
             "the load recorded no models to withdraw"
         );
@@ -1455,7 +1293,7 @@ mcp_compatible = true
         assert_eq!(row.connector, None, "a disabled row still names a connector");
         assert_eq!(row.provider, None, "a disabled row still names a provider");
         assert!(
-            h.info("echo-test").await.models.is_empty(),
+            h.registered("echo-test").await.models.is_empty(),
             "a disabled plugin's provider models are still registered"
         );
     }
@@ -1629,22 +1467,32 @@ mcp_compatible = true
         assert!(row.warnings.is_empty(), "a clean drain reported stragglers");
     }
 
-    /// **`/v1/plugins` still serialises `running`/`disabled`/`waiting-approval`**
-    /// (design §4.3) — the shim that keeps the GUI panel working until C7.
+    /// The three states one plugin walks through, read as `ExtensionState`.
+    ///
+    /// This was `the_legacy_route_still_reads_the_words_it_always_did`, which
+    /// asserted the `running`/`waiting-approval`/`disabled` vocabulary of
+    /// `GET /v1/plugins`. C7 deleted that route and its shim; the sequence is
+    /// still worth pinning, so it now reads the ledger's own words (design
+    /// §4.3).
     #[tokio::test]
-    async fn the_legacy_route_still_reads_the_words_it_always_did() {
+    async fn one_plugin_walks_unapproved_then_enabled_then_disabled() {
         let tmp = tempfile::tempdir().unwrap();
         install_stub_plugin(tmp.path(), "echo-test", "[types]\ntools = true\n");
         let h = Harness::new(tmp.path());
 
         h.scan().await;
-        assert_eq!(h.info("echo-test").await.status, "waiting-approval");
+        assert_eq!(
+            h.state("echo-test").await,
+            ExtensionState::Unapproved {
+                reason: UnapprovedReason::NeverSeen
+            }
+        );
 
         h.manager.approve_plugin("echo-test").await.unwrap();
-        assert_eq!(h.info("echo-test").await.status, "running");
+        assert_eq!(h.state("echo-test").await, ExtensionState::Enabled);
 
         h.manager.disable(&ext("echo-test")).await.unwrap();
-        assert_eq!(h.info("echo-test").await.status, "disabled");
+        assert_eq!(h.state("echo-test").await, ExtensionState::Disabled);
     }
 
     /// **A sensitive config key never appears in `.config/<name>.toml` and is

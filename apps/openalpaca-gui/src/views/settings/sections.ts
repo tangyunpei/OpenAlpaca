@@ -7,14 +7,18 @@
  * speaking JSON-RPC 2.0 over stdio (CLAUDE.md, `crates/openalpaca_plugins`) —
  * there is no WASM anywhere in the system. Shipping that sentence would teach
  * the user something false about their own machine.
+ *
+ * Two ids changed with ADR-030 §9.1 and still count eight: `skills` → `tools`
+ * (the design's "Skills" rows are tools) and `plugins` → `extensions` (MCP
+ * servers and plugins are one list under one ENABLE axis).
  */
 
 export const SETTINGS_SECTION_IDS = [
   "connection",
   "models",
   "connectors",
-  "skills",
-  "plugins",
+  "tools",
+  "extensions",
   "agents",
   "conversations",
   "events",
@@ -50,17 +54,23 @@ export const SETTINGS_SECTIONS: readonly SettingsSectionMeta[] = [
     add: "Connect service",
   },
   {
-    id: "skills",
-    label: "Skills",
+    id: "tools",
+    label: "Tools",
+    // The design calls these rows "Skills"; they are tools (ADR-030 §9.1,
+    // API_MAP §2.4) and `GET /v1/tools` is what serves them. Skill *health*
+    // keeps a subsection inside this one.
     blurb: "Capabilities the agents can invoke, and whether each asks first.",
   },
   {
-    id: "plugins",
-    label: "Plugins",
-    // Corrected from the design's "Loaded WASM plugins …" — see the file note.
+    id: "extensions",
+    label: "Extensions",
+    // Corrected from the design's "Loaded WASM plugins …" — see the file note —
+    // and widened from plugins alone to the whole ENABLE axis: MCP servers and
+    // plugins are one list, because they carry the same one-bit toggle
+    // (ADR-030 §1, §9.2).
     blurb:
-      "Out-of-process plugins the daemon speaks JSON-RPC to, and what each contributes.",
-    add: "Install plugin",
+      "MCP servers and out-of-process plugins the daemon speaks JSON-RPC to, and what each contributes.",
+    add: "Add extension",
   },
   {
     id: "agents",

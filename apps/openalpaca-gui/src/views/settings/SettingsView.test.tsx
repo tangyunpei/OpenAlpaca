@@ -5,12 +5,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useUiStore } from "@/stores/ui";
 
 import SettingsView from "./SettingsView";
+import { extensionRow } from "./extension-fixture";
 
 /**
  * Every server-backed hook is mocked so the sections render against a known
- * payload; the *unbacked* hooks (`useDaemonStatusDetail`, `useToolCatalog`,
- * `usePluginInstall`) stay real, because their unavailable branches are exactly
- * what these tests are checking.
+ * payload; the *unbacked* hooks (`useDaemonStatusDetail`, `useExtensionInstall`)
+ * stay real, because their unavailable branches are exactly what these tests
+ * are checking.
  */
 const query = (data: unknown) => ({ data, isPending: false, error: null });
 const mutation = () => ({ mutate: vi.fn(), isPending: false });
@@ -108,6 +109,31 @@ vi.mock("@/hooks/useConnectors", async (importOriginal) => ({
 
 vi.mock("@/hooks/useSkills", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/hooks/useSkills")>()),
+  useTools: () =>
+    query([
+      {
+        name: "shell_execute",
+        description: "Runs a shell command.",
+        source: "builtin",
+        origin: null,
+        provides_capabilities: ["shell_execute"],
+        requires_confirmation: true,
+        invocations_today: 4,
+        version: "1.0.0",
+        author: "builtin",
+      },
+      {
+        name: "github__create_issue",
+        description: "Opens an issue.",
+        source: "mcp",
+        origin: { kind: "mcp", id: "github", enabled: true, state: "enabled" },
+        provides_capabilities: ["github__create_issue"],
+        requires_confirmation: false,
+        invocations_today: 12,
+        version: "1.4.0",
+        author: "mcp:github",
+      },
+    ]),
   useSkillHealth: () =>
     query([
       {
@@ -129,30 +155,37 @@ vi.mock("@/hooks/useSkills", async (importOriginal) => ({
     ]),
 }));
 
-vi.mock("@/hooks/usePlugins", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/hooks/usePlugins")>()),
-  usePlugins: () =>
+vi.mock("@/hooks/useExtensions", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/hooks/useExtensions")>()),
+  useExtensions: () =>
     query([
-      {
-        name: "notion",
+      extensionRow({
+        kind: "plugin",
+        id: "notion",
         version: "0.2.0",
-        status: "running",
-        tools: ["notion_search"],
-        connector: null,
-        provider: null,
-        models: [],
-      },
-      {
-        name: "risky",
+        state: "enabled",
+        enabled: true,
+        consent: "approved",
+        tools: ["notion::search"],
+      }),
+      extensionRow({
+        kind: "plugin",
+        id: "risky",
         version: "0.1.0",
-        status: "waiting-approval",
-        tools: [],
-        connector: null,
-        provider: null,
-        models: [],
-      },
+        state: "unapproved",
+        reason: "never_seen",
+        enabled: true,
+        consent: "pending",
+        declared: {
+          capabilities: ["fs_write"],
+          virtual_capabilities: [],
+          types: { tool: true },
+        },
+      }),
     ]),
-  usePluginAction: () => mutation(),
+  useExtensionVerb: () => mutation(),
+  useRemoveExtension: () => mutation(),
+  useSetExtensionConfig: () => mutation(),
 }));
 
 vi.mock("@/hooks/useAgents", async (importOriginal) => ({
@@ -230,7 +263,8 @@ describe("SettingsView (§2.5, §5.4)", () => {
     const nav = screen.getByRole("navigation", { name: "Settings sections" });
     expect(nav).toHaveTextContent("Connection");
     expect(nav).toHaveTextContent("Models & keys1");
-    expect(nav).toHaveTextContent("Plugins2");
+    expect(nav).toHaveTextContent("Extensions2");
+    expect(nav).toHaveTextContent("Tools2");
     // Connection and Event log have no count in the design.
     expect(
       screen.getByRole("button", { name: "Connection" }),
@@ -263,24 +297,27 @@ describe("SettingsView (§2.5, §5.4)", () => {
     ).toBeInTheDocument();
   });
 
-  it("uses accurate plugin copy and the daemon's own status words", async () => {
+  it("uses accurate extension copy and gates consent instead of drawing a switch", async () => {
     render(<SettingsView />);
-    await open("Plugins");
+    await open("Extensions");
     expect(screen.queryByText(/WASM/i)).toBeNull();
     expect(screen.getByText(/JSON-RPC/)).toBeInTheDocument();
-    // `running` gets a switch; `waiting-approval` gets the approval gate.
+    // `enabled` gets a switch; `unapproved` gets the approval gate, because a
+    // switch would misrepresent it (§9.2).
     expect(screen.getByRole("switch", { name: "Enable notion" })).toBeEnabled();
+    expect(screen.queryByRole("switch", { name: "Enable risky" })).toBeNull();
     expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Deny" })).toBeInTheDocument();
   });
 
-  it("shows the skill health the daemon serves and names the missing catalog", async () => {
+  it("shows the tool catalog, the skill health, and the skill listing still missing", async () => {
     render(<SettingsView />);
-    await open("Skills");
+    await open("Tools");
+    expect(screen.getByText("shell_execute")).toBeInTheDocument();
     expect(screen.getByText("connector_audit")).toBeInTheDocument();
     expect(
-      screen.getByText(/Tool and skill catalog not yet available/),
-    ).toHaveTextContent("GET /v1/tools");
+      screen.getByText(/Skill catalog not yet available/),
+    ).toHaveTextContent("GET /v1/skills");
   });
 
   it("renders conversations with their compaction state", async () => {

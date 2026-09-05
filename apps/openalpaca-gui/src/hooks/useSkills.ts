@@ -1,20 +1,21 @@
 /**
- * Settings → Skills.
+ * Settings → Tools.
  *
- * `GET /v1/skills/health` is the only skill route that exists, and it returns
- * metrics keyed by `skill_id` with no name, description, `asks` badge, or
- * enabled flag. The rows the design draws are really *tools*, and no tool
- * listing is exposed at all — so the catalog side is `Unavailable` (GAP-18)
- * and the health side is real.
+ * `GET /v1/tools` is the tool catalog (ADR-030 §8) — name, description,
+ * `origin`, `requires_confirmation`, `invocations_today`. There is no per-tool
+ * enable state to read, because none exists (S1).
+ *
+ * `GET /v1/skills/health` is still the only *skill* route: metrics keyed by
+ * `skill_id`, with no name and no description (GAP-18's remaining half), which
+ * is why the health rows read as ids.
  */
 
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 
 import { getSkillHealth } from "@/lib/api/skills";
-import { listToolCatalog, type ToolCatalogEntry } from "@/lib/api/unbacked";
-import type { SkillHealthMetrics } from "@/lib/api/types";
+import { listTools } from "@/lib/api/tools";
+import type { SkillHealthMetrics, ToolCatalogEntry } from "@/lib/api/types";
 import { qk } from "@/lib/query-keys";
-import type { Availability } from "@/lib/unavailable";
 
 export function useSkillHealth(): UseQueryResult<SkillHealthMetrics[]> {
   return useQuery({
@@ -23,7 +24,9 @@ export function useSkillHealth(): UseQueryResult<SkillHealthMetrics[]> {
   });
 }
 
-/** GAP-18 — no `/v1/tools`, no `/v1/skills` catalog. */
-export function useToolCatalog(): Availability<ToolCatalogEntry[]> {
-  return listToolCatalog();
+export function useTools(): UseQueryResult<ToolCatalogEntry[]> {
+  return useQuery({
+    queryKey: qk.tools.list(),
+    queryFn: ({ signal }) => listTools(signal),
+  });
 }

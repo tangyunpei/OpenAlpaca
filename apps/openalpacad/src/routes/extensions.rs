@@ -457,7 +457,6 @@ pub(crate) fn toml_to_json(v: &toml::Value) -> serde_json::Value {
     }
 }
 
-/// Shared with the legacy `POST /v1/plugins/{name}/config` until C7 deletes it.
 pub(crate) fn json_to_toml(v: &serde_json::Value) -> toml::Value {
     match v {
         serde_json::Value::String(s) => toml::Value::String(s.clone()),

@@ -4,9 +4,6 @@
 //! keep their names but their meanings are now the design's: `enable` no longer
 //! records consent and `deny` performs a full unload. `openalpaca ext` is the
 //! surface that also covers MCP; this one stays as the plugin-shaped shortcut.
-//!
-//! The legacy `/v1/plugins*` routes still exist for the GUI until C7 — nothing
-//! here calls them.
 
 use anyhow::Result;
 use clap::{Args, Subcommand};

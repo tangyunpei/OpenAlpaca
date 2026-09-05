@@ -8,8 +8,8 @@ describe("Settings sections (§5.4)", () => {
       "Connection",
       "Models & keys",
       "Connectors",
-      "Skills",
-      "Plugins",
+      "Tools",
+      "Extensions",
       "Agents",
       "Conversations",
       "Event log",
@@ -26,7 +26,7 @@ describe("Settings sections (§5.4)", () => {
     expect(sectionMeta("connectors").blurb).toBe(
       "External services the agents may read and write.",
     );
-    expect(sectionMeta("skills").blurb).toBe(
+    expect(sectionMeta("tools").blurb).toBe(
       "Capabilities the agents can invoke, and whether each asks first.",
     );
     expect(sectionMeta("agents").blurb).toBe(
@@ -41,21 +41,28 @@ describe("Settings sections (§5.4)", () => {
   });
 
   it("corrects the one factually wrong blurb — plugins are not WASM", () => {
-    const blurb = sectionMeta("plugins").blurb;
+    const blurb = sectionMeta("extensions").blurb;
     expect(blurb).not.toMatch(/wasm/i);
     expect(blurb).toMatch(/JSON-RPC/);
   });
 
-  it("only Models, Connectors and Plugins carry an add action", () => {
+  // ADR-030 §9.2: MCP servers and plugins are one list under one ENABLE axis.
+  it("says the Extensions section covers MCP servers too", () => {
+    expect(sectionMeta("extensions").blurb).toMatch(/MCP/);
+  });
+
+  it("only Models, Connectors and Extensions carry an add action", () => {
     expect(
       SETTINGS_SECTIONS.filter((section) => section.add !== undefined).map(
         (section) => section.add,
       ),
-    ).toEqual(["Add provider", "Connect service", "Install plugin"]);
+    ).toEqual(["Add provider", "Connect service", "Add extension"]);
   });
 
   it("falls back to Connection for an unknown persisted section id", () => {
-    expect(toSectionId("plugins")).toBe("plugins");
+    expect(toSectionId("extensions")).toBe("extensions");
+    // The two ids C7 renamed are unknown now, and degrade rather than throw.
+    expect(toSectionId("plugins")).toBe("connection");
     expect(toSectionId("nonsense")).toBe("connection");
   });
 });

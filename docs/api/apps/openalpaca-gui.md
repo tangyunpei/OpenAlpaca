@@ -32,7 +32,7 @@
 
 - WebSocket client source: `apps/openalpaca-gui/src/lib/events.ts`.
 - Parsed `ServerEvent` discriminators:
-- `agent_config_changed`, `agent_status`, `chat_stream_ended`, `chat_stream_started`, `circuit_breaker_tripped`, `command_received`, `connector_status`, `daemon_config_changed`, `dag_node_status`, `extension_capability_withdrawn`, `extension_capability_withheld`, `followup_queued`, `heartbeat`, `key_status_changed`, `llm_call_completed`, `orchestrator_config_changed`, `plugin_crashed`, `plugin_disabled`, `plugin_loaded`, `plugin_needs_config`, `plugin_pending_approval`, `plugin_unloaded`, `security_violation`, `skill_catalog_updated`, `skill_completed`, `skill_failed`, `skill_invocation_started`, `soul_updated`, `task_status`, `tool_confirmation_requested`, `tool_executed`, `wake`, `workflow_progress`, `workflow_started`, `workflow_steered`
+- `agent_config_changed`, `agent_status`, `chat_stream_ended`, `chat_stream_started`, `circuit_breaker_tripped`, `command_received`, `connector_status`, `daemon_config_changed`, `dag_node_status`, `extension_capability_withdrawn`, `extension_capability_withheld`, `extension_state_changed`, `followup_queued`, `heartbeat`, `key_status_changed`, `llm_call_completed`, `orchestrator_config_changed`, `security_violation`, `skill_catalog_updated`, `skill_completed`, `skill_failed`, `skill_invocation_started`, `soul_updated`, `task_status`, `tool_confirmation_requested`, `tool_executed`, `wake`, `workflow_progress`, `workflow_started`, `workflow_steered`
 
 ## Related Links
 
@@ -70,6 +70,12 @@
 - Exported functions: `getConversationMessages`, `listConversations`
 - Endpoints: none
 
+### `extensions.ts`
+
+- Source: `apps/openalpaca-gui/src/lib/api/extensions.ts`
+- Exported functions: `listExtensions`, `removeExtension`, `runExtensionVerb`, `setExtensionConfig`
+- Endpoints: none
+
 ### `files.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/files.ts`
@@ -80,12 +86,6 @@
 
 - Source: `apps/openalpaca-gui/src/lib/api/orchestrator.ts`
 - Exported functions: `getDispatchDecisions`, `getLatencyAggregates`, `getLatencyRecords`, `getOrchestratorConfig`, `updateOrchestratorConfig`
-- Endpoints: none
-
-### `plugins.ts`
-
-- Source: `apps/openalpaca-gui/src/lib/api/plugins.ts`
-- Exported functions: `listPlugins`, `performPluginAction`, `setPluginConfig`
 - Endpoints: none
 
 ### `settings.ts`
@@ -110,6 +110,12 @@
 
 - Source: `apps/openalpaca-gui/src/lib/api/telemetry.ts`
 - Exported functions: `getEventHistory`, `getHealth`
+- Endpoints: none
+
+### `tools.ts`
+
+- Source: `apps/openalpaca-gui/src/lib/api/tools.ts`
+- Exported functions: `listTools`
 - Endpoints: none
 
 ### `types.ts`

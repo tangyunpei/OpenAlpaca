@@ -12,7 +12,7 @@ pub use bridge::PluginLlmProvider;
 pub use bridge::PluginSkillBridge;
 pub use bridge::PluginToolProxy;
 pub use error::PluginError;
-pub use manager::{PluginEventSink, PluginInfo, PluginManager, SecretStorage, legacy_status_word};
+pub use manager::{PluginManager, SecretStorage};
 pub use manifest::PluginManifest;
 pub use permission_gate::{PermissionGate, PermissionTable, SecretReference};
 pub use process_pool::PluginProcess;

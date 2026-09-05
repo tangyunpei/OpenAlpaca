@@ -46,7 +46,7 @@ function seeded(): QueryClient {
     defaultOptions: { queries: { retry: false, gcTime: Infinity } },
   });
   client.setQueryData(qk.tasks.list({ status: "active" }), []);
-  client.setQueryData(qk.plugins.list(), []);
+  client.setQueryData(qk.extensions.list(), []);
   return client;
 }
 
@@ -85,7 +85,7 @@ describe("QueryProvider", () => {
     });
 
     expect(invalidated(client, qk.tasks.list({ status: "active" }))).toBe(true);
-    expect(invalidated(client, qk.plugins.list())).toBe(false);
+    expect(invalidated(client, qk.extensions.list())).toBe(false);
   });
 
   it("refetches everything on the possibly-missed-events signal", () => {
@@ -100,7 +100,7 @@ describe("QueryProvider", () => {
     captured.resync?.({ reason: "reconnected", offlineMs: 4200 });
 
     expect(invalidated(client, qk.tasks.list({ status: "active" }))).toBe(true);
-    expect(invalidated(client, qk.plugins.list())).toBe(true);
+    expect(invalidated(client, qk.extensions.list())).toBe(true);
   });
 
   it("unsubscribes and closes the socket on unmount", () => {

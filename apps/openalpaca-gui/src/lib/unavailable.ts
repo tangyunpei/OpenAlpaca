@@ -31,11 +31,10 @@ export type GapId =
   | "GAP-15"
   | "GAP-17"
   | "GAP-18"
-  | "GAP-19"
   | "GAP-20"
   | "GAP-21"
-  | "GAP-22"
-  | "GAP-23";
+  | "GAP-23"
+  | "GAP-24";
 
 export type GapFixSize = "XS" | "S" | "S–M" | "M" | "L";
 
@@ -188,22 +187,17 @@ export const GAPS: Record<GapId, GapDescriptor> = {
     blocks: "Call counts, the `unwired` badge, Connect service",
     fixSize: "M",
   },
+  // The tool half closed with `GET /v1/tools` (ADR-030 §8): the Settings →
+  // Tools rows are real, and `enabled` is struck from the claim entirely —
+  // that field is derived from the extension row and does not exist per tool.
+  // The skill half is still open, which is why the health rows read as ids.
   "GAP-18": {
     id: "GAP-18",
-    label: "Tool and skill catalog",
+    label: "Skill catalog",
     missingApi:
-      "neither the tool registry nor the skill catalog has an HTTP listing",
-    proposedEndpoint: "GET /v1/tools and GET /v1/skills",
-    blocks: "The Settings → Skills rows (name, description, asks, enabled)",
-    fixSize: "M",
-  },
-  "GAP-19": {
-    id: "GAP-19",
-    label: "Plugin install",
-    missingApi:
-      "no install route; plugins are dropped into the plugins dir by hand",
-    proposedEndpoint: "POST /v1/plugins/install { source, path }",
-    blocks: "Install plugin",
+      "GET /v1/skills/health is the only skill route — no listing carries a skill's name, description or triggers",
+    proposedEndpoint: "GET /v1/skills",
+    blocks: "Naming a skill in Settings → Tools; the health rows show ids",
     fixSize: "M",
   },
   "GAP-20": {
@@ -224,21 +218,29 @@ export const GAPS: Record<GapId, GapDescriptor> = {
     blocks: "Renaming or removing a stored lane",
     fixSize: "S",
   },
-  "GAP-22": {
-    id: "GAP-22",
-    label: "Timestamps on plugin events",
-    missingApi: "six plugin_* ServerEvent variants carry no ts or instance_id",
-    proposedEndpoint: "add ts and instance_id to the six plugin variants",
-    blocks: "Ordering plugin rows in the event log",
-    fixSize: "XS",
-    noteOverride: "Plugin events arrive without a timestamp",
-  },
+  // GAP-22 (the six `plugin_*` variants carrying no `ts`/`instance_id`) is
+  // closed: C7 deleted those variants with `/v1/plugins*`, and the extension
+  // family that replaced them carries both on every frame (ADR-030 §7.3).
   "GAP-23": {
     id: "GAP-23",
     label: "Message → run links",
     missingApi: "ConversationMessage has no task_id and no artifact refs",
     proposedEndpoint: "add task_id and artifact_ids to ConversationMessage",
     blocks: "Rebuilding run-report and artifact cards after a reload",
+    fixSize: "M",
+  },
+  // Was GAP-19 ("plugin install"), widened to both extension kinds: the same
+  // mechanism is missing for an MCP server, which had no gap id at all
+  // (ADR-030 §9.1). `DELETE /v1/extensions/plugin/{id}` removes an orphan's
+  // permissions entry — it is not an uninstall and never touches a directory.
+  "GAP-24": {
+    id: "GAP-24",
+    label: "Extension install / uninstall",
+    missingApi:
+      "no install or uninstall route for either kind; a plugin is a directory copied into the plugins root, an MCP server a hand-written [servers.<name>] block",
+    proposedEndpoint:
+      "POST /v1/extensions/{kind} { source } and DELETE /v1/extensions/{kind}/{id}?uninstall=true",
+    blocks: "Add extension; removing an installed plugin or MCP server",
     fixSize: "M",
   },
 };

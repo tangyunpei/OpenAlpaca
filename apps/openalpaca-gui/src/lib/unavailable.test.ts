@@ -19,10 +19,24 @@ describe("gap registry", () => {
     }
   });
 
-  it("covers the 20 gaps still open from API_MAP §3 (GAP-01/07/08a/08b/16 retired in Phase 0)", () => {
-    expect(listGaps()).toHaveLength(20);
+  // GAP-01/07/08a/08b/16 retired in Phase 0; GAP-19 became GAP-24 (widened to
+  // both extension kinds) and GAP-22 closed with the six `plugin_*` variants
+  // C7 deleted — the family that replaced them carries `ts`/`instance_id`.
+  it("covers the 19 gaps still open from API_MAP §3", () => {
+    expect(listGaps()).toHaveLength(19);
     expect(listGaps()[0]?.id).toBe("GAP-02");
-    expect(listGaps().at(-1)?.id).toBe("GAP-23");
+    expect(listGaps().at(-1)?.id).toBe("GAP-24");
+    expect(listGaps().map((gap) => gap.id)).not.toContain("GAP-19");
+    expect(listGaps().map((gap) => gap.id)).not.toContain("GAP-22");
+  });
+
+  // §9.1: the tool half is served by `GET /v1/tools`; the `enabled` half of
+  // the claim is struck, because that field is derived from the extension row
+  // and does not exist per tool.
+  it("keeps only the skill half of GAP-18, with no claim about `enabled`", () => {
+    expect(GAPS["GAP-18"].proposedEndpoint).toBe("GET /v1/skills");
+    expect(GAPS["GAP-18"].missingApi).not.toMatch(/tool registry/);
+    expect(GAPS["GAP-18"].blocks).not.toMatch(/enabled/);
   });
 });
 

@@ -1562,8 +1562,8 @@ Left section nav (220px) + a 660px-max body. Eight sections, each with a label, 
 | **Connection**    | —     | Two `StatusCard`s (daemon status grid; today's spend/runs/tokens + progress bar) | —                 |
 | **Models & keys** | 3     | `ListCard` with model chips per provider                                         | `Add provider`    |
 | **Connectors**    | 4     | `ListCard`                                                                       | `Connect service` |
-| **Skills**        | 6     | `ListCard`                                                                       | —                 |
-| **Plugins**       | 2     | `ListCard`                                                                       | `Install plugin`  |
+| **Tools**         | 6     | `ListCard` (+ a `Skill health` sub-card)                                         | —                 |
+| **Extensions**    | 2     | `ListCard`                                                                       | `Add extension`   |
 | **Agents**        | 6     | `ListCard`                                                                       | —                 |
 | **Conversations** | 9     | `ListCard`                                                                       | —                 |
 | **Event log**     | —     | `ListCard` of mono log rows, newest first                                        | —                 |
@@ -1573,8 +1573,8 @@ Blurbs (verbatim from the design — reuse them):
 - Connection: "Daemon status, endpoint and today's spend against the cap."
 - Models & keys: "Providers the router can reach, in priority order. Pick a model to make it the chat default."
 - Connectors: "External services the agents may read and write."
-- Skills: "Capabilities the agents can invoke, and whether each asks first."
-- Plugins: "Loaded WASM plugins and what each contributes." _(the real system uses out-of-process JSON-RPC plugins, not WASM — correct this copy)_
+- Tools: "Capabilities the agents can invoke, and whether each asks first." _(the design calls this section "Skills"; its rows are **tools** — ADR-030 §9.1, and `GET /v1/tools` is what serves them)_
+- Extensions: "Loaded WASM plugins and what each contributes." _(two corrections: the real system uses out-of-process JSON-RPC plugins, not WASM; and the section covers **MCP servers and plugins together**, because both carry the same one-bit ENABLE toggle — ADR-030 §1, §9.2. Shipped copy: "MCP servers and out-of-process plugins the daemon speaks JSON-RPC to, and what each contributes.")_
 - Agents: "Templates the orchestrator spawns from."
 - Conversations: "Stored lanes. Memory compaction runs weekly."
 - Event log: "Everything the daemon emitted, newest first."
@@ -1639,8 +1639,8 @@ Preserve the existing connection plumbing conceptually (see `apps/openalpaca-gui
 | Steer pill on a user message; `workflow_steered` | WS `workflow_steered`                                                                                                                                                                  |
 | `follow-up →` composer mode                      | WS `followup_queued`                                                                                                                                                                   |
 | Event log rows (`tag`)                           | `tool` ← `tool_executed`/`tool_confirmation_requested`; `spawn` ← `agent_status`; `artifact` ← artifact writes; `steer` ← `workflow_steered`; `run` ← `task_status`/`workflow_started` |
-| Settings → Skills                                | `skill_catalog_updated`, `skill_invocation_started/completed/failed`                                                                                                                   |
-| Settings → Plugins                               | `plugin_loaded/unloaded/crashed/disabled/pending_approval/needs_config`                                                                                                                |
+| Settings → Tools                                 | `skill_catalog_updated`, `skill_invocation_started/completed/failed`; `extension_state_changed` (a tool's `origin` moves with its extension)                                           |
+| Settings → Extensions                            | `extension_state_changed`, `extension_capability_withheld`, `extension_capability_withdrawn` — the six `plugin_*` variants were deleted with `/v1/plugins*` (ADR-030 §7.3, §9.5)       |
 | Settings → Models & keys                         | `llm_call_completed` (token/cost meters), `key_status_changed`                                                                                                                         |
 | `spend` in the composer hint + Settings "Today"  | aggregate of `llm_call_completed.cost_usd`                                                                                                                                             |
 | `heartbeat`                                      | connection liveness only; not surfaced                                                                                                                                                 |

@@ -192,47 +192,47 @@ The whole view has **no backing API**. The design's `ARTS[]` fixture shape is:
 
 ### 2.4 Settings view
 
-| Section                                                                       | Endpoint(s)                                                                                                                                                                                                                                                                                                        | Notes                                                                                                                                                                                                                                            |
-| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Connection** — `Daemon connected`                                           | ✅ `GET /v1/health` → `{ status, version, pid, instance_id }`                                                                                                                                                                                                                                                      |                                                                                                                                                                                                                                                  |
-| `uptime 4d 02h`                                                               | ⚠️ derivable client-side from `discovery.json.started_at` via the Tauri command; **not** on `/v1/health` — **GAP-14**                                                                                                                                                                                              |
-| `Instance 7f3a91c4`                                                           | ✅ `health.instance_id` / `ConnectionInfo.instanceId`                                                                                                                                                                                                                                                              |                                                                                                                                                                                                                                                  |
-| `Endpoint 127.0.0.1:51823`                                                    | ✅ `ConnectionInfo.baseUrl`                                                                                                                                                                                                                                                                                        |                                                                                                                                                                                                                                                  |
-| `Schema v33`                                                                  | ❌ **GAP-14** — migration count is compile-time only (`crates/openalpaca_storage/src/migrations/`, currently 034)                                                                                                                                                                                                  |
-| `Reconnect`                                                                   | ✅ client-side (re-invoke `ensure_daemon_running`, reopen WS)                                                                                                                                                                                                                                                      |                                                                                                                                                                                                                                                  |
-| `Copy log path`                                                               | ❌ **GAP-14** — no route or Tauri command returns the daemon log path                                                                                                                                                                                                                                              |
-| `Today: {{ spend }} of $5.00 cap · 15 runs · 41k tokens`                      | ⚠️ spend from `GET /v1/orchestrator/config.daily_cost_usd` (GAP-08a, resolved `7dbb988`); tokens from `GET /v1/llm/usage/daily?date=` summed client-side (no other source); run count from `GET /v1/tasks?limit=…` filtered client-side; **the cap is not served, by design — no daily budget (N4)** — **GAP-08c** |
-| **Models & keys** — provider rows                                             | ✅ `GET /v1/settings/llm` (full `LlmConfig`), `GET /v1/settings/llm/status` (`key_health()`), `GET /v1/settings/llm/providers/usage` → `ProviderUsageSummary[] { provider, total_cost_usd, total_tokens, total_requests, health, external_usage? }`                                                                | ⚠️ `health` is hardcoded `"healthy"` in `get_provider_usage`                                                                                                                                                                                     |
-| model chips per provider                                                      | ✅ `GET /v1/models`, `POST /v1/models/refresh`                                                                                                                                                                                                                                                                     |                                                                                                                                                                                                                                                  |
-| `key added 12 Jul`                                                            | ⚠️ present inside the `GET /v1/settings/llm` config payload; verify the field survives redaction before relying on it                                                                                                                                                                                              |
-| `41k tok today` per provider                                                  | ⚠️ `ProviderUsageSummary.total_tokens` is **lifetime**, not today; per-day-per-provider requires client math over `/v1/llm/usage?limit=` (`LlmCallLog { timestamp, agent_id, task_id, provider, model, key_id, input_tokens, output_tokens, cost_usd, status, latency_ms, error_message }`) — **GAP-08c**          |
-| `Add provider` / key CRUD                                                     | ✅ `PUT /v1/settings/llm` (upsert), `DELETE /v1/settings/llm/keys/{provider}/{key_id}`, `PUT .../keys/reorder`, `PUT .../keys/priority`, `POST .../validate`, `GET .../credentials`, `POST .../credentials/rescan`, `GET .../cli-backends`                                                                         |                                                                                                                                                                                                                                                  |
-| provider on/off toggle                                                        | ❌ **GAP-15** — no enable/disable route; only add/remove keys                                                                                                                                                                                                                                                      |
-| **Connectors** rows                                                           | ⚠️ `GET /v1/connectors` → `[{ id, name, status, configured }]`                                                                                                                                                                                                                                                     | Name mapping is **hardcoded** for `telegram`/`imessage` only; MCP servers and plugin-declared connectors do not appear                                                                                                                           |
-| toggle / delete                                                               | ✅ `POST /v1/connectors/{id}/action` `{ action: "enable"\|"disable"\|"delete" }`                                                                                                                                                                                                                                   |                                                                                                                                                                                                                                                  |
-| config / settings                                                             | ✅ `POST /v1/connectors/{id}/config` `{ token }`; `GET\|PUT /v1/connectors/{id}/settings` (`{ settings: Record<string,string> }`, keys must be `"{id}."`-prefixed and present in `config_schema::CONFIG_KEYS`)                                                                                                     |                                                                                                                                                                                                                                                  |
-| `184 calls 7d`, `unwired` tag, `Connect service`                              | ❌ **GAP-17**                                                                                                                                                                                                                                                                                                      |                                                                                                                                                                                                                                                  |
-| live status                                                                   | ✅ WS `connector_status` `{ id, status, ts, instance_id }`                                                                                                                                                                                                                                                         |                                                                                                                                                                                                                                                  |
-| **Skills** rows (`shell_execute`, `file_edit`, `web_fetch`, `memory_search`…) | ❌ **GAP-18** — the design's "skills" are actually **tools**; neither the tool registry nor the skill catalog has an HTTP listing                                                                                                                                                                                  |
-| skill health                                                                  | ✅ `GET /v1/skills/health` → `SkillHealthMetrics[] { skill_id, total_invocations, clean_success_rate, clean_success_rate_7d, repair_rate, repair_effectiveness, degraded_rate, avg_duration_ms, avg_cost_usd, avg_rounds, last_invoked_at?, user_satisfaction_rate?, feedback_count, feedback_coverage }`          | health only — no name/description/`asks`/enabled state                                                                                                                                                                                           |
-| `asks` (requires confirmation) badge                                          | ❌ **GAP-18**                                                                                                                                                                                                                                                                                                      |                                                                                                                                                                                                                                                  |
-| `9 uses today`                                                                | ⚠️ `total_invocations` is lifetime; no daily breakdown                                                                                                                                                                                                                                                             |                                                                                                                                                                                                                                                  |
-| skill lifecycle events                                                        | ✅ WS `skill_catalog_updated`, `skill_invocation_started` `{ request_id, skill_id, query_preview }`, `skill_completed` `{ request_id, skill_id, duration_ms, output_preview }`, `skill_failed` `{ request_id, skill_id, error }`                                                                                   |                                                                                                                                                                                                                                                  |
-| **Plugins** rows                                                              | ✅ `GET /v1/plugins` → `[{ name, version, status, tools, connector, provider, models }]`                                                                                                                                                                                                                           |                                                                                                                                                                                                                                                  |
-| approve/deny/enable/disable/config                                            | ✅ `POST /v1/plugins/{name}/{approve\|deny\|enable\|disable}`; `POST /v1/plugins/{name}/config` `{ key, value }`                                                                                                                                                                                                   |                                                                                                                                                                                                                                                  |
-| `Install plugin`                                                              | ❌ **GAP-19**                                                                                                                                                                                                                                                                                                      |                                                                                                                                                                                                                                                  |
-| `Declares 2 connectors, 0 registered` warn tag                                | ⚠️ derivable: `plugins[].connector` non-null vs. absent from `GET /v1/connectors` — client-side join                                                                                                                                                                                                               |
-| plugin lifecycle                                                              | ✅ WS `plugin_loaded` `{ plugin_id, tools[] }`, `plugin_unloaded`, `plugin_crashed { error, restart_in_secs }`, `plugin_disabled { reason }`, `plugin_pending_approval { capabilities[] }`, `plugin_needs_config { missing_keys[] }` — ⚠️ these six carry **no `ts`/`instance_id`** (unlike every other variant)   |                                                                                                                                                                                                                                                  |
-| **Agents** rows (templates)                                                   | ✅ `GET /v1/agent-templates` → `TemplateResponse[] { id, name, description, icon?, singleton, capabilities[], denied_capabilities[], temperature, verbosity, model?, fallback_models[], max_tool_calls?, timeout_seconds?, max_cost_per_task?, require_confirmation_for[], persona, body }`                        | plus `GET\|PUT\|DELETE /v1/agent-templates/{id}`, `POST /v1/agent-templates`                                                                                                                                                                     |
-| running instances                                                             | ✅ `GET /v1/agent-instances` → `InstanceResponse[] { id, template_id, name, status, current_task? }`                                                                                                                                                                                                               |                                                                                                                                                                                                                                                  |
-| agent CRUD/config/action                                                      | ✅ `GET\|POST /v1/agents`, `POST /v1/agents/from-toml`, `GET\|DELETE /v1/agents/{id}`, `GET\|PUT /v1/agents/{id}/config` (`{ config: AgentConfigFile, config_version: u64 }` — optimistic lock), `POST /v1/agents/{id}/action` `{ action: "pause"\|"resume" }`                                                     |                                                                                                                                                                                                                                                  |
-| `12 runs 7d` per template                                                     | ❌ **GAP-20** — `AgentMetrics { agent_id, tasks_completed, tasks_failed, total_runtime_seconds, average_runtime_seconds, success_rate, updated_at }` is lifetime and keyed by _instance_, not template; and it is only returned on `GET /v1/agents/{id}`                                                           |
-| template on/off toggle                                                        | ❌ **GAP-20**                                                                                                                                                                                                                                                                                                      |                                                                                                                                                                                                                                                  |
-| **Conversations** rows                                                        | ✅ `GET /v1/conversations?source&limit&offset` → `{ conversations: Conversation[] }`                                                                                                                                                                                                                               | `Conversation { id, lane_key, source, title, message_count: i64, last_message_at?, created_at, updated_at, summary, summary_version: i64, last_summarized_message_id: i64, summary_updated_at? }` — covers `142 messages`, `29 Aug`, `compacted` |
-| messages of one conversation                                                  | ✅ `GET /v1/conversations/{id}/messages?limit&offset` → `{ messages: ConversationMessage[], total: i64 }`                                                                                                                                                                                                          |                                                                                                                                                                                                                                                  |
-| delete / rename a conversation                                                | ❌ **GAP-21** — `DELETE /v1/chat/history?lane_key=` clears _messages_ but the conversation row and its title are untouched, and there is no rename                                                                                                                                                                 |
-| **Event log** section                                                         | ⚠️ `GET /v1/events/history?limit&agent_id` → `EventLog[] { id, timestamp, agent_id?, event_type, detail?: Value, result?: Value }`                                                                                                                                                                                 | ⚠️ the WS stream carries far more (and richer) events than the persisted log — see **GAP-10**                                                                                                                                                    |
-| **Orchestrator observability** (not in the design; available if wanted)       | ✅ `GET /v1/orchestrator/latency?mode&from&to&limit` → `{ records: [...] }`; `GET /v1/orchestrator/latency/aggregate?from&to` → `{ aggregates: [...] }`; `GET /v1/orchestrator/decisions?mode&from&to&limit` → `{ records: [...] }`                                                                                | `mode` values are historical strings (`two_phase_*`, `planner_*`, `fast_path`, `no_llm`) plus current Routing V2 modes                                                                                                                           |
+| Section                                                                 | Endpoint(s)                                                                                                                                                                                                                                                                                                                            | Notes                                                                                                                                                                                                                                            |
+| ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Connection** — `Daemon connected`                                     | ✅ `GET /v1/health` → `{ status, version, pid, instance_id }`                                                                                                                                                                                                                                                                          |                                                                                                                                                                                                                                                  |
+| `uptime 4d 02h`                                                         | ⚠️ derivable client-side from `discovery.json.started_at` via the Tauri command; **not** on `/v1/health` — **GAP-14**                                                                                                                                                                                                                  |
+| `Instance 7f3a91c4`                                                     | ✅ `health.instance_id` / `ConnectionInfo.instanceId`                                                                                                                                                                                                                                                                                  |                                                                                                                                                                                                                                                  |
+| `Endpoint 127.0.0.1:51823`                                              | ✅ `ConnectionInfo.baseUrl`                                                                                                                                                                                                                                                                                                            |                                                                                                                                                                                                                                                  |
+| `Schema v33`                                                            | ❌ **GAP-14** — migration count is compile-time only (`crates/openalpaca_storage/src/migrations/`, currently 034)                                                                                                                                                                                                                      |
+| `Reconnect`                                                             | ✅ client-side (re-invoke `ensure_daemon_running`, reopen WS)                                                                                                                                                                                                                                                                          |                                                                                                                                                                                                                                                  |
+| `Copy log path`                                                         | ❌ **GAP-14** — no route or Tauri command returns the daemon log path                                                                                                                                                                                                                                                                  |
+| `Today: {{ spend }} of $5.00 cap · 15 runs · 41k tokens`                | ⚠️ spend from `GET /v1/orchestrator/config.daily_cost_usd` (GAP-08a, resolved `7dbb988`); tokens from `GET /v1/llm/usage/daily?date=` summed client-side (no other source); run count from `GET /v1/tasks?limit=…` filtered client-side; **the cap is not served, by design — no daily budget (N4)** — **GAP-08c**                     |
+| **Models & keys** — provider rows                                       | ✅ `GET /v1/settings/llm` (full `LlmConfig`), `GET /v1/settings/llm/status` (`key_health()`), `GET /v1/settings/llm/providers/usage` → `ProviderUsageSummary[] { provider, total_cost_usd, total_tokens, total_requests, health, external_usage? }`                                                                                    | ⚠️ `health` is hardcoded `"healthy"` in `get_provider_usage`                                                                                                                                                                                     |
+| model chips per provider                                                | ✅ `GET /v1/models`, `POST /v1/models/refresh`                                                                                                                                                                                                                                                                                         |                                                                                                                                                                                                                                                  |
+| `key added 12 Jul`                                                      | ⚠️ present inside the `GET /v1/settings/llm` config payload; verify the field survives redaction before relying on it                                                                                                                                                                                                                  |
+| `41k tok today` per provider                                            | ⚠️ `ProviderUsageSummary.total_tokens` is **lifetime**, not today; per-day-per-provider requires client math over `/v1/llm/usage?limit=` (`LlmCallLog { timestamp, agent_id, task_id, provider, model, key_id, input_tokens, output_tokens, cost_usd, status, latency_ms, error_message }`) — **GAP-08c**                              |
+| `Add provider` / key CRUD                                               | ✅ `PUT /v1/settings/llm` (upsert), `DELETE /v1/settings/llm/keys/{provider}/{key_id}`, `PUT .../keys/reorder`, `PUT .../keys/priority`, `POST .../validate`, `GET .../credentials`, `POST .../credentials/rescan`, `GET .../cli-backends`                                                                                             |                                                                                                                                                                                                                                                  |
+| provider on/off toggle                                                  | ❌ **GAP-15** — no enable/disable route; only add/remove keys                                                                                                                                                                                                                                                                          |
+| **Connectors** rows                                                     | ⚠️ `GET /v1/connectors` → `[{ id, name, status, configured }]`                                                                                                                                                                                                                                                                         | Name mapping is **hardcoded** for `telegram`/`imessage` only; MCP servers and plugin-declared connectors do not appear                                                                                                                           |
+| toggle / delete                                                         | ✅ `POST /v1/connectors/{id}/action` `{ action: "enable"\|"disable"\|"delete" }`                                                                                                                                                                                                                                                       |                                                                                                                                                                                                                                                  |
+| config / settings                                                       | ✅ `POST /v1/connectors/{id}/config` `{ token }`; `GET\|PUT /v1/connectors/{id}/settings` (`{ settings: Record<string,string> }`, keys must be `"{id}."`-prefixed and present in `config_schema::CONFIG_KEYS`)                                                                                                                         |                                                                                                                                                                                                                                                  |
+| `184 calls 7d`, `unwired` tag, `Connect service`                        | ❌ **GAP-17**                                                                                                                                                                                                                                                                                                                          |                                                                                                                                                                                                                                                  |
+| live status                                                             | ✅ WS `connector_status` `{ id, status, ts, instance_id }`                                                                                                                                                                                                                                                                             |                                                                                                                                                                                                                                                  |
+| **Tools** rows (`shell_execute`, `file_edit`, `github__create_issue`…)  | ✅ `GET /v1/tools` → `[{ name, description, source, origin, provides_capabilities, requires_confirmation, invocations_today, version, author }]` (ADR-030 §8). The design calls the section "Skills"; its rows are **tools**                                                                                                           |
+| skill health                                                            | ✅ `GET /v1/skills/health` → `SkillHealthMetrics[] { skill_id, total_invocations, clean_success_rate, clean_success_rate_7d, repair_rate, repair_effectiveness, degraded_rate, avg_duration_ms, avg_cost_usd, avg_rounds, last_invoked_at?, user_satisfaction_rate?, feedback_count, feedback_coverage }`                              | health only — no name/description/`asks`/enabled state                                                                                                                                                                                           |
+| `asks` (requires confirmation) badge                                    | ✅ `requires_confirmation` on the tool row                                                                                                                                                                                                                                                                                             |                                                                                                                                                                                                                                                  |
+| `9 uses today`                                                          | ⚠️ `total_invocations` is lifetime; no daily breakdown                                                                                                                                                                                                                                                                                 |                                                                                                                                                                                                                                                  |
+| skill lifecycle events                                                  | ✅ WS `skill_catalog_updated`, `skill_invocation_started` `{ request_id, skill_id, query_preview }`, `skill_completed` `{ request_id, skill_id, duration_ms, output_preview }`, `skill_failed` `{ request_id, skill_id, error }`                                                                                                       |                                                                                                                                                                                                                                                  |
+| **Extensions** rows (MCP servers + plugins)                             | ✅ `GET /v1/extensions?include_orphaned=true` → the 23-field row of ADR-030 §8 (`kind, id, version, transport, enabled, consent, state, reason, actionable, detail, hint, missing_config_keys, added_capabilities, tools, skipped_tools, withdrawn_by_server, tools_changed_at, declared, skills, agents, connector, provider, since`) |                                                                                                                                                                                                                                                  |
+| enable/disable/reload/approve/deny/config/remove                        | ✅ `POST /v1/extensions/{kind}/{id}/{enable\|disable\|reload\|approve\|deny}`; `GET\|POST /v1/extensions/{kind}/{id}/config`; `DELETE /v1/extensions/plugin/{id}` (orphans only). `/v1/plugins*` was deleted in C7                                                                                                                     |                                                                                                                                                                                                                                                  |
+| `Add extension` (install / uninstall)                                   | ❌ **GAP-24**                                                                                                                                                                                                                                                                                                                          |                                                                                                                                                                                                                                                  |
+| `Declares 2 connectors, 0 registered` warn tag                          | ⚠️ derivable: `extensions[].connector` non-null vs. absent from `GET /v1/connectors` — client-side join                                                                                                                                                                                                                                |
+| extension lifecycle                                                     | ✅ WS `extension_state_changed` `{ kind, id, state, generation, tools_changed, ts, instance_id }`, `extension_capability_withheld`, `extension_capability_withdrawn` — the six `plugin_*` variants were deleted with `/v1/plugins*` in C7, and this family carries `ts`/`instance_id` on every frame (former GAP-22)                   |                                                                                                                                                                                                                                                  |
+| **Agents** rows (templates)                                             | ✅ `GET /v1/agent-templates` → `TemplateResponse[] { id, name, description, icon?, singleton, capabilities[], denied_capabilities[], temperature, verbosity, model?, fallback_models[], max_tool_calls?, timeout_seconds?, max_cost_per_task?, require_confirmation_for[], persona, body }`                                            | plus `GET\|PUT\|DELETE /v1/agent-templates/{id}`, `POST /v1/agent-templates`                                                                                                                                                                     |
+| running instances                                                       | ✅ `GET /v1/agent-instances` → `InstanceResponse[] { id, template_id, name, status, current_task? }`                                                                                                                                                                                                                                   |                                                                                                                                                                                                                                                  |
+| agent CRUD/config/action                                                | ✅ `GET\|POST /v1/agents`, `POST /v1/agents/from-toml`, `GET\|DELETE /v1/agents/{id}`, `GET\|PUT /v1/agents/{id}/config` (`{ config: AgentConfigFile, config_version: u64 }` — optimistic lock), `POST /v1/agents/{id}/action` `{ action: "pause"\|"resume" }`                                                                         |                                                                                                                                                                                                                                                  |
+| `12 runs 7d` per template                                               | ❌ **GAP-20** — `AgentMetrics { agent_id, tasks_completed, tasks_failed, total_runtime_seconds, average_runtime_seconds, success_rate, updated_at }` is lifetime and keyed by _instance_, not template; and it is only returned on `GET /v1/agents/{id}`                                                                               |
+| template on/off toggle                                                  | ❌ **GAP-20**                                                                                                                                                                                                                                                                                                                          |                                                                                                                                                                                                                                                  |
+| **Conversations** rows                                                  | ✅ `GET /v1/conversations?source&limit&offset` → `{ conversations: Conversation[] }`                                                                                                                                                                                                                                                   | `Conversation { id, lane_key, source, title, message_count: i64, last_message_at?, created_at, updated_at, summary, summary_version: i64, last_summarized_message_id: i64, summary_updated_at? }` — covers `142 messages`, `29 Aug`, `compacted` |
+| messages of one conversation                                            | ✅ `GET /v1/conversations/{id}/messages?limit&offset` → `{ messages: ConversationMessage[], total: i64 }`                                                                                                                                                                                                                              |                                                                                                                                                                                                                                                  |
+| delete / rename a conversation                                          | ❌ **GAP-21** — `DELETE /v1/chat/history?lane_key=` clears _messages_ but the conversation row and its title are untouched, and there is no rename                                                                                                                                                                                     |
+| **Event log** section                                                   | ⚠️ `GET /v1/events/history?limit&agent_id` → `EventLog[] { id, timestamp, agent_id?, event_type, detail?: Value, result?: Value }`                                                                                                                                                                                                     | ⚠️ the WS stream carries far more (and richer) events than the persisted log — see **GAP-10**                                                                                                                                                    |
+| **Orchestrator observability** (not in the design; available if wanted) | ✅ `GET /v1/orchestrator/latency?mode&from&to&limit` → `{ records: [...] }`; `GET /v1/orchestrator/latency/aggregate?from&to` → `{ aggregates: [...] }`; `GET /v1/orchestrator/decisions?mode&from&to&limit` → `{ records: [...] }`                                                                                                    | `mode` values are historical strings (`two_phase_*`, `planner_*`, `fast_path`, `no_llm`) plus current Routing V2 modes                                                                                                                           |
 
 ### 2.5 Command palette (⌘K)
 
@@ -907,77 +907,38 @@ structured `detail`.
 
 ---
 
-### GAP-18 — No tool/skill catalog endpoint
+### GAP-18 — No skill catalog endpoint
 
-**UI needs:** the Settings → Skills rows: `{ name, description, asks (requires
-confirmation), uses today, enabled }` for `shell_execute`, `file_edit`, `web_fetch`,
-`memory_search`, `calendar_read`, `email_send`.
+**Closed half:** the tool catalog. `GET /v1/tools` ships with ADR-030 §8 —
+`{ name, description, source, origin, provides_capabilities, requires_confirmation,
+invocations_today, version, author }` — and backs the Settings → Tools rows, including
+the `asks` badge and `N today`. Two fields of the shape proposed here did **not** ship,
+deliberately: `denied` and `provider`. There is no per-tool enable state anywhere in the
+system; availability is _derived_ — (the agent's capabilities) ∩ (its extension being
+enabled) — never asserted per tool (S1), so provenance is `origin: {kind, id, enabled,
+state} | null` and a builtin row carries no enable field at all.
 
-**Why nothing fits:** these are **tools**, not skills, and neither registry is exposed.
+**Still missing:** the **skill** listing.
 
-- Tools: `ToolRegistry` (`crates/openalpaca_core/src/tools/registry/mod.rs`) has
-  `registered_tool_names()`, `iter_registered_tools()`, `tools_for_capabilities()`,
-  `extension_tool_defs(deny)` — all in-process. `grep -rn "v1/tools" apps/openalpacad`
-  → nothing.
-- Skills: `SkillCatalog` (`orchestrator/skill/catalog/mod.rs`) has `list_names()`,
+- `SkillCatalog` (`orchestrator/skill/catalog/mod.rs`) has `list_names()`,
   `catalog_summary() -> Vec<(String, String, Option<String>)>`, `entries_snapshot()`,
-  `count()`, `validate_dependencies()` — again in-process only. The **only** skill route
-  is `GET /v1/skills/health`, which returns `SkillHealthMetrics` keyed by `skill_id`
-  with no name, description, trigger, or enabled flag.
-- "Asks first": `AgentTemplate.require_confirmation_for: Vec<String>` is served per
-  template, and `execution.skill_defaults.global_tool_deny` lives in daemon config —
-  neither gives a per-tool "this will ask you" answer.
-
-**Proposal — two new listings:**
-
-```
-GET /v1/tools
-→ 200 { "tools": [
-    { "name": "shell_execute", "description": "Runs a command in the project directory",
-      "source": "builtin",                   // builtin | mcp | plugin
-      "provider": null,                      // "<server>" for mcp, "<plugin>" for plugin
-      "capability": "shell_execute",
-      "requires_confirmation": true,         // ⇒ the "asks" badge
-      "denied": false,                       // in execution.skill_defaults.global_tool_deny
-      "invocations_today": 9, "invocations_7d": 61,
-      "parameters_schema": { … } }
-  ] }
-
-GET /v1/skills
-→ 200 { "skills": [
-    { "id": "daily-digest", "name": "Daily digest", "description": "…",
-      "source": "file" | "plugin", "scope": "user" | "project",
-      "command": "/digest", "requires_capabilities": ["web_fetch"],
-      "cron": "0 9 * * *", "enabled": true,
-      "health": SkillHealthMetrics | null } ] }
-```
-
-`GET /v1/skills` should embed (or link) the existing `/v1/skills/health` payload so the
-Settings panel needs one call. `invocations_today` depends on GAP-10's structured
-event log or a dedicated counter.
-
----
-
-### GAP-19 — No plugin install route
-
-**UI needs:** `Install plugin` in Settings → Plugins.
-
-**Why nothing fits:** `router.rs` exposes list / approve / deny / enable / disable /
-config only. Installation today means dropping a directory into
-`~/.openalpaca/plugins/` by hand and restarting the daemon.
+  `count()`, `validate_dependencies()` — in-process only. The **only** skill route is
+  `GET /v1/skills/health`, which returns `SkillHealthMetrics` keyed by `skill_id` with no
+  name, description or trigger, which is why the Skill health rows read as ids.
 
 **Proposal:**
 
 ```
-POST /v1/plugins/install
-{ "source": "path", "path": "/Users/…/my-plugin" }        // or { "source": "url", "url": "…" }
-→ 202 { "name": "openalpaca-notion", "version": "0.3.1", "status": "pending_approval",
-        "capabilities": ["connectors","tools"] }
+GET /v1/skills
+→ 200 [ { "id": "daily-digest", "name": "Daily digest", "description": "…",
+          "source": "file" | "plugin", "scope": "user" | "project",
+          "command": "/digest", "requires_capabilities": ["web_fetch"],
+          "cron": "0 9 * * *",
+          "health": SkillHealthMetrics | null } ]
 ```
 
-Then the existing `POST /v1/plugins/{name}/approve` completes the flow, and
-`plugin_pending_approval` / `plugin_loaded` narrate it over WS. If URL installs are out
-of scope for the local-first threat model, ship the `path` variant only.
+A bare array, like `/v1/tools` and `/v1/extensions`. Embedding (or linking) the existing
+`/v1/skills/health` payload keeps the Settings panel to one call.
 
 ---
 
@@ -1031,17 +992,16 @@ DELETE /v1/conversations/{id}                                → 200 { "id", "de
 
 ---
 
-### GAP-22 — Six plugin ServerEvent variants omit `ts` and `instance_id`
+### GAP-22 — CLOSED (C7)
 
-**Why it matters:** every other `ServerEvent` variant carries
-`ts: DateTime<Utc>` and `instance_id: String`; the client keys its event log and its
-stale-instance guard on those. `PluginLoaded`, `PluginUnloaded`, `PluginCrashed`,
-`PluginDisabled`, `PluginPendingApproval`, `PluginNeedsConfig`
-(`crates/openalpaca_api/src/events/mod.rs`) have neither — confirmed in the existing
-client's union type too (`daemon.ts`, the six plugin arms have only `_id`).
-
-**Proposal:** add `ts` and `instance_id` to all six for uniformity. Non-breaking for
-readers that ignore extra fields.
+Six `ServerEvent` variants — `PluginLoaded`, `PluginUnloaded`, `PluginCrashed`,
+`PluginDisabled`, `PluginPendingApproval`, `PluginNeedsConfig` — carried neither
+`ts: DateTime<Utc>` nor `instance_id: String`, so plugin rows in the event log could not
+be ordered. C7 deleted all six with `/v1/plugins*`, together with their producers and the
+`PluginEventSink` that fed them. The extension family that replaced them
+(`extension_state_changed`, `extension_capability_withheld`,
+`extension_capability_withdrawn` — ADR-030 §7.3) carries both fields on every frame, so
+the defect has no way back.
 
 ---
 
@@ -1067,12 +1027,51 @@ schema change, but a typed field is far easier for the client to rely on.
 
 ---
 
+### GAP-24 — No extension install / uninstall route
+
+_(Was GAP-19, "no plugin install route", widened in ADR-030 §9.1 to both extension kinds:
+the same mechanism is missing for an MCP server, which had no gap id at all.)_
+
+**UI needs:** `Add extension` in Settings → Extensions, and a real uninstall.
+
+**Why nothing fits:** `/v1/extensions` covers the whole lifecycle of an extension that is
+already _declared_ — enable, disable, reload, approve, deny, config — plus `DELETE
+/v1/extensions/plugin/{id}`, which removes an **orphan's** `.permissions.toml` entry and
+its ledger record and deliberately never touches a directory. Installing still means
+copying a plugin directory into the plugins root, or writing a `[servers.<name>]` block
+into `config/mcp.toml`, and restarting.
+
+**Proposal:**
+
+```
+POST /v1/extensions/plugin
+{ "source": "path", "path": "/Users/…/my-plugin" }        // or { "source": "url", "url": "…" }
+→ 202 { "kind": "plugin", "id": "openalpaca-notion", "version": "0.3.1",
+        "state": "unapproved", "reason": "never_seen" }
+
+POST /v1/extensions/mcp
+{ "id": "github", "transport": "stdio", "command": "…", "args": [], "enabled": true }
+→ 201 the §8 row
+
+DELETE /v1/extensions/{kind}/{id}?uninstall=true
+→ 200 { "removed": "openalpaca-notion" }        // trashes the directory / the block
+```
+
+The existing `approve` verb then completes a plugin's first load, and
+`extension_state_changed` narrates it over WS. If URL installs are out of scope for the
+local-first threat model, ship the `path` variant only.
+
+---
+
 ### Summary table
 
 Gaps 01, 07, 08.1, 08.2 and 16 shipped in Phase 0 (`88e8a3b`, `298bad3`, `a827dcf`,
 `7dbb988`, `26b3eaf`) and are removed from this table; see their now-**RESOLVED**
 sections above. GAP-08's remaining piece (the cap and a real usage-summary rollup)
-continues below as GAP-08c.
+continues below as GAP-08c. **GAP-22 closed in C7** (the six `plugin_*` variants were
+deleted, and their replacements carry `ts`/`instance_id`), **GAP-19 became GAP-24**
+(widened to both extension kinds), and **GAP-18 lost its tool half** to
+`GET /v1/tools` — nineteen remain.
 
 | #   | Gap                                         | Blocks                                 | Fix size                         |
 | --- | ------------------------------------------- | -------------------------------------- | -------------------------------- |
@@ -1084,12 +1083,11 @@ continues below as GAP-08c.
 | 03  | no follow-up API                            | Queue follow-up                        | **M**                            |
 | 15  | no provider enable/disable                  | Models toggles                         | **S**                            |
 | 21  | no conversation rename/delete               | Conversations rows                     | **S**                            |
-| 22  | plugin events lack `ts`/`instance_id`       | event log ordering                     | **XS**                           |
 | 13  | per-chat model override is global           | model picker                           | **M**                            |
-| 18  | no tool/skill catalog                       | Skills section                         | **M**                            |
+| 18  | no skill catalog listing                    | skill names in the Tools section       | **M**                            |
 | 20  | no template run counts / enabled            | Agents section                         | **M**                            |
 | 17  | connector call counts / unwired / add       | Connectors section                     | **M**                            |
-| 19  | no plugin install                           | Install plugin                         | **M**                            |
+| 24  | no extension install / uninstall            | Add extension                          | **M**                            |
 | 10  | event log has no `task_id`                  | per-run event log                      | **M** (migration)                |
 | 23  | messages not linked to runs/artifacts       | transcript recap cards                 | **M** (migration)                |
 | 09  | no subagent timeline                        | **Parallel work swimlanes**            | **L** (migration + events)       |
@@ -1097,7 +1095,7 @@ continues below as GAP-08c.
 | 05  | no artifact versions / diff                 | History + Diff tabs                    | **L** (migration + routes)       |
 | 12  | no pin state                                | ★ Pin                                  | **XS** — do it in `localStorage` |
 
-**Recommended order:** the XS/S column first (08c, 11, 14, 06, 02, 15, 21, 22) unblocks roughly two-thirds of the design for a handful of one-file changes. Then
+**Recommended order:** the XS/S column first (08c, 11, 14, 06, 02, 15, 21) unblocks roughly two-thirds of the design for a handful of one-file changes. Then
 04 + 05 + 09 as one "run observability + artifacts" milestone, since they share the
 same storage work and are what the Work and Library views are actually built around.
 Ship the UI with those three surfaces feature-flagged/empty-stated until then.
@@ -1264,11 +1262,13 @@ the query string.
 ## 5. Notes for the implementer
 
 - **Two response envelope styles exist and they are inconsistent.** Chat/settings use
-  `{ error: { code, message } }` (settings adds `status`); tasks/agents/plugins/connectors
-  use `{ error: "<string>" }`. Write one `parseError(response)` that handles both.
-- **Two list styles exist too.** `GET /v1/tasks`, `GET /v1/connectors`, `GET /v1/plugins`,
-  `GET /v1/models`, `GET /v1/skills/health`, `GET /v1/events/history` return **bare
-  arrays**; `GET /v1/conversations`, `/v1/chat/history`, `/v1/orchestrator/latency`,
+  `{ error: { code, message } }` (settings adds `status`); tasks/agents/extensions/connectors
+  use `{ error: "<string>" }` — for `/v1/extensions` the string is a **word**
+  (`not_loaded`, `store_unreadable`, `unsupported_for_kind`, `not_orphaned`, `orphaned`)
+  the client maps to copy, ADR-030 §8. Write one `parseError(response)` that handles both.
+- **Two list styles exist too.** `GET /v1/tasks`, `GET /v1/connectors`,
+  `GET /v1/extensions`, `GET /v1/tools`, `GET /v1/models`, `GET /v1/skills/health`,
+  `GET /v1/events/history` return **bare arrays**; `GET /v1/conversations`, `/v1/chat/history`, `/v1/orchestrator/latency`,
   `/v1/orchestrator/decisions` return **envelopes**. Any new endpoint proposed above
   uses an envelope — do not "fix" the old ones without versioning.
 - **`GET /v1/tasks` and `GET /v1/tasks/{id}` disagree.** The list injects

@@ -5,7 +5,7 @@
 ## Overview
 
 - Router source: `apps/openalpacad/src/router.rs`.
-- Total documented method/path endpoints: 79.
+- Total documented method/path endpoints: 73.
 - Includes public, bearer-protected, WebSocket, and SSE routes.
 
 ## Auth
@@ -74,12 +74,6 @@
 | GET | `/v1/orchestrator/decisions` | `bearer` | `dispatch_decisions_handler` | - | `dispatch_decisions::DecisionParams` | `apps/openalpacad/src/routes/dispatch_decisions.rs` |
 | GET | `/v1/orchestrator/latency` | `bearer` | `orchestrator_latency_handler` | - | `orchestrator_latency::LatencyParams` | `apps/openalpacad/src/routes/orchestrator_latency.rs` |
 | GET | `/v1/orchestrator/latency/aggregate` | `bearer` | `orchestrator_latency_aggregate_handler` | - | `orchestrator_latency::AggregateParams` | `apps/openalpacad/src/routes/orchestrator_latency.rs` |
-| GET | `/v1/plugins` | `bearer` | `list_plugins_handler` | - | - | `apps/openalpacad/src/routes/plugins.rs` |
-| POST | `/v1/plugins/{name}/approve` | `bearer` | `approve_plugin_handler` | - | - | `apps/openalpacad/src/routes/plugins.rs` |
-| POST | `/v1/plugins/{name}/config` | `bearer` | `set_plugin_config_handler` | `plugins::SetConfigRequest` | - | `apps/openalpacad/src/routes/plugins.rs` |
-| POST | `/v1/plugins/{name}/deny` | `bearer` | `deny_plugin_handler` | - | - | `apps/openalpacad/src/routes/plugins.rs` |
-| POST | `/v1/plugins/{name}/disable` | `bearer` | `disable_plugin_handler` | - | - | `apps/openalpacad/src/routes/plugins.rs` |
-| POST | `/v1/plugins/{name}/enable` | `bearer` | `enable_plugin_handler` | - | - | `apps/openalpacad/src/routes/plugins.rs` |
 | GET | `/v1/settings/llm` | `bearer` | `get_llm_settings` | - | - | `apps/openalpacad/src/routes/settings.rs` |
 | PUT | `/v1/settings/llm` | `bearer` | `upsert_key` | `AddKeyRequest` | - | `apps/openalpacad/src/routes/settings.rs` |
 | GET | `/v1/settings/llm/cli-backends` | `bearer` | `get_cli_backends` | - | - | `apps/openalpacad/src/routes/settings.rs` |
@@ -300,16 +294,6 @@
 | `from` | `Option<String>` |
 | `to` | `Option<String>` |
 | `limit` | `Option<usize>` |
-
-### `plugins::SetConfigRequest`
-
-- Kind: `struct`
-- Source: `apps/openalpacad/src/routes/plugins.rs`
-
-| Field | Type |
-|---|---|
-| `key` | `String` |
-| `value` | `serde_json::Value` |
 
 ## Response Shapes
 

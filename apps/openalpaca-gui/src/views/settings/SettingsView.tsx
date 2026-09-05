@@ -12,9 +12,9 @@
 import { useAgentTemplates } from "@/hooks/useAgents";
 import { useConnectors } from "@/hooks/useConnectors";
 import { useConversations } from "@/hooks/useConversations";
-import { usePlugins } from "@/hooks/usePlugins";
+import { useExtensions } from "@/hooks/useExtensions";
 import { useLlmSettings } from "@/hooks/useSettings";
-import { useSkillHealth } from "@/hooks/useSkills";
+import { useTools } from "@/hooks/useSkills";
 import { useUiStore } from "@/stores/ui";
 
 import { AgentsSection } from "./AgentsSection";
@@ -22,9 +22,9 @@ import { ConnectionSection } from "./ConnectionSection";
 import { ConnectorsSection } from "./ConnectorsSection";
 import { ConversationsSection } from "./ConversationsSection";
 import { EventLogSection } from "./EventLogSection";
+import { ExtensionsSection } from "./ExtensionsSection";
 import { ModelsSection } from "./ModelsSection";
-import { PluginsSection } from "./PluginsSection";
-import { SkillsSection } from "./SkillsSection";
+import { ToolsSection } from "./ToolsSection";
 import { PageHead, SectionNavItem } from "./primitives";
 import {
   SETTINGS_SECTIONS,
@@ -41,10 +41,10 @@ function renderSection(id: SettingsSectionId) {
       return <ModelsSection />;
     case "connectors":
       return <ConnectorsSection />;
-    case "skills":
-      return <SkillsSection />;
-    case "plugins":
-      return <PluginsSection />;
+    case "tools":
+      return <ToolsSection />;
+    case "extensions":
+      return <ExtensionsSection />;
     case "agents":
       return <AgentsSection />;
     case "conversations":
@@ -58,8 +58,8 @@ function renderSection(id: SettingsSectionId) {
 function useSectionCounts(): Partial<Record<SettingsSectionId, number>> {
   const llm = useLlmSettings();
   const connectors = useConnectors();
-  const skills = useSkillHealth();
-  const plugins = usePlugins();
+  const tools = useTools();
+  const extensions = useExtensions();
   const templates = useAgentTemplates();
   const conversations = useConversations({ limit: 50 });
 
@@ -69,8 +69,8 @@ function useSectionCounts(): Partial<Record<SettingsSectionId, number>> {
         ? undefined
         : Object.keys(llm.data.providers).length,
     connectors: connectors.data?.length,
-    skills: skills.data?.length,
-    plugins: plugins.data?.length,
+    tools: tools.data?.length,
+    extensions: extensions.data?.length,
     agents: templates.data?.length,
     conversations: conversations.data?.conversations.length,
   };

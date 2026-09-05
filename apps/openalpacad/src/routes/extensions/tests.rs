@@ -952,10 +952,11 @@ async fn a_config_write_that_fails_is_a_500() {
 }
 
 /// The catch-all arm `plugin_error_status` ends with is the one that silently
-/// reclassifies a new variant, so the four cases the config pair can produce
-/// are pinned here. `StoreUnreadable` is not reachable through this pair today
-/// — the write path never reads `.permissions.toml` — but the mapping is
-/// shared with `/v1/plugins*` and is what the route table promises.
+/// reclassifies a new variant, so the cases the config pair can produce are
+/// pinned here — including the three that fall through to it.
+/// `StoreUnreadable` is not reachable through this pair today (the write path
+/// never reads `.permissions.toml`), but the mapping is what the route table
+/// promises.
 #[test]
 fn the_plugin_error_status_map_is_the_one_the_config_route_promises() {
     assert_eq!(
@@ -974,6 +975,47 @@ fn the_plugin_error_status_map_is_the_one_the_config_route_promises() {
         plugin_error_status(&PluginError::MissingConfig(vec!["api_key".to_string()])),
         StatusCode::BAD_REQUEST
     );
+    // The catch-all itself: a caller's own mistake stays `400`, so the split
+    // between "your request was wrong" and "our write failed" is a real one.
+    for error in [
+        PluginError::Unavailable("no such plugin".into()),
+        PluginError::HandleHeld("echo".into()),
+        PluginError::InvalidManifest("bad toml".into()),
+    ] {
+        assert_eq!(plugin_error_status(&error), StatusCode::BAD_REQUEST);
+    }
+}
+
+/// Design §3.2 W-deny: a consent decision that cannot be persisted must answer
+/// `500` and change nothing. The failure is the daemon's — here
+/// `.permissions.toml` cannot be written at all — and reporting it as `400`
+/// tells the client to fix a request that was fine.
+///
+/// (Carried from the deleted `routes/plugins.rs`, whose `deny` handler is now
+/// the `POST /v1/extensions/plugin/{id}/deny` verb.)
+#[tokio::test]
+async fn a_denial_that_cannot_be_persisted_is_a_500() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let h = Harness::new();
+    h.write_plugin("some-plugin");
+    h.plugins.start().await.expect("plugin scan");
+
+    // Unwritable but readable — the writer cannot even create its lock file —
+    // so this is a **write** failure and not `409 store_unreadable`.
+    std::fs::set_permissions(
+        h.plugins_root.path(),
+        std::fs::Permissions::from_mode(0o555),
+    )
+    .expect("chmod plugins root");
+    let (status, _body) = h.verb("plugin", "some-plugin", Verb::Deny).await;
+    std::fs::set_permissions(
+        h.plugins_root.path(),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .expect("restore plugins root");
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 // ============================================================================

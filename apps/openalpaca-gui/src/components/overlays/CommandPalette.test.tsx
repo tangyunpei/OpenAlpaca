@@ -93,10 +93,10 @@ describe("CommandPalette (§3.33)", () => {
     const user = userEvent.setup();
     render(<CommandPalette />);
     await user.click(
-      screen.getByRole("option", { name: /Settings — skills & plugins/ }),
+      screen.getByRole("option", { name: /Settings — tools & extensions/ }),
     );
     expect(useUiStore.getState().view).toBe("settings");
-    expect(useUiStore.getState().settingsSectionId).toBe("skills");
+    expect(useUiStore.getState().settingsSectionId).toBe("tools");
   });
 
   it("only offers Approve when the chat lane has a pending confirmation", async () => {

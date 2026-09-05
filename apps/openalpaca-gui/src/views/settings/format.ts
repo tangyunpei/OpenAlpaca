@@ -13,6 +13,17 @@ export function shortDate(iso: string | null | undefined): string {
   return `${date.getDate()} ${date.toLocaleString("en-GB", { month: "short" })}`;
 }
 
+/**
+ * `3 Sep 14:22:41` — when a row entered its current state (ADR-030 §8's
+ * `since`). Boot counts as a transition, so this is never older than the
+ * daemon's start; the stamp says so by carrying the day as well as the clock.
+ */
+export function whenStamp(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "—";
+  return `${shortDate(iso)} ${timeOfDay(iso)}`;
+}
+
 /** `14:22:41` — the design's time-of-day stamp for log rows. */
 export function timeOfDay(iso: string): string {
   const date = new Date(iso);

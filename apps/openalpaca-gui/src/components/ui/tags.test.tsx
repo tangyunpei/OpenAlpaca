@@ -17,7 +17,7 @@ describe("LogTag", () => {
 
   it("degrades anything unknown to the neutral run tone (§3.28)", () => {
     expect(toLogTone("run")).toBe("run");
-    expect(toLogTone("plugin_crashed")).toBe("run");
+    expect(toLogTone("extension_state_changed")).toBe("run");
   });
 
   it("holds the 58px column that aligns the message text", () => {

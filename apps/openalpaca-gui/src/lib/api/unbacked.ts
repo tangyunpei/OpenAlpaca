@@ -283,19 +283,8 @@ export function getDaemonStatusDetail(): Availability<DaemonStatusDetail> {
   return unavailable("GAP-14");
 }
 
-// ── Tool / skill catalog (GAP-18) ───────────────────────────────────────────
-
-export interface ToolCatalogEntry {
-  name: string;
-  description: string;
-  source: "builtin" | "mcp" | "plugin";
-  provider: string | null;
-  requires_confirmation: boolean;
-  denied: boolean;
-  invocations_today: number;
-}
-
-/** GAP-18 — the Settings → Skills rows are really tools, and nothing lists them. */
-export function listToolCatalog(): Availability<ToolCatalogEntry[]> {
-  return unavailable("GAP-18");
-}
+// The tool catalog left this file in C7: `GET /v1/tools` is real, so
+// `ToolCatalogEntry` is a wire type (`api/types.ts`) fetched by `api/tools.ts`.
+// Its ADR-029 shape carried `denied: boolean` and `provider: string | null`;
+// both are gone — availability is derived from the extension's `origin`, and
+// there is no per-tool enable state anywhere in the system (S1, ADR-030 §8).

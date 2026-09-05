@@ -21,7 +21,7 @@ import type { Connector, ConnectorAction } from "@/lib/api/types";
 import { qk } from "@/lib/query-keys";
 import { GAPS, gapNote } from "@/lib/unavailable";
 
-import { usePlugins } from "./usePlugins";
+import { useExtensions } from "./useExtensions";
 
 export function useConnectors(): UseQueryResult<Connector[]> {
   return useQuery({
@@ -30,16 +30,16 @@ export function useConnectors(): UseQueryResult<Connector[]> {
   });
 }
 
-/** The design's `unwired` tag, derived from the plugin manifest join. */
+/** The design's `unwired` tag, derived from the extension rows' `connector`. */
 export function useUnwiredConnectors(): Array<{
   connectorId: string;
   declaredBy: string;
 }> {
   const connectors = useConnectors();
-  const plugins = usePlugins();
+  const extensions = useExtensions();
   return useMemo(
-    () => findUnwiredConnectors(plugins.data ?? [], connectors.data ?? []),
-    [plugins.data, connectors.data],
+    () => findUnwiredConnectors(extensions.data ?? [], connectors.data ?? []),
+    [extensions.data, connectors.data],
   );
 }
 

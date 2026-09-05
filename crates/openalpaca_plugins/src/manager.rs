@@ -16,8 +16,8 @@
 //!    `PluginStatus` could not distinguish "off" from "blocked", pinned a
 //!    failed load at `Loading` forever, and had no notion of *which load* a
 //!    handle belonged to. `ExtensionState` plus the ledger's `generation`
-//!    replace it; [`legacy_status_word`] keeps `GET /v1/plugins` and the GUI's
-//!    Plugins panel working until C7 deletes the route (design §4.3).
+//!    replace it. C7 deleted the last of the old vocabulary with
+//!    `GET /v1/plugins` and the GUI panel that parsed it (design §4.3).
 //! 3. **Every transition runs under a per-extension mutex**, held across the
 //!    whole thing (design §3). That is what lets the ledger's CAS replace the
 //!    contained claim-token machinery Phase 0 A2 added: two overlapping verbs
@@ -39,7 +39,6 @@ use tokio::sync::RwLock;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tracing::{debug, error, info, warn};
 
-use openalpaca_api::events::ServerEvent;
 use openalpaca_core::agent::registry::AgentRegistry;
 use openalpaca_core::agent::template::{AgentSource, AgentTemplate, AgentTemplateFrontmatter};
 use openalpaca_core::bus::EventBus;
@@ -77,37 +76,6 @@ const DEFAULT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 
 /// How often T3 re-reads the in-flight counter while draining.
 const DRAIN_POLL: std::time::Duration = std::time::Duration::from_millis(5);
-
-// ── The legacy status vocabulary ────────────────────────────────────────
-
-/// `ExtensionState` rendered in the words `GET /v1/plugins` and the GUI's
-/// `PluginsSection` still parse (design §4.3).
-///
-/// The shim exists for exactly one commit range: C6 adds `/v1/extensions`, C7
-/// deletes the plugins route and this function with it. Until then "tree green"
-/// includes the GUI, which reads `running` / `disabled` / `waiting-approval`
-/// and splits `crashed: …` / `needs-config (…)` on the first `:` or `(`.
-///
-/// Note the word that moves: a **denied** plugin reads `waiting-approval` here,
-/// because `denied` is a *consent* word and consent now has its own field on the
-/// extension row (`consent: "denied"`), not the state's. And `Orphaned` has no
-/// legacy spelling — nothing could produce one before — so it renders as itself
-/// and the GUI gives it the neutral tag any unknown word gets.
-pub fn legacy_status_word(state: &ExtensionState) -> String {
-    match state {
-        ExtensionState::Enabled => "running".to_string(),
-        ExtensionState::Disabled => "disabled".to_string(),
-        ExtensionState::Unapproved { .. } => "waiting-approval".to_string(),
-        ExtensionState::Failed {
-            reason: FailureReason::NeedsConfig { missing },
-            ..
-        } => format!("needs-config ({})", missing.join(", ")),
-        ExtensionState::Failed { detail, .. } => format!("crashed: {detail}"),
-        ExtensionState::Enabling => "loading".to_string(),
-        ExtensionState::Disabling => "stopped".to_string(),
-        ExtensionState::Orphaned => "orphaned".to_string(),
-    }
-}
 
 // ── PluginCapabilityProvider ────────────────────────────────────────────
 
@@ -231,37 +199,7 @@ struct Discovered {
     agent: Option<AgentTemplate>,
 }
 
-// ── PluginInfo ──────────────────────────────────────────────────────
-
-/// Summary of a plugin returned by [`PluginManager::list_plugins`] — the shape
-/// `GET /v1/plugins` serialises until C7 replaces it with the extension row.
-#[derive(Debug, Clone)]
-pub struct PluginInfo {
-    pub name: String,
-    pub version: String,
-    /// [`legacy_status_word`] of the ledger's state (design §4.3).
-    pub status: String,
-    pub tools: Vec<String>,
-    pub connector: Option<String>,
-    pub provider: Option<String>,
-    pub models: Vec<String>,
-    pub skills: Vec<String>,
-    pub agents: Vec<String>,
-}
-
 // ── PluginManager ───────────────────────────────────────────────────────
-
-/// Callback through which the `PluginManager` emits lifecycle events
-/// (`ServerEvent::Plugin*` variants). The daemon wires this to its
-/// `EventBroadcaster` so WebSocket clients (e.g. the GUI plugin panel)
-/// see plugin state changes live. A plain callback keeps this crate free
-/// of any dependency on the daemon's event infrastructure.
-///
-/// Superseded by the event bus ([`PluginManager::with_event_bus`]), which
-/// carries `SystemEvent::ExtensionStateChanged`; both fire until C7 deletes the
-/// legacy route, the `ServerEvent::Plugin*` producers and this type together
-/// (design §7.3).
-pub type PluginEventSink = Arc<dyn Fn(ServerEvent) + Send + Sync>;
 
 /// The plugin supervisor: discovery, load/unload, consent, disposition, tool
 /// registration and crash detection.
@@ -273,7 +211,6 @@ pub struct PluginManager {
     ledger: Arc<ExtensionLedger>,
     skill_catalog: Option<Arc<SkillCatalog>>,
     agent_registry: Option<Arc<AgentRegistry>>,
-    event_sink: Option<PluginEventSink>,
     /// Installed by `with_event_bus` so T5/E5 can publish
     /// `SystemEvent::ExtensionStateChanged` before C4 gives the ledger a bus of
     /// its own (design §7.3).
@@ -321,7 +258,6 @@ impl PluginManager {
             ledger,
             skill_catalog,
             agent_registry,
-            event_sink: None,
             bus: None,
             daemon_config: None,
             secret_store: None,
@@ -335,13 +271,6 @@ impl PluginManager {
     /// 3's cron notice is written (design §7.3 step 1).
     pub fn with_notice_lane(mut self, lane: impl Into<String>) -> Self {
         self.notice_lane = lane.into();
-        self
-    }
-
-    /// Attach a lifecycle event sink. Events emitted before this is called
-    /// are dropped, so attach it before [`start`](Self::start).
-    pub fn with_event_sink(mut self, sink: PluginEventSink) -> Self {
-        self.event_sink = Some(sink);
         self
     }
 
@@ -380,13 +309,6 @@ impl PluginManager {
                 sup.reap(&ext, generation).await;
             }
         });
-    }
-
-    /// Emit a legacy lifecycle event to the attached sink (no-op when absent).
-    fn emit(&self, event: ServerEvent) {
-        if let Some(ref sink) = self.event_sink {
-            sink(event);
-        }
     }
 
     /// The one transition announcement. `state` is always a state word rendered
@@ -632,10 +554,6 @@ impl PluginManager {
                     WithdrawalCause::Watcher,
                 )
                 .await;
-                self.emit(ServerEvent::PluginPendingApproval {
-                    plugin_id: id.clone(),
-                    capabilities: manifest.capabilities.provides.clone(),
-                });
             }
             Some(false) => {
                 self.park(
@@ -1095,10 +1013,6 @@ impl PluginManager {
             Ok(config) => config,
             Err(missing) => {
                 info!(plugin = %id, ?missing, "a plugin secret could not be resolved");
-                self.emit(ServerEvent::PluginNeedsConfig {
-                    plugin_id: id.clone(),
-                    missing_keys: missing.clone(),
-                });
                 self.commit(
                     ext,
                     self.failure(
@@ -1112,10 +1026,6 @@ impl PluginManager {
         let missing = manifest.missing_config_keys(&provided);
         if !missing.is_empty() {
             info!(plugin = %id, ?missing, "plugin needs configuration");
-            self.emit(ServerEvent::PluginNeedsConfig {
-                plugin_id: id.clone(),
-                missing_keys: missing.clone(),
-            });
             let detail = format!("missing configuration: {}", missing.join(", "));
             self.commit(
                 ext,
@@ -1184,10 +1094,6 @@ impl PluginManager {
                 self.ledger.restore(ext);
                 self.ledger.record_tools(ext, tools.clone());
                 self.commit(ext, ExtensionState::Enabled);
-                self.emit(ServerEvent::PluginLoaded {
-                    plugin_id: id.clone(),
-                    tools,
-                });
                 info!(plugin = %id, generation, "plugin loaded successfully");
             }
             Err(e) => {
@@ -1732,52 +1638,11 @@ impl PluginManager {
         self.ledger
             .store_state(&ext, unapproved(UnapprovedReason::Denied));
         self.emit_record(&ext);
-        self.emit(ServerEvent::PluginUnloaded {
-            plugin_id: name.to_string(),
-        });
-        self.emit(ServerEvent::PluginDisabled {
-            plugin_id: name.to_string(),
-            reason: "denied by user".to_string(),
-        });
         info!(plugin = name, "plugin denied");
         self.row(&ext).await
     }
 
     // ── Reads ────────────────────────────────────────────────────────
-
-    /// List all tracked plugins with the legacy metadata `GET /v1/plugins`
-    /// serialises.
-    ///
-    /// It runs the **same `try_wait` sweep** `list()` does: between C3 and C7
-    /// this is the only route to the sweep, because the plugins panel still
-    /// reads the legacy endpoint (design §3.6 item 3).
-    pub async fn list_plugins(&self) -> Vec<PluginInfo> {
-        self.sweep().await;
-        let plugins = self.plugins.read().await;
-        let mut rows: Vec<PluginInfo> = plugins
-            .iter()
-            .map(|(name, state)| {
-                let status = self
-                    .ledger
-                    .state(&ExtensionId::plugin(name.clone()))
-                    .map(|s| legacy_status_word(&s))
-                    .unwrap_or_else(|| "loading".to_string());
-                PluginInfo {
-                    name: name.clone(),
-                    version: state.manifest.plugin.version.clone(),
-                    status,
-                    tools: state.registered_tools.clone(),
-                    connector: state.registered_connector.clone(),
-                    provider: state.registered_provider.clone(),
-                    models: state.registered_models.clone(),
-                    skills: state.registered_skills.clone(),
-                    agents: state.registered_agents.clone(),
-                }
-            })
-            .collect();
-        rows.sort_by(|a, b| a.name.cmp(&b.name));
-        rows
-    }
 
     /// The extension row for one plugin: the ledger's record plus the row data
     /// only the supervisor holds — consent, the manifest's declarations, the
@@ -2232,16 +2097,6 @@ impl ExtensionSupervisor for PluginManager {
         let stragglers = self.t3(id).await;
         self.t4(&id.name).await;
         self.commit(id, ExtensionState::Disabled);
-        // The two legacy producers this teardown replaces: `unload_plugin`
-        // emitted `PluginUnloaded` on every unload and the verb emitted
-        // `PluginDisabled`. Both keep firing until C7 deletes the route (§7.3).
-        self.emit(ServerEvent::PluginUnloaded {
-            plugin_id: id.name.clone(),
-        });
-        self.emit(ServerEvent::PluginDisabled {
-            plugin_id: id.name.clone(),
-            reason: "disabled by user".to_string(),
-        });
         info!(extension = %id, "plugin disabled");
 
         let mut record = self.row(id).await?;

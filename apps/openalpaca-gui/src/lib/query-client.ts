@@ -61,24 +61,39 @@ export function invalidationKeysFor(
     case "chat_stream_ended":
       return [qk.chat.all(), qk.conversations.all()];
 
-    // T1 step 3's transition event (ADR-030 §7.3, §9.5). The dispatcher writes
-    // the cron notice as a conversation row on the default lane, so an open chat
-    // has to refetch to show it without a reload — the same reason
-    // `chat_stream_ended` invalidates chat. The extension/tool/skill/agent keys
-    // land with the Extensions view in C7.
+    // ADR-030 §9.5. Skills and agents because a plugin's contributions come and
+    // go with it; connectors because a plugin may declare one. A frame carrying
+    // `tools_changed: true` (a server-driven `tools/list_changed`, §3.7)
+    // invalidates the same keys as any other.
+    case "extension_state_changed":
+      return [
+        qk.extensions.all(),
+        qk.tools.all(),
+        qk.skills.all(),
+        qk.agents.all(),
+        qk.connectors.all(),
+      ];
+
+    // A refusal, not a transition: the surface the caller saw is stale, the
+    // extension's own state is not.
+    case "extension_capability_withheld":
+      return [qk.extensions.all(), qk.tools.all()];
+
+    // T1 step 3's transition event (§7.3). The dispatcher writes the cron
+    // notice as a conversation row on the default lane, so an open chat has to
+    // refetch to show it without a reload — the same reason
+    // `chat_stream_ended` invalidates chat.
     case "extension_capability_withdrawn":
-      return [qk.chat.all()];
+      return [
+        qk.extensions.all(),
+        qk.tools.all(),
+        qk.skills.all(),
+        qk.agents.all(),
+        qk.chat.all(),
+      ];
 
     case "connector_status":
       return [qk.connectors.all()];
-
-    case "plugin_loaded":
-    case "plugin_unloaded":
-    case "plugin_crashed":
-    case "plugin_disabled":
-    case "plugin_pending_approval":
-    case "plugin_needs_config":
-      return [qk.plugins.all(), qk.connectors.all()];
 
     case "key_status_changed":
       return [qk.settings.all()];
@@ -125,8 +140,7 @@ export function invalidationKeysFor(
     // A frame this build does not know yet invalidates nothing rather than
     // falling off the end of the switch and returning `undefined`, which the
     // listener loop would then iterate and throw on. The daemon's event set
-    // grows ahead of the GUI's (the extension frame lands with the MCP
-    // supervisor, its query key with the Extensions view).
+    // grows ahead of the GUI's.
     default:
       return [];
   }
@@ -143,10 +157,33 @@ export function invalidateForEvent(
 }
 
 /**
+ * `GET /v1/extensions` is the resync primitive (ADR-030 §9.5 (ii), G-4).
+ *
+ * The client cannot detect a `Lagged` gap — the server warns and continues,
+ * and a `resync_needed` signal is explicitly out of scope — so **reconnect is
+ * the only trigger**, and it invalidates these keys unconditionally rather
+ * than waiting for an `extension_state_changed` it may never see. Named
+ * separately from the sweep below so narrowing that sweep can never silently
+ * drop the extension set; if `resync_needed` ever ships it maps to the same
+ * keys.
+ */
+export function extensionResyncKeys(): readonly (readonly unknown[])[] {
+  return [
+    qk.extensions.all(),
+    qk.tools.all(),
+    qk.skills.all(),
+    qk.agents.all(),
+  ];
+}
+
+/**
  * After a reconnect the client may have missed events with no notification
  * (the server drops frames for a lagged subscriber and never replays), so the
  * only correct move is to invalidate everything server-derived.
  */
 export function invalidateAfterResync(client: QueryClient): void {
+  for (const queryKey of extensionResyncKeys()) {
+    void client.invalidateQueries({ queryKey });
+  }
   void client.invalidateQueries();
 }

@@ -1,7 +1,7 @@
 /** `/v1/connectors*`. */
 
 import { apiFetch } from "../http";
-import type { Connector, ConnectorAction, PluginInfo } from "./types";
+import type { Connector, ConnectorAction, ExtensionRow } from "./types";
 
 /**
  * `GET /v1/connectors` — bare array of `{ id, name, status, configured }`.
@@ -61,16 +61,21 @@ export async function updateConnectorSettings(
 /**
  * The design's `unwired` badge: a plugin declares a connector that never
  * registered. Derivable client-side, which is why it is not a gap on its own.
+ *
+ * The join reads the extension rows: `connector` is non-null only while the
+ * plugin is loaded, so a disabled plugin no longer claims a connector it is
+ * not serving (ADR-030 §8 — a `disabled` row with a non-null `connector` is a
+ * teardown bug, not an `unwired` badge).
  */
 export function findUnwiredConnectors(
-  plugins: PluginInfo[],
+  extensions: ExtensionRow[],
   connectors: Connector[],
 ): Array<{ connectorId: string; declaredBy: string }> {
   const registered = new Set(connectors.map((c) => c.id));
-  return plugins
+  return extensions
     .filter(
-      (p): p is PluginInfo & { connector: string } => p.connector !== null,
+      (e): e is ExtensionRow & { connector: string } => e.connector !== null,
     )
-    .filter((p) => !registered.has(p.connector))
-    .map((p) => ({ connectorId: p.connector, declaredBy: p.name }));
+    .filter((e) => !registered.has(e.connector))
+    .map((e) => ({ connectorId: e.connector, declaredBy: e.id }));
 }

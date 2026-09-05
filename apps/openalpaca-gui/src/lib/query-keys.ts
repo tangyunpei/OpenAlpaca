@@ -85,9 +85,15 @@ export const qk = {
       ["orchestrator", "decisions", query] as const,
   },
 
-  plugins: {
-    all: () => ["plugins"] as const,
-    list: () => ["plugins", "list"] as const,
+  /** MCP servers and plugins in one list (ADR-030 §9.2). */
+  extensions: {
+    all: () => ["extensions"] as const,
+    list: () => ["extensions", "list"] as const,
+  },
+
+  tools: {
+    all: () => ["tools"] as const,
+    list: () => ["tools", "list"] as const,
   },
 
   connectors: {

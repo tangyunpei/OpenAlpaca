@@ -315,36 +315,6 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
-    /// A plugin was loaded and registered its tools
-    PluginLoaded {
-        plugin_id: String,
-        tools: Vec<String>,
-    },
-    /// A plugin was unloaded (graceful shutdown)
-    PluginUnloaded {
-        plugin_id: String,
-    },
-    /// A plugin process crashed unexpectedly
-    PluginCrashed {
-        plugin_id: String,
-        error: String,
-        restart_in_secs: u64,
-    },
-    /// A plugin was disabled by the system or user
-    PluginDisabled {
-        plugin_id: String,
-        reason: String,
-    },
-    /// A plugin requires capability approval before activation
-    PluginPendingApproval {
-        plugin_id: String,
-        capabilities: Vec<String>,
-    },
-    /// A plugin needs configuration keys before it can start
-    PluginNeedsConfig {
-        plugin_id: String,
-        missing_keys: Vec<String>,
-    },
 }
 
 /// The source of an event, identifying which connector or interface originated it.

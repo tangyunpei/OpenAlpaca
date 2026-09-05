@@ -258,31 +258,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         // Tool catalog (GAP-18) — read-only; no per-tool toggle (S1)
         .route("/v1/tools", get(crate::routes::list_tools_handler))
-        // Plugin routes — superseded by /v1/extensions; deleted in C7
-        .route(
-            "/v1/plugins",
-            get(crate::routes::list_plugins_handler),
-        )
-        .route(
-            "/v1/plugins/{name}/approve",
-            post(crate::routes::approve_plugin_handler),
-        )
-        .route(
-            "/v1/plugins/{name}/deny",
-            post(crate::routes::deny_plugin_handler),
-        )
-        .route(
-            "/v1/plugins/{name}/enable",
-            post(crate::routes::enable_plugin_handler),
-        )
-        .route(
-            "/v1/plugins/{name}/disable",
-            post(crate::routes::disable_plugin_handler),
-        )
-        .route(
-            "/v1/plugins/{name}/config",
-            post(crate::routes::set_plugin_config_handler),
-        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::middleware::auth_middleware,

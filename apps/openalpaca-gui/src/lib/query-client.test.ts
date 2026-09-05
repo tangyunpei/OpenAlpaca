@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ServerEvent } from "./events";
 import {
+  extensionResyncKeys,
   invalidateAfterResync,
   invalidateForEvent,
   invalidationKeysFor,
@@ -37,7 +38,8 @@ function seeded(): QueryClient {
   });
   client.setQueryData(qk.tasks.list({ status: "active" }), []);
   client.setQueryData(qk.tasks.timeline("run-1"), null);
-  client.setQueryData(qk.plugins.list(), []);
+  client.setQueryData(qk.extensions.list(), []);
+  client.setQueryData(qk.tools.list(), []);
   client.setQueryData(qk.connectors.list(), []);
   client.setQueryData(qk.skills.health(), []);
   client.setQueryData(qk.models.list(), []);
@@ -68,20 +70,61 @@ describe("invalidationKeysFor", () => {
     ).toEqual([qk.tasks.detail("run-1"), qk.tasks.timeline("run-1")]);
   });
 
-  it("refreshes plugins and connectors together — a plugin can serve one", () => {
-    for (const type of [
-      "plugin_loaded",
-      "plugin_unloaded",
-      "plugin_crashed",
-      "plugin_disabled",
-      "plugin_pending_approval",
-      "plugin_needs_config",
-    ] as const) {
-      expect(invalidationKeysFor(event(type))).toEqual([
-        qk.plugins.all(),
-        qk.connectors.all(),
-      ]);
-    }
+  // ADR-030 §9.5. Skills and agents because a plugin's contributions come and
+  // go with it; connectors because a plugin may declare one.
+  it("refreshes everything an extension contributes when its state changes", () => {
+    expect(
+      invalidationKeysFor(
+        event("extension_state_changed", { kind: "plugin", id: "notion" }),
+      ),
+    ).toEqual([
+      qk.extensions.all(),
+      qk.tools.all(),
+      qk.skills.all(),
+      qk.agents.all(),
+      qk.connectors.all(),
+    ]);
+  });
+
+  it("treats a `tools_changed` refresh as any other state change", () => {
+    expect(
+      invalidationKeysFor(
+        event("extension_state_changed", { tools_changed: true }),
+      ),
+    ).toEqual(
+      invalidationKeysFor(
+        event("extension_state_changed", { tools_changed: false }),
+      ),
+    );
+  });
+
+  it("narrows a withheld capability to the surfaces that showed it", () => {
+    expect(invalidationKeysFor(event("extension_capability_withheld"))).toEqual(
+      [qk.extensions.all(), qk.tools.all()],
+    );
+  });
+
+  // The dispatcher writes the cron notice as a conversation row on the default
+  // lane, so an open chat has to refetch to show it without a reload (§7.3).
+  it("reaches chat from a withdrawal, because the notice lands in one", () => {
+    expect(
+      invalidationKeysFor(event("extension_capability_withdrawn")),
+    ).toEqual([
+      qk.extensions.all(),
+      qk.tools.all(),
+      qk.skills.all(),
+      qk.agents.all(),
+      qk.chat.all(),
+    ]);
+  });
+
+  it("invalidates nothing for a frame this build does not know", () => {
+    expect(
+      invalidationKeysFor({
+        type: "something_new",
+        _id: 1,
+      } as unknown as ServerEvent),
+    ).toEqual([]);
   });
 
   it("refreshes connectors from a connector status frame", () => {
@@ -117,15 +160,19 @@ describe("invalidateForEvent", () => {
 
     expect(invalidated(client, qk.tasks.list({ status: "active" }))).toBe(true);
     expect(invalidated(client, qk.tasks.timeline("run-1"))).toBe(true);
-    expect(invalidated(client, qk.plugins.list())).toBe(false);
+    expect(invalidated(client, qk.extensions.list())).toBe(false);
     expect(invalidated(client, qk.models.list())).toBe(false);
   });
 
-  it("reaches the plugin and connector lists from one plugin frame", () => {
+  it("reaches the extension, tool and connector lists from one state frame", () => {
     const client = seeded();
-    invalidateForEvent(client, event("plugin_crashed", { plugin_id: "x" }));
+    invalidateForEvent(
+      client,
+      event("extension_state_changed", { kind: "plugin", id: "x" }),
+    );
 
-    expect(invalidated(client, qk.plugins.list())).toBe(true);
+    expect(invalidated(client, qk.extensions.list())).toBe(true);
+    expect(invalidated(client, qk.tools.list())).toBe(true);
     expect(invalidated(client, qk.connectors.list())).toBe(true);
     expect(invalidated(client, qk.tasks.list({ status: "active" }))).toBe(
       false,
@@ -140,12 +187,29 @@ describe("invalidateAfterResync", () => {
 
     for (const key of [
       qk.tasks.list({ status: "active" }),
-      qk.plugins.list(),
+      qk.extensions.list(),
       qk.connectors.list(),
       qk.skills.health(),
       qk.models.list(),
     ]) {
       expect(invalidated(client, key)).toBe(true);
     }
+  });
+
+  // §9.5 (ii), G-4: `GET /v1/extensions` is the resync primitive. The client
+  // cannot detect a `Lagged` gap, so reconnect is the only trigger and it must
+  // not depend on having seen an `extension_state_changed`.
+  it("names the extension set explicitly, so narrowing the sweep cannot drop it", () => {
+    expect(extensionResyncKeys()).toEqual([
+      qk.extensions.all(),
+      qk.tools.all(),
+      qk.skills.all(),
+      qk.agents.all(),
+    ]);
+
+    const client = seeded();
+    invalidateAfterResync(client);
+    expect(invalidated(client, qk.extensions.list())).toBe(true);
+    expect(invalidated(client, qk.tools.list())).toBe(true);
   });
 });

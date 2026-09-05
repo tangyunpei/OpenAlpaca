@@ -333,7 +333,6 @@ async fn async_main(
 
     // Initialize PluginManager
     let plugin_dir = store::plugins_dir()?;
-    let eb_for_plugins = event_broadcaster.clone();
     let plugin_manager = Arc::new(
         openalpaca_plugins::PluginManager::new(
             plugin_dir,
@@ -341,14 +340,12 @@ async fn async_main(
             Some(svcs.skill_catalog.clone()),
             Some(svcs.shared_context.agent_registry.clone()),
         )
-        // Wire lifecycle events (ServerEvent::Plugin*) to the WS broadcaster
-        // so clients like the GUI plugin panel live-update. Superseded by the
-        // bus below; both fire until C7 deletes the legacy route.
-        .with_event_sink(Arc::new(move |event| eb_for_plugins.broadcast(event)))
         // T5/E5 publish `SystemEvent::ExtensionStateChanged` here, which the
         // event bridge forwards to the `ServerEvent` peer C2 added
-        // (extension design §7.3). `mark_failed`'s own `failed` event moved
-        // onto the ledger's bus in C4 (§3.6); the supervisor keeps the rest.
+        // (extension design §7.3) — the only lifecycle events there are since
+        // C7 deleted the six `plugin_*` variants and the sink that fed them.
+        // `mark_failed`'s own `failed` event moved onto the ledger's bus in C4
+        // (§3.6); the supervisor keeps the rest.
         .with_event_bus(bus.clone())
         // T1 step 3's cron notice is written to the default lane (§7.3 step 1).
         .with_notice_lane(default_lane_key.clone())
@@ -652,7 +649,6 @@ async fn async_main(
         confirmation_broker: Some(confirmation_broker),
         tool_registry: tool_registry_for_state,
         extensions: extensions.clone(),
-        plugin_manager: Some(plugin_manager),
     });
 
     let app = router::build_router(state);

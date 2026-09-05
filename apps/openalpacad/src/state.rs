@@ -44,8 +44,4 @@ pub struct AppState {
     /// supervisors are constructed unconditionally, so no "subsystem absent"
     /// path exists to report and `/v1/extensions` has no `503`.
     pub extensions: Arc<crate::managers::extensions::Extensions>,
-    /// The legacy plugin handle `GET /v1/plugins` and the five `POST
-    /// /v1/plugins/{name}/…` routes still read. **Deleted in C7** with those
-    /// routes; `extensions.plugins()` is the same `Arc`.
-    pub plugin_manager: Option<Arc<openalpaca_plugins::PluginManager>>,
 }
