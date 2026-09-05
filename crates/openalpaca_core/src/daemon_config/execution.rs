@@ -79,8 +79,6 @@ impl Default for LeadAgentDefaults {
 pub struct SkillDefaults {
     pub max_rounds: usize,
     pub max_tools_per_round: usize,
-    /// Global tool deny list (applied to all skills in addition to per-skill deny).
-    pub global_tool_deny: Vec<String>,
     /// Auto-select score threshold for the skill router.
     pub router_auto_select_threshold: f64,
     /// Suggest score threshold for the skill router.
@@ -92,7 +90,6 @@ impl Default for SkillDefaults {
         Self {
             max_rounds: 6,
             max_tools_per_round: 3,
-            global_tool_deny: Vec::new(),
             router_auto_select_threshold: 0.65,
             router_suggest_threshold: 0.45,
         }

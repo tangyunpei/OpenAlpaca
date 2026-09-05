@@ -28,9 +28,6 @@ pub struct SkillInvocationToolExecutor {
     /// From `security.auto_approve_confirmations` — nested sandboxes have no
     /// confirmation broker, so confirm-listed tools fail closed unless this is set.
     pub auto_approve: bool,
-    /// From `execution.skill_defaults.global_tool_deny` — enforced on nested
-    /// skills the same as the top-level path in invocation.rs.
-    pub global_tool_deny: Vec<String>,
     /// From `[security.circuit_breaker]` — nested sandboxes use the same
     /// breaker settings as the top-level path in invocation.rs.
     pub circuit_breaker: crate::daemon_config::CircuitBreakerConfig,
@@ -52,7 +49,6 @@ impl SkillInvocationToolExecutor {
         parent_tool_context: Option<ToolContext>,
         parent_max_cost: f64,
         auto_approve: bool,
-        global_tool_deny: Vec<String>,
         circuit_breaker: crate::daemon_config::CircuitBreakerConfig,
         confirmation_timeout_secs: u64,
     ) -> Self {
@@ -68,7 +64,6 @@ impl SkillInvocationToolExecutor {
             parent_tool_context,
             parent_max_cost,
             auto_approve,
-            global_tool_deny,
             circuit_breaker,
             confirmation_timeout_secs,
         }
@@ -213,9 +208,6 @@ impl SkillInvocationToolExecutor {
             return Err(requirements.refusal(skill_id));
         }
 
-        // Apply the global deny list, mirroring the top-level path in invocation.rs.
-        tool_defs.retain(|t| !self.global_tool_deny.contains(&t.name));
-
         // Add invoke_skill:* synthetic tool definitions for nested skill's own depends_on
         for dep_id in &skill_doc.frontmatter.depends_on {
             if let Some(dep_entry) = self.catalog.get(dep_id) {
@@ -344,7 +336,6 @@ impl SkillInvocationToolExecutor {
                     Some(child_tool_ctx.clone()),
                     remaining,
                     self.auto_approve,
-                    self.global_tool_deny.clone(),
                     self.circuit_breaker.clone(),
                     self.confirmation_timeout_secs,
                 ));
@@ -421,19 +412,11 @@ impl SkillInvocationToolExecutor {
                 allowed_capabilities: Allowlist::only(
                     tool_defs.iter().map(|t| t.name.as_str()),
                 ),
-                denied_capabilities: {
-                    let mut denied: Vec<String> = child_tool_ctx
-                        .effective_constraints
-                        .as_ref()
-                        .map(|c| c.denied.iter().cloned().collect())
-                        .unwrap_or_default();
-                    for g in &self.global_tool_deny {
-                        if !denied.contains(g) {
-                            denied.push(g.clone());
-                        }
-                    }
-                    denied
-                },
+                denied_capabilities: child_tool_ctx
+                    .effective_constraints
+                    .as_ref()
+                    .map(|c| c.denied.iter().cloned().collect())
+                    .unwrap_or_default(),
                 require_confirmation_for: skill_doc
                     .frontmatter
                     .permissions
@@ -660,7 +643,6 @@ Use echo_tool to answer.
             None,
             1.0,
             false,
-            vec![],
             crate::daemon_config::CircuitBreakerConfig::default(),
             300,
         );
@@ -698,91 +680,5 @@ Use echo_tool to answer.
             "nested tool call was stubbed out: {:?}",
             round2
         );
-    }
-
-    /// The global tool deny list must bind nested skills exactly like the
-    /// top-level path in invocation.rs.
-    #[tokio::test]
-    async fn test_nested_invocation_respects_global_tool_deny() {
-        let tmp = TempDir::new().unwrap();
-        write_skill(
-            tmp.path(),
-            "child-skill",
-            r#"---
-name: "Child Skill"
-description: "Nested skill for global-deny test"
-tools:
-  allow:
-    - echo_tool
----
-Use echo_tool to answer.
-"#,
-        );
-
-        let catalog = Arc::new(SkillCatalog::new());
-        catalog.scan_directory(tmp.path(), SkillScope::Project);
-
-        let registry = Arc::new(ToolRegistry::new().unwrap());
-        let calls = Arc::new(AtomicUsize::new(0));
-        registry
-            .register(RegisteredTool {
-                definition: ToolDefinition {
-                    name: "echo_tool".to_string(),
-                    description: "Echo".to_string(),
-                    parameters: serde_json::json!({
-                        "type": "object",
-                        "properties": {"query": {"type": "string"}}
-                    }),
-                    strict: None,
-                    input_examples: None,
-                },
-                backend: ToolBackend::BuiltIn(Arc::new(EchoTool {
-                    calls: calls.clone(),
-                })),
-                provides_capabilities: vec![],
-                exempt_from_timeout: false,
-                annotations: None,
-                version: "test".to_string(),
-                author: "test".to_string(),
-                created_at: chrono::Utc::now(),
-            })
-            .unwrap();
-
-        let provider = Arc::new(MockProvider {
-            call_count: AtomicUsize::new(0),
-            requests: Mutex::new(Vec::new()),
-        });
-        let router = Arc::new(LlmRouter::single_provider(
-            provider.clone(),
-            ProviderType::Anthropic,
-            "claude-sonnet-4-20250514".to_string(),
-        ));
-
-        let executor = SkillInvocationToolExecutor::new(
-            catalog,
-            registry,
-            router,
-            EventBus::new(16),
-            vec!["parent-skill".to_string()],
-            3,
-            None,
-            None,
-            None,
-            1.0,
-            false,
-            vec!["echo_tool".to_string()],
-            crate::daemon_config::CircuitBreakerConfig::default(),
-            300,
-        );
-
-        let _ = executor
-            .execute(
-                "invoke_skill:child-skill",
-                &serde_json::json!({"query": "run it"}),
-            )
-            .await;
-
-        // The globally denied tool must never execute in a nested loop.
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }

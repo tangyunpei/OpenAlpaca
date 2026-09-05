@@ -142,17 +142,12 @@ pub async fn run_lead_agent(
         tools.push(mem_tool.definition.clone());
     }
     // Extension tools (MCP-bridged `<server>__<tool>` + plugin-provided
-    // `<plugin>::<tool>`) join the lead surface by default, minus the global
-    // tool deny list — same union-minus-deny policy as the main loop
-    // (tool/skill wiring, Chunk 3). Definitions only: their backends already
-    // live in the global registry the per-request clone below carries.
-    let global_tool_deny = daemon_config
-        .load()
-        .execution
-        .skill_defaults
-        .global_tool_deny
-        .clone();
-    tools.extend(tool_registry.extension_tool_defs(&global_tool_deny));
+    // `<plugin>::<tool>`) join the lead surface by default, less those whose
+    // extension is not enabled — same policy as the main loop (tool/skill
+    // wiring, Chunk 3); there is no per-tool opt-out (design §1 S1, §11).
+    // Definitions only: their backends already live in the global registry
+    // the per-request clone below carries.
+    tools.extend(tool_registry.extension_tool_defs());
     // invoke_skill: per-request catalog-skill invocation over the nested-skill
     // executor (same instance as the main loop's). Budget ceiling = this
     // lead's own loop budget (defaults + agent constraint overrides).

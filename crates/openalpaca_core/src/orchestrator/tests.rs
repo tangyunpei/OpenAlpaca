@@ -2727,7 +2727,6 @@ async fn a_legacy_tools_allow_skill_is_attributed_on_both_the_top_level_and_the_
         None,
         1.0,
         true,
-        vec![],
         crate::daemon_config::CircuitBreakerConfig::default(),
         30,
     );
@@ -2978,7 +2977,6 @@ fn nested_executor(
         None,
         1.0,
         true,
-        vec![],
         crate::daemon_config::CircuitBreakerConfig::default(),
         30,
     )

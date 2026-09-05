@@ -146,9 +146,9 @@ impl Orchestrator {
                 Some(super::LoopOverrides::MainLoop { .. }) => {
                     // Routing V2 main loop: budgets from
                     // `[orchestrator.routing]`; tool surface = base picks ∪
-                    // the per-request set (core tools, MCP/plugin extension
-                    // tools minus the global deny list, `invoke_skill`, and —
-                    // when active — the workflow tools).
+                    // the per-request set (core tools, the enabled MCP/plugin
+                    // extension tools, `invoke_skill`, and — when active —
+                    // the workflow tools).
                     let routing = self.daemon_config.load().orchestrator.routing.clone();
                     let set = crate::tools::builtins::main_loop_tool_set(
                         self.task_dispatcher.clone(),
@@ -166,23 +166,15 @@ impl Orchestrator {
                         &tool_ctx,
                     );
                     // Base surface: suggested picks ("core_union", default) or
-                    // the whole registry minus the global deny list ("full").
-                    // Either way `set.definitions` is unioned in below, so
-                    // extension tools and `invoke_skill` are reachable in both
-                    // modes (deduped by name).
+                    // the whole registry ("full"). Either way
+                    // `set.definitions` is unioned in below, so extension
+                    // tools and `invoke_skill` are reachable in both modes
+                    // (deduped by name).
                     let mut defs: Vec<openalpaca_llm::ToolDefinition> =
                         if routing.tool_selection == "full" {
-                            let deny = self
-                                .daemon_config
-                                .load()
-                                .execution
-                                .skill_defaults
-                                .global_tool_deny
-                                .clone();
                             self.tool_registry
                                 .registered_tool_names()
                                 .iter()
-                                .filter(|n| !deny.contains(n))
                                 .filter_map(|n| self.tool_registry.get(n))
                                 // The third assembly site: it never passes
                                 // through `extension_tool_defs`, so it carries

@@ -233,16 +233,11 @@ impl Orchestrator {
             }
         }
 
-        // Apply deny list (both paths)
+        // Apply the skill's own deny list (both paths). There is no global
+        // per-tool deny — the ENABLE axis is per extension (design §11).
         let skill_deny = &skill_doc.frontmatter.tools.deny;
-        let global_deny = &self
-            .daemon_config
-            .load()
-            .execution
-            .skill_defaults
-            .global_tool_deny;
 
-        tool_defs.retain(|t| !skill_deny.contains(&t.name) && !global_deny.contains(&t.name));
+        tool_defs.retain(|t| !skill_deny.contains(&t.name));
 
         // Resolve script tools from skill's scripts/ directory
         let script_tool_defs: Vec<openalpaca_llm::ToolDefinition> = skill_doc
@@ -332,12 +327,7 @@ impl Orchestrator {
                 tool_names_log
             );
             let resolved: Vec<String> = tool_defs.iter().map(|t| t.name.clone()).collect();
-            let mut denied_caps: Vec<String> = skill_deny.clone();
-            for g in global_deny {
-                if !denied_caps.contains(g) {
-                    denied_caps.push(g.clone());
-                }
-            }
+            let denied_caps: Vec<String> = skill_deny.clone();
             policy_opt = Some(SandboxPolicy {
                 agent_id: "orchestrator".to_string(),
                 // Closed set: the skill may call exactly the tools resolved for
@@ -673,7 +663,6 @@ impl Orchestrator {
                             .load()
                             .security
                             .auto_approve_confirmations, // auto_approve
-                        global_deny.clone(),            // global_tool_deny
                         self.daemon_config.load().security.circuit_breaker.clone(),
                         self.daemon_config
                             .load()
@@ -1020,18 +1009,7 @@ impl Orchestrator {
         let withheld_scope = request_id.to_string();
         let (allowed, requirements) =
             plugin_skill_allowlist(skill_name, fm, &self.tool_registry, &withheld_scope)?;
-        let mut denied: Vec<String> = fm.tools.deny.clone();
-        for g in &self
-            .daemon_config
-            .load()
-            .execution
-            .skill_defaults
-            .global_tool_deny
-        {
-            if !denied.contains(g) {
-                denied.push(g.clone());
-            }
-        }
+        let denied: Vec<String> = fm.tools.deny.clone();
 
         let policy = SandboxPolicy {
             agent_id: format!("plugin:{plugin_id}"),

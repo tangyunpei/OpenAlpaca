@@ -1316,17 +1316,13 @@ async fn test_lead_loop_request_carries_extension_defs_and_invoke_skill() {
             calls: std::sync::atomic::AtomicUsize::new(0),
         })),
     );
-    register_extension_tool(&registry, "srv__blocked", mcp_backend());
-
-    let mut cfg = DaemonConfig::default();
-    cfg.execution.skill_defaults.global_tool_deny = vec!["srv__blocked".to_string()];
 
     let provider = ScriptedProvider::new(vec![scripted_response("done", vec![])]);
     let result = run_lead_for_test(
         provider.clone(),
         registry,
         Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
-        Arc::new(ArcSwap::from_pointee(cfg)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
         EventBus::default(),
     )
     .await;
@@ -1349,11 +1345,6 @@ async fn test_lead_loop_request_carries_extension_defs_and_invoke_skill() {
             "round-1 request missing {expected}: {names:?}"
         );
     }
-    assert!(
-        !names.iter().any(|n| n == "srv__blocked"),
-        "denied extension tool leaked into lead surface: {names:?}"
-    );
-
     // The system prompt carries the skills/integrations guidance suffix.
     let messages = provider.seen_messages.lock().unwrap();
     let system = &messages[0][0];

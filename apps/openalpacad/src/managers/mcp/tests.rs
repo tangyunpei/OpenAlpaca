@@ -799,7 +799,7 @@ async fn a_crash_then_a_deleted_declaration_leaves_no_residue() {
 
     assert!(h.registry.get("srv__echo").is_none(), "no registry entry");
     assert!(
-        h.registry.extension_tool_defs(&[]).is_empty(),
+        h.registry.extension_tool_defs().is_empty(),
         "and nothing from it on any surface"
     );
     assert!(h.record("srv").is_none(), "the record is gone");

@@ -938,9 +938,10 @@ impl ToolRegistry {
     /// Tool definitions for all "extension" tools — those bridged from MCP
     /// servers (`ToolBackend::Mcp`, registered as `<server>__<tool>`) or
     /// provided by plugins (`ToolBackend::Plugin`, registered as
-    /// `<plugin>::<tool>`) — excluding any name on `deny` (the
-    /// `execution.skill_defaults.global_tool_deny` list, the opt-out for
-    /// surfaces that include extension tools by default).
+    /// `<plugin>::<tool>`).
+    ///
+    /// There is no per-tool opt-out: the ENABLE axis is one toggle per MCP
+    /// server and per plugin (design §1 S1, §11).
     ///
     /// The backend variant is the origin marker: builtins register as
     /// `BuiltIn`, custom TOML tools as `Http`/`Command`. Sorted by name so
@@ -949,7 +950,7 @@ impl ToolRegistry {
     /// Tools whose extension is not `Enabled` are dropped — **hygiene only**,
     /// so the model does not burn a round on a call the gate will refuse. An
     /// absent ledger entry counts as enabled (design §6.2 #2, §6.2a).
-    pub fn extension_tool_defs(&self, deny: &[String]) -> Vec<ToolDefinition> {
+    pub fn extension_tool_defs(&self) -> Vec<ToolDefinition> {
         let mut defs: Vec<ToolDefinition> = self
             .tools
             .iter()
@@ -957,8 +958,7 @@ impl ToolRegistry {
                 matches!(
                     e.value().backend,
                     ToolBackend::Mcp { .. } | ToolBackend::Plugin(_)
-                ) && !deny.contains(e.key())
-                    && self.extension_is_available(e.value())
+                ) && self.extension_is_available(e.value())
             })
             .map(|e| e.value().definition.clone())
             .collect();

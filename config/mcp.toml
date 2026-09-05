@@ -32,6 +32,11 @@ reconnect_backoff_ms = 100
 # auth = { api_key_header = "X-API-Key", api_key_env = "GITHUB_MCP_TOKEN" }
 
 # ─── Example: Explicitly disabled without removing ───
+# `enabled = false` is the ENABLE axis's one knob for a server: the daemon does
+# not connect at boot, and toggling it at runtime (`openalpaca ext enable|disable
+# mcp experimental`, or the GUI's Extensions section) writes this key and then
+# loads or unloads the server — a disabled server's tools leave every surface
+# and are refused at the gate. There is no per-tool switch.
 # [servers.experimental]
 # transport = "stdio"
 # command = "./some/binary"

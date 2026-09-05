@@ -1841,7 +1841,7 @@ fn mcp_backend() -> ToolBackend {
 }
 
 #[test]
-fn test_extension_tool_defs_filters_by_origin_and_deny() {
+fn test_extension_tool_defs_filters_by_origin() {
     let registry = ToolRegistry::default();
     registry.register(make_tool("builtin_tool", "ok")).unwrap();
     registry
@@ -1868,15 +1868,10 @@ fn test_extension_tool_defs_filters_by_origin_and_deny() {
         ))
         .unwrap();
 
-    let defs = registry.extension_tool_defs(&["srv__blocked".to_string()]);
+    let defs = registry.extension_tool_defs();
     let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-    // Only MCP/Plugin backends, minus the deny list, sorted by name.
-    assert_eq!(names, vec!["plug::do", "srv__echo"]);
-
-    // Empty deny keeps all extension tools; builtins/custom still excluded.
-    let all = registry.extension_tool_defs(&[]);
-    let all_names: Vec<&str> = all.iter().map(|d| d.name.as_str()).collect();
-    assert_eq!(all_names, vec!["plug::do", "srv__blocked", "srv__echo"]);
+    // Only MCP/Plugin backends, sorted by name; builtins/custom excluded.
+    assert_eq!(names, vec!["plug::do", "srv__blocked", "srv__echo"]);
 }
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -2255,7 +2250,7 @@ async fn unrecorded_extension_tool_executes() {
 
     // Still listed on the default surfaces.
     let names: Vec<String> = registry
-        .extension_tool_defs(&[])
+        .extension_tool_defs()
         .into_iter()
         .map(|d| d.name)
         .collect();
@@ -2371,8 +2366,8 @@ fn two_assemblies_against_an_unchanged_ledger_are_byte_identical() {
         ))
         .unwrap();
 
-    let first = serde_json::to_string(&registry.extension_tool_defs(&[])).unwrap();
-    let second = serde_json::to_string(&registry.extension_tool_defs(&[])).unwrap();
+    let first = serde_json::to_string(&registry.extension_tool_defs()).unwrap();
+    let second = serde_json::to_string(&registry.extension_tool_defs()).unwrap();
     assert_eq!(first, second, "tool ordering feeds prompt-cache fingerprints");
 }
 
@@ -2384,12 +2379,12 @@ fn extension_tool_defs_drops_tools_whose_extension_is_not_enabled() {
     registry.register(mcp_tool("srv__echo", "srv", 1)).unwrap();
     registry.register(make_tool("builtin_tool", "ok")).unwrap();
 
-    assert_eq!(registry.extension_tool_defs(&[]).len(), 1);
+    assert_eq!(registry.extension_tool_defs().len(), 1);
     registry
         .extensions()
         .begin(&ext, ExtensionState::Disabling, Some(WithdrawalCause::Disable));
     assert!(
-        registry.extension_tool_defs(&[]).is_empty(),
+        registry.extension_tool_defs().is_empty(),
         "hygiene: the T0→T1 window must not advertise a tool the gate refuses"
     );
 }

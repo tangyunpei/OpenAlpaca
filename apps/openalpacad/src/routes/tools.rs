@@ -9,7 +9,8 @@
 //!
 //! This supersedes `ToolCatalogEntry.denied: boolean` and folds that
 //! interface's `provider: string | null` into `origin.id` (C7 deletes both on
-//! the frontend side). `global_tool_deny` is not the source of anything here.
+//! the frontend side). No config key is the source of anything here: the
+//! per-tool deny list was purged in C8 (design §11).
 
 use std::collections::HashMap;
 use std::sync::Arc;
