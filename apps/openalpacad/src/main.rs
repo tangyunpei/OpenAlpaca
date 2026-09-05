@@ -169,7 +169,6 @@ async fn async_main(
     // Repairs the absolute file_asset paths the root move broke. Idempotent:
     // matches zero rows on every boot after the first.
     store::migrate::rebase_asset_paths(&db);
-    bootstrap::migrate_preference_summaries(&db);
     // Routing V2 Phase 3: fail all orphaned (non-terminal) tasks from the
     // previous daemon generation. MUST stay here — after the DB opens and
     // before any ingress starts (WakeManager::start in Step 8,
