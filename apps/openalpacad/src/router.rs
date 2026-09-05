@@ -55,6 +55,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/auth/link",
             post(crate::routes::generate_link_token_handler),
         )
+        // Identity (GAP-16)
+        .route("/v1/me", get(crate::routes::get_me_handler))
         .route("/v1/tasks", post(crate::routes::create_task_handler))
         .route("/v1/tasks", get(crate::routes::list_tasks_handler))
         .route("/v1/tasks/{id}", get(crate::routes::get_task_handler))
