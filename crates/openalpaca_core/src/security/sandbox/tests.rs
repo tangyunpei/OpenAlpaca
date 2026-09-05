@@ -67,7 +67,9 @@ fn make_sandbox() -> SandboxManager {
 fn make_policy(agent_id: &str) -> SandboxPolicy {
     SandboxPolicy {
         agent_id: agent_id.to_string(),
-        allowed_capabilities: vec![],
+        // These tests exercise sanitization, confirmation, the circuit breaker
+        // and timeouts — not the allow axis.
+        allowed_capabilities: Allowlist::Unrestricted,
         denied_capabilities: vec![],
         require_confirmation_for: vec![],
         max_tool_calls: None,
@@ -117,6 +119,21 @@ async fn test_denied_capability() {
     let result = sandbox.execute_tool(&tc, &policy, &ctx).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("denied"));
+}
+
+/// A0 (bug A): an allow list that resolved to nothing blocks execution — it is
+/// never read as "unconstrained".
+#[tokio::test]
+async fn test_empty_allowlist_blocks_execution() {
+    let sandbox = make_sandbox();
+    let mut policy = make_policy("agent1");
+    policy.allowed_capabilities = Allowlist::Only(vec![]);
+    let tc = make_tool_call("web_search");
+    let ctx = make_ctx("agent1");
+
+    let result = sandbox.execute_tool(&tc, &policy, &ctx).await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("not in allow list"));
 }
 
 #[tokio::test]

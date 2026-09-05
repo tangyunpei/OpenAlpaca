@@ -19,6 +19,7 @@ use crate::middleware::prompt::AgentPersona;
 use crate::orchestrator::{ConversationContext, Orchestrator};
 use crate::prompt_ctx::{SectionPriority, sources::{ContextRequest, ExecutionPath}};
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
+use crate::security::capabilities::Allowlist;
 use crate::security::sandbox::SandboxManager;
 use crate::security::sandbox::SandboxPolicy;
 use crate::tools::registry::ToolContext;
@@ -226,7 +227,9 @@ impl Orchestrator {
             let resolved: Vec<String> = tool_defs.iter().map(|t| t.name.to_lowercase()).collect();
             policy_opt = Some(SandboxPolicy {
                 agent_id: "orchestrator".to_string(),
-                allowed_capabilities: resolved,
+                // Closed set: the main loop may call exactly the surface it was
+                // handed (this arm only runs when that surface is non-empty).
+                allowed_capabilities: Allowlist::Only(resolved),
                 denied_capabilities: vec![],
                 require_confirmation_for: vec![],
                 max_tool_calls: None,

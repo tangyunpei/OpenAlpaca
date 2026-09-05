@@ -247,10 +247,11 @@ fn test_singleton_extract_persona() {
 
 #[test]
 fn test_to_subagent_orchestration_allows_coordination_tools() {
-    use crate::security::capabilities::CapabilityManager;
+    use crate::security::capabilities::{Allowlist, CapabilityManager};
 
     let doc = parse_agent_markdown(SINGLETON_AGENT).expect("should parse");
     let agent = doc.to_subagent("lead-01", "task-1");
+    let allowed = Allowlist::from_agent_constraints(&agent.constraints);
     for tool in [
         "spawn_subagent",
         "spawn_subagents_batch",
@@ -260,8 +261,13 @@ fn test_to_subagent_orchestration_allows_coordination_tools() {
         "queue_followup",
     ] {
         assert!(
-            CapabilityManager::check_agent_capability(&agent.id, tool, &agent.constraints)
-                .is_ok(),
+            CapabilityManager::check_agent_capability(
+                &agent.id,
+                tool,
+                &allowed,
+                &agent.constraints.denied_capabilities
+            )
+            .is_ok(),
             "coordination tool '{}' should pass the capability allowlist",
             tool
         );
@@ -270,13 +276,18 @@ fn test_to_subagent_orchestration_allows_coordination_tools() {
 
 #[test]
 fn test_to_subagent_non_orchestration_denies_coordination_tools() {
-    use crate::security::capabilities::CapabilityManager;
+    use crate::security::capabilities::{Allowlist, CapabilityManager};
 
     let doc = parse_agent_markdown(VALID_AGENT).expect("should parse");
     let agent = doc.to_subagent("code-01", "task-1");
     assert!(
-        CapabilityManager::check_agent_capability(&agent.id, "spawn_subagent", &agent.constraints)
-            .is_err(),
+        CapabilityManager::check_agent_capability(
+            &agent.id,
+            "spawn_subagent",
+            &Allowlist::from_agent_constraints(&agent.constraints),
+            &agent.constraints.denied_capabilities
+        )
+        .is_err(),
         "non-orchestration agents must not get coordination tools"
     );
 }

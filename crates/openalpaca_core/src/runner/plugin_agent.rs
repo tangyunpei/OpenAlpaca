@@ -332,9 +332,14 @@ mod tests {
     }
 
     fn policy() -> SandboxPolicy {
+        // Template-scoped, like any spawned agent: the plugin agent may call
+        // exactly the tool its template declared.
         SandboxPolicy::from_constraints(
             "plugin-instance",
-            &crate::agent::subagent::AgentConstraints::default(),
+            &crate::agent::subagent::AgentConstraints {
+                allowed_capabilities: vec!["echo".to_string()],
+                ..Default::default()
+            },
         )
     }
 

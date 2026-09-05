@@ -7,7 +7,7 @@ use crate::agent::subagent::AgentConstraints;
 use crate::bus::EventBus;
 use crate::daemon_config::CircuitBreakerConfig;
 use crate::events::SystemEvent;
-use crate::security::capabilities::CapabilityManager;
+use crate::security::capabilities::{Allowlist, CapabilityManager};
 use crate::security::circuit_breaker::{ToolCircuitBreaker, is_transient_tool_error};
 use crate::security::confirmation::{ConfirmationBroker, ConfirmationRequest};
 use crate::security::sanitizer::InputSanitizer;
@@ -22,7 +22,9 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub struct SandboxPolicy {
     pub agent_id: String,
-    pub allowed_capabilities: Vec<String>,
+    /// The ALLOW axis. `Allowlist::Only(vec![])` admits nothing; a surface that
+    /// means "no allow-list restriction" must spell `Allowlist::Unrestricted`.
+    pub allowed_capabilities: Allowlist,
     pub denied_capabilities: Vec<String>,
     pub require_confirmation_for: Vec<String>,
     pub max_tool_calls: Option<u32>,
@@ -42,7 +44,7 @@ impl SandboxPolicy {
     pub fn from_constraints(agent_id: &str, constraints: &AgentConstraints) -> Self {
         Self {
             agent_id: agent_id.to_string(),
-            allowed_capabilities: constraints.allowed_capabilities.clone(),
+            allowed_capabilities: Allowlist::from_agent_constraints(constraints),
             denied_capabilities: constraints.denied_capabilities.clone(),
             require_confirmation_for: constraints.require_confirmation_for.clone(),
             max_tool_calls: constraints.max_tool_calls,
@@ -140,15 +142,12 @@ impl SandboxManager {
         let agent_id = ctx.agent_id.as_deref().unwrap_or("unknown");
 
         // 1. Capability check
-        let constraints = AgentConstraints {
-            allowed_capabilities: policy.allowed_capabilities.clone(),
-            denied_capabilities: policy.denied_capabilities.clone(),
-            ..Default::default()
-        };
-
-        if let Err(violation) =
-            CapabilityManager::check_agent_capability(agent_id, &tool_call.name, &constraints)
-        {
+        if let Err(violation) = CapabilityManager::check_agent_capability(
+            agent_id,
+            &tool_call.name,
+            &policy.allowed_capabilities,
+            &policy.denied_capabilities,
+        ) {
             self.emit_security_violation(agent_id, &tool_call.name, &violation.to_string());
             return Err(violation.to_string());
         }

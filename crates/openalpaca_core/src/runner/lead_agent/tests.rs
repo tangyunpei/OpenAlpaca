@@ -1424,7 +1424,7 @@ async fn test_lead_executes_extension_tool_through_sandbox() {
 
 #[test]
 fn test_plain_subagent_does_not_inherit_extension_tools() {
-    use crate::security::capabilities::CapabilityManager;
+    use crate::security::capabilities::{Allowlist, CapabilityManager};
 
     // A non-orchestration worker template with its own declared capability.
     let agent = crate::test_util::make_agent("researcher", vec!["research"]);
@@ -1434,24 +1434,22 @@ fn test_plain_subagent_does_not_inherit_extension_tools() {
     // Its allowlist is template-scoped: declared capability + workspace only.
     let allowed = &subagent.constraints.allowed_capabilities;
     assert!(allowed.iter().any(|c| c == "research"));
+    let allowlist = Allowlist::from_agent_constraints(&subagent.constraints);
+    let denied = &subagent.constraints.denied_capabilities;
     for blanket in ["invoke_skill", "srv__echo", "plug::do", "spawn_subagent"] {
         assert!(
             !allowed.iter().any(|c| c == blanket),
             "worker allowlist must not carry the lead's blanket grant: {allowed:?}"
         );
         assert!(
-            CapabilityManager::check_agent_capability(
-                &subagent.id,
-                blanket,
-                &subagent.constraints
-            )
-            .is_err(),
+            CapabilityManager::check_agent_capability(&subagent.id, blanket, &allowlist, denied)
+                .is_err(),
             "worker sandbox must deny undeclared tool {blanket}"
         );
     }
     // Declared tools still pass.
     assert!(
-        CapabilityManager::check_agent_capability("researcher-1", "research", &subagent.constraints)
+        CapabilityManager::check_agent_capability("researcher-1", "research", &allowlist, denied)
             .is_ok()
     );
 }

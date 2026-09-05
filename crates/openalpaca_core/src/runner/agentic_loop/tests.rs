@@ -312,7 +312,8 @@ async fn test_sandbox_execution() {
         SandboxManager::with_defaults(std::sync::Arc::new(registry), EventBus::default());
     let policy = SandboxPolicy {
         agent_id: "test_agent".to_string(),
-        allowed_capabilities: vec![],
+        // This test does not exercise the allow axis.
+        allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
         denied_capabilities: vec![],
         require_confirmation_for: vec![],
         max_tool_calls: None,
@@ -386,7 +387,8 @@ async fn test_sandbox_denied_tool() {
         SandboxManager::with_defaults(std::sync::Arc::new(registry), EventBus::default());
     let policy = SandboxPolicy {
         agent_id: "test_agent".to_string(),
-        allowed_capabilities: vec![],
+        // This test does not exercise the allow axis.
+        allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
         denied_capabilities: vec!["search".to_string()], // deny the tool
         require_confirmation_for: vec![],
         max_tool_calls: None,
@@ -565,7 +567,8 @@ async fn test_cancellation_during_tool_execution() {
         SandboxManager::with_defaults(std::sync::Arc::new(registry), EventBus::default());
     let policy = SandboxPolicy {
         agent_id: "test_agent".to_string(),
-        allowed_capabilities: vec![],
+        // This test does not exercise the allow axis.
+        allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
         denied_capabilities: vec![],
         require_confirmation_for: vec![],
         max_tool_calls: None,

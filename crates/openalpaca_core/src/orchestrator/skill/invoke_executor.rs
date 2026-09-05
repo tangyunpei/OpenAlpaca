@@ -2,6 +2,7 @@ use crate::bus::EventBus;
 use crate::orchestrator::skill::catalog::SkillCatalog;
 use crate::orchestrator::skill::constraints::{compose_constraints, filter_tools_by_constraints, MAX_SKILL_STACK_DEPTH};
 use crate::runner::{LoopConfig, LoopCostAccumulator, LoopResult, run_agentic_loop_routed};
+use crate::security::capabilities::Allowlist;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::builtins::ScriptToolBuiltIn;
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext, ToolRegistry};
@@ -374,7 +375,11 @@ impl SkillInvocationToolExecutor {
         } else {
             Some(SandboxPolicy {
                 agent_id: format!("skill:{}", skill_id),
-                allowed_capabilities: tool_defs.iter().map(|t| t.name.clone()).collect(),
+                // Closed set: the nested skill may call exactly the tools
+                // composed for it (this arm only runs when there are some).
+                allowed_capabilities: Allowlist::Only(
+                    tool_defs.iter().map(|t| t.name.clone()).collect(),
+                ),
                 denied_capabilities: {
                     let mut denied: Vec<String> = child_tool_ctx
                         .effective_constraints

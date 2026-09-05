@@ -68,6 +68,46 @@ impl fmt::Display for SecurityViolation {
 
 impl std::error::Error for SecurityViolation {}
 
+/// The ALLOW axis of tool governance: which capabilities a policy admits.
+///
+/// An *empty* allow list is a total restriction, not an absent one — the
+/// distinction the `Vec<String>` this replaced could not express (bug A): a
+/// plugin skill whose providing extension was absent resolved its requirements
+/// to an empty list and was handed the entire tool surface, so disabling an
+/// extension *widened* reach. [`Allowlist::Only`] with no entries now admits
+/// nothing, and a caller that genuinely means "no allow-list restriction" has
+/// to spell [`Allowlist::Unrestricted`].
+///
+/// Ambient capabilities are granted constructor-side, not here:
+/// `AgentTemplate::to_subagent` appends `workspace_read`/`workspace_write` to
+/// the template's list, so they arrive as ordinary members of `Only(..)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Allowlist {
+    /// No allow-list restriction — only the deny list applies.
+    Unrestricted,
+    /// Exactly these capabilities (pre-lowercased), and nothing else.
+    Only(Vec<String>),
+}
+
+impl Allowlist {
+    /// The allow list an agent's constraints spell.
+    ///
+    /// Template-declared capabilities are a closed set: whatever the template
+    /// granted is all the agent gets, and a template that granted nothing
+    /// yields an agent that can call nothing.
+    pub fn from_agent_constraints(constraints: &AgentConstraints) -> Self {
+        Self::Only(constraints.allowed_capabilities.clone())
+    }
+
+    /// Does this allow list admit `capability` (already lowercased)?
+    pub fn admits(&self, capability_lower: &str) -> bool {
+        match self {
+            Self::Unrestricted => true,
+            Self::Only(names) => names.iter().any(|n| n == capability_lower),
+        }
+    }
+}
+
 /// Manages capability checks at principal and agent level.
 pub struct CapabilityManager;
 
@@ -85,27 +125,26 @@ impl CapabilityManager {
     /// Check whether an agent is allowed to use a particular tool/capability.
     ///
     /// Rules:
-    /// - If the tool is on `denied_capabilities`, always block.
-    /// - If `allowed_capabilities` is non-empty and the tool is NOT on it, block.
+    /// - If the tool is on `denied`, always block — deny wins over allow.
+    /// - If `allowed` is [`Allowlist::Only`] and the tool is not on it, block.
+    ///   An empty `Only` therefore denies everything.
     /// - Otherwise, allow.
     pub fn check_agent_capability(
         agent_id: &str,
         tool_name: &str,
-        constraints: &AgentConstraints,
+        allowed: &Allowlist,
+        denied: &[String],
     ) -> Result<(), SecurityViolation> {
-        // Check deny list first (case-insensitive; constraint entries are pre-normalized)
+        // Check deny list first (case-insensitive; list entries are pre-normalized)
         let tool_lower = tool_name.to_lowercase();
-        if constraints.denied_capabilities.contains(&tool_lower) {
+        if denied.iter().any(|d| d == &tool_lower) {
             return Err(SecurityViolation::CapabilityDenied {
                 agent_id: agent_id.to_string(),
                 capability: tool_name.to_string(),
             });
         }
 
-        // If allow list is non-empty, tool must be on it (case-insensitive)
-        if !constraints.allowed_capabilities.is_empty()
-            && !constraints.allowed_capabilities.contains(&tool_lower)
-        {
+        if !allowed.admits(&tool_lower) {
             return Err(SecurityViolation::CapabilityNotAllowed {
                 agent_id: agent_id.to_string(),
                 capability: tool_name.to_string(),

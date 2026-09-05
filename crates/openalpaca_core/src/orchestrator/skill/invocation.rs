@@ -22,6 +22,7 @@ use crate::orchestrator::{ConversationContext, Orchestrator};
 use crate::prompt_ctx::SectionPriority;
 use crate::prompt_ctx::sources::{ContextRequest, ExecutionPath};
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
+use crate::security::capabilities::Allowlist;
 use crate::security::sandbox::SandboxManager;
 use crate::security::sandbox::SandboxPolicy;
 use crate::tools::builtins::ScriptToolBuiltIn;
@@ -296,7 +297,9 @@ impl Orchestrator {
             }
             policy_opt = Some(SandboxPolicy {
                 agent_id: "orchestrator".to_string(),
-                allowed_capabilities: resolved,
+                // Closed set: the skill may call exactly the tools resolved for
+                // it (this arm only runs when that resolution is non-empty).
+                allowed_capabilities: Allowlist::Only(resolved),
                 denied_capabilities: denied_caps,
                 require_confirmation_for: skill_doc
                     .frontmatter
@@ -947,17 +950,7 @@ impl Orchestrator {
     ) -> Result<SkillInvocationResult, String> {
         let fm = &skill_doc.frontmatter;
 
-        // Allowed tool set: capability-resolved names (same resolution as the
-        // file-based path), falling back to the legacy allow list.
-        let allowed: Vec<String> = if !fm.requires_capabilities.is_empty() {
-            self.tool_registry
-                .tools_for_capabilities(&fm.requires_capabilities)
-                .into_iter()
-                .map(|d| d.name)
-                .collect()
-        } else {
-            fm.tools.allow.clone()
-        };
+        let allowed = plugin_skill_allowlist(skill_name, fm, &self.tool_registry)?;
         let mut denied: Vec<String> = fm.tools.deny.clone();
         for g in &self
             .daemon_config
@@ -1059,6 +1052,47 @@ impl Orchestrator {
     }
 }
 
+/// Resolve the allow list for a plugin-backed skill.
+///
+/// Capability-resolved names (same resolution as the file-based path), falling
+/// back to the legacy allow list. Either way the result is a closed set — a
+/// skill that names no tool gets none.
+///
+/// A skill that *does* declare `requires_capabilities` which resolve to nothing
+/// has lost the extension providing them (uninstalled, or disabled): it is
+/// refused up front rather than run without the tools it asked for.
+fn plugin_skill_allowlist(
+    skill_name: &str,
+    fm: &crate::middleware::skill::SkillFrontmatter,
+    tool_registry: &crate::tools::ToolRegistry,
+) -> Result<Allowlist, String> {
+    if fm.requires_capabilities.is_empty() {
+        return Ok(Allowlist::Only(fm.tools.allow.clone()));
+    }
+
+    let resolved: Vec<String> = tool_registry
+        .tools_for_capabilities(&fm.requires_capabilities)
+        .into_iter()
+        .map(|d| d.name)
+        .collect();
+
+    if resolved.is_empty() {
+        let unresolved = fm.requires_capabilities.join(", ");
+        tracing::warn!(
+            skill = skill_name,
+            capabilities = %unresolved,
+            "Refusing plugin skill: required capabilities resolve to no tool"
+        );
+        return Err(format!(
+            "Skill '{skill_name}' requires capabilities that no installed tool provides \
+             ({unresolved}). The extension providing them is missing or disabled — \
+             refusing to run the skill rather than running it without them."
+        ));
+    }
+
+    Ok(Allowlist::Only(resolved))
+}
+
 /// Adapter giving a plugin skill sandboxed tool access during `invoke()`.
 ///
 /// Every tool call the plugin requests goes through the same sandboxed
@@ -1090,3 +1124,6 @@ impl openalpaca_api::plugin_traits::ToolCallbackExecutor for SandboxToolCallback
             .await
     }
 }
+
+#[cfg(test)]
+mod tests;

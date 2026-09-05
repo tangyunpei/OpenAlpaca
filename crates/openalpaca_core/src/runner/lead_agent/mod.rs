@@ -32,6 +32,7 @@ use crate::middleware::prompt::format_tool_guidance;
 use crate::prompt_ctx::ContextManager;
 use crate::prompt_ctx::section::ContextBundle;
 use crate::runner::{LoopConfig, LoopResult, run_agentic_loop_routed};
+use crate::security::capabilities::Allowlist;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::ToolRegistry;
 use crate::tools::registry::ToolContext;
@@ -311,11 +312,15 @@ pub async fn run_lead_agent(
     // exposed definitions. Template denials still win: the sandbox checks the
     // deny list first. Subagents are untouched — their policies are built from
     // their own template constraints in the spawn path.
-    if !sandbox_policy.allowed_capabilities.is_empty() {
+    // An allow list that resolved to nothing stays empty: a template that
+    // granted no capability must not be back-filled from the assembled surface.
+    if let Allowlist::Only(ref mut allowed) = sandbox_policy.allowed_capabilities
+        && !allowed.is_empty()
+    {
         for def in &tools {
             let name = def.name.to_lowercase();
-            if !sandbox_policy.allowed_capabilities.contains(&name) {
-                sandbox_policy.allowed_capabilities.push(name);
+            if !allowed.contains(&name) {
+                allowed.push(name);
             }
         }
     }

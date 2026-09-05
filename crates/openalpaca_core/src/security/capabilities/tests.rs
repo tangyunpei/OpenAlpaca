@@ -42,13 +42,17 @@ fn test_user_principal_allowed() {
     assert!(CapabilityManager::check_principal(&principal, &cap, &Scope::Global).is_ok());
 }
 
+/// Deny-first regression: the deny list is consulted before the allow list,
+/// so an unrestricted allow list cannot resurrect a denied capability.
 #[test]
 fn test_denied_capability_blocked() {
-    let constraints = AgentConstraints {
-        denied_capabilities: vec!["shell_execute".to_string()],
-        ..default_constraints()
-    };
-    let result = CapabilityManager::check_agent_capability("agent1", "shell_execute", &constraints);
+    let denied = vec!["shell_execute".to_string()];
+    let result = CapabilityManager::check_agent_capability(
+        "agent1",
+        "shell_execute",
+        &Allowlist::Unrestricted,
+        &denied,
+    );
     assert!(result.is_err());
     match result.unwrap_err() {
         SecurityViolation::CapabilityDenied {
@@ -64,16 +68,14 @@ fn test_denied_capability_blocked() {
 
 #[test]
 fn test_allowed_capability_enforced() {
-    let constraints = AgentConstraints {
-        allowed_capabilities: vec!["web_search".to_string(), "summarize".to_string()],
-        ..default_constraints()
-    };
+    let allowed = Allowlist::Only(vec!["web_search".to_string(), "summarize".to_string()]);
     // Allowed tool passes
     assert!(
-        CapabilityManager::check_agent_capability("agent1", "web_search", &constraints).is_ok()
+        CapabilityManager::check_agent_capability("agent1", "web_search", &allowed, &[]).is_ok()
     );
     // Unlisted tool is blocked
-    let result = CapabilityManager::check_agent_capability("agent1", "shell_execute", &constraints);
+    let result =
+        CapabilityManager::check_agent_capability("agent1", "shell_execute", &allowed, &[]);
     assert!(result.is_err());
     match result.unwrap_err() {
         SecurityViolation::CapabilityNotAllowed { .. } => {}
@@ -82,9 +84,86 @@ fn test_allowed_capability_enforced() {
 }
 
 #[test]
-fn test_empty_allow_list_allows_all() {
-    let constraints = default_constraints();
-    assert!(CapabilityManager::check_agent_capability("agent1", "anything", &constraints).is_ok());
+fn test_unrestricted_allowlist_admits_anything() {
+    // The only form that means "no allow-list restriction" — it has to be
+    // spelled, never inferred from an empty list.
+    assert!(
+        CapabilityManager::check_agent_capability(
+            "agent1",
+            "anything",
+            &Allowlist::Unrestricted,
+            &[]
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn empty_allowlist_denies_every_non_ambient_capability() {
+    // An empty allow list is a total restriction, not an absent one.
+    let nothing = Allowlist::Only(vec![]);
+    for tool in [
+        "shell_execute",
+        "web_search",
+        "workspace_read",
+        "workspace_write",
+    ] {
+        assert!(
+            CapabilityManager::check_agent_capability("agent1", tool, &nothing, &[]).is_err(),
+            "empty allow list must deny '{tool}'"
+        );
+    }
+
+    // The ambient capabilities are granted constructor-side — an agent gets
+    // them because `AgentTemplate::to_subagent` appended them to its list, and
+    // everything outside that list is still denied.
+    let ambient = Allowlist::Only(vec![
+        "workspace_read".to_string(),
+        "workspace_write".to_string(),
+    ]);
+    for tool in ["workspace_read", "workspace_write"] {
+        assert!(CapabilityManager::check_agent_capability("agent1", tool, &ambient, &[]).is_ok());
+    }
+    for tool in ["shell_execute", "web_search"] {
+        assert!(
+            CapabilityManager::check_agent_capability("agent1", tool, &ambient, &[]).is_err(),
+            "ambient-only allow list must deny '{tool}'"
+        );
+    }
+}
+
+#[test]
+fn deny_beats_allow() {
+    // A name on both lists is denied — the deny list is checked first.
+    let mut constraints = AgentConstraints {
+        allowed_capabilities: vec!["shell_execute".to_string(), "web_search".to_string()],
+        denied_capabilities: vec!["shell_execute".to_string()],
+        ..default_constraints()
+    };
+    constraints.normalize();
+    let allowed = Allowlist::from_agent_constraints(&constraints);
+
+    match CapabilityManager::check_agent_capability(
+        "agent1",
+        "shell_execute",
+        &allowed,
+        &constraints.denied_capabilities,
+    ) {
+        Err(SecurityViolation::CapabilityDenied { capability, .. }) => {
+            assert_eq!(capability, "shell_execute");
+        }
+        other => panic!("Expected CapabilityDenied, got: {:?}", other),
+    }
+    // The rest of the allow list is unaffected.
+    assert!(
+        CapabilityManager::check_agent_capability(
+            "agent1",
+            "web_search",
+            &allowed,
+            &constraints.denied_capabilities
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -96,7 +175,13 @@ fn test_capability_check_case_insensitive() {
     };
     constraints.normalize();
     assert!(
-        CapabilityManager::check_agent_capability("agent1", "shell_execute", &constraints).is_err()
+        CapabilityManager::check_agent_capability(
+            "agent1",
+            "shell_execute",
+            &Allowlist::Unrestricted,
+            &constraints.denied_capabilities
+        )
+        .is_err()
     );
 
     // Allow list with mixed case should match lowercase tool name (after normalize)
@@ -106,7 +191,13 @@ fn test_capability_check_case_insensitive() {
     };
     constraints.normalize();
     assert!(
-        CapabilityManager::check_agent_capability("agent1", "web_search", &constraints).is_ok()
+        CapabilityManager::check_agent_capability(
+            "agent1",
+            "web_search",
+            &Allowlist::from_agent_constraints(&constraints),
+            &[]
+        )
+        .is_ok()
     );
 }
 
