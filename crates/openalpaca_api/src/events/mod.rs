@@ -247,6 +247,29 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
+    /// An extension's observed state changed — T5, E5, `mark_failed`, T5-deny,
+    /// T5-gone and §3.7's tool-list refresh (extension design ADR-030).
+    ///
+    /// The GUI **invalidates** on this and re-reads the row; nothing is ever
+    /// rendered from the payload, so a late, dropped or reordered event can
+    /// never show a state the daemon is not in (§8, X-18).
+    ExtensionStateChanged {
+        /// `"mcp"` | `"plugin"`.
+        kind: String,
+        /// The extension id — a server name, or a plugin directory name.
+        id: String,
+        /// The record's new state word, or `"removed"` when the declaration is
+        /// gone and the row simply disappears.
+        state: String,
+        /// The load the change belongs to, so the event log stays unambiguous
+        /// when a late crash notice arrives after a newer load's events.
+        generation: u64,
+        /// Set only by a server-driven `tools/list_changed` refresh.
+        #[serde(default)]
+        tools_changed: bool,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
     /// A plugin was loaded and registered its tools
     PluginLoaded {
         plugin_id: String,

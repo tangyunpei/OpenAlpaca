@@ -28,6 +28,7 @@ openalpaca_storage = { workspace = true }
 openalpaca_wake = { workspace = true }
 openalpaca_mcp = { path = "../../crates/openalpaca_mcp" }
 toml.workspace = true
+toml_edit.workspace = true
 rand.workspace = true
 async-trait.workspace = true
 openalpaca_plugins = { workspace = true }

@@ -21,7 +21,11 @@ pub(super) async fn build_tool_registry(
     bus: &EventBus,
     daemon_config: &Arc<ArcSwap<openalpaca_core::daemon_config::DaemonConfig>>,
     web_search_config: &Arc<ArcSwap<openalpaca_llm::WebSearchConfig>>,
-) -> anyhow::Result<(Arc<openalpaca_core::tools::ToolRegistry>, ConnectorSendLock)> {
+) -> anyhow::Result<(
+    Arc<openalpaca_core::tools::ToolRegistry>,
+    ConnectorSendLock,
+    Arc<crate::managers::mcp::McpSupervisor>,
+)> {
     let tool_registry = openalpaca_core::tools::ToolRegistry::new()
         .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -104,8 +108,15 @@ pub(super) async fn build_tool_registry(
 
     let tool_registry = Arc::new(tool_registry);
 
-    // Register MCP servers (from config/mcp.toml).
-    super::mcp::register_mcp_servers(config_base_dir, &tool_registry).await?;
+    // Bring up the MCP supervisor (from config/mcp.toml) and reconcile once.
+    // Never fatal: an unparseable store parks one pseudo-record and boots.
+    let mcp_supervisor = super::mcp::build_mcp_supervisor(
+        config_base_dir,
+        &tool_registry,
+        daemon_config,
+        bus,
+    )
+    .await;
 
-    Ok((tool_registry, connector_send_lock))
+    Ok((tool_registry, connector_send_lock, mcp_supervisor))
 }

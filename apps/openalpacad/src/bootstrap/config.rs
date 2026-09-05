@@ -64,6 +64,12 @@ const DEFAULT_LLM_TOML: &str =
     include_str!("../../../../scripts/release/templates/config/llm.toml");
 const DEFAULT_DAEMON_TOML: &str =
     include_str!("../../../../scripts/release/templates/config/daemon.toml");
+/// The MCP declaration store. Seeded fully commented, because it is also the
+/// **toggle** store (extension design §5): every `watch_paths` push is guarded
+/// by `if path.exists()`, so without a seeded file the watcher never binds and
+/// a hand edit never applies.
+const DEFAULT_MCP_TOML: &str =
+    include_str!("../../../../scripts/release/templates/config/mcp.toml");
 
 /// Seed default configuration files if they don't exist yet.
 ///
@@ -89,6 +95,14 @@ pub fn seed_default_configs(config_dir: &Path) {
         match std::fs::write(&daemon_path, DEFAULT_DAEMON_TOML) {
             Ok(()) => info!("Seeded default config: {}", daemon_path.display()),
             Err(e) => warn!("Failed to seed {}: {e}", daemon_path.display()),
+        }
+    }
+
+    let mcp_path = config_dir.join("mcp.toml");
+    if !mcp_path.exists() {
+        match std::fs::write(&mcp_path, DEFAULT_MCP_TOML) {
+            Ok(()) => info!("Seeded default config: {}", mcp_path.display()),
+            Err(e) => warn!("Failed to seed {}: {e}", mcp_path.display()),
         }
     }
 }

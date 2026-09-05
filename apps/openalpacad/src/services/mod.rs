@@ -39,6 +39,13 @@ pub struct InitializedServices {
     /// Shared lock for the `send` tool's connector send provider.
     /// Populated post-construction in main.rs after the ConnectorSendBridge is created.
     pub connector_send_lock: ConnectorSendLock,
+    /// The MCP half of the ENABLE axis (extension design ADR-030, C2).
+    ///
+    /// Parked here between C2 and C6: the file watcher finds it here for edge
+    /// case 15's `reconcile_all`, and the daemon shutdown path calls its
+    /// `shutdown_all()` directly. C6 folds it into the `Extensions` aggregator
+    /// and both call sites move behind that.
+    pub mcp_supervisor: Arc<crate::managers::mcp::McpSupervisor>,
 }
 
 /// Initialize all core services: agent templates, LLM router, tools, security, etc.
@@ -123,7 +130,7 @@ pub async fn initialize_services(
     let web_search_config = Arc::new(ArcSwap::from_pointee(web_search_cfg));
 
     // Build ToolRegistry
-    let (tool_registry, connector_send_lock) = tools::build_tool_registry(
+    let (tool_registry, connector_send_lock, mcp_supervisor) = tools::build_tool_registry(
         config_base_dir,
         db,
         &embedder,
@@ -196,5 +203,6 @@ pub async fn initialize_services(
         secret_store,
         web_search_config,
         connector_send_lock,
+        mcp_supervisor,
     })
 }

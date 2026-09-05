@@ -537,7 +537,7 @@ impl ToolRegistry {
                 client,
                 remote_name,
                 server_name,
-                ..
+                generation,
             } => {
                 match ctx {
                     Some(ctx) => tracing::debug!(
@@ -559,17 +559,63 @@ impl ToolRegistry {
                         tracing::warn!(
                             server = %server_name,
                             remote_name = %remote_name,
+                            generation = *generation,
                             error_category = ?e.category(),
                             error = %e,
                             "MCP tool call failed"
                         );
-                        Err(format!(
-                            "MCP server '{server_name}' tool '{remote_name}' failed: {e}"
-                        ))
+                        // Lazy crash detection (design §3.6 item 1): the typed
+                        // error and the backend's generation are both in hand
+                        // here, and only a *terminal* class may flip the row.
+                        // `mark_failed` is itself guarded twice — `Enabled`
+                        // only, current generation only — so a stale snapshot
+                        // cannot tear down the load that replaced it.
+                        if let Some(reason) =
+                            crate::tools::mcp::classify_call_failure(&e)
+                        {
+                            // The `detail` is rendered from the client's own
+                            // terminal state, not inferred from the last error
+                            // string (design §3.2 T4b, X-5 c).
+                            let detail = match client.connection_state().await {
+                                openalpaca_mcp::ConnectionSnapshot::Failed { reason } => reason,
+                                _ => e.to_string(),
+                            };
+                            self.extensions.mark_failed(
+                                &ExtensionId::mcp(server_name),
+                                *generation,
+                                reason,
+                                detail,
+                            );
+                        }
+                        // "closed on purpose" and "closed unexpectedly" are
+                        // different facts, and the row should say which
+                        // (design §3.2 T4b).
+                        match e {
+                            openalpaca_mcp::McpError::Closed => Err(format!(
+                                "MCP server '{server_name}' tool '{remote_name}' failed: \
+                                 client sealed by disable"
+                            )),
+                            _ => Err(format!(
+                                "MCP server '{server_name}' tool '{remote_name}' failed: {e}"
+                            )),
+                        }
                     }
                 }
             }
         }
+    }
+
+    /// The **raw**, un-deduped capability-index entry for one capability.
+    ///
+    /// Every read path dedupes through a `seen` set, so a duplicate edge — the
+    /// rot an enable/disable/enable cycle that skipped `replace`'s remove would
+    /// leak — is invisible to them and would never fail a test. This is the one
+    /// accessor that can see it (design §3.3 E4).
+    pub fn capability_index_entry(&self, capability: &str) -> Vec<String> {
+        self.capability_index
+            .get(capability)
+            .map(|e| e.value().clone())
+            .unwrap_or_default()
     }
 
     /// List registered tool names.

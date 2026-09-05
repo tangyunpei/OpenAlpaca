@@ -113,6 +113,14 @@ export function invalidationKeysFor(
     case "skill_invocation_started":
     case "soul_updated":
       return [];
+
+    // A frame this build does not know yet invalidates nothing rather than
+    // falling off the end of the switch and returning `undefined`, which the
+    // listener loop would then iterate and throw on. The daemon's event set
+    // grows ahead of the GUI's (the extension frame lands with the MCP
+    // supervisor, its query key with the Extensions view).
+    default:
+      return [];
   }
 }
 

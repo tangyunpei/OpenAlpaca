@@ -355,6 +355,24 @@ impl EventBroadcaster {
                     });
                     repo.log("followup_queued", None, Some(&detail), None)
                 }
+                // Extension (MCP server / plugin) state transitions
+                ServerEvent::ExtensionStateChanged {
+                    kind,
+                    id,
+                    state,
+                    generation,
+                    tools_changed,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "kind": kind,
+                        "id": id,
+                        "state": state,
+                        "generation": generation,
+                        "tools_changed": tools_changed,
+                    });
+                    repo.log("extension_state_changed", None, Some(&detail), None)
+                }
                 // Plugin lifecycle events
                 ServerEvent::PluginLoaded {
                     plugin_id, tools, ..

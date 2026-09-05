@@ -1990,6 +1990,30 @@ async fn snapshot_refuses_after_a_ledger_disable_with_the_s4_string() {
     assert!(!err.contains("transport"), "{err}");
 }
 
+/// The §6.3 guard rail, carried from C1's review: the snapshot test above
+/// exercises `execute_with_context`, but `execute()` — the no-context path —
+/// is the *same* gate through the same `dispatch`, and a refactor that
+/// re-split them would be invisible without this.
+#[tokio::test]
+async fn the_no_context_execute_path_refuses_a_disabled_extension_too() {
+    let registry = Arc::new(ToolRegistry::default());
+    let ext = ExtensionId::mcp("github");
+    enabled_record(registry.extensions(), &ext, &["github__create_issue"]);
+    registry
+        .register(mcp_tool("github__create_issue", "github", 1))
+        .unwrap();
+
+    let snapshot = (*registry).clone();
+    ledger_disable(registry.extensions(), &ext);
+
+    let err = snapshot
+        .execute("github__create_issue", &serde_json::json!({}))
+        .await
+        .expect_err("execute() is gated exactly like execute_with_context()");
+    assert!(err.contains("MCP server 'github' is disabled by the owner"), "{err}");
+    assert!(!err.contains("Unknown tool"), "{err}");
+}
+
 // ── (ii) The miss arm ────────────────────────────────────────────────────
 
 #[tokio::test]

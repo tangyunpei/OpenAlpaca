@@ -403,6 +403,30 @@ impl EventBroadcaster {
         let _ = self.tx.send(event);
     }
 
+    /// Broadcast an extension state transition and persist it (extension
+    /// design ADR-030 §3.2 T5, §3.3 E5, §3.6, §3.7).
+    pub fn extension_state_changed(
+        &self,
+        kind: &str,
+        id: &str,
+        state: &str,
+        generation: u64,
+        tools_changed: bool,
+    ) {
+        let event = ServerEvent::ExtensionStateChanged {
+            kind: kind.to_string(),
+            id: id.to_string(),
+            state: state.to_string(),
+            generation,
+            tools_changed,
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
     /// Broadcast a SOUL.md update event and persist it
     pub fn soul_updated(
         &self,

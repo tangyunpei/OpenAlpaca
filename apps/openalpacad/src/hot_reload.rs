@@ -3,6 +3,7 @@ use crate::events::EventBroadcaster;
 use arc_swap::ArcSwap;
 use openalpaca_core::{
     bus::EventBus, daemon_config::load_daemon_config, orchestrator::Orchestrator,
+    tools::extensions::ExtensionSupervisor,
 };
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -27,6 +28,7 @@ pub struct FileWatcherContext {
     pub bootstrap_path: Option<PathBuf>,
     pub llm_config_path: PathBuf,
     pub daemon_config_path: PathBuf,
+    pub mcp_config_path: PathBuf,
     pub skills_dir: PathBuf,
     pub agents_dir: PathBuf,
 
@@ -38,6 +40,10 @@ pub struct FileWatcherContext {
     pub daemon_config: Arc<ArcSwap<openalpaca_core::daemon_config::DaemonConfig>>,
     pub web_search_config: Arc<ArcSwap<openalpaca_llm::WebSearchConfig>>,
     pub bus: EventBus,
+    /// The MCP half of the ENABLE axis. Edge case 15's reload arm calls its
+    /// `reconcile_all()`: `mcp.toml` **is** the store, so a hand edit is
+    /// authoritative and there is no precedence rule to surprise anyone.
+    pub mcp_supervisor: Arc<crate::managers::mcp::McpSupervisor>,
     pub fs_watch_handle: Option<openalpaca_wake::FileWatchHandle>,
 
     /// Gateway for injecting scheduled-skill turns (WakeEvent::Timer).
@@ -134,6 +140,11 @@ pub fn spawn_file_watcher(
                         scheduled_skills_enabled(&ctx),
                     )
                     .await;
+                }
+
+                // MCP declaration + toggle store (mcp.toml) — edge case 15
+                if bootstrap::is_same_file_path(&changed_path, &ctx.mcp_config_path) {
+                    handle_mcp_config_change(&ctx).await;
                 }
 
                 // Skills directory hot-reload
@@ -383,6 +394,37 @@ async fn handle_llm_config_change(ctx: &FileWatcherContext) {
     } else {
         info!("Skipping LLM config reload (settings-service write dedup)");
     }
+}
+
+/// **Edge case 15.** A change to `config/mcp.toml`.
+///
+/// The file *is* the store, so a hand edit is authoritative: `reconcile_all()`
+/// diffs desired against actual on **presence + `enabled` bit +
+/// `config_fingerprint`** and loads or unloads only what changed. An
+/// unparseable rewrite keeps the last-good desired set and skips the diff, so
+/// an editor's intermediate save tears nothing down.
+///
+/// The daemon's **own** write produces the same filesystem event a hand edit
+/// does; the supervisor's dedup ring is what swallows it — it pushed the
+/// post-write hash before the rename, so the route-driven toggle runs only its
+/// in-process transition. Losing the event is tolerable (filesystem events are
+/// `try_send` with drop-on-full) precisely because the route path never depends
+/// on the watcher.
+async fn handle_mcp_config_change(ctx: &FileWatcherContext) {
+    if let Ok(contents) = std::fs::read_to_string(&ctx.mcp_config_path)
+        && ctx.mcp_supervisor.swallow_own_write(&contents)
+    {
+        info!(
+            "Skipping MCP reconcile for {} (the daemon wrote it)",
+            ctx.mcp_config_path.display()
+        );
+        return;
+    }
+    ctx.mcp_supervisor.reconcile_all().await;
+    info!(
+        "MCP servers reconciled (watcher): {}",
+        ctx.mcp_config_path.display()
+    );
 }
 
 async fn handle_skills_change(ctx: &FileWatcherContext, changed_path: &Path) {

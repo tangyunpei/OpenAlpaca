@@ -99,6 +99,45 @@ pub struct ExtensionRecord {
     /// Names the server itself dropped mid-session while staying enabled.
     pub withdrawn_by_server: Vec<String>,
     pub in_flight: usize,
+    /// `blake3` over the canonical, masked rendering of the declaration this
+    /// load was built from (design §3.3 E2). Edge case 15's diff key is
+    /// presence + bit + this. `None` until a load has stamped one.
+    pub config_fingerprint: Option<String>,
+    /// The last server-driven `tools/list_changed` refresh in *this*
+    /// incarnation (design §3.7 step 7). Cleared by the next load.
+    pub tools_changed_at: Option<DateTime<Utc>>,
+    /// Non-fatal facts about the transition that produced this row — the
+    /// `warnings: [...]` of design §8's `disable`/`reload` response ("torn down
+    /// with N call(s) in flight", "teardown pending: 1 call still holding the
+    /// transport").
+    ///
+    /// Per-call, not ledger state: [`ExtensionLedger`] never stores one, and a
+    /// snapshot always reads empty. The supervisor fills it in on the record it
+    /// hands back from the verb that produced the warning.
+    pub warnings: Vec<String>,
+}
+
+impl ExtensionRecord {
+    /// The names that are **live** right now — the API row's `tools` (design
+    /// §8), which is `tools` minus the ones the server itself withdrew.
+    ///
+    /// The two are different on purpose and the difference is easy to get
+    /// wrong: [`Self::tools`] is the *retained* set, which §3.7 step 7 writes
+    /// as `live ∪ server_withdrawn` so attribution of a withdrawn name
+    /// survives exactly as it survives a disable. A row that reported the
+    /// retained set as its live tools would advertise names the gate refuses.
+    pub fn live_tools(&self) -> Vec<String> {
+        let withdrawn: std::collections::BTreeSet<String> = self
+            .withdrawn_by_server
+            .iter()
+            .map(|n| n.to_lowercase())
+            .collect();
+        self.tools
+            .iter()
+            .filter(|n| !withdrawn.contains(&n.to_lowercase()))
+            .cloned()
+            .collect()
+    }
 }
 
 #[derive(Debug)]
@@ -114,6 +153,8 @@ struct LedgerEntry {
     /// lowercased name → name as recorded.
     server_withdrawn: BTreeMap<String, String>,
     in_flight: Arc<AtomicUsize>,
+    config_fingerprint: Option<String>,
+    tools_changed_at: Option<DateTime<Utc>>,
 }
 
 impl LedgerEntry {
@@ -127,6 +168,8 @@ impl LedgerEntry {
             contributions: BTreeSet::new(),
             server_withdrawn: BTreeMap::new(),
             in_flight: Arc::new(AtomicUsize::new(0)),
+            config_fingerprint: None,
+            tools_changed_at: None,
         }
     }
 
@@ -146,6 +189,11 @@ impl LedgerEntry {
                 .collect(),
             withdrawn_by_server: self.server_withdrawn.values().cloned().collect(),
             in_flight: self.in_flight.load(Ordering::SeqCst),
+            config_fingerprint: self.config_fingerprint.clone(),
+            tools_changed_at: self.tools_changed_at,
+            // Never ledger state — the supervisor attaches these to the record
+            // it returns from the verb that produced them.
+            warnings: Vec::new(),
         }
     }
 }
@@ -506,6 +554,41 @@ impl ExtensionLedger {
         stored
     }
 
+    /// **E2** — stamp the declaration this load was built from (design §3.3
+    /// E2). Edge case 15 compares it to decide whether a watcher event is a
+    /// real change; §3.4 trigger 2 consults it on `Failed` records only.
+    pub fn set_config_fingerprint(&self, ext: &ExtensionId, fingerprint: Option<String>) -> bool {
+        match self.records.get_mut(ext) {
+            Some(mut entry) => {
+                entry.config_fingerprint = fingerprint;
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn config_fingerprint(&self, ext: &ExtensionId) -> Option<String> {
+        self.records.get(ext).and_then(|e| e.config_fingerprint.clone())
+    }
+
+    /// **§3.7 step 7** — the incarnation's last server-driven list change. A
+    /// fresh load clears it, because it describes *this* incarnation.
+    pub fn stamp_tools_changed(&self, ext: &ExtensionId) -> bool {
+        match self.records.get_mut(ext) {
+            Some(mut entry) => {
+                entry.tools_changed_at = Some(Utc::now());
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn clear_tools_changed(&self, ext: &ExtensionId) {
+        if let Some(mut entry) = self.records.get_mut(ext) {
+            entry.tools_changed_at = None;
+        }
+    }
+
     /// The owner's persisted toggle, as last read or written by the supervisor.
     pub fn set_disposition(&self, ext: &ExtensionId, disposition: bool) -> bool {
         match self.records.get_mut(ext) {
@@ -518,6 +601,14 @@ impl ExtensionLedger {
     }
 
     /// T5-gone and `DELETE /v1/extensions/plugin/{id}` — the row disappears.
+    ///
+    /// **Ruling R13:** it drops the extension's tombstones with the record, so
+    /// a skill that depended on one of its capabilities classifies `unknown`
+    /// afterwards rather than `withheld`. That is correct and deliberate: with
+    /// the declaration gone there is no row to attribute the loss to, and
+    /// `unknown` is exactly what §10 case 8 says a capability from a
+    /// never-declared extension reads as. The precise attribution lives only as
+    /// long as the row does.
     pub fn drop_record(&self, ext: &ExtensionId) -> bool {
         let existed = self.records.remove(ext).is_some();
         self.owners.retain(|_, owner| &*owner != ext);
@@ -854,9 +945,29 @@ impl ExtensionLedger {
     /// keeps §6.2a's fail-open from becoming a bypass. The supervisors call it
     /// at the end of boot and log at `error` if it is non-empty.
     pub fn audit(&self, registry: &crate::tools::ToolRegistry) -> Vec<String> {
+        self.audit_inner(registry, None)
+    }
+
+    /// [`Self::audit`] narrowed to one kind, so a supervisor logs only the
+    /// registrations it is responsible for — an MCP supervisor auditing plugin
+    /// tools would report a hole only the plugin supervisor can close.
+    pub fn audit_kind(
+        &self,
+        registry: &crate::tools::ToolRegistry,
+        kind: ExtensionKind,
+    ) -> Vec<String> {
+        self.audit_inner(registry, Some(kind))
+    }
+
+    fn audit_inner(
+        &self,
+        registry: &crate::tools::ToolRegistry,
+        kind: Option<ExtensionKind>,
+    ) -> Vec<String> {
         let mut orphans: Vec<String> = registry
             .iter_registered_tools()
             .filter_map(|(name, tool)| tool.extension_id().map(|ext| (name, ext)))
+            .filter(|(_, ext)| kind.is_none_or(|k| ext.kind == k))
             .filter(|(_, ext)| !self.records.contains_key(ext))
             .map(|(name, ext)| format!("{name} (no ledger record for {ext})"))
             .collect();

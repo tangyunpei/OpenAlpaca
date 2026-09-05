@@ -250,6 +250,14 @@ async fn async_main(
     if daemon_config_path.exists() {
         watch_paths.push(daemon_config_path.clone());
     }
+    // `mcp.toml` is the MCP declaration **and** the toggle store (extension
+    // design §5), so a hand edit to it is authoritative: edge case 15's reload
+    // arm reconciles from it. `seed_default_configs` seeds the file, so the
+    // `exists()` guard here is satisfied on a fresh install too.
+    let mcp_config_path = config_base_dir.join("mcp.toml");
+    if mcp_config_path.exists() {
+        watch_paths.push(mcp_config_path.clone());
+    }
     if soul_path.exists() {
         watch_paths.push(soul_path.clone());
     }
@@ -296,6 +304,10 @@ async fn async_main(
         &cancel_token,
     )
     .await?;
+
+    // The MCP supervisor is parked on the services bundle between C2 and C6:
+    // the file watcher and the shutdown path both reach it from here.
+    let mcp_supervisor = svcs.mcp_supervisor.clone();
 
     // Verify critical tool registered
     if svcs.tool_registry.get("update_persona").is_none() {
@@ -414,6 +426,7 @@ async fn async_main(
             bootstrap_path: bootstrap_path.clone(),
             llm_config_path: llm_config_path.clone(),
             daemon_config_path: daemon_config_path.clone(),
+            mcp_config_path: mcp_config_path.clone(),
             skills_dir,
             agents_dir,
             orchestrator: orchestrator.clone(),
@@ -424,6 +437,7 @@ async fn async_main(
             daemon_config: daemon_config.clone(),
             web_search_config: web_search_config_for_reload,
             bus: bus.clone(),
+            mcp_supervisor: mcp_supervisor.clone(),
             fs_watch_handle,
             gateway: gateway.clone(),
             wake_manager: wake_manager.clone(),
@@ -637,6 +651,12 @@ async fn async_main(
     if let Some(ref router) = llm_router_for_shutdown {
         services::flush_cost_tracker(router, &db_for_shutdown, &cost_tracker_date).await;
     }
+
+    // Close every live MCP connection. Nothing tore these down before: rmcp
+    // kills its child from a `Drop` guard that does not fire on `process::exit`
+    // (extension design §3.5). C6 moves this behind `Extensions::shutdown_all`.
+    info!("Shutting down MCP servers...");
+    openalpaca_core::tools::extensions::ExtensionSupervisor::shutdown_all(&*mcp_supervisor).await;
 
     // Shutdown connectors
     info!("Shutting down connectors...");
