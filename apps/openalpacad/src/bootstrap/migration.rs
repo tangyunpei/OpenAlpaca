@@ -1,7 +1,7 @@
 //! Utility functions and data migration helpers.
 
 use openalpaca_storage::repository::TaskRepository;
-use openalpaca_storage::{ConfigRepository, ConversationRepository, Database, IdentityRepository};
+use openalpaca_storage::{ConfigRepository, Database, IdentityRepository};
 use std::path::Path;
 
 /// Startup orphan sweep (Routing V2 Phase 3): mark every non-terminal task
@@ -36,9 +36,8 @@ pub fn is_same_file_path(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Resolve the stable local user ID from the database. On first run, if legacy
-/// `gui_user:gui` messages exist, adopt `"gui_user"` to preserve history continuity.
-/// Otherwise generate a UUID.
+/// Resolve the stable local user ID from the database: the persisted id if one
+/// exists, otherwise a freshly minted UUID that is persisted for future runs.
 pub fn resolve_local_user_id(db: &Database) -> String {
     let config_repo = ConfigRepository::new(db);
 
@@ -47,13 +46,7 @@ pub fn resolve_local_user_id(db: &Database) -> String {
         return id;
     }
 
-    // Check for legacy gui_user:gui history
-    let conv_repo = ConversationRepository::new(db);
-    let local_user_id = if conv_repo.count_by_lane("gui_user:gui").unwrap_or(0) > 0 {
-        "gui_user".to_string() // Preserve existing history
-    } else {
-        uuid::Uuid::new_v4().to_string()
-    };
+    let local_user_id = uuid::Uuid::new_v4().to_string();
 
     // Persist for future runs
     let _ = config_repo.set("identity.local_user_id", &local_user_id, "string");
