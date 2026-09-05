@@ -20,6 +20,11 @@ pub enum PluginError {
     PermissionDenied(String),
     #[error("plugin unavailable: {0}")]
     Unavailable(String),
+    /// A load tried to replace the state of a plugin that still holds a live
+    /// handle (a child process or a capability provider). Replacing it would
+    /// orphan whatever the old entry held, so the load is refused instead.
+    #[error("plugin '{0}' still holds a live handle; unload it before loading again")]
+    HandleHeld(String),
     #[error("config missing required keys: {0:?}")]
     MissingConfig(Vec<String>),
     #[error("io error: {0}")]

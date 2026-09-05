@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use serde_json::Value;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use openalpaca_api::events::ServerEvent;
 use openalpaca_core::agent::registry::AgentRegistry;
@@ -266,9 +266,26 @@ impl PluginManager {
         let name = manifest.plugin.name.clone();
         info!(plugin = %name, "loading plugin");
 
-        // Insert initial Loading state
+        // Insert initial Loading state.
+        //
+        // Refuse to replace an entry that still holds a live handle — a child
+        // process or a capability provider. Overwriting it would orphan both:
+        // the provider is only released through `unload_plugin`, and the child
+        // would die incidentally, if at all. Every legitimate load path (boot
+        // scan, approve, enable, config retry) reaches this point with nothing
+        // held, so this is a guard, not a branch (design §2.2).
         {
             let mut plugins = self.plugins.write().await;
+            if let Some(existing) = plugins.get(&name)
+                && (existing.process.is_some() || existing.capability_provider_handle.is_some())
+            {
+                error!(
+                    plugin = %name,
+                    status = %existing.status,
+                    "refusing to load over a plugin that still holds a process or capability provider"
+                );
+                return Err(PluginError::HandleHeld(name));
+            }
             plugins.insert(
                 name.clone(),
                 PluginState {
@@ -651,23 +668,28 @@ impl PluginManager {
     }
 
     /// Re-enable a disabled plugin and trigger loading.
+    ///
+    /// Enabling a plugin that is already running is a no-op success, never a
+    /// reload (design §3.3 E0): a reload would insert a fresh `PluginState`
+    /// over the live one and orphan the capability provider it holds, which
+    /// only [`unload_plugin`](Self::unload_plugin) can release.
     pub async fn enable_plugin(&self, name: &str) -> Result<(), PluginError> {
-        let plugin_dir = {
+        let (plugin_dir, capabilities) = {
             let plugins = self.plugins.read().await;
             let state = plugins.get(name).ok_or_else(|| {
                 PluginError::Unavailable(format!("plugin '{}' not found", name))
             })?;
-            state.plugin_dir.clone()
+            if matches!(state.status, PluginStatus::Running) {
+                info!(plugin = name, "plugin is already running, enable is a no-op");
+                return Ok(());
+            }
+            (
+                state.plugin_dir.clone(),
+                state.manifest.capabilities.provides.clone(),
+            )
         };
 
         // Record approval
-        let capabilities = {
-            let plugins = self.plugins.read().await;
-            plugins
-                .get(name)
-                .map(|s| s.manifest.capabilities.provides.clone())
-                .unwrap_or_default()
-        };
         self.permission_gate.approve(name, &capabilities)?;
 
         info!(plugin = name, "plugin re-enabled, loading");
@@ -1411,6 +1433,26 @@ mcp_compatible = true
                 .unwrap_or_else(|| panic!("plugin '{name}' holds no child process"))
         }
 
+        /// The capability-provider handle the manager tracks for this plugin.
+        async fn provider_handle(&self, name: &str) -> ProviderHandle {
+            let plugins = self.manager.plugins.read().await;
+            plugins
+                .get(name)
+                .and_then(|s| s.capability_provider_handle)
+                .unwrap_or_else(|| panic!("plugin '{name}' registered no capability provider"))
+        }
+
+        /// How many providers currently emit the stub's virtual capability.
+        /// `known_virtual_capabilities` does not de-duplicate, so a duplicate
+        /// provider shows up as a second occurrence.
+        fn stub_caps(&self) -> usize {
+            self.tools
+                .known_virtual_capabilities()
+                .iter()
+                .filter(|c| *c == "annotation:echo_stub")
+                .count()
+        }
+
         /// `try_wait` on the held child: `None` while it is still running.
         async fn child_exited(&self, name: &str) -> Option<std::process::ExitStatus> {
             let mut plugins = self.manager.plugins.write().await;
@@ -1433,22 +1475,21 @@ mcp_compatible = true
             .unwrap_or(false)
     }
 
-    /// Load the stub as an approved plugin and assert it came up whole.
-    async fn load_running_stub(harness: &Harness, dir: &Path, name: &str, extra_checks: bool) {
+    /// Load the stub as an approved plugin and assert it came up running, with
+    /// its tool registered and its child alive. Returns the loaded info so a
+    /// caller can check the contributions its manifest asked for.
+    async fn load_running_stub(harness: &Harness, dir: &Path, name: &str) -> PluginInfo {
         harness.manager.permission_gate.approve(name, &[]).unwrap();
         harness.manager.try_load_plugin(dir).await.unwrap();
 
         let info = harness.info(name).await;
         assert_eq!(info.status, "running", "stub plugin failed to start");
         assert_eq!(info.tools, vec![format!("{name}::echo")]);
-        if extra_checks {
-            assert_eq!(info.skills, vec![name.to_string()]);
-            assert_eq!(info.agents, vec![name.to_string()]);
-        }
         assert!(
             harness.child_exited(name).await.is_none(),
             "stub child exited during load"
         );
+        info
     }
 
     /// A1 (bug B): deny must tear the plugin down, not just relabel it.
@@ -1461,7 +1502,9 @@ mcp_compatible = true
             "[types]\ntools = true\nskill = true\nagent = true\n",
         );
         let h = Harness::new(tmp.path());
-        load_running_stub(&h, &dir, "echo-test", true).await;
+        let loaded = load_running_stub(&h, &dir, "echo-test").await;
+        assert_eq!(loaded.skills, vec!["echo-test".to_string()]);
+        assert_eq!(loaded.agents, vec!["echo-test".to_string()]);
         let pid = h.child_pid("echo-test").await;
 
         h.manager.deny_plugin("echo-test").await.unwrap();
@@ -1504,7 +1547,7 @@ mcp_compatible = true
         let tmp = tempfile::tempdir().unwrap();
         let dir = install_stub_plugin(tmp.path(), "echo-test", "[types]\ntools = true\n");
         let h = Harness::new(tmp.path());
-        load_running_stub(&h, &dir, "echo-test", false).await;
+        load_running_stub(&h, &dir, "echo-test").await;
         let pid = h.child_pid("echo-test").await;
 
         // Make the permissions write fail: a directory cannot be overwritten
@@ -1524,6 +1567,74 @@ mcp_compatible = true
         assert_eq!(info.tools, vec!["echo-test::echo".to_string()]);
         assert!(h.child_exited("echo-test").await.is_none());
         assert!(pid_alive(pid), "plugin child {pid} was killed anyway");
+    }
+
+    /// A2 (bug C): enabling a plugin that is already running must not reload
+    /// it. A reload overwrites the map entry with a fresh `PluginState` whose
+    /// `capability_provider_handle` is `None`, orphaning the provider that
+    /// only `unload_plugin` can release — one permanent leak per redundant
+    /// enable.
+    #[tokio::test]
+    async fn redundant_enable_registers_no_second_capability_provider() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(
+            tmp.path(),
+            "echo-test",
+            "[types]\ntools = true\n\n[capabilities.virtual]\nprovides = [\"annotation:echo_stub\"]\n",
+        );
+        let h = Harness::new(tmp.path());
+        load_running_stub(&h, &dir, "echo-test").await;
+
+        let pid = h.child_pid("echo-test").await;
+        let handle = h.provider_handle("echo-test").await;
+        let providers = h.tools.provider_handles().len();
+        assert_eq!(h.stub_caps(), 1, "the stub's virtual cap is registered once");
+
+        h.manager.enable_plugin("echo-test").await.unwrap();
+
+        assert_eq!(
+            h.tools.provider_handles().len(),
+            providers,
+            "redundant enable registered a second capability provider"
+        );
+        assert_eq!(h.stub_caps(), 1, "the stub's virtual cap is now duplicated");
+        assert_eq!(
+            h.provider_handle("echo-test").await,
+            handle,
+            "the tracked provider handle was replaced"
+        );
+        assert_eq!(h.child_pid("echo-test").await, pid, "the child was restarted");
+        assert_eq!(h.info("echo-test").await.status, "running");
+
+        // The decisive check: a leaked provider would survive the unload,
+        // because nothing holds its handle any more.
+        h.manager.unload_plugin("echo-test").await.unwrap();
+        assert_eq!(h.stub_caps(), 0, "a capability provider outlived the plugin");
+    }
+
+    /// A2, second half (design §2.2): the map insert refuses to replace an
+    /// entry that still holds a handle, so no load path — a redundant enable,
+    /// an approve, a second directory using the same manifest name — can
+    /// orphan a live process or provider by overwriting its state.
+    #[tokio::test]
+    async fn loading_over_a_plugin_that_holds_a_handle_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(tmp.path(), "echo-test", "[types]\ntools = true\n");
+        let h = Harness::new(tmp.path());
+        load_running_stub(&h, &dir, "echo-test").await;
+        let pid = h.child_pid("echo-test").await;
+
+        let err = h.manager.try_load_plugin(&dir).await.unwrap_err();
+        assert!(
+            matches!(&err, PluginError::HandleHeld(name) if name == "echo-test"),
+            "expected HandleHeld, got {err:?}"
+        );
+
+        // The running plugin is untouched.
+        let info = h.info("echo-test").await;
+        assert_eq!(info.status, "running");
+        assert_eq!(info.tools, vec!["echo-test::echo".to_string()]);
+        assert_eq!(h.child_pid("echo-test").await, pid);
     }
 }
 
