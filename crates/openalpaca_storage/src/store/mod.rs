@@ -24,7 +24,13 @@
 //! to [`ContentKind`] — no crate ever joins a literal directory name onto a store
 //! root.
 
+mod artifact;
 pub mod migrate;
+
+pub use artifact::{
+    artifact_extension, artifact_file_name, confine_to_root, loose_dir, run_dir, slugify,
+    upload_dir, upload_file_name, version_file_path,
+};
 
 use anyhow::{Context, Result, bail};
 use directories::BaseDirs;

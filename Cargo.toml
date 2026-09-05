@@ -111,6 +111,9 @@ libc = "0.2.180"
 tempfile = "3.24.0"
 sqlite-vec = "0.1.6"
 fastembed = "4"
+# Already vendored transitively (pdf-extract → openalpacad); promoted to a
+# direct dependency for the artifact-grammar slugifier's NFKD step (store/artifact.rs).
+unicode-normalization = "0.1.25"
 
 # config
 toml = "0.9"
