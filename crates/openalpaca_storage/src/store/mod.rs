@@ -521,13 +521,13 @@ files only.
 | Entry | Holds | Retention class |
 |---|---|---|
 | `state/` | database (+ WAL/SHM), `discovery.json`, `openalpacad.lock`, `.master_key` | never swept — deleting it is a factory reset |
-| `state/assets/` | interim home for uploaded file bytes | never garbage-collected |
+| `state/assets/` | interim home for uploaded file bytes | swept: an upload attached to no message is deleted once past the grace period |
 | `state/backups/` | rotated copies of hand-edited config (`<name>.bak.<ts>`, `<name>.unparseable-<ts>`) | regenerable — swept freely; never user-edited |
 | `state/logs/` | `daemon.log`, `gui.log` | regenerable — swept freely |
 | `config/` | your runtime config: `llm.toml`, `daemon.toml`, `mcp.toml`, `agents/`, `skills/`, `orchestrator/`, `tools/` | yours — never swept |
 | `plugins/` | plugin directories you dropped in, `.permissions.toml`, `.config/<name>.toml`, `.data/<name>/` | yours — never swept |
 | `artifacts/` | files produced by tasks that had no project | never garbage-collected |
-| `uploads/` | files you uploaded that carried no project signal | never garbage-collected |
+| `uploads/` | files you uploaded that carried no project signal | swept: an upload attached to no message is deleted once past the grace period |
 | `sessions/` | session event logs — all sessions live here, never in a project | size-capped, optional age sweep |
 | `scratch/`, `cache/` | reserved; agent working space and derived data | swept freely |
 | `memory/`, `skills/` | reserved; not created until used | yours — never swept |
@@ -549,7 +549,7 @@ Deleting a directory below loses those files only.
 |---|---|---|
 | `artifacts/` | files produced by tasks run in this project | never garbage-collected; heads are committable |
 | `artifacts/**/.versions/` | previous versions of a produced file | OpenAlpaca's private history; git-ignored |
-| `uploads/` | copies of files you uploaded here | never garbage-collected; git-ignored |
+| `uploads/` | copies of files you uploaded here | swept: an upload attached to no message is deleted once past the grace period; git-ignored |
 | `sessions/` | reserved, deliberately unused — session logs live in the home store | — |
 | `memory/`, `skills/`, `config/` | reserved; not created until used | yours — never swept, and deliberately *not* git-ignored |
 | `scratch/`, `cache/` | reserved; agent working space and derived data | swept freely; git-ignored |

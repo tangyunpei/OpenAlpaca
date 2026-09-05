@@ -174,6 +174,34 @@ fn interim_asset_paths_are_sharded_under_state() {
 // ensure_store
 // ============================================================================
 
+/// The README is the document this subsystem writes into the user's own
+/// project, and D2 put human-named uploads there. The daemon's asset sweep
+/// deletes an upload that was never attached to a message once the grace period
+/// passes — bytes and row — so no retention row may promise those files are kept
+/// forever. Produced artifacts are genuinely never swept; only uploads are.
+#[test]
+fn the_readmes_tell_the_truth_about_upload_retention() {
+    for (name, text) in [("home", HOME_README), ("project", PROJECT_README)] {
+        let uploads = text
+            .lines()
+            .find(|line| line.starts_with("| `uploads/`"))
+            .unwrap_or_else(|| panic!("the {name} README has no uploads/ row"));
+        assert!(
+            !uploads.contains("never garbage-collected"),
+            "the {name} README promises uploads survive, but the sweep deletes them: {uploads}"
+        );
+        assert!(
+            uploads.contains("grace period"),
+            "the {name} README must name the retention rule the sweep applies: {uploads}"
+        );
+        assert!(
+            text.lines()
+                .any(|line| line.starts_with("| `artifacts/`") && line.contains("never")),
+            "the {name} README must keep saying produced artifacts are never swept"
+        );
+    }
+}
+
 #[test]
 fn ensure_store_seeds_the_home_root() {
     let tmp = tempdir().unwrap();

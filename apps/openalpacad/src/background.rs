@@ -326,35 +326,55 @@ pub fn spawn_asset_cleanup(
                 }
             }
 
-            let repo = FileAssetRepository::new(&db);
-            let orphans = match repo.list_orphaned(grace_hours) {
-                Ok(o) => o,
-                Err(e) => {
-                    tracing::warn!("Asset cleanup: failed to list orphans: {e}");
-                    continue;
-                }
-            };
-
-            let mut cleaned = 0usize;
-            for orphan in &orphans {
-                // Delete file from disk
-                if let Err(e) = std::fs::remove_file(&orphan.storage_path) {
-                    // File may already be gone — just warn
-                    tracing::debug!("Failed to remove orphan file {}: {e}", orphan.storage_path);
-                }
-                // Delete DB row
-                if let Err(e) = repo.delete_by_id(&orphan.id) {
-                    tracing::warn!("Failed to delete orphan asset {}: {e}", orphan.id);
-                } else {
-                    cleaned += 1;
-                }
-            }
-
+            let cleaned = sweep_orphaned_uploads(&db, grace_hours);
             if cleaned > 0 {
                 tracing::info!("Asset cleanup: removed {cleaned} orphaned assets");
             }
         }
     });
+}
+
+/// One sweep pass: for every orphaned upload, the bytes first and then the row.
+/// Returns how many rows were removed.
+///
+/// **The row never goes without the bytes.** A row is the only handle anything
+/// has on an upload's file — nothing walks the store's directories — so deleting
+/// it while `remove_file` failed (a permission error, an unmounted project
+/// volume) strands that file forever, and frees its sequence number for a name
+/// that is still taken on disk. When the removal fails the row stays, the
+/// failure is warned about with the path, and the next pass tries again. A file
+/// that is already gone is simply removed: there is nothing left but the row.
+fn sweep_orphaned_uploads(db: &Database, grace_hours: i64) -> usize {
+    let repo = FileAssetRepository::new(db);
+    let orphans = match repo.list_orphaned(grace_hours) {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!("Asset cleanup: failed to list orphans: {e}");
+            return 0;
+        }
+    };
+
+    let mut cleaned = 0usize;
+    for orphan in &orphans {
+        match std::fs::remove_file(&orphan.storage_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!(
+                    "Asset cleanup: keeping asset {} — failed to remove {}: {e}",
+                    orphan.id,
+                    orphan.storage_path
+                );
+                continue;
+            }
+        }
+        if let Err(e) = repo.delete_by_id(&orphan.id) {
+            tracing::warn!("Failed to delete orphan asset {}: {e}", orphan.id);
+        } else {
+            cleaned += 1;
+        }
+    }
+    cleaned
 }
 
 /// Spawn telemetry cleanup task.
@@ -384,4 +404,105 @@ pub fn spawn_telemetry_cleanup(db: Database, cancel: CancellationToken) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An orphaned upload row: past the grace period and attached to no message,
+    /// so `list_orphaned` returns it.
+    fn orphan_row(db: &Database, id: &str, storage_path: &str) {
+        FileAssetRepository::new(db)
+            .insert(&openalpaca_storage::FileAsset {
+                id: id.to_string(),
+                owner_id: "owner-1".to_string(),
+                sha256: id.to_string(),
+                filename: "notes.txt".to_string(),
+                mime_type: "text/plain".to_string(),
+                size_bytes: 5,
+                storage_path: storage_path.to_string(),
+                status: FileAssetStatus::Ready,
+                extracted_text: None,
+                extract_error: None,
+                metadata_json: None,
+                created_at: String::new(),
+                updated_at: String::new(),
+            })
+            .expect("insert orphan row");
+        // Age it past the grace period the sweep is asked for.
+        db.with_connection(|conn| {
+            conn.execute(
+                "UPDATE file_assets SET created_at = datetime('now', '-48 hours')",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect("age the row");
+    }
+
+    fn test_db(dir: &tempfile::TempDir) -> Database {
+        Database::open(&dir.path().join("test.db")).expect("open test db")
+    }
+
+    #[test]
+    fn a_sweep_removes_the_orphans_bytes_and_its_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(&dir);
+        let file = dir.path().join("01-notes.txt");
+        std::fs::write(&file, b"hello").unwrap();
+        orphan_row(&db, "orphan-1", file.to_str().unwrap());
+
+        assert_eq!(sweep_orphaned_uploads(&db, 24), 1);
+        assert!(!file.exists());
+        assert!(
+            FileAssetRepository::new(&db)
+                .get_by_id("orphan-1")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_sweep_whose_file_is_already_gone_still_removes_the_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(&dir);
+        orphan_row(&db, "orphan-1", dir.path().join("gone.txt").to_str().unwrap());
+
+        assert_eq!(sweep_orphaned_uploads(&db, 24), 1);
+        assert!(
+            FileAssetRepository::new(&db)
+                .get_by_id("orphan-1")
+                .unwrap()
+                .is_none(),
+            "nothing on disk to lose, so the row is all there is to remove"
+        );
+    }
+
+    /// The row is the only handle anything has on an upload's bytes — nothing
+    /// walks the store's directories — so deleting it while the file survives
+    /// strands that file forever *and* frees its sequence number for a name that
+    /// is still taken. When the removal fails, the row stays and the next sweep
+    /// tries again.
+    #[test]
+    fn a_sweep_whose_file_cannot_be_removed_keeps_the_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(&dir);
+        // A directory at the storage path: `remove_file` fails with something
+        // that is not `NotFound`, exactly like a permission error or an
+        // unmounted project volume.
+        let blocked = dir.path().join("01-notes.txt");
+        std::fs::create_dir(&blocked).unwrap();
+        orphan_row(&db, "orphan-1", blocked.to_str().unwrap());
+
+        assert_eq!(sweep_orphaned_uploads(&db, 24), 0);
+        assert!(blocked.exists());
+        assert!(
+            FileAssetRepository::new(&db)
+                .get_by_id("orphan-1")
+                .unwrap()
+                .is_some(),
+            "the row must outlive a failed removal, or the bytes are unreachable"
+        );
+    }
 }
