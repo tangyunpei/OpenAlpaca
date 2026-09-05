@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing;
 
-use super::{LlmConfig, build_provider_with_runtime, parse_provider_type};
+use super::parse_provider_type;
 use super::router_config::LlmRouterConfig;
 use super::runtime::LlmRuntimeConfig;
 
@@ -20,10 +20,6 @@ fn resolve_key_secret(env_var: &str) -> Option<String> {
 }
 
 /// Build an LlmRouter from a config file path.
-///
-/// Auto-detects format:
-/// - If `providers` key is present → new hierarchical format
-/// - Otherwise → legacy flat format (wraps in single-provider router)
 pub fn build_router(path: &std::path::Path) -> Result<LlmRouter, LlmError> {
     build_router_with_secret_store(path, None)
 }
@@ -36,43 +32,10 @@ pub fn build_router_with_secret_store(
     let content = std::fs::read_to_string(path)
         .map_err(|e| LlmError::Config(format!("Failed to read {}: {}", path.display(), e)))?;
 
-    // Try parsing as a generic Value to detect format
-    let raw: toml::Value = toml::from_str(&content)
-        .map_err(|e| LlmError::Config(format!("Failed to parse {}: {}", path.display(), e)))?;
-
-    if raw.get("providers").is_some() {
-        build_router_from_hierarchical(&content, secret_store)
-    } else {
-        build_router_from_legacy(&content)
-    }
+    build_router_from_hierarchical(&content, secret_store)
 }
 
-/// Build router from legacy flat format (single provider).
-fn build_router_from_legacy(content: &str) -> Result<LlmRouter, LlmError> {
-    let config: LlmConfig = toml::from_str(content)
-        .map_err(|e| LlmError::Config(format!("Failed to parse legacy config: {}", e)))?;
-
-    let runtime = LlmRuntimeConfig::default();
-    let provider = build_provider_with_runtime(&config, Some(&runtime))?;
-    let provider_type = parse_provider_type(&config.provider)
-        .ok_or_else(|| LlmError::UnknownProvider(config.provider.clone()))?;
-
-    let default_model = config.model.unwrap_or_else(|| {
-        runtime
-            .provider_defaults
-            .get(config.provider.as_str())
-            .map(|d| d.default_model.clone())
-            .unwrap_or_else(|| "claude-sonnet-4-5-20250929".to_string())
-    });
-
-    Ok(LlmRouter::single_provider(
-        Arc::from(provider),
-        provider_type,
-        default_model,
-    ))
-}
-
-/// Build router from new hierarchical format.
+/// Build router from the hierarchical config format.
 #[allow(unused_variables, unused_mut, unreachable_code)]
 fn build_router_from_hierarchical(
     content: &str,
@@ -149,9 +112,10 @@ fn build_router_from_hierarchical(
                             None
                         }
                     } else if let Some(ref encrypted) = key_config.secret_encrypted {
-                        // 3. Legacy encrypted (read-only, for pre-migration compat)
+                        // 3. AES-256-GCM local encryption — the no-keychain
+                        //    fallback tier, not a compat shim (P16).
                         if crate::keys::key_encryption::KeyEncryptor::is_encrypted(encrypted) {
-                            match crate::keys::key_encryption::KeyEncryptor::load_or_generate() {
+                            match crate::keys::key_encryption::KeyEncryptor::from_env() {
                                 Ok(enc) => match enc.decrypt(encrypted) {
                                     Ok(s) => Some(s),
                                     Err(e) => {

@@ -66,15 +66,17 @@ pub fn apply_task_action(
     action: &str,
 ) -> Result<TaskEntryStatus, TaskActionError> {
     // Resolve current state: in-memory registry first, DB fallback.
-    let current = match shared_context.task_registry.get(task_id) {
-        Some(entry) => entry.status,
+    // The title travels with it so the TaskUpdated event below can carry a
+    // real title even for DB-only tasks resurrected after a restart (GAP-07).
+    let (current, title) = match shared_context.task_registry.get(task_id) {
+        Some(entry) => (entry.status, entry.title),
         None => match db {
             Some(db) => {
                 let task = TaskRepository::new(db)
                     .get(task_id)
                     .map_err(|e| TaskActionError::Db(e.to_string()))?
                     .ok_or(TaskActionError::NotFound)?;
-                entry_status_from_db(task.status)
+                (entry_status_from_db(task.status), task.title)
             }
             None => return Err(TaskActionError::NotFound),
         },
@@ -152,6 +154,7 @@ pub fn apply_task_action(
     // Emit TaskUpdated event
     bus.publish(SystemEvent::TaskUpdated {
         task_id: task_id.to_string(),
+        title,
         status: new_status.as_str().to_string(),
         progress_current: None,
         progress_total: None,

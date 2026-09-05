@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use openalpaca_storage::discovery;
-use openalpaca_storage::paths;
+use openalpaca_storage::store;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -34,8 +34,8 @@ pub fn start_daemon() -> Result<()> {
     println!("🚀 Starting OpenAlpaca Daemon...");
 
     let runtime_dir = ensure_runtime_dirs()?;
-    let config_dir = runtime_dir.join("config");
-    let log_path = runtime_dir.join("daemon.log");
+    let config_dir = store::ensure_runtime_config_dir()?;
+    let log_path = store::logs_dir()?.join("daemon.log");
     let log_file = fs::File::create(&log_path)
         .with_context(|| format!("Failed to create daemon log file: {}", log_path.display()))?;
 
@@ -134,8 +134,8 @@ pub fn start_gui() -> Result<()> {
             println!("✅ GUI started from {}.", app_path.display());
         }
         GuiLaunch::DevTauri { workspace_root } => {
-            let runtime_dir = ensure_runtime_dirs()?;
-            let log_path = runtime_dir.join("gui.log");
+            ensure_runtime_dirs()?;
+            let log_path = store::logs_dir()?.join("gui.log");
             let log_file = fs::File::create(&log_path).with_context(|| {
                 format!("Failed to create GUI log file: {}", log_path.display())
             })?;
@@ -211,16 +211,10 @@ fn daemon_launch_command(launch: &DaemonLaunch, runtime_dir: &Path, config_dir: 
 }
 
 fn ensure_runtime_dirs() -> Result<PathBuf> {
-    let app_dir = paths::app_dir().context("Failed to resolve OpenAlpaca app directory")?;
-    fs::create_dir_all(&app_dir)
-        .with_context(|| format!("Failed to create app directory: {}", app_dir.display()))?;
-    fs::create_dir_all(app_dir.join("config")).with_context(|| {
-        format!(
-            "Failed to create config directory: {}",
-            app_dir.join("config").display()
-        )
-    })?;
-    Ok(app_dir)
+    let home_root = store::ensure_store(&store::StoreScope::Home)
+        .context("Failed to create the OpenAlpaca home store")?;
+    store::ensure_runtime_config_dir().context("Failed to create the runtime config directory")?;
+    Ok(home_root)
 }
 
 fn resolve_daemon_launch(current_exe: &Path) -> Result<DaemonLaunch> {

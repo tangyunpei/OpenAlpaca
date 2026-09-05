@@ -1,92 +1,68 @@
-/**
- * REST API client for task endpoints.
- */
+/** `/v1/tasks*`. */
 
-import { ensureConnection } from "./connection";
+import { apiFetch } from "../http";
 import type {
-  Task,
-  TaskDetailResponse,
   CreateTaskRequest,
   CreateTaskResponse,
+  Task,
+  TaskAction,
   TaskActionResponse,
-} from "../types";
+  TaskDetailResponse,
+} from "./types";
 
 export interface ListTasksQuery {
-  created_by?: string;
-  status?: string;
+  /** `active` is a special list mode, not a `TaskStatus` value. */
+  status?: "active" | Task["status"];
+  createdBy?: string;
   limit?: number;
 }
 
-/** GET /v1/tasks */
-export async function getTasks(query?: ListTasksQuery): Promise<Task[]> {
-  const conn = await ensureConnection();
-  const params = new URLSearchParams();
-  if (query?.created_by) params.set("created_by", query.created_by);
-  if (query?.status) params.set("status", query.status);
-  if (query?.limit) params.set("limit", String(query.limit));
-  const qs = params.toString();
-
-  const response = await fetch(
-    `${conn.baseUrl}/v1/tasks${qs ? `?${qs}` : ""}`,
-    { headers: { Authorization: `Bearer ${conn.token}` } },
-  );
-
-  if (!response.ok) {
-    throw new Error(`Failed to fetch tasks: ${response.statusText}`);
-  }
-  return await response.json();
-}
-
-/** GET /v1/tasks/{id} — returns task + assignments */
-export async function getTask(id: string): Promise<TaskDetailResponse> {
-  const conn = await ensureConnection();
-  const response = await fetch(`${conn.baseUrl}/v1/tasks/${id}`, {
-    headers: { Authorization: `Bearer ${conn.token}` },
-  });
-
-  if (!response.ok) {
-    throw new Error(`Failed to fetch task ${id}: ${response.statusText}`);
-  }
-  return await response.json();
-}
-
-/** POST /v1/tasks */
-export async function createTask(req: CreateTaskRequest): Promise<CreateTaskResponse> {
-  const conn = await ensureConnection();
-  const response = await fetch(`${conn.baseUrl}/v1/tasks`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${conn.token}`,
+/** `GET /v1/tasks` — a bare array, with `assigned_agents` and `outcome` injected. */
+export async function listTasks(
+  query: ListTasksQuery = {},
+  signal?: AbortSignal,
+): Promise<Task[]> {
+  return await apiFetch<Task[]>("/v1/tasks", {
+    query: {
+      status: query.status,
+      created_by: query.createdBy,
+      limit: query.limit,
     },
-    body: JSON.stringify(req),
+    signal,
   });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error || `Failed to create task: ${response.statusText}`);
-  }
-  return await response.json();
 }
 
-/** POST /v1/tasks/{id}/action — action: "cancel" | "pause" | "resume" */
+/** `GET /v1/tasks/{id}` — a different shape from a list row. */
+export async function getTask(
+  id: string,
+  signal?: AbortSignal,
+): Promise<TaskDetailResponse> {
+  return await apiFetch<TaskDetailResponse>(
+    `/v1/tasks/${encodeURIComponent(id)}`,
+    { signal },
+  );
+}
+
+/** `POST /v1/tasks` — persists a row and a lane; it does **not** dispatch a workflow. */
+export async function createTask(
+  req: CreateTaskRequest,
+): Promise<CreateTaskResponse> {
+  return await apiFetch<CreateTaskResponse>("/v1/tasks", {
+    method: "POST",
+    body: req,
+  });
+}
+
+/** `POST /v1/tasks/{id}/action` — 409 on an illegal transition. `rerun`/`start` are GAP-06. */
 export async function performTaskAction(
   id: string,
-  action: "cancel" | "pause" | "resume",
+  action: TaskAction,
 ): Promise<TaskActionResponse> {
-  const conn = await ensureConnection();
-  const response = await fetch(`${conn.baseUrl}/v1/tasks/${id}/action`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${conn.token}`,
+  return await apiFetch<TaskActionResponse>(
+    `/v1/tasks/${encodeURIComponent(id)}/action`,
+    {
+      method: "POST",
+      body: { action },
     },
-    body: JSON.stringify({ action }),
-  });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error || `Task action ${action} failed: ${response.statusText}`);
-  }
-  return await response.json();
+  );
 }

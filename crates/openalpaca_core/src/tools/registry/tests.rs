@@ -1836,11 +1836,12 @@ fn mcp_backend() -> ToolBackend {
         client: Arc::new(openalpaca_mcp::McpClient::disconnected_for_tests("srv")),
         remote_name: "echo".to_string(),
         server_name: "srv".to_string(),
+        generation: 0,
     }
 }
 
 #[test]
-fn test_extension_tool_defs_filters_by_origin_and_deny() {
+fn test_extension_tool_defs_filters_by_origin() {
     let registry = ToolRegistry::default();
     registry.register(make_tool("builtin_tool", "ok")).unwrap();
     registry
@@ -1867,13 +1868,745 @@ fn test_extension_tool_defs_filters_by_origin_and_deny() {
         ))
         .unwrap();
 
-    let defs = registry.extension_tool_defs(&["srv__blocked".to_string()]);
+    let defs = registry.extension_tool_defs();
     let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-    // Only MCP/Plugin backends, minus the deny list, sorted by name.
-    assert_eq!(names, vec!["plug::do", "srv__echo"]);
+    // Only MCP/Plugin backends, sorted by name; builtins/custom excluded.
+    assert_eq!(names, vec!["plug::do", "srv__blocked", "srv__echo"]);
+}
 
-    // Empty deny keeps all extension tools; builtins/custom still excluded.
-    let all = registry.extension_tool_defs(&[]);
-    let all_names: Vec<&str> = all.iter().map(|d| d.name.as_str()).collect();
-    assert_eq!(all_names, vec!["plug::do", "srv__blocked", "srv__echo"]);
+// ═════════════════════════════════════════════════════════════════════════
+// THE EXTENSION GATE (extension design §6.2 #1, §6.2a, §7.1)
+// ═════════════════════════════════════════════════════════════════════════
+
+use crate::tools::extensions::{
+    Audience, ExtensionId, ExtensionLedger, ExtensionState, FailureReason, WithdrawalCause,
+};
+
+/// A plugin executor that reports which load it belongs to and, on call, how
+/// many in-flight guards the ledger is holding — which is how "the gate ran
+/// exactly once" is observed from below the gate.
+struct GenPluginExec {
+    generation: u64,
+    ledger: Option<Arc<ExtensionLedger>>,
+    ext: ExtensionId,
+}
+
+#[async_trait]
+impl openalpaca_api::plugin_traits::PluginToolExecutor for GenPluginExec {
+    async fn execute(
+        &self,
+        _tool_name: &str,
+        _arguments: &serde_json::Value,
+    ) -> Result<String, String> {
+        match &self.ledger {
+            Some(ledger) => Ok(format!("in_flight={}", ledger.in_flight(&self.ext))),
+            None => Ok("plugin ok".to_string()),
+        }
+    }
+
+    fn plugin_id(&self) -> &str {
+        "plug"
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
+fn mcp_tool(name: &str, server: &str, generation: u64) -> RegisteredTool {
+    let mut tool = make_tool(name, "ok");
+    tool.backend = ToolBackend::Mcp {
+        client: Arc::new(openalpaca_mcp::McpClient::disconnected_for_tests(server)),
+        remote_name: "echo".to_string(),
+        server_name: server.to_string(),
+        generation,
+    };
+    tool.author = format!("mcp:{server}");
+    tool
+}
+
+fn plugin_tool(name: &str, plugin: &str, executor: Arc<GenPluginExec>) -> RegisteredTool {
+    let mut tool = make_tool(name, "ok");
+    tool.backend = ToolBackend::Plugin(executor);
+    tool.author = format!("plugin:{plugin}");
+    tool
+}
+
+/// The disable half of a supervisor's T0–T5, run against the ledger alone.
+fn ledger_disable(ledger: &ExtensionLedger, ext: &ExtensionId) {
+    ledger.begin(ext, ExtensionState::Disabling, Some(WithdrawalCause::Disable));
+    ledger.commit(ext, ExtensionState::Disabled);
+}
+
+fn enabled_record(ledger: &ExtensionLedger, ext: &ExtensionId, tools: &[&str]) -> u64 {
+    let generation = match ledger.begin(ext, ExtensionState::Enabling, None) {
+        crate::tools::extensions::Transition::Took(g) => g,
+        other => panic!("E0 refused: {other:?}"),
+    };
+    ledger.restore(ext);
+    ledger.record_tools(ext, tools.iter().map(|s| s.to_string()));
+    assert!(ledger.commit(ext, ExtensionState::Enabled));
+    generation
+}
+
+// ── (i) The snapshot arm ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn snapshot_refuses_after_a_ledger_disable_with_the_s4_string() {
+    let registry = Arc::new(ToolRegistry::default());
+    let ext = ExtensionId::mcp("github");
+    enabled_record(registry.extensions(), &ext, &["github__create_issue"]);
+    registry
+        .register(mcp_tool("github__create_issue", "github", 1))
+        .unwrap();
+
+    // A lead agent takes a deep snapshot and holds it for the whole run.
+    let snapshot = (*registry).clone();
+    assert!(snapshot.get("github__create_issue").is_some());
+
+    ledger_disable(registry.extensions(), &ext);
+
+    let err = snapshot
+        .execute_with_context(
+            "github__create_issue",
+            &serde_json::json!({}),
+            &ToolContext::default(),
+        )
+        .await
+        .expect_err("a disabled extension must be refused in every snapshot");
+
+    assert!(
+        err.starts_with("tool 'github__create_issue' is unavailable: "),
+        "{err}"
+    );
+    assert!(err.contains("MCP server 'github' is disabled by the owner"), "{err}");
+    assert!(err.contains("Settings → Extensions"), "{err}");
+    assert!(!err.contains("not found"), "{err}");
+    assert!(!err.contains("transport"), "{err}");
+}
+
+/// The §6.3 guard rail, carried from C1's review: the snapshot test above
+/// exercises `execute_with_context`, but `execute()` — the no-context path —
+/// is the *same* gate through the same `dispatch`, and a refactor that
+/// re-split them would be invisible without this.
+#[tokio::test]
+async fn the_no_context_execute_path_refuses_a_disabled_extension_too() {
+    let registry = Arc::new(ToolRegistry::default());
+    let ext = ExtensionId::mcp("github");
+    enabled_record(registry.extensions(), &ext, &["github__create_issue"]);
+    registry
+        .register(mcp_tool("github__create_issue", "github", 1))
+        .unwrap();
+
+    let snapshot = (*registry).clone();
+    ledger_disable(registry.extensions(), &ext);
+
+    let err = snapshot
+        .execute("github__create_issue", &serde_json::json!({}))
+        .await
+        .expect_err("execute() is gated exactly like execute_with_context()");
+    assert!(err.contains("MCP server 'github' is disabled by the owner"), "{err}");
+    assert!(!err.contains("Unknown tool"), "{err}");
+}
+
+// ── (ii) The miss arm ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn live_registry_miss_on_withdrawn_tool_refuses_with_attribution() {
+    let registry = Arc::new(ToolRegistry::default());
+    let ext = ExtensionId::mcp("github");
+    enabled_record(registry.extensions(), &ext, &["github__create_issue"]);
+    registry
+        .register(mcp_tool("github__create_issue", "github", 1))
+        .unwrap();
+
+    // T0 then T1: the ordinary skill holds the LIVE registry and sees the
+    // entry vanish, which without the miss arm is an unattributed "not found".
+    ledger_disable(registry.extensions(), &ext);
+    assert!(registry.remove("github__create_issue"));
+
+    let ctx = ToolContext {
+        task_id: Some("task-1".into()),
+        ..Default::default()
+    };
+    let err = registry
+        .execute_with_context("github__create_issue", &serde_json::json!({}), &ctx)
+        .await
+        .expect_err("the miss arm must refuse, not fall through");
+
+    assert!(
+        err.contains("MCP server 'github' is disabled by the owner"),
+        "{err}"
+    );
+    assert!(!err.contains("not found in registry"), "{err}");
+
+    // Exactly one announcement, however many times the model retries — while
+    // every attempt still fails (design §7.1/§7.4). The dedup set is C1's
+    // observable; the event variant lands in C4.
+    for _ in 0..9 {
+        assert!(
+            registry
+                .execute_with_context("github__create_issue", &serde_json::json!({}), &ctx)
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(registry.extensions().warned_count(), 1);
+}
+
+// ── (iii) The generation compare ─────────────────────────────────────────
+
+#[tokio::test]
+async fn stale_snapshot_after_reenable_refuses_and_live_stays_enabled() {
+    let registry = Arc::new(ToolRegistry::default());
+    let ext = ExtensionId::plugin("notion");
+    let gen1 = enabled_record(registry.extensions(), &ext, &["notion::write"]);
+    assert_eq!(gen1, 1);
+    registry
+        .register(plugin_tool(
+            "notion::write",
+            "notion",
+            Arc::new(GenPluginExec {
+                generation: 1,
+                ledger: None,
+                ext: ext.clone(),
+            }),
+        ))
+        .unwrap();
+
+    // A run in flight holds load 1's proxy.
+    let snapshot = (*registry).clone();
+
+    // Disable, then re-enable: E0 bumps the generation and E4 replaces the
+    // registry entry with a handle stamped for load 2.
+    ledger_disable(registry.extensions(), &ext);
+    assert!(registry.remove("notion::write"));
+    let gen2 = match registry
+        .extensions()
+        .begin(&ext, ExtensionState::Enabling, None)
+    {
+        crate::tools::extensions::Transition::Took(g) => g,
+        other => panic!("E0 refused: {other:?}"),
+    };
+    assert_eq!(gen2, 2, "every load exceeds the last");
+    registry
+        .replace(plugin_tool(
+            "notion::write",
+            "notion",
+            Arc::new(GenPluginExec {
+                generation: gen2,
+                ledger: None,
+                ext: ext.clone(),
+            }),
+        ))
+        .unwrap();
+    registry.extensions().restore(&ext);
+    registry.extensions().record_tools(&ext, ["notion::write"]);
+    assert!(
+        registry
+            .extensions()
+            .commit(&ext, ExtensionState::Enabled)
+    );
+
+    // The stale snapshot is refused BEFORE it can reach the dead channel.
+    let err = snapshot
+        .execute_with_context(
+            "notion::write",
+            &serde_json::json!({}),
+            &ToolContext::default(),
+        )
+        .await
+        .expect_err("a handle from a previous load must be refused");
+    assert!(err.contains("belongs to a previous load of 'notion'"), "{err}");
+    assert!(err.contains("available again on your next request"), "{err}");
+    assert_eq!(registry.extensions().warned_count(), 1);
+
+    // …while the live registry serves the new load.
+    let ok = registry
+        .execute_with_context(
+            "notion::write",
+            &serde_json::json!({}),
+            &ToolContext::default(),
+        )
+        .await
+        .expect("the current load still works");
+    assert_eq!(ok, "plugin ok");
+
+    // And the stale proxy's own crash report cannot flip the healthy row.
+    assert!(!registry.extensions().mark_failed(&ext, gen1, FailureReason::Crashed, "channel closed"));
+    assert_eq!(
+        registry.extensions().state(&ext),
+        Some(ExtensionState::Enabled)
+    );
+}
+
+// ── The gate runs exactly once per call ──────────────────────────────────
+
+#[tokio::test]
+async fn the_gate_is_taken_exactly_once_for_a_plugin_backend() {
+    let registry = Arc::new(ToolRegistry::default());
+    let ext = ExtensionId::plugin("plug");
+    enabled_record(registry.extensions(), &ext, &["plug::do"]);
+    registry
+        .register(plugin_tool(
+            "plug::do",
+            "plug",
+            Arc::new(GenPluginExec {
+                generation: 1,
+                ledger: Some(Arc::clone(registry.extensions())),
+                ext: ext.clone(),
+            }),
+        ))
+        .unwrap();
+
+    // `execute_with_context`'s Plugin arm used to delegate to `execute`, which
+    // would double-take the guard and double-count T3's drain.
+    let out = registry
+        .execute_with_context("plug::do", &serde_json::json!({}), &ToolContext::default())
+        .await
+        .unwrap();
+    assert_eq!(out, "in_flight=1", "the guard must be taken exactly once");
+
+    let out = registry
+        .execute("plug::do", &serde_json::json!({}))
+        .await
+        .unwrap();
+    assert_eq!(out, "in_flight=1");
+
+    // The guard is released when the call finishes.
+    assert_eq!(registry.extensions().in_flight(&ext), 0);
+}
+
+#[tokio::test]
+async fn builtins_are_never_gated() {
+    let registry = Arc::new(ToolRegistry::default());
+    registry.register(make_tool("builtin_tool", "ok")).unwrap();
+    // A ledger record for a *different* extension changes nothing.
+    registry
+        .extensions()
+        .upsert(&ExtensionId::mcp("github"), false, ExtensionState::Disabled);
+
+    assert_eq!(
+        registry
+            .execute_with_context("builtin_tool", &serde_json::json!({}), &ToolContext::default())
+            .await
+            .unwrap(),
+        "ok"
+    );
+    assert_eq!(
+        registry.execute("builtin_tool", &serde_json::json!({})).await.unwrap(),
+        "ok"
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_name_with_no_ledger_owner_still_gets_the_plain_not_found_error() {
+    let registry = Arc::new(ToolRegistry::default());
+    // An owner that IS enabled must also fall through, not refuse.
+    let ext = ExtensionId::mcp("github");
+    enabled_record(registry.extensions(), &ext, &["github__create_issue"]);
+
+    let err = registry
+        .execute_with_context("nope", &serde_json::json!({}), &ToolContext::default())
+        .await
+        .unwrap_err();
+    assert_eq!(err, "Tool 'nope' not found in registry");
+
+    let err = registry.execute("nope", &serde_json::json!({})).await.unwrap_err();
+    assert_eq!(err, "Unknown tool: 'nope'");
+
+    // A name an ENABLED extension retains but the registry no longer holds is
+    // also a fall-through — it is not withheld by anything.
+    let err = registry
+        .execute_with_context(
+            "github__create_issue",
+            &serde_json::json!({}),
+            &ToolContext::default(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err, "Tool 'github__create_issue' not found in registry");
+}
+
+// ── §6.2a — fail-open, audited ───────────────────────────────────────────
+
+#[tokio::test]
+async fn unrecorded_extension_tool_executes() {
+    let registry = Arc::new(ToolRegistry::default());
+    // Exactly what `services/mcp.rs` and `manager.rs` do today: register
+    // straight through, with no ledger record anywhere.
+    registry.register(mcp_tool("srv__echo", "srv", 0)).unwrap();
+    registry
+        .register(plugin_tool(
+            "plug::do",
+            "plug",
+            Arc::new(GenPluginExec {
+                generation: 0,
+                ledger: None,
+                ext: ExtensionId::plugin("plug"),
+            }),
+        ))
+        .unwrap();
+
+    // Still listed on the default surfaces.
+    let names: Vec<String> = registry
+        .extension_tool_defs()
+        .into_iter()
+        .map(|d| d.name)
+        .collect();
+    assert_eq!(names, vec!["plug::do".to_string(), "srv__echo".to_string()]);
+
+    // Still executes: the plugin call returns its own result…
+    assert_eq!(
+        registry
+            .execute_with_context("plug::do", &serde_json::json!({}), &ToolContext::default())
+            .await
+            .unwrap(),
+        "plugin ok"
+    );
+    // …and the MCP call reaches its backend (the disconnected test client's own
+    // transport error), rather than being stopped at the gate.
+    let err = registry
+        .execute_with_context("srv__echo", &serde_json::json!({}), &ToolContext::default())
+        .await
+        .unwrap_err();
+    assert!(err.starts_with("MCP server 'srv' tool 'echo' failed:"), "{err}");
+
+    // And the audit names both, so the fail-open path cannot hide.
+    let audit = registry.extensions().audit(&registry);
+    assert_eq!(audit.len(), 2, "{audit:?}");
+    assert!(audit.iter().any(|line| line.contains("mcp:srv")), "{audit:?}");
+    assert!(audit.iter().any(|line| line.contains("plugin:plug")), "{audit:?}");
+}
+
+// ── Registry hygiene (§6.2 #4, §3.2 T3, §3.3 E4) ─────────────────────────
+
+#[test]
+fn extension_tools_never_timeout_exempt() {
+    let registry = ToolRegistry::default();
+    let mut tool = mcp_tool("srv__echo", "srv", 0);
+    tool.exempt_from_timeout = true;
+    registry.register(tool).unwrap();
+    assert!(!registry.is_exempt_from_timeout("srv__echo"));
+    assert!(!registry.get("srv__echo").unwrap().exempt_from_timeout);
+
+    // `replace` goes through the same guard.
+    let mut tool = plugin_tool(
+        "plug::do",
+        "plug",
+        Arc::new(GenPluginExec {
+            generation: 0,
+            ledger: None,
+            ext: ExtensionId::plugin("plug"),
+        }),
+    );
+    tool.exempt_from_timeout = true;
+    registry.replace(tool).unwrap();
+    assert!(!registry.is_exempt_from_timeout("plug::do"));
+
+    // A coordination builtin keeps its exemption.
+    let mut builtin = make_tool("wait_for_subagents", "ok");
+    builtin.exempt_from_timeout = true;
+    registry.register(builtin).unwrap();
+    assert!(registry.is_exempt_from_timeout("wait_for_subagents"));
+}
+
+#[test]
+fn remove_drops_the_capability_index_key_when_its_last_provider_leaves() {
+    let registry = ToolRegistry::default();
+    registry
+        .register(make_tool_with_caps("a", vec!["shared_cap"]))
+        .unwrap();
+    registry
+        .register(make_tool_with_caps("b", vec!["shared_cap"]))
+        .unwrap();
+
+    registry.remove("a");
+    assert!(
+        registry.capability_index.contains_key("shared_cap"),
+        "a surviving provider keeps the key"
+    );
+    registry.remove("b");
+    assert!(
+        !registry.capability_index.contains_key("shared_cap"),
+        "no phantom capabilities: the key goes with its last provider"
+    );
+}
+
+#[test]
+fn enable_disable_enable_leaves_no_duplicate_index_edges() {
+    let registry = ToolRegistry::default();
+    for _ in 0..3 {
+        registry
+            .replace(make_tool_with_caps("srv__echo", vec!["srv__echo"]))
+            .unwrap();
+    }
+    let names = registry.capability_index.get("srv__echo").unwrap();
+    assert_eq!(
+        names.value().len(),
+        1,
+        "register appends without dedupe; only replace's remove scrubs"
+    );
+}
+
+#[test]
+fn two_assemblies_against_an_unchanged_ledger_are_byte_identical() {
+    let registry = ToolRegistry::default();
+    registry.register(mcp_tool("srv__b", "srv", 0)).unwrap();
+    registry.register(mcp_tool("srv__a", "srv", 0)).unwrap();
+    registry
+        .register(plugin_tool(
+            "plug::do",
+            "plug",
+            Arc::new(GenPluginExec {
+                generation: 0,
+                ledger: None,
+                ext: ExtensionId::plugin("plug"),
+            }),
+        ))
+        .unwrap();
+
+    let first = serde_json::to_string(&registry.extension_tool_defs()).unwrap();
+    let second = serde_json::to_string(&registry.extension_tool_defs()).unwrap();
+    assert_eq!(first, second, "tool ordering feeds prompt-cache fingerprints");
+}
+
+#[test]
+fn extension_tool_defs_drops_tools_whose_extension_is_not_enabled() {
+    let registry = ToolRegistry::default();
+    let ext = ExtensionId::mcp("srv");
+    enabled_record(registry.extensions(), &ext, &["srv__echo"]);
+    registry.register(mcp_tool("srv__echo", "srv", 1)).unwrap();
+    registry.register(make_tool("builtin_tool", "ok")).unwrap();
+
+    assert_eq!(registry.extension_tool_defs().len(), 1);
+    registry
+        .extensions()
+        .begin(&ext, ExtensionState::Disabling, Some(WithdrawalCause::Disable));
+    assert!(
+        registry.extension_tool_defs().is_empty(),
+        "hygiene: the T0→T1 window must not advertise a tool the gate refuses"
+    );
+}
+
+// ── §7.2 classification ──────────────────────────────────────────────────
+
+#[test]
+fn partial_withdrawal_is_distinguished_from_total_loss_and_from_unknown() {
+    let registry = ToolRegistry::default();
+    let a = ExtensionId::mcp("a");
+    let b = ExtensionId::plugin("b");
+    let ledger = registry.extensions();
+    enabled_record(ledger, &a, &["a__do"]);
+    enabled_record(ledger, &b, &["b::do"]);
+    registry
+        .register(make_tool_with_caps("a__do", vec!["shared_cap"]))
+        .unwrap();
+    registry
+        .register(make_tool_with_caps("b::do", vec!["shared_cap"]))
+        .unwrap();
+
+    let caps = vec!["shared_cap".to_string()];
+    let clean = registry.resolve_capabilities(&caps, &[]);
+    assert_eq!(clean.defs.len(), 2);
+    assert!(clean.withheld.is_empty() && clean.partially_withheld.is_empty());
+
+    // Disable A: B still serves the capability → partially withheld, attributed.
+    ledger.withdraw(&a, ["shared_cap"]);
+    registry.remove("a__do");
+    ledger_disable(ledger, &a);
+
+    let partial = registry.resolve_capabilities(&caps, &[]);
+    assert_eq!(partial.defs.len(), 1);
+    assert!(partial.withheld.is_empty());
+    assert_eq!(partial.partially_withheld.len(), 1);
+    assert_eq!(partial.partially_withheld[0].providers.len(), 1);
+    assert_eq!(partial.partially_withheld[0].providers[0].extension, a);
+    assert!(!partial.partially_withheld[0].providers[0].server_withdrawn);
+
+    // Disable B too: every provider is gone → withheld, not "unknown".
+    ledger.withdraw(&b, ["shared_cap"]);
+    registry.remove("b::do");
+    ledger_disable(ledger, &b);
+
+    let total = registry.resolve_capabilities(&caps, &[]);
+    assert!(total.defs.is_empty());
+    assert_eq!(total.withheld.len(), 1);
+    assert_eq!(total.withheld[0].providers.len(), 2);
+    assert!(total.unknown.is_empty());
+
+    // A capability nothing ever provided stays `unknown` — a typo and a
+    // withdrawal must not become indistinguishable in the other direction.
+    let unknown = registry.resolve_capabilities(&["never_provided".to_string()], &[]);
+    assert_eq!(unknown.unknown, vec!["never_provided".to_string()]);
+    assert!(unknown.withheld.is_empty());
+}
+
+// ── X-23: case ───────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_mixed_case_extension_tool_name_is_refused_on_both_arms() {
+    let registry = Arc::new(ToolRegistry::default());
+    let ext = ExtensionId::mcp("srv");
+    enabled_record(registry.extensions(), &ext, &["Srv__Echo"]);
+    registry.register(mcp_tool("Srv__Echo", "srv", 1)).unwrap();
+    ledger_disable(registry.extensions(), &ext);
+
+    // Hit arm — the snapshot still holds the mixed-case entry.
+    let err = registry
+        .execute_with_context("Srv__Echo", &serde_json::json!({}), &ToolContext::default())
+        .await
+        .unwrap_err();
+    assert!(err.contains("MCP server 'srv' is disabled by the owner"), "{err}");
+
+    // Miss arm — the ledger retains "Srv__Echo"; the call names it differently.
+    assert!(registry.remove("Srv__Echo"));
+    assert_eq!(
+        registry.extensions().owner_of("srv__echo"),
+        Some(ext.clone())
+    );
+    let err = registry
+        .execute_with_context("srv__echo", &serde_json::json!({}), &ToolContext::default())
+        .await
+        .unwrap_err();
+    assert!(err.contains("MCP server 'srv' is disabled by the owner"), "{err}");
+    assert!(!err.contains("not found"), "{err}");
+}
+
+// ── §3.7: the server withdrew the name itself ────────────────────────────
+
+#[tokio::test]
+async fn a_server_withdrawn_name_is_refused_on_both_arms_while_the_row_reads_enabled() {
+    let registry = Arc::new(ToolRegistry::default());
+    let ext = ExtensionId::mcp("github");
+    let generation = enabled_record(registry.extensions(), &ext, &["github__create_issue"]);
+    registry
+        .register(mcp_tool("github__create_issue", "github", generation))
+        .unwrap();
+
+    // §3.7 step 5: tombstone + remove, but keep the name flagged.
+    registry
+        .extensions()
+        .flag_server_withdrawn(&ext, "github__create_issue");
+
+    // Hit arm — a snapshot taken before the change still holds the entry, and
+    // its state and generation both pass.
+    let snapshot = (*registry).clone();
+    let err = snapshot
+        .execute_with_context(
+            "github__create_issue",
+            &serde_json::json!({}),
+            &ToolContext::default(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains("was withdrawn by 'github' itself, which is still enabled"),
+        "{err}"
+    );
+    assert!(!err.contains("disabled by the owner"), "{err}");
+
+    // Miss arm.
+    assert!(registry.remove("github__create_issue"));
+    let err = registry
+        .execute_with_context(
+            "github__create_issue",
+            &serde_json::json!({}),
+            &ToolContext::default(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains("was withdrawn by 'github' itself, which is still enabled"),
+        "{err}"
+    );
+
+    // The extension itself is untouched.
+    assert_eq!(
+        registry.extensions().state(&ext),
+        Some(ExtensionState::Enabled)
+    );
+    assert_eq!(
+        registry.extensions().record(&ext).unwrap().withdrawn_by_server,
+        vec!["github__create_issue".to_string()]
+    );
+}
+
+// ── X-21: precedence — the gate is the highest rung ──────────────────────
+
+#[tokio::test]
+async fn auto_approve_cannot_undo_the_extension_gate_on_either_arm() {
+    use crate::bus::EventBus;
+    use crate::daemon_config::DaemonConfig;
+    use crate::security::capabilities::Allowlist;
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+
+    let registry = Arc::new(ToolRegistry::default());
+    let ext = ExtensionId::mcp("github");
+    enabled_record(registry.extensions(), &ext, &["github__create_issue"]);
+    registry
+        .register(mcp_tool("github__create_issue", "github", 1))
+        .unwrap();
+
+    let sandbox = SandboxManager::with_defaults(Arc::clone(&registry), EventBus::new(16));
+
+    let mut config = DaemonConfig::default();
+    config.security.auto_approve_confirmations = true;
+    let policy = SandboxPolicy {
+        agent_id: "lead".to_string(),
+        allowed_capabilities: Allowlist::Unrestricted,
+        denied_capabilities: vec![],
+        // The tool would otherwise prompt; auto_approve skips the prompt.
+        require_confirmation_for: vec!["github__create_issue".to_string()],
+        max_tool_calls: None,
+        max_tool_runtime_secs: 30,
+        stream_id: None,
+        lane_key: None,
+        confirmation_timeout_secs: None,
+        auto_approve: config.security.auto_approve_confirmations,
+    };
+    assert!(policy.auto_approve);
+
+    let call = openalpaca_llm::ToolCall {
+        id: "call-1".to_string(),
+        name: "github__create_issue".to_string(),
+        arguments: serde_json::json!({}),
+    };
+
+    // T0 — from this instant the gate refuses, whatever the policy says.
+    registry
+        .extensions()
+        .begin(&ext, ExtensionState::Disabling, Some(WithdrawalCause::Disable));
+
+    // Hit arm.
+    let err = sandbox
+        .execute_tool(&call, &policy, &ToolContext::default())
+        .await
+        .unwrap_err();
+    assert!(err.contains("is being turned off right now"), "{err}");
+
+    // Miss arm.
+    assert!(registry.remove("github__create_issue"));
+    let err = sandbox
+        .execute_tool(&call, &policy, &ToolContext::default())
+        .await
+        .unwrap_err();
+    assert!(err.contains("is being turned off right now"), "{err}");
+    assert!(!err.contains("not found"), "{err}");
+}
+
+#[test]
+fn the_refusal_is_rendered_from_the_same_table_as_the_row() {
+    // One source, three renderings (X-18): the gate string and the human
+    // secondary text come from `describe`, so they cannot disagree.
+    let ext = ExtensionId::mcp("github");
+    let model = ExtensionState::Disabled
+        .describe(&ext, None, Audience::Model)
+        .render_model(Some("github__create_issue"));
+    let human = ExtensionState::Disabled
+        .describe(&ext, None, Audience::Human)
+        .render_human();
+    assert!(model.contains("MCP server 'github' is disabled by the owner"));
+    assert!(human.contains("MCP server 'github' is disabled by the owner"));
+    assert!(human.contains("config/mcp.toml"));
 }

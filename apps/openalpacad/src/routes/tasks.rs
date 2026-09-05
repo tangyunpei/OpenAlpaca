@@ -21,7 +21,9 @@ use uuid::Uuid;
 
 use openalpaca_core::events::SystemEvent;
 use openalpaca_core::orchestrator::{TaskActionError, apply_task_action, parse_outcome};
-use openalpaca_storage::{Database, SubAgentRepository, Task, TaskRepository, TaskStatus};
+use openalpaca_storage::{
+    Database, LlmUsageRepository, SubAgentRepository, Task, TaskRepository, TaskStatus,
+};
 
 use super::tasks_types::*;
 use crate::AppState;
@@ -162,34 +164,29 @@ pub async fn list_tasks_handler(
 
     match tasks {
         Ok(tasks) => {
-            let enriched: Vec<serde_json::Value> = tasks
-                .iter()
+            // GAP-08b: one grouped query for every task on the page, rather
+            // than a per-row lookup.
+            let task_ids: Vec<String> = tasks.iter().map(|t| t.id.clone()).collect();
+            let costs = LlmUsageRepository::new(&state.db)
+                .cost_for_tasks(&task_ids)
+                .unwrap_or_default();
+            let summaries: Vec<TaskSummaryResponse> = tasks
+                .into_iter()
                 .map(|t| {
-                    let agents = agent_runs_summary(&state.db, &t.id);
-                    match serde_json::to_value(t) {
-                        Ok(mut v) => {
-                            if let Some(obj) = v.as_object_mut() {
-                                obj.insert(
-                                    "assigned_agents".to_string(),
-                                    serde_json::json!(agents),
-                                );
-                                if let Some(parsed) = parse_outcome(t) {
-                                    if let Ok(outcome_val) = serde_json::to_value(parsed) {
-                                        obj.insert("outcome".to_string(), outcome_val);
-                                    }
-                                }
-                            }
-                            v
-                        }
-                        Err(_) => {
-                            serde_json::json!({ "id": t.id, "error": "serialization_failed" })
-                        }
+                    let assigned_agents = agent_runs_summary(&state.db, &t.id);
+                    let outcome = parse_outcome(&t);
+                    let cost_usd = costs.get(&t.id).copied().unwrap_or(0.0);
+                    TaskSummaryResponse {
+                        task: t,
+                        assigned_agents,
+                        outcome,
+                        cost_usd,
                     }
                 })
                 .collect();
             (
                 StatusCode::OK,
-                Json(serde_json::to_value(enriched).unwrap_or_else(|_| serde_json::json!([]))),
+                Json(serde_json::to_value(summaries).unwrap_or_else(|_| serde_json::json!([]))),
             )
         }
         Err(e) => (
@@ -585,5 +582,97 @@ mod tests {
         // But the parsed outcome should be present at top level
         assert!(v.get("outcome").is_some());
         assert_eq!(v["outcome"]["outcome_summary"], "Test");
+    }
+
+    /// Reproduces `list_tasks_handler`'s pre-refactor shape: `serde_json::to_value(&task)`
+    /// with `assigned_agents` (always) and `outcome` (only when it parses) inserted onto
+    /// the object — the exact algorithm `TaskSummaryResponse` replaces — plus `cost_usd`
+    /// (GAP-08b), which never existed pre-refactor but is always present on the typed
+    /// struct today. Used below to pin that the typed struct serializes to byte-for-byte
+    /// this shape.
+    fn pre_refactor_shape(
+        task: &Task,
+        agents: Vec<serde_json::Value>,
+        cost_usd: f64,
+    ) -> serde_json::Value {
+        let mut v = serde_json::to_value(task).unwrap();
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("assigned_agents".to_string(), serde_json::json!(agents));
+            let outcome_val =
+                parse_outcome(task).and_then(|parsed| serde_json::to_value(parsed).ok());
+            if let Some(outcome_val) = outcome_val {
+                obj.insert("outcome".to_string(), outcome_val);
+            }
+            obj.insert("cost_usd".to_string(), serde_json::json!(cost_usd));
+        }
+        v
+    }
+
+    #[test]
+    fn test_task_summary_response_matches_pre_refactor_shape_with_outcome() {
+        let mut task = make_test_task();
+        task.outcome_kind = Some(OutcomeKind::TextOnly);
+        task.artifact_count = 0;
+        task.outcome_json = Some(
+            serde_json::json!({
+                "summary": "Generated a text summary",
+                "outcome_kind": "text_only",
+                "no_artifact_reason": "No files were requested",
+                "artifacts": []
+            })
+            .to_string(),
+        );
+        let agents = vec![serde_json::json!({
+            "agent_id": "researcher",
+            "role": "researcher",
+            "status": "completed",
+            "runtime_seconds": 12,
+            "completed_at": task.completed_at,
+        })];
+
+        let expected = pre_refactor_shape(&task, agents.clone(), 1.25);
+        let outcome = parse_outcome(&task);
+        let summary = TaskSummaryResponse {
+            task,
+            assigned_agents: agents,
+            outcome,
+            cost_usd: 1.25,
+        };
+        let actual = serde_json::to_value(&summary).unwrap();
+
+        assert_eq!(actual, expected);
+        // Sanity: the fields the old post-injection added are actually present,
+        // so this test would fail if either one silently dropped out.
+        assert!(actual.get("assigned_agents").is_some());
+        assert!(actual.get("outcome").is_some());
+        assert_eq!(actual["outcome"]["outcome_kind"], "text_only");
+        assert_eq!(actual["cost_usd"], 1.25);
+    }
+
+    #[test]
+    fn test_task_summary_response_matches_pre_refactor_shape_without_outcome() {
+        // No outcome_kind/outcome_json set: parse_outcome returns None, and the
+        // old code never inserted an "outcome" key in that case.
+        let task = make_test_task();
+        let agents: Vec<serde_json::Value> = Vec::new();
+
+        let expected = pre_refactor_shape(&task, agents.clone(), 0.0);
+        let outcome = parse_outcome(&task);
+        assert!(outcome.is_none());
+        let summary = TaskSummaryResponse {
+            task,
+            assigned_agents: agents,
+            outcome,
+            cost_usd: 0.0,
+        };
+        let actual = serde_json::to_value(&summary).unwrap();
+
+        assert_eq!(actual, expected);
+        // A task with no logged LLM calls still gets an explicit 0.0, not an
+        // omitted field.
+        assert_eq!(actual["cost_usd"], 0.0);
+        assert!(actual.get("outcome").is_none());
+        // assigned_agents is still present, just empty — not omitted.
+        assert_eq!(actual["assigned_agents"], serde_json::json!([]));
     }
 }

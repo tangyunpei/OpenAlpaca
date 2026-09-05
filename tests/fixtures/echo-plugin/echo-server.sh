@@ -5,6 +5,13 @@
 # Responds to:
 #   tools/list  → one tool: "echo" with a "message" string parameter
 #   tools/call  → echoes back the message argument
+#   skill/info  → the contents of ./skill-info.json when the plugin directory
+#                 holds one, otherwise an empty result (the daemon then defaults
+#                 the skill's id and name to the plugin's own)
+#   provider/info → the contents of ./provider-info.json when the plugin
+#                 directory holds one (a provider_name and a models list),
+#                 otherwise an empty result
+#   everything else → an empty result
 
 while true; do
     # Read Content-Length header
@@ -25,7 +32,7 @@ while true; do
     # Parse and respond using python3 — body is piped via stdin to avoid
     # quoting issues with embedded quotes in the JSON.
     result=$(echo "$body" | python3 -c "
-import json, sys
+import json, os, sys
 
 msg = json.load(sys.stdin)
 method = msg.get('method', '')
@@ -59,6 +66,16 @@ elif method == 'tools/call':
             'content': [{'type': 'text', 'text': f'echo: {text}'}]
         }
     }
+elif method == 'skill/info' and os.path.exists('skill-info.json'):
+    # The child's cwd is its plugin directory, so a test can hand the stub a
+    # skill descriptor (a mixed-case id, a slash command) by dropping a file in.
+    with open('skill-info.json') as f:
+        resp = {'jsonrpc': '2.0', 'id': mid, 'result': json.load(f)}
+elif method == 'provider/info' and os.path.exists('provider-info.json'):
+    # Same shape for the provider probe: a test that needs the supervisor to
+    # record models drops a {"provider_name": …, "models": [{"id": …}]} here.
+    with open('provider-info.json') as f:
+        resp = {'jsonrpc': '2.0', 'id': mid, 'result': json.load(f)}
 else:
     resp = {'jsonrpc': '2.0', 'id': mid, 'result': {}}
 

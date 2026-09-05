@@ -103,3 +103,106 @@ fn test_ensure_at_rejects_invalid() {
     let result = KeyEncryptor::ensure_at(tmp.path());
     assert!(result.is_err());
 }
+
+// ============================================================================
+// This crate resolves no paths of its own (R11)
+// ============================================================================
+
+/// Points `HOME` at a temp dir for the duration of a test.
+///
+/// `openalpaca_llm` sits below `openalpaca_storage` in the dependency graph, so
+/// it must never look a directory up — every path is an argument. These tests
+/// prove that by sandboxing the only lookup anything here could make: a
+/// home-relative "application data" directory. Nothing may appear under the
+/// sandbox except what the test hands the code explicitly.
+struct HomeSandbox {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    prev_home: Option<std::ffi::OsString>,
+}
+
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+impl HomeSandbox {
+    fn enter(root: &std::path::Path) -> Self {
+        let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prev_home = std::env::var_os("HOME");
+        // SAFETY: serialized by ENV_LOCK; no other test in this crate reads HOME.
+        unsafe { std::env::set_var("HOME", root) };
+        Self {
+            _lock: lock,
+            prev_home,
+        }
+    }
+}
+
+impl Drop for HomeSandbox {
+    fn drop(&mut self) {
+        // SAFETY: as above — still holding ENV_LOCK.
+        match self.prev_home.take() {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+}
+
+fn children(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .map(|it| {
+            it.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+#[test]
+fn the_config_write_lock_sits_beside_the_file_it_guards() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _home = HomeSandbox::enter(tmp.path());
+
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let llm_toml = config_dir.join("llm.toml");
+    std::fs::write(&llm_toml, "").unwrap();
+
+    let lock = acquire_config_write_lock(&llm_toml).unwrap();
+    drop(lock);
+
+    assert_eq!(
+        children(tmp.path()),
+        vec!["config".to_string()],
+        "locking a config file must not create an application data root"
+    );
+    assert!(
+        config_dir.join("llm.toml.lock").exists(),
+        "the lock belongs beside the file it guards"
+    );
+}
+
+#[test]
+fn load_or_generate_at_uses_the_directory_it_is_given() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _home = HomeSandbox::enter(tmp.path());
+
+    let state = tmp.path().join("home").join("state");
+    std::fs::create_dir_all(&state).unwrap();
+
+    let enc = KeyEncryptor::load_or_generate_at(&state).unwrap();
+    let encrypted = enc.encrypt("sk-secret").unwrap();
+
+    assert!(
+        state.join(".master_key").exists(),
+        "the key is generated in the directory it was given"
+    );
+    assert_eq!(
+        children(tmp.path()),
+        vec!["home".to_string()],
+        "no second key directory was invented"
+    );
+
+    // A second call reads the same key back rather than generating another.
+    let again = KeyEncryptor::load_or_generate_at(&state).unwrap();
+    assert_eq!(again.decrypt(&encrypted).unwrap(), "sk-secret");
+}

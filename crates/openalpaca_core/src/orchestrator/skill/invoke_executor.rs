@@ -2,6 +2,7 @@ use crate::bus::EventBus;
 use crate::orchestrator::skill::catalog::SkillCatalog;
 use crate::orchestrator::skill::constraints::{compose_constraints, filter_tools_by_constraints, MAX_SKILL_STACK_DEPTH};
 use crate::runner::{LoopConfig, LoopCostAccumulator, LoopResult, run_agentic_loop_routed};
+use crate::security::capabilities::Allowlist;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::builtins::ScriptToolBuiltIn;
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext, ToolRegistry};
@@ -27,9 +28,6 @@ pub struct SkillInvocationToolExecutor {
     /// From `security.auto_approve_confirmations` — nested sandboxes have no
     /// confirmation broker, so confirm-listed tools fail closed unless this is set.
     pub auto_approve: bool,
-    /// From `execution.skill_defaults.global_tool_deny` — enforced on nested
-    /// skills the same as the top-level path in invocation.rs.
-    pub global_tool_deny: Vec<String>,
     /// From `[security.circuit_breaker]` — nested sandboxes use the same
     /// breaker settings as the top-level path in invocation.rs.
     pub circuit_breaker: crate::daemon_config::CircuitBreakerConfig,
@@ -51,7 +49,6 @@ impl SkillInvocationToolExecutor {
         parent_tool_context: Option<ToolContext>,
         parent_max_cost: f64,
         auto_approve: bool,
-        global_tool_deny: Vec<String>,
         circuit_breaker: crate::daemon_config::CircuitBreakerConfig,
         confirmation_timeout_secs: u64,
     ) -> Self {
@@ -67,7 +64,6 @@ impl SkillInvocationToolExecutor {
             parent_tool_context,
             parent_max_cost,
             auto_approve,
-            global_tool_deny,
             circuit_breaker,
             confirmation_timeout_secs,
         }
@@ -148,31 +144,69 @@ impl SkillInvocationToolExecutor {
             .load_full(skill_id)
             .map_err(|e| format!("Failed to load skill '{}': {}", skill_id, e))?;
 
-        // Resolve tools for nested skill
+        // Resolve tools for nested skill.
+        //
+        // **S4 moment 2** on both branches (extension design §7.2, §6.2 #10).
+        // This path had *no* warning at all before — not even the unattributed
+        // one the top-level site emits — so a withdrawn extension tool
+        // disappeared here in total silence, with `sandbox_policy = None`
+        // beneath it. The refusal on total loss is C5's.
+        let ctx = self.parent_tool_context.as_ref();
         let mut tool_defs: Vec<ToolDefinition> =
             if !skill_doc.frontmatter.requires_capabilities.is_empty() {
                 let deny = &skill_doc.frontmatter.tools.deny;
-                let mut defs = self
+                let resolution = self
                     .tool_registry
-                    .tools_for_capabilities(&skill_doc.frontmatter.requires_capabilities);
+                    .resolve_capabilities(&skill_doc.frontmatter.requires_capabilities, &[]);
+                self.tool_registry.announce_withheld(&resolution, ctx, None);
+                let mut defs = resolution.defs;
                 defs.retain(|t| !deny.contains(&t.name));
                 defs
             } else if !skill_doc.frontmatter.tools.allow.is_empty() {
-                skill_doc
-                    .frontmatter
-                    .tools
-                    .allow
+                let names = &skill_doc.frontmatter.tools.allow;
+                let resolved: Vec<ToolDefinition> = names
                     .iter()
                     .filter_map(|name| {
                         self.tool_registry.get(name).map(|t| t.definition.clone())
                     })
-                    .collect()
+                    .collect();
+                if resolved.len() < names.len() {
+                    let resolved_names: Vec<&str> =
+                        resolved.iter().map(|d| d.name.as_str()).collect();
+                    let missing: Vec<&str> = names
+                        .iter()
+                        .filter(|n| !resolved_names.contains(&n.as_str()))
+                        .map(|n| n.as_str())
+                        .collect();
+                    let unattributed =
+                        self.tool_registry.announce_withheld_names(missing, ctx, None);
+                    if !unattributed.is_empty() {
+                        tracing::warn!(
+                            "Skill '{}' references unknown tools: {:?}",
+                            skill_id,
+                            unattributed
+                        );
+                    }
+                }
+                resolved
             } else {
                 vec![]
             };
 
-        // Apply the global deny list, mirroring the top-level path in invocation.rs.
-        tool_defs.retain(|t| !self.global_tool_deny.contains(&t.name));
+        // **Fail closed — the total-loss refusal** (design §6.2 #10, §10
+        // case 3), the same predicate the top-level site applies, on both
+        // resolution branches. This path used to degrade in total silence:
+        // no warn, no event, and `sandbox_policy = None` beneath it.
+        let requirements = self
+            .tool_registry
+            .skill_requirements(&skill_doc.frontmatter);
+        if !requirements.is_satisfiable() {
+            tracing::warn!(
+                skill = skill_id,
+                "Refusing nested skill: a required capability is wholly withheld"
+            );
+            return Err(requirements.refusal(skill_id));
+        }
 
         // Add invoke_skill:* synthetic tool definitions for nested skill's own depends_on
         for dep_id in &skill_doc.frontmatter.depends_on {
@@ -302,7 +336,6 @@ impl SkillInvocationToolExecutor {
                     Some(child_tool_ctx.clone()),
                     remaining,
                     self.auto_approve,
-                    self.global_tool_deny.clone(),
                     self.circuit_breaker.clone(),
                     self.confirmation_timeout_secs,
                 ));
@@ -374,20 +407,16 @@ impl SkillInvocationToolExecutor {
         } else {
             Some(SandboxPolicy {
                 agent_id: format!("skill:{}", skill_id),
-                allowed_capabilities: tool_defs.iter().map(|t| t.name.clone()).collect(),
-                denied_capabilities: {
-                    let mut denied: Vec<String> = child_tool_ctx
-                        .effective_constraints
-                        .as_ref()
-                        .map(|c| c.denied.iter().cloned().collect())
-                        .unwrap_or_default();
-                    for g in &self.global_tool_deny {
-                        if !denied.contains(g) {
-                            denied.push(g.clone());
-                        }
-                    }
-                    denied
-                },
+                // Closed set: the nested skill may call exactly the tools
+                // composed for it (this arm only runs when there are some).
+                allowed_capabilities: Allowlist::only(
+                    tool_defs.iter().map(|t| t.name.as_str()),
+                ),
+                denied_capabilities: child_tool_ctx
+                    .effective_constraints
+                    .as_ref()
+                    .map(|c| c.denied.iter().cloned().collect())
+                    .unwrap_or_default(),
                 require_confirmation_for: skill_doc
                     .frontmatter
                     .permissions
@@ -412,7 +441,7 @@ impl SkillInvocationToolExecutor {
             })
         };
 
-        let result = run_agentic_loop_routed(
+        let mut result = run_agentic_loop_routed(
             self.router.as_ref(),
             messages,
             tool_defs,
@@ -429,6 +458,12 @@ impl SkillInvocationToolExecutor {
             Some(cost_acc.clone()), // shared accumulator
         )
         .await;
+
+        // Partial loss runs and says so — the model named this skill, so the
+        // tool result carries the warning naming the extension (§10 case 3).
+        if let Some(prefix) = requirements.chat_prefix() {
+            result.final_content = format!("{prefix}{}", result.final_content);
+        }
 
         Ok(result)
     }
@@ -608,7 +643,6 @@ Use echo_tool to answer.
             None,
             1.0,
             false,
-            vec![],
             crate::daemon_config::CircuitBreakerConfig::default(),
             300,
         );
@@ -646,91 +680,5 @@ Use echo_tool to answer.
             "nested tool call was stubbed out: {:?}",
             round2
         );
-    }
-
-    /// The global tool deny list must bind nested skills exactly like the
-    /// top-level path in invocation.rs.
-    #[tokio::test]
-    async fn test_nested_invocation_respects_global_tool_deny() {
-        let tmp = TempDir::new().unwrap();
-        write_skill(
-            tmp.path(),
-            "child-skill",
-            r#"---
-name: "Child Skill"
-description: "Nested skill for global-deny test"
-tools:
-  allow:
-    - echo_tool
----
-Use echo_tool to answer.
-"#,
-        );
-
-        let catalog = Arc::new(SkillCatalog::new());
-        catalog.scan_directory(tmp.path(), SkillScope::Project);
-
-        let registry = Arc::new(ToolRegistry::new().unwrap());
-        let calls = Arc::new(AtomicUsize::new(0));
-        registry
-            .register(RegisteredTool {
-                definition: ToolDefinition {
-                    name: "echo_tool".to_string(),
-                    description: "Echo".to_string(),
-                    parameters: serde_json::json!({
-                        "type": "object",
-                        "properties": {"query": {"type": "string"}}
-                    }),
-                    strict: None,
-                    input_examples: None,
-                },
-                backend: ToolBackend::BuiltIn(Arc::new(EchoTool {
-                    calls: calls.clone(),
-                })),
-                provides_capabilities: vec![],
-                exempt_from_timeout: false,
-                annotations: None,
-                version: "test".to_string(),
-                author: "test".to_string(),
-                created_at: chrono::Utc::now(),
-            })
-            .unwrap();
-
-        let provider = Arc::new(MockProvider {
-            call_count: AtomicUsize::new(0),
-            requests: Mutex::new(Vec::new()),
-        });
-        let router = Arc::new(LlmRouter::single_provider(
-            provider.clone(),
-            ProviderType::Anthropic,
-            "claude-sonnet-4-20250514".to_string(),
-        ));
-
-        let executor = SkillInvocationToolExecutor::new(
-            catalog,
-            registry,
-            router,
-            EventBus::new(16),
-            vec!["parent-skill".to_string()],
-            3,
-            None,
-            None,
-            None,
-            1.0,
-            false,
-            vec!["echo_tool".to_string()],
-            crate::daemon_config::CircuitBreakerConfig::default(),
-            300,
-        );
-
-        let _ = executor
-            .execute(
-                "invoke_skill:child-skill",
-                &serde_json::json!({"query": "run it"}),
-            )
-            .await;
-
-        // The globally denied tool must never execute in a nested loop.
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }

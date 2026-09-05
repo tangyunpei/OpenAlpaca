@@ -39,6 +39,13 @@ pub struct InitializedServices {
     /// Shared lock for the `send` tool's connector send provider.
     /// Populated post-construction in main.rs after the ConnectorSendBridge is created.
     pub connector_send_lock: ConnectorSendLock,
+    /// The MCP half of the ENABLE axis (extension design ADR-030, C2).
+    ///
+    /// Parked here between C2 and C6: the file watcher finds it here for edge
+    /// case 15's `reconcile_all`, and the daemon shutdown path calls its
+    /// `shutdown_all()` directly. C6 folds it into the `Extensions` aggregator
+    /// and both call sites move behind that.
+    pub mcp_supervisor: Arc<crate::managers::mcp::McpSupervisor>,
 }
 
 /// Initialize all core services: agent templates, LLM router, tools, security, etc.
@@ -52,6 +59,9 @@ pub async fn initialize_services(
     user_path: &Path,
     identity_path: &Path,
     cancel_token: &CancellationToken,
+    // The daemon's default lane, `{local_user_id}:gui` — where T1 step 3's
+    // cron notice is written (extension design §7.3 step 1).
+    default_lane_key: &str,
 ) -> Result<InitializedServices> {
     let shared_context = Arc::new(SharedContext::new());
 
@@ -122,36 +132,11 @@ pub async fn initialize_services(
         .unwrap_or_default();
     let web_search_config = Arc::new(ArcSwap::from_pointee(web_search_cfg));
 
-    // Build ToolRegistry
-    let (tool_registry, connector_send_lock) = tools::build_tool_registry(
-        config_base_dir,
-        db,
-        &embedder,
-        soul_path,
-        user_path,
-        identity_path,
-        bus,
-        daemon_config,
-        &web_search_config,
-    )
-    .await?;
-
-    // Load agent templates from .md files + legacy .toml files
-    // (deferred until the tool registry exists so annotation: capabilities
-    // in agent frontmatter can be validated against the known set.)
-    agents::load_agent_templates(config_base_dir, db, &shared_context, &tool_registry)?;
-
-    // Build security chain
-    let sandbox_manager = Arc::new(openalpaca_core::security::sandbox::SandboxManager::new(
-        tool_registry.clone(),
-        bus.clone(),
-        &daemon_config.load().security.circuit_breaker,
-    ));
-    let security_gate = Arc::new(openalpaca_core::security::gate::SecurityGate::new(
-        sandbox_manager,
-    ));
-
-    // Build SkillCatalog
+    // Build SkillCatalog — **before** the tool registry, because the MCP
+    // supervisor's first `reconcile_all` happens inside `build_tool_registry`
+    // and T1 step 3's dependent scan needs the catalog handle from
+    // construction (extension design §7.3). The catalog reads only
+    // `config/skills`, so nothing here depends on the registry.
     let skill_catalog = {
         let catalog = openalpaca_core::orchestrator::skill_catalog::SkillCatalog::new();
         let skills_dir = config_base_dir.join("skills");
@@ -168,6 +153,51 @@ pub async fn initialize_services(
         }
         Arc::new(catalog)
     };
+
+    // Build ToolRegistry
+    let (tool_registry, connector_send_lock, mcp_supervisor) = tools::build_tool_registry(
+        config_base_dir,
+        db,
+        &embedder,
+        soul_path,
+        user_path,
+        identity_path,
+        bus,
+        daemon_config,
+        &web_search_config,
+        &skill_catalog,
+        &shared_context.agent_registry,
+        default_lane_key,
+    )
+    .await?;
+
+    // Install the ENABLE axis's availability oracle (extension design §6.2
+    // #12). `SkillRouter::route` takes only `(&str, &SkillCatalog)` and has no
+    // registry handle, so the catalog carries `ToolRegistry` for it, for
+    // `catalog_summary` (`<available_skills>`) and for the `invoke_skill`
+    // listing. Wired here, the one place both exist.
+    skill_catalog.set_availability_oracle(tool_registry.clone());
+
+    // Load agent templates from .md files + legacy .toml files
+    // (deferred until the tool registry exists so annotation: capabilities
+    // in agent frontmatter can be validated against the known set.)
+    agents::load_agent_templates(config_base_dir, db, &shared_context, &tool_registry)?;
+
+    // The MCP crash reaper starts **after** the templates are loaded: its T1
+    // step 3 intersects the withdrawn capabilities with the agent registry, and
+    // a crash inside the boot window would otherwise report a dependent scan
+    // that names nothing (extension design §7.3, C4 review).
+    mcp_supervisor.spawn_reaper();
+
+    // Build security chain
+    let sandbox_manager = Arc::new(openalpaca_core::security::sandbox::SandboxManager::new(
+        tool_registry.clone(),
+        bus.clone(),
+        &daemon_config.load().security.circuit_breaker,
+    ));
+    let security_gate = Arc::new(openalpaca_core::security::gate::SecurityGate::new(
+        sandbox_manager,
+    ));
 
     // Build SkillRouter with configurable thresholds from daemon config
     let skill_router = {
@@ -196,5 +226,6 @@ pub async fn initialize_services(
         secret_store,
         web_search_config,
         connector_send_lock,
+        mcp_supervisor,
     })
 }

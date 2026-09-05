@@ -44,7 +44,7 @@ Defaults:
 - binaries: `~/.local/openalpaca`
 - GUI app: `~/Applications/openalpaca-gui.app`
 - PATH link: `~/.local/bin/openalpaca`
-- runtime config/data: `~/Library/Application Support/OpenAlpaca/`
+- runtime config/data: `~/.openalpaca/` (`OPENALPACA_HOME_STORE` overrides — absolute paths only)
 
 Linux and Windows packaging/install scripts also exist under `scripts/release/` (`package-linux.sh`, `package-windows.ps1`, `install-windows.ps1`, `uninstall.sh`, `uninstall-windows.ps1`).
 
@@ -93,7 +93,7 @@ Notes:
 - `restart` restarts daemon only.
 - `tail` streams live daemon events (not historical query output); `--count` limits the number of events shown, default `0` = unlimited (Ctrl+C to stop).
 - Optional daemon binary override: `OPENALPACA_DAEMON_BIN=/abs/path/openalpacad`.
-- Daemon startup sets `OPENALPACA_CONFIG_DIR` to `~/Library/Application Support/OpenAlpaca/config`.
+- Daemon startup sets `OPENALPACA_CONFIG_DIR` to `~/.openalpaca/config`.
 
 ### `config`
 
@@ -200,9 +200,41 @@ openalpaca llm backends [--format table|json]
 openalpaca llm provider-usage [--format table|json]
 ```
 
+### `ext`
+
+Manage extensions — MCP servers and plugins — on the one ENABLE axis. There is
+no per-tool switch: a tool is turned off by turning off the server or plugin
+that provides it.
+
+```bash
+openalpaca ext list [--include-orphaned] [--format table|json]
+openalpaca ext info <kind> <id>          # kind = mcp | plugin
+openalpaca ext enable <kind> <id>
+openalpaca ext disable <kind> <id>
+openalpaca ext reload <kind> <id>
+openalpaca ext approve <plugin-id>
+openalpaca ext deny <plugin-id>
+openalpaca ext remove <plugin-id>
+```
+
+Notes:
+- `enable` writes the toggle and then loads; `disable` writes it, drains
+  in-flight calls (`[extensions] drain_timeout_secs`, default 10 s) and unloads
+  — the plugin child is killed, the MCP connection dropped, no reconnect.
+- `enable` on a plugin that has not been approved records the bit and leaves it
+  `unapproved`: consent pre-empts the switch. `approve` records consent and
+  does **not** turn the plugin on; `deny` refuses it and unloads it.
+- `reload` re-applies an edited declaration or a rotated credential.
+- `remove` drops the permissions entry of an *orphaned* plugin — one whose
+  directory is gone. `list --include-orphaned` is how you see those.
+- Rows report `kind`, `id`, `enabled`, `state` (`enabled`, `disabled`,
+  `unapproved`, `failed`, `orphaned`, and the in-flight `enabling`/`disabling`)
+  and what the extension contributes.
+
 ### `plugin`
 
-Manage daemon plugins (approval, lifecycle, configuration).
+The plugin-shaped shortcut over the same routes (`/v1/extensions`), kept for
+plugin-only work such as configuration.
 
 ```bash
 openalpaca plugin list [--format table|json]
@@ -216,10 +248,14 @@ openalpaca plugin config <name> get [<key>]
 ```
 
 Notes:
-- `approve` allows a plugin to load; `deny` prevents loading; `enable`/`disable` toggle an approved plugin.
-- `info` shows name, version, status, and tools for one plugin.
-- `config set` writes a key through the daemon (values are parsed as number/bool/string).
-- `config get` does not fetch anything: it only prints a pointer to the plugin's config file (`~/.openalpaca/plugins/.config/<name>.toml`).
+- The verbs keep their names but carry the `ext` meanings above: `enable` no
+  longer records consent, and `deny` performs a full unload.
+- `info` shows the same row `ext info` shows, for one plugin.
+- `config set` writes a key through the daemon (values are parsed as
+  number/bool/string).
+- `config get` reads the plugin's configuration back through the daemon; a
+  value the manifest declares as a secret reads `<redacted>`, and nothing
+  prints it in the clear.
 
 ### `chat`
 

@@ -81,6 +81,14 @@ pub struct ConfigField {
     pub default: Option<toml::Value>,
     #[serde(default)]
     pub description: String,
+    /// A value that must never land in `plugins/.config/<name>.toml`
+    /// (extension design §8, X-29). The TOML stores only a reference —
+    /// `secret_ref` (OS keychain) or `secret_encrypted` (AES-256-GCM under
+    /// `state/.master_key`) — and a read of the config redacts it.
+    ///
+    /// Defaults to `false`, so every existing manifest is unchanged.
+    #[serde(default)]
+    pub sensitive: bool,
 }
 
 impl PluginManifest {

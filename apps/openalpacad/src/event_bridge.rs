@@ -41,6 +41,7 @@ pub fn spawn_event_bridge(
                 }
                 openalpaca_core::events::SystemEvent::TaskUpdated {
                     task_id,
+                    title,
                     status,
                     progress_current,
                     progress_total,
@@ -48,7 +49,7 @@ pub fn spawn_event_bridge(
                 } => {
                     eb.task_status(
                         &task_id,
-                        "",
+                        &title,
                         &status,
                         progress_current,
                         progress_total,
@@ -60,6 +61,7 @@ pub fn spawn_event_bridge(
                 }
                 openalpaca_core::events::SystemEvent::TaskCompleted {
                     task_id,
+                    title,
                     result_summary,
                     outcome_kind,
                     artifact_count,
@@ -67,15 +69,15 @@ pub fn spawn_event_bridge(
                     ..
                 } => {
                     eb.task_status(
-                        &task_id, "", "completed", None, None, result_summary,
+                        &task_id, &title, "completed", None, None, result_summary,
                         outcome_kind, artifact_count, outcome_summary,
                     );
                 }
                 openalpaca_core::events::SystemEvent::TaskFailed {
-                    task_id, error, outcome_kind, ..
+                    task_id, title, error, outcome_kind, ..
                 } => {
                     eb.task_status(
-                        &task_id, "", "failed", None, None, Some(error),
+                        &task_id, &title, "failed", None, None, Some(error),
                         outcome_kind, None, None,
                     );
                 }
@@ -83,13 +85,14 @@ pub fn spawn_event_bridge(
                     agent_id,
                     instance_id,
                     template_id,
+                    name,
                     status,
                     current_task_id,
                     ..
                 } => {
                     eb.agent_status(
                         &agent_id,
-                        "",
+                        &name,
                         &status,
                         current_task_id,
                         &instance_id,
@@ -331,13 +334,11 @@ pub fn spawn_event_bridge(
                 openalpaca_core::events::SystemEvent::OrchestrationStage {
                     request_id,
                     mode,
-                    planner_ms,
-                    dispatch_ms,
                     ack_ms,
                     ..
                 } => {
                     tracing::debug!(
-                        "Orchestration: request={request_id}, mode={mode}, planner={planner_ms}ms, dispatch={dispatch_ms}ms, ack={ack_ms}ms"
+                        "Orchestration: request={request_id}, mode={mode}, ack={ack_ms}ms"
                     );
                 }
 
@@ -499,6 +500,71 @@ pub fn spawn_event_bridge(
                 } => {
                     tracing::info!(%lane_key, followup_id, %kind, "Follow-up queued");
                     eb.followup_queued(lane_key, followup_id, kind);
+                }
+                openalpaca_core::events::SystemEvent::ExtensionStateChanged {
+                    ref extension, ref state, generation, tools_changed, ..
+                } => {
+                    tracing::info!(
+                        %extension, %state, generation, tools_changed,
+                        "Extension state changed"
+                    );
+                    eb.extension_state_changed(
+                        extension.kind.as_str(),
+                        &extension.name,
+                        state,
+                        generation,
+                        tools_changed,
+                    );
+                }
+                openalpaca_core::events::SystemEvent::ExtensionCapabilityWithheld {
+                    ref extension, ref subject, moment, ref state, ref scope, stale, ..
+                } => {
+                    tracing::debug!(
+                        %extension, %subject, moment = moment.word(), %state, stale,
+                        "Extension capability withheld"
+                    );
+                    eb.extension_capability_withheld(
+                        extension.kind.as_str(),
+                        &extension.name,
+                        subject,
+                        moment.word(),
+                        state,
+                        scope,
+                        stale,
+                    );
+                }
+                openalpaca_core::events::SystemEvent::ExtensionCapabilityWithdrawn {
+                    ref extension,
+                    ref state,
+                    cause,
+                    ref capabilities,
+                    ref tools,
+                    ref affected_templates,
+                    ref affected_skills,
+                    ref affected_cron_skills,
+                    ref notice_lane,
+                    ..
+                } => {
+                    tracing::info!(
+                        %extension,
+                        cause = cause.word(),
+                        templates = affected_templates.len(),
+                        skills = affected_skills.len(),
+                        cron_skills = affected_cron_skills.len(),
+                        "Extension capabilities withdrawn"
+                    );
+                    eb.extension_capability_withdrawn(
+                        extension.kind.as_str(),
+                        &extension.name,
+                        state.word(),
+                        cause.word(),
+                        capabilities.clone(),
+                        tools.clone(),
+                        affected_templates.clone(),
+                        affected_skills.clone(),
+                        affected_cron_skills.clone(),
+                        notice_lane,
+                    );
                 } // NO catch-all: compiler will flag any missing SystemEvent variant
             }
         }
@@ -559,6 +625,104 @@ mod tests {
                 assert_eq!(instance_id, "test-instance");
             }
             other => panic!("Expected WorkflowStarted, got {other:?}"),
+        }
+        cancel.cancel();
+    }
+
+    /// The S4 withholding frame carries `ts` **and** `instance_id` — the two
+    /// fields the six `plugin_*` variants omit (GAP-22), which is what makes
+    /// this family's rows orderable.
+    #[tokio::test]
+    async fn test_extension_capability_withheld_bridged_with_ts_and_instance_id() {
+        use openalpaca_core::tools::extensions::{ExtensionId, Moment};
+
+        let (bus, mut rx, cancel) = setup_bridge();
+        let before = chrono::Utc::now();
+        bus.publish(SystemEvent::ExtensionCapabilityWithheld {
+            extension: ExtensionId::mcp("github"),
+            subject: "github__create_issue".into(),
+            moment: Moment::AttemptedUse,
+            state: "disabled".into(),
+            scope: "task-1".into(),
+            agent_id: None,
+            task_id: Some("task-1".into()),
+            stale: false,
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::ExtensionCapabilityWithheld {
+                kind,
+                id,
+                subject,
+                moment,
+                state,
+                scope,
+                stale,
+                ts,
+                instance_id,
+            } => {
+                assert_eq!(kind, "mcp");
+                assert_eq!(id, "github");
+                assert_eq!(subject, "github__create_issue");
+                assert_eq!(moment, "attempted_use");
+                assert_eq!(state, "disabled");
+                assert_eq!(scope, "task-1");
+                assert!(!stale);
+                assert!(ts >= before);
+                assert_eq!(instance_id, "test-instance");
+            }
+            other => panic!("Expected ExtensionCapabilityWithheld, got {other:?}"),
+        }
+        cancel.cancel();
+    }
+
+    /// T1 step 3's transition frame, with the lists the `NotificationDispatcher`
+    /// and the GUI read.
+    #[tokio::test]
+    async fn test_extension_capability_withdrawn_bridged_with_its_lists() {
+        use openalpaca_core::tools::extensions::{ExtensionId, ExtensionState, WithdrawalCause};
+
+        let (bus, mut rx, cancel) = setup_bridge();
+        bus.publish(SystemEvent::ExtensionCapabilityWithdrawn {
+            extension: ExtensionId::plugin("acme"),
+            state: ExtensionState::Disabling,
+            cause: WithdrawalCause::Deny,
+            capabilities: vec!["net_read".into()],
+            tools: vec!["acme::fetch".into()],
+            affected_templates: vec!["reader".into()],
+            affected_skills: vec!["nightly".into()],
+            affected_cron_skills: vec!["nightly".into()],
+            notice_lane: "owner:gui".into(),
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::ExtensionCapabilityWithdrawn {
+                kind,
+                id,
+                state,
+                cause,
+                capabilities,
+                tools,
+                affected_templates,
+                affected_skills,
+                affected_cron_skills,
+                notice_lane,
+                instance_id,
+                ..
+            } => {
+                assert_eq!(kind, "plugin");
+                assert_eq!(id, "acme");
+                assert_eq!(state, "disabling");
+                assert_eq!(cause, "deny", "the wording is keyed on the cause, not the state");
+                assert_eq!(capabilities, vec!["net_read".to_string()]);
+                assert_eq!(tools, vec!["acme::fetch".to_string()]);
+                assert_eq!(affected_templates, vec!["reader".to_string()]);
+                assert_eq!(affected_skills, vec!["nightly".to_string()]);
+                assert_eq!(affected_cron_skills, vec!["nightly".to_string()]);
+                assert_eq!(notice_lane, "owner:gui");
+                assert_eq!(instance_id, "test-instance");
+            }
+            other => panic!("Expected ExtensionCapabilityWithdrawn, got {other:?}"),
         }
         cancel.cancel();
     }
@@ -626,6 +790,125 @@ mod tests {
                 assert_eq!(kind, "followup");
             }
             other => panic!("Expected FollowupQueued, got {other:?}"),
+        }
+        cancel.cancel();
+    }
+
+    // ── GAP-07: task/agent events must carry a non-empty title/name ────
+
+    #[tokio::test]
+    async fn test_task_updated_bridged_carries_title() {
+        let (bus, mut rx, cancel) = setup_bridge();
+        bus.publish(SystemEvent::TaskUpdated {
+            task_id: "t-updated".into(),
+            title: "Sync the repo".into(),
+            status: "running".into(),
+            progress_current: Some(1),
+            progress_total: Some(4),
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::TaskStatus {
+                task_id,
+                title,
+                status,
+                ..
+            } => {
+                assert_eq!(task_id, "t-updated");
+                assert_eq!(title, "Sync the repo");
+                assert!(!title.is_empty());
+                assert_eq!(status, "running");
+            }
+            other => panic!("Expected TaskStatus, got {other:?}"),
+        }
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_task_completed_bridged_carries_title() {
+        let (bus, mut rx, cancel) = setup_bridge();
+        bus.publish(SystemEvent::TaskCompleted {
+            task_id: "t-completed".into(),
+            title: "Generate the report".into(),
+            result_summary: Some("Done".into()),
+            outcome_kind: None,
+            artifact_count: None,
+            outcome_summary: None,
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::TaskStatus {
+                task_id,
+                title,
+                status,
+                ..
+            } => {
+                assert_eq!(task_id, "t-completed");
+                assert_eq!(title, "Generate the report");
+                assert!(!title.is_empty());
+                assert_eq!(status, "completed");
+            }
+            other => panic!("Expected TaskStatus, got {other:?}"),
+        }
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_task_failed_bridged_carries_title() {
+        let (bus, mut rx, cancel) = setup_bridge();
+        bus.publish(SystemEvent::TaskFailed {
+            task_id: "t-failed".into(),
+            title: "Deploy the release".into(),
+            error: "Network timeout".into(),
+            outcome_kind: None,
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::TaskStatus {
+                task_id,
+                title,
+                status,
+                result_summary,
+                ..
+            } => {
+                assert_eq!(task_id, "t-failed");
+                assert_eq!(title, "Deploy the release");
+                assert!(!title.is_empty());
+                assert_eq!(status, "failed");
+                assert_eq!(result_summary, Some("Network timeout".to_string()));
+            }
+            other => panic!("Expected TaskStatus, got {other:?}"),
+        }
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_agent_status_changed_bridged_carries_name() {
+        let (bus, mut rx, cancel) = setup_bridge();
+        bus.publish(SystemEvent::AgentStatusChanged {
+            agent_id: "code_agent::a1b2c3d4".into(),
+            instance_id: "code_agent::a1b2c3d4".into(),
+            template_id: "code_agent".into(),
+            name: "Code Agent".into(),
+            status: "spawned".into(),
+            current_task_id: Some("t-1".into()),
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::AgentStatus {
+                agent_id,
+                name,
+                status,
+                template_id,
+                ..
+            } => {
+                assert_eq!(agent_id, "code_agent::a1b2c3d4");
+                assert_eq!(name, "Code Agent");
+                assert!(!name.is_empty());
+                assert_eq!(status, "spawned");
+                assert_eq!(template_id, "code_agent");
+            }
+            other => panic!("Expected AgentStatus, got {other:?}"),
         }
         cancel.cancel();
     }

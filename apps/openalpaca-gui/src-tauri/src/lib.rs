@@ -5,7 +5,7 @@
 //! - Ensuring the daemon is running (spawning if needed)
 
 use openalpaca_storage::discovery::{self, ConnectionInfo};
-use openalpaca_storage::paths;
+use openalpaca_storage::store;
 use std::process::Command;
 use std::time::Duration;
 
@@ -109,10 +109,11 @@ fn spawn_daemon() -> anyhow::Result<()> {
         }
     };
 
-    let app_dir = paths::app_dir()?;
-    std::fs::create_dir_all(&app_dir)?;
-    let config_dir = app_dir.join("config");
-    std::fs::create_dir_all(&config_dir)?;
+    // D1: one root. `ensure_store` seeds README/.layout; the config dir must
+    // exist before the spawn — `resolve_config_base_dir` ignores an
+    // `OPENALPACA_CONFIG_DIR` that does not.
+    let app_dir = store::ensure_store(&store::StoreScope::Home)?;
+    let config_dir = store::ensure_runtime_config_dir()?;
 
     tracing::info!("Spawning daemon: {}", path_to_use.display());
     tracing::info!("Daemon runtime dir: {}", app_dir.display());

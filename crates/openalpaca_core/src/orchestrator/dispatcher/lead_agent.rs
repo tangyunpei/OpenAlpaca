@@ -81,6 +81,7 @@ impl TaskDispatcher {
             agent_id: lead_agent.id.clone(),
             instance_id: lead_agent.id.clone(),
             template_id: lead_agent.template_id.clone(),
+            name: lead_agent.name.clone(),
             status: "spawned".to_string(),
             current_task_id: Some(task_id.clone()),
             timestamp: now,
@@ -236,6 +237,7 @@ impl TaskDispatcher {
                 .update_status(&task_id, TaskEntryStatus::Running);
             bus.publish(SystemEvent::TaskUpdated {
                 task_id: task_id.clone(),
+                title: task_title.clone(),
                 status: "running".to_string(),
                 progress_current: Some(0),
                 progress_total: None, // Lead agent has dynamic progress
@@ -404,6 +406,7 @@ impl TaskDispatcher {
                 agent_id: lead_agent.id.clone(),
                 instance_id: lead_agent.id.clone(),
                 template_id: lead_agent.template_id.clone(),
+                name: lead_agent.name.clone(),
                 status: destroy_status.to_string(),
                 current_task_id: None,
                 timestamp: now,

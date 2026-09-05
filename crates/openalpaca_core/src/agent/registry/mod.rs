@@ -38,6 +38,11 @@ pub struct AgentRegistry {
     templates: Mutex<HashMap<String, AgentTemplate>>,
     /// Active agent instances keyed by instance_id (e.g. "code_agent::a1b2c3d4").
     instances: Mutex<HashMap<String, RegisteredAgent>>,
+    /// Templates withdrawn with a plugin: `template_id → plugin_id`
+    /// (extension design §10 case 5(a)). Kept so `spawn_subagent` naming one
+    /// answers *"provided by plugin 'x', which is disabled"* rather than the
+    /// bare "template not found". The live map stays scrubbed exactly as today.
+    template_tombstones: Mutex<HashMap<String, String>>,
 }
 
 impl AgentRegistry {
@@ -45,6 +50,7 @@ impl AgentRegistry {
         Self {
             templates: Mutex::new(HashMap::new()),
             instances: Mutex::new(HashMap::new()),
+            template_tombstones: Mutex::new(HashMap::new()),
         }
     }
 
@@ -80,6 +86,8 @@ impl AgentRegistry {
         if templates.contains_key(&id) {
             return false;
         }
+        // A template that came back invalidates its own tombstone.
+        self.lock_template_tombstones().remove(&id);
         templates.insert(id, template);
         true
     }
@@ -111,6 +119,30 @@ impl AgentRegistry {
     /// Remove a template by id. Returns true if it existed.
     pub fn remove_template(&self, template_id: &str) -> bool {
         self.lock_templates().remove(template_id).is_some()
+    }
+
+    /// Remove a plugin's template and leave a tombstone behind
+    /// (extension design §10 case 5(a)).
+    pub fn remove_plugin_template(&self, template_id: &str, plugin_id: &str) -> bool {
+        let existed = self.lock_templates().remove(template_id).is_some();
+        self.lock_template_tombstones()
+            .insert(template_id.to_string(), plugin_id.to_string());
+        existed
+    }
+
+    /// The plugin a withdrawn template belonged to, if one is recorded.
+    pub fn template_tombstone(&self, template_id: &str) -> Option<String> {
+        self.lock_template_tombstones().get(template_id).cloned()
+    }
+
+    fn lock_template_tombstones(&self) -> std::sync::MutexGuard<'_, HashMap<String, String>> {
+        match self.template_tombstones.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::error!("AgentRegistry template tombstones mutex poisoned — recovering");
+                poisoned.into_inner()
+            }
+        }
     }
 
     // ── Instance methods ─────────────────────────────────────────────

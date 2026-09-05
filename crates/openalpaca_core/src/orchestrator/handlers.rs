@@ -138,8 +138,6 @@ impl Orchestrator {
                 self.record_orchestration_stage(
                     request_id,
                     "task_ops".to_string(),
-                    0,
-                    0,
                     ack_start.elapsed().as_millis() as u64,
                     None,
                     None,
@@ -154,8 +152,6 @@ impl Orchestrator {
 
         // 5. Compute result — deterministic tiers, then the main loop.
         //    Track timing for observability (OrchestrationStage metrics).
-        //    `planner_ms`/`dispatch_ms` are kept at 0 for schema stability
-        //    (the planner ladder was deleted in Routing V2 Phase 5).
         let mode: String;
 
         let result: Result<String, String> = if !force_simple_query
@@ -196,6 +192,14 @@ impl Orchestrator {
                 stream_id.as_deref(),
             )
             .await
+        } else if let Some(reply) = self.withdrawn_skill_reply(&intent_source_content) {
+            // A `/slash` naming a skill a **disabled plugin** used to provide.
+            // The catalog's live indices were scrubbed at T2, so the command
+            // missed above and the message would otherwise have fallen through
+            // to the main loop as ordinary chat; the tombstone answers with the
+            // plugin that owns it instead (extension design §10 case 5(a)).
+            mode = "skill_withdrawn".to_string();
+            Ok(reply)
         } else if self.is_bootstrapping() {
             mode = "bootstrap".to_string();
             self.handle_simple_query(
@@ -280,7 +284,7 @@ impl Orchestrator {
         let ack_ms = ack_start.elapsed().as_millis() as u64;
 
         // Emit OrchestrationStage event + persist the latency record
-        self.record_orchestration_stage(request_id, mode, 0, 0, ack_ms, None, None);
+        self.record_orchestration_stage(request_id, mode, ack_ms, None, None);
 
         // 6 + 7. Summary update and user trait extraction run concurrently
         // in a background spawn (fire-and-forget, never blocks the response).
@@ -362,13 +366,10 @@ impl Orchestrator {
     /// Publish an `OrchestrationStage` event and persist the matching
     /// latency record (best-effort). Shared by the routing ladder and the
     /// task-ops early return so every routed message is observable.
-    #[allow(clippy::too_many_arguments)]
     fn record_orchestration_stage(
         &self,
         request_id: Uuid,
         mode: String,
-        planner_ms: u64,
-        dispatch_ms: u64,
         ack_ms: u64,
         fallback_reason: Option<String>,
         auto_promotion_reason: Option<String>,
@@ -376,8 +377,6 @@ impl Orchestrator {
         self.bus.publish(SystemEvent::OrchestrationStage {
             request_id,
             mode: mode.clone(),
-            planner_ms,
-            dispatch_ms,
             ack_ms,
             fallback_reason: fallback_reason.clone(),
             auto_promotion_reason: auto_promotion_reason.clone(),
@@ -390,8 +389,6 @@ impl Orchestrator {
                 id: None,
                 request_id: request_id.to_string(),
                 mode,
-                planner_ms,
-                dispatch_ms,
                 ack_ms,
                 fallback_reason,
                 auto_promotion_reason,

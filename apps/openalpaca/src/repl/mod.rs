@@ -12,7 +12,8 @@ use std::io::Write;
 const MAX_HISTORY_ENTRIES: usize = 1000;
 
 fn history_path() -> anyhow::Result<std::path::PathBuf> {
-    let dir = openalpaca_storage::discovery::ensure_app_dir()?;
+    // Machine state, not something the user edits — it lives under state/.
+    let dir = openalpaca_storage::store::state_dir()?;
     Ok(dir.join("repl_history"))
 }
 

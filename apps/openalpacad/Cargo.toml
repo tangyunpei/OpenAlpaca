@@ -28,6 +28,7 @@ openalpaca_storage = { workspace = true }
 openalpaca_wake = { workspace = true }
 openalpaca_mcp = { path = "../../crates/openalpaca_mcp" }
 toml.workspace = true
+toml_edit.workspace = true
 rand.workspace = true
 async-trait.workspace = true
 openalpaca_plugins = { workspace = true }
@@ -51,6 +52,9 @@ opener.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# `McpClient::disconnected_for_tests` — a client shell for a `ToolBackend::Mcp`
+# with no live server, which the `GET /v1/tools` origin tests need.
+openalpaca_mcp = { path = "../../crates/openalpaca_mcp", features = ["test-utils"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

@@ -331,45 +331,9 @@ pub struct SkillFrontmatter {
     /// Skill IDs that must be loaded before this skill can be invoked.
     #[serde(default)]
     pub depends_on: Vec<String>,
-
-    // Legacy compat (deserialized but not serialized)
-    /// Slash command that invokes this skill (e.g. "review"). Legacy field.
-    #[serde(skip_serializing)]
-    pub command: Option<String>,
-    /// Regex patterns that auto-detect when this skill should activate. Legacy field.
-    #[serde(skip_serializing)]
-    pub trigger_patterns: Vec<String>,
-    /// Tool names this skill requires to function. Legacy field.
-    #[serde(skip_serializing)]
-    pub tools_required: Vec<String>,
-    /// If true, this skill's instructions are always loaded into context. Legacy field.
-    #[serde(skip_serializing)]
-    pub auto_load: bool,
 }
 
 impl SkillFrontmatter {
-    /// Bridge legacy fields to the new schema sections.
-    pub(super) fn apply_legacy_compat(&mut self) {
-        // command -> invoke.slash (add "/" prefix)
-        if self.invoke.slash.is_none()
-            && let Some(ref cmd) = self.command
-        {
-            self.invoke.slash = Some(format!("/{}", cmd));
-        }
-        // auto_load=true -> invoke.mode="auto" (only if mode is still default)
-        if self.invoke.mode == "manual" && self.auto_load {
-            self.invoke.mode = "auto".to_string();
-        }
-        // trigger_patterns -> routing.intent
-        if self.routing.intent.is_empty() && !self.trigger_patterns.is_empty() {
-            self.routing.intent = self.trigger_patterns.clone();
-        }
-        // tools_required -> tools.allow
-        if self.tools.allow.is_empty() && !self.tools_required.is_empty() {
-            self.tools.allow = self.tools_required.clone();
-        }
-    }
-
     pub(super) fn validate(&self) -> Result<(), super::SkillParseError> {
         if self.name.is_empty() {
             return Err(super::SkillParseError::MissingField("name"));
@@ -380,14 +344,12 @@ impl SkillFrontmatter {
         Ok(())
     }
 
-    /// Get the effective slash command (without "/" prefix), checking both
-    /// new `invoke.slash` and legacy `command` fields.
+    /// Get the effective slash command (without the "/" prefix).
     pub fn effective_slash_command(&self) -> Option<String> {
         self.invoke
             .slash
             .as_ref()
             .map(|s| s.strip_prefix('/').unwrap_or(s).to_string())
-            .or_else(|| self.command.clone())
     }
 }
 

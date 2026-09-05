@@ -8,7 +8,7 @@ fn test_database_creation() {
 
     let db = Database::open(&db_path).unwrap();
     assert!(db_path.exists());
-    assert_eq!(db.schema_version().unwrap(), 34);
+    assert_eq!(db.schema_version().unwrap(), 35);
 }
 
 #[test]
@@ -20,7 +20,49 @@ fn test_migrations_idempotent() {
     let _db1 = Database::open(&db_path).unwrap();
     let db2 = Database::open(&db_path).unwrap();
 
-    assert_eq!(db2.schema_version().unwrap(), 34);
+    assert_eq!(db2.schema_version().unwrap(), 35);
+}
+
+#[test]
+fn test_migration_035_drops_planner_telemetry() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    assert_eq!(db.schema_version().unwrap(), 35);
+
+    db.with_connection(|conn| {
+        let columns = |table: &str| -> rusqlite::Result<Vec<String>> {
+            let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+            let names = stmt
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(names)
+        };
+
+        let latency = columns("orchestrator_latency")?;
+        assert!(
+            !latency.contains(&"planner_ms".to_string()),
+            "orchestrator_latency.planner_ms should be gone: {latency:?}"
+        );
+        assert!(
+            !latency.contains(&"dispatch_ms".to_string()),
+            "orchestrator_latency.dispatch_ms should be gone: {latency:?}"
+        );
+        // The column the metric actually uses survives.
+        assert!(latency.contains(&"ack_ms".to_string()), "{latency:?}");
+
+        let decisions = columns("dispatch_decisions")?;
+        assert!(
+            !decisions.contains(&"planner_requested_mode".to_string()),
+            "dispatch_decisions.planner_requested_mode should be gone: {decisions:?}"
+        );
+        assert!(
+            decisions.contains(&"error_message".to_string()),
+            "{decisions:?}"
+        );
+
+        Ok(())
+    })
+    .unwrap();
 }
 
 #[test]

@@ -207,6 +207,7 @@ pub async fn agent_action_handler(
         agent_id: id.clone(),
         instance_id: id.clone(),
         template_id,
+        name: agent.name.clone(),
         status: new_status.to_string(),
         current_task_id: None,
         timestamp: Utc::now(),

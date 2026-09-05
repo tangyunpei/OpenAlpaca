@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Top-level MCP configuration parsed from `config/mcp.toml`.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -43,7 +43,14 @@ fn default_max_reconnect() -> u32 { 3 }
 fn default_reconnect_backoff() -> u64 { 100 }
 fn default_enabled() -> bool { true }
 
-#[derive(Debug, Clone, Deserialize)]
+/// One `[servers.<name>]` block.
+///
+/// `Serialize` exists for exactly one reader: the `config_fingerprint`
+/// preimage of extension design §3.3 E2 (`super::fingerprint`), which hashes a
+/// canonical rendering of the *parsed* block so that a comment, a blank line or
+/// a key-order edit changes nothing while a value edit does. The writer does
+/// not use it — that is a surgical `toml_edit` assignment (§2.1).
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "transport", rename_all = "snake_case")]
 pub enum McpServerConfig {
     Stdio {
@@ -105,7 +112,10 @@ impl McpServerConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// `Serialize` for the same single reader as [`McpServerConfig`] — the
+/// fingerprint preimage, where the auth *kind* is structure and the literal
+/// `bearer` value is masked before it is hashed.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum HttpAuthConfig {
     BearerEnv { bearer_env: String },
@@ -135,7 +145,19 @@ impl McpConfig {
             return Err(LoadError::NotFound(path.to_path_buf()));
         }
         let text = std::fs::read_to_string(path)?;
-        let config: McpConfig = toml::from_str(&text)?;
+        Self::parse(&text)
+    }
+
+    /// Parse and validate MCP config from TOML text.
+    ///
+    /// Split out of [`Self::load`] so the atomic writer can re-parse its own
+    /// rendered output with **the reader's own parser** before the rename
+    /// (extension design §2.1): a `toml_edit` index-assignment can synthesize a
+    /// structurally valid table this type rejects — `enabled` assigned into a
+    /// `[servers.<n>]` block that no longer exists produces a table with no
+    /// `transport` tag — and that must abort the write, not land.
+    pub fn parse(text: &str) -> Result<Self, LoadError> {
+        let config: McpConfig = toml::from_str(text)?;
         for name in config.servers.keys() {
             if !is_valid_server_name(name) {
                 return Err(LoadError::InvalidServerName(name.clone()));

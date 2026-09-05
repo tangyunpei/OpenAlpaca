@@ -9,29 +9,16 @@ pub mod routing;
 pub mod streaming;
 pub mod types;
 
-// TODO: Remove backward-compat re-exports once all consumers use canonical paths
-// (apps/ imports were updated in the reorganize branch; external consumers may remain)
-pub use config::settings_service;
-pub use keys::credential_discovery;
-pub use keys::key_encryption;
-pub use keys::key_pool;
-pub use keys::secret_store;
-pub use routing::cost_tracker;
-pub use routing::model_registry;
-pub use routing::provider_usage;
-pub use routing::rate_limiter;
-pub use routing::router;
-
 pub use cli_backend::{
     ClaudeCodeCliProvider, CliBackendConfig, CliBackendStatus, CliBackendsConfig, CodexCliProvider,
     detect_cli_backends,
 };
 pub use config::llm_config::{
-    EmbeddingsConfig, EndpointsConfig, EnvVarsConfig, KeyConfig, LlmConfig, LlmRouterConfig,
-    LlmRuntimeConfig, ModelConfigEntry, OrchestratorLlmConfig, ProviderConfig, ProviderDefaults,
-    SecurityConfig, TimeoutsConfig, WebSearchConfig, build_provider, build_provider_with_runtime,
-    build_router, build_router_with_secret_store, collect_secret_refs, migrate_llm_secrets,
-    read_config, resolve_key_from_config, reverse_migrate_llm_secrets, write_config,
+    EmbeddingsConfig, EndpointsConfig, EnvVarsConfig, KeyConfig, LlmRouterConfig, LlmRuntimeConfig,
+    ModelConfigEntry, OrchestratorLlmConfig, ProviderConfig, ProviderDefaults, SecurityConfig,
+    TimeoutsConfig, WebSearchConfig, build_router, build_router_with_secret_store,
+    collect_secret_refs, migrate_llm_secrets, read_config, resolve_key_from_config,
+    reverse_migrate_llm_secrets, write_config,
 };
 pub use config::settings_service::{
     LlmSettingsService, OrchestratorConfigResponse, UpdateOrchestratorRequest,

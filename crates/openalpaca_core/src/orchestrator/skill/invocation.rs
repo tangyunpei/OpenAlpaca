@@ -22,6 +22,7 @@ use crate::orchestrator::{ConversationContext, Orchestrator};
 use crate::prompt_ctx::SectionPriority;
 use crate::prompt_ctx::sources::{ContextRequest, ExecutionPath};
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
+use crate::security::capabilities::Allowlist;
 use crate::security::sandbox::SandboxManager;
 use crate::security::sandbox::SandboxPolicy;
 use crate::tools::builtins::ScriptToolBuiltIn;
@@ -145,11 +146,24 @@ impl Orchestrator {
         // Resolve tools via capability model, falling back to legacy name-based matching.
         // Intent-suggested tools are intentionally NOT merged here to maintain
         // skill-level tool isolation (P1-1 security fix).
+        //
+        // **S4 moment 2** on both branches (extension design §7.2, §6.2 #10):
+        // a capability whose every provider is gone — or a legacy allowed name
+        // whose owning extension is not `Enabled` — is announced with an
+        // attributed `warn!` + `ExtensionCapabilityWithheld {
+        // Moment::SurfaceAssembly }`. The **refusal** on total loss is C5's;
+        // this is the attribution that lands with the event. The dedup scope is
+        // the request, which has no `ToolContext` yet at this point.
+        let withheld_scope = request_id.to_string();
         let mut tool_defs: Vec<openalpaca_llm::ToolDefinition> =
             if !skill_doc.frontmatter.requires_capabilities.is_empty() {
                 // New path: capability-based resolution
+                let resolution = self
+                    .tool_registry
+                    .resolve_capabilities(&skill_doc.frontmatter.requires_capabilities, &[]);
                 self.tool_registry
-                    .tools_for_capabilities(&skill_doc.frontmatter.requires_capabilities)
+                    .announce_withheld(&resolution, None, Some(&withheld_scope));
+                resolution.defs
             } else if !skill_doc.frontmatter.tools.allow.is_empty() {
                 // Legacy fallback: direct tool name matching
                 let names = &skill_doc.frontmatter.tools.allow;
@@ -167,16 +181,46 @@ impl Orchestrator {
                         .filter(|n| !resolved_names.contains(&n.as_str()))
                         .map(|n| n.as_str())
                         .collect();
-                    tracing::warn!(
-                        "Skill '{}' references unknown tools: {:?}",
-                        skill_name,
-                        missing
+                    // Every miss the ledger attributes is announced with the
+                    // extension that took it; the rest keep today's
+                    // unattributed warning, because a typo and a withdrawal are
+                    // indistinguishable for a name nothing ever owned.
+                    let unattributed = self.tool_registry.announce_withheld_names(
+                        missing,
+                        None,
+                        Some(&withheld_scope),
                     );
+                    if !unattributed.is_empty() {
+                        tracing::warn!(
+                            "Skill '{}' references unknown tools: {:?}",
+                            skill_name,
+                            unattributed
+                        );
+                    }
                 }
                 resolved
             } else {
                 vec![]
             };
+
+        // **Fail closed — the total-loss refusal** (design §6.2 #10, §10
+        // case 3). One predicate across both resolution branches: refuse when
+        // **any** required capability is wholly withheld, or — on the legacy
+        // `tools.allow` branch — when every allowed name belongs to a
+        // withdrawn extension. Partial loss is never gating; it runs and
+        // carries the chat-visible prefix below. The SKILL.md body still tells
+        // the model to use the missing tool, so the reliable outcome of
+        // running anyway is a confidently fabricated result.
+        let requirements = self
+            .tool_registry
+            .skill_requirements(&skill_doc.frontmatter);
+        if !requirements.is_satisfiable() {
+            tracing::warn!(
+                skill = skill_name,
+                "Refusing skill: a required capability is wholly withheld"
+            );
+            return Err(requirements.refusal(skill_name));
+        }
 
         // Force-include persona tools during bootstrap mode
         if self.is_bootstrapping() {
@@ -189,16 +233,11 @@ impl Orchestrator {
             }
         }
 
-        // Apply deny list (both paths)
+        // Apply the skill's own deny list (both paths). There is no global
+        // per-tool deny — the ENABLE axis is per extension (design §11).
         let skill_deny = &skill_doc.frontmatter.tools.deny;
-        let global_deny = &self
-            .daemon_config
-            .load()
-            .execution
-            .skill_defaults
-            .global_tool_deny;
 
-        tool_defs.retain(|t| !skill_deny.contains(&t.name) && !global_deny.contains(&t.name));
+        tool_defs.retain(|t| !skill_deny.contains(&t.name));
 
         // Resolve script tools from skill's scripts/ directory
         let script_tool_defs: Vec<openalpaca_llm::ToolDefinition> = skill_doc
@@ -288,15 +327,12 @@ impl Orchestrator {
                 tool_names_log
             );
             let resolved: Vec<String> = tool_defs.iter().map(|t| t.name.clone()).collect();
-            let mut denied_caps: Vec<String> = skill_deny.clone();
-            for g in global_deny {
-                if !denied_caps.contains(g) {
-                    denied_caps.push(g.clone());
-                }
-            }
+            let denied_caps: Vec<String> = skill_deny.clone();
             policy_opt = Some(SandboxPolicy {
                 agent_id: "orchestrator".to_string(),
-                allowed_capabilities: resolved,
+                // Closed set: the skill may call exactly the tools resolved for
+                // it (this arm only runs when that resolution is non-empty).
+                allowed_capabilities: Allowlist::only(resolved),
                 denied_capabilities: denied_caps,
                 require_confirmation_for: skill_doc
                     .frontmatter
@@ -525,7 +561,7 @@ impl Orchestrator {
             + composed.token_budget.dynamic_context_tokens)
             as usize;
         budget.register_section("system_prompt", system_prompt_tokens);
-        budget.register_section("tools", tools_for_loop.len() * 200);
+        budget.register_section("tools", crate::runner::estimate_tools_tokens(&tools_for_loop));
 
         // --- Context Budget Telemetry ---
         {
@@ -627,7 +663,6 @@ impl Orchestrator {
                             .load()
                             .security
                             .auto_approve_confirmations, // auto_approve
-                        global_deny.clone(),            // global_tool_deny
                         self.daemon_config.load().security.circuit_breaker.clone(),
                         self.daemon_config
                             .load()
@@ -904,6 +939,16 @@ impl Orchestrator {
             validated
         };
 
+        // Partial loss runs, and says so (design §10 case 3): the user invoked
+        // this skill explicitly, so the result carries the chat-visible
+        // warning naming the extension whose tools it lost. Applied after
+        // validation and truncation — it is the chat layer, not the skill's
+        // declared output.
+        let validated = match requirements.chat_prefix() {
+            Some(prefix) => format!("{prefix}{validated}"),
+            None => validated,
+        };
+
         Ok(SkillInvocationResult {
             content: validated,
             finish_reason: inv_finish_reason,
@@ -947,29 +992,24 @@ impl Orchestrator {
     ) -> Result<SkillInvocationResult, String> {
         let fm = &skill_doc.frontmatter;
 
-        // Allowed tool set: capability-resolved names (same resolution as the
-        // file-based path), falling back to the legacy allow list.
-        let allowed: Vec<String> = if !fm.requires_capabilities.is_empty() {
-            self.tool_registry
-                .tools_for_capabilities(&fm.requires_capabilities)
-                .into_iter()
-                .map(|d| d.name)
-                .collect()
-        } else {
-            fm.tools.allow.clone()
-        };
-        let mut denied: Vec<String> = fm.tools.deny.clone();
-        for g in &self
-            .daemon_config
-            .load()
-            .execution
-            .skill_defaults
-            .global_tool_deny
-        {
-            if !denied.contains(g) {
-                denied.push(g.clone());
-            }
-        }
+        // The run-guard (design §3.2 T3(b)), taken at the only in-process entry
+        // point into the plugin's own `skill/invoke` loop — which never enters
+        // `ToolRegistry` for the run itself, only for the tool callbacks it
+        // makes. Pre-flight refuses a run against a plugin that is not
+        // `Enabled`, or against a *previous load* of an enabled one, before the
+        // first RPC is sent; the guard it returns is what T3's drain waits on,
+        // so a multi-minute `skill/invoke` is no longer invisible to a disable.
+        let extension =
+            crate::tools::extensions::ExtensionId::plugin(plugin_id.to_string());
+        let ledger = Arc::clone(self.tool_registry.extensions());
+        let _run_guard = ledger.begin_run(&extension, executor.generation())?;
+
+        // The dedup scope for the announcements below, matching the file-skill
+        // site: the request, which is what a skill invoked in a loop varies by.
+        let withheld_scope = request_id.to_string();
+        let (allowed, requirements) =
+            plugin_skill_allowlist(skill_name, fm, &self.tool_registry, &withheld_scope)?;
+        let denied: Vec<String> = fm.tools.deny.clone();
 
         let policy = SandboxPolicy {
             agent_id: format!("plugin:{plugin_id}"),
@@ -1038,10 +1078,22 @@ impl Orchestrator {
             plugin = plugin_id,
             "Invoking plugin-backed skill"
         );
-        let content = executor
-            .invoke(query, &context, &callback)
+        // `run_scoped` owns the exit: a run torn down at the drain deadline
+        // fails with the S4 refusal, never with a broken-pipe string. The
+        // bridge rewrites the common cases itself; this is the belt-and-braces
+        // catch for any path that surfaced a raw one (design §3.2 T3(b)).
+        let content = ledger
+            .run_scoped(&extension, executor.invoke(query, &context, &callback))
             .await
             .map_err(|e| format!("Plugin skill '{skill_name}' failed: {e}"))?;
+
+        // Partial loss runs, and says so: the user invoked this skill
+        // explicitly, so the surviving provider's result carries the
+        // chat-visible warning naming the extension that went (§10 case 3).
+        let content = match requirements.chat_prefix() {
+            Some(prefix) => format!("{prefix}{content}"),
+            None => content,
+        };
 
         Ok(SkillInvocationResult {
             content,
@@ -1057,6 +1109,90 @@ impl Orchestrator {
             validation_failures: Vec::new(),
         })
     }
+}
+
+/// Resolve the allow list for a plugin-backed skill.
+///
+/// Capability-resolved names (same resolution as the file-based path), falling
+/// back to the legacy allow list. Either way the result is a closed set — a
+/// skill that names no tool gets none.
+///
+/// A skill that *does* declare `requires_capabilities` which resolve to nothing
+/// has lost the extension providing them (uninstalled, or disabled): it is
+/// refused up front rather than run without the tools it asked for.
+///
+/// **C5 — fail closed at the caller** (design §6.2 #10, #11): the refusal is
+/// the one predicate, `!skill_requirements(fm).is_satisfiable()`, on **both**
+/// resolution branches — any required capability wholly withheld, or every
+/// legacy allowed name withheld. `Allowlist::Only` at the callee is the second
+/// half: an empty list denies every non-ambient capability, so no future
+/// resolver can reopen the escalation by handing an empty vec to a policy.
+///
+/// Returns the requirements beside the allow list so a *partial* loss can carry
+/// its chat-visible prefix (§10 case 3) without a second index read.
+fn plugin_skill_allowlist(
+    skill_name: &str,
+    fm: &crate::middleware::skill::SkillFrontmatter,
+    tool_registry: &crate::tools::ToolRegistry,
+    withheld_scope: &str,
+) -> Result<(Allowlist, crate::tools::registry::SkillRequirements), String> {
+    let requirements = tool_registry.skill_requirements(fm);
+
+    if fm.requires_capabilities.is_empty() {
+        // The legacy `tools.allow` fallback is never resolved against the
+        // registry, so the same `owner_of` scan is what attributes it: a plugin
+        // skill whose allowed names went with a disabled extension is announced
+        // here rather than one refused call at a time by the gate's miss arm
+        // (extension design §6.2 #10), and refused up front on total loss.
+        tool_registry.announce_withheld_names(
+            fm.tools.allow.iter().map(String::as_str),
+            None,
+            Some(withheld_scope),
+        );
+        if !requirements.is_satisfiable() {
+            tracing::warn!(
+                skill = skill_name,
+                "Refusing plugin skill: every allowed tool belongs to a withdrawn extension"
+            );
+            return Err(requirements.refusal(skill_name));
+        }
+        return Ok((Allowlist::only(&fm.tools.allow), requirements));
+    }
+
+    let resolution = tool_registry.resolve_capabilities(&fm.requires_capabilities, &[]);
+    tool_registry.announce_withheld(&resolution, None, Some(withheld_scope));
+    let resolved: Vec<String> = resolution.defs.into_iter().map(|d| d.name).collect();
+
+    if !requirements.is_satisfiable() {
+        tracing::warn!(
+            skill = skill_name,
+            "Refusing plugin skill: a required capability is wholly withheld"
+        );
+        return Err(requirements.refusal(skill_name));
+    }
+
+    if resolved.is_empty() {
+        // A0's condition, kept and **not** folded into the predicate above.
+        // §6.2 #11 says the predicate covers "non-empty but resolves to
+        // nothing"; it does not, for a capability nothing ever recorded — an
+        // `unknown` (§7.2) is satisfiable by design so typos keep degrading
+        // silently, and a restart with the extension already disabled produces
+        // exactly that (§10 case 8). This is the empty allow list the
+        // escalation lived in, so it stays a refusal on its own terms.
+        let unresolved = fm.requires_capabilities.join(", ");
+        tracing::warn!(
+            skill = skill_name,
+            capabilities = %unresolved,
+            "Refusing plugin skill: required capabilities resolve to no tool"
+        );
+        return Err(format!(
+            "Skill '{skill_name}' requires capabilities that no installed tool provides \
+             ({unresolved}). The extension providing them is missing or disabled — \
+             refusing to run the skill rather than running it without them."
+        ));
+    }
+
+    Ok((Allowlist::only(resolved), requirements))
 }
 
 /// Adapter giving a plugin skill sandboxed tool access during `invoke()`.
@@ -1090,3 +1226,6 @@ impl openalpaca_api::plugin_traits::ToolCallbackExecutor for SandboxToolCallback
             .await
     }
 }
+
+#[cfg(test)]
+mod tests;

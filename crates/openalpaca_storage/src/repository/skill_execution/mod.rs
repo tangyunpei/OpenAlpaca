@@ -5,6 +5,7 @@ use crate::models::skill_health::SkillHealthMetrics;
 use crate::Database;
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
+use std::collections::HashMap;
 
 
 /// Repository for skill/tool execution log operations.
@@ -73,6 +74,35 @@ impl<'a> SkillExecutionRepository<'a> {
             )
             .context("Failed to insert tool execution log")?;
             Ok(conn.last_insert_rowid())
+        })
+    }
+
+    /// `tool_name → COUNT(*)` over `tool_execution_log` since `since_utc`, for
+    /// `GET /v1/tools`' `invocations_today` (GAP-18).
+    ///
+    /// `since_utc` is **already UTC** in the table's own `%Y-%m-%d %H:%M:%S`
+    /// text form: `timestamp` defaults to `datetime('now')`, which is UTC, so a
+    /// bare `date('now')` predicate would be off by the daemon's UTC offset.
+    /// The caller converts local midnight; the index `idx_tel_tool_ts
+    /// (tool_name, timestamp DESC)` serves the predicate.
+    ///
+    /// One grouped query rather than one per tool: the registry has hundreds of
+    /// names and the route renders all of them.
+    pub fn tool_invocations_since(&self, since_utc: &str) -> Result<HashMap<String, i64>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT tool_name, COUNT(*) FROM tool_execution_log
+                 WHERE timestamp >= ?1 GROUP BY tool_name",
+            )?;
+            let rows = stmt.query_map([since_utc], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            let mut counts = HashMap::new();
+            for row in rows {
+                let (name, count) = row?;
+                counts.insert(name, count);
+            }
+            Ok(counts)
         })
     }
 

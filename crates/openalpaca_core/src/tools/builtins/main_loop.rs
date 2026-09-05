@@ -6,8 +6,8 @@
 //!   only — its backend already lives in the shared registry).
 //! - **Extension tools** (tool/skill wiring, Chunk 2): every MCP-bridged
 //!   (`<server>__<tool>`) and plugin-provided (`<plugin>::<tool>`) tool in the
-//!   global registry, minus `execution.skill_defaults.global_tool_deny`
-//!   (definitions only — backends already live in the shared registry).
+//!   global registry whose extension is enabled (definitions only — backends
+//!   already live in the shared registry).
 //! - **`invoke_skill`** (when an LLM router is available): per-request
 //!   catalog-skill invocation via the nested-skill executor.
 //! - **Workflow-aware** (only when the lane has active workflows AND steering
@@ -173,16 +173,12 @@ pub fn main_loop_tool_set(
 
     // ── Extension tools (MCP-bridged + plugin-provided) ─────────────────
     // Part of the DEFAULT surface: every `<server>__<tool>` / `<plugin>::<tool>`
-    // in the global registry joins, minus the global tool deny list (the
-    // opt-out). Definitions only — their backends already live in the global
-    // registry, so the caller's per-request registry clone carries them.
-    let global_tool_deny = daemon_config
-        .load()
-        .execution
-        .skill_defaults
-        .global_tool_deny
-        .clone();
-    definitions.extend(global_registry.extension_tool_defs(&global_tool_deny));
+    // in the global registry joins, less those whose extension is not enabled
+    // (hygiene — the gate is what refuses). There is no per-tool opt-out; the
+    // ENABLE axis is one toggle per server / per plugin (design §1 S1, §11).
+    // Definitions only — their backends already live in the global registry,
+    // so the caller's per-request registry clone carries them.
+    definitions.extend(global_registry.extension_tool_defs());
 
     // ── invoke_skill (per-request; requires an LLM router to run skills) ─
     if let Some(router) = llm_router {
@@ -487,6 +483,7 @@ mod tests {
             client: Arc::new(openalpaca_mcp::McpClient::disconnected_for_tests("srv")),
             remote_name: "echo".to_string(),
             server_name: "srv".to_string(),
+            generation: 0,
         }
     }
 
@@ -526,14 +523,10 @@ mod tests {
     }
 
     #[test]
-    fn test_extension_tools_join_default_surface_minus_deny() {
+    fn test_extension_tools_join_default_surface() {
         let (shared, dispatcher, bus, registry) = setup();
         register_extension_tool(&registry, "srv__echo", mcp_backend());
         register_extension_tool(&registry, "plug::do", plugin_backend());
-        register_extension_tool(&registry, "srv__blocked", mcp_backend());
-
-        let mut cfg = DaemonConfig::default();
-        cfg.execution.skill_defaults.global_tool_deny = vec!["srv__blocked".to_string()];
 
         let set = build_with(
             shared,
@@ -543,16 +536,12 @@ mod tests {
             &routing(true),
             None,
             "user1:cli",
-            Arc::new(ArcSwap::from_pointee(cfg)),
+            Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
             None,
         );
         let names = names(&set.definitions);
         assert!(names.contains(&"srv__echo"), "MCP tool missing: {names:?}");
         assert!(names.contains(&"plug::do"), "plugin tool missing: {names:?}");
-        assert!(
-            !names.contains(&"srv__blocked"),
-            "denied tool must be excluded: {names:?}"
-        );
         // No router → no invoke_skill; extension tools have no per-request
         // instances (their backends live in the global registry).
         assert!(!names.contains(&"invoke_skill"));

@@ -1,55 +1,36 @@
-/**
- * REST API client for cross-platform conversation endpoints.
- */
+/** `/v1/conversations*` — envelope-style responses. */
 
-import { ensureConnection } from "./connection";
-import type { ConversationsResponse, ConversationMessagesResponse } from "../types";
+import { apiFetch } from "../http";
+import type {
+  ConversationMessagesResponse,
+  ConversationsResponse,
+} from "./types";
 
-/** GET /v1/conversations — list conversations across all sources */
-export async function listConversations(
-  source?: string,
-  limit?: number,
-  offset?: number,
-): Promise<ConversationsResponse> {
-  const conn = await ensureConnection();
-  const params = new URLSearchParams();
-  if (source !== undefined) params.set("source", source);
-  if (limit !== undefined) params.set("limit", String(limit));
-  if (offset !== undefined) params.set("offset", String(offset));
-  const qs = params.toString();
-
-  const response = await fetch(
-    `${conn.baseUrl}/v1/conversations${qs ? `?${qs}` : ""}`,
-    { headers: { Authorization: `Bearer ${conn.token}` } },
-  );
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Failed to fetch conversations: ${response.statusText}`);
-  }
-  return await response.json();
+export interface ListConversationsQuery {
+  source?: string;
+  limit?: number;
+  offset?: number;
 }
 
-/** GET /v1/conversations/{id}/messages — get messages for a conversation */
+/** `GET /v1/conversations` */
+export async function listConversations(
+  query: ListConversationsQuery = {},
+  signal?: AbortSignal,
+): Promise<ConversationsResponse> {
+  return await apiFetch<ConversationsResponse>("/v1/conversations", {
+    query: { source: query.source, limit: query.limit, offset: query.offset },
+    signal,
+  });
+}
+
+/** `GET /v1/conversations/{id}/messages` */
 export async function getConversationMessages(
   conversationId: string,
-  limit?: number,
-  offset?: number,
+  query: { limit?: number; offset?: number } = {},
+  signal?: AbortSignal,
 ): Promise<ConversationMessagesResponse> {
-  const conn = await ensureConnection();
-  const params = new URLSearchParams();
-  if (limit !== undefined) params.set("limit", String(limit));
-  if (offset !== undefined) params.set("offset", String(offset));
-  const qs = params.toString();
-
-  const response = await fetch(
-    `${conn.baseUrl}/v1/conversations/${encodeURIComponent(conversationId)}/messages${qs ? `?${qs}` : ""}`,
-    { headers: { Authorization: `Bearer ${conn.token}` } },
+  return await apiFetch<ConversationMessagesResponse>(
+    `/v1/conversations/${encodeURIComponent(conversationId)}/messages`,
+    { query: { limit: query.limit, offset: query.offset }, signal },
   );
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Failed to fetch messages: ${response.statusText}`);
-  }
-  return await response.json();
 }

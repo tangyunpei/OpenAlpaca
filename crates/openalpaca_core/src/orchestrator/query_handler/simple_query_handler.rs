@@ -19,6 +19,7 @@ use crate::middleware::prompt::AgentPersona;
 use crate::orchestrator::{ConversationContext, Orchestrator};
 use crate::prompt_ctx::{SectionPriority, sources::{ContextRequest, ExecutionPath}};
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
+use crate::security::capabilities::Allowlist;
 use crate::security::sandbox::SandboxManager;
 use crate::security::sandbox::SandboxPolicy;
 use crate::tools::registry::ToolContext;
@@ -145,9 +146,9 @@ impl Orchestrator {
                 Some(super::LoopOverrides::MainLoop { .. }) => {
                     // Routing V2 main loop: budgets from
                     // `[orchestrator.routing]`; tool surface = base picks ∪
-                    // the per-request set (core tools, MCP/plugin extension
-                    // tools minus the global deny list, `invoke_skill`, and —
-                    // when active — the workflow tools).
+                    // the per-request set (core tools, the enabled MCP/plugin
+                    // extension tools, `invoke_skill`, and — when active —
+                    // the workflow tools).
                     let routing = self.daemon_config.load().orchestrator.routing.clone();
                     let set = crate::tools::builtins::main_loop_tool_set(
                         self.task_dispatcher.clone(),
@@ -165,26 +166,21 @@ impl Orchestrator {
                         &tool_ctx,
                     );
                     // Base surface: suggested picks ("core_union", default) or
-                    // the whole registry minus the global deny list ("full").
-                    // Either way `set.definitions` is unioned in below, so
-                    // extension tools and `invoke_skill` are reachable in both
-                    // modes (deduped by name).
+                    // the whole registry ("full"). Either way
+                    // `set.definitions` is unioned in below, so extension
+                    // tools and `invoke_skill` are reachable in both modes
+                    // (deduped by name).
                     let mut defs: Vec<openalpaca_llm::ToolDefinition> =
                         if routing.tool_selection == "full" {
-                            let deny = self
-                                .daemon_config
-                                .load()
-                                .execution
-                                .skill_defaults
-                                .global_tool_deny
-                                .clone();
                             self.tool_registry
                                 .registered_tool_names()
                                 .iter()
-                                .filter(|n| !deny.contains(n))
-                                .filter_map(|n| {
-                                    self.tool_registry.get(n).map(|t| t.definition.clone())
-                                })
+                                .filter_map(|n| self.tool_registry.get(n))
+                                // The third assembly site: it never passes
+                                // through `extension_tool_defs`, so it carries
+                                // the same state filter (design §6.2 #2).
+                                .filter(|t| self.tool_registry.extension_is_available(t))
+                                .map(|t| t.definition.clone())
                                 .collect()
                         } else {
                             tool_defs
@@ -220,13 +216,17 @@ impl Orchestrator {
                 tool_names
             );
 
-            // Lowercased: `check_agent_capability` lowercases the tool name
-            // and expects allow-list entries pre-normalized (matters for
-            // mixed-case MCP/plugin tool names on the default surface).
-            let resolved: Vec<String> = tool_defs.iter().map(|t| t.name.to_lowercase()).collect();
             policy_opt = Some(SandboxPolicy {
                 agent_id: "orchestrator".to_string(),
-                allowed_capabilities: resolved,
+                // Closed set: the main loop may call exactly the surface it was
+                // handed (this arm only runs when that surface is non-empty).
+                // `Allowlist::only` lowercases: `check_agent_capability`
+                // lowercases the tool name and compares verbatim, which
+                // matters for mixed-case MCP/plugin names on the default
+                // surface (X-23).
+                allowed_capabilities: Allowlist::only(
+                    tool_defs.iter().map(|t| t.name.as_str()),
+                ),
                 denied_capabilities: vec![],
                 require_confirmation_for: vec![],
                 max_tool_calls: None,
@@ -516,7 +516,7 @@ impl Orchestrator {
             + composed.token_budget.dynamic_context_tokens)
             as usize;
         budget.register_section("system_prompt", system_prompt_tokens);
-        budget.register_section("tools", tools_for_loop.len() * 200);
+        budget.register_section("tools", crate::runner::estimate_tools_tokens(&tools_for_loop));
 
         let (response_content, is_structured) = if let Some(ref router) = self.llm_router {
             // The messages vec came out of the compose engine above, which

@@ -247,6 +247,13 @@ pub(super) fn finalize_task(
     outcome_summary: Option<&str>,
 ) {
     let now = chrono::Utc::now();
+    // Title comes from the in-memory registry; a DB-only task resurrected
+    // after a restart (no registry entry) falls back to "" (GAP-07).
+    let title = ctx
+        .task_registry
+        .get(task_id)
+        .map(|e| e.title)
+        .unwrap_or_default();
     if success {
         ctx.task_registry
             .update_status(task_id, crate::context::TaskEntryStatus::Completed);
@@ -267,6 +274,7 @@ pub(super) fn finalize_task(
         }
         bus.publish(crate::events::SystemEvent::TaskCompleted {
             task_id: task_id.to_string(),
+            title,
             result_summary: Some(summary.to_string()),
             outcome_kind: outcome_kind.map(|k| k.as_str().to_string()),
             artifact_count,
@@ -293,6 +301,7 @@ pub(super) fn finalize_task(
         }
         bus.publish(crate::events::SystemEvent::TaskFailed {
             task_id: task_id.to_string(),
+            title,
             error: summary.to_string(),
             outcome_kind: outcome_kind.map(|k| k.as_str().to_string()),
             timestamp: now,
@@ -318,9 +327,20 @@ pub(super) fn completion_status_line(
 }
 
 /// Persist a task result as a conversation message.
-/// `pub(crate)` so the lead-agent `post_update` tool can reuse it.
+///
+/// `pub` — re-exported from `orchestrator::dispatcher` — because the lead
+/// agent's `post_update` tool and the daemon's `NotificationDispatcher` both
+/// reuse it: T1 step 3's cron notice is written to the default lane through
+/// exactly this call (extension design §7.3 step 2).
+///
+/// Two things about the arguments, stated so nobody re-derives them: the
+/// `source` argument is the **column**, not the role — `role` is hardcoded
+/// `"assistant"` below, which is why the row renders (the GUI transcript skips
+/// only `role === "system"`) — and it should be the lane's own source, because
+/// `get_or_create_conversation` creates a missing conversation with whatever
+/// `source` it is handed.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn persist_conversation(
+pub fn persist_conversation(
     db: &openalpaca_storage::Database,
     lane_key: &str,
     source: &str,

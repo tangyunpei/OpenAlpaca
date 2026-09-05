@@ -1,12 +1,18 @@
 //! Plugin command — list, approve, deny, enable, disable, info, config
+//!
+//! **Re-pointed at `/v1/extensions` in C6** (extension design §8). The verbs
+//! keep their names but their meanings are now the design's: `enable` no longer
+//! records consent and `deny` performs a full unload. `openalpaca ext` is the
+//! surface that also covers MCP; this one stays as the plugin-shaped shortcut.
 
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use colored::Colorize;
-use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::client::DaemonClient;
-use crate::output::{OutputFormat, TableRow, print_list, status_color};
+use crate::commands::ext::{ExtensionRow, fetch_rows, print_row};
+use crate::output::{OutputFormat, print_list, print_table_header};
 
 #[derive(Args)]
 pub struct PluginArgs {
@@ -72,110 +78,38 @@ pub enum ConfigAction {
     },
 }
 
-// ── Local deserialization structs ────────────────────────────────
-
-#[derive(Debug, Serialize, Deserialize)]
-struct PluginItem {
-    name: String,
-    version: String,
-    status: String,
-    #[serde(default)]
-    tools: Vec<String>,
-}
-
-impl TableRow for PluginItem {
-    fn headers() -> Vec<(&'static str, usize)> {
-        vec![
-            ("NAME", 20),
-            ("VERSION", 12),
-            ("STATUS", 20),
-            ("TOOLS", 30),
-        ]
-    }
-
-    fn table_row(&self) -> String {
-        let tools = if self.tools.is_empty() {
-            "-".to_string()
-        } else {
-            self.tools.join(", ")
-        };
-
-        format!(
-            "{:<20} {:<12} {:<20} {:<30}",
-            truncate(&self.name, 18),
-            truncate(&self.version, 10),
-            status_color(&self.status),
-            truncate(&tools, 28),
-        )
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}...", &s[..max.saturating_sub(3)])
-    } else {
-        s.to_string()
-    }
-}
-
 // ── Command runner ───────────────────────────────────────────────
 
 pub async fn run(args: PluginArgs) -> Result<()> {
     match args.command {
         PluginCommands::List { format } => list_plugins(format).await,
-        PluginCommands::Approve { name } => plugin_action(&name, "approve").await,
-        PluginCommands::Deny { name } => plugin_action(&name, "deny").await,
-        PluginCommands::Enable { name } => plugin_action(&name, "enable").await,
-        PluginCommands::Disable { name } => plugin_action(&name, "disable").await,
+        PluginCommands::Approve { name } => crate::commands::ext::verb("plugin", &name, "approve").await,
+        PluginCommands::Deny { name } => crate::commands::ext::verb("plugin", &name, "deny").await,
+        PluginCommands::Enable { name } => crate::commands::ext::verb("plugin", &name, "enable").await,
+        PluginCommands::Disable { name } => crate::commands::ext::verb("plugin", &name, "disable").await,
         PluginCommands::Info { name } => plugin_info(&name).await,
         PluginCommands::Config { name, action } => plugin_config(&name, action).await,
     }
 }
 
+/// `GET /v1/extensions`, filtered to plugins.
+async fn plugin_rows() -> Result<Vec<ExtensionRow>> {
+    let mut rows = fetch_rows(true).await?;
+    rows.retain(|row| row.kind == "plugin");
+    Ok(rows)
+}
+
 async fn list_plugins(format: OutputFormat) -> Result<()> {
-    let client = DaemonClient::connect()?;
-    let plugins: Vec<PluginItem> = client.get("/v1/plugins").await?;
+    let plugins = plugin_rows().await?;
     print_list(&plugins, format);
     Ok(())
 }
 
-async fn plugin_action(name: &str, action: &str) -> Result<()> {
-    let client = DaemonClient::connect()?;
-    let body = serde_json::json!({});
-    let result: serde_json::Value = client
-        .post(&format!("/v1/plugins/{}/{}", name, action), &body)
-        .await?;
-
-    let status = result["status"].as_str().unwrap_or("unknown");
-    println!("{} Plugin {} -> {}", "ok".green(), name, status_color(status));
-    Ok(())
-}
-
 async fn plugin_info(name: &str) -> Result<()> {
-    let client = DaemonClient::connect()?;
-    let plugins: Vec<PluginItem> = client.get("/v1/plugins").await?;
-
-    match plugins.iter().find(|p| p.name == name) {
-        Some(plugin) => {
-            println!("{} {}", "Name:".dimmed(), plugin.name);
-            println!("{} {}", "Version:".dimmed(), plugin.version);
-            println!("{} {}", "Status:".dimmed(), status_color(&plugin.status));
-            if plugin.tools.is_empty() {
-                println!("{} -", "Tools:".dimmed());
-            } else {
-                println!("{}", "Tools:".dimmed());
-                for tool in &plugin.tools {
-                    println!("  - {}", tool);
-                }
-            }
-        }
-        None => {
-            println!(
-                "{} Plugin '{}' not found",
-                "error:".red(),
-                name
-            );
-        }
+    let plugins = plugin_rows().await?;
+    match plugins.iter().find(|p| p.id == name) {
+        Some(plugin) => print_row(plugin),
+        None => println!("{} Plugin '{}' not found", "error:".red(), name),
     }
     Ok(())
 }
@@ -200,7 +134,7 @@ async fn plugin_config(name: &str, action: ConfigAction) -> Result<()> {
 
             let body = serde_json::json!({ "key": key, "value": json_value });
             let _result: serde_json::Value = client
-                .post(&format!("/v1/plugins/{}/config", name), &body)
+                .post(&format!("/v1/extensions/plugin/{}/config", name), &body)
                 .await?;
 
             println!(
@@ -211,27 +145,38 @@ async fn plugin_config(name: &str, action: ConfigAction) -> Result<()> {
                 value,
             );
         }
+        // Backed by the redacting `GET` added in C6: a value stored as a secret
+        // reference reads `<redacted>` here and nowhere reads it in the clear.
         ConfigAction::Get { key } => {
-            // Config get is not a separate API endpoint — it would need a GET
-            // endpoint. For now, show plugin info which includes status.
-            // The plugin config is managed server-side; the CLI set command
-            // is the primary interaction pattern.
-            println!(
-                "{} Plugin config viewing is managed via the plugin directory.",
-                "info:".dimmed()
-            );
-            if let Some(ref k) = key {
-                println!(
-                    "  To view key '{}' for plugin '{}', check ~/.openalpaca/plugins/.config/{}.toml",
-                    k, name, name
-                );
-            } else {
-                println!(
-                    "  To view config for plugin '{}', check ~/.openalpaca/plugins/.config/{}.toml",
-                    name, name
-                );
+            let config: BTreeMap<String, serde_json::Value> = client
+                .get(&format!("/v1/extensions/plugin/{}/config", name))
+                .await?;
+
+            match key {
+                Some(key) => match config.get(&key) {
+                    Some(value) => println!("{} = {}", key, render_value(value)),
+                    None => println!("{} '{}' is not set", "info:".dimmed(), key),
+                },
+                None if config.is_empty() => {
+                    println!("{}", "No configuration set.".dimmed());
+                }
+                None => {
+                    print_table_header(&[("KEY", 28), ("VALUE", 40)]);
+                    for (key, value) in &config {
+                        println!("{:<28} {:<40}", key, render_value(value));
+                    }
+                }
             }
         }
     }
     Ok(())
+}
+
+/// A config value as one line. A string prints bare; anything else prints as
+/// compact JSON, so a redaction marker and a nested table are both legible.
+fn render_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
 }

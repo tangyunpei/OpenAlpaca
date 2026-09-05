@@ -198,5 +198,73 @@ fn test_empty_results() {
 #[test]
 fn test_schema_version() {
     let db = setup_db();
-    assert_eq!(db.schema_version().unwrap(), 34);
+    assert_eq!(db.schema_version().unwrap(), 35);
+}
+
+fn call_log_for_task(task_id: &str, cost_usd: f64) -> LlmCallLog {
+    LlmCallLog {
+        id: None,
+        timestamp: Utc::now(),
+        agent_id: Some("orchestrator".to_string()),
+        task_id: Some(task_id.to_string()),
+        provider: "anthropic".to_string(),
+        model: "claude-sonnet-4-5-20250929".to_string(),
+        key_id: None,
+        input_tokens: 10,
+        output_tokens: 5,
+        cost_usd,
+        status: "success".to_string(),
+        latency_ms: Some(100),
+        error_message: None,
+    }
+}
+
+#[test]
+fn test_cost_for_tasks_sums_multiple_calls_per_task() {
+    let db = setup_db();
+    let repo = LlmUsageRepository::new(&db);
+
+    repo.insert_call_log(&call_log_for_task("task1", 0.01)).unwrap();
+    repo.insert_call_log(&call_log_for_task("task1", 0.02)).unwrap();
+    repo.insert_call_log(&call_log_for_task("task2", 0.05)).unwrap();
+    // A call with no task_id must not leak into either total.
+    repo.insert_call_log(&LlmCallLog {
+        task_id: None,
+        ..call_log_for_task("unused", 99.0)
+    })
+    .unwrap();
+
+    let costs = repo
+        .cost_for_tasks(&["task1".to_string(), "task2".to_string()])
+        .unwrap();
+
+    assert_eq!(costs.len(), 2);
+    assert!((costs["task1"] - 0.03).abs() < 1e-9);
+    assert!((costs["task2"] - 0.05).abs() < 1e-9);
+}
+
+#[test]
+fn test_cost_for_tasks_omits_tasks_with_no_logged_cost() {
+    let db = setup_db();
+    let repo = LlmUsageRepository::new(&db);
+
+    repo.insert_call_log(&call_log_for_task("task1", 0.01)).unwrap();
+
+    let costs = repo
+        .cost_for_tasks(&["task1".to_string(), "task-with-no-calls".to_string()])
+        .unwrap();
+
+    assert_eq!(costs.len(), 1);
+    assert!(costs.contains_key("task1"));
+    assert!(!costs.contains_key("task-with-no-calls"));
+}
+
+#[test]
+fn test_cost_for_tasks_empty_input_returns_empty_map_without_querying() {
+    let db = setup_db();
+    let repo = LlmUsageRepository::new(&db);
+    repo.insert_call_log(&call_log_for_task("task1", 0.01)).unwrap();
+
+    let costs = repo.cost_for_tasks(&[]).unwrap();
+    assert!(costs.is_empty());
 }

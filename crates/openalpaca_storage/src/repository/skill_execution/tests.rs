@@ -193,3 +193,54 @@ fn test_all_skill_health_empty() {
     let health = repo.all_skill_health().unwrap();
     assert!(health.is_empty());
 }
+
+/// **`invocations_today` counts from an instant, not from a calendar day.**
+///
+/// `GET /v1/tools` passes local midnight already converted to UTC (the column
+/// is `datetime('now')` text, i.e. UTC), so the predicate has to be a plain
+/// text comparison against that instant: rows before it are excluded, rows at
+/// or after it are counted, and the grouping is per tool name.
+#[test]
+fn test_tool_invocations_since_counts_from_the_instant() {
+    let db = setup_db();
+    let repo = SkillExecutionRepository::new(&db);
+
+    // Two rows either side of a known instant, plus one exactly on it and a
+    // second tool, all with explicit UTC timestamps in the column's own format.
+    let rows = [
+        ("web_fetch", "2026-09-04 21:59:59"), // one second before — excluded
+        ("web_fetch", "2026-09-04 22:00:00"), // exactly on it — counted
+        ("web_fetch", "2026-09-05 03:14:00"),
+        ("shell", "2026-09-04 12:00:00"), // yesterday — excluded
+        ("shell", "2026-09-05 01:00:00"),
+    ];
+    db.with_connection(|conn| {
+        for (tool, ts) in &rows {
+            conn.execute(
+                "INSERT INTO tool_execution_log (request_id, agent_id, tool_name, success, duration_ms, timestamp)
+                 VALUES ('req', 'orchestrator', ?1, 1, 10, ?2)",
+                rusqlite::params![tool, ts],
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+
+    let counts = repo
+        .tool_invocations_since("2026-09-04 22:00:00")
+        .unwrap();
+    assert_eq!(
+        counts.get("web_fetch"),
+        Some(&2),
+        "the row one second before the instant must not be counted: {counts:?}"
+    );
+    assert_eq!(
+        counts.get("shell"),
+        Some(&1),
+        "counts are per tool name: {counts:?}"
+    );
+
+    // Nothing at all after the newest row: an empty map, not an error.
+    let none = repo.tool_invocations_since("2026-09-06 00:00:00").unwrap();
+    assert!(none.is_empty(), "{none:?}");
+}

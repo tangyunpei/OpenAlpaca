@@ -36,5 +36,12 @@ pub struct AppState {
     pub daemon_config_path: PathBuf,
     pub web_search_config: Arc<ArcSwap<openalpaca_llm::WebSearchConfig>>,
     pub confirmation_broker: Option<Arc<ConfirmationBroker>>,
-    pub plugin_manager: Option<Arc<openalpaca_plugins::PluginManager>>,
+    /// GAP-18's read path: `GET /v1/tools` renders the live registry. Cloned
+    /// **before** the registry moves into `Orchestrator::new` (`main.rs`), the
+    /// way the plugin manager's clone already is.
+    pub tool_registry: Arc<openalpaca_core::tools::ToolRegistry>,
+    /// The ENABLE axis (extension design §6.2 #15). Non-optional: both
+    /// supervisors are constructed unconditionally, so no "subsystem absent"
+    /// path exists to report and `/v1/extensions` has no `503`.
+    pub extensions: Arc<crate::managers::extensions::Extensions>,
 }

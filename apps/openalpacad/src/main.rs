@@ -42,15 +42,24 @@ use openalpaca_core::{
     orchestrator::Orchestrator,
     runner::LoopConfig,
 };
-use openalpaca_storage::{Database, discovery, paths};
+use openalpaca_storage::{Database, discovery, store};
 use openalpaca_wake::manager::WakeManager;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
+
+/// How long graceful shutdown gets before the process is forced out.
+///
+/// It is the only bound the whole shutdown sequence has, which is why
+/// [`Extensions::shutdown_all`](crate::managers::extensions::Extensions::shutdown_all)
+/// derives its sweep budget from what is left of it rather than from a literal
+/// of its own.
+const FORCE_EXIT_GRACE: Duration = Duration::from_secs(10);
 
 fn main() -> Result<()> {
     // Initialize logging (before tokio, so resolve_config_base_dir() can use tracing)
@@ -66,9 +75,14 @@ fn main() -> Result<()> {
 
     info!("OpenAlpaca Daemon starting...");
 
-    // Migrate legacy app dir (com.openalpaca.OpenAlpaca → OpenAlpaca) before
-    // acquiring the singleton lock, since the lock file lives inside app_dir.
-    paths::migrate_legacy_app_dir();
+    // D1: everything lives under ~/.openalpaca. Seed the home store, then move
+    // any legacy app dir into it — before acquiring the singleton lock, since
+    // the lock file itself moves and the database must not be open mid-rename.
+    if let Err(e) = store::ensure_store(&store::StoreScope::Home) {
+        error!("FATAL: cannot create the OpenAlpaca home store: {e:#}");
+        std::process::exit(1);
+    }
+    store::migrate::move_app_root();
 
     // D3: Singleton lock FIRST — prevents all multi-process races.
     // Acquired before any config I/O or key generation.
@@ -96,37 +110,12 @@ fn main() -> Result<()> {
         );
     }
 
-    // D1: Master key always at app_dir (canonical, CWD-independent).
-    let app_dir = paths::app_dir().context("Failed to get app dir")?;
-
-    // Legacy migration: if config_base_dir/.master_key exists but app_dir/.master_key doesn't,
-    // copy legacy key to app_dir using atomic create-new.
-    let legacy_key_path = config_base_dir.join(".master_key");
-    if legacy_key_path.exists()
-        && !app_dir.join(".master_key").exists()
-        && let Ok(hex) = std::fs::read_to_string(&legacy_key_path)
-    {
-        std::fs::create_dir_all(&app_dir).ok();
-        // Atomic copy: if another process beat us, that's fine
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(app_dir.join(".master_key"))
-        {
-            use std::io::Write;
-            let _ = f.write_all(hex.trim().as_bytes());
-            let _ = f.flush();
-            let _ = f.sync_all();
-        }
-        info!(
-            "Migrated legacy master key from {} to {}",
-            legacy_key_path.display(),
-            app_dir.join(".master_key").display()
-        );
-    }
+    // D1: master key always in the state dir (canonical, CWD-independent); the
+    // mover owns relocating an existing one.
+    let master_key_dir = store::master_key_dir().context("Failed to resolve the state dir")?;
 
     // D6+D7: ensure_at is race-safe; on failure, fail fast.
-    match openalpaca_llm::key_encryption::KeyEncryptor::ensure_at(&app_dir) {
+    match openalpaca_llm::keys::key_encryption::KeyEncryptor::ensure_at(&master_key_dir) {
         Ok(hex_key) => {
             // SAFETY: No other threads exist yet — tokio runtime has not started.
             unsafe {
@@ -134,13 +123,13 @@ fn main() -> Result<()> {
             }
             info!(
                 "Master key loaded from {}",
-                app_dir.join(".master_key").display()
+                master_key_dir.join(".master_key").display()
             );
         }
         Err(e) => {
             error!(
                 "FATAL: Cannot ensure master key at {}: {e}",
-                app_dir.display()
+                master_key_dir.display()
             );
             std::process::exit(1);
         }
@@ -183,10 +172,12 @@ async fn async_main(
     let token = disc.auth.token.clone();
 
     // Step 3: Initialize database
-    let db_path = paths::database_path()?;
+    let db_path = store::database_path()?;
     let db = Database::open(&db_path).context("Failed to initialize database")?;
     info!("Database initialized: {}", db_path.display());
-    bootstrap::migrate_preference_summaries(&db);
+    // Repairs the absolute file_asset paths the root move broke. Idempotent:
+    // matches zero rows on every boot after the first.
+    store::migrate::rebase_asset_paths(&db);
     // Routing V2 Phase 3: fail all orphaned (non-terminal) tasks from the
     // previous daemon generation. MUST stay here — after the DB opens and
     // before any ingress starts (WakeManager::start in Step 8,
@@ -268,6 +259,14 @@ async fn async_main(
     if daemon_config_path.exists() {
         watch_paths.push(daemon_config_path.clone());
     }
+    // `mcp.toml` is the MCP declaration **and** the toggle store (extension
+    // design §5), so a hand edit to it is authoritative: edge case 15's reload
+    // arm reconciles from it. `seed_default_configs` seeds the file, so the
+    // `exists()` guard here is satisfied on a fresh install too.
+    let mcp_config_path = config_base_dir.join("mcp.toml");
+    if mcp_config_path.exists() {
+        watch_paths.push(mcp_config_path.clone());
+    }
     if soul_path.exists() {
         watch_paths.push(soul_path.clone());
     }
@@ -312,8 +311,13 @@ async fn async_main(
         &user_path,
         &identity_path,
         &cancel_token,
+        &default_lane_key,
     )
     .await?;
+
+    // The MCP supervisor is parked on the services bundle between C2 and C6:
+    // the file watcher and the shutdown path both reach it from here.
+    let mcp_supervisor = svcs.mcp_supervisor.clone();
 
     // Verify critical tool registered
     if svcs.tool_registry.get("update_persona").is_none() {
@@ -328,9 +332,7 @@ async fn async_main(
     let cost_tracker_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
     // Initialize PluginManager
-    let plugin_dir = paths::app_dir()?.join("plugins");
-    std::fs::create_dir_all(&plugin_dir).ok();
-    let eb_for_plugins = event_broadcaster.clone();
+    let plugin_dir = store::plugins_dir()?;
     let plugin_manager = Arc::new(
         openalpaca_plugins::PluginManager::new(
             plugin_dir,
@@ -338,13 +340,38 @@ async fn async_main(
             Some(svcs.skill_catalog.clone()),
             Some(svcs.shared_context.agent_registry.clone()),
         )
-        // Wire lifecycle events (ServerEvent::Plugin*) to the WS broadcaster
-        // so clients like the GUI plugin panel live-update.
-        .with_event_sink(Arc::new(move |event| eb_for_plugins.broadcast(event))),
+        // T5/E5 publish `SystemEvent::ExtensionStateChanged` here, which the
+        // event bridge forwards to the `ServerEvent` peer C2 added
+        // (extension design §7.3) — the only lifecycle events there are since
+        // C7 deleted the six `plugin_*` variants and the sink that fed them.
+        // `mark_failed`'s own `failed` event moved onto the ledger's bus in C4
+        // (§3.6); the supervisor keeps the rest.
+        .with_event_bus(bus.clone())
+        // T1 step 3's cron notice is written to the default lane (§7.3 step 1).
+        .with_notice_lane(default_lane_key.clone())
+        // `[extensions] drain_timeout_secs` bounds T3.
+        .with_daemon_config(daemon_config.clone())
+        // Without this the `secret_ref` half of a sensitive config key cannot
+        // be resolved and the plugin parks at `Failed{NeedsConfig}` reporting a
+        // key that *is* set (extension design §8, X-29).
+        .with_secret_store(svcs.secret_store.clone()),
     );
+    // The crash reaper: one sequential task draining `mark_failed`'s channel
+    // (extension design §3.6). Started before the scan, so a plugin that dies
+    // during boot is reaped.
+    plugin_manager.spawn_reaper();
     if let Err(e) = plugin_manager.start().await {
         warn!("plugin manager startup: {e}");
     }
+
+    // The ENABLE axis's one handle (extension design §6.2 #15): the routes, the
+    // CLI and the shutdown path all reach both supervisors through it.
+    let extensions = crate::managers::extensions::Extensions::new(
+        mcp_supervisor.clone(),
+        plugin_manager.clone(),
+        daemon_config.clone(),
+    );
+    let extensions_for_shutdown = extensions.clone();
 
     // Step 10: Create ConfirmationBroker and construct Orchestrator
     let confirmation_broker = Arc::new(openalpaca_core::security::confirmation::ConfirmationBroker::new());
@@ -361,6 +388,13 @@ async fn async_main(
             ..LoopConfig::default()
         }
     };
+
+    // Cloned **before** the move into `Orchestrator::new`: the file watcher's
+    // cron arm needs it for the scheduled-skill availability check
+    // (extension design §6.2 #13), and `AppState.tool_registry` is GAP-18's
+    // read path for `GET /v1/tools` (§6.2 #15).
+    let tool_registry_for_watcher = svcs.tool_registry.clone();
+    let tool_registry_for_state = svcs.tool_registry.clone();
 
     let orchestrator = Arc::new(Orchestrator::new(
         svcs.shared_context.clone(),
@@ -433,6 +467,7 @@ async fn async_main(
             bootstrap_path: bootstrap_path.clone(),
             llm_config_path: llm_config_path.clone(),
             daemon_config_path: daemon_config_path.clone(),
+            mcp_config_path: mcp_config_path.clone(),
             skills_dir,
             agents_dir,
             orchestrator: orchestrator.clone(),
@@ -440,9 +475,11 @@ async fn async_main(
             llm_router: llm_router_for_reload,
             secret_store: svcs.secret_store,
             skill_catalog: svcs.skill_catalog,
+            tool_registry: tool_registry_for_watcher,
             daemon_config: daemon_config.clone(),
             web_search_config: web_search_config_for_reload,
             bus: bus.clone(),
+            mcp_supervisor: mcp_supervisor.clone(),
             fs_watch_handle,
             gateway: gateway.clone(),
             wake_manager: wake_manager.clone(),
@@ -610,7 +647,8 @@ async fn async_main(
         daemon_config_path,
         web_search_config: svcs.web_search_config,
         confirmation_broker: Some(confirmation_broker),
-        plugin_manager: Some(plugin_manager),
+        tool_registry: tool_registry_for_state,
+        extensions: extensions.clone(),
     });
 
     let app = router::build_router(state);
@@ -639,12 +677,21 @@ async fn async_main(
         cancel_for_server.cancel();
     });
 
-    // Force-exit watchdog: if graceful shutdown takes too long, exit the process.
+    // Force-exit watchdog: if graceful shutdown takes too long, exit the
+    // process. The instant it starts counting is published so the extension
+    // sweep can bound itself by what is *left* of the window rather than by a
+    // literal of its own.
+    let force_exit_at: Arc<OnceLock<Instant>> = Arc::new(OnceLock::new());
     let watchdog_cancel = cancel_token.clone();
+    let watchdog_deadline = force_exit_at.clone();
     tokio::spawn(async move {
         watchdog_cancel.cancelled().await;
-        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-        warn!("Graceful shutdown timed out after 10s, forcing exit");
+        let _ = watchdog_deadline.set(Instant::now() + FORCE_EXIT_GRACE);
+        tokio::time::sleep(FORCE_EXIT_GRACE).await;
+        warn!(
+            "Graceful shutdown timed out after {}s, forcing exit",
+            FORCE_EXIT_GRACE.as_secs()
+        );
         std::process::exit(1);
     });
 
@@ -656,6 +703,20 @@ async fn async_main(
     if let Some(ref router) = llm_router_for_shutdown {
         services::flush_cost_tracker(router, &db_for_shutdown, &cost_tracker_date).await;
     }
+
+    // Close every live MCP connection and every plugin child. Nothing tore
+    // either down before: rmcp kills its child from a `Drop` guard that does not
+    // fire on `process::exit`, and `kill_on_drop` does not either (extension
+    // design §3.5). `Extensions::shutdown_all` bounds the sweep, so a busy
+    // server cannot hold the exit open indefinitely.
+    info!("Shutting down extensions...");
+    // What is left of the force-exit window. Unset means the watchdog has not
+    // observed the cancellation yet, so nothing has been spent.
+    let window = force_exit_at
+        .get()
+        .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+        .unwrap_or(FORCE_EXIT_GRACE);
+    extensions_for_shutdown.shutdown_all(window).await;
 
     // Shutdown connectors
     info!("Shutting down connectors...");

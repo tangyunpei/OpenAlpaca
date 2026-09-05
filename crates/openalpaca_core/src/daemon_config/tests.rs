@@ -109,7 +109,6 @@ fn test_skill_defaults_new_fields_default() {
     let sd = &config.execution.skill_defaults;
     assert_eq!(sd.max_rounds, 6);
     assert_eq!(sd.max_tools_per_round, 3);
-    assert!(sd.global_tool_deny.is_empty());
     assert!((sd.router_auto_select_threshold - 0.65).abs() < f64::EPSILON);
     assert!((sd.router_suggest_threshold - 0.45).abs() < f64::EPSILON);
 }
@@ -119,14 +118,12 @@ fn test_skill_defaults_from_toml() {
     let toml_str = r#"
 [execution.skill_defaults]
 max_rounds = 10
-global_tool_deny = ["shell_command", "file_delete"]
 router_auto_select_threshold = 0.8
 router_suggest_threshold = 0.5
 "#;
     let config: DaemonConfig = toml::from_str(toml_str).unwrap();
     let sd = &config.execution.skill_defaults;
     assert_eq!(sd.max_rounds, 10);
-    assert_eq!(sd.global_tool_deny, vec!["shell_command", "file_delete"]);
     assert!((sd.router_auto_select_threshold - 0.8).abs() < f64::EPSILON);
     assert!((sd.router_suggest_threshold - 0.5).abs() < f64::EPSILON);
 }
@@ -143,8 +140,6 @@ max_tools_per_round = 5
     let sd = &config.execution.skill_defaults;
     assert_eq!(sd.max_rounds, 8);
     assert_eq!(sd.max_tools_per_round, 5);
-    // New fields have defaults
-    assert!(sd.global_tool_deny.is_empty());
 }
 
 #[test]
@@ -345,4 +340,30 @@ fn test_routing_validate_clamps() {
     assert_eq!(config.orchestrator.routing.main_loop_max_rounds, 1);
     assert_eq!(config.orchestrator.routing.main_loop_max_tools_per_round, 50);
     assert_eq!(config.orchestrator.routing.tool_selection, "core_union");
+}
+
+/// A hand-edited `daemon.toml` still carrying the purged
+/// `execution.skill_defaults.global_tool_deny` key loads clean — the key is
+/// ignored (and the loader warns once), and every other key in the file is
+/// honoured (extension design §11.1).
+#[test]
+fn test_removed_deny_key_is_ignored_and_file_still_loads() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("daemon.toml");
+    std::fs::write(
+        &path,
+        r#"
+[execution.skill_defaults]
+max_rounds = 9
+global_tool_deny = ["srv__blocked"]
+
+[extensions]
+drain_timeout_secs = 7
+"#,
+    )
+    .unwrap();
+
+    let config = load_daemon_config(&path);
+    assert_eq!(config.execution.skill_defaults.max_rounds, 9);
+    assert_eq!(config.extensions.drain_timeout_secs, 7);
 }

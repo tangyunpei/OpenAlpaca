@@ -60,6 +60,7 @@ impl EventBroadcaster {
                 // Log task status changes
                 ServerEvent::TaskStatus {
                     task_id,
+                    title,
                     status,
                     progress_current,
                     progress_total,
@@ -71,6 +72,7 @@ impl EventBroadcaster {
                 } => {
                     let detail = serde_json::json!({
                         "task_id": task_id,
+                        "title": title,
                         "status": status,
                         "progress_current": progress_current,
                         "progress_total": progress_total,
@@ -353,65 +355,73 @@ impl EventBroadcaster {
                     });
                     repo.log("followup_queued", None, Some(&detail), None)
                 }
-                // Plugin lifecycle events
-                ServerEvent::PluginLoaded {
-                    plugin_id, tools, ..
-                } => {
-                    let detail = serde_json::json!({
-                        "plugin_id": plugin_id,
-                        "tools": tools
-                    });
-                    repo.log("plugin_loaded", None, Some(&detail), None)
-                }
-                ServerEvent::PluginUnloaded { plugin_id, .. } => {
-                    let detail = serde_json::json!({
-                        "plugin_id": plugin_id
-                    });
-                    repo.log("plugin_unloaded", None, Some(&detail), None)
-                }
-                ServerEvent::PluginCrashed {
-                    plugin_id,
-                    error,
-                    restart_in_secs,
+                // Extension (MCP server / plugin) state transitions
+                ServerEvent::ExtensionStateChanged {
+                    kind,
+                    id,
+                    state,
+                    generation,
+                    tools_changed,
                     ..
                 } => {
                     let detail = serde_json::json!({
-                        "plugin_id": plugin_id,
-                        "error": error,
-                        "restart_in_secs": restart_in_secs
+                        "kind": kind,
+                        "id": id,
+                        "state": state,
+                        "generation": generation,
+                        "tools_changed": tools_changed,
                     });
-                    repo.log("plugin_crashed", None, Some(&detail), None)
+                    repo.log("extension_state_changed", None, Some(&detail), None)
                 }
-                ServerEvent::PluginDisabled {
-                    plugin_id, reason, ..
+                // S4 moment 1/2 — a withheld capability (already deduped)
+                ServerEvent::ExtensionCapabilityWithheld {
+                    kind,
+                    id,
+                    subject,
+                    moment,
+                    state,
+                    scope,
+                    stale,
+                    ..
                 } => {
                     let detail = serde_json::json!({
-                        "plugin_id": plugin_id,
-                        "reason": reason
+                        "kind": kind,
+                        "id": id,
+                        "subject": subject,
+                        "moment": moment,
+                        "state": state,
+                        "scope": scope,
+                        "stale": stale,
                     });
-                    repo.log("plugin_disabled", None, Some(&detail), None)
+                    repo.log("extension_capability_withheld", None, Some(&detail), None)
                 }
-                ServerEvent::PluginPendingApproval {
-                    plugin_id,
+                // S4 moment 3 — T1 step 3's dependent scan, one per transition
+                ServerEvent::ExtensionCapabilityWithdrawn {
+                    kind,
+                    id,
+                    state,
+                    cause,
                     capabilities,
+                    tools,
+                    affected_templates,
+                    affected_skills,
+                    affected_cron_skills,
+                    notice_lane,
                     ..
                 } => {
                     let detail = serde_json::json!({
-                        "plugin_id": plugin_id,
-                        "capabilities": capabilities
+                        "kind": kind,
+                        "id": id,
+                        "state": state,
+                        "cause": cause,
+                        "capabilities": capabilities,
+                        "tools": tools,
+                        "affected_templates": affected_templates,
+                        "affected_skills": affected_skills,
+                        "affected_cron_skills": affected_cron_skills,
+                        "notice_lane": notice_lane,
                     });
-                    repo.log("plugin_pending_approval", None, Some(&detail), None)
-                }
-                ServerEvent::PluginNeedsConfig {
-                    plugin_id,
-                    missing_keys,
-                    ..
-                } => {
-                    let detail = serde_json::json!({
-                        "plugin_id": plugin_id,
-                        "missing_keys": missing_keys
-                    });
-                    repo.log("plugin_needs_config", None, Some(&detail), None)
+                    repo.log("extension_capability_withdrawn", None, Some(&detail), None)
                 }
             };
             if let Err(e) = persist_result {

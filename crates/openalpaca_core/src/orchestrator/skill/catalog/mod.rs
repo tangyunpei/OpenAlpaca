@@ -56,8 +56,32 @@ pub struct SkillEntry {
     pub source: SkillSource,
 }
 
-/// Cached catalog summary: `(name, description, command)` tuples.
-type CatalogSummaryCache = RwLock<Option<Vec<(String, String, Option<String>)>>>;
+/// Cached catalog summary row. The skill **id** rides along so the
+/// availability filter (design §6.2 #12) can re-test each row against the
+/// oracle on every read: the cache is invalidated by catalog mutations, and an
+/// extension toggle is not one.
+#[derive(Clone)]
+struct CatalogSummaryRow {
+    id: String,
+    name: String,
+    description: String,
+    command: Option<String>,
+}
+
+/// Cached catalog summary.
+type CatalogSummaryCache = RwLock<Option<Vec<CatalogSummaryRow>>>;
+
+/// What a plugin used to contribute, kept after T2 withdrew it so `/slash` and
+/// `invoke_skill` can answer *"skill 'x' is provided by plugin 'notion', which
+/// is disabled"* instead of *"unknown skill"* plus a dump of every catalog name
+/// (design §10 case 5(a)).
+#[derive(Debug, Clone)]
+pub struct SkillTombstone {
+    /// The lowercased skill id the entry was removed under.
+    pub skill_id: String,
+    /// The plugin directory name — the ledger key its state is read from.
+    pub plugin_id: String,
+}
 
 /// Central skill catalog — lightweight at startup, loads full content on demand.
 ///
@@ -76,6 +100,17 @@ pub struct SkillCatalog {
     bus: Option<EventBus>,
     /// Cached catalog summary — invalidated on mutation (Opt-8a).
     cached_summary: CatalogSummaryCache,
+    /// The ENABLE axis's availability question (design §6.2 #12). `SkillRouter`
+    /// takes only `(&str, &SkillCatalog)` and has no registry handle, so the
+    /// catalog carries the oracle for it, for `catalog_summary` and for the
+    /// `invoke_skill` listing. `None` — every test catalog, and the window
+    /// before the registry exists — means *everything is available*, which is
+    /// the same fail-open the ledger takes for an unrecorded extension (§6.2a).
+    availability_oracle: RwLock<Option<Arc<dyn crate::tools::registry::CapabilityOracle>>>,
+    /// Withdrawn plugin contributions, keyed by the lowercased skill id **and**
+    /// by the slash command and aliases captured before `remove` scrubbed the
+    /// indices (design §10 case 5(a)).
+    tombstones: RwLock<HashMap<String, SkillTombstone>>,
 }
 
 impl Default for SkillCatalog {
@@ -92,6 +127,8 @@ impl SkillCatalog {
             alias_index: RwLock::new(HashMap::new()),
             bus: None,
             cached_summary: RwLock::new(None),
+            availability_oracle: RwLock::new(None),
+            tombstones: RwLock::new(HashMap::new()),
         }
     }
 
@@ -103,6 +140,101 @@ impl SkillCatalog {
             alias_index: RwLock::new(HashMap::new()),
             bus: Some(bus),
             cached_summary: RwLock::new(None),
+            availability_oracle: RwLock::new(None),
+            tombstones: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Install the ENABLE axis's availability oracle — `ToolRegistry`
+    /// (design §6.2 #12). Wired once, in the daemon's service bundle, as soon
+    /// as both exist.
+    pub fn set_availability_oracle(
+        &self,
+        oracle: Arc<dyn crate::tools::registry::CapabilityOracle>,
+    ) {
+        if let Ok(mut guard) = self.availability_oracle.write() {
+            *guard = Some(oracle);
+        }
+        self.invalidate_summary_cache();
+    }
+
+    /// **The one predicate** (design §10 case 3, §6.2 #12): can this skill
+    /// still reach every requirement it declares? With no oracle installed the
+    /// answer is always yes — nothing is known to have been withdrawn.
+    pub fn is_satisfiable(&self, frontmatter: &SkillFrontmatter) -> bool {
+        match self.availability_oracle.read() {
+            Ok(guard) => guard
+                .as_ref()
+                .is_none_or(|oracle| oracle.is_satisfiable(frontmatter)),
+            Err(_) => true,
+        }
+    }
+
+    /// Skill IDs whose requirements are still served — the `invoke_skill`
+    /// listing (design §6.2 #12). A skill this omits is one no `/slash` and no
+    /// `invoke_skill` would run.
+    pub fn available_names(&self) -> Vec<String> {
+        match self.entries.read() {
+            Ok(guard) => guard
+                .iter()
+                .filter(|(_, entry)| self.is_satisfiable(&entry.frontmatter))
+                .map(|(id, _)| id.clone())
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    // ── Tombstones for withdrawn plugin contributions (§10 case 5(a)) ────
+
+    /// Remove a plugin's skill and leave a tombstone behind.
+    ///
+    /// `remove` scrubs the command and alias indices, so afterwards
+    /// `get_by_command` resolves to nothing and falls through to a `get_by_id`
+    /// that also misses. The tombstone is a **separate** map — the live indices
+    /// stay scrubbed exactly as today — keyed by the lowercased id and by the
+    /// command and aliases captured *before* the removal, and consulted by the
+    /// `/slash` tier and `invoke_skill` **only on a miss**.
+    pub fn remove_plugin_skill(&self, skill_id: &str, plugin_id: &str) {
+        let key = skill_id.to_lowercase();
+        let mut keys = vec![key.clone()];
+        if let Ok(entries) = self.entries.read()
+            && let Some(entry) = entries.get(&key)
+        {
+            if let Some(cmd) = entry.frontmatter.effective_slash_command() {
+                keys.push(cmd.strip_prefix('/').unwrap_or(&cmd).to_lowercase());
+            }
+            for alias in &entry.frontmatter.invoke.aliases {
+                keys.push(alias.strip_prefix('/').unwrap_or(alias).to_lowercase());
+            }
+        }
+        self.remove(skill_id);
+        if let Ok(mut tombstones) = self.tombstones.write() {
+            for k in keys {
+                tombstones.insert(
+                    k,
+                    SkillTombstone {
+                        skill_id: key.clone(),
+                        plugin_id: plugin_id.to_string(),
+                    },
+                );
+            }
+        }
+    }
+
+    /// The tombstone for a skill id, slash command or alias, if one was left.
+    pub fn tombstone(&self, name: &str) -> Option<SkillTombstone> {
+        let key = name.strip_prefix('/').unwrap_or(name).to_lowercase();
+        self.tombstones.read().ok()?.get(&key).cloned()
+    }
+
+    /// Drop every tombstone belonging to a skill that has just come back, plus
+    /// any keyed by a command the new entry claims.
+    fn clear_tombstones(&self, skill_id: &str, commands: &[String]) {
+        let key = skill_id.to_lowercase();
+        if let Ok(mut tombstones) = self.tombstones.write() {
+            tombstones.retain(|k, tomb| {
+                tomb.skill_id != key && !commands.iter().any(|c| c == k)
+            });
         }
     }
 
@@ -293,6 +425,18 @@ impl SkillCatalog {
             }
         }
 
+        // A skill that came back invalidates its own tombstone.
+        {
+            let mut claimed: Vec<String> = new_aliases
+                .iter()
+                .map(|a| a.strip_prefix('/').unwrap_or(a).to_lowercase())
+                .collect();
+            if let Some(ref cmd) = new_slash_cmd {
+                claimed.push(cmd.strip_prefix('/').unwrap_or(cmd).to_lowercase());
+            }
+            self.clear_tombstones(&key, &claimed);
+        }
+
         // Emit lifecycle event
         if let Some(ref bus) = self.bus {
             let scope_str = match scope {
@@ -394,37 +538,72 @@ impl SkillCatalog {
 
     /// List all skills with their (name, description, command) for prompt catalog.
     /// Returns a cached copy when available; rebuilt on catalog mutations.
+    ///
+    /// **Availability-filtered** (design §6.2 #12): a skill any of whose
+    /// required capabilities is wholly withheld is dropped, so
+    /// `<available_skills>` never coaches the model toward a skill `/slash`
+    /// would refuse. The filter runs on **read**, not into the cache — the
+    /// cache is invalidated by catalog mutations, and an extension toggle is
+    /// not one.
     pub fn catalog_summary(&self) -> Vec<(String, String, Option<String>)> {
         // Fast path: return cached summary
-        if let Ok(guard) = self.cached_summary.read()
-            && let Some(ref cached) = *guard
-        {
-            return cached.clone();
-        }
-
-        // Slow path: build summary and cache it
-        let summaries = match self.entries.read() {
-            Ok(guard) => {
-                let mut summaries: Vec<(String, String, Option<String>)> = guard
-                    .values()
-                    .map(|e| {
-                        (
-                            e.frontmatter.name.clone(),
-                            e.frontmatter.description.clone(),
-                            e.frontmatter.effective_slash_command(),
-                        )
-                    })
-                    .collect();
-                summaries.sort_by(|a, b| a.0.cmp(&b.0));
-                summaries
+        let cached = {
+            let guard = self.cached_summary.read().ok();
+            guard.and_then(|g| g.clone())
+        };
+        let rows = match cached {
+            Some(rows) => rows,
+            None => {
+                // Slow path: build summary and cache it
+                let rows = match self.entries.read() {
+                    Ok(guard) => {
+                        let mut rows: Vec<CatalogSummaryRow> = guard
+                            .iter()
+                            .map(|(id, e)| CatalogSummaryRow {
+                                id: id.clone(),
+                                name: e.frontmatter.name.clone(),
+                                description: e.frontmatter.description.clone(),
+                                command: e.frontmatter.effective_slash_command(),
+                            })
+                            .collect();
+                        rows.sort_by(|a, b| a.name.cmp(&b.name));
+                        rows
+                    }
+                    Err(_) => Vec::new(),
+                };
+                if let Ok(mut cache) = self.cached_summary.write() {
+                    *cache = Some(rows.clone());
+                }
+                rows
             }
-            Err(_) => Vec::new(),
         };
 
-        if let Ok(mut cache) = self.cached_summary.write() {
-            *cache = Some(summaries.clone());
+        let to_tuple = |row: CatalogSummaryRow| (row.name, row.description, row.command);
+        if !self.has_availability_oracle() {
+            return rows.into_iter().map(to_tuple).collect();
         }
-        summaries
+
+        let unavailable: std::collections::HashSet<String> = match self.entries.read() {
+            Ok(guard) => guard
+                .iter()
+                .filter(|(_, entry)| !self.is_satisfiable(&entry.frontmatter))
+                .map(|(id, _)| id.clone())
+                .collect(),
+            Err(_) => std::collections::HashSet::new(),
+        };
+
+        rows.into_iter()
+            .filter(|row| !unavailable.contains(&row.id))
+            .map(to_tuple)
+            .collect()
+    }
+
+    /// Is an oracle installed at all? With none, nothing is known to have been
+    /// withdrawn and every availability filter is a no-op.
+    fn has_availability_oracle(&self) -> bool {
+        self.availability_oracle
+            .read()
+            .is_ok_and(|guard| guard.is_some())
     }
 
     /// Invalidate the cached catalog summary (call after any mutation).
@@ -503,6 +682,14 @@ impl SkillCatalog {
     ///
     /// Plugin skills have no filesystem path — their execution is delegated
     /// to the `PluginSkillExecutor` provided by the plugin runtime.
+    ///
+    /// **The id is lowercased at insert** (design §6.2 #14). Every reader
+    /// lowercases: `get_by_id` looks up `id.to_lowercase()` with no name
+    /// fallback, so a plugin whose `skill/info` returns a mixed-case id was
+    /// unreachable by `/slash` and by `invoke_skill`; and `remove(skill_id)`
+    /// found the verbatim entry only through its name-scan fallback, so a
+    /// plugin supplying both an id slug and a display name leaked a catalog
+    /// entry holding an executor for a killed process at every unload.
     pub fn register_plugin_skill(
         &self,
         skill_id: String,
@@ -510,6 +697,7 @@ impl SkillCatalog {
         executor: Arc<dyn openalpaca_api::plugin_traits::PluginSkillExecutor>,
         plugin_id: String,
     ) {
+        let skill_id = skill_id.to_lowercase();
         let slash_cmd = frontmatter.invoke.slash.clone();
         let aliases = frontmatter.invoke.aliases.clone();
         let entry = SkillEntry {
@@ -550,6 +738,17 @@ impl SkillCatalog {
                 let alias_lower = alias.strip_prefix('/').unwrap_or(alias).to_lowercase();
                 alias_idx.insert(alias_lower, skill_id.clone());
             }
+        }
+        // A re-enabled plugin's skill is live again — drop its tombstone.
+        {
+            let mut claimed: Vec<String> = aliases
+                .iter()
+                .map(|a| a.strip_prefix('/').unwrap_or(a).to_lowercase())
+                .collect();
+            if let Some(ref cmd) = slash_cmd {
+                claimed.push(cmd.strip_prefix('/').unwrap_or(cmd).to_lowercase());
+            }
+            self.clear_tombstones(&skill_id, &claimed);
         }
         self.invalidate_summary_cache();
     }

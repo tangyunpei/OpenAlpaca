@@ -1,8 +1,12 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use openalpaca_api::plugin_traits::{PluginSkillExecutor, ToolCallbackExecutor};
+use openalpaca_core::tools::extensions::ExtensionLedger;
 use serde_json::Value;
 use tracing::{debug, warn};
 
+use crate::bridge::LoadBinding;
 use crate::stdio_channel::StdioChannel;
 
 /// Maximum tool-callback iterations before aborting the skill invocation.
@@ -16,18 +20,33 @@ const MAX_TOOL_LOOP_ITERATIONS: usize = 20;
 /// `skill/invoke_continue`. The loop repeats until the plugin returns an
 /// empty `tool_calls` array (or no `tool_calls` field), up to
 /// [`MAX_TOOL_LOOP_ITERATIONS`].
+///
+/// It carries the load's generation for the same reason the tool proxy does
+/// (extension design §3.0 Fact 3): the run-guard at `invoke_plugin_skill`
+/// compares it to the ledger's, so a run is never started against a previous
+/// load, and a mid-run teardown surfaces as the §7.1 refusal rather than as a
+/// dead channel.
 pub struct PluginSkillBridge {
     plugin_id: String,
     skill_id: String,
     channel: StdioChannel,
+    load: LoadBinding,
 }
 
 impl PluginSkillBridge {
-    pub fn new(plugin_id: String, skill_id: String, channel: StdioChannel) -> Self {
+    pub fn new(
+        plugin_id: String,
+        skill_id: String,
+        channel: StdioChannel,
+        generation: u64,
+        ledger: Arc<ExtensionLedger>,
+    ) -> Self {
+        let load = LoadBinding::new(&plugin_id, generation, ledger);
         Self {
             plugin_id,
             skill_id,
             channel,
+            load,
         }
     }
 }
@@ -62,7 +81,7 @@ impl PluginSkillExecutor for PluginSkillBridge {
             .channel
             .call("skill/invoke", params)
             .await
-            .map_err(|e| format!("plugin {}::skill/invoke: {}", self.plugin_id, e))?;
+            .map_err(|e| self.load.describe_failure("skill/invoke", None, &e))?;
 
         // Tool callback loop
         for iteration in 0..MAX_TOOL_LOOP_ITERATIONS {
@@ -123,9 +142,10 @@ impl PluginSkillExecutor for PluginSkillBridge {
                 .call("skill/invoke_continue", continue_params)
                 .await
                 .map_err(|e| {
-                    format!(
-                        "plugin {}::skill/invoke_continue (iteration {}): {}",
-                        self.plugin_id, iteration, e
+                    self.load.describe_failure(
+                        &format!("skill/invoke_continue (iteration {iteration})"),
+                        None,
+                        &e,
                     )
                 })?;
         }
@@ -152,5 +172,9 @@ impl PluginSkillExecutor for PluginSkillBridge {
 
     fn skill_id(&self) -> &str {
         &self.skill_id
+    }
+
+    fn generation(&self) -> u64 {
+        self.load.generation()
     }
 }

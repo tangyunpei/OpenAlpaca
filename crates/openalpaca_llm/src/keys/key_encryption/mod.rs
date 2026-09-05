@@ -5,7 +5,7 @@ use aes_gcm::{
     aead::{Aead, KeyInit, OsRng, rand_core::RngCore},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const PREFIX: &str = "aes256:";
 
@@ -15,48 +15,52 @@ pub struct KeyEncryptor {
 }
 
 impl KeyEncryptor {
-    /// Load master key from env var or config file, generating if neither exists.
-    pub fn load_or_generate() -> Result<Self, String> {
-        // 1. Try env var
-        if let Ok(hex_key) = std::env::var("OPENALPACA_MASTER_KEY") {
-            let bytes = hex::decode(&hex_key)
-                .map_err(|e| format!("Invalid OPENALPACA_MASTER_KEY hex: {e}"))?;
-            if bytes.len() != 32 {
-                return Err(format!(
-                    "OPENALPACA_MASTER_KEY must be 32 bytes (64 hex chars), got {}",
-                    bytes.len()
-                ));
-            }
-            let key = *Key::<Aes256Gcm>::from_slice(&bytes);
-            return Ok(Self { key });
-        }
+    /// The encryptor for the master key in `OPENALPACA_MASTER_KEY`.
+    ///
+    /// This crate sits below `openalpaca_storage` in the dependency graph, so it
+    /// never resolves a path of its own: a process that wants a key file says
+    /// which directory holds it ([`Self::load_or_generate_at`], with
+    /// `store::master_key_dir()`). The daemon does that once in its boot
+    /// preamble and exports the key here, so everything downstream of it —
+    /// router construction, keychain migration, the settings service — reads the
+    /// same key without knowing where it lives.
+    pub fn from_env() -> Result<Self, String> {
+        Self::from_env_opt()?.ok_or_else(|| {
+            "OPENALPACA_MASTER_KEY is not set: the process must load the master key first \
+             (KeyEncryptor::load_or_generate_at(store::master_key_dir()?))"
+                .to_string()
+        })
+    }
 
-        // 2. Try key file at canonical location (app_dir)
-        let key_path = Self::key_file_path()?;
-        if key_path.exists() {
-            let hex_key = std::fs::read_to_string(&key_path)
-                .map_err(|e| format!("Failed to read master key file: {e}"))?;
-            let hex_key = hex_key.trim();
-            let bytes =
-                hex::decode(hex_key).map_err(|e| format!("Invalid master key file hex: {e}"))?;
-            if bytes.len() != 32 {
-                return Err(format!(
-                    "Master key file must contain 32 bytes, got {}",
-                    bytes.len()
-                ));
-            }
-            let key = *Key::<Aes256Gcm>::from_slice(&bytes);
-            return Ok(Self { key });
+    /// The encryptor for the master key kept in `dir`, generating one if `dir`
+    /// has none. `OPENALPACA_MASTER_KEY` still wins when it is set, so a daemon
+    /// and a CLI in the same environment agree.
+    pub fn load_or_generate_at(dir: &Path) -> Result<Self, String> {
+        if let Some(encryptor) = Self::from_env_opt()? {
+            return Ok(encryptor);
         }
+        Self::from_hex(&Self::ensure_at(dir)?, "generated master key")
+    }
 
-        // 3. Auto-generate via ensure_at
-        let dir = key_path
-            .parent()
-            .ok_or_else(|| "Cannot determine parent directory for master key".to_string())?;
-        let hex_key = Self::ensure_at(dir)?;
-        let bytes = hex::decode(&hex_key).map_err(|e| format!("Invalid generated key hex: {e}"))?;
-        let key = *Key::<Aes256Gcm>::from_slice(&bytes);
-        Ok(Self { key })
+    fn from_env_opt() -> Result<Option<Self>, String> {
+        match std::env::var("OPENALPACA_MASTER_KEY") {
+            Ok(hex_key) => Self::from_hex(&hex_key, "OPENALPACA_MASTER_KEY").map(Some),
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn from_hex(hex_key: &str, source: &str) -> Result<Self, String> {
+        let bytes =
+            hex::decode(hex_key.trim()).map_err(|e| format!("Invalid {source} hex: {e}"))?;
+        if bytes.len() != 32 {
+            return Err(format!(
+                "{source} must be 32 bytes (64 hex chars), got {}",
+                bytes.len()
+            ));
+        }
+        Ok(Self {
+            key: *Key::<Aes256Gcm>::from_slice(&bytes),
+        })
     }
 
     /// Race-safe master key generation at a specific directory.
@@ -196,32 +200,25 @@ impl KeyEncryptor {
     pub fn is_encrypted(value: &str) -> bool {
         value.starts_with(PREFIX)
     }
-
-    /// Canonical master key file path.
-    ///
-    /// Defaults to `app_dir()/.master_key` (always writable, CWD-independent).
-    /// Only `OPENALPACA_MASTER_KEY` env var overrides (checked in `load_or_generate()`).
-    fn key_file_path() -> Result<PathBuf, String> {
-        use directories::ProjectDirs;
-        if let Some(proj) = ProjectDirs::from("", "", "OpenAlpaca") {
-            return Ok(proj.data_dir().join(".master_key"));
-        }
-        // Fallback to CWD (should not happen on supported platforms)
-        let cwd = std::env::current_dir().map_err(|e| format!("Failed to get current dir: {e}"))?;
-        Ok(cwd.join("config").join(".master_key"))
-    }
 }
 
-/// Acquire a file lock for writing llm.toml. Returns guard that releases on drop.
-pub fn acquire_config_write_lock() -> Result<file_lock::FileLock, String> {
-    use directories::ProjectDirs;
-    let lock_dir = if let Some(proj) = ProjectDirs::from("", "", "OpenAlpaca") {
-        proj.data_dir().to_path_buf()
-    } else {
-        std::env::current_dir().map_err(|e| format!("Failed to get current dir: {e}"))?
-    };
-    std::fs::create_dir_all(&lock_dir).map_err(|e| format!("Failed to create lock dir: {e}"))?;
-    let lock_path = lock_dir.join("llm.toml.lock");
+/// Acquire a file lock for writing `config_path`. Returns a guard that releases
+/// on drop.
+///
+/// The lock sits beside the file it guards (`<config_path>.lock`), so every
+/// writer of the same config agrees on it without this crate resolving a
+/// directory of its own — and locking a config never creates a second root.
+pub fn acquire_config_write_lock(config_path: &Path) -> Result<file_lock::FileLock, String> {
+    let mut name = config_path
+        .file_name()
+        .ok_or_else(|| format!("Config path has no file name: {}", config_path.display()))?
+        .to_os_string();
+    name.push(".lock");
+    let lock_path = config_path.with_file_name(name);
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create {}: {e}", parent.display()))?;
+    }
     let opts = file_lock::FileOptions::new().write(true).create(true);
     file_lock::FileLock::lock(&lock_path, true, opts).map_err(|e| {
         format!(

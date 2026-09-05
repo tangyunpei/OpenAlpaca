@@ -5,7 +5,8 @@ use super::{read_config, write_config};
 
 /// Resolve a secret from a `KeyConfig` using the given secret store.
 ///
-/// Resolution order: `secret_env` > `secret_ref` (keychain) > `secret_encrypted` (legacy).
+/// Resolution order: `secret_env` > `secret_ref` (keychain) > `secret_encrypted`
+/// (AES-256-GCM local encryption — the fallback when no OS keychain is usable).
 pub fn resolve_key_from_config(
     key_config: &KeyConfig,
     secret_store: Option<&dyn crate::keys::secret_store::SecretStore>,
@@ -21,7 +22,7 @@ pub fn resolve_key_from_config(
     }
     if let Some(ref encrypted) = key_config.secret_encrypted {
         if crate::keys::key_encryption::KeyEncryptor::is_encrypted(encrypted) {
-            if let Ok(enc) = crate::keys::key_encryption::KeyEncryptor::load_or_generate() {
+            if let Ok(enc) = crate::keys::key_encryption::KeyEncryptor::from_env() {
                 return enc.decrypt(encrypted).ok();
             }
         } else {
@@ -60,7 +61,7 @@ pub fn migrate_llm_secrets(
     let mut config = read_config(config_path)
         .map_err(|e| format!("Failed to read config for migration: {e}"))?;
 
-    let encryptor = match crate::keys::key_encryption::KeyEncryptor::load_or_generate() {
+    let encryptor = match crate::keys::key_encryption::KeyEncryptor::from_env() {
         Ok(e) => e,
         Err(e) => {
             tracing::warn!("Cannot load master key for migration: {e}");
@@ -113,7 +114,7 @@ pub fn migrate_llm_secrets(
     }
 
     if migrated > 0 {
-        let _lock = crate::keys::key_encryption::acquire_config_write_lock()
+        let _lock = crate::keys::key_encryption::acquire_config_write_lock(config_path)
             .map_err(|e| format!("Failed to acquire config lock for migration: {e}"))?;
         write_config(config_path, &config)
             .map_err(|e| format!("Failed to write migrated config: {e}"))?;
@@ -147,7 +148,7 @@ pub fn reverse_migrate_llm_secrets(
     let mut config = read_config(config_path)
         .map_err(|e| format!("Failed to read config for reverse migration: {e}"))?;
 
-    let encryptor = match crate::keys::key_encryption::KeyEncryptor::load_or_generate() {
+    let encryptor = match crate::keys::key_encryption::KeyEncryptor::from_env() {
         Ok(e) => e,
         Err(e) => {
             tracing::warn!("Cannot load master key for reverse migration: {e}");
@@ -208,7 +209,7 @@ pub fn reverse_migrate_llm_secrets(
     }
 
     if migrated > 0 {
-        let _lock = crate::keys::key_encryption::acquire_config_write_lock()
+        let _lock = crate::keys::key_encryption::acquire_config_write_lock(config_path)
             .map_err(|e| format!("Failed to acquire config lock for reverse migration: {e}"))?;
         write_config(config_path, &config)
             .map_err(|e| format!("Failed to write reverse-migrated config: {e}"))?;

@@ -32,9 +32,7 @@ pub struct StepState {
 
 /// Constraints governing task execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskConstraints {
-    pub pipeline_sequential: bool,
-}
+pub struct TaskConstraints {}
 
 impl StepState {
     /// Add an artifact pointer for this step.
@@ -70,9 +68,7 @@ impl TaskState {
         TaskState {
             objective: objective.to_string(),
             steps,
-            constraints: TaskConstraints {
-                pipeline_sequential: true,
-            },
+            constraints: TaskConstraints {},
             workspace: TaskWorkspace::default(),
             created_at: now,
             updated_at: now,

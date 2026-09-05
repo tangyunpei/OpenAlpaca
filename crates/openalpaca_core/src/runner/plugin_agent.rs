@@ -15,6 +15,7 @@
 //! `SubagentTracker` completion shape (content string + success flag).
 
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+use crate::tools::extensions::{ExtensionId, ExtensionLedger, ScopedRun};
 use crate::tools::registry::ToolContext;
 use openalpaca_api::plugin_traits::PluginAgentExecutor;
 use openalpaca_llm::ToolCall;
@@ -24,6 +25,39 @@ use tokio_util::sync::CancellationToken;
 
 /// Maximum `step()` polls before the plugin agent is stopped and failed.
 pub const MAX_PLUGIN_ITERATIONS: usize = 50;
+
+/// Which plugin, and which *load* of it, an agent run belongs to.
+///
+/// The loop consults the ledger at every step boundary — exactly where it
+/// already checks the cancellation token — so a plugin disabled mid-run stops
+/// deliberately at its next step instead of waiting for T4 to close the channel
+/// under it (design §3.2 T3(b)).
+#[derive(Clone)]
+pub struct PluginRunScope {
+    pub ledger: Arc<ExtensionLedger>,
+    pub extension: ExtensionId,
+    pub generation: u64,
+}
+
+impl PluginRunScope {
+    /// The S4 refusal for this plugin's current state, or `None` while it reads
+    /// `Enabled` at this run's generation.
+    fn blocked(&self) -> Option<String> {
+        if let Some(refusal) = self.ledger.refusal_if_not_enabled(&self.extension, None) {
+            return Some(refusal);
+        }
+        match self.ledger.generation(&self.extension) {
+            Some(current) if current != self.generation => Some(
+                crate::tools::extensions::Described::stale_run(
+                    &self.extension,
+                    crate::tools::extensions::Audience::Model,
+                )
+                .render_model(None),
+            ),
+            _ => None,
+        }
+    }
+}
 
 /// Delay between polls while the plugin reports `"working"`.
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -48,6 +82,28 @@ pub enum PluginLoopOutcome {
 impl PluginLoopOutcome {
     pub fn success(&self) -> bool {
         matches!(self, Self::Completed { .. })
+    }
+}
+
+/// `run_scoped` has to see this outcome's failure the way it sees an `Err`
+/// (design §3.2 T3(b)): the loop reports a killed plugin as
+/// `Failed { error: "plugin agent step failed: …process crashed" }`, which a
+/// `Result`-only wrapper would pass through as a raw channel string.
+impl ScopedRun for PluginLoopOutcome {
+    fn is_failure(&self) -> bool {
+        matches!(self, Self::Failed { .. })
+    }
+
+    fn rewrite_failure(self, refusal: String) -> Self {
+        match self {
+            Self::Failed {
+                tool_calls_made, ..
+            } => Self::Failed {
+                error: refusal,
+                tool_calls_made,
+            },
+            other => other,
+        }
     }
 }
 
@@ -79,6 +135,7 @@ pub async fn run_plugin_agent_loop(
     sandbox_policy: &SandboxPolicy,
     tool_ctx: &ToolContext,
     cancel_token: Option<&CancellationToken>,
+    scope: Option<&PluginRunScope>,
 ) -> PluginLoopOutcome {
     let accepted = match executor
         .spawn(instance_id, task_id, instructions, context)
@@ -112,6 +169,25 @@ pub async fn run_plugin_agent_loop(
             let _ = executor.stop(instance_id).await;
             return PluginLoopOutcome::Failed {
                 error: "Cancelled".to_string(),
+                tool_calls_made: total_tool_calls,
+            };
+        }
+
+        // The step-boundary ledger check (design §3.2 T3(b)): a plugin that
+        // left `Enabled` — disabled, denied, crashed — stops the loop here,
+        // deliberately and with the S4 wording, rather than running until T4
+        // closes the channel and the next RPC fails with a transport string.
+        if let Some(scope) = scope
+            && let Some(refusal) = scope.blocked()
+        {
+            tracing::info!(
+                instance_id,
+                extension = %scope.extension,
+                "plugin agent stopped at a step boundary: the extension is no longer enabled"
+            );
+            let _ = executor.stop(instance_id).await;
+            return PluginLoopOutcome::Failed {
+                error: refusal,
                 tool_calls_made: total_tool_calls,
             };
         }
@@ -331,10 +407,237 @@ mod tests {
         (sandbox, registry)
     }
 
+    /// A run scope over a ledger the test drives directly.
+    fn scope(ledger: &Arc<ExtensionLedger>, generation: u64) -> PluginRunScope {
+        PluginRunScope {
+            ledger: Arc::clone(ledger),
+            extension: ExtensionId::plugin("notion"),
+            generation,
+        }
+    }
+
+    /// **The S4 refusal, not a channel string** (design §3.2 T3(b), §3.6 item 2).
+    ///
+    /// A plugin agent whose child is killed mid-`step` while the plugin is
+    /// `Disabling` reports `PluginLoopOutcome::Failed { error: "plugin agent
+    /// step failed: …process crashed" }` — **not** an `Err`, which is why
+    /// `run_scoped` is generic over [`ScopedRun`] and not over `Result`. The
+    /// caller must see *"is being turned off right now"*, never the transport.
+    #[tokio::test(start_paused = true)]
+    async fn a_plugin_agent_killed_mid_step_while_disabling_gets_the_s4_refusal() {
+        let ledger = Arc::new(ExtensionLedger::new());
+        let ext = ExtensionId::plugin("notion");
+        ledger.upsert(&ext, true, crate::tools::extensions::ExtensionState::Enabled);
+        let generation = ledger.generation(&ext).unwrap();
+
+        // The child dies on the first `step`, exactly as a T4 kill leaves it.
+        let executor = StubExecutor::new(true, vec![]);
+        let exec: Arc<dyn PluginAgentExecutor> = executor.clone();
+        let (sandbox, _registry) = make_sandbox();
+
+        // The toggle flips while the run is in flight.
+        ledger.begin(
+            &ext,
+            crate::tools::extensions::ExtensionState::Disabling,
+            Some(crate::tools::extensions::WithdrawalCause::Disable),
+        );
+
+        let outcome = ledger
+            .run_scoped(
+                &ext,
+                run_plugin_agent_loop(
+                    &exec,
+                    "plugin-instance",
+                    "task-1",
+                    "do the thing",
+                    &serde_json::json!({}),
+                    &sandbox,
+                    &policy(),
+                    &ToolContext::default(),
+                    None,
+                    Some(&scope(&ledger, generation)),
+                ),
+            )
+            .await;
+
+        let PluginLoopOutcome::Failed { error, .. } = outcome else {
+            panic!("a run against a disabling plugin must not succeed");
+        };
+        assert!(
+            error.contains("is being turned off right now"),
+            "expected the S4 refusal, got: {error}"
+        );
+        assert!(!error.contains("process crashed"), "{error}");
+        assert!(!error.contains("script exhausted"), "{error}");
+        assert!(
+            *executor.stopped.lock().unwrap(),
+            "the loop did not stop the plugin instance deliberately"
+        );
+    }
+
+    /// A stub whose `step` flips the toggle **and then** fails — a T0 that
+    /// lands between the loop's step-boundary check and the `step` RPC, which
+    /// is the window `run_scoped` exists to cover.
+    struct FlippingExecutor {
+        ledger: Arc<ExtensionLedger>,
+        extension: ExtensionId,
+        steps: Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl PluginAgentExecutor for FlippingExecutor {
+        async fn spawn(
+            &self,
+            _instance_id: &str,
+            _task_id: &str,
+            _instructions: &str,
+            _context: &serde_json::Value,
+        ) -> Result<bool, String> {
+            Ok(true)
+        }
+
+        async fn step(
+            &self,
+            _instance_id: &str,
+            _tool_results: Option<&serde_json::Value>,
+        ) -> Result<(String, String, Vec<serde_json::Value>), String> {
+            *self.steps.lock().unwrap() += 1;
+            // T4 kills the child under the in-flight RPC; the ledger flips
+            // first, exactly as `disable` orders it.
+            self.ledger.begin(
+                &self.extension,
+                crate::tools::extensions::ExtensionState::Disabling,
+                Some(crate::tools::extensions::WithdrawalCause::Disable),
+            );
+            Err("plugin child process crashed".to_string())
+        }
+
+        async fn stop(&self, _instance_id: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn plugin_id(&self) -> &str {
+            "stub_plugin"
+        }
+
+        fn agent_id(&self) -> &str {
+            "stub_agent"
+        }
+    }
+
+    /// **`run_scoped` rewrites `PluginLoopOutcome::Failed`** — the case §3.2
+    /// T3(b) names as the one a `Result`-only wrapper would miss.
+    ///
+    /// The plugin reads `Enabled` when the loop passes its step boundary, so
+    /// the boundary check lets the run through; the toggle flips *inside*
+    /// `step`, and the loop reports `Failed { error: "plugin agent step failed:
+    /// …process crashed" }` — not an `Err`. The caller must still see the S4
+    /// refusal, which only [`ScopedRun`]'s second implementor delivers.
+    #[tokio::test(start_paused = true)]
+    async fn a_step_that_fails_after_the_toggle_flips_gets_the_s4_refusal() {
+        let ledger = Arc::new(ExtensionLedger::new());
+        let ext = ExtensionId::plugin("notion");
+        ledger.upsert(&ext, true, crate::tools::extensions::ExtensionState::Enabled);
+        let generation = ledger.generation(&ext).unwrap();
+
+        let executor = Arc::new(FlippingExecutor {
+            ledger: Arc::clone(&ledger),
+            extension: ext.clone(),
+            steps: Mutex::new(0),
+        });
+        let exec: Arc<dyn PluginAgentExecutor> = executor.clone();
+        let (sandbox, _registry) = make_sandbox();
+
+        let outcome = ledger
+            .run_scoped(
+                &ext,
+                run_plugin_agent_loop(
+                    &exec,
+                    "plugin-instance",
+                    "task-1",
+                    "do the thing",
+                    &serde_json::json!({}),
+                    &sandbox,
+                    &policy(),
+                    &ToolContext::default(),
+                    None,
+                    Some(&scope(&ledger, generation)),
+                ),
+            )
+            .await;
+
+        assert_eq!(
+            *executor.steps.lock().unwrap(),
+            1,
+            "the step-boundary check pre-empted the RPC; the rewrite window was never entered"
+        );
+        let PluginLoopOutcome::Failed { error, .. } = outcome else {
+            panic!("a step that errored must not report success");
+        };
+        assert!(
+            error.contains("is being turned off right now"),
+            "expected the S4 refusal, got: {error}"
+        );
+        assert!(
+            !error.contains("process crashed"),
+            "the caller got the transport string: {error}"
+        );
+    }
+
+    /// The step-boundary check is what makes the stop *deliberate*: the loop
+    /// terminates at its next step rather than waiting for T4 to close the
+    /// channel under it.
+    #[tokio::test(start_paused = true)]
+    async fn a_plugin_agent_stops_at_the_next_step_boundary_when_the_plugin_is_disabled() {
+        let ledger = Arc::new(ExtensionLedger::new());
+        let ext = ExtensionId::plugin("notion");
+        ledger.upsert(&ext, true, crate::tools::extensions::ExtensionState::Enabled);
+        let generation = ledger.generation(&ext).unwrap();
+
+        // A script that would otherwise run to completion.
+        let executor = StubExecutor::new(
+            true,
+            vec![("working".into(), String::new(), vec![])],
+        );
+        let exec: Arc<dyn PluginAgentExecutor> = executor.clone();
+        let (sandbox, _registry) = make_sandbox();
+
+        ledger.upsert(&ext, false, crate::tools::extensions::ExtensionState::Disabled);
+
+        let outcome = run_plugin_agent_loop(
+            &exec,
+            "plugin-instance",
+            "task-1",
+            "do the thing",
+            &serde_json::json!({}),
+            &sandbox,
+            &policy(),
+            &ToolContext::default(),
+            None,
+            Some(&scope(&ledger, generation)),
+        )
+        .await;
+
+        let PluginLoopOutcome::Failed { error, .. } = outcome else {
+            panic!("the loop ran on against a disabled plugin");
+        };
+        assert!(error.contains("disabled by the owner"), "{error}");
+        assert!(*executor.stopped.lock().unwrap());
+        assert!(
+            executor.results_received().is_empty(),
+            "the loop took a step after the plugin was disabled"
+        );
+    }
+
     fn policy() -> SandboxPolicy {
+        // Template-scoped, like any spawned agent: the plugin agent may call
+        // exactly the tool its template declared.
         SandboxPolicy::from_constraints(
             "plugin-instance",
-            &crate::agent::subagent::AgentConstraints::default(),
+            &crate::agent::subagent::AgentConstraints {
+                allowed_capabilities: vec!["echo".to_string()],
+                ..Default::default()
+            },
         )
     }
 
@@ -354,6 +657,9 @@ mod tests {
             &policy(),
             &ToolContext::default(),
             cancel_token,
+            // No run scope: these stubs are not backed by a supervisor, so the
+            // step-boundary ledger check has nothing to consult.
+            None,
         )
         .await
     }
@@ -471,6 +777,7 @@ mod tests {
             &sandbox,
             &denying_policy,
             &ToolContext::default(),
+            None,
             None,
         )
         .await;

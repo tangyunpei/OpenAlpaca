@@ -1,6 +1,6 @@
 //! Workspace root detection for memory scoping.
 //!
-//! Walks up from a starting directory to find project markers (`.alpaca` preferred,
+//! Walks up from a starting directory to find project markers (`.openalpaca` preferred,
 //! `.git` as fallback) and derives a stable workspace ID from the canonical path.
 //! Results are cached for the process lifetime.
 
@@ -12,7 +12,7 @@ use std::sync::{LazyLock, Mutex};
 static CACHE: LazyLock<Mutex<HashMap<PathBuf, Option<PathBuf>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Walk up from `start_dir` looking for `.alpaca` (preferred) or `.git`.
+/// Walk up from `start_dir` looking for `.openalpaca` (preferred) or `.git`.
 /// Returns the directory containing the first marker found, or `None`.
 ///
 /// Results are cached by canonical start path for the process lifetime.
@@ -39,11 +39,11 @@ pub fn detect_workspace_root(start_dir: &Path) -> Option<PathBuf> {
 }
 
 /// Walk up from `start` looking for project root markers.
-/// Prefers `.alpaca` over `.git` at the same level.
+/// Prefers `.openalpaca` over `.git` at the same level.
 fn walk_up_for_marker(start: &Path) -> Option<PathBuf> {
     let mut current = start.to_path_buf();
     loop {
-        if current.join(".alpaca").exists() || current.join(".alpaca").is_dir() {
+        if current.join(".openalpaca").exists() {
             return Some(current);
         }
         if current.join(".git").exists() {
@@ -102,11 +102,11 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_alpaca_root() {
+    fn test_detect_openalpaca_root() {
         clear_cache();
         let tmp = TempDir::new().unwrap();
-        let alpaca_dir = tmp.path().join(".alpaca");
-        std::fs::create_dir(&alpaca_dir).unwrap();
+        let openalpaca_dir = tmp.path().join(".openalpaca");
+        std::fs::create_dir(&openalpaca_dir).unwrap();
 
         let root = detect_workspace_root(tmp.path());
         assert!(root.is_some());
@@ -117,16 +117,16 @@ mod tests {
     }
 
     #[test]
-    fn test_alpaca_preferred_over_git() {
+    fn test_openalpaca_preferred_over_git() {
         clear_cache();
         let tmp = TempDir::new().unwrap();
         // Both markers at the same level
         std::fs::create_dir(tmp.path().join(".git")).unwrap();
-        std::fs::create_dir(tmp.path().join(".alpaca")).unwrap();
+        std::fs::create_dir(tmp.path().join(".openalpaca")).unwrap();
 
         let root = detect_workspace_root(tmp.path());
         assert!(root.is_some());
-        // .alpaca checked first, so the root is found via .alpaca
+        // .openalpaca checked first, so the root is found via .openalpaca
         assert_eq!(
             root.unwrap().canonicalize().unwrap(),
             tmp.path().canonicalize().unwrap()

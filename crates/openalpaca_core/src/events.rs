@@ -27,6 +27,10 @@ pub enum SystemEvent {
     /// A task was updated (status change, progress update)
     TaskUpdated {
         task_id: String,
+        /// The task's title. Empty for post-restart DB-only tasks whose
+        /// in-memory registry entry (and thus title) was lost (GAP-07).
+        #[serde(default)]
+        title: String,
         status: String,
         progress_current: Option<i32>,
         progress_total: Option<i32>,
@@ -35,6 +39,10 @@ pub enum SystemEvent {
     /// A task completed successfully
     TaskCompleted {
         task_id: String,
+        /// The task's title. Empty for post-restart DB-only tasks whose
+        /// in-memory registry entry (and thus title) was lost (GAP-07).
+        #[serde(default)]
+        title: String,
         result_summary: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         outcome_kind: Option<String>,
@@ -48,6 +56,10 @@ pub enum SystemEvent {
     /// A task failed
     TaskFailed {
         task_id: String,
+        /// The task's title. Empty for post-restart DB-only tasks whose
+        /// in-memory registry entry (and thus title) was lost (GAP-07).
+        #[serde(default)]
+        title: String,
         error: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         outcome_kind: Option<String>,
@@ -69,6 +81,10 @@ pub enum SystemEvent {
         instance_id: String,
         /// The template this instance was spawned from (e.g. "code_agent").
         template_id: String,
+        /// The agent's human-readable display name (e.g. "Code Agent").
+        /// Empty when the instance could not be resolved (GAP-07).
+        #[serde(default)]
+        name: String,
         /// Lifecycle status string.
         status: String,
         current_task_id: Option<String>,
@@ -251,8 +267,6 @@ pub enum SystemEvent {
         /// "task_ops" | "steered" | "skill_command" | "bootstrap" |
         /// "forced_simple_query" | "social_fast_path" | "main_loop"
         mode: String,
-        planner_ms: u64,
-        dispatch_ms: u64,
         ack_ms: u64,
         fallback_reason: Option<String>,
         auto_promotion_reason: Option<String>,
@@ -394,6 +408,78 @@ pub enum SystemEvent {
         followup_id: i64,
         /// "followup" | "unprocessed_steering"
         kind: String,
+        timestamp: DateTime<Utc>,
+    },
+    /// An extension's observed state changed — T5, E5, `mark_failed`, T5-deny,
+    /// T5-gone and §3.7's tool-list refresh (extension design ADR-030).
+    ///
+    /// Declared here, in C1, because the plugin supervisor publishes it and
+    /// `openalpaca_plugins` cannot see a variant the daemon crate would add.
+    ExtensionStateChanged {
+        extension: crate::tools::extensions::ExtensionId,
+        /// The record's new state word, or `"removed"` when the declaration is
+        /// gone and the row simply disappears.
+        state: String,
+        /// The load the change belongs to, so the event log stays unambiguous
+        /// when a late crash notice arrives after a newer load's events.
+        generation: u64,
+        /// Set only by a server-driven `tools/list_changed` refresh.
+        #[serde(default)]
+        tools_changed: bool,
+        timestamp: DateTime<Utc>,
+    },
+    /// **S4 moment 1 and 2** — a capability was withheld from a caller
+    /// (extension design §7.1, §7.2, §6.2 #13).
+    ///
+    /// Published by [`ExtensionLedger`](crate::tools::extensions::ExtensionLedger)
+    /// itself, beside the `warn!`, and governed by the same 10-minute dedup
+    /// (§7.4): the **announcement** is deduped, never the error.
+    ExtensionCapabilityWithheld {
+        extension: crate::tools::extensions::ExtensionId,
+        /// The tool name (`AttemptedUse`), the capability or allowed tool name
+        /// (`SurfaceAssembly`) or the skill id (`ScheduledSkip`) the
+        /// withholding is about.
+        subject: String,
+        moment: crate::tools::extensions::Moment,
+        /// The record's state word at the moment of the refusal, or
+        /// `"unrecorded"` when there is no record (design §6.2a).
+        state: String,
+        /// The dedup `ScopeKey`: `task_id` → `request_id` → `agent_id` →
+        /// `"global"`, or the **skill id** for `ScheduledSkip`, which is exempt
+        /// from dedup (design §7.4, §6.2 #13).
+        scope: String,
+        agent_id: Option<String>,
+        task_id: Option<String>,
+        /// The caller held a *previous load*'s handle (design §3.0 Fact 3).
+        stale: bool,
+        timestamp: DateTime<Utc>,
+    },
+    /// **S4 moment 3** — the transition the owner is looking at: T1 step 3's
+    /// dependent scan (extension design §3.2 T1, §7.3).
+    ///
+    /// One per transition, never deduped. `cause` — not the transient state —
+    /// is what the `warn!` and the owner notice are worded from.
+    ExtensionCapabilityWithdrawn {
+        extension: crate::tools::extensions::ExtensionId,
+        /// `Disabling` on the route / watcher / deny / reload paths,
+        /// `Failed{Crashed,..}` from the reaper and the residue exits, `Enabled`
+        /// from §3.7's server-driven list change.
+        state: crate::tools::extensions::ExtensionState,
+        cause: crate::tools::extensions::WithdrawalCause,
+        /// The withdrawn set — T1 step 1's and T2 step 1's tombstones.
+        capabilities: Vec<String>,
+        /// The withdrawn tool **names**, which the legacy `tools.allow` scan
+        /// matches on.
+        tools: Vec<String>,
+        affected_templates: Vec<String>,
+        /// Skills now unsatisfiable — at least one required capability wholly
+        /// withheld, or (legacy `tools.allow`) every allowed name withdrawn.
+        affected_skills: Vec<String>,
+        /// The subset of `affected_skills` that carry `invoke.cron`. The owner
+        /// notice fires only when this is non-empty (design §7.3).
+        affected_cron_skills: Vec<String>,
+        /// The daemon's default lane, `{local_user_id}:gui`.
+        notice_lane: String,
         timestamp: DateTime<Utc>,
     },
 }

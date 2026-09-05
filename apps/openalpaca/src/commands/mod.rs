@@ -8,6 +8,7 @@ mod config_tui;
 pub mod connector;
 pub mod daemon;
 pub mod daemon_config_cli;
+pub mod ext;
 pub mod gui;
 pub mod llm;
 pub mod plugin;

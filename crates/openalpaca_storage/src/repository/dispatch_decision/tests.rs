@@ -20,7 +20,6 @@ fn test_dispatch_decision_record_roundtrip() {
             agent_count: 3,
             dag_node_count: None,
             predictability_score: Some(0.85),
-            planner_requested_mode: Some("lead_agent".to_string()),
             error_message: None,
             timestamp: None,
         })
@@ -37,10 +36,6 @@ fn test_dispatch_decision_record_roundtrip() {
     assert_eq!(records[0].agent_count, 3);
     assert!(records[0].dag_node_count.is_none());
     assert_eq!(records[0].predictability_score, Some(0.85));
-    assert_eq!(
-        records[0].planner_requested_mode.as_deref(),
-        Some("lead_agent")
-    );
 }
 
 #[test]
@@ -58,7 +53,6 @@ fn test_dispatch_decision_null_task_id_query() {
         agent_count: 1,
         dag_node_count: None,
         predictability_score: None,
-        planner_requested_mode: None,
         error_message: None,
         timestamp: None,
     })
@@ -74,7 +68,6 @@ fn test_dispatch_decision_null_task_id_query() {
         agent_count: 0,
         dag_node_count: None,
         predictability_score: None,
-        planner_requested_mode: None,
         error_message: None,
         timestamp: None,
     })
@@ -109,7 +102,6 @@ fn test_dispatch_decision_mode_filter() {
                 agent_count: 1,
                 dag_node_count: None,
                 predictability_score: None,
-                planner_requested_mode: None,
                 error_message: None,
                 timestamp: None,
             })
@@ -141,7 +133,6 @@ fn test_dispatch_decision_error_message_roundtrip() {
         agent_count: 0,
         dag_node_count: None,
         predictability_score: None,
-        planner_requested_mode: None,
         error_message: Some("No agents match the required skills".to_string()),
         timestamp: None,
     })
@@ -165,7 +156,6 @@ fn test_dispatch_decision_error_message_roundtrip() {
         agent_count: 1,
         dag_node_count: None,
         predictability_score: None,
-        planner_requested_mode: None,
         error_message: None,
         timestamp: None,
     })
@@ -180,7 +170,7 @@ fn test_dispatch_decision_error_message_roundtrip() {
 #[test]
 fn test_migration_025_creates_error_message_schema() {
     let db = setup_db();
-    assert_eq!(db.schema_version().unwrap(), 34);
+    assert_eq!(db.schema_version().unwrap(), 35);
 
     // Verify request_id column works
     let repo = DispatchDecisionRepository::new(&db);
@@ -193,7 +183,6 @@ fn test_migration_025_creates_error_message_schema() {
         agent_count: 1,
         dag_node_count: Some(4),
         predictability_score: Some(0.5),
-        planner_requested_mode: None,
         error_message: None,
         timestamp: None,
     })

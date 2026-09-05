@@ -17,10 +17,9 @@ impl NotificationDispatcher {
                 .ok()
                 .flatten()
                 .map(|p| p.value)
+                && let Err(e) = send.send_message("discord", &channel_id, message).await
             {
-                if let Err(e) = send.send_message("discord", &channel_id, message).await {
-                    warn!("Failed to send Discord notification: {e}");
-                }
+                warn!("Failed to send Discord notification: {e}");
             }
         }
     }

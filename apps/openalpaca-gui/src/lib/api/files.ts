@@ -1,164 +1,52 @@
 /**
- * REST API client for file upload/download endpoints.
+ * `/v1/files*` — metadata, download, and host-side open.
+ *
+ * Inline preview of file CONTENT is deliberately absent: `/content` sits behind
+ * the auth middleware, so `<img src>`/`<iframe src>` cannot load it (API_MAP
+ * GAP-11). The `fetch → blob → createObjectURL` workaround lands together with
+ * the artifact API (GAP-04), which is what would supply a preview source.
  */
 
-import { save } from "@tauri-apps/plugin-dialog";
-import { writeFile } from "@tauri-apps/plugin-fs";
-import { ensureConnection } from "./connection";
-import type { FileUploadResponse, FileAsset, FileOpenResponse } from "../types";
+import { apiFetch, apiFetchBlob } from "../http";
+import type { FileAsset, FileOpenResponse } from "./types";
 
-let systemOpenEndpointUnavailable = false;
-let systemOpenEndpointInstanceId: string | null = null;
-
-export type SaveFileWithDialogResult = "saved" | "cancelled" | "unavailable";
-
-/** POST /v1/files/upload — Upload a file via multipart form data. */
-export async function uploadFile(
-  file: File,
-  onProgress?: (loaded: number, total: number) => void,
-): Promise<FileUploadResponse> {
-  const conn = await ensureConnection();
-  const formData = new FormData();
-  formData.append("file", file);
-
-  if (onProgress) {
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open("POST", `${conn.baseUrl}/v1/files/upload`);
-      xhr.setRequestHeader("Authorization", `Bearer ${conn.token}`);
-
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) onProgress(e.loaded, e.total);
-      };
-
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          try { resolve(JSON.parse(xhr.responseText)); }
-          catch { reject(new Error("Failed to parse upload response")); }
-        } else {
-          try {
-            const data = JSON.parse(xhr.responseText);
-            reject(new Error(data.error?.message || `Upload failed: ${xhr.statusText}`));
-          } catch { reject(new Error(`Upload failed: ${xhr.statusText}`)); }
-        }
-      };
-
-      xhr.onerror = () => reject(new Error("Upload network error"));
-      xhr.onabort = () => reject(new Error("Upload aborted"));
-      xhr.send(formData);
-    });
-  }
-
-  const response = await fetch(`${conn.baseUrl}/v1/files/upload`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${conn.token}` },
-    body: formData,
+/** `GET /v1/files/{id}` */
+export async function getFileMetadata(
+  id: string,
+  signal?: AbortSignal,
+): Promise<FileAsset> {
+  return await apiFetch<FileAsset>(`/v1/files/${encodeURIComponent(id)}`, {
+    signal,
   });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Upload failed: ${response.statusText}`);
-  }
-  return await response.json();
 }
 
-/** GET /v1/files/{id} — Get file metadata. */
-export async function getFileMetadata(id: string): Promise<FileAsset> {
-  const conn = await ensureConnection();
-  const response = await fetch(`${conn.baseUrl}/v1/files/${encodeURIComponent(id)}`, {
-    headers: { Authorization: `Bearer ${conn.token}` },
+/** `GET /v1/files/{id}/content` as a `Blob`. */
+export async function downloadFile(
+  id: string,
+  signal?: AbortSignal,
+): Promise<Blob> {
+  return await apiFetchBlob(`/v1/files/${encodeURIComponent(id)}/content`, {
+    signal,
   });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Failed to fetch file: ${response.statusText}`);
-  }
-  return await response.json();
-}
-
-/** GET /v1/files/{id}/content — Download file as Blob. */
-export async function downloadFile(id: string): Promise<Blob> {
-  const conn = await ensureConnection();
-  const response = await fetch(
-    `${conn.baseUrl}/v1/files/${encodeURIComponent(id)}/content`,
-    { headers: { Authorization: `Bearer ${conn.token}` } },
-  );
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Download failed: ${response.statusText}`);
-  }
-  return await response.blob();
-}
-
-/** POST /v1/files/{id}/open — Open file with system default app on daemon host. */
-export async function openFileWithSystemDefault(id: string): Promise<FileOpenResponse> {
-  const conn = await ensureConnection();
-  if (systemOpenEndpointInstanceId !== conn.instanceId) {
-    systemOpenEndpointInstanceId = conn.instanceId;
-    systemOpenEndpointUnavailable = false;
-  }
-
-  if (systemOpenEndpointUnavailable) {
-    throw new Error("System open endpoint unavailable");
-  }
-
-  const response = await fetch(`${conn.baseUrl}/v1/files/${encodeURIComponent(id)}/open`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${conn.token}` },
-  });
-
-  if (response.status === 404) {
-    // Route may be unavailable on an older daemon build; avoid retrying every click.
-    systemOpenEndpointUnavailable = true;
-    throw new Error("System open endpoint unavailable");
-  }
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Open failed: ${response.statusText}`);
-  }
-
-  return await response.json();
-}
-
-function isPluginUnavailableError(error: unknown): boolean {
-  if (!error) return false;
-  const message = error instanceof Error ? error.message : String(error);
-  const normalized = message.toLowerCase();
-  return (
-    normalized.includes("plugin") ||
-    normalized.includes("not available") ||
-    normalized.includes("window.__tauri_internal") ||
-    normalized.includes("window.__tauri")
-  );
 }
 
 /**
- * Show native Save dialog via Tauri and persist blob to selected path.
- * Returns:
- * - "saved": user picked a path and save succeeded
- * - "cancelled": user cancelled dialog
- * - "unavailable": native API unavailable (fallback needed)
+ * A blob object URL for `<img>`/`<iframe>`, plus its revoke function.
+ * Purely a workaround for GAP-11 — delete this once the content route accepts
+ * `?token=`.
  */
-export async function saveBlobWithDialog(
-  filename: string,
-  blob: Blob,
-): Promise<SaveFileWithDialogResult> {
-  try {
-    const path = await save({ defaultPath: filename });
-    if (!path || (Array.isArray(path) && path.length === 0)) {
-      return "cancelled";
-    }
-
-    const targetPath = Array.isArray(path) ? path[0] : path;
-    const bytes = new Uint8Array(await blob.arrayBuffer());
-    await writeFile(targetPath, bytes);
-    return "saved";
-  } catch (error) {
-    if (isPluginUnavailableError(error)) {
-      return "unavailable";
-    }
-    throw error;
-  }
+/**
+ * `POST /v1/files/{id}/open` — opens with the daemon host's default app. Note
+ * this *opens*, it does not reveal in Finder; revealing needs a Tauri command
+ * that does not exist yet.
+ */
+export async function openFileWithSystemDefault(
+  id: string,
+): Promise<FileOpenResponse> {
+  return await apiFetch<FileOpenResponse>(
+    `/v1/files/${encodeURIComponent(id)}/open`,
+    {
+      method: "POST",
+    },
+  );
 }

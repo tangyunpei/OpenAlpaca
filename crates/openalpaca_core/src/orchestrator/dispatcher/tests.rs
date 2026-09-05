@@ -371,6 +371,7 @@ fn test_finalize_task_emits_outcome_fields() {
     while let Ok(event) = rx.try_recv() {
         if let SystemEvent::TaskCompleted {
             task_id,
+            title,
             result_summary,
             outcome_kind,
             artifact_count,
@@ -379,6 +380,7 @@ fn test_finalize_task_emits_outcome_fields() {
         } = event
         {
             assert_eq!(task_id, "t1");
+            assert_eq!(title, "Test task");
             assert_eq!(result_summary, Some("All done".to_string()));
             assert_eq!(outcome_kind, Some("mixed".to_string()));
             assert_eq!(artifact_count, Some(2));
@@ -418,12 +420,14 @@ fn test_finalize_task_failed_emits_outcome_kind() {
     while let Ok(event) = rx.try_recv() {
         if let SystemEvent::TaskFailed {
             task_id,
+            title,
             error,
             outcome_kind,
             ..
         } = event
         {
             assert_eq!(task_id, "t2");
+            assert_eq!(title, "Failing task");
             assert_eq!(error, "Network timeout");
             assert_eq!(outcome_kind, Some("failed".to_string()));
             return;
@@ -448,6 +452,7 @@ fn test_finalize_task_none_outcome_fields() {
     while let Ok(event) = rx.try_recv() {
         if let SystemEvent::TaskCompleted {
             task_id,
+            title,
             outcome_kind,
             artifact_count,
             outcome_summary,
@@ -455,6 +460,7 @@ fn test_finalize_task_none_outcome_fields() {
         } = event
         {
             assert_eq!(task_id, "t3");
+            assert_eq!(title, "Legacy task");
             assert_eq!(outcome_kind, None);
             assert_eq!(artifact_count, None); // None preserved (unknown)
             assert_eq!(outcome_summary, None);
@@ -527,9 +533,7 @@ fn test_build_task_outcome_with_db_and_state_json() {
                 completed_at: Some(now),
             },
         ],
-        constraints: TaskConstraints {
-            pipeline_sequential: true,
-        },
+        constraints: TaskConstraints {},
         workspace: TaskWorkspace::default(),
         created_at: now,
         updated_at: now,

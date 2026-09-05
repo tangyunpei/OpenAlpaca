@@ -5,27 +5,24 @@
 
 use anyhow::{Context, Result};
 use openalpaca_llm::config::{KeyConfig, read_config, write_config};
-use openalpaca_llm::keys::key_encryption::KeyEncryptor;
 use std::collections::HashMap;
 
 use super::ai_config_helpers::*;
 
 /// Get a single AI config value by key. Decrypts api_keys.
 pub fn get_ai_value(key: &str) -> Result<Option<String>> {
-    ensure_master_key();
     let path = llm_config_path()?;
     if !path.exists() {
         return Ok(None);
     }
     let config = read_config(&path).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let encryptor = KeyEncryptor::load_or_generate().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let encryptor = encryptor()?;
     let store = secret_store();
     Ok(read_from_config(key, &config, &encryptor, &store))
 }
 
 /// Set a single AI config value. Stores api_keys in OS keychain. Creates llm.toml if missing.
 pub fn set_ai_value(key: &str, value: &str) -> Result<()> {
-    ensure_master_key();
     let path = llm_config_path()?;
     let mut config = load_or_default(&path)?;
     let store = secret_store();
@@ -47,7 +44,6 @@ pub fn set_ai_values_batch(entries: &[(&str, &str)]) -> Result<()> {
     if entries.is_empty() {
         return Ok(());
     }
-    ensure_master_key();
     let path = llm_config_path()?;
     let mut config = load_or_default(&path)?;
     let store = secret_store();
@@ -179,7 +175,7 @@ pub fn delete_ai_value(key: &str) -> Result<()> {
                 let cli_id = format!("{}_cli", provider);
                 // Delete keychain secrets for removed keys
                 for k in keys.iter() {
-                    if (k.id == cli_id || keys.len() == 1)
+                    if k.id == cli_id
                         && let Some(ref sref) = k.secret_ref
                     {
                         let _ = store.delete(sref);
@@ -190,14 +186,8 @@ pub fn delete_ai_value(key: &str) -> Result<()> {
                 keys.retain(|k| k.id != cli_id);
                 if keys.len() < before {
                     // Removed cli key — done
-                } else if keys.len() == 1 {
-                    // 2. Migration fallback: exactly one key (legacy) → remove it
-                    if let Some(ref sref) = keys[0].secret_ref {
-                        let _ = store.delete(sref);
-                    }
-                    keys.remove(0);
                 } else if !keys.is_empty() {
-                    // 3. Multiple keys, no cli key → remove first primary, else first
+                    // 2. No cli key → remove first primary, else first
                     let pos = keys
                         .iter()
                         .position(|k| k.priority.as_deref() == Some("primary"))
@@ -234,13 +224,12 @@ pub fn delete_ai_value(key: &str) -> Result<()> {
 
 /// List all currently-set AI values. Returns `(key, value, kind)`.
 pub fn list_ai_entries() -> Result<Vec<(String, String, String)>> {
-    ensure_master_key();
     let path = llm_config_path()?;
     if !path.exists() {
         return Ok(Vec::new());
     }
     let config = read_config(&path).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let encryptor = KeyEncryptor::load_or_generate().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let encryptor = encryptor()?;
     let store = secret_store();
 
     let keys = [
@@ -346,7 +335,6 @@ pub fn upsert_provider_key(
     tier: Option<&str>,
     notes: Option<&str>,
 ) -> Result<()> {
-    ensure_master_key();
     let path = llm_config_path()?;
     let mut config = load_or_default(&path)?;
     let store = secret_store();
@@ -359,7 +347,7 @@ pub fn upsert_provider_key(
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         (Some(sref), None)
     } else {
-        let encryptor = KeyEncryptor::load_or_generate().map_err(|e| anyhow::anyhow!("{}", e))?;
+        let encryptor = encryptor()?;
         let encrypted = encryptor
             .encrypt(secret)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -413,13 +401,12 @@ pub fn upsert_provider_key(
 
 /// List all keys for a provider from disk.
 pub fn list_provider_keys(provider: &str) -> Result<Vec<ProviderKeyInfo>> {
-    ensure_master_key();
     let path = llm_config_path()?;
     if !path.exists() {
         return Ok(Vec::new());
     }
     let config = read_config(&path).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let encryptor = KeyEncryptor::load_or_generate().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let encryptor = encryptor()?;
     let store = secret_store();
 
     let keys = match config

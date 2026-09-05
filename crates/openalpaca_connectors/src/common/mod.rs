@@ -231,7 +231,7 @@ pub fn store_attachment(
     }
 
     // 3. Compute sharded storage path
-    let storage_path = openalpaca_storage::paths::asset_storage_path(&sha256)
+    let storage_path = openalpaca_storage::store::interim_asset_storage_path(&sha256)
         .map_err(|e| format!("Failed to compute storage path: {e}"))?;
 
     // 4. Write file to disk
