@@ -4257,7 +4257,6 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "dashmap",
- "directories",
  "fastembed",
  "file-lock",
  "futures-util",

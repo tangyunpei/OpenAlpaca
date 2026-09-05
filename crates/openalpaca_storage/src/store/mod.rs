@@ -77,7 +77,13 @@ fn resolve_home_root(override_value: Option<PathBuf>, home: Option<PathBuf>) -> 
 
 /// `home_root()/state` — machine state. Created (0700 on Unix) if missing.
 pub fn state_dir() -> Result<PathBuf> {
-    let dir = state_dir_path()?;
+    state_dir_in(&home_root()?)
+}
+
+/// [`state_dir`] under an explicit root — for the mover, which works on the two
+/// roots it was given rather than on the ambient one.
+pub(crate) fn state_dir_in(root: &Path) -> Result<PathBuf> {
+    let dir = root.join("state");
     create_private_dir(&dir)?;
     Ok(dir)
 }
@@ -160,12 +166,26 @@ pub fn plugins_dir() -> Result<PathBuf> {
 }
 
 /// `home_root()/config` — the runtime config dir GUI/CLI-managed daemons are
-/// started with (`OPENALPACA_CONFIG_DIR`). Created if missing.
+/// started with (`OPENALPACA_CONFIG_DIR`).
+///
+/// A pure path query: the CLI calls this only to *test* whether a runtime
+/// `llm.toml`/`daemon.toml` exists before falling back to the repo's `./config`,
+/// and asking must not materialise a store. Use [`ensure_runtime_config_dir`]
+/// where something is about to be written.
 ///
 /// The *semantics* of `OPENALPACA_CONFIG_DIR` are untouched by the root move:
 /// a dev run from the repo still resolves `./config` through the exe/CWD walk-up.
 pub fn runtime_config_dir() -> Result<PathBuf> {
-    let dir = home_root()?.join("config");
+    Ok(home_root()?.join("config"))
+}
+
+/// [`runtime_config_dir`], created if missing.
+///
+/// The GUI and the CLI pass this to a daemon they spawn, and
+/// `resolve_config_base_dir` ignores an `OPENALPACA_CONFIG_DIR` that does not
+/// exist — so the directory has to be there before the spawn, not after.
+pub fn ensure_runtime_config_dir() -> Result<PathBuf> {
+    let dir = runtime_config_dir()?;
     fs::create_dir_all(&dir)
         .with_context(|| format!("Failed to create config directory: {}", dir.display()))?;
     Ok(dir)
@@ -259,8 +279,17 @@ pub fn ensure_store(scope: &StoreScope) -> Result<PathBuf> {
 
 /// `store_root(scope)/<kind>` — created on use (reserved names stay absent until
 /// something actually needs them).
+///
+/// A project store is seeded first: `uploads/` must never exist before the
+/// `.gitignore` that excludes it, or the first upload lands in the user's git
+/// index. The home root has no `.gitignore` and nothing to race, so it is left
+/// to the explicit `ensure_store` at boot.
 pub fn content_dir(scope: &StoreScope, kind: ContentKind) -> Result<PathBuf> {
-    let dir = store_root(scope)?.join(kind.dir_name());
+    let root = match scope {
+        StoreScope::Project(_) => ensure_store(scope)?,
+        StoreScope::Home => store_root(scope)?,
+    };
+    let dir = root.join(kind.dir_name());
     fs::create_dir_all(&dir)
         .with_context(|| format!("Failed to create content directory: {}", dir.display()))?;
     Ok(dir)
@@ -331,8 +360,31 @@ fn write_new(path: &Path, contents: &str) -> Result<()> {
     fs::write(path, contents).with_context(|| format!("Failed to write {}", path.display()))
 }
 
-/// Writes `.layout` when absent; on the home root, appends `install_id=<uuid>`
-/// exactly once if an existing marker predates it.
+/// Write through a sibling temp file and `rename`, so a crash can never leave a
+/// half-written file behind.
+fn write_atomic(path: &Path, contents: &str) -> Result<()> {
+    let mut tmp_name = path
+        .file_name()
+        .with_context(|| format!("Not a file path: {}", path.display()))?
+        .to_os_string();
+    tmp_name.push(".tmp");
+    let tmp = path.with_file_name(tmp_name);
+
+    let mut file =
+        fs::File::create(&tmp).with_context(|| format!("Failed to create {}", tmp.display()))?;
+    use std::io::Write;
+    file.write_all(contents.as_bytes())
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("Failed to write {}", tmp.display()))?;
+    drop(file);
+
+    fs::rename(&tmp, path).with_context(|| format!("Failed to move {} into place", tmp.display()))
+}
+
+/// Writes `.layout` when absent; repairs an unreadable version line; on the home
+/// root, appends `install_id=<uuid>` exactly once if an existing marker predates
+/// it. Any other line already there is carried through untouched — a project
+/// root's `project_id=` is not this function's to drop.
 fn ensure_layout(root: &Path, is_home: bool) -> Result<()> {
     let path = root.join(LAYOUT_FILE);
     let existing = match fs::read_to_string(&path) {
@@ -341,25 +393,46 @@ fn ensure_layout(root: &Path, is_home: bool) -> Result<()> {
         Err(e) => return Err(e).with_context(|| format!("Failed to read {}", path.display())),
     };
 
-    match existing {
-        None => {
-            let mut text = format!("{LAYOUT_VERSION}\n");
-            if is_home {
-                text.push_str(&format!("{INSTALL_ID_KEY}={}\n", uuid::Uuid::new_v4()));
-            }
-            write_new(&path, &text)
+    let Some(text) = existing else {
+        let mut fresh = format!("{LAYOUT_VERSION}\n");
+        if is_home {
+            fresh.push_str(&format!("{INSTALL_ID_KEY}={}\n", uuid::Uuid::new_v4()));
         }
-        Some(text) if is_home && read_install_id(&text).is_none() => {
-            // Written once, never rewritten: an existing id is left alone.
-            let mut text = text;
-            if !text.ends_with('\n') {
-                text.push('\n');
-            }
-            text.push_str(&format!("{INSTALL_ID_KEY}={}\n", uuid::Uuid::new_v4()));
-            write_new(&path, &text)
+        return write_atomic(&path, &fresh);
+    };
+
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let mut changed = false;
+
+    // Line 1 is the layout version. Something that is not an integer is not a
+    // version — repair it rather than preserve it and keep failing every read.
+    if lines
+        .first()
+        .is_none_or(|first| first.trim().parse::<u32>().is_err())
+    {
+        tracing::warn!(
+            "Repairing the layout marker in {}: line 1 was not a version",
+            path.display()
+        );
+        match lines.first_mut() {
+            Some(first) => *first = LAYOUT_VERSION.to_string(),
+            None => lines.push(LAYOUT_VERSION.to_string()),
         }
-        Some(_) => Ok(()),
+        changed = true;
     }
+
+    // Written once, never rewritten: an existing id is left alone.
+    if is_home && read_install_id(&text).is_none() {
+        lines.push(format!("{INSTALL_ID_KEY}={}", uuid::Uuid::new_v4()));
+        changed = true;
+    }
+
+    if !changed {
+        return Ok(());
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    write_atomic(&path, &out)
 }
 
 fn read_install_id(layout: &str) -> Option<String> {

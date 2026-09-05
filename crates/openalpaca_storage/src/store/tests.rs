@@ -120,8 +120,9 @@ fn test_paths_are_consistent() {
 
     // The human's half of the root sits beside state/, not inside it.
     let plugins = plugins_dir().unwrap();
-    let config = runtime_config_dir().unwrap();
+    let config = ensure_runtime_config_dir().unwrap();
     assert_eq!(plugins, tmp.path().join("plugins"));
+    assert_eq!(config, runtime_config_dir().unwrap());
     assert_eq!(config, tmp.path().join("config"));
     assert!(plugins.is_dir() && config.is_dir());
 }
@@ -140,6 +141,7 @@ fn path_queries_do_not_create_the_store() {
         discovery_path().unwrap(),
         lock_path().unwrap(),
         interim_assets_dir().unwrap(),
+        runtime_config_dir().unwrap(),
     ] {
         assert!(
             path.starts_with(&root),
@@ -259,9 +261,61 @@ fn layout_version_reports_absence_and_rejects_garbage() {
     assert!(layout_version(tmp.path()).is_err());
 }
 
+#[test]
+fn a_malformed_layout_marker_is_repaired_not_appended_to() {
+    let tmp = tempdir().unwrap();
+    let _guard = HomeStoreGuard::set(tmp.path());
+    fs::write(tmp.path().join(".layout"), "not-a-number\n").unwrap();
+
+    ensure_store(&StoreScope::Home).unwrap();
+
+    assert_eq!(layout_version(tmp.path()).unwrap(), Some(LAYOUT_VERSION));
+    assert!(install_id(tmp.path()).unwrap().is_some());
+}
+
+#[test]
+fn layout_lines_this_module_does_not_own_are_preserved() {
+    let tmp = tempdir().unwrap();
+    let project = tmp.path().to_path_buf();
+    let scope = StoreScope::Project(project.clone());
+    let root = ensure_store(&scope).unwrap();
+    // A future project id (P-12) must survive a repair of line 1.
+    fs::write(root.join(".layout"), "garbage\nproject_id=abc\n").unwrap();
+
+    ensure_store(&scope).unwrap();
+
+    let text = fs::read_to_string(root.join(".layout")).unwrap();
+    assert_eq!(text, "1\nproject_id=abc\n");
+}
+
+#[test]
+fn no_temp_file_survives_a_layout_write() {
+    let tmp = tempdir().unwrap();
+    let _guard = HomeStoreGuard::set(tmp.path());
+    ensure_store(&StoreScope::Home).unwrap();
+    assert!(
+        !tmp.path().join(".layout.tmp").exists(),
+        ".layout is written through a temp file that must be renamed away"
+    );
+}
+
 // ============================================================================
 // Content stores
 // ============================================================================
+
+#[test]
+fn a_project_content_dir_seeds_the_store_first() {
+    let tmp = tempdir().unwrap();
+    let project = tmp.path().to_path_buf();
+
+    let uploads = content_dir(&StoreScope::Project(project.clone()), ContentKind::Uploads).unwrap();
+
+    assert!(uploads.is_dir());
+    assert!(
+        project.join(".openalpaca").join(".gitignore").exists(),
+        "uploads must never exist before the .gitignore that excludes them from git"
+    );
+}
 
 #[test]
 fn content_dirs_have_the_same_shape_in_both_scopes() {

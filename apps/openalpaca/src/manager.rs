@@ -34,7 +34,7 @@ pub fn start_daemon() -> Result<()> {
     println!("🚀 Starting OpenAlpaca Daemon...");
 
     let runtime_dir = ensure_runtime_dirs()?;
-    let config_dir = store::runtime_config_dir()?;
+    let config_dir = store::ensure_runtime_config_dir()?;
     let log_path = store::logs_dir()?.join("daemon.log");
     let log_file = fs::File::create(&log_path)
         .with_context(|| format!("Failed to create daemon log file: {}", log_path.display()))?;
@@ -213,7 +213,7 @@ fn daemon_launch_command(launch: &DaemonLaunch, runtime_dir: &Path, config_dir: 
 fn ensure_runtime_dirs() -> Result<PathBuf> {
     let home_root = store::ensure_store(&store::StoreScope::Home)
         .context("Failed to create the OpenAlpaca home store")?;
-    store::runtime_config_dir().context("Failed to create the runtime config directory")?;
+    store::ensure_runtime_config_dir().context("Failed to create the runtime config directory")?;
     Ok(home_root)
 }
 

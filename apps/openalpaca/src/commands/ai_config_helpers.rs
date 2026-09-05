@@ -11,11 +11,17 @@ use openalpaca_llm::keys::secret_store::{KeyringSecretStore, MemorySecretStore, 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Ensure master key exists at its canonical location before any crypto operations.
-pub(super) fn ensure_master_key() {
-    if let Ok(dir) = openalpaca_storage::store::master_key_dir() {
-        let _ = KeyEncryptor::ensure_at(&dir);
-    }
+/// The encryptor for `llm.toml` secrets, keyed on the one master key.
+///
+/// `openalpaca_llm` resolves no paths of its own, so the directory is always
+/// passed in — and it is always `store::master_key_dir()`, the same file the
+/// daemon loads at boot. Resolving it anywhere else would silently generate a
+/// second key: `ai config set-key` would then write secrets the daemon cannot
+/// decrypt.
+pub(super) fn encryptor() -> Result<KeyEncryptor> {
+    let dir = openalpaca_storage::store::master_key_dir()
+        .context("Failed to resolve the master key directory")?;
+    KeyEncryptor::load_or_generate_at(&dir).map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 /// Check whether OS keychain is enabled via `[security] use_keychain` in llm.toml.
@@ -269,8 +275,7 @@ pub(super) fn apply_to_config(
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
                 (Some(sref), None)
             } else {
-                let encryptor =
-                    KeyEncryptor::load_or_generate().map_err(|e| anyhow::anyhow!("{}", e))?;
+                let encryptor = encryptor()?;
                 let encrypted = encryptor
                     .encrypt(value)
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -299,11 +304,7 @@ pub(super) fn apply_to_config(
                     } else {
                         k.secret_encrypted
                             .as_ref()
-                            .and_then(|enc| {
-                                KeyEncryptor::load_or_generate()
-                                    .ok()
-                                    .and_then(|e| e.decrypt(enc).ok())
-                            })
+                            .and_then(|enc| encryptor().ok().and_then(|e| e.decrypt(enc).ok()))
                             .map(|decrypted| decrypted == value)
                             .unwrap_or(false)
                     }
@@ -442,3 +443,6 @@ pub(super) fn read_from_config(
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests;

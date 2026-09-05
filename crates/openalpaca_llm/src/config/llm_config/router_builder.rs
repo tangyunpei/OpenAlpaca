@@ -151,7 +151,7 @@ fn build_router_from_hierarchical(
                     } else if let Some(ref encrypted) = key_config.secret_encrypted {
                         // 3. Legacy encrypted (read-only, for pre-migration compat)
                         if crate::keys::key_encryption::KeyEncryptor::is_encrypted(encrypted) {
-                            match crate::keys::key_encryption::KeyEncryptor::load_or_generate() {
+                            match crate::keys::key_encryption::KeyEncryptor::from_env() {
                                 Ok(enc) => match enc.decrypt(encrypted) {
                                     Ok(s) => Some(s),
                                     Err(e) => {

@@ -1,6 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Args, Subcommand};
-use openalpaca_storage::{ConfigRepository, Database, store};
+use openalpaca_storage::{ConfigRepository, store};
 
 use crate::output::OutputFormat;
 
@@ -42,8 +42,10 @@ pub enum ConfigAction {
 }
 
 pub async fn run(args: ConfigArgs) -> Result<()> {
-    let db_path = store::database_path()?;
-    let db = Database::open(&db_path).context("Failed to open database")?;
+    // Runs the root move first: opening the database would otherwise *create* an
+    // empty one at the new path and strand the legacy install's data. Idempotent
+    // — a no-op once the daemon has booted at least once.
+    let db = store::migrate::open_store_database()?;
     let repo = ConfigRepository::new(&db);
 
     match args.action {

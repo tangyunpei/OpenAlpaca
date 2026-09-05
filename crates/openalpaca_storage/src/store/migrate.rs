@@ -9,6 +9,14 @@
 //! process killed mid-ledger resumes exactly where it stopped on the next boot.
 //! There is no rollback and none is needed — no consumer opens any of these
 //! files before the mover finishes.
+//!
+//! The one exception to skip-if-destination-exists is the database and its
+//! sidecars: skipping there would boot the daemon on the wrong database, so
+//! [`guard_database_trio`] decides the whole trio before the first rename and
+//! aborts rather than choose. Anything that opens the database outside the
+//! daemon's boot preamble goes through [`open_store_database`], which runs the
+//! move first — `Database::open` creates what it does not find, and an empty
+//! database at the destination is exactly what that guard then refuses.
 
 use crate::database::Database;
 use crate::store;
@@ -33,28 +41,55 @@ pub fn legacy_app_dir() -> Option<PathBuf> {
 /// Moves the legacy app dir into the home store, then removes it if empty.
 ///
 /// Aborts startup (`exit(1)`) on any failure, with the failing path in the log —
-/// a half-moved root must never be booted on top of. The testable core is
-/// [`move_root`].
+/// a half-moved root must never be booted on top of. The daemon's entry point;
+/// [`move_app_root_result`] is the same move for callers that report rather than
+/// exit, and [`move_root`] is the testable core.
 pub fn move_app_root() {
-    let Some(old) = legacy_app_dir() else {
-        warn!("Could not determine the legacy app directory; skipping the root move");
-        return;
-    };
-    let new = match store::home_root() {
-        Ok(p) => p,
-        Err(e) => {
-            error!("FATAL: cannot resolve the OpenAlpaca home root: {e:#}");
-            std::process::exit(1);
-        }
-    };
-    if let Err(e) = move_root(&old, &new) {
-        error!(
-            "FATAL: cannot migrate {} to {}: {e:#}",
-            old.display(),
-            new.display()
-        );
+    if let Err(e) = move_app_root_result() {
+        error!("FATAL: {e:#}");
         std::process::exit(1);
     }
+}
+
+/// [`move_app_root`] without the `exit(1)` — for processes that print the error
+/// and set an exit code themselves (the CLI).
+pub fn move_app_root_result() -> Result<()> {
+    let Some(old) = legacy_app_dir() else {
+        warn!("Could not determine the legacy app directory; skipping the root move");
+        return Ok(());
+    };
+    let new = store::home_root().context("cannot resolve the OpenAlpaca home root")?;
+    move_root(&old, &new)
+        .with_context(|| format!("cannot migrate {} to {}", old.display(), new.display()))
+}
+
+/// The store database, opened only after the root move has run to completion.
+///
+/// The daemon does these two things separately — the mover runs before the
+/// singleton lock, the open long after. Every *other* process that opens the
+/// database directly must do them in this order: `Database::open` **creates**
+/// what it does not find, so opening the destination first would leave an empty
+/// database in the way of the real one (which the trio guard then refuses to
+/// boot past, rather than silently stranding it).
+pub fn open_store_database() -> Result<Database> {
+    let new = store::home_root().context("cannot resolve the OpenAlpaca home root")?;
+    match legacy_app_dir() {
+        Some(old) => move_then_open(&old, &new),
+        None => open_moved_database(&new),
+    }
+}
+
+fn move_then_open(old: &Path, new: &Path) -> Result<Database> {
+    move_root(old, new)
+        .with_context(|| format!("cannot migrate {} to {}", old.display(), new.display()))?;
+    open_moved_database(new)
+}
+
+fn open_moved_database(new: &Path) -> Result<Database> {
+    // Through `state_dir_in`, so a CLI that opens the database before any daemon
+    // has run still gets the 0700 state directory the daemon would have made.
+    let path = store::state_dir_in(new)?.join(DB_NAME);
+    Database::open(&path).with_context(|| format!("Failed to open {}", path.display()))
 }
 
 /// Moves every ledger entry from `old` into `new`. See [`move_app_root`].
@@ -83,9 +118,9 @@ fn ledger(old: &Path, new: &Path) -> Vec<Step> {
         dst,
     };
     vec![
-        mv("openalpaca.db-wal", state.join("openalpaca.db-wal")),
-        mv("openalpaca.db-shm", state.join("openalpaca.db-shm")),
-        mv("openalpaca.db", state.join("openalpaca.db")),
+        mv(DB_SIDECARS[0], state.join(DB_SIDECARS[0])),
+        mv(DB_SIDECARS[1], state.join(DB_SIDECARS[1])),
+        mv(DB_NAME, state.join(DB_NAME)),
         mv(".master_key", state.join(".master_key")),
         Step::Merge {
             src: old.join("config"),
@@ -97,6 +132,8 @@ fn ledger(old: &Path, new: &Path) -> Vec<Step> {
         },
         mv("assets", state.join("assets")),
         mv("daemon.log", state.join("logs").join("daemon.log")),
+        mv("gui.log", state.join("logs").join("gui.log")),
+        mv("repl_history", state.join("repl_history")),
         Step::Delete {
             path: old.join("discovery.json"),
         },
@@ -105,6 +142,10 @@ fn ledger(old: &Path, new: &Path) -> Vec<Step> {
         },
     ]
 }
+
+/// The database file names, in move order: sidecars first, then the database.
+const DB_NAME: &str = "openalpaca.db";
+const DB_SIDECARS: [&str; 2] = ["openalpaca.db-wal", "openalpaca.db-shm"];
 
 /// `stop_after: Some(n)` applies only the first `n` ledger entries and skips the
 /// old-root disposal — it simulates a process killed mid-move, and exists so the
@@ -123,6 +164,11 @@ fn move_root_inner(old: &Path, new: &Path, stop_after: Option<usize>) -> Result<
     // 2. Live-daemon guard. Renaming a WAL-mode database out from under a live
     //    process is corruption; this is the one race the mover refuses to paper over.
     guard_no_live_daemon(old)?;
+
+    // 2b. The database and its sidecars move as one, or not at all — and never
+    //     onto a database that is already there. Both guards run before the
+    //     first rename, so an abort leaves everything exactly as it was.
+    guard_database_trio(old, new)?;
 
     // 3. Entry ledger.
     let steps = ledger(old, new);
@@ -165,6 +211,60 @@ fn guard_no_live_daemon(old: &Path) -> Result<()> {
             old.display()
         ),
     }
+}
+
+/// The database trio is the one ledger group where skip-if-destination-exists is
+/// unsafe, so it is decided up front rather than entry by entry.
+///
+/// SQLite pairs a WAL with a database by file name and validates only the WAL's
+/// own checksums — there is no database-identity check. So moving a sidecar onto
+/// a database that is not its own can apply foreign frames, and skipping the
+/// database while its sidecars move does exactly that. It is reachable without
+/// any concurrency: a CLI command that opened `state/openalpaca.db` before the
+/// daemon's first boot leaves an empty database at the destination, and the
+/// legacy one — conversations, memories, tasks, the local user id — would be
+/// silently left behind.
+///
+/// Two databases are a question only their owner can answer, so both cases
+/// abort with the paths named. Every other ledger entry keeps the skip rule.
+fn guard_database_trio(old: &Path, new: &Path) -> Result<()> {
+    let src_db = old.join(DB_NAME);
+    let dst_db = new.join("state").join(DB_NAME);
+
+    if exists(&src_db) {
+        if exists(&dst_db) {
+            bail!(
+                "two databases: {} has not moved yet and {} already exists. \
+                 Refusing to merge them — the sidecars of one would be read as the \
+                 other's. Keep the one you want (the legacy file is the older \
+                 install's data), remove or rename the other, and restart",
+                src_db.display(),
+                dst_db.display()
+            );
+        }
+        // The database will move; the sidecars precede it as usual.
+        return Ok(());
+    }
+
+    // No source database: any sidecar still in the old root belongs to a
+    // database that has already moved (or is gone), so it must not travel to a
+    // destination database it does not match.
+    if exists(&dst_db) {
+        for sidecar in DB_SIDECARS {
+            let src = old.join(sidecar);
+            if exists(&src) {
+                bail!(
+                    "{} is left over from an interrupted move, but {} is already in place \
+                     and no database accompanies the sidecar. A write-ahead log from a \
+                     different database can corrupt this one: delete the leftover file \
+                     and restart",
+                    src.display(),
+                    dst_db.display()
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// One atomic rename, guarded by skip-if-destination-exists.
@@ -231,24 +331,35 @@ fn remove_stale(path: &Path) -> Result<()> {
 }
 
 fn dispose_old_root(old: &Path) {
-    if fs::remove_dir(old).is_ok() {
-        info!("Removed the legacy app dir {}", old.display());
-        return;
-    }
-    let leftovers: Vec<String> = fs::read_dir(old)
-        .map(|entries| {
-            entries
+    let removal = match fs::remove_dir(old) {
+        Ok(()) => {
+            info!("Removed the legacy app dir {}", old.display());
+            return;
+        }
+        Err(e) => e,
+    };
+    // The directory survived: say so either way — an unreadable leftover root is
+    // the case most worth reporting, not the one to stay silent about.
+    match fs::read_dir(old) {
+        Ok(entries) => {
+            let leftovers: Vec<String> = entries
                 .flatten()
                 .map(|e| e.file_name().to_string_lossy().into_owned())
-                .collect()
-        })
-        .unwrap_or_default();
-    if !leftovers.is_empty() {
-        warn!(
-            "Left {} in place: it still contains {}",
-            old.display(),
-            leftovers.join(", ")
-        );
+                .collect();
+            warn!(
+                "Left {} in place: it still contains {}",
+                old.display(),
+                if leftovers.is_empty() {
+                    format!("nothing this mover recognises ({removal})")
+                } else {
+                    leftovers.join(", ")
+                }
+            );
+        }
+        Err(e) => warn!(
+            "Left {} in place and cannot list it: {e} (removal failed with: {removal})",
+            old.display()
+        ),
     }
 }
 
@@ -300,8 +411,23 @@ pub fn rebase_asset_paths(db: &Database) {
     match rebase_asset_paths_between(db, &old, &new) {
         Ok(0) => {}
         Ok(n) => info!("Rebased {n} file asset path(s) onto {}", new.display()),
-        Err(e) => warn!("Failed to rebase file asset paths: {e:#}"),
+        // Not fatal — nothing else at boot depends on it — but it is the reason
+        // an uploaded file later fails to open, so name the database it could
+        // not repair, like every other error path in this file.
+        Err(e) => warn!(
+            "Failed to rebase file asset paths in {}: {e:#}; \
+             files uploaded before the move may not resolve",
+            database_file(db)
+        ),
     }
+}
+
+/// The file backing `db`, for error messages.
+fn database_file(db: &Database) -> String {
+    db.with_connection(|conn| Ok(conn.path().map(|p| p.to_string())))
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "the database".to_string())
 }
 
 /// The testable core of [`rebase_asset_paths`]; returns the number of rows changed.
@@ -323,7 +449,9 @@ pub fn rebase_asset_paths_between(db: &Database, old: &Path, new: &Path) -> Resu
                   WHERE substr(storage_path, 1, length(?1)) = ?1",
                 rusqlite::params![old_prefix, new_prefix],
             )
-            .context("Failed to rebase file_assets.storage_path")?;
+            .with_context(|| {
+                format!("Failed to rewrite file_assets.storage_path {old_prefix}* to {new_prefix}*")
+            })?;
         Ok(changed)
     })
 }

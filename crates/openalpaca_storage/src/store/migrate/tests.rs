@@ -40,9 +40,11 @@ fn populate_old(old: &Path) {
         "bytes",
     );
     touch(&old.join("daemon.log"), "log line");
+    touch(&old.join("gui.log"), "gui line");
+    touch(&old.join("repl_history"), "chat with me");
     touch(&old.join("discovery.json"), "{}");
     touch(&old.join("openalpacad.lock"), "");
-    touch(&old.join("repl_history"), "unknown to the ledger");
+    touch(&old.join("notes.txt"), "unknown to the ledger");
 }
 
 fn assert_fully_moved(old: &Path, new: &Path) {
@@ -86,6 +88,14 @@ fn assert_fully_moved(old: &Path, new: &Path) {
     assert_eq!(
         fs::read_to_string(state.join("logs").join("daemon.log")).unwrap(),
         "log line"
+    );
+    assert_eq!(
+        fs::read_to_string(state.join("logs").join("gui.log")).unwrap(),
+        "gui line"
+    );
+    assert_eq!(
+        fs::read_to_string(state.join("repl_history")).unwrap(),
+        "chat with me"
     );
     // Regenerated every boot — deleted, never moved.
     assert!(!old.join("discovery.json").exists());
@@ -169,7 +179,7 @@ fn unknown_entries_are_left_behind_and_the_old_root_survives() {
     assert_fully_moved(&old, &new);
     assert_eq!(
         children(&old),
-        BTreeSet::from(["repl_history".to_string()]),
+        BTreeSet::from(["notes.txt".to_string()]),
         "the store never deletes what it did not create"
     );
 }
@@ -182,7 +192,7 @@ fn unknown_entries_are_left_behind_and_the_old_root_survives() {
 fn a_kill_between_any_two_ledger_entries_resumes_cleanly() {
     let ledger_len = ledger(Path::new("/old"), Path::new("/new")).len();
     assert_eq!(
-        ledger_len, 10,
+        ledger_len, 12,
         "the ledger changed — update the resume test"
     );
 
@@ -200,7 +210,7 @@ fn a_kill_between_any_two_ledger_entries_resumes_cleanly() {
         assert_fully_moved(&old, &new);
         assert_eq!(
             children(&old),
-            BTreeSet::from(["repl_history".to_string()]),
+            BTreeSet::from(["notes.txt".to_string()]),
             "resume after {stop_after} entries left the old root wrong"
         );
     }
@@ -301,6 +311,150 @@ fn a_gui_pre_created_config_dir_is_merged_child_by_child() {
     // Everything else still landed.
     assert!(new.join("plugins").join(".permissions.toml").exists());
     assert!(new.join("state").join("openalpaca.db").exists());
+}
+
+// ============================================================================
+// Step 2 — the database trio is atomic
+// ============================================================================
+
+#[test]
+fn a_database_at_both_roots_aborts_the_move() {
+    let tmp = tempdir().unwrap();
+    let old = tmp.path().join("legacy");
+    let new = tmp.path().join("home");
+    populate_old(&old);
+    // A CLI command that opened the database before the daemon's first boot
+    // leaves an empty one at the destination.
+    touch(
+        &new.join("state").join("openalpaca.db"),
+        "empty-destination",
+    );
+
+    let err = move_root(&old, &new).unwrap_err();
+    let message = format!("{err:#}");
+    for path in [
+        old.join("openalpaca.db"),
+        new.join("state").join("openalpaca.db"),
+    ] {
+        assert!(
+            message.contains(&path.display().to_string()),
+            "the abort must name {}: {message}",
+            path.display()
+        );
+    }
+
+    // Nothing moved, both databases intact.
+    assert_eq!(
+        fs::read_to_string(old.join("openalpaca.db")).unwrap(),
+        "db",
+        "the legacy database must survive untouched"
+    );
+    assert_eq!(
+        fs::read_to_string(new.join("state").join("openalpaca.db")).unwrap(),
+        "empty-destination"
+    );
+    assert!(
+        !new.join("state").join("openalpaca.db-wal").exists(),
+        "a sidecar must never land on a database that is not its own"
+    );
+    assert!(old.join("openalpaca.db-wal").exists());
+    assert!(old.join("openalpaca.db-shm").exists());
+    assert!(old.join(".master_key").exists());
+    assert!(old.join("discovery.json").exists());
+}
+
+#[test]
+fn a_leftover_sidecar_with_a_destination_database_aborts() {
+    let tmp = tempdir().unwrap();
+    let old = tmp.path().join("legacy");
+    let new = tmp.path().join("home");
+    // The database already moved; a stale WAL was left in the old root.
+    touch(&old.join("openalpaca.db-wal"), "wal");
+    touch(&new.join("state").join("openalpaca.db"), "destination");
+
+    let err = move_root(&old, &new).unwrap_err();
+    let message = format!("{err:#}");
+    assert!(
+        message.contains(&old.join("openalpaca.db-wal").display().to_string()),
+        "the abort must name the leftover sidecar: {message}"
+    );
+    assert!(
+        !new.join("state").join("openalpaca.db-wal").exists(),
+        "the sidecar belongs to a different database and must not move"
+    );
+}
+
+#[test]
+fn a_moved_out_database_leaves_the_rest_of_the_ledger_free_to_move() {
+    let tmp = tempdir().unwrap();
+    let old = tmp.path().join("legacy");
+    let new = tmp.path().join("home");
+    populate_old(&old);
+
+    // The whole trio already landed (the normal resume case): no source
+    // database, no source sidecars, a destination database — not an abort.
+    move_root_inner(&old, &new, Some(3)).unwrap();
+    move_root(&old, &new).unwrap();
+
+    assert_fully_moved(&old, &new);
+}
+
+// ============================================================================
+// Opening the store database — the mover runs first
+// ============================================================================
+
+#[test]
+fn opening_the_database_on_a_fresh_install_moves_nothing() {
+    let tmp = tempdir().unwrap();
+    let old = tmp.path().join("legacy");
+    let new = tmp.path().join("home");
+
+    let db = move_then_open(&old, &new).unwrap();
+    assert!(asset_paths(&db).is_empty());
+
+    assert!(!old.exists(), "no legacy root was invented");
+    assert!(new.join("state").join("openalpaca.db").exists());
+}
+
+#[test]
+fn opening_the_database_moves_a_legacy_root_first() {
+    let tmp = tempdir().unwrap();
+    let old = tmp.path().join("legacy");
+    let new = tmp.path().join("home");
+
+    // A real legacy database with a row in it.
+    {
+        let db = Database::open(&old.join("openalpaca.db")).unwrap();
+        insert_asset(&db, "asset-1", "/legacy/ab/cd/abcd");
+    }
+
+    // Opening it through the store must find that row, not create an empty
+    // database beside it and strand the legacy one.
+    let db = move_then_open(&old, &new).unwrap();
+    assert_eq!(asset_paths(&db), vec!["/legacy/ab/cd/abcd".to_string()]);
+    assert!(!old.exists(), "the emptied legacy root is removed");
+}
+
+#[test]
+fn opening_the_database_refuses_when_both_roots_have_one() {
+    let tmp = tempdir().unwrap();
+    let old = tmp.path().join("legacy");
+    let new = tmp.path().join("home");
+    touch(&old.join("openalpaca.db"), "legacy");
+    touch(&new.join("state").join("openalpaca.db"), "destination");
+
+    let err = match move_then_open(&old, &new) {
+        Err(e) => e,
+        Ok(_) => panic!("opening the database must refuse while two of them exist"),
+    };
+    assert!(
+        format!("{err:#}").contains("openalpaca.db"),
+        "unexpected error: {err:#}"
+    );
+    assert_eq!(
+        fs::read_to_string(old.join("openalpaca.db")).unwrap(),
+        "legacy"
+    );
 }
 
 // ============================================================================

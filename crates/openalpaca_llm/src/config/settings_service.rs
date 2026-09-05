@@ -32,7 +32,7 @@ pub struct LlmSettingsService {
 
 impl LlmSettingsService {
     pub fn new(router: Arc<LlmRouter>, config_path: PathBuf) -> Result<Self, String> {
-        let encryptor = KeyEncryptor::load_or_generate()?;
+        let encryptor = KeyEncryptor::from_env()?;
         let secret_store: Arc<dyn SecretStore> =
             Arc::new(crate::keys::secret_store::MemorySecretStore::new());
         Ok(Self {
@@ -48,7 +48,7 @@ impl LlmSettingsService {
         config_path: PathBuf,
         secret_store: Arc<dyn SecretStore>,
     ) -> Result<Self, String> {
-        let encryptor = KeyEncryptor::load_or_generate()?;
+        let encryptor = KeyEncryptor::from_env()?;
         Ok(Self {
             router,
             config_path,
@@ -594,7 +594,7 @@ impl LlmSettingsService {
         F: FnOnce(&mut LlmRouterConfig),
     {
         // D4: Acquire config write lock
-        let _lock = crate::keys::key_encryption::acquire_config_write_lock()?;
+        let _lock = crate::keys::key_encryption::acquire_config_write_lock(&self.config_path)?;
 
         // 1. Read current config
         let mut config =
