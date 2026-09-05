@@ -104,12 +104,21 @@ impl BuiltInTool for WorkspaceReadTool {
         let result: Vec<serde_json::Value> = entries
             .iter()
             .map(|e| {
-                serde_json::json!({
+                let mut value = serde_json::json!({
                     "key": e.key,
                     "content": e.content,
                     "author": e.author_agent_id,
                     "type": e.entry_type,
-                })
+                });
+                // An entry whose bytes live in the artifact store says so: the
+                // spill leaves only a preview behind, and without the id a
+                // second agent picking up the hand-off would have no way to
+                // tell, let alone to name what it is missing.
+                if let Some(id) = &e.file_asset_id {
+                    value["file_asset_id"] = serde_json::json!(id);
+                    value["truncated"] = serde_json::json!(e.truncated);
+                }
+                value
             })
             .collect();
 
@@ -163,7 +172,9 @@ impl BuiltInTool for WorkspaceWriteTool {
         if content.len() > MAX_WORKSPACE_CONTENT_SIZE {
             return Err(format!(
                 "Content size {} bytes exceeds the {} byte limit. \
-                 Condense or summarize your content to fit within the limit, then retry.",
+                 Condense or summarize your content to fit within the limit, then retry \
+                 — or save the full deliverable with artifact_write, which takes far larger \
+                 content and versions it.",
                 content.len(),
                 MAX_WORKSPACE_CONTENT_SIZE
             ));
@@ -189,6 +200,8 @@ impl BuiltInTool for WorkspaceWriteTool {
         let mut spilled_id: Option<String> = None;
         let mut spill_error: Option<String> = None;
         let mut stored_content = content;
+        // Whether `stored_content` ends up shorter than what the store holds.
+        let mut spill_truncated = false;
         // Assigned only on a successful spill; `stored_content` borrows it.
         let preview;
         if entry_type == WorkspaceEntryType::Artifact && explicit_asset_id.is_none() {
@@ -202,6 +215,7 @@ impl BuiltInTool for WorkspaceWriteTool {
             ) {
                 Ok(id) => {
                     preview = artifact_write::spill_preview(content);
+                    spill_truncated = preview.as_str() != content;
                     stored_content = &preview;
                     spilled_id = Some(id);
                 }
@@ -238,7 +252,9 @@ impl BuiltInTool for WorkspaceWriteTool {
 
             // Set file_asset_id in the same state mutation (before persisting)
             if let Some(fid) = explicit_asset_id.or(spilled_id.as_deref()) {
-                state.workspace.set_file_asset_id(key, fid);
+                // Only the spill shortens the entry; an explicitly supplied id
+                // leaves the caller's content verbatim.
+                state.workspace.set_file_asset_id(key, fid, spill_truncated);
             }
 
             let new_json = state.to_json();

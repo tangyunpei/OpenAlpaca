@@ -27,6 +27,13 @@ pub struct WorkspaceEntry {
     /// Optional file asset ID for entries backed by uploaded/generated files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_asset_id: Option<String>,
+    /// Whether `content` is a shortened view of what `file_asset_id` holds.
+    /// Set only by the `workspace_write` artifact spill, which replaces a long
+    /// body with a preview; an entry the caller backed with its own asset id
+    /// keeps its content verbatim and stays `false`. `workspace_read` surfaces
+    /// it so a *reading* agent knows it is not holding the whole thing.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// The shared workspace for a task — all agents can read/write.
@@ -91,6 +98,8 @@ impl TaskWorkspace {
             existing.author_agent_id = author_agent_id.to_string();
             existing.entry_type = entry_type;
             existing.updated_at = now;
+            // The content just written is whole until a spill says otherwise.
+            existing.truncated = false;
             return Ok(());
         }
 
@@ -126,14 +135,20 @@ impl TaskWorkspace {
             created_at: now,
             updated_at: now,
             file_asset_id: None,
+            truncated: false,
         });
         Ok(())
     }
 
     /// Associate a file asset ID with an existing workspace entry.
-    pub fn set_file_asset_id(&mut self, key: &str, file_asset_id: &str) {
+    ///
+    /// `truncated` says whether the entry's content is only a preview of what
+    /// that asset holds — true for a spilled artifact whose body was shortened,
+    /// false for an entry the caller backed with its own asset.
+    pub fn set_file_asset_id(&mut self, key: &str, file_asset_id: &str, truncated: bool) {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.key == key) {
             entry.file_asset_id = Some(file_asset_id.to_string());
+            entry.truncated = truncated;
         }
     }
 

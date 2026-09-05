@@ -1,5 +1,6 @@
 use super::*;
 use crate::agent::subagent::SubAgent;
+use crate::memory::scope_context::MemoryScopeContext;
 use crate::test_util::{make_agent, template_from_agent};
 
 fn setup(agents: Vec<SubAgent>) -> TaskDispatcher {
@@ -143,7 +144,7 @@ fn test_dispatch_lead_agent_marks_agent_busy() {
         "user1",
         "user1:cli",
         "cli",
-        None,
+        MemoryScopeContext::global_only(),
     );
 
     assert!(result.is_ok());
@@ -179,7 +180,7 @@ fn test_dispatch_lead_agent_prefers_orchestration_capability() {
         "user1",
         "user1:cli",
         "cli",
-        None,
+        MemoryScopeContext::global_only(),
     );
 
     assert!(result.is_ok());
@@ -216,7 +217,7 @@ fn test_dispatch_lead_agent_fallback_to_any_idle_agent() {
         "user1",
         "user1:cli",
         "cli",
-        None,
+        MemoryScopeContext::global_only(),
     );
 
     assert!(result.is_ok());
@@ -250,7 +251,7 @@ fn test_dispatch_lead_agent_fails_no_agents() {
         "user1",
         "user1:cli",
         "cli",
-        None,
+        MemoryScopeContext::global_only(),
     );
 
     assert!(result.is_err());
@@ -674,7 +675,7 @@ async fn test_lead_agent_steering_attach_detach_and_leftover_conversion() {
             "user1",
             "user1:cli",
             "cli",
-            None,
+            MemoryScopeContext::global_only(),
         )
         .unwrap();
     let task_id = outcome.task_id;
@@ -765,7 +766,7 @@ async fn test_lead_agent_lane_attachment_independent_of_steering_flag() {
             "user1",
             "user1:cli",
             "cli",
-            None,
+            MemoryScopeContext::global_only(),
         )
         .unwrap();
 
@@ -862,7 +863,7 @@ async fn test_lead_agent_completion_report_persists_final_content_verbatim() {
             "user1",
             "user1:cli",
             "cli",
-            None,
+            MemoryScopeContext::global_only(),
         )
         .unwrap();
 
@@ -892,7 +893,7 @@ async fn test_lead_agent_completion_report_empty_falls_back_to_template_with_sta
             "user1",
             "user1:cli",
             "cli",
-            None,
+            MemoryScopeContext::global_only(),
         )
         .unwrap();
 

@@ -124,6 +124,7 @@ impl Orchestrator {
             task_id: None,
             owner_id: owner_id.map(|s| s.to_string()),
             workspace_id: scope_ctx.workspace_id.clone(),
+            request_workspace_root: scope_ctx.request_workspace_root.clone(),
             skill_stack: vec![],
             effective_constraints: None,
             lane_key: Some(lane_key.to_string()),

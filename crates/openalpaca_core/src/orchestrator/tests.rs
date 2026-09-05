@@ -566,6 +566,175 @@ fn make_orchestrator_with_tools_and_llm(
     )
 }
 
+/// Ruling R22, through the real request path: `handle_message` →
+/// `MemoryScopeContext::for_request` → `simple_query_handler`'s `ToolContext`
+/// → the tool. A turn that carried no workspace — every connector lane, every
+/// scheduled skill — must reach tools with `request_workspace_root: None`,
+/// even though the CWD fallback still hands memory a `workspace_id` (this test
+/// process runs inside a `.git` checkout, so it does).
+mod request_workspace_threading {
+    use super::*;
+    use crate::tools::registry::{BuiltInTool, ToolContext};
+    use openalpaca_llm::{
+        ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, ToolCall as LlmToolCall,
+        Usage,
+    };
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Records the `ToolContext` every invocation was handed.
+    struct RecordingTool(Arc<Mutex<Vec<ToolContext>>>);
+
+    #[async_trait]
+    impl BuiltInTool for RecordingTool {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+            Err("needs context".to_string())
+        }
+        async fn execute_with_context(
+            &self,
+            _arguments: &serde_json::Value,
+            ctx: &ToolContext,
+        ) -> Result<String, String> {
+            self.0
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(ctx.clone());
+            Ok("recorded".to_string())
+        }
+    }
+
+    /// One tool call, then a final answer.
+    struct CallsTheToolOnce {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmProvider for CallsTheToolOnce {
+        fn name(&self) -> &str {
+            "records-ctx"
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            let (tool_calls, finish_reason, content) = if n == 0 {
+                (
+                    vec![LlmToolCall {
+                        id: "tc_1".to_string(),
+                        name: "record_ctx".to_string(),
+                        arguments: serde_json::json!({}),
+                    }],
+                    FinishReason::ToolUse,
+                    String::new(),
+                )
+            } else {
+                (vec![], FinishReason::Stop, "done".to_string())
+            };
+            Ok(ChatResponse {
+                content,
+                tool_calls,
+                model: "mock-model".to_string(),
+                usage: Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    ..Default::default()
+                },
+                finish_reason,
+                thinking: None,
+                parts: None,
+            })
+        }
+    }
+
+    /// Drive one turn through the front door and return the `ToolContext` the
+    /// tool was invoked with.
+    async fn tool_context_for_turn(workspace_path: Option<String>) -> ToolContext {
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let registry = ToolRegistry::default();
+        let mut tool = make_mock_tool("record_ctx");
+        tool.backend = ToolBackend::BuiltIn(Arc::new(RecordingTool(recorded.clone())));
+        registry.register(tool).unwrap();
+        let registry = Arc::new(registry);
+
+        // "full" puts the whole registry on the main-loop surface, so the
+        // recording tool is reachable without depending on keyword suggestion.
+        let mut config = DaemonConfig::default();
+        config.orchestrator.routing.tool_selection = "full".to_string();
+
+        let router = openalpaca_llm::LlmRouter::single_provider(
+            Arc::new(CallsTheToolOnce {
+                calls: AtomicUsize::new(0),
+            }),
+            openalpaca_llm::ProviderType::Anthropic,
+            "claude-sonnet-4-5-20250929".to_string(),
+        );
+        let bus = EventBus::default();
+        let gate = make_security_gate_with_registry(&bus, registry.clone());
+        let orch = Orchestrator::new(
+            Arc::new(SharedContext::new()),
+            Arc::new(LaneManager::new()),
+            bus,
+            SystemPersona::default(),
+            Some(Arc::new(router)),
+            LoopConfig::default(),
+            gate,
+            registry,
+            None,
+            None,
+            Arc::new(skill_catalog::SkillCatalog::new()),
+            Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+            Arc::new(ArcSwap::from_pointee(config)),
+        );
+
+        orch.handle_message(
+            Uuid::new_v4(),
+            "telegram".to_string(),
+            "write up the report".to_string(),
+            Principal::System,
+            Scope::Global,
+            "user1:telegram".to_string(),
+            workspace_path,
+            None,
+        )
+        .await
+        .expect("turn should succeed");
+
+        let recorded = recorded.lock().unwrap_or_else(|p| p.into_inner());
+        assert_eq!(recorded.len(), 1, "the tool should have run exactly once");
+        recorded[0].clone()
+    }
+
+    #[tokio::test]
+    async fn a_turn_without_a_workspace_path_carries_no_request_root() {
+        let ctx = tool_context_for_turn(None).await;
+
+        assert_eq!(
+            ctx.request_workspace_root, None,
+            "the daemon CWD must never reach a tool as a request workspace root"
+        );
+        assert_eq!(
+            ctx.workspace_id,
+            std::env::current_dir()
+                .ok()
+                .and_then(|d| crate::memory::workspace::resolve_workspace_id(&d)),
+            "memory scoping keeps its CWD fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_with_a_workspace_path_carries_the_resolved_root() {
+        let project = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(project.path().join(".git")).unwrap();
+        let root = project.path().canonicalize().unwrap();
+
+        let ctx = tool_context_for_turn(Some(project.path().to_string_lossy().to_string())).await;
+
+        assert_eq!(ctx.request_workspace_root.as_deref(), root.to_str());
+        assert_eq!(ctx.workspace_id.as_deref(), root.to_str());
+    }
+}
+
 #[tokio::test]
 async fn test_tool_intent_detected_and_executes() {
     use openalpaca_llm::{

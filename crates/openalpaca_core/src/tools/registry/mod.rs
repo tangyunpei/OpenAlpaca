@@ -26,7 +26,20 @@ pub struct ToolContext {
     pub agent_id: Option<String>,
     pub task_id: Option<String>,
     pub owner_id: Option<String>,
+    /// Workspace root for **memory scoping**. Derived from the daemon's current
+    /// directory when the request carried no workspace, so it is never proof
+    /// that the turn belongs to a project — see `request_workspace_root`.
     pub workspace_id: Option<String>,
+    /// The project root the originating *request* supplied (`x-workspace-path`
+    /// on `/v1/chat`, `workspace_path` on `/v1/command`), resolved to its root.
+    /// `None` for connector lanes, scheduled skills and every turn that carried
+    /// none — never CWD-derived (ruling R22).
+    ///
+    /// The only field that may place content on disk: `artifact_write` and the
+    /// `workspace_write` spill read this and nothing else, so a chat turn's
+    /// deliverable lands in the home store rather than in whatever repository
+    /// the daemon happened to start in.
+    pub request_workspace_root: Option<String>,
     /// Skill invocation chain, oldest first. Empty at top level.
     pub skill_stack: Vec<String>,
     /// Effective tool constraints inherited from parent skill chain.

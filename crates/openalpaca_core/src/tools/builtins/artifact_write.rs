@@ -3,9 +3,11 @@
 //! The first **per-request** file writer in the codebase. `file_write` writes
 //! under a `workspace_root` captured once at daemon startup
 //! (`services/tools.rs` → `builtins::builtin_tools`); `artifact_write` resolves
-//! its store from [`ToolContext::workspace_id`] on every call, so an artifact
-//! produced for a request that arrived with a workspace lands in *that*
-//! project's store and never in the daemon's current directory.
+//! its store from [`ToolContext::request_workspace_root`] on every call, so an
+//! artifact produced for a request that arrived with a workspace lands in
+//! *that* project's store, and one produced for a turn that carried no
+//! workspace — every connector lane, every scheduled skill — lands in the home
+//! store, never in the daemon's current directory (ruling R22).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -33,23 +35,30 @@ const KINDS: &[&str] = &[
     "binary",
 ];
 
-/// The store an invocation writes to (plan §4.6, "Critical").
+/// The store an invocation writes to (plan §4.6 "Critical", ruling R22).
 ///
-/// `workspace_id` is the canonical absolute path of the request's workspace
-/// root (`memory::workspace::workspace_id_from_root`). Absent — a chat turn
-/// with no project, a detached loop — the artifact belongs to the home store.
-/// A non-absolute value is not a project root: `store_root` would reject it,
-/// so it degrades to the home store with a warning rather than failing a write.
+/// The **only** input is [`ToolContext::request_workspace_root`]: the project
+/// root a client actually sent with the turn (`x-workspace-path` on
+/// `/v1/chat`, `workspace_path` on `/v1/command`), already resolved to its
+/// root. `ToolContext::workspace_id` is deliberately not read — it falls back
+/// to the daemon's current directory for memory scoping, and placing files by
+/// it would drop a Telegram lane's deliverables into whatever repository the
+/// daemon was started in.
+///
+/// Absent — a connector turn, a scheduled skill, a detached loop — the
+/// artifact belongs to the home store. A non-absolute value is not a project
+/// root: `store_root` would reject it, so it degrades to the home store with a
+/// warning rather than failing a write.
 fn scope_from_context(ctx: &ToolContext) -> StoreScope {
-    match ctx.workspace_id.as_deref() {
-        Some(id) if !id.trim().is_empty() => {
-            let root = PathBuf::from(id);
+    match ctx.request_workspace_root.as_deref() {
+        Some(root) if !root.trim().is_empty() => {
+            let root = PathBuf::from(root);
             if root.is_absolute() {
                 StoreScope::Project(root)
             } else {
                 tracing::warn!(
-                    workspace_id = id,
-                    "artifact_write: workspace_id is not an absolute path — using the home store"
+                    request_workspace_root = %root.display(),
+                    "artifact_write: the request workspace root is not an absolute path — using the home store"
                 );
                 StoreScope::Home
             }
@@ -367,8 +376,13 @@ mod tests {
 
     /// A temp project root, a temp home root and a temp database — no test
     /// here ever touches a real store or the daemon's current directory.
+    ///
+    /// The home store is `<home_parent>/.openalpaca`, mirroring production, so
+    /// a test can also play the `$HOME` sub-case: a CWD walk that finds no
+    /// closer marker stops at `$HOME` (Phase 1 puts a `.openalpaca` there) and
+    /// would hand the resolver `$HOME` as a *project* root.
     struct Fixture {
-        _home: TempDir,
+        home_parent: TempDir,
         _env: HomeStoreGuard,
         _db_dir: TempDir,
         project: TempDir,
@@ -377,13 +391,15 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let home = TempDir::new().unwrap();
-            let env = HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+            let home_parent = TempDir::new().unwrap();
+            let home = home_parent.path().join(".openalpaca");
+            std::fs::create_dir(&home).unwrap();
+            let env = HomeStoreGuard::set(&home.canonicalize().unwrap());
             let project = TempDir::new().unwrap();
             let db_dir = TempDir::new().unwrap();
             let db = Database::open(&db_dir.path().join("test.db")).unwrap();
             Self {
-                _home: home,
+                home_parent,
                 _env: env,
                 _db_dir: db_dir,
                 project,
@@ -396,7 +412,16 @@ mod tests {
         }
 
         fn home_root(&self) -> PathBuf {
-            self._home.path().canonicalize().unwrap()
+            self.home_parent
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join(".openalpaca")
+        }
+
+        /// The directory the home store lives in — `$HOME`'s stand-in.
+        fn home_parent(&self) -> PathBuf {
+            self.home_parent.path().canonicalize().unwrap()
         }
 
         fn tool(&self) -> ArtifactWriteTool {
@@ -443,12 +468,17 @@ mod tests {
         }
     }
 
-    fn ctx(workspace_id: Option<&str>, task_id: Option<&str>) -> ToolContext {
+    /// A turn that arrived with a workspace. Only `request_workspace_root` is
+    /// set: it is the field that places content, and leaving `workspace_id`
+    /// empty keeps every project-store assertion below a statement about the
+    /// *request*. The reverse shape — a CWD-derived `workspace_id` and no
+    /// request root — is the connector regression above.
+    fn ctx(request_workspace_root: Option<&str>, task_id: Option<&str>) -> ToolContext {
         ToolContext {
             agent_id: Some("writing_agent".to_string()),
             task_id: task_id.map(str::to_string),
             owner_id: Some(OWNER.to_string()),
-            workspace_id: workspace_id.map(str::to_string),
+            request_workspace_root: request_workspace_root.map(str::to_string),
             ..Default::default()
         }
     }
@@ -527,6 +557,97 @@ mod tests {
         );
     }
 
+    /// R22, the regression this fix exists for. A Telegram/iMessage/Discord
+    /// turn and every scheduled skill pass `workspace_path: None`, and
+    /// `handlers.rs` then derives `workspace_id` by walking up from the
+    /// *daemon's* current directory — a plausible absolute project root. That
+    /// id scopes memory; it must never place an artifact, or a daemon started
+    /// from a checkout writes chat deliverables into the developer's working
+    /// tree (`artifacts/` is deliberately not in the store's `.gitignore`).
+    #[tokio::test]
+    async fn a_connector_turn_never_places_an_artifact_in_the_daemons_project() {
+        let fx = Fixture::new();
+
+        // The daemon's CWD, inside a marker-bearing project — resolved exactly
+        // as `handlers.rs` resolves it.
+        let cwd_project = TempDir::new().unwrap();
+        std::fs::create_dir(cwd_project.path().join(".git")).unwrap();
+        let cwd_root = cwd_project.path().canonicalize().unwrap();
+        let cwd_workspace_id =
+            crate::memory::workspace::resolve_workspace_id(cwd_project.path()).unwrap();
+        assert_eq!(PathBuf::from(&cwd_workspace_id), cwd_root);
+
+        let telegram_ctx = ToolContext {
+            agent_id: Some("writing_agent".to_string()),
+            owner_id: Some(OWNER.to_string()),
+            // Memory scoping keeps its CWD-derived id …
+            workspace_id: Some(cwd_workspace_id),
+            // … and the request carried no workspace at all.
+            request_workspace_root: None,
+            ..Default::default()
+        };
+
+        let out = fx
+            .tool()
+            .execute_with_context(
+                &serde_json::json!({
+                    "name": "reply-draft",
+                    "kind": "markdown",
+                    "content": "# Draft\n"
+                }),
+                &telegram_ctx,
+            )
+            .await
+            .unwrap();
+
+        let path = PathBuf::from(parse(&out)["path"].as_str().unwrap());
+        assert!(
+            path.starts_with(fx.home_root().join("artifacts")),
+            "a connector turn belongs in the home store, got {}",
+            path.display()
+        );
+        assert!(
+            !cwd_root.join(".openalpaca").exists(),
+            "the daemon's own project must not gain a store"
+        );
+    }
+
+    /// The `$HOME` sub-case of R22: when the CWD walk finds no closer marker it
+    /// stops at `$HOME`, and the old resolver turned that into
+    /// `StoreScope::Project($HOME)` — whose `store_root` *is* the home store,
+    /// so `ensure_store` seeded a **project** `.gitignore` into it. The request
+    /// root is the only source now, so the scope is `Home` and nothing is
+    /// seeded.
+    #[tokio::test]
+    async fn a_cwd_walk_that_stops_at_home_never_seeds_a_project_gitignore() {
+        let fx = Fixture::new();
+
+        let home_shaped_ctx = ToolContext {
+            agent_id: Some("writing_agent".to_string()),
+            owner_id: Some(OWNER.to_string()),
+            workspace_id: Some(fx.home_parent().to_str().unwrap().to_string()),
+            request_workspace_root: None,
+            ..Default::default()
+        };
+
+        let out = fx
+            .tool()
+            .execute_with_context(
+                &serde_json::json!({"name": "notes", "kind": "markdown", "content": "hi"}),
+                &home_shaped_ctx,
+            )
+            .await
+            .unwrap();
+
+        let path = PathBuf::from(parse(&out)["path"].as_str().unwrap());
+        assert!(path.starts_with(fx.home_root().join("artifacts")));
+        assert!(
+            !fx.home_root().join(".gitignore").exists(),
+            "ensure_store must never run with StoreScope::Project($HOME): a \
+             project .gitignore was seeded into the home store"
+        );
+    }
+
     #[tokio::test]
     async fn falls_back_to_the_home_store_without_a_workspace() {
         let fx = Fixture::new();
@@ -555,7 +676,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_relative_workspace_id_degrades_to_the_home_store() {
+    async fn a_relative_request_workspace_root_degrades_to_the_home_store() {
         let fx = Fixture::new();
 
         let out = fx
@@ -812,7 +933,7 @@ mod tests {
         assert!(err.contains("database context"), "{err}");
 
         let ownerless = ToolContext {
-            workspace_id: Some(root.to_str().unwrap().to_string()),
+            request_workspace_root: Some(root.to_str().unwrap().to_string()),
             ..Default::default()
         };
         let err = fx
@@ -915,6 +1036,40 @@ mod tests {
             "the startup workspace_root must not attract artifacts"
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Deliverable\n");
+    }
+
+    /// The rule itself, stated once (R22): the request root places content and
+    /// nothing else does.
+    #[test]
+    fn the_scope_reads_the_request_root_and_only_the_request_root() {
+        let cwd_only = ToolContext {
+            workspace_id: Some("/some/checkout".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(scope_from_context(&cwd_only), StoreScope::Home);
+
+        let from_request = ToolContext {
+            workspace_id: Some("/some/checkout".to_string()),
+            request_workspace_root: Some("/the/project".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            scope_from_context(&from_request),
+            StoreScope::Project(PathBuf::from("/the/project"))
+        );
+
+        for degrades in ["relative/path", "   ", ""] {
+            let ctx = ToolContext {
+                request_workspace_root: Some(degrades.to_string()),
+                ..Default::default()
+            };
+            assert_eq!(scope_from_context(&ctx), StoreScope::Home, "{degrades:?}");
+        }
+
+        assert_eq!(
+            scope_from_context(&ToolContext::default()),
+            StoreScope::Home
+        );
     }
 
     #[test]

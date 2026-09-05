@@ -10,6 +10,7 @@ use crate::compose::{
 use crate::context::SharedContext;
 use crate::daemon_config::DaemonConfig;
 use crate::events::SystemEvent;
+use crate::memory::scope_context::MemoryScopeContext;
 use crate::middleware::prompt::{format_tool_guidance, SystemPersona};
 use crate::prompt_ctx::ContextManager;
 use crate::prompt_ctx::section::ContextBundle;
@@ -55,7 +56,9 @@ pub struct SpawnSubagentTool {
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
     /// Tracks how many subagents have been spawned (for observability).
     spawn_count: AtomicUsize,
-    workspace_id: Option<String>,
+    /// The turn's workspace identity: `workspace_id` scopes memory,
+    /// `request_workspace_root` alone places artifacts (R22).
+    workspace: MemoryScopeContext,
     /// Cancellation token from the parent lead agent task.
     /// Child tokens are created for each subagent so they auto-cancel
     /// when the parent task is cancelled.
@@ -102,7 +105,7 @@ impl SpawnSubagentTool {
         tracker: Arc<SubagentTracker>,
         depth: u32,
         max_concurrent_subagents: usize,
-        workspace_id: Option<String>,
+        workspace: MemoryScopeContext,
         confirmation_broker: Option<Arc<crate::security::confirmation::ConfirmationBroker>>,
         context_manager: Arc<ContextManager>,
         parent_bundle: Arc<ContextBundle>,
@@ -141,7 +144,7 @@ impl SpawnSubagentTool {
             depth,
             max_concurrent_subagents,
             concurrency_semaphore: Arc::new(tokio::sync::Semaphore::new(max_concurrent_subagents)),
-            workspace_id,
+            workspace,
             prompt_template,
             confirmation_broker,
             context_manager,
@@ -265,7 +268,8 @@ impl BuiltInTool for SpawnSubagentTool {
             agent_id: Some(agent_id.to_string()),
             task_id: Some(self.task_id.clone()),
             owner_id: Some(self.created_by.clone()),
-            workspace_id: self.workspace_id.clone(),
+            workspace_id: self.workspace.workspace_id.clone(),
+            request_workspace_root: self.workspace.request_workspace_root.clone(),
             skill_stack: vec![],
             effective_constraints: None,
             // Subagents are lane-detached: no lane/request threading here.

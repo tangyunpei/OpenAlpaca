@@ -59,7 +59,7 @@ impl BuiltInTool for MemoryStoreTool {
 
         // Identity from context, not from arguments (anti-spoofing) — same
         // contract as `memory_search`.
-        let scope_ctx = MemoryScopeContext::new(ctx.workspace_id.clone());
+        let scope_ctx = MemoryScopeContext::from_tool_context(ctx);
         store_memory(
             self.db.as_ref(),
             &self.embedder,

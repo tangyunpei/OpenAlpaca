@@ -340,12 +340,23 @@ mod workspace_artifact_spill {
             }
         }
 
+        fn read_tool(&self) -> WorkspaceReadTool {
+            WorkspaceReadTool {
+                db: Some(self.db.clone()),
+            }
+        }
+
+        /// A turn that arrived with a workspace: `request_workspace_root` is
+        /// the field that places content (R22), and production sets the
+        /// memory-scoping id from the same path.
         fn ctx(&self) -> ToolContext {
+            let root = self.project_root().to_str().unwrap().to_string();
             ToolContext {
                 agent_id: Some("writing_agent".to_string()),
                 task_id: Some(TASK_ID.to_string()),
                 owner_id: Some(OWNER.to_string()),
-                workspace_id: Some(self.project_root().to_str().unwrap().to_string()),
+                workspace_id: Some(root.clone()),
+                request_workspace_root: Some(root),
                 ..Default::default()
             }
         }
@@ -554,6 +565,115 @@ mod workspace_artifact_spill {
         assert!(out.contains("could not be saved"), "{out}");
         let entry = fx.entry("doomed");
         assert!(entry.file_asset_id.is_none());
+        assert!(!entry.truncated);
         assert_eq!(entry.content, body);
+    }
+
+    /// Fix round 1, Important 2. Before this, a second agent reading a spilled
+    /// hand-off saw 512 characters and a bare ellipsis, with nothing in the
+    /// tool result saying an artifact existed or how to name it.
+    #[tokio::test]
+    async fn workspace_read_names_the_artifact_behind_a_preview() {
+        let fx = Fixture::new();
+        let body = long_body();
+
+        fx.tool()
+            .execute_with_context(
+                &serde_json::json!({"key": "draft_v1", "content": body, "entry_type": "artifact"}),
+                &fx.ctx(),
+            )
+            .await
+            .unwrap();
+        fx.tool()
+            .execute_with_context(
+                &serde_json::json!({"key": "notes", "content": "short", "entry_type": "text"}),
+                &fx.ctx(),
+            )
+            .await
+            .unwrap();
+
+        let out = fx
+            .read_tool()
+            .execute_with_context(&serde_json::json!({}), &fx.ctx())
+            .await
+            .unwrap();
+        let entries: Vec<serde_json::Value> = serde_json::from_str(&out).unwrap();
+
+        let draft = entries
+            .iter()
+            .find(|e| e["key"] == "draft_v1")
+            .expect("the artifact entry");
+        assert_eq!(
+            draft["file_asset_id"].as_str(),
+            fx.entry("draft_v1").file_asset_id.as_deref(),
+            "the reader must be handed the id Phase 3's routes resolve"
+        );
+        assert_eq!(draft["truncated"], serde_json::json!(true));
+        assert!(
+            draft["content"].as_str().unwrap().chars().count() <= 512,
+            "the entry still carries only the preview"
+        );
+
+        let notes = entries.iter().find(|e| e["key"] == "notes").unwrap();
+        assert!(
+            notes.get("file_asset_id").is_none() && notes.get("truncated").is_none(),
+            "an unspilled entry gains no artifact fields: {notes}"
+        );
+    }
+
+    /// A short artifact spills but is not shortened — the entry holds the whole
+    /// body, so `truncated` must say so even though an asset exists.
+    #[tokio::test]
+    async fn a_spill_that_fits_in_the_preview_is_not_truncated() {
+        let fx = Fixture::new();
+
+        fx.tool()
+            .execute_with_context(
+                &serde_json::json!({"key": "tiny", "content": "# Tiny\n", "entry_type": "artifact"}),
+                &fx.ctx(),
+            )
+            .await
+            .unwrap();
+
+        let entry = fx.entry("tiny");
+        assert!(entry.file_asset_id.is_some());
+        assert!(!entry.truncated);
+        assert_eq!(entry.content, "# Tiny\n");
+    }
+
+    /// The spill resolves its store exactly like the tool (R22): a connector
+    /// turn carries a CWD-derived `workspace_id` and no request root, and its
+    /// bytes belong in the home store.
+    #[tokio::test]
+    async fn a_connector_turn_spills_into_the_home_store() {
+        let fx = Fixture::new();
+        let connector_ctx = ToolContext {
+            workspace_id: Some(fx.project_root().to_str().unwrap().to_string()),
+            request_workspace_root: None,
+            ..fx.ctx()
+        };
+
+        fx.tool()
+            .execute_with_context(
+                &serde_json::json!({
+                    "key": "reply_draft",
+                    "content": long_body(),
+                    "entry_type": "artifact"
+                }),
+                &connector_ctx,
+            )
+            .await
+            .unwrap();
+
+        let asset_id = fx.entry("reply_draft").file_asset_id.clone().unwrap();
+        let asset = FileAssetRepository::new(&fx.db)
+            .get_by_id(&asset_id)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !PathBuf::from(&asset.storage_path).starts_with(fx.project_root()),
+            "a connector turn's spill must not land in the daemon's project: {}",
+            asset.storage_path
+        );
     }
 }

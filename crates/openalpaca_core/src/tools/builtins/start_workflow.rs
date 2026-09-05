@@ -126,7 +126,10 @@ impl BuiltInTool for StartWorkflowTool {
             &created_by,
             lane_key,
             source,
-            ctx.workspace_id.clone(),
+            // Both halves of the turn's workspace identity travel into the
+            // workflow: the memory-scoping id and the request-supplied root
+            // that alone may place artifacts (R22).
+            crate::memory::scope_context::MemoryScopeContext::from_tool_context(ctx),
         )?;
 
         // 3. Store the outcome in the result cell for the caller.

@@ -28,6 +28,7 @@ use crate::agent::template::AgentTemplate;
 use crate::bus::EventBus;
 use crate::context::SharedContext;
 use crate::daemon_config::DaemonConfig;
+use crate::memory::scope_context::MemoryScopeContext;
 use crate::middleware::prompt::format_tool_guidance;
 use crate::prompt_ctx::ContextManager;
 use crate::prompt_ctx::section::ContextBundle;
@@ -85,7 +86,7 @@ pub async fn run_lead_agent(
     lane_key: &str,
     source: &str,
     daemon_config: &Arc<ArcSwap<DaemonConfig>>,
-    workspace_id: Option<String>,
+    workspace: MemoryScopeContext,
     cancel_token: Option<CancellationToken>,
     steering_inbox: Option<Arc<crate::runner::steering::SteeringInbox>>,
     connector_guidance: &str,
@@ -205,7 +206,7 @@ pub async fn run_lead_agent(
             .execution
             .lead_agent_defaults
             .max_concurrent_subagents,
-        workspace_id.clone(),
+        workspace.clone(),
         confirmation_broker.clone(),
         context_manager,
         parent_bundle,
@@ -224,7 +225,8 @@ pub async fn run_lead_agent(
         agent_id: Some(lead_agent.id.clone()),
         task_id: Some(task_id.to_string()),
         owner_id: Some(created_by.to_string()),
-        workspace_id: workspace_id.clone(),
+        workspace_id: workspace.workspace_id.clone(),
+        request_workspace_root: workspace.request_workspace_root.clone(),
         skill_stack: vec![],
         effective_constraints: None,
         lane_key: Some(lane_key.to_string()),
@@ -369,9 +371,7 @@ pub async fn run_lead_agent(
         } else {
             None
         };
-        let scope_ctx = workspace_id
-            .as_ref()
-            .map(|ws| crate::memory::scope_context::MemoryScopeContext::new(Some(ws.clone())));
+        let scope_ctx = workspace.has_workspace().then(|| workspace.clone());
         let memories = if let Some(ref ctx) = scope_ctx {
             let cascade_scopes = ctx.cascade_scopes();
             repo.search_hybrid_cascade(

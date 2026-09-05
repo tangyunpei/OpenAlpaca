@@ -1,4 +1,5 @@
 use super::*;
+use crate::memory::scope_context::MemoryScopeContext;
 
 #[test]
 fn test_lead_agent_registry_contains_coordination_tools() {
@@ -57,7 +58,7 @@ fn test_lead_agent_registry_contains_coordination_tools() {
         tracker.clone(),
         0,
         DEFAULT_MAX_CONCURRENT_SUBAGENTS,
-        None,
+        MemoryScopeContext::global_only(),
         None,
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
@@ -367,7 +368,7 @@ fn test_batch_spawn_tool_hidden_when_disabled() {
         tracker.clone(),
         0,
         DEFAULT_MAX_CONCURRENT_SUBAGENTS,
-        None,
+        MemoryScopeContext::global_only(),
         None,
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
@@ -423,7 +424,7 @@ fn test_batch_spawn_tool_present_when_enabled() {
         tracker.clone(),
         0,
         DEFAULT_MAX_CONCURRENT_SUBAGENTS,
-        None,
+        MemoryScopeContext::global_only(),
         None,
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
@@ -478,7 +479,7 @@ async fn test_batch_spawn_empty_array_error() {
         tracker,
         0,
         DEFAULT_MAX_CONCURRENT_SUBAGENTS,
-        None, // workspace_id
+        MemoryScopeContext::global_only(), // workspace
         None, // confirmation_broker
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
@@ -518,7 +519,7 @@ async fn test_batch_spawn_exceeds_max_error() {
         tracker,
         0,
         DEFAULT_MAX_CONCURRENT_SUBAGENTS,
-        None, // workspace_id
+        MemoryScopeContext::global_only(), // workspace
         None, // confirmation_broker
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
@@ -1027,7 +1028,7 @@ async fn test_spawn_subagent_executes_plugin_backed_template() {
         tracker.clone(),
         0,
         DEFAULT_MAX_CONCURRENT_SUBAGENTS,
-        None,
+        MemoryScopeContext::global_only(),
         None,
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
@@ -1293,7 +1294,7 @@ async fn run_lead_for_test(
         "user-1:cli",
         "cli",
         &daemon_config,
-        None,
+        MemoryScopeContext::global_only(),
         None,
         None,
         "",

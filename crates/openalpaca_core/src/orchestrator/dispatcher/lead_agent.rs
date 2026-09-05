@@ -9,6 +9,7 @@ use crate::agent::registry::DestroyOutcome;
 use crate::agent::subagent::SubAgent;
 use crate::context::TaskEntryStatus;
 use crate::events::SystemEvent;
+use crate::memory::scope_context::MemoryScopeContext;
 use crate::runner::lead_agent::run_lead_agent;
 use crate::runner::steering::SteeringInbox;
 use chrono::Utc;
@@ -27,7 +28,7 @@ impl TaskDispatcher {
         created_by: &str,
         lane_key: &str,
         source: &str,
-        workspace_id: Option<String>,
+        workspace: MemoryScopeContext,
     ) -> Result<DispatchOutcome, String> {
         let task_id = Uuid::new_v4().to_string();
         let now = Utc::now();
@@ -151,7 +152,7 @@ impl TaskDispatcher {
             lane_key.to_string(),
             source.to_string(),
             created_by.to_string(),
-            workspace_id,
+            workspace,
         );
 
         let ack = format!(
@@ -179,7 +180,7 @@ impl TaskDispatcher {
         lane_key: String,
         source: String,
         created_by: String,
-        workspace_id: Option<String>,
+        workspace: MemoryScopeContext,
     ) {
         let Some(router) = self.require_router(&task_id) else {
             return;
@@ -278,7 +279,7 @@ impl TaskDispatcher {
                 &lane_key,
                 &source,
                 &daemon_config,
-                workspace_id.clone(),
+                workspace.clone(),
                 Some(cancel_token),
                 steering_inbox.clone(),
                 &connector_block,
@@ -572,7 +573,7 @@ impl TaskDispatcher {
                     &final_content,
                     "lead_agent",
                     result.success,
-                    workspace_id,
+                    workspace.workspace_id,
                 );
             }
 
