@@ -140,4 +140,16 @@ describe("ParallelWorkBlock", () => {
     );
     expect(screen.getByText("explore·1")).toBeInTheDocument();
   });
+
+  // Fix round 1, finding 4 — a failed timeline read must not be drawn as "no
+  // subagent spans": that line asserts the run did nothing, which a 500 or a
+  // dropped connection does not tell you.
+  it("says the read failed rather than claiming there are no spans", () => {
+    render(<ParallelWorkBlock timeline={null} error="database is locked" />);
+    expect(
+      screen.queryByText("No subagent spans yet."),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(/could not load/i)).toBeInTheDocument();
+    expect(screen.getByText(/database is locked/)).toBeInTheDocument();
+  });
 });

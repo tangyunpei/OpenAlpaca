@@ -102,6 +102,8 @@ export function axisLabels(
 export interface ParallelWorkBlockProps {
   /** `null` while the run's timeline is loading, or if the read failed. */
   timeline: TaskTimeline | null;
+  /** Why the read failed — a failed request, never a gap. */
+  error?: string | null;
   /** This run holds the pending tool confirmation. */
   blocked?: boolean;
   className?: string;
@@ -109,6 +111,7 @@ export interface ParallelWorkBlockProps {
 
 export function ParallelWorkBlock({
   timeline,
+  error = null,
   blocked = false,
   className,
 }: ParallelWorkBlockProps) {
@@ -136,7 +139,9 @@ export function ParallelWorkBlock({
         </div>
       ) : (
         <p className="m-0 font-mono text-2xs-plus leading-[1.5] text-faint">
-          No subagent spans yet.
+          {error !== null
+            ? `Could not load this run's timeline — ${error}`
+            : "No subagent spans yet."}
         </p>
       )}
     </div>

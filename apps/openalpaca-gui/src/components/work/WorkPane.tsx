@@ -186,6 +186,7 @@ function RunCardSlot({
     <RunCard
       run={run}
       timeline={timeline.data ?? null}
+      timelineError={timeline.error !== null ? timeline.error.message : null}
       dense={dense}
       blocked={blocked}
       busy={controller.busyFor(run.id)}

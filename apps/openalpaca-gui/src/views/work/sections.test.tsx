@@ -13,7 +13,11 @@ import type { RunEvent } from "@/lib/api/unbacked";
 
 import { EventLogSection, EVENT_LOG_EMPTY } from "./EventLogSection";
 import { OutputSection, OUTPUT_EMPTY } from "./OutputSection";
-import { TimelineSection, TIMELINE_EMPTY } from "./TimelineSection";
+import {
+  TimelineSection,
+  TIMELINE_EMPTY,
+  TIMELINE_ERROR,
+} from "./TimelineSection";
 
 const timeline = (lanes: TaskTimeline["lanes"]): TaskTimeline => ({
   task_id: "b41",
@@ -68,6 +72,16 @@ describe("TimelineSection", () => {
     expect(screen.getByText("waiting on shell_execute")).toBeInTheDocument();
     expect(screen.queryByText(TIMELINE_EMPTY)).not.toBeInTheDocument();
     expect(screen.queryByText(/not yet available/)).not.toBeInTheDocument();
+  });
+
+  // Fix round 1, finding 4 — a failed read is not evidence the run spawned
+  // nothing; `TimelineSection` must say the read failed, not draw the empty
+  // sentence a 500 or a dropped connection has no business producing.
+  it("says the read failed rather than claiming no steps have run", () => {
+    render(<TimelineSection timeline={null} error="database is locked" />);
+    expect(screen.getByText(TIMELINE_ERROR)).toBeInTheDocument();
+    expect(screen.getByText(/database is locked/)).toBeInTheDocument();
+    expect(screen.queryByText(TIMELINE_EMPTY)).not.toBeInTheDocument();
   });
 });
 

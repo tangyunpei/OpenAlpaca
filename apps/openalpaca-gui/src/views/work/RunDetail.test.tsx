@@ -128,6 +128,36 @@ describe("RunDetail — Output", () => {
   });
 });
 
+describe("RunDetail — Timeline", () => {
+  it("says the timeline read failed rather than claiming no steps have run", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        requested.push(url);
+        if (url.includes("/v1/artifacts")) return artifactsReply();
+        if (url.includes("/timeline")) {
+          return json(
+            { error: { code: "DB_ERROR", message: "database is locked" } },
+            500,
+          );
+        }
+        if (url.includes("/v1/tasks/")) return json({ task, assignments: [] });
+        return json({ error: "not found" }, 404);
+      }),
+    );
+    renderDetail();
+
+    await waitFor(() =>
+      expect(screen.getByText(/database is locked/)).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByText(/This run's timeline could not be loaded/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/No steps have run yet/)).not.toBeInTheDocument();
+  });
+});
+
 /** `userEvent.setup()` must run before render for its clipboard/pointer stubs. */
 function useAndRender() {
   const user = userEvent.setup();

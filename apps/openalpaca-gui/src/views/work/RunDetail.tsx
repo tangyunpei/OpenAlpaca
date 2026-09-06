@@ -170,7 +170,11 @@ export function RunDetail({
         </>
       )}
 
-      <TimelineSection timeline={timeline.data ?? null} blocked={blocked} />
+      <TimelineSection
+        timeline={timeline.data ?? null}
+        error={timeline.error !== null ? timeline.error.message : null}
+        blocked={blocked}
+      />
       <OutputSection
         artifacts={outputs ?? run.artifacts}
         count={run.artifactCount}

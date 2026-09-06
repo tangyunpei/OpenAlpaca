@@ -45,6 +45,8 @@ export interface RunCardProps {
   run: Run;
   /** `null` while the run's timeline is loading, or if the read failed. */
   timeline: TaskTimeline | null;
+  /** Why the timeline read failed — a failed request, never a gap. */
+  timelineError?: string | null;
   /** This run holds the pending tool confirmation. */
   blocked?: boolean;
   dense?: boolean;
@@ -61,6 +63,7 @@ export interface RunCardProps {
 export function RunCard({
   run,
   timeline,
+  timelineError = null,
   blocked = false,
   dense = false,
   busy = null,
@@ -114,7 +117,11 @@ export function RunCard({
 
         {raised && (
           <>
-            <ParallelWorkBlock timeline={timeline} blocked={blocked} />
+            <ParallelWorkBlock
+              timeline={timeline}
+              error={timelineError}
+              blocked={blocked}
+            />
             {run.note !== null && (
               <div className="mt-[10px] flex items-start gap-[7px]">
                 <span
