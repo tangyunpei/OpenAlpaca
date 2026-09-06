@@ -12,18 +12,30 @@
 //! stays the resolved absolute path so the existing content routes need no
 //! change. Bytes are placed by the §4.2 grammar
 //! (`crate::store::{run_dir, loose_dir, artifact_file_name, version_file_path}`) —
-//! this module never joins a literal directory name onto a store root.
+//! this module never joins a literal directory name onto a store root. R24: the
+//! `project_root` half of the address comes from the *canonicalized* store root
+//! ([`crate::store::project_root_at`]), never from the scope the caller named,
+//! so two scopes whose bytes land in one directory address one sequence space.
 //!
-//! ## Write protocol (§4.2), as implemented by [`ArtifactStore::put`]
+//! ## Write protocol (§4.2 + R24), as implemented by [`ArtifactStore::put`]
 //!
 //! ```text
+//! 0. create <dir>/<NN-stem.ext>  O_EXCL                                       (create only)
 //! 1. write  <dir>/.<stem>.tmp
 //! 2. fsync  the tmp file
 //! 3. rename <dir>/<NN-stem.ext>  ->  <dir>/.versions/<NN-stem>/v<N-1>.<ext>   (supersede only)
 //! 4. rename <dir>/.<stem>.tmp    ->  <dir>/<NN-stem.ext>
 //! ```
 //!
-//! All four steps run inside one `with_connection` transaction, which is also
+//! Step 0 is [`HeadReservation`] (R24, the rule T26 gave uploads): a *new*
+//! artifact claims its name with `O_EXCL` before a byte is written, because
+//! step 4's rename would otherwise replace whatever stands there. A name
+//! already held by a file no row describes is [`ArtifactError::NameTaken`] and
+//! the write fails — an artifact is addressed by name, so unlike an upload
+//! there is no sequence to bump. Superseding an artifact skips step 0: its own
+//! row already owns the name, and step 3 moves that file aside itself.
+//!
+//! All the steps run inside one `with_connection` transaction, which is also
 //! what serialises concurrent `put`s (the `Database` mutex is held for the whole
 //! call). The database statements run *after* the bytes are in place and the
 //! transaction commits last, so a failure anywhere rolls the row back to the
@@ -78,7 +90,7 @@ use crate::models::file_asset::FileAssetStatus;
 use crate::models::{ArtifactKind, ArtifactOrigin};
 use crate::store::{
     ContentKind, StoreScope, artifact_extension, artifact_file_name, confine_to_root, content_dir,
-    leading_sequence, loose_dir, project_root_of, relative_to, run_dir, version_file_path,
+    leading_sequence, loose_dir, project_root_at, relative_to, run_dir, version_file_path,
 };
 
 /// `[execution.artifacts] max_versions_per_artifact` (plan §4.6). The config key
@@ -110,6 +122,14 @@ pub enum ArtifactError {
     VersionNotFound { id: String, version: u32 },
     /// §4.9: `kind ∈ {image, binary}` → **409** `NOT_DIFFABLE`.
     NotDiffable { id: String, kind: &'static str },
+    /// R24: the head name is already held by a file no artifact row describes
+    /// — a crash orphan, or something dropped into the directory by hand.
+    ///
+    /// An artifact is addressed *by name*, so unlike an upload there is no
+    /// sequence to bump: the only two answers are "replace it" and "refuse",
+    /// and replacing bytes this store cannot account for is the one thing the
+    /// write protocol exists to prevent.
+    NameTaken { path: String },
 }
 
 impl ArtifactError {
@@ -120,6 +140,7 @@ impl ArtifactError {
             Self::Gone { .. } => "ARTIFACT_GONE",
             Self::VersionNotFound { .. } => "ARTIFACT_VERSION_NOT_FOUND",
             Self::NotDiffable { .. } => "NOT_DIFFABLE",
+            Self::NameTaken { .. } => "ARTIFACT_NAME_TAKEN",
         }
     }
 }
@@ -137,6 +158,11 @@ impl fmt::Display for ArtifactError {
             Self::NotDiffable { id, kind } => {
                 write!(f, "artifact {id} of kind {kind} is not diffable")
             }
+            Self::NameTaken { path } => write!(
+                f,
+                "{path} is already held by a file no artifact describes; \
+                 move it aside and write again"
+            ),
         }
     }
 }
@@ -427,7 +453,15 @@ impl<'a> ArtifactStore<'a> {
         };
         let rel_dir = relative_to(&artifacts_root, &dir)?;
         let ext = artifact_extension(new.kind, new.mime_type, new.name_hint);
-        let project_root = project_root_of(new.scope)?;
+        // R24: the address is the store the bytes *reach*, not the path the
+        // caller named — see `store::project_root_at`. Both the row and the
+        // directory scan below take it, so two scopes that resolve to one
+        // directory share one sequence space (and one identity) instead of both
+        // starting at `01` over each other's files.
+        let store_root = artifacts_root
+            .parent()
+            .with_context(|| format!("{} has no parent store root", artifacts_root.display()))?;
+        let project_root = project_root_at(store_root)?;
         let project_key = project_root.clone().unwrap_or_default();
         let mime = new
             .mime_type
@@ -466,6 +500,15 @@ impl<'a> ArtifactStore<'a> {
             // --- The §4.2 write protocol -------------------------------------
             fs::create_dir_all(&dir)
                 .with_context(|| format!("failed to create {}", dir.display()))?;
+            // R24: claim the name with `O_EXCL` before a byte is written. Only
+            // a *new* artifact reserves — superseding one already owns the name
+            // its own row addresses, and step 3 moves that file aside itself.
+            // The reservation is dropped (and the file with it) on every path
+            // out of this closure but the committed one.
+            let reservation = match existing {
+                Some(_) => None,
+                None => Some(HeadReservation::claim(&head_path)?),
+            };
             let rotated_rel = write_bytes(
                 &artifacts_root,
                 &dir,
@@ -615,6 +658,11 @@ impl<'a> ArtifactStore<'a> {
             let record = load_by_id(&tx, &id)?
                 .with_context(|| format!("artifact {id} vanished inside its own transaction"))?;
             tx.commit()?;
+            // The row is committed: the bytes standing at the reserved name are
+            // now described by it and must outlive this call.
+            if let Some(reservation) = reservation {
+                reservation.keep();
+            }
             Ok((record, existing.is_none()))
         })
     }
@@ -1047,6 +1095,57 @@ fn dir_rows(conn: &Connection, project_key: &str, rel_dir: &str) -> Result<Vec<D
         });
     }
     Ok(out)
+}
+
+/// R24's head reservation: the empty file this writer creates at the head name,
+/// with `O_EXCL`, before writing anything.
+///
+/// `fs::rename` replaces its destination without a word, so the *only* way the
+/// protocol's final rename cannot destroy a file is for this writer to own the
+/// name first. Until [`Self::keep`] is called nothing describes what stands at
+/// that name — the empty reservation, or the bytes the rename put over it — so
+/// dropping the guard removes it. That is what keeps a failed write (a rolled
+/// back `INSERT`, a disk-full `artifact_versions` row) from stranding an
+/// unreferenced file that the *next* attempt at the same address would then
+/// refuse as a taken name.
+struct HeadReservation<'a> {
+    path: &'a Path,
+    armed: bool,
+}
+
+impl<'a> HeadReservation<'a> {
+    /// Claim `path`, or [`ArtifactError::NameTaken`] if something already holds
+    /// it. The caller has already established that no row of this store does.
+    fn claim(path: &'a Path) -> Result<Self> {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(_) => Ok(Self { path, armed: true }),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(anyhow::Error::new(ArtifactError::NameTaken {
+                    path: path.to_string_lossy().to_string(),
+                }))
+            }
+            Err(e) => {
+                Err(anyhow::Error::new(e).context(format!("failed to create {}", path.display())))
+            }
+        }
+    }
+
+    /// A committed row now describes what stands at the name. Disarm.
+    fn keep(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for HeadReservation<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            remove_best_effort(self.path);
+        }
+    }
 }
 
 /// The §4.2 write protocol. Returns the `rel_path` under `.versions/` that the

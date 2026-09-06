@@ -329,6 +329,131 @@ fn put_refuses_to_supersede_another_owners_artifact() {
 }
 
 // ============================================================================
+// put — the head reservation and the address rule (R24)
+// ============================================================================
+
+/// `fs::rename` replaces its destination without a word, so the head name is
+/// claimed with `O_EXCL` before a byte is written. A file the store has no row
+/// for — a crash orphan, or something dropped in by hand — therefore survives:
+/// an artifact is addressed *by name*, so unlike an upload there is no next
+/// slot to move to, and the write fails rather than destroying it.
+#[test]
+fn a_stray_file_at_the_next_slot_is_never_overwritten() {
+    let f = Fixture::new();
+    let scope = f.scope();
+
+    let day_dir = f.artifacts_root().join("loose/2026-09-01");
+    fs::create_dir_all(&day_dir).unwrap();
+    let stray = day_dir.join("01-notes.md");
+    fs::write(&stray, b"bytes with no row").unwrap();
+
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"hello");
+    new.created = at(1);
+    let err = f.store().put(new).unwrap_err();
+
+    assert_eq!(
+        err.downcast_ref::<ArtifactError>()
+            .unwrap_or_else(|| panic!("not an ArtifactError: {err}"))
+            .code(),
+        "ARTIFACT_NAME_TAKEN"
+    );
+    assert_eq!(
+        fs::read(&stray).unwrap(),
+        b"bytes with no row",
+        "the stray file must be left exactly as it was"
+    );
+    assert_eq!(
+        f.store().list(&ArtifactQuery::new(OWNER)).unwrap().1,
+        0,
+        "and no row claims it"
+    );
+    assert_no_tmp_leftovers(&day_dir);
+}
+
+/// The reservation must not outlive the call that made it. A create that fails
+/// after claiming the name leaves nothing behind — otherwise the very next
+/// attempt at the same address would meet its own orphan and refuse it.
+#[test]
+fn a_create_that_fails_releases_the_name_it_reserved() {
+    let f = Fixture::new();
+    let scope = f.scope();
+
+    {
+        let _crash = CrashGuard::after(WriteStep::TmpWritten);
+        let mut doomed = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"a\n");
+        doomed.created = at(1);
+        f.store().put(doomed).unwrap_err();
+    }
+
+    let dir = f.artifacts_root().join("loose/2026-09-01");
+    assert!(
+        !dir.join("01-notes.md").exists(),
+        "the reservation was removed with the failed write"
+    );
+    assert_no_tmp_leftovers(&dir);
+
+    let mut retry = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"a\n");
+    retry.created = at(1);
+    let (record, created) = f.store().put(retry).unwrap();
+    assert!(created);
+    assert_eq!(record.name, "01-notes.md");
+    assert_eq!(fs::read_to_string(&record.storage_path).unwrap(), "a\n");
+}
+
+/// Placement identity *is* address identity. A `<project>/.openalpaca`
+/// symlinked at another store — the home store here — puts both scopes' bytes
+/// in one directory, so they must share one sequence space; keying the address
+/// off the path the caller named would restart it at `01` and hand two
+/// different artifacts the same name. `confine_to_root` cannot catch that: the
+/// symlink is *at* the root it canonicalizes, not under it.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_store_root_cannot_open_a_second_sequence_space() {
+    let f = Fixture::new();
+    std::os::unix::fs::symlink(f.home_root(), f.project_root().join(".openalpaca")).unwrap();
+
+    let home_scope = StoreScope::Home;
+    let mut first = NewArtifact::new(OWNER, &home_scope, ArtifactKind::Markdown, "Alpha", b"hello");
+    first.created = at(1);
+    let (home, _) = f.store().put(first).unwrap();
+
+    let project_scope = f.scope();
+    let mut second = NewArtifact::new(
+        OWNER,
+        &project_scope,
+        ArtifactKind::Markdown,
+        "Beta",
+        b"other bytes",
+    );
+    second.created = at(1);
+    let (project, _) = f.store().put(second).unwrap();
+
+    assert!(
+        home.storage_path.ends_with("/01-alpha.md"),
+        "{}",
+        home.storage_path
+    );
+    assert!(
+        project.storage_path.ends_with("/02-beta.md"),
+        "the second write shares the first's sequence space: {}",
+        project.storage_path
+    );
+    assert_eq!(fs::read_to_string(&home.storage_path).unwrap(), "hello");
+    assert_eq!(
+        fs::read_to_string(&project.storage_path).unwrap(),
+        "other bytes"
+    );
+
+    // One directory, one address space: the row records the store the bytes
+    // reached, not the path the caller named.
+    assert!(
+        project.project_root.is_none(),
+        "the bytes reached the home store: {:?}",
+        project.project_root
+    );
+}
+
+// ============================================================================
 // put — crash injection between the write-protocol steps
 // ============================================================================
 
@@ -990,11 +1115,17 @@ fn verify_counts_and_marks_the_missing_rows_under_a_root() {
 fn diff_rejects_the_non_text_kinds() {
     let f = Fixture::new();
     let scope = f.scope();
-    for kind in [ArtifactKind::Image, ArtifactKind::Binary] {
-        let mut one = NewArtifact::new(OWNER, &scope, kind, "Shot", b"a");
+    // Distinct titles, because both kinds fall through to `.bin`: one title
+    // would make the second pair a *supersede* of the first artifact rather
+    // than a second artifact.
+    for (kind, title) in [
+        (ArtifactKind::Image, "Shot"),
+        (ArtifactKind::Binary, "Blob"),
+    ] {
+        let mut one = NewArtifact::new(OWNER, &scope, kind, title, b"a");
         one.created = at(1);
         let (record, _) = f.store().put(one).unwrap();
-        let mut two = NewArtifact::new(OWNER, &scope, kind, "Shot", b"b");
+        let mut two = NewArtifact::new(OWNER, &scope, kind, title, b"b");
         two.created = at(1);
         f.store().put(two).unwrap();
 
@@ -1004,11 +1135,6 @@ fn diff_rejects_the_non_text_kinds() {
             "NOT_DIFFABLE",
             "kind {kind:?} must not be diffable"
         );
-        f.db.with_connection(|conn| {
-            conn.execute("DELETE FROM file_assets WHERE id = ?1", [&record.id])?;
-            Ok(())
-        })
-        .unwrap();
     }
 }
 
