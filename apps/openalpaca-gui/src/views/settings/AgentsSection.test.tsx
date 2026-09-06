@@ -71,6 +71,31 @@ describe("AgentsSection run counts (GAP-20, counts half)", () => {
     expect(screen.queryByText(/0 runs/)).toBeNull();
   });
 
+  /**
+   * A daemon older than the field serves a row without it, and `apiFetch`
+   * casts rather than validates — so the missing count has to read the same as
+   * a zero one. It must never reach the card as the string `undefined`.
+   */
+  it("reads a row with no run_count as never having run", () => {
+    state.templates = [template()];
+    delete (state.templates[0] as Record<string, unknown>).run_count;
+
+    render(<AgentsSection />);
+
+    expect(screen.getByText(/No runs yet/)).toBeInTheDocument();
+    expect(screen.queryByText(/undefined/)).toBeNull();
+  });
+
+  /** One run is `1 run`, not `1 runs`. */
+  it("says 1 run in the singular", () => {
+    state.templates = [template({ run_count: 1 })];
+
+    render(<AgentsSection />);
+
+    expect(screen.getByText("1 run")).toBeInTheDocument();
+    expect(screen.queryByText(/1 runs/)).toBeNull();
+  });
+
   /** Running instances are a different fact, and both fit on the meta line. */
   it("keeps the running-instance count beside the run count", () => {
     state.templates = [template({ run_count: 3 })];

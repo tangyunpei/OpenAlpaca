@@ -206,6 +206,8 @@ vi.mock("@/hooks/useAgents", async (importOriginal) => ({
         require_confirmation_for: [],
         persona: "",
         body: "",
+        run_count: 3,
+        last_run_at: "2026-09-04T09:15:00.000Z",
       },
     ]),
   useAgentInstances: () => query([]),

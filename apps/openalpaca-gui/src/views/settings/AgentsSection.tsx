@@ -26,18 +26,25 @@ import { GapNote, ListCard, ListRow, ListState, Toggle } from "./primitives";
 /**
  * `1 running · 12 runs · last 4 Sep`. A template nothing has ever spawned says
  * so in words: `0 runs` reads like a metric that failed to load.
+ *
+ * The falsy test is deliberate. `run_count` is typed as always present, but
+ * `apiFetch` casts the response rather than validating it, so a daemon older
+ * than the field serves a row without one — `=== 0` would let that row through
+ * to render the literal string `undefined runs`. Absent and zero mean the same
+ * thing here, and read the same.
  */
 function templateMeta(template: AgentTemplate, running: number): string {
   const parts: string[] = [];
   if (running > 0) parts.push(`${running} running`);
-  if (template.run_count === 0) {
+  if (!template.run_count) {
     parts.push("No runs yet");
   } else {
     const last =
       template.last_run_at === undefined
         ? ""
         : ` · last ${shortDate(template.last_run_at)}`;
-    parts.push(`${template.run_count} runs${last}`);
+    const noun = template.run_count === 1 ? "run" : "runs";
+    parts.push(`${template.run_count} ${noun}${last}`);
   }
   return parts.join(" · ");
 }
