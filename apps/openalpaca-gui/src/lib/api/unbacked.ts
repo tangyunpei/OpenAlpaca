@@ -6,21 +6,14 @@
  * contract today and lose nothing but the `unavailable` branch when the route
  * lands. Nothing here fabricates rows.
  *
- * Two exceptions do real work because a genuine workaround exists:
- *   `steerWorkflow` — posts `/steer …` down the chat channel (GAP-02)
- *   `queueFollowupViaChat` — has no workaround, so it stays unavailable
- *
  * Not every adapter has a `hooks/useUnbacked` wrapper: where a surface has a
  * working alternative rather than an empty state, the view handles the gap at
  * the point of use — `components/work/run-actions` disables `Start now`,
- * `Re-run` and `Queue follow-up` and names the missing route, and
- * `useChatSession` does the `/steer …` send itself. The adapters below stay as
- * the shape those routes take.
+ * `Re-run` and `Queue follow-up` and names the missing route. The adapters
+ * below stay as the shape those routes take.
  */
 
-import { sendChatMessage } from "../chat-stream";
 import { unavailable, type Availability } from "../unavailable";
-import type { ChatSendResponse } from "./types";
 
 // The artifact resource left this file when Phase 3 landed `/v1/artifacts*`:
 // the `Artifact`, `ArtifactVersion` and `ArtifactDiff` types are now wire types
@@ -64,27 +57,13 @@ export function startTaskNow(
   return unavailable("GAP-06");
 }
 
-// ── Steering (GAP-02) ───────────────────────────────────────────────────────
-
-export interface SteerResult {
-  /** The chat stream the steer went down; there is no deterministic ack. */
-  response: ChatSendResponse;
-}
-
-/**
- * GAP-02 — the only steering channel is the chat text stream: the orchestrator
- * strips a literal `"/steer "` prefix and targets the *lane's* active workflow.
- * It takes no `task_id`, so this cannot address a specific run, and there is no
- * accepted/rejected answer — the acknowledgement arrives later as a
- * `workflow_steered` WS event, if at all.
- */
-export async function steerWorkflow(message: string): Promise<SteerResult> {
-  const response = await sendChatMessage({ content: `/steer ${message}` });
-  return { response };
-}
-
-/** The note to render beside the Steer control. */
-export const STEERING_GAP = unavailable("GAP-02");
+// Steering left this file when Phase 5 landed `POST /v1/tasks/{id}/steer`:
+// `SteerResult` is a wire type in `api/tasks.ts`, pushed by a real `steerTask`
+// there. What was GAP-02 is served — and *addressed*, which the `/steer ` chat
+// prefix never could: it aims at the lane's sole running workflow, so a client
+// holding a run id had no way to name it. The route answers `accepted` and
+// `inbox_depth` synchronously instead of leaving the client to infer the
+// outcome from a later `workflow_steered` frame.
 
 // ── Follow-ups (GAP-03) ─────────────────────────────────────────────────────
 

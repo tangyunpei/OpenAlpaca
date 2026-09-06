@@ -124,10 +124,16 @@
 - Exported functions: `getSkillHealth`
 - Endpoints: none
 
+### `tasks.test.ts`
+
+- Source: `apps/openalpaca-gui/src/lib/api/tasks.test.ts`
+- Exported functions: none
+- Endpoints: none
+
 ### `tasks.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/tasks.ts`
-- Exported functions: `createTask`, `getTask`, `getTaskTimeline`, `listTasks`, `performTaskAction`
+- Exported functions: `createTask`, `getTask`, `getTaskTimeline`, `listTasks`, `performTaskAction`, `steerTask`
 - Endpoints: none
 
 ### `telemetry.ts`
@@ -151,7 +157,7 @@
 ### `unbacked.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/unbacked.ts`
-- Exported functions: `steerWorkflow`
+- Exported functions: none
 - Endpoints: none
 
 ### `usage.ts`

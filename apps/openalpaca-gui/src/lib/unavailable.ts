@@ -16,7 +16,6 @@
  */
 
 export type GapId =
-  | "GAP-02"
   | "GAP-03"
   | "GAP-06"
   | "GAP-08c"
@@ -48,16 +47,13 @@ export interface GapDescriptor {
 }
 
 export const GAPS: Record<GapId, GapDescriptor> = {
-  "GAP-02": {
-    id: "GAP-02",
-    label: "Steering API",
-    missingApi: "no POST /v1/tasks/{id}/steer — steering is chat-text-only",
-    proposedEndpoint: "POST /v1/tasks/{id}/steer { message }",
-    blocks: "Steer button on a run; composer steer mode",
-    fixSize: "S–M",
-    noteOverride:
-      "Steering has no direct endpoint — sent through chat as `/steer …`",
-  },
+  // GAP-02 (steering was chat-text-only) closed with Phase 5:
+  // `POST /v1/tasks/{id}/steer` pushes into the same rail the `/steer ` chat
+  // prefix does, but addressed at a *run* — the composer's steer mode now aims
+  // at the run the user picked instead of at whatever the lane happens to be
+  // running, and the queue answers `accepted`/`inbox_depth` rather than
+  // nothing. The chat prefix is untouched; it is still the CLI's and
+  // Telegram's only channel.
   "GAP-03": {
     id: "GAP-03",
     label: "Follow-up API",

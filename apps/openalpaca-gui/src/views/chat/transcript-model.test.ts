@@ -48,6 +48,7 @@ function input(overrides: Partial<TranscriptInput> = {}): TranscriptInput {
     artifacts: [],
     confirmations: [],
     resolutions: [],
+    steers: [],
     stream: initialChatStreamState,
     pending: null,
     ...overrides,
@@ -139,7 +140,9 @@ describe("live-turn lifecycle", () => {
   });
 });
 
-describe("parseUserContent (GAP-02)", () => {
+// The GUI stopped sending the prefix when GAP-02 closed, but the CLI and
+// Telegram still do — and stored history keeps what was sent before.
+describe("parseUserContent — the chat prefix in stored history", () => {
   it("recognises the `/steer ` prefix and strips it for display", () => {
     expect(parseUserContent("/steer keep going")).toEqual({
       text: "keep going",
@@ -149,6 +152,38 @@ describe("parseUserContent (GAP-02)", () => {
       text: "hello",
       steered: false,
     });
+  });
+});
+
+describe("buildTranscript — steers sent to a run's own route", () => {
+  it("shows a steer as a user row carrying the run's pill, in time order", () => {
+    const items = buildTranscript(
+      input({
+        history: [
+          message({
+            id: 1,
+            role: "user",
+            content: "audit the connectors",
+            created_at: "2026-09-05T14:22:00Z",
+          }),
+        ],
+        steers: [
+          {
+            id: "run-1-0",
+            text: "check telegram first",
+            label: "connector audit",
+            at: "2026-09-05T14:22:30Z",
+          },
+        ],
+      }),
+    );
+
+    expect(items.map((item) => item.kind)).toEqual(["user", "user"]);
+    const steered = items[1];
+    if (steered?.kind !== "user") throw new Error("expected a user row");
+    expect(steered.text).toBe("check telegram first");
+    expect(steered.steer).toEqual({ mode: "steer", label: "connector audit" });
+    expect(steered.key).toBe("srun-1-0");
   });
 });
 

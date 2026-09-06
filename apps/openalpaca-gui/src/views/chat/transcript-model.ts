@@ -24,7 +24,12 @@ import type { RunReportStatus } from "@/components/chat";
 import type { AttachmentDisplay, ChatMessage } from "@/lib/api/types";
 import type { ChatStreamState } from "@/lib/chat-stream";
 
-/** `/steer …` is the only steering channel there is (GAP-02). */
+/**
+ * The chat prefix the orchestrator strips. This client no longer *sends* it —
+ * a steer is `POST /v1/tasks/{id}/steer` now (GAP-02, closed) — but stored
+ * history still carries it: from the CLI and Telegram, whose only steering
+ * channel it remains, and from turns this GUI sent before the route existed.
+ */
 export const STEER_PREFIX = "/steer ";
 
 export interface ParsedUserContent {
@@ -96,6 +101,25 @@ export interface PendingTurn {
   steer: SteerRef | null;
 }
 
+/**
+ * A steer this client sent through `POST /v1/tasks/{id}/steer`.
+ *
+ * Session-local by construction, and for a reason the run reports do not share:
+ * a steer is not a chat turn, so the daemon stores no message for it and a
+ * reload has nothing to rebuild from. The design still shows it as a user
+ * message carrying the `steer → {run}` pill (§5.1.4), so the row is drawn from
+ * what this client sent — never inferred from a `workflow_steered` frame, which
+ * carries no text.
+ */
+export interface SteerEntry {
+  /** Client-side id; only ever a React key. */
+  id: string;
+  text: string;
+  /** The run's short title — the pill's label. */
+  label: string;
+  at: string;
+}
+
 export type StreamPhaseLabel = "thinking" | "streaming" | null;
 
 export interface AttachmentInfo {
@@ -134,6 +158,8 @@ export interface TranscriptInput {
   artifacts: readonly WrittenArtifact[];
   confirmations: readonly ConfirmationEntry[];
   resolutions: readonly ResolutionEntry[];
+  /** Steers this client pushed to a run's own `/steer` route, newest last. */
+  steers: readonly SteerEntry[];
   stream: ChatStreamState;
   pending: PendingTurn | null;
   /** Label for the steer pill on history messages that carry the prefix. */
@@ -217,6 +243,7 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
     artifacts,
     confirmations,
     resolutions,
+    steers,
     stream,
     pending,
     steerLabel = "the active workflow",
@@ -286,6 +313,19 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
       kind: "resolution",
       key: `x${entry.requestId}`,
       entry,
+    });
+  }
+
+  // A steer is a user message in the design (§5.1.4) even though it never went
+  // down the chat channel, so it takes the same row — with the pill naming the
+  // run it was addressed to.
+  for (const entry of steers) {
+    push(timestamp(entry.at), {
+      kind: "user",
+      key: `s${entry.id}`,
+      text: entry.text,
+      time: entry.at,
+      steer: { mode: "steer", label: entry.label },
     });
   }
 

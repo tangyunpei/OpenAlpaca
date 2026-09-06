@@ -7,9 +7,13 @@
  * the design shows around a turn.
  *
  * Honest wiring, gap by gap:
- *   * **GAP-02** steering has no endpoint, so a steered message is sent down
- *     the chat channel with the literal `/steer ` prefix the orchestrator
- *     strips. It targets the lane's active workflow, not a chosen run.
+ *   * Steering (GAP-02, closed) is `POST /v1/tasks/{id}/steer`: it addresses
+ *     the run the composer is aimed at, not whatever the lane happens to be
+ *     running, and it answers `accepted`/`inbox_depth` synchronously. It is
+ *     *not* a chat turn — nothing is persisted for it — so the transcript row
+ *     is session-local, like the run reports beside it. Every refusal code
+ *     gets its own toast; a steer that did not land never looks like one that
+ *     did.
  *   * **GAP-03** queueing a follow-up has no write route at all, so the
  *     composer refuses and says why instead of quietly sending a chat message.
  *   * `Always allow` sends `approval_scope: "entire_tool"`, which the daemon
@@ -32,12 +36,12 @@ import {
   pendingResolutionNote,
   shortTitle,
   type Resolution,
-  type SteerRef,
 } from "@/components/chat";
 import { toUiStatus, type UiStatus } from "@/components/ui";
 import { useChatHistory, useChatStream } from "@/hooks/useChat";
 import { useServerEvent } from "@/hooks/useDaemonEvents";
 import { useTasks } from "@/hooks/useTasks";
+import { steerErrorMessage, steerTask } from "@/lib/api/tasks";
 import type { ApprovalScope } from "@/lib/api/types";
 import { GAPS, gapNote } from "@/lib/unavailable";
 import { useProjectStore, workspaceOption } from "@/stores/project";
@@ -49,6 +53,7 @@ import {
   type PendingTurn,
   type ResolutionEntry,
   type RunReportData,
+  type SteerEntry,
   type TranscriptItem,
   type WrittenArtifact,
 } from "./transcript-model";
@@ -145,6 +150,7 @@ export function useChatSession(): ChatSession {
   const [reports, setReports] = useState<RunReportData[]>([]);
   const [artifacts, setArtifacts] = useState<WrittenArtifact[]>([]);
   const [resolutions, setResolutions] = useState<ResolutionEntry[]>([]);
+  const [steers, setSteers] = useState<SteerEntry[]>([]);
   const [confirmationMeta, setConfirmationMeta] = useState<
     Record<string, ConfirmationMeta>
   >({});
@@ -319,6 +325,7 @@ export function useChatSession(): ChatSession {
         artifacts,
         confirmations,
         resolutions,
+        steers,
         stream: stream.state,
         pending,
         steerLabel: steerRun === null ? undefined : shortTitle(steerRun.title),
@@ -329,6 +336,7 @@ export function useChatSession(): ChatSession {
       artifacts,
       confirmations,
       resolutions,
+      steers,
       stream.state,
       pending,
       steerRun,
@@ -346,24 +354,56 @@ export function useChatSession(): ChatSession {
       return;
     }
 
-    const steered = steerTargetRunId !== null && composerMode === "steer";
-    const sent = steered ? `/steer ${text}` : text;
-    const steerRef: SteerRef | null =
-      steered && steer !== null ? { mode: "steer", label: steer.label } : null;
+    if (steerTargetRunId !== null && composerMode === "steer") {
+      // A steer is a control action on a run, not a chat turn: it goes to that
+      // run's own route and never down the stream. The row it leaves in the
+      // transcript is therefore session-local — the daemon stores no message
+      // for it — and it is only added once the queue has actually taken it.
+      const label = steer?.label ?? shortTitle(steerTargetRunId);
+      const targetId = steerTargetRunId;
+      setSendError(null);
+      setSending(true);
+      setDraft("");
+      void steerTask(targetId, text, projectPath ?? undefined)
+        .then(() => {
+          setSteers((current) => [
+            ...current,
+            {
+              id: `${targetId}-${current.length}-${Date.now()}`,
+              text,
+              label,
+              at: new Date().toISOString(),
+            },
+          ]);
+          clearSteerTarget();
+        })
+        .catch((error: unknown) => {
+          // Never silent, and never a shrug: each refusal code has its own
+          // sentence, and the text goes back in the composer so a full queue
+          // or a finished run does not cost the user their message.
+          const message = steerErrorMessage(error);
+          setSendError(message);
+          showToast(message);
+          setDraft(text);
+        })
+        .finally(() => setSending(false));
+      return;
+    }
 
     setSendError(null);
     setSending(true);
     setDraft("");
     setPending({
       text,
-      sent,
+      sent: text,
       at: new Date().toISOString(),
-      steer: steerRef,
+      // A chat turn is never a steer any more — that path returned above.
+      steer: null,
     });
 
     void stream
       .send({
-        content: sent,
+        content: text,
         ...(model === null ? {} : { model }),
         ...workspaceOption(projectPath),
       })
@@ -376,8 +416,6 @@ export function useChatSession(): ChatSession {
         setPending(null);
       })
       .finally(() => setSending(false));
-
-    if (steered) clearSteerTarget();
   }, [
     draft,
     sending,

@@ -10,14 +10,12 @@
  *   `Queue follow-up`       GAP-03 — the storage and the `followup_queued`
  *                           event exist; no HTTP route does.
  *
- * `Steer` is the awkward one. It stays **enabled** because the design's own
- * handler (`r.steer`, §4.4) does not send anything: it aims the chat composer
- * at the run, which is pure client state and works today. What is missing is
- * the *addressed* steer — the daemon's only channel is the chat text prefix
- * `/steer …`, which targets the lane's active workflow and takes no
- * `task_id` (GAP-02) — so the tooltip says exactly that, and the disabled-verb
- * footnote under the detail action group repeats it in visible text rather
- * than hover-only.
+ * `Steer` was the awkward one and no longer is. The design's own handler
+ * (`r.steer`, §4.4) sends nothing — it aims the chat composer at the run — and
+ * the send behind it is now `POST /v1/tasks/{id}/steer`, which takes the run's
+ * id. What used to be GAP-02 (the daemon's only channel was the chat text
+ * prefix `/steer …`, which targets the lane's active workflow and cannot name
+ * a run) is served, so the control carries no tooltip and no gap.
  *
  * `Cancel` / `Pause` / `Resume` are real and wired to `POST /v1/tasks/{id}/action`.
  */
@@ -71,11 +69,9 @@ const STEER: RunActionDescriptor = {
   id: "steer",
   label: "Steer",
   tone: "secondary",
-  // Enabled: the button only aims the composer (§4.4). Sending is the chat
-  // view's job, and it goes down the `/steer …` text channel.
+  // The button only aims the composer (§4.4). Sending is the chat view's job,
+  // and it now POSTs to the run's own `/steer` route.
   enabled: true,
-  title: gapTooltip("GAP-02"),
-  gap: "GAP-02",
 };
 
 const JUMP: RunActionDescriptor = {

@@ -26,13 +26,16 @@ describe("gap registry", () => {
   // server-side pins (GAP-12). Phase 4 closed two: the subagent timeline
   // (GAP-09), served by `subagent_span` + `GET /v1/tasks/{id}/timeline`, and
   // the per-run event log (GAP-10), served by `event_log.task_id` +
-  // `GET /v1/events/history?task_id=`. GAP-20 is *narrowed*, not closed: its
-  // run counts are served now, its toggle is not — so the count stays 13.
-  it("covers the 13 gaps still open from API_MAP §3", () => {
-    expect(listGaps()).toHaveLength(13);
-    expect(listGaps()[0]?.id).toBe("GAP-02");
+  // `GET /v1/events/history?task_id=`. Phase 5 closed steering (GAP-02):
+  // `POST /v1/tasks/{id}/steer` addresses a run rather than a lane. GAP-20 is
+  // *narrowed*, not closed: its run counts are served now, its toggle is not —
+  // so the count is 12.
+  it("covers the 12 gaps still open from API_MAP §3", () => {
+    expect(listGaps()).toHaveLength(12);
+    expect(listGaps()[0]?.id).toBe("GAP-03");
     expect(listGaps().at(-1)?.id).toBe("GAP-24");
     for (const closed of [
+      "GAP-02",
       "GAP-04",
       "GAP-05",
       "GAP-09",
@@ -78,8 +81,8 @@ describe("Unavailable results", () => {
   });
 
   it("uses the override phrasing where the generic sentence would read wrong", () => {
-    expect(gapNote(GAPS["GAP-02"])).toBe(
-      "Steering has no direct endpoint — sent through chat as `/steer …`",
+    expect(gapNote(GAPS["GAP-13"])).toBe(
+      "Changing the model here changes the daemon default for every client",
     );
   });
 

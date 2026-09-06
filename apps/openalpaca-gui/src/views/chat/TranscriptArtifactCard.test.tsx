@@ -29,6 +29,7 @@ function items(...artifacts: WrittenArtifact[]) {
     artifacts,
     confirmations: [],
     resolutions: [],
+    steers: [],
     stream: initialChatStreamState,
     pending: null,
   });

@@ -54,11 +54,13 @@ describe("liveRunActions", () => {
     expect(byId.get("queue")?.gap).toBe("GAP-03");
   });
 
-  it("keeps Steer enabled but marked: it aims the composer, GAP-02 is the send", () => {
+  // GAP-02 closed: the send behind the composer is `POST /v1/tasks/{id}/steer`,
+  // so the control carries no gap and no apologetic tooltip any more.
+  it("keeps Steer enabled and unmarked — the addressed send exists now", () => {
     const steer = byId.get("steer");
     expect(steer?.enabled).toBe(true);
-    expect(steer?.gap).toBe("GAP-02");
-    expect(steer?.title).toContain("steer");
+    expect(steer?.gap).toBeUndefined();
+    expect(steer?.title).toBeUndefined();
   });
 });
 

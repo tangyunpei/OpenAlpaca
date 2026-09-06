@@ -76,6 +76,9 @@ function json(payload: unknown): Response {
   return new Response(JSON.stringify(payload), { status: 200 });
 }
 
+/** What `POST /v1/tasks/{id}/steer` answers; swapped per test to refuse. */
+let steerReply: () => Response;
+
 function installFetch() {
   const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
     const url = String(input);
@@ -96,6 +99,9 @@ function installFetch() {
     }
     if (url.includes("/v1/chat")) {
       return json({ stream_id: "stream-1", lane_key: "user:gui" });
+    }
+    if (url.includes("/steer")) {
+      return steerReply();
     }
     if (url.includes("/v1/tasks")) return json([]);
     if (url.includes("/v1/models")) {
@@ -170,6 +176,13 @@ async function sendMessage(text: string): Promise<FakeEventSource> {
 beforeEach(() => {
   requests = [];
   FakeEventSource.instances = [];
+  steerReply = () =>
+    json({
+      task_id: "run-1",
+      accepted: true,
+      inbox_depth: 1,
+      lane_key: "user:gui",
+    });
   resetConnection();
   useUiStore.setState({ ...initialUi, model: null, view: "chat" });
   useProjectStore.setState({ path: null });
@@ -442,14 +455,97 @@ describe("ChatView — the chosen project (plan §4.7 item 2)", () => {
     );
   });
 
-  it("carries the project on a steered turn too — it is the same route", async () => {
+  // A steered turn is no longer a chat turn at all — see the block below.
+});
+
+/**
+ * GAP-02, closed. The composer's steer mode addresses the run it is aimed at
+ * through `POST /v1/tasks/{id}/steer`; nothing goes down `/v1/chat`, because a
+ * steer is a control action on a run rather than a turn in the conversation.
+ */
+describe("ChatView — steering a run (GAP-02, closed)", () => {
+  /** The one `POST …/steer` a steered send makes. */
+  function steerPost(): RecordedRequest {
+    const post = requests.find(
+      (request) => request.method === "POST" && request.url.includes("/steer"),
+    );
+    if (post === undefined) throw new Error("no POST …/steer recorded");
+    return post;
+  }
+
+  async function steerSend(text: string) {
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: text },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() =>
+      expect(
+        requests.some((r) => r.method === "POST" && r.url.includes("/steer")),
+      ).toBe(true),
+    );
+  }
+
+  it("posts to the run's own route and opens no chat stream", async () => {
+    useUiStore.setState({ steerTargetRunId: "run-1", composerMode: "steer" });
+    renderChat();
+    await steerSend("try the other branch");
+
+    expect(steerPost().url).toContain("/v1/tasks/run-1/steer");
+    expect(steerPost().body).toEqual({ message: "try the other branch" });
+    expect(FakeEventSource.instances).toHaveLength(0);
+    expect(
+      requests.some(
+        (r) =>
+          r.method === "POST" &&
+          r.url.includes("/v1/chat") &&
+          !r.url.includes("/v1/chat/history"),
+      ),
+    ).toBe(false);
+
+    // The steer still shows in the transcript, and the target is released.
+    expect(await screen.findByText("try the other branch")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(useUiStore.getState().steerTargetRunId).toBeNull(),
+    );
+  });
+
+  it("carries the project in the body — the route takes no header", async () => {
     useProjectStore.setState({ path: "/Users/dev/openalpaca" });
     useUiStore.setState({ steerTargetRunId: "run-1", composerMode: "steer" });
     renderChat();
-    await sendMessage("try the other branch");
+    await steerSend("try the other branch");
 
-    const post = chatPost();
-    expect(post.body).toMatchObject({ content: "/steer try the other branch" });
-    expect(post.headers.get("x-workspace-path")).toBe("/Users/dev/openalpaca");
+    expect(steerPost().body).toEqual({
+      message: "try the other branch",
+      workspace_path: "/Users/dev/openalpaca",
+    });
   });
+
+  it.each([
+    [409, "STEERING_INBOX_FULL", /queue is full/i],
+    [409, "TASK_NOT_STEERABLE", /no longer running/i],
+    [503, "STEERING_DISABLED", /disabled/i],
+    [404, "NOT_FOUND", /gone/i],
+  ])(
+    "renders %i %s with its own message and keeps the draft",
+    async (status, code, expected) => {
+      steerReply = () =>
+        new Response(
+          JSON.stringify({ error: { code, message: "raw daemon text" } }),
+          { status },
+        );
+      useUiStore.setState({ steerTargetRunId: "run-1", composerMode: "steer" });
+      renderChat();
+      await steerSend("try the other branch");
+
+      expect(await screen.findByText(expected)).toBeInTheDocument();
+      // Nothing was queued, so the target stays aimed and the text comes back.
+      expect(useUiStore.getState().steerTargetRunId).toBe("run-1");
+      await waitFor(() =>
+        expect(screen.getByLabelText("Message")).toHaveValue(
+          "try the other branch",
+        ),
+      );
+    },
+  );
 });

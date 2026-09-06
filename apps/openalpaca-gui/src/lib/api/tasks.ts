@@ -1,6 +1,6 @@
 /** `/v1/tasks*`. */
 
-import { apiFetch } from "../http";
+import { apiFetch, ApiError } from "../http";
 import type {
   CreateTaskRequest,
   CreateTaskResponse,
@@ -112,4 +112,83 @@ export async function performTaskAction(
       body: { action },
     },
   );
+}
+
+// ── Steering (`POST /v1/tasks/{id}/steer`) ──────────────────────────────────
+
+/**
+ * What the steering queue accepted.
+ *
+ * `accepted` is not a promise the workflow *read* the message: the rail drains
+ * at the run's next round boundary, so `inbox_depth` — the queue depth after
+ * this push — is the only acknowledgement the daemon can honestly give.
+ */
+export interface SteerResult {
+  task_id: string;
+  accepted: boolean;
+  inbox_depth: number;
+  lane_key: string;
+}
+
+/**
+ * `POST /v1/tasks/{id}/steer` — inject a message into one *running* run.
+ *
+ * Addressed at the run, not at a lane: the daemon reads the lane from the
+ * run's own `source_lane`. `workspacePath` is optional — omitted, the daemon
+ * uses the run's own project, so a message the workflow never drained re-enters
+ * as a follow-up scoped where the run was.
+ *
+ * Throws `ApiError` with the daemon's code: `STEERING_INBOX_FULL` /
+ * `TASK_NOT_STEERABLE` (409), `STEERING_DISABLED` (503), `EMPTY_MESSAGE` (400),
+ * `NOT_FOUND` (404). Render them through {@link steerErrorMessage}.
+ */
+export async function steerTask(
+  id: string,
+  message: string,
+  workspacePath?: string,
+): Promise<SteerResult> {
+  return await apiFetch<SteerResult>(
+    `/v1/tasks/${encodeURIComponent(id)}/steer`,
+    {
+      method: "POST",
+      body: {
+        message,
+        ...(workspacePath === undefined
+          ? {}
+          : { workspace_path: workspacePath }),
+      },
+    },
+  );
+}
+
+/**
+ * The sentence a failed steer shows the user.
+ *
+ * Every code the route can answer with gets its own line — a steer that did
+ * not land must never look like one that did, and "Request failed with status
+ * 409" tells nobody what to do next. An unrecognised code falls back to the
+ * daemon's own message rather than to a shrug.
+ */
+export function steerErrorMessage(error: unknown): string {
+  if (error instanceof ApiError) {
+    switch (error.code) {
+      case "STEERING_INBOX_FULL":
+        return "The run's steering queue is full — it has not caught up with earlier messages yet.";
+      case "TASK_NOT_STEERABLE":
+        return "That run is no longer running — nothing was queued.";
+      case "STEERING_DISABLED":
+        return "Steering is disabled on this daemon — nothing was queued.";
+      case "EMPTY_MESSAGE":
+        return "A steering message cannot be empty.";
+      case "NOT_FOUND":
+        return "That run is gone — nothing was queued.";
+      default:
+        break;
+    }
+    if (error.isTransport)
+      return "Could not reach the daemon — nothing was queued.";
+    return error.message;
+  }
+  if (error instanceof Error) return error.message;
+  return "Could not steer that run.";
 }
