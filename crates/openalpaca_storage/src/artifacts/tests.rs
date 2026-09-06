@@ -57,6 +57,50 @@ impl Fixture {
         self.project_root().join(".openalpaca").join("artifacts")
     }
 
+    /// A `file_assets` row written by neither `ArtifactStore` nor this owner's
+    /// produced history — an **upload**, the table's other writer — addressing
+    /// `rel` in this project's store. `dir_rows` never sees it (it filters on
+    /// `origin = 'produced'`), so it is exactly the foreign claim R33 must not
+    /// reclaim.
+    fn foreign_row(&self, id: &str, rel: &str, storage_path: &Path) {
+        let root = self.project_root().to_string_lossy().to_string();
+        self.db
+            .with_connection(|conn| {
+                conn.execute(
+                    "INSERT INTO file_assets
+                        (id, owner_id, sha256, filename, mime_type, size_bytes, storage_path,
+                         status, origin, project_root, rel_path)
+                     VALUES (?1, ?2, 'sha', 'notes.md', 'text/markdown', 0, ?3, 'ready',
+                             'upload', ?4, ?5)",
+                    rusqlite::params![
+                        id,
+                        OWNER,
+                        storage_path.to_string_lossy(),
+                        root,
+                        rel
+                    ],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// An `artifact_versions` row pointing at `rel` — a version's bytes, which
+    /// are as referenced as a head's.
+    fn version_row(&self, artifact_id: &str, version: u32, rel: &str) {
+        self.db
+            .with_connection(|conn| {
+                conn.execute(
+                    "INSERT INTO artifact_versions
+                        (artifact_id, version, rel_path, sha256, size_bytes)
+                     VALUES (?1, ?2, ?3, 'sha', 0)",
+                    rusqlite::params![artifact_id, version, rel],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
     /// A `task` row, so `file_assets.task_id`'s foreign key is satisfiable.
     fn task(&self, id: &str, title: &str) {
         self.db
@@ -332,20 +376,80 @@ fn put_refuses_to_supersede_another_owners_artifact() {
 // put — the head reservation and the address rule (R24)
 // ============================================================================
 
-/// `fs::rename` replaces its destination without a word, so the head name is
-/// claimed with `O_EXCL` before a byte is written. A file the store has no row
-/// for — a crash orphan, or something dropped in by hand — therefore survives:
-/// an artifact is addressed *by name*, so unlike an upload there is no next
-/// slot to move to, and the write fails rather than destroying it.
+/// R33. The row is the commit, so bytes at the head address that no row
+/// references are an *uncommitted write* — what a create leaves behind when the
+/// process dies between the final rename and `tx.commit()`, which the in-process
+/// `Drop` guard cannot cover. The next put reclaims them and continues, instead
+/// of refusing that address for good.
 #[test]
-fn a_stray_file_at_the_next_slot_is_never_overwritten() {
+fn a_row_less_head_left_by_a_crashed_create_is_reclaimed() {
+    let f = Fixture::new();
+    let scope = f.scope();
+
+    // What the daemon would find after a power loss: the bytes of a create
+    // that got as far as step 4 and never committed a row.
+    let day_dir = f.artifacts_root().join("loose/2026-09-01");
+    fs::create_dir_all(&day_dir).unwrap();
+    let orphan = day_dir.join("01-notes.md");
+    fs::write(&orphan, b"bytes with no row").unwrap();
+
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"hello");
+    new.created = at(1);
+    let (record, created) = f.store().put(new).unwrap();
+
+    assert!(created);
+    assert_eq!(record.name, "01-notes.md");
+    assert_eq!(
+        fs::read_to_string(&orphan).unwrap(),
+        "hello",
+        "the new bytes are the head"
+    );
+    assert_eq!(
+        f.store().list(&ArtifactQuery::new(OWNER)).unwrap().1,
+        1,
+        "exactly one row describes the address"
+    );
+    assert!(
+        !day_dir.join(".versions/01-notes/v0.md").exists(),
+        "the orphan was garbage, not a version"
+    );
+    assert_no_tmp_leftovers(&day_dir);
+}
+
+/// The cheaper half of the same crash: a create that died right after
+/// `create_new` leaves an empty reservation and no row. Same rule, same
+/// recovery.
+#[test]
+fn an_empty_reservation_left_by_a_crashed_create_is_reclaimed() {
     let f = Fixture::new();
     let scope = f.scope();
 
     let day_dir = f.artifacts_root().join("loose/2026-09-01");
     fs::create_dir_all(&day_dir).unwrap();
-    let stray = day_dir.join("01-notes.md");
-    fs::write(&stray, b"bytes with no row").unwrap();
+    fs::write(day_dir.join("01-notes.md"), b"").unwrap();
+
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"hello");
+    new.created = at(1);
+    let (record, created) = f.store().put(new).unwrap();
+
+    assert!(created);
+    assert_eq!(fs::read_to_string(&record.storage_path).unwrap(), "hello");
+}
+
+/// The other half of R33: a file a row *does* reference is not this store's to
+/// reclaim. `dir_rows` only sees produced heads, so an upload — the other
+/// writer of `file_assets` — addressing the same `project_root` + `rel_path` is
+/// a genuine collision, and the write refuses rather than destroying it.
+#[test]
+fn a_head_another_row_describes_is_never_overwritten() {
+    let f = Fixture::new();
+    let scope = f.scope();
+
+    let day_dir = f.artifacts_root().join("loose/2026-09-01");
+    fs::create_dir_all(&day_dir).unwrap();
+    let taken = day_dir.join("01-notes.md");
+    fs::write(&taken, b"bytes another row describes").unwrap();
+    f.foreign_row("upload-1", "loose/2026-09-01/01-notes.md", &taken);
 
     let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"hello");
     new.created = at(1);
@@ -358,16 +462,82 @@ fn a_stray_file_at_the_next_slot_is_never_overwritten() {
         "ARTIFACT_NAME_TAKEN"
     );
     assert_eq!(
-        fs::read(&stray).unwrap(),
-        b"bytes with no row",
-        "the stray file must be left exactly as it was"
+        fs::read(&taken).unwrap(),
+        b"bytes another row describes",
+        "the file must be left exactly as it was"
     );
+    let produced = ArtifactQuery {
+        origin: Some(ArtifactOrigin::Produced),
+        ..ArtifactQuery::new(OWNER)
+    };
     assert_eq!(
-        f.store().list(&ArtifactQuery::new(OWNER)).unwrap().1,
+        f.store().list(&produced).unwrap().1,
         0,
-        "and no row claims it"
+        "and no produced row was written"
     );
     assert_no_tmp_leftovers(&day_dir);
+}
+
+/// A version row references bytes just as a head row does — the `.versions/`
+/// side of the same rule. A file some artifact's history still points at is
+/// never reclaimed.
+#[test]
+fn a_head_a_version_row_still_points_at_is_never_overwritten() {
+    let f = Fixture::new();
+    let scope = f.scope();
+
+    let mut first = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Alpha", b"a\n");
+    first.created = at(1);
+    let (alpha, _) = f.store().put(first).unwrap();
+
+    // Beta's address, claimed by a version row of Alpha's history.
+    let day_dir = f.artifacts_root().join("loose/2026-09-01");
+    let taken = day_dir.join("02-beta.md");
+    fs::write(&taken, b"a version's bytes").unwrap();
+    f.version_row(&alpha.id, 9, "loose/2026-09-01/02-beta.md");
+
+    let mut second = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Beta", b"b\n");
+    second.created = at(1);
+    let err = f.store().put(second).unwrap_err();
+
+    assert_eq!(
+        err.downcast_ref::<ArtifactError>()
+            .unwrap_or_else(|| panic!("not an ArtifactError: {err}"))
+            .code(),
+        "ARTIFACT_NAME_TAKEN"
+    );
+    assert_eq!(fs::read(&taken).unwrap(), b"a version's bytes");
+}
+
+/// R33 is about the crash the process does not survive; inside the process the
+/// `Drop` guard is still what answers. A create that dies *after* the final
+/// rename — the head already holding the new bytes — leaves neither the bytes
+/// nor a row, because no row describes them either way.
+#[test]
+fn a_crash_after_the_head_rename_on_a_create_leaves_nothing() {
+    let f = Fixture::new();
+    let scope = f.scope();
+
+    {
+        let _crash = CrashGuard::after(WriteStep::HeadRenamed);
+        let mut doomed = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"a\n");
+        doomed.created = at(1);
+        f.store().put(doomed).unwrap_err();
+    }
+
+    let day_dir = f.artifacts_root().join("loose/2026-09-01");
+    assert!(
+        !day_dir.join("01-notes.md").exists(),
+        "the reservation took the uncommitted bytes with it"
+    );
+    assert_eq!(f.store().list(&ArtifactQuery::new(OWNER)).unwrap().1, 0);
+    assert_no_tmp_leftovers(&day_dir);
+
+    let mut retry = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"b\n");
+    retry.created = at(1);
+    let (record, created) = f.store().put(retry).unwrap();
+    assert!(created);
+    assert_eq!(fs::read_to_string(&record.storage_path).unwrap(), "b\n");
 }
 
 /// The reservation must not outlive the call that made it. A create that fails

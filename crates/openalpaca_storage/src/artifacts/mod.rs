@@ -29,11 +29,12 @@
 //!
 //! Step 0 is [`HeadReservation`] (R24, the rule T26 gave uploads): a *new*
 //! artifact claims its name with `O_EXCL` before a byte is written, because
-//! step 4's rename would otherwise replace whatever stands there. A name
-//! already held by a file no row describes is [`ArtifactError::NameTaken`] and
-//! the write fails — an artifact is addressed by name, so unlike an upload
-//! there is no sequence to bump. Superseding an artifact skips step 0: its own
-//! row already owns the name, and step 3 moves that file aside itself.
+//! step 4's rename would otherwise replace whatever stands there. An artifact
+//! is addressed by name, so unlike an upload there is no sequence to bump: the
+//! only two answers are to reclaim the name or to refuse it, and which one
+//! applies is decided by the rows (R33 — see below). Superseding an artifact
+//! skips step 0: its own row already owns the name, and step 3 moves that file
+//! aside itself.
 //!
 //! All the steps run inside one `with_connection` transaction, which is also
 //! what serialises concurrent `put`s (the `Database` mutex is held for the whole
@@ -73,6 +74,23 @@
 //! The interrupted state is not exclusive to power loss: any failure after the
 //! bytes land and before `tx.commit()` (an FK violation on `task_id`, a unique
 //! index conflict, a disk-full `INSERT`) leaves exactly the same thing on disk.
+//!
+//! ## The head name: reclaim or refuse (R33)
+//!
+//! **The row is the commit.** Bytes at an address that no `file_assets` and no
+//! `artifact_versions` row references are an *uncommitted write*, and belong to
+//! nobody — the same rule the `.versions/` recovery above applies. So when a
+//! create finds its head name taken ([`reserve_head`]):
+//!
+//! | What holds the name | Action |
+//! |---|---|
+//! | A file no row of this store's address space (`project_root` + `rel_path`) references — the head of a create that died between step 4 and `tx.commit()`, or its empty step-0 reservation | Removed (`warn`, with the path and size), the name claimed, the write continues. |
+//! | A file some row *does* reference — a concurrent writer, an upload addressing the same `rel_path`, an artifact version | [`ArtifactError::NameTaken`]: this store will not destroy bytes it can account for. |
+//! | A file no row references that cannot be removed (a directory at the name, a permission denial) | [`ArtifactError::NameTaken`], and the **one state the protocol cannot recover on its own** — a human must move it aside. Bounded to a single title in a single run/loose directory: another title, or another day, is unaffected. |
+//!
+//! Within the process the reclaim is never needed: [`HeadReservation`]'s `Drop`
+//! removes the file on every path out of `put` but the committed one. It exists
+//! for the crash that ends the process between the two.
 
 use std::fmt;
 use std::fs;
@@ -147,13 +165,17 @@ pub enum ArtifactError {
         size_bytes: u64,
         limit: u64,
     },
-    /// R24: the head name is already held by a file no artifact row describes
-    /// — a crash orphan, or something dropped into the directory by hand.
+    /// R24: the head name is held by a file this store will not replace —
+    /// because a row describes it (a concurrent or foreign writer, an upload at
+    /// the same `rel_path`, a retained version), or because it could not be
+    /// removed.
     ///
     /// An artifact is addressed *by name*, so unlike an upload there is no
-    /// sequence to bump: the only two answers are "replace it" and "refuse",
-    /// and replacing bytes this store cannot account for is the one thing the
-    /// write protocol exists to prevent.
+    /// sequence to bump: the only two answers are to reclaim the name and to
+    /// refuse it. R33 draws that line at the rows — bytes no row references are
+    /// an uncommitted write and get reclaimed; anything else is refused, since
+    /// replacing bytes this store *can* account for is the one thing the write
+    /// protocol exists to prevent.
     NameTaken { path: String },
 }
 
@@ -196,8 +218,8 @@ impl fmt::Display for ArtifactError {
             ),
             Self::NameTaken { path } => write!(
                 f,
-                "{path} is already held by a file no artifact describes; \
-                 move it aside and write again"
+                "{path} is held by a file this store will not replace — another row \
+                 describes it, or it could not be removed; move it aside and write again"
             ),
         }
     }
@@ -543,7 +565,7 @@ impl<'a> ArtifactStore<'a> {
             // out of this closure but the committed one.
             let reservation = match existing {
                 Some(_) => None,
-                None => Some(HeadReservation::claim(&head_path)?),
+                None => Some(reserve_head(&tx, &project_key, &head_rel, &head_path)?),
             };
             let rotated_rel = write_bytes(
                 &artifacts_root,
@@ -1187,6 +1209,69 @@ fn dir_rows(conn: &Connection, project_key: &str, rel_dir: &str) -> Result<Vec<D
         });
     }
     Ok(out)
+}
+
+/// R33: claim the head name, reclaiming it first if what holds it is an
+/// **uncommitted write**.
+///
+/// The row is the commit. Bytes at the head address that no `file_assets` or
+/// `artifact_versions` row references are therefore garbage by definition —
+/// the same rule the `.versions/` recovery applies — and the state a create
+/// leaves behind when the process dies between the final rename and
+/// `tx.commit()`, which the in-process [`HeadReservation`] guard cannot cover.
+/// Without this, one power loss would refuse that one address forever.
+///
+/// A file some row *does* describe is a genuine collision — a concurrent or
+/// foreign writer, an upload addressing the same `rel_path` — and stays
+/// [`ArtifactError::NameTaken`]. So does one that cannot be removed.
+fn reserve_head<'a>(
+    conn: &Connection,
+    project_key: &str,
+    head_rel: &str,
+    head_path: &'a Path,
+) -> Result<HeadReservation<'a>> {
+    let taken = match HeadReservation::claim(head_path) {
+        Ok(reservation) => return Ok(reservation),
+        Err(e) => e,
+    };
+    let is_name_taken = matches!(
+        taken.downcast_ref::<ArtifactError>(),
+        Some(ArtifactError::NameTaken { .. })
+    );
+    if !is_name_taken || rel_path_is_referenced(conn, project_key, head_rel)? {
+        return Err(taken);
+    }
+
+    let size = fs::metadata(head_path).map(|m| m.len()).unwrap_or(0);
+    tracing::warn!(
+        "Reclaiming {} ({size} bytes): no artifact row describes it, so it is an \
+         uncommitted write left behind by an interrupted create",
+        head_path.display()
+    );
+    if let Err(e) = fs::remove_file(head_path) {
+        tracing::warn!("Failed to remove {}: {e}", head_path.display());
+        return Err(taken);
+    }
+    HeadReservation::claim(head_path)
+}
+
+/// Does any row of this store address `rel` — a head in `file_assets` or a
+/// retained version in `artifact_versions`? Scoped to `project_key`, because
+/// `rel_path` alone repeats in every store: that pair *is* the address (§4.3).
+fn rel_path_is_referenced(conn: &Connection, project_key: &str, rel: &str) -> Result<bool> {
+    let referenced: bool = conn.query_row(
+        "SELECT EXISTS (
+             SELECT 1 FROM file_assets
+              WHERE COALESCE(project_root, '') = ?1 AND rel_path = ?2
+             UNION ALL
+             SELECT 1 FROM artifact_versions v
+               JOIN file_assets f ON f.id = v.artifact_id
+              WHERE COALESCE(f.project_root, '') = ?1 AND v.rel_path = ?2
+         )",
+        rusqlite::params![project_key, rel],
+        |row| row.get(0),
+    )?;
+    Ok(referenced)
 }
 
 /// R24's head reservation: the empty file this writer creates at the head name,
