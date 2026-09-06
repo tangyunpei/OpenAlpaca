@@ -23,16 +23,19 @@ describe("gap registry", () => {
   // both extension kinds) and GAP-22 closed with the six `plugin_*` variants
   // C7 deleted. Phase 3 closed four more: the artifact resource (GAP-04), its
   // versions and diff (GAP-05), browser-loadable content (GAP-11) and
-  // server-side pins (GAP-12). Phase 4 closed the subagent timeline (GAP-09):
-  // `subagent_span` + `GET /v1/tasks/{id}/timeline` serve the swimlanes.
-  it("covers the 14 gaps still open from API_MAP §3", () => {
-    expect(listGaps()).toHaveLength(14);
+  // server-side pins (GAP-12). Phase 4 closed two: the subagent timeline
+  // (GAP-09), served by `subagent_span` + `GET /v1/tasks/{id}/timeline`, and
+  // the per-run event log (GAP-10), served by `event_log.task_id` +
+  // `GET /v1/events/history?task_id=`.
+  it("covers the 13 gaps still open from API_MAP §3", () => {
+    expect(listGaps()).toHaveLength(13);
     expect(listGaps()[0]?.id).toBe("GAP-02");
     expect(listGaps().at(-1)?.id).toBe("GAP-24");
     for (const closed of [
       "GAP-04",
       "GAP-05",
       "GAP-09",
+      "GAP-10",
       "GAP-11",
       "GAP-12",
       "GAP-19",
@@ -69,8 +72,8 @@ describe("Unavailable results", () => {
   });
 
   it("accepts a caller-supplied reason", () => {
-    expect(unavailable("GAP-10", "No events for this run yet").reason).toBe(
-      "No events for this run yet",
+    expect(unavailable("GAP-14", "No uptime for this daemon yet").reason).toBe(
+      "No uptime for this daemon yet",
     );
   });
 

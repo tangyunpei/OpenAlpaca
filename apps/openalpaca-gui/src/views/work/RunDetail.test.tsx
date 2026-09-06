@@ -1,9 +1,10 @@
 /**
- * The run detail's `Output` card, over the real data layer.
+ * The run detail's data-backed cards, over the real data layer.
  *
- * Phase 3 gave the card a typed source — `GET /v1/artifacts?task_id=` — where
- * it previously had only the run's free-form outcome blob. Both edges are
- * doubled and nothing else.
+ * Phase 3 gave `Output` a typed source — `GET /v1/artifacts?task_id=` — where
+ * it previously had only the run's free-form outcome blob. Phase 4 did the same
+ * for `Event log`: `GET /v1/events/history?task_id=` replaced a filtered live
+ * socket ring (GAP-10). Every edge is doubled and nothing else.
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -63,7 +64,25 @@ const artifact = {
 };
 
 let artifactsReply: () => Response;
+let eventsReply: () => Response;
 let requested: string[] = [];
+
+/** One persisted row, as `GET /v1/events/history` serves it. */
+function row(
+  id: number,
+  event_type: string,
+  detail: Record<string, unknown>,
+  agent_id: string | null = null,
+) {
+  return {
+    id,
+    timestamp: "2026-09-05T10:20:00Z",
+    agent_id,
+    task_id: "task-1",
+    event_type,
+    detail,
+  };
+}
 
 function json(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), { status });
@@ -74,11 +93,13 @@ beforeEach(() => {
   resetConnection();
   useUiStore.setState({ view: "work", panelArtifactId: null });
   artifactsReply = () => json({ artifacts: [artifact], total: 1 });
+  eventsReply = () => json({ events: [], next_before: null });
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: unknown) => {
       const url = String(input);
       requested.push(url);
+      if (url.includes("/v1/events/history")) return eventsReply();
       if (url.includes("/v1/artifacts")) return artifactsReply();
       if (url.includes("/timeline")) {
         return json({
@@ -135,6 +156,7 @@ describe("RunDetail — Timeline", () => {
       vi.fn(async (input: unknown) => {
         const url = String(input);
         requested.push(url);
+        if (url.includes("/v1/events/history")) return eventsReply();
         if (url.includes("/v1/artifacts")) return artifactsReply();
         if (url.includes("/timeline")) {
           return json(
@@ -155,6 +177,88 @@ describe("RunDetail — Timeline", () => {
       screen.getByText(/This run's timeline could not be loaded/),
     ).toBeInTheDocument();
     expect(screen.queryByText(/No steps have run yet/)).not.toBeInTheDocument();
+  });
+});
+
+describe("RunDetail — Event log", () => {
+  it("renders this run's persisted log, tool rows included (GAP-10)", async () => {
+    eventsReply = () =>
+      json({
+        events: [
+          row(12, "tool_executed", {
+            tool_name: "shell_execute",
+            success: true,
+            task_id: "task-1",
+          }),
+          row(11, "artifact_written", {
+            name: "findings.md",
+            version: 1,
+            task_id: "task-1",
+          }),
+          row(10, "workflow_started", { title: "connector audit" }),
+        ],
+        next_before: null,
+      });
+    renderDetail();
+
+    // The card asked the server for *this* run rather than filtering a ring.
+    await waitFor(() =>
+      expect(
+        requested.some(
+          (url) =>
+            url.includes("/v1/events/history") &&
+            url.includes("task_id=task-1"),
+        ),
+      ).toBe(true),
+    );
+
+    // A tool row: the thing the live socket could never attribute to a run.
+    expect(await screen.findByText("shell_execute")).toBeInTheDocument();
+    expect(screen.getByText("tool")).toBeInTheDocument();
+    expect(screen.getByText("findings.md · v1")).toBeInTheDocument();
+    expect(screen.getByText("started · connector audit")).toBeInTheDocument();
+    // …and no gap note, because there is no longer a gap.
+    expect(
+      screen.queryByText(/No events for this run yet/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("drops `dag_node_status`, which duplicates the span it mirrors", async () => {
+    eventsReply = () =>
+      json({
+        events: [
+          row(21, "subagent_span", {
+            label: "review·1",
+            state: "done",
+            task_id: "task-1",
+          }),
+          row(20, "dag_node_status", {
+            node_id: "node-1",
+            status: "completed",
+            task_id: "task-1",
+          }),
+        ],
+        next_before: null,
+      });
+    renderDetail();
+
+    expect(await screen.findByText("review·1 · done")).toBeInTheDocument();
+    expect(screen.queryByText(/dag_node_status/)).not.toBeInTheDocument();
+  });
+
+  it("says the read failed rather than claiming the run is quiet", async () => {
+    eventsReply = () =>
+      json({ error: { code: "DB_ERROR", message: "database is locked" } }, 500);
+    renderDetail();
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(/This run's event log could not be loaded/),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByText(/No events for this run yet/),
+    ).not.toBeInTheDocument();
   });
 });
 

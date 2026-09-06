@@ -131,11 +131,20 @@ export function invalidationKeysFor(
       return [qk.agents.instances()];
 
     case "llm_call_completed":
-      return [qk.usage.all()];
+      return event.task_id === null
+        ? [qk.usage.all()]
+        : [qk.usage.all(), qk.tasks.eventLog(event.task_id)];
 
+    // These carry `task_id` since Phase 4 (GAP-10), so a run's own log key is
+    // refreshed alongside the daemon-wide one — that is what keeps the run
+    // detail's card live now that it reads the server instead of the socket.
     case "tool_executed":
     case "security_violation":
     case "circuit_breaker_tripped":
+      return event.task_id === null
+        ? [qk.events.all()]
+        : [qk.events.all(), qk.tasks.eventLog(event.task_id)];
+
     case "command_received":
     case "wake":
       return [qk.events.all()];

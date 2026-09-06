@@ -700,11 +700,16 @@ export interface SkillHealthMetrics {
 
 // ── Telemetry / health ──────────────────────────────────────────────────────
 
-/** Persisted event row. Has no `task_id` column — GAP-10. */
+/**
+ * Persisted event row. `task_id` is the run it happened inside — filled since
+ * migration 037 for every arm that knows its run, `null` for an event that
+ * belongs to none (and on rows written before the column existed).
+ */
 export interface EventLogRecord {
   id: number;
   timestamp: string;
   agent_id: string | null;
+  task_id: string | null;
   event_type: string;
   detail?: unknown;
   result?: unknown;

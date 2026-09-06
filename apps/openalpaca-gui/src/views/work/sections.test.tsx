@@ -9,9 +9,13 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { OutcomeArtifact } from "@/components/work/run-model";
 import type { TaskTimeline } from "@/lib/api/tasks";
-import type { RunEvent } from "@/lib/api/unbacked";
+import type { RunEvent } from "@/lib/api/run-events";
 
-import { EventLogSection, EVENT_LOG_EMPTY } from "./EventLogSection";
+import {
+  EventLogSection,
+  EVENT_LOG_EMPTY,
+  EVENT_LOG_ERROR,
+} from "./EventLogSection";
 import { OutputSection, OUTPUT_EMPTY } from "./OutputSection";
 import {
   TimelineSection,
@@ -133,7 +137,7 @@ describe("OutputSection", () => {
   });
 });
 
-describe("EventLogSection (GAP-10)", () => {
+describe("EventLogSection", () => {
   const event: RunEvent = {
     id: 4,
     task_id: "b41",
@@ -142,18 +146,27 @@ describe("EventLogSection (GAP-10)", () => {
     at: "2026-08-31T14:31:00Z",
   };
 
-  it("shows the design's empty copy and names the proposed filter", () => {
+  it("shows the design's own empty copy for a run with nothing logged", () => {
     render(<EventLogSection events={[]} />);
     expect(screen.getByText(EVENT_LOG_EMPTY)).toBeInTheDocument();
-    expect(screen.getByText(/task_id=/)).toBeInTheDocument();
   });
 
-  it("renders the live rows it does have, and still states the limitation", () => {
+  // The gap note is gone with GAP-10: the card no longer shows this session
+  // only, so a footer saying it would be false.
+  it("renders the run's rows with no missing-API note", () => {
     render(<EventLogSection events={[event]} />);
     expect(screen.getByText("steering message delivered")).toBeInTheDocument();
     expect(screen.getByText("steer")).toBeInTheDocument();
-    expect(
-      screen.getByText(/Live events from this session only/),
-    ).toBeInTheDocument();
+    expect(screen.queryByText(/not yet available/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/task_id=/)).not.toBeInTheDocument();
+  });
+
+  // A failed read is not "nothing happened" — the T32 precedent from
+  // `TimelineSection`, applied to the card below it.
+  it("says the read failed rather than claiming the run is quiet", () => {
+    render(<EventLogSection events={[]} error="500 Internal Server Error" />);
+    expect(screen.getByText(EVENT_LOG_ERROR)).toBeInTheDocument();
+    expect(screen.getByText(/500 Internal Server Error/)).toBeInTheDocument();
+    expect(screen.queryByText(EVENT_LOG_EMPTY)).not.toBeInTheDocument();
   });
 });

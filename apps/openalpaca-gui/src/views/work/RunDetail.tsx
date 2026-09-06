@@ -28,7 +28,6 @@ import {
   terminalRunActions,
   type RunActionId,
 } from "@/components/work/run-actions";
-import { runEventsFromRing } from "@/components/work/run-events";
 import {
   toRun,
   type OutcomeArtifact,
@@ -36,7 +35,7 @@ import {
 } from "@/components/work/run-model";
 import { toFileKind } from "@/components/ui";
 import { useArtifacts } from "@/hooks/useArtifacts";
-import { useEventRing } from "@/hooks/useDaemonEvents";
+import { useRunEventLog } from "@/hooks/useEventHistory";
 import { useTask, useTaskTimeline } from "@/hooks/useTasks";
 import { isLive } from "@/components/ui";
 import { useUiStore } from "@/stores/ui";
@@ -66,7 +65,7 @@ export function RunDetail({
   const openSidePanel = useUiStore((state) => state.openSidePanel);
   const detail = useTask(runId);
   const timeline = useTaskTimeline(runId);
-  const ring = useEventRing();
+  const eventLog = useRunEventLog(runId);
 
   const task = detail.data?.task;
   const run = useMemo<Run | null>(() => {
@@ -83,9 +82,11 @@ export function RunDetail({
     return { ...detailRun, costUsd, meta };
   }, [task, fallbackRun]);
 
+  // The design draws up to six rows (§5.2); the query fetches a wider page so
+  // the dropped `dag_node_status` duplicates cannot empty the card.
   const events = useMemo(
-    () => (runId === null ? [] : runEventsFromRing(ring, runId)),
-    [ring, runId],
+    () => (eventLog.data?.events ?? []).slice(0, 6),
+    [eventLog.data],
   );
 
   // The run's own files, with ids that open. `run.outcome.artifacts` stays the
@@ -187,7 +188,10 @@ export function RunDetail({
             : null
         }
       />
-      <EventLogSection events={events} />
+      <EventLogSection
+        events={events}
+        error={eventLog.error !== null ? eventLog.error.message : null}
+      />
     </div>
   );
 }

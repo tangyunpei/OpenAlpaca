@@ -13,10 +13,9 @@
  * Not every adapter has a `hooks/useUnbacked` wrapper: where a surface has a
  * working alternative rather than an empty state, the view handles the gap at
  * the point of use — `components/work/run-actions` disables `Start now`,
- * `Re-run` and `Queue follow-up` and names the missing route, `useChatSession`
- * does the `/steer …` send itself, and `views/work/EventLogSection` shows the
- * live socket instead of a per-run history. The adapters below stay as the
- * shape those routes take.
+ * `Re-run` and `Queue follow-up` and names the missing route, and
+ * `useChatSession` does the `/steer …` send itself. The adapters below stay as
+ * the shape those routes take.
  */
 
 import { sendChatMessage } from "../chat-stream";
@@ -36,32 +35,12 @@ import type { ChatSendResponse } from "./types";
 // `agent_task_history` (written only at completion, with no start time) could
 // never do.
 
-// ── Per-run event log (GAP-10) ──────────────────────────────────────────────
-
-export type RunEventTag = "tool" | "steer" | "artifact" | "spawn" | "run";
-
-export interface RunEvent {
-  id: number;
-  task_id: string;
-  tag: RunEventTag;
-  text: string;
-  at: string;
-}
-
-export interface RunEventPage {
-  events: RunEvent[];
-  next_before: number | null;
-}
-
-/** GAP-10 — `event_log` has no `task_id` column, so a run-scoped log is impossible. */
-export function getRunEventLog(
-  _taskId: string,
-  _limit = 200,
-): Availability<RunEventPage> {
-  void _taskId;
-  void _limit;
-  return unavailable("GAP-10");
-}
+// The per-run event log left this file when Phase 4 filled `event_log.task_id`
+// and made `GET /v1/events/history` a task-filtered envelope: `RunEvent`,
+// `RunEventTag` and `RunEventPage` are now wire-derived types in
+// `api/run-events.ts`, fetched by `getRunEventLog` in `api/telemetry.ts`. What
+// was GAP-10 is served — including the tool rows the socket could never
+// attribute to a run, and surviving a restart, which a live ring cannot.
 
 // ── Task actions the daemon rejects (GAP-06) ────────────────────────────────
 

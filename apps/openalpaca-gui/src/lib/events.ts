@@ -41,15 +41,15 @@ export type ServerEvent =
   | { type: "agent_config_changed"; agent_id: string; action: string; config_version: number; ts: string; instance_id: string; _id: number }
   | { type: "orchestrator_config_changed"; model: string; ts: string; instance_id: string; _id: number }
   | { type: "dag_node_status"; task_id: string; node_id: string; node_title: string; agent_id: string; status: string; duration_ms: number | null; output_preview: string | null; ts: string; instance_id: string; _id: number }
-  | { type: "security_violation"; agent_id: string; tool_name: string; reason: string; ts: string; instance_id: string; _id: number }
-  | { type: "circuit_breaker_tripped"; agent_id: string; tool_name: string; consecutive_failures: number; reset_after_secs: number; ts: string; instance_id: string; _id: number }
-  | { type: "tool_executed"; agent_id: string; tool_name: string; success: boolean; duration_ms: number; ts: string; instance_id: string; _id: number }
-  | { type: "llm_call_completed"; agent_id: string; model: string; input_tokens: number; output_tokens: number; cost_usd: number; ts: string; instance_id: string; _id: number }
+  | { type: "security_violation"; agent_id: string; tool_name: string; reason: string; task_id: string | null; ts: string; instance_id: string; _id: number }
+  | { type: "circuit_breaker_tripped"; agent_id: string; tool_name: string; consecutive_failures: number; reset_after_secs: number; task_id: string | null; ts: string; instance_id: string; _id: number }
+  | { type: "tool_executed"; agent_id: string; tool_name: string; success: boolean; duration_ms: number; task_id: string | null; ts: string; instance_id: string; _id: number }
+  | { type: "llm_call_completed"; agent_id: string; model: string; input_tokens: number; output_tokens: number; cost_usd: number; task_id: string | null; ts: string; instance_id: string; _id: number }
   | { type: "skill_catalog_updated"; skill_name: string; action: string; ts: string; instance_id: string; _id: number }
   | { type: "skill_invocation_started"; request_id: string; skill_id: string; query_preview: string; ts: string; instance_id: string; _id: number }
   | { type: "skill_completed"; request_id: string; skill_id: string; duration_ms: number; output_preview: string; ts: string; instance_id: string; _id: number }
   | { type: "skill_failed"; request_id: string; skill_id: string; error: string; ts: string; instance_id: string; _id: number }
-  | { type: "tool_confirmation_requested"; request_id: string; agent_id: string; tool_name: string; tool_arguments: unknown; stream_id: string | null; lane_key: string | null; ts: string; instance_id: string; _id: number }
+  | { type: "tool_confirmation_requested"; request_id: string; agent_id: string; tool_name: string; tool_arguments: unknown; stream_id: string | null; lane_key: string | null; task_id: string | null; ts: string; instance_id: string; _id: number }
   | { type: "soul_updated"; actor: string; mode: string; content_sha256: string; backup_path: string | null; ts: string; instance_id: string; _id: number }
   | { type: "daemon_config_changed"; ts: string; instance_id: string; _id: number }
   | { type: "workflow_started"; task_id: string; lane_key: string; title: string; ts: string; instance_id: string; _id: number }

@@ -20,7 +20,6 @@ export type GapId =
   | "GAP-03"
   | "GAP-06"
   | "GAP-08c"
-  | "GAP-10"
   | "GAP-13"
   | "GAP-14"
   | "GAP-15"
@@ -101,15 +100,12 @@ export const GAPS: Record<GapId, GapDescriptor> = {
   // detail — `GET /v1/tasks/{id}/timeline` serves them, and the `subagent_span`
   // event moves the swimlanes live. `blocked` and the interrupted-lane rule
   // are derived at read time rather than stored, so neither can go stale.
-  "GAP-10": {
-    id: "GAP-10",
-    label: "Per-run event log",
-    missingApi:
-      "event_log has no task_id column; /v1/events/history filters by agent_id only",
-    proposedEndpoint: "GET /v1/events/history?task_id=&before=&event_type=",
-    blocks: "The run detail's Event log",
-    fixSize: "M",
-  },
+  // GAP-10 (no per-run event log) closed with Phase 4: `event_log.task_id` is
+  // filled by every persistence arm that knows its run, and
+  // `GET /v1/events/history?task_id=&event_type=&before=&limit=` serves the
+  // run's own log as a keyset-paginated envelope. The run detail reads it, so
+  // the card is no longer this session's socket ring with the tool rows
+  // missing.
   "GAP-13": {
     id: "GAP-13",
     label: "Per-chat model override",

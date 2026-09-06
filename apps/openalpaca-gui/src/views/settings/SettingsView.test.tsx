@@ -235,14 +235,18 @@ vi.mock("@/hooks/useConversations", () => ({
 vi.mock("@/hooks/useEventHistory", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/hooks/useEventHistory")>()),
   useEventHistory: () =>
-    query([
-      {
-        id: 1,
-        timestamp: "2026-08-31T14:22:41Z",
-        agent_id: "review_agent",
-        event_type: "tool_invoked",
-      },
-    ]),
+    query({
+      events: [
+        {
+          id: 1,
+          timestamp: "2026-08-31T14:22:41Z",
+          agent_id: "review_agent",
+          task_id: null,
+          event_type: "tool_invoked",
+        },
+      ],
+      next_before: null,
+    }),
 }));
 
 beforeEach(() => {

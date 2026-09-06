@@ -147,6 +147,63 @@ describe("invalidationKeysFor", () => {
     ).toEqual([qk.tasks.timeline("run-1")]);
   });
 
+  // GAP-10 — these three carry a run now, so the run detail's log key is
+  // refreshed alongside the daemon-wide one. That is what keeps the card live
+  // now that it reads the server rather than the socket ring.
+  it("refreshes the run's own log for a tool frame that names a run", () => {
+    expect(
+      invalidationKeysFor(
+        event("tool_executed", {
+          agent_id: "a1",
+          tool_name: "shell_execute",
+          success: true,
+          duration_ms: 12,
+          task_id: "run-1",
+        }),
+      ),
+    ).toEqual([qk.events.all(), qk.tasks.eventLog("run-1")]);
+  });
+
+  it("refreshes only the daemon-wide log for a tool frame with no run", () => {
+    expect(
+      invalidationKeysFor(
+        event("security_violation", {
+          agent_id: "a1",
+          tool_name: "shell_execute",
+          reason: "denied",
+          task_id: null,
+        }),
+      ),
+    ).toEqual([qk.events.all()]);
+  });
+
+  it("keeps usage on an LLM frame and adds the run's log when it names one", () => {
+    expect(
+      invalidationKeysFor(
+        event("llm_call_completed", {
+          agent_id: "a1",
+          model: "m",
+          input_tokens: 1,
+          output_tokens: 2,
+          cost_usd: 0.1,
+          task_id: null,
+        }),
+      ),
+    ).toEqual([qk.usage.all()]);
+    expect(
+      invalidationKeysFor(
+        event("llm_call_completed", {
+          agent_id: "a1",
+          model: "m",
+          input_tokens: 1,
+          output_tokens: 2,
+          cost_usd: 0.1,
+          task_id: "run-1",
+        }),
+      ),
+    ).toEqual([qk.usage.all(), qk.tasks.eventLog("run-1")]);
+  });
+
   it("invalidates nothing for a frame this build does not know", () => {
     expect(
       invalidationKeysFor({

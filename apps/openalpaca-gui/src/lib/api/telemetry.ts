@@ -2,23 +2,64 @@
 
 import { apiFetch } from "../http";
 import { ensureConnection } from "../connection";
+import { runEventsFromLog, type RunEventPage } from "./run-events";
 import type { EventLogRecord, HealthResponse } from "./types";
 
 export interface EventHistoryQuery {
   limit?: number;
-  /** The only filter the route accepts — there is no `task_id` column (GAP-10). */
+  /** Scope to one run — `event_log.task_id`, filled since migration 037. */
+  taskId?: string;
   agentId?: string;
+  /** Exact match on `event_type`; `tool_` does not select `tool_executed`. */
+  eventType?: string;
+  /** Exclusive upper bound on `id` — the `next_before` of the page before. */
+  before?: number;
 }
 
-/** `GET /v1/events/history` — bare array, server-capped at 1000. */
+/**
+ * `GET /v1/events/history` — always this envelope, with filters and without
+ * (P20). Paging walks the autoincrement `id`, not the timestamp.
+ */
+export interface EventHistoryPage {
+  events: EventLogRecord[];
+  next_before: number | null;
+}
+
+/** `GET /v1/events/history` — server default 100, clamped at 1000. */
 export async function getEventHistory(
   query: EventHistoryQuery = {},
   signal?: AbortSignal,
-): Promise<EventLogRecord[]> {
-  return await apiFetch<EventLogRecord[]>("/v1/events/history", {
-    query: { limit: query.limit, agent_id: query.agentId },
+): Promise<EventHistoryPage> {
+  return await apiFetch<EventHistoryPage>("/v1/events/history", {
+    query: {
+      limit: query.limit,
+      task_id: query.taskId,
+      agent_id: query.agentId,
+      event_type: query.eventType,
+      before: query.before,
+    },
     signal,
   });
+}
+
+/**
+ * One run's event log (GAP-10, closed).
+ *
+ * Over-fetches relative to the six rows the run detail draws: the page still
+ * carries `dag_node_status` rows, which the projection drops as duplicates of
+ * `subagent_span`, so asking for exactly six could answer with none.
+ */
+export async function getRunEventLog(
+  taskId: string,
+  limit = 100,
+  before?: number,
+  signal?: AbortSignal,
+): Promise<RunEventPage> {
+  const page = await getEventHistory({ taskId, limit, before }, signal);
+  return {
+    events: runEventsFromLog(page.events, taskId),
+    next_before: page.next_before,
+  };
 }
 
 /**

@@ -8,17 +8,19 @@
  * the palette and leaves the untouched `event_type` in the message column, so
  * nothing is invented and nothing is hidden.
  *
- * The persisted log is thinner than the live socket, which carries far more
- * event variants and cannot be replayed (GAP-10).
+ * This is the daemon-wide tail. It is thinner than the live socket, which
+ * carries more event variants than the daemon persists and cannot be replayed;
+ * a single run reads its own slice through `?task_id=` on the same route
+ * (`views/work/EventLogSection`).
  */
 
 import { useEventHistory } from "@/hooks/useEventHistory";
-import { GAPS, gapNote } from "@/lib/unavailable";
 
 import { GapNote, ListCard, ListState, LogRow } from "./primitives";
 import { timeOfDay } from "./format";
 
-const EVENT_SCOPE_NOTE = gapNote(GAPS["GAP-10"]);
+const EVENT_SCOPE_NOTE =
+  "The persisted log is narrower than the live socket, which carries more event variants than the daemon stores";
 
 /** The design's five tones (§3.28), keyed off the daemon's `event_type`. */
 export function tagForEvent(eventType: string): string {
@@ -32,7 +34,9 @@ export function tagForEvent(eventType: string): string {
 
 export function EventLogSection() {
   const events = useEventHistory({ limit: 50 });
-  const rows = [...(events.data ?? [])].sort((a, b) =>
+  // Served newest-first by `id`; the sort keeps the display stable for rows
+  // that predate that ordering.
+  const rows = [...(events.data?.events ?? [])].sort((a, b) =>
     b.timestamp.localeCompare(a.timestamp),
   );
 

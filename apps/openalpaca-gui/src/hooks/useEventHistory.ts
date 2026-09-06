@@ -1,25 +1,44 @@
 /**
  * The persisted event log.
  *
- * `GET /v1/events/history` filters by `agent_id` only and the table has no
- * `task_id` column, so a run-scoped log is impossible (GAP-10). The live WS
- * ring (`useEventRing`) is richer but unbounded-lossy; use both.
+ * `GET /v1/events/history` is an envelope with a keyset cursor, filterable by
+ * run, agent and event type. Two readers use it: Settings shows the daemon-wide
+ * tail, and a run detail shows its own log through `useRunEventLog`.
+ *
+ * The live WS ring (`useEventRing`) is still richer per frame but is
+ * unbounded-lossy and vanishes on reload; freshness here comes from the cache
+ * bridge instead — a run event invalidates that run's log key.
  */
 
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 
-import { getEventHistory, type EventHistoryQuery } from "@/lib/api/telemetry";
-import type { EventLogRecord } from "@/lib/api/types";
+import {
+  getEventHistory,
+  getRunEventLog,
+  type EventHistoryPage,
+  type EventHistoryQuery,
+} from "@/lib/api/telemetry";
+import type { RunEventPage } from "@/lib/api/run-events";
 import { qk } from "@/lib/query-keys";
-import { GAPS, gapNote } from "@/lib/unavailable";
 
 export function useEventHistory(
   query: EventHistoryQuery = {},
-): UseQueryResult<EventLogRecord[]> {
+): UseQueryResult<EventHistoryPage> {
   return useQuery({
     queryKey: qk.events.history(query),
     queryFn: ({ signal }) => getEventHistory(query, signal),
   });
 }
 
-export const RUN_EVENT_LOG_NOTE = gapNote(GAPS["GAP-10"]);
+/** One run's own log (GAP-10). Disabled until there is a run to ask about. */
+export function useRunEventLog(
+  taskId: string | null,
+): UseQueryResult<RunEventPage> {
+  return useQuery({
+    queryKey: qk.tasks.eventLog(taskId ?? ""),
+    queryFn: ({ signal }) =>
+      getRunEventLog(taskId as string, 100, undefined, signal),
+    enabled: taskId !== null && taskId !== "",
+    staleTime: 5_000,
+  });
+}
