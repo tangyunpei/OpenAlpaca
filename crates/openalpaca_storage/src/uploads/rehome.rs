@@ -125,7 +125,11 @@ fn rehome_inner(db: &Database, stop_after: Option<Stop>) -> RehomeSummary {
                 return summary;
             }
         }
-        summary.remaining -= summary.moved;
+        // A missing-blob row leaves the `remaining` set once marked (Important
+        // 1, fix round 1): its bytes are gone either way, and holding
+        // `state/assets` open for it forever would make the pass's own
+        // deliverable unreachable on a plausible install.
+        summary.remaining -= summary.moved + summary.missing;
         info!(
             "Re-homed {} pre-D2 upload(s) into uploads/ ({} blob(s) missing, {} failed, {} left)",
             summary.moved, summary.missing, summary.failed, summary.remaining
@@ -145,12 +149,16 @@ struct PreD2Row {
     filename: String,
     storage_path: String,
     created: DateTime<Utc>,
+    /// Set once [`mark_missing`] has stamped this row on an earlier pass —
+    /// read so a later pass does not warn about it again (Important 1, fix
+    /// round 1).
+    missing_since: Option<String>,
 }
 
 fn pre_d2_rows(db: &Database) -> Result<Vec<PreD2Row>> {
     db.with_connection(|conn| {
         let mut stmt = conn.prepare(
-            "SELECT id, filename, storage_path, created_at FROM file_assets
+            "SELECT id, filename, storage_path, created_at, missing_since FROM file_assets
               WHERE origin = 'upload' AND rel_path IS NULL
               ORDER BY created_at, id",
         )?;
@@ -165,6 +173,7 @@ fn pre_d2_rows(db: &Database) -> Result<Vec<PreD2Row>> {
                 filename: row.get(1)?,
                 storage_path: row.get(2)?,
                 created,
+                missing_since: row.get(4)?,
             });
         }
         Ok(out)
@@ -230,7 +239,9 @@ enum RowOutcome {
     Moved,
     /// The blob is not on disk. The row keeps its `storage_path` — a row with no
     /// bytes is the file routes' 404 either way, and rewriting its address would
-    /// only move the hole.
+    /// only move the hole. Marked `missing_since` (once — see [`mark_missing`])
+    /// so it stops blocking disposal and this warning does not repeat every
+    /// boot (Important 1, fix round 1).
     MissingSource,
     /// A `stop_after` injection ended the pass mid-row.
     Stopped,
@@ -246,11 +257,16 @@ fn rehome_row(
     let data = match fs::read(&source) {
         Ok(data) => data,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            warn!(
-                "Upload {} has no bytes at {}; leaving the row where it is",
-                row.id,
-                source.display()
-            );
+            if row.missing_since.is_none() {
+                mark_missing(db, &row.id)
+                    .with_context(|| format!("Failed to mark upload {} missing", row.id))?;
+                warn!(
+                    "Upload {} has no bytes at {}; marking it missing so this warning \
+                     does not repeat",
+                    row.id,
+                    source.display()
+                );
+            }
             return Ok(RowOutcome::MissingSource);
         }
         Err(e) => {
@@ -315,6 +331,23 @@ fn rehome_row(
         remove_best_effort(&source);
     }
     Ok(RowOutcome::Moved)
+}
+
+/// Stamps `missing_since` on a row whose blob is gone — T23's own convention
+/// (the artifact store's `verify`, `store/artifacts/mod.rs:1011`), reused here
+/// rather than invented. Idempotent by construction: [`rehome_row`] calls this
+/// only the first time a row's blob is found missing, so the boot log warns
+/// once and a marked row stops blocking [`dispose_interim_assets`] forever
+/// (Important 1, fix round 1).
+fn mark_missing(db: &Database, id: &str) -> Result<()> {
+    db.with_connection(|conn| {
+        conn.execute(
+            "UPDATE file_assets SET missing_since = datetime('now'), updated_at = datetime('now')
+              WHERE id = ?1",
+            rusqlite::params![id],
+        )?;
+        Ok(())
+    })
 }
 
 /// R33 at boot: a head that no upload row addresses is the residue of a re-home

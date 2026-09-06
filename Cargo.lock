@@ -4345,6 +4345,7 @@ dependencies = [
  "sqlite-vec",
  "tempfile",
  "tracing",
+ "tracing-test",
  "unicode-normalization",
  "uuid",
 ]

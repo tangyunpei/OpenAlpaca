@@ -111,6 +111,20 @@ impl Fixture {
             .unwrap()
     }
 
+    /// Whether — and, if so, when — a row was marked `missing_since` (T23's
+    /// convention). `Some` once [`mark_missing`] has run for it, `None` before.
+    fn missing_since(&self, id: &str) -> Option<String> {
+        self.db
+            .with_connection(|conn| {
+                Ok(conn.query_row(
+                    "SELECT missing_since FROM file_assets WHERE id = ?1",
+                    rusqlite::params![id],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap()
+    }
+
     /// The file names in one day directory, sorted — the assertion that a resumed
     /// pass left one file and not two.
     fn day_entries(&self, day: &str) -> Vec<String> {
@@ -349,11 +363,13 @@ fn a_stray_file_keeps_the_interim_directory() {
     assert!(fx.assets().exists());
 }
 
-/// A row whose bytes are gone cannot be re-homed and is left exactly as it is:
-/// rewriting its address would only move the hole. It also keeps the interim
-/// directory, because a pre-D2 row still lives there.
+/// A row whose bytes are gone cannot be re-homed: rewriting its address would
+/// only move the hole. It is marked `missing_since` (T23's own convention)
+/// instead, and a marked row leaves the `remaining` set — its blob being gone
+/// is not a reason to keep `state/assets` alive forever (Important 1, fix
+/// round 1).
 #[test]
-fn a_row_whose_blob_is_missing_is_left_alone() {
+fn a_row_whose_blob_is_missing_is_marked_and_disposal_proceeds() {
     let fx = Fixture::new();
     fs::create_dir_all(fx.assets()).unwrap();
     let ghost = interim_blob_path(&crate::content_io::sha256_hex(b"gone"));
@@ -363,18 +379,65 @@ fn a_row_whose_blob_is_missing_is_left_alone() {
         rehome_inner(&fx.db, None),
         RehomeSummary {
             missing: 1,
-            remaining: 1,
+            ..Default::default()
+        }
+    );
+    let (storage_path, rel_path, _project_root) = fx.address("up-1");
+    assert_eq!(storage_path, ghost.to_string_lossy());
+    assert_eq!(
+        rel_path, None,
+        "a missing blob is never given a bytes-less D2 address"
+    );
+    assert!(
+        fx.missing_since("up-1").is_some(),
+        "the row is marked so this warning does not repeat"
+    );
+    assert!(
+        !fx.assets().exists(),
+        "the only remaining row is marked missing, so disposal proceeds"
+    );
+}
+
+/// Marking is idempotent: a row already marked missing on an earlier boot is
+/// neither re-marked nor re-warned about on a later one.
+#[tracing_test::traced_test]
+#[test]
+fn a_row_already_marked_missing_does_not_rewarn_on_a_second_boot() {
+    let fx = Fixture::new();
+    fs::create_dir_all(fx.assets()).unwrap();
+    let ghost = interim_blob_path(&crate::content_io::sha256_hex(b"gone"));
+    fx.insert_row("up-1", "owner-1", "gone.txt", &ghost, b"gone", CREATED);
+
+    rehome_inner(&fx.db, None);
+    let marked_at = fx
+        .missing_since("up-1")
+        .expect("the first pass marks the row");
+
+    assert_eq!(
+        rehome_inner(&fx.db, None),
+        RehomeSummary {
+            missing: 1,
             ..Default::default()
         }
     );
     assert_eq!(
-        fx.address("up-1"),
-        (ghost.to_string_lossy().into_owned(), None, None)
+        fx.missing_since("up-1"),
+        Some(marked_at),
+        "a row already marked missing is not re-marked"
     );
-    assert!(
-        fx.assets().exists(),
-        "a pre-D2 row still lives there, so the directory stays"
-    );
+
+    logs_assert(|lines: &[&str]| {
+        let warns = lines
+            .iter()
+            .filter(|l| l.contains("WARN") && l.contains("has no bytes at"))
+            .count();
+        match warns {
+            1 => Ok(()),
+            n => Err(format!(
+                "expected exactly one WARN across both boots, saw {n}"
+            )),
+        }
+    });
 }
 
 /// The day directory comes from the row's `created_at`, not from today. An
