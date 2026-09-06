@@ -171,6 +171,7 @@ export function RunDetail({
             }
             note={run.note}
             actions={actions}
+            busy={busy}
             onAction={(action) => onAction(action, run)}
           />
           <UnavailableActionsNote actions={actions} />

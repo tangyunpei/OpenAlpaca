@@ -121,6 +121,14 @@ export interface TerminalRunRowProps {
   status: "done" | "cancelled" | "failed";
   onAction: (id: RunActionId) => void;
   rerun: RunActionDescriptor;
+  /**
+   * The action currently in flight — its button shows as busy, exactly as in
+   * {@link RunActionBar}. `Re-run` is a *launch*: a second click is a second
+   * `POST /v1/tasks/{id}/rerun`, a second lead agent and real spend, and the
+   * daemon is right not to deduplicate it (two re-runs of one goal is a
+   * legitimate request), so the guard belongs here.
+   */
+  busy?: RunActionId | null;
   dense?: boolean;
 }
 
@@ -130,6 +138,7 @@ export function TerminalRunRow({
   status,
   onAction,
   rerun,
+  busy = null,
   dense = false,
 }: TerminalRunRowProps) {
   return (
@@ -144,7 +153,7 @@ export function TerminalRunRow({
       </span>
       <Button
         variant="secondarySm"
-        disabled={!rerun.enabled}
+        disabled={!rerun.enabled || busy === rerun.id}
         title={rerun.title}
         onClick={() => onAction(rerun.id)}
       >
@@ -172,6 +181,8 @@ export interface TerminalBannerProps {
   note: string | null;
   actions: readonly RunActionDescriptor[];
   onAction: (id: RunActionId) => void;
+  /** See {@link TerminalRunRowProps.busy} — same guard, same reason. */
+  busy?: RunActionId | null;
 }
 
 /** §3.26's banner, which replaces the action group on a finished run. */
@@ -180,6 +191,7 @@ export function TerminalBanner({
   note,
   actions,
   onAction,
+  busy = null,
 }: TerminalBannerProps) {
   const good = status === "done";
   const text =
@@ -210,7 +222,7 @@ export function TerminalBanner({
         <Button
           key={action.id}
           variant="outlineRaised"
-          disabled={!action.enabled}
+          disabled={!action.enabled || busy === action.id}
           title={action.title}
           onClick={() => onAction(action.id)}
         >

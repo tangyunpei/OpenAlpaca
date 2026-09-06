@@ -192,6 +192,7 @@ export function RunCard({
                 : "cancelled"
           }
           rerun={rerun}
+          busy={busy}
           dense={dense}
           onAction={(action) => onAction(action, run)}
         />

@@ -1,11 +1,22 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
+import { resetConnection } from "@/lib/connection";
 import type { TaskTimeline } from "@/lib/api/tasks";
 
 import { RunCard } from "./RunCard";
 import type { Run } from "./run-model";
+import { useRunController } from "./useRunController";
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(async () => ({
+    baseUrl: "http://127.0.0.1:9999",
+    token: "tok en/+",
+    instanceId: "7f3a1122",
+  })),
+}));
 
 const TIMELINE: TaskTimeline = {
   task_id: "b41c8e02",
@@ -160,5 +171,76 @@ describe("RunCard (§3.19)", () => {
       "pause",
       expect.objectContaining({ id: "b41c8e02" }),
     );
+  });
+});
+
+/**
+ * `Re-run` is the only live control on a terminal card, and it is a *launch*:
+ * every extra click is a real `POST /v1/tasks/{id}/rerun` → a real `201` → a
+ * real lead agent and real spend. `rerun` has no server-side idempotency (nor
+ * should it — two re-runs of one goal is a legitimate request), so the in-flight
+ * guard has to be the button.
+ */
+describe("RunCard — Re-run in flight", () => {
+  it("disables Re-run while the controller says this run is busy", async () => {
+    const onAction = vi.fn();
+    card({ status: "done" }, { onAction, busy: "rerun" });
+
+    const button = screen.getByRole("button", { name: "Re-run" });
+    expect(button).toBeDisabled();
+    await userEvent.click(button);
+    expect(onAction).not.toHaveBeenCalled();
+  });
+
+  it("does not POST twice when the user double-clicks", async () => {
+    resetConnection();
+    const deferred: { settle: () => void } = { settle: () => {} };
+    const inFlight = new Promise<void>((resolve) => {
+      deferred.settle = resolve;
+    });
+    const fetchMock = vi.fn(async () => {
+      await inFlight;
+      return new Response(
+        JSON.stringify({
+          task_id: "task-2",
+          source_task_id: "b41c8e02",
+          title: "Audit the connector surface",
+          status: "queued",
+        }),
+        { status: 201 },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    // The real wiring: the controller owns `busy`, the card renders it.
+    function Wired() {
+      const controller = useRunController();
+      const r = run({ status: "done" });
+      return (
+        <RunCard
+          run={r}
+          timeline={TIMELINE}
+          busy={controller.busyFor(r.id)}
+          onAction={controller.perform}
+        />
+      );
+    }
+    render(
+      <QueryClientProvider
+        client={
+          new QueryClient({ defaultOptions: { queries: { retry: false } } })
+        }
+      >
+        <Wired />
+      </QueryClientProvider>,
+    );
+
+    const button = screen.getByRole("button", { name: "Re-run" });
+    await userEvent.click(button);
+    await userEvent.click(button);
+
+    expect(button).toBeDisabled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    deferred.settle();
   });
 });

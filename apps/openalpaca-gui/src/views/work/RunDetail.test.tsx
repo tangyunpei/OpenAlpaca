@@ -268,3 +268,24 @@ function useAndRender() {
   renderDetail();
   return user;
 }
+
+/**
+ * §3.26's terminal banner takes the same in-flight guard the live action bar
+ * has. `Re-run` is a launch, not a transition: a second click is a second
+ * `POST /v1/tasks/{id}/rerun` and a second lead agent.
+ */
+describe("RunDetail — Re-run in flight", () => {
+  it("disables Re-run on the terminal banner while it is busy", async () => {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: 0 } },
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <RunDetail runId="task-1" busy="rerun" onAction={vi.fn()} />
+      </QueryClientProvider>,
+    );
+    expect(
+      await screen.findByRole("button", { name: "Re-run" }),
+    ).toBeDisabled();
+  });
+});
