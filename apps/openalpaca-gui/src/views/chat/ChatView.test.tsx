@@ -98,6 +98,12 @@ let chatSendReply: () => Response;
 let sessionRows: Record<string, unknown>[] = [];
 /** What `GET /v1/sessions` answers — one page of `sessionRows`. */
 let sessionListReply: (url: string) => Response;
+/**
+ * What `GET /v1/status` answers. The default is an exact-match daemon: the
+ * project root it resolves is the header it was sent. A test that cares about
+ * R50 swaps in a root the picker's path only *contains*.
+ */
+let statusReply: (headers: Headers) => Response;
 /** What the five `/v1/sessions` write verbs answer; swapped per test to refuse. */
 let sessionWriteReply: () => Response;
 
@@ -143,6 +149,9 @@ function installFetch() {
       headers: new Headers(init?.headers),
     });
 
+    if (url.includes("/v1/status")) {
+      return statusReply(new Headers(init?.headers));
+    }
     if (url.includes("/v1/sessions")) {
       if (method === "GET") return sessionListReply(url);
       const reply = sessionWriteReply();
@@ -240,6 +249,16 @@ async function sendMessage(text: string): Promise<FakeEventSource> {
   return source;
 }
 
+/** `GET /v1/status`'s body — the store roots plus this request's project. */
+function daemonStatus(projectRoot: string | null) {
+  return {
+    home_root: "/Users/dev/.openalpaca",
+    state_dir: "/Users/dev/.openalpaca/state",
+    db_path: "/Users/dev/.openalpaca/state/openalpaca.db",
+    project_root: projectRoot,
+  };
+}
+
 /** One `SessionView`, as `/v1/sessions` serializes it. */
 function sessionRow(overrides: Record<string, unknown> = {}) {
   return {
@@ -269,6 +288,8 @@ beforeEach(() => {
   sessionRows = [];
   sessionListReply = pageOfSessions;
   sessionWriteReply = () => json(sessionRow());
+  statusReply = (headers) =>
+    json(daemonStatus(headers.get("x-workspace-path")));
   steerReply = () =>
     json({
       task_id: "run-1",
@@ -1322,6 +1343,46 @@ describe("ChatView — the conversation sidebar (§5.7)", () => {
         (r) => r.method === "POST" && r.url.endsWith("/v1/sessions"),
       ),
     ).toBe(false);
+  });
+
+  /**
+   * R50. `session.workspace_id` is a **canonical project root**; the picker
+   * holds free text that is only checked for absoluteness. `/repo/apps/gui`
+   * resolves to `/repo`, which is exactly what this conversation is bound to,
+   * so the daemon is provably not switching scope — and an override line here
+   * would announce something that is not happening.
+   */
+  it("stays quiet when the picker's path resolves to the conversation's own project", async () => {
+    useProjectStore.setState({ path: "/repo/apps/gui" });
+    statusReply = () => json(daemonStatus("/repo"));
+    seedSessions([sessionRow({ id: "sess-live", workspace_id: "/repo" })]);
+    renderChat();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Connector audit/ }),
+    );
+    await waitFor(() =>
+      expect(useSessionSelection.getState().selectedId).toBe("sess-live"),
+    );
+
+    expect(screen.queryByText(/not the window's project/)).toBeNull();
+  });
+
+  /** And when they really differ, the line names the *resolved* roots. */
+  it("names the canonical roots when the two projects really differ", async () => {
+    useProjectStore.setState({ path: "/repo/apps/gui" });
+    statusReply = () => json(daemonStatus("/repo"));
+    seedSessions([sessionRow({ id: "sess-live", workspace_id: "/elsewhere" })]);
+    renderChat();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Connector audit/ }),
+    );
+
+    const line = await screen.findByText(/This conversation runs in/);
+    expect(line).toHaveTextContent("/elsewhere");
+    expect(line).toHaveTextContent("(/repo)");
+    expect(line).not.toHaveTextContent("/repo/apps/gui");
   });
 
   it("reads the resumed conversation's transcript, not the lane's", async () => {

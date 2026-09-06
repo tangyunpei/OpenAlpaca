@@ -13,8 +13,9 @@ import {
 } from "@tanstack/react-query";
 import { useCallback, useEffect, useState } from "react";
 
+import { getDaemonStatus } from "@/lib/api/status";
 import { getHealth } from "@/lib/api/telemetry";
-import type { HealthResponse } from "@/lib/api/types";
+import type { DaemonStatus, HealthResponse } from "@/lib/api/types";
 import {
   bootstrapConnection,
   getCachedConnection,
@@ -40,6 +41,24 @@ export function useHealth(): UseQueryResult<HealthResponse> {
     queryFn: ({ signal }) => getHealth(signal),
     refetchInterval: 30_000,
     staleTime: 10_000,
+  });
+}
+
+/**
+ * `GET /v1/status` for one window's project — the canonical root the daemon
+ * resolves that path to (R50), plus the store roots.
+ *
+ * Disabled with no project: the route would answer `project_root: null`, which
+ * is what a window with no project already means, and asking costs a request.
+ */
+export function useDaemonStatus(
+  workspacePath: string | null,
+): UseQueryResult<DaemonStatus> {
+  return useQuery({
+    queryKey: qk.status(workspacePath),
+    queryFn: ({ signal }) => getDaemonStatus(workspacePath, signal),
+    enabled: workspacePath !== null,
+    staleTime: 30_000,
   });
 }
 

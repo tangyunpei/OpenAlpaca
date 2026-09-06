@@ -41,7 +41,11 @@ export interface SessionSidebarProps {
   creating: boolean;
   /** The last refusal, already turned into a sentence. */
   actionError: string | null;
-  /** The project this window is pointed at, for the R49 line. */
+  /**
+   * The **canonical** project root this window resolves to, for the R49 line —
+   * `GET /v1/status`'s `project_root`, so the comparison below is root against
+   * root (R50). `null` while it is unknown, and the line then stays away.
+   */
   windowProject: string | null;
   onNewChat: () => void;
   onSelect: (id: string) => void;

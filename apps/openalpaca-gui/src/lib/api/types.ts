@@ -779,6 +779,26 @@ export interface HealthResponse {
   instance_id: string;
 }
 
+/**
+ * `GET /v1/status` — the authenticated sibling of `/v1/health` (plan §4.7
+ * item 4). It names absolute paths on the owner's disk, hence the token.
+ *
+ * GAP-14's remaining fields (`started_at`, `uptime_secs`, `schema_version`,
+ * `log_path`) are Phase 8 and are not here yet.
+ */
+export interface DaemonStatus {
+  /** `~/.openalpaca` (or `$OPENALPACA_HOME_STORE`). */
+  home_root: string;
+  state_dir: string;
+  db_path: string;
+  /**
+   * The project root the request's own `x-workspace-path` resolves to — the
+   * canonical value a `workspace_id` is compared against (R50). `null` when
+   * no header was sent, or when the path is not inside a project.
+   */
+  project_root: string | null;
+}
+
 export interface DaemonProvidersResponse {
   web_search: {
     api_key_configured: boolean;

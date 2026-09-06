@@ -15,6 +15,13 @@ import type { TelemetryQuery } from "./api/orchestrator";
 export const qk = {
   health: () => ["health"] as const,
 
+  /**
+   * `GET /v1/status`. The window's project is part of the key because the
+   * route answers a question *about the request* — a different
+   * `x-workspace-path` is a different answer, not a stale one.
+   */
+  status: (workspacePath: string | null) => ["status", workspacePath] as const,
+
   chat: {
     all: () => ["chat"] as const,
     history: (query: ChatHistoryQuery) => ["chat", "history", query] as const,

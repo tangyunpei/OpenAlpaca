@@ -142,6 +142,18 @@
 - Exported functions: `getSkillHealth`
 - Endpoints: none
 
+### `status.test.ts`
+
+- Source: `apps/openalpaca-gui/src/lib/api/status.test.ts`
+- Exported functions: none
+- Endpoints: none
+
+### `status.ts`
+
+- Source: `apps/openalpaca-gui/src/lib/api/status.ts`
+- Exported functions: `getDaemonStatus`
+- Endpoints: none
+
 ### `tasks.test.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/tasks.test.ts`

@@ -23,6 +23,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { useDaemonStatus } from "@/hooks/useConnection";
 import {
   useActivateSession,
   useArchiveSession,
@@ -51,6 +52,11 @@ export interface SessionSidebarState {
   busyId: string | null;
   creating: boolean;
   actionError: string | null;
+  /**
+   * The **canonical** project root this window resolves to — `GET /v1/status`'s
+   * `project_root` for the picker's path, never the picker's path itself
+   * (R50). `null` while it is unknown, or when the window has no project.
+   */
   windowProject: string | null;
   newChat: () => void;
   select: (id: string) => void;
@@ -81,6 +87,23 @@ export function useSessionSidebar(
   const projectPath = useProjectStore((s) => s.path);
   const selectedId = useSessionSelection((s) => s.selectedId);
   const select = useSessionSelection((s) => s.select);
+
+  /**
+   * R50: the R49 line compares two **canonical project roots**, so the window's
+   * half has to be the daemon's answer, not the picker's raw text.
+   *
+   * `session.workspace_id` is what `MemoryScopeContext::for_request` resolved
+   * — a marker walk up to a `.git`/`.openalpaca` root, with symlinks
+   * canonicalized. `useProjectStore.path` is free text validated only for
+   * absoluteness. Comparing the two announced an override for every window
+   * pointed at a subdirectory of its own project (`/repo/apps/gui` vs `/repo`)
+   * or at an uncanonicalized path (`/tmp/...` vs `/private/tmp/...`) — a claim
+   * of a scope change in exactly the case where the daemon is provably not
+   * making one. `GET /v1/status` answers the same question a turn asks, with
+   * the same header, so its `project_root` is the value to compare.
+   */
+  const status = useDaemonStatus(projectPath);
+  const windowProject = status.data?.project_root ?? null;
 
   const [busyId, setBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -230,7 +253,7 @@ export function useSessionSidebar(
     busyId,
     creating: create.isPending,
     actionError,
-    windowProject: projectPath,
+    windowProject,
     newChat,
     select: onSelect,
     rename,
