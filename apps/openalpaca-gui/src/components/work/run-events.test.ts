@@ -53,13 +53,49 @@ const RING: ServerEvent[] = [
     ...base,
   },
   { type: "heartbeat", _id: 7, ...base },
+  {
+    type: "artifact_written",
+    artifact_id: "a-1",
+    task_id: "b41",
+    agent_id: "writing_agent",
+    name: "01-quarterly-report.md",
+    kind: "markdown",
+    version: 2,
+    path: "/p/.openalpaca/artifacts/run/01-quarterly-report.md",
+    _id: 8,
+    ...base,
+  },
+  {
+    type: "artifact_written",
+    artifact_id: "a-2",
+    task_id: null,
+    agent_id: null,
+    name: "01-notes.md",
+    kind: "markdown",
+    version: 1,
+    path: "/h/.openalpaca/artifacts/loose/01-notes.md",
+    _id: 9,
+    ...base,
+  },
 ];
 
 describe("runEventsFromRing", () => {
-  const events = runEventsFromRing(RING, "b41");
+  const events = runEventsFromRing(RING, "b41", 10);
 
   it("keeps only the events that carry this task id", () => {
-    expect(events.map((event) => event.id)).toEqual([4, 3, 2, 1]);
+    expect(events.map((event) => event.id)).toEqual([8, 4, 3, 2, 1]);
+  });
+
+  // T28 — the first `ServerEvent` that carries both a run and a deliverable,
+  // so the `artifact` tag the design reserved finally has a producer.
+  it("tags a produced artifact as `artifact` and names it with its version", () => {
+    const artifact = events.find((event) => event.id === 8);
+    expect(artifact?.tag).toBe("artifact");
+    expect(artifact?.text).toBe("01-quarterly-report.md · v2");
+  });
+
+  it("drops a loose artifact, which belongs to no run", () => {
+    expect(events.some((event) => event.id === 9)).toBe(false);
   });
 
   it("drops tool events, which carry an agent id and no task id (GAP-10)", () => {

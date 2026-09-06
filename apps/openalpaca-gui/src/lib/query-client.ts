@@ -58,6 +58,13 @@ export function invalidationKeysFor(
     case "followup_queued":
       return [qk.followups.all(), qk.tasks.all()];
 
+    // `["artifacts"]` is a prefix of the list, versions and diff keys, so one
+    // entry refreshes whichever Library surface is mounted. Not `tasks`: a
+    // run's artifact list is read out of `task.outcome`, which the daemon only
+    // writes at completion — and that arrives as `task_status`.
+    case "artifact_written":
+      return [qk.artifacts.all()];
+
     case "chat_stream_ended":
       return [qk.chat.all(), qk.conversations.all()];
 

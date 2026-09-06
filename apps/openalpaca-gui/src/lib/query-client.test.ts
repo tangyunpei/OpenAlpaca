@@ -118,6 +118,24 @@ describe("invalidationKeysFor", () => {
     ]);
   });
 
+  // T28. `["artifacts"]` is a prefix of the list, versions and diff keys, so
+  // one entry refreshes the Library whichever of them is mounted.
+  it("refreshes the Library when a produced artifact lands", () => {
+    expect(
+      invalidationKeysFor(
+        event("artifact_written", { artifact_id: "a-1", task_id: "run-1" }),
+      ),
+    ).toEqual([qk.artifacts.all()]);
+  });
+
+  it("refreshes the Library for a loose artifact too", () => {
+    expect(
+      invalidationKeysFor(
+        event("artifact_written", { artifact_id: "a-2", task_id: null }),
+      ),
+    ).toEqual([qk.artifacts.all()]);
+  });
+
   it("invalidates nothing for a frame this build does not know", () => {
     expect(
       invalidationKeysFor({

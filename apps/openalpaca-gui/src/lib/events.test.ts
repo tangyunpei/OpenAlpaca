@@ -122,6 +122,79 @@ describe("DaemonEventsClient", () => {
     client.disconnect();
   });
 
+  // T28. Narrowing on `type` is what proves the union member exists with the
+  // right field types — `bun run check` fails if any of these reads is wrong.
+  it("carries an artifact_written frame through with its own fields", async () => {
+    const client = makeClient();
+    const seen: ServerEvent[] = [];
+    client.onEvent((event) => seen.push(event));
+    await client.connect();
+
+    const socket = latest();
+    socket.onopen?.({});
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "artifact_written",
+        artifact_id: "a-1",
+        task_id: "b41",
+        agent_id: "writing_agent",
+        name: "01-quarterly-report.md",
+        kind: "markdown",
+        version: 2,
+        path: "/p/.openalpaca/artifacts/run/01-quarterly-report.md",
+        ts: "2026-09-05T10:00:00Z",
+        instance_id: "7f3a",
+      }),
+    });
+
+    const event = seen[0];
+    if (event?.type !== "artifact_written") {
+      throw new Error(`expected artifact_written, got ${event?.type}`);
+    }
+    expect(event.artifact_id).toBe("a-1");
+    expect(event.task_id).toBe("b41");
+    expect(event.agent_id).toBe("writing_agent");
+    expect(event.name).toBe("01-quarterly-report.md");
+    expect(event.kind).toBe("markdown");
+    expect(event.version).toBe(2);
+    expect(event.path).toBe(
+      "/p/.openalpaca/artifacts/run/01-quarterly-report.md",
+    );
+    client.disconnect();
+  });
+
+  it("accepts an artifact_written frame with no run and no agent", async () => {
+    const client = makeClient();
+    const seen: ServerEvent[] = [];
+    client.onEvent((event) => seen.push(event));
+    await client.connect();
+
+    const socket = latest();
+    socket.onopen?.({});
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "artifact_written",
+        artifact_id: "a-2",
+        task_id: null,
+        agent_id: null,
+        name: "01-notes.md",
+        kind: "markdown",
+        version: 1,
+        path: "/h/.openalpaca/artifacts/loose/01-notes.md",
+        ts: "2026-09-05T10:00:00Z",
+        instance_id: "7f3a",
+      }),
+    });
+
+    const event = seen[0];
+    if (event?.type !== "artifact_written") {
+      throw new Error(`expected artifact_written, got ${event?.type}`);
+    }
+    expect(event.task_id).toBeNull();
+    expect(event.agent_id).toBeNull();
+    client.disconnect();
+  });
+
   it("drops frames that are not tagged ServerEvents", async () => {
     const client = makeClient();
     await client.connect();

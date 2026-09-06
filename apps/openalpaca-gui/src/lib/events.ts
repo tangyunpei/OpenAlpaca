@@ -56,6 +56,10 @@ export type ServerEvent =
   | { type: "workflow_steered"; task_id: string; lane_key: string; ts: string; instance_id: string; _id: number }
   | { type: "workflow_progress"; task_id: string; lane_key: string; message: string; ts: string; instance_id: string; _id: number }
   | { type: "followup_queued"; lane_key: string; followup_id: number; kind: string; ts: string; instance_id: string; _id: number }
+  // A produced artifact (plan §4.9). `name` is the head file's own name and
+  // `path` its absolute location; `task_id`/`agent_id` are null for a loose
+  // artifact — a chat turn that ran no workflow. Never fired for uploads.
+  | { type: "artifact_written"; artifact_id: string; task_id: string | null; agent_id: string | null; name: string; kind: string; version: number; path: string; ts: string; instance_id: string; _id: number }
   // The extension family (ADR-030) — the only lifecycle events there are since
   // C7 deleted the six `plugin_*` variants with `/v1/plugins*`. Every one of
   // these carries `ts` and `instance_id`, which is what the deleted six lacked

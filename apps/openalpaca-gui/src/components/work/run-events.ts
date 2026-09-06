@@ -3,9 +3,9 @@
  *
  * There is no per-run event history: `event_log` has no `task_id` column and
  * `GET /v1/events/history` filters by `agent_id` only. What *does* carry a
- * `task_id` is the live socket — five of the `ServerEvent` variants — so the
- * card shows those, scoped to this run, and says plainly that it is showing
- * this session only.
+ * `task_id` is the live socket — six of the `ServerEvent` variants, since T28
+ * added `artifact_written` — so the card shows those, scoped to this run, and
+ * says plainly that it is showing this session only.
  *
  * The two variants the design's `tool` tag would come from (`tool_executed`,
  * `tool_confirmation_requested`) carry an `agent_id` and no `task_id`, so they
@@ -69,6 +69,18 @@ function toRunEvent(event: ServerEvent, taskId: string): RunEvent | null {
         task_id: taskId,
         tag: "spawn",
         text: `${event.node_title} · ${event.status}`,
+        at: event.ts,
+      };
+    // The first frame that carries both a run and a deliverable, so the
+    // `artifact` tag finally has a producer (T28). A loose artifact — a chat
+    // turn with no workflow — has a null `task_id` and belongs to no run.
+    case "artifact_written":
+      if (event.task_id !== taskId) return null;
+      return {
+        id: event._id,
+        task_id: taskId,
+        tag: "artifact",
+        text: `${event.name} · v${event.version}`,
         at: event.ts,
       };
     default:
