@@ -1,12 +1,16 @@
 /**
  * An `ArtifactCard` (DESIGN_SPEC §3.13) for a file a turn referenced.
  *
- * The card's identity comes from the attachment itself
- * (`ChatMessage.attachments`, or the SSE `done.attachments_used` ids) and its
- * preview body from that file's `extracted_text` — never invented lines. Its
- * version and pin come from the artifact row, which is the same record under
- * another route, and `Diff` opens the file panel on its Diff tab rather than
- * drawing a patch inside a transcript card.
+ * Two populations share this component, and only one of them fetches. A
+ * history-served link (`ChatMessage.attachments`/`.artifacts`, GAP-23)
+ * already carries its id, name and kind from the one history query, so it
+ * renders with **no request of its own** — the badge needs nothing more. A
+ * live turn's SSE `done.attachments_used` carries only the file id, so that
+ * chip still calls `useFileMetadata`/`useArtifact` to learn even the
+ * filename, and gets the preview body and version those calls return. `Diff`
+ * opens the file panel on its Diff tab rather than drawing a patch inside a
+ * transcript card; the pin always writes through `PUT /v1/artifacts/{id}/pin`
+ * regardless of which population the chip came from.
  */
 
 import { ArtifactCard } from "@/components/chat";
@@ -24,8 +28,13 @@ export interface TranscriptArtifactProps {
 }
 
 export function TranscriptArtifact({ attachment }: TranscriptArtifactProps) {
-  const metadata = useFileMetadata(attachment.fileId);
-  const row = useArtifact(attachment.fileId);
+  // A history-served link already names its file (`filename` is never null
+  // for `role='attachment'`/`role='artifact'` rows the server resolved); only
+  // a bare live-turn id lacks even that. Passing `null` disables the query
+  // outright, so a history chip issues no request at all.
+  const knownFromServer = attachment.filename !== null;
+  const metadata = useFileMetadata(knownFromServer ? null : attachment.fileId);
+  const row = useArtifact(knownFromServer ? null : attachment.fileId);
   const openSidePanel = useUiStore((s) => s.openSidePanel);
   const setPanelTab = useUiStore((s) => s.setPanelTab);
   const togglePin = useTogglePin();
@@ -43,11 +52,13 @@ export function TranscriptArtifact({ attachment }: TranscriptArtifactProps) {
       ? fileKind(name, mime)
       : toFileKind(attachment.kind as ArtifactKind);
 
-  const note = metadata.isLoading
-    ? "Reading the file…"
-    : metadata.error !== null
-      ? metadata.error.message
-      : "No text preview for this file.";
+  const note = knownFromServer
+    ? "Open to preview this file."
+    : metadata.isLoading
+      ? "Reading the file…"
+      : metadata.error !== null
+        ? metadata.error.message
+        : "No text preview for this file.";
 
   return (
     <ArtifactCard

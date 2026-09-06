@@ -824,6 +824,66 @@ describe("ChatView — the run link and artifact chips after a reload (GAP-23)",
     expect(FakeEventSource.instances).toHaveLength(0);
   });
 
+  it("issues no /v1/files or /v1/artifacts fetch for N chips rendered from history", async () => {
+    // Three chips across two reports — the server already named each one's id,
+    // name and kind, so the transcript chip needs no request of its own to
+    // draw the badge (Important #2): only clicking Open (→ the file panel)
+    // fetches anything.
+    historyReply = () =>
+      json({
+        messages: [
+          {
+            id: 1,
+            lane_key: "user:gui",
+            role: "assistant",
+            content: "First run done.",
+            created_at: "2026-09-05T13:41:00Z",
+            task_id: "b41c8e02-9f3a-4c11-8f52-2b7d5e6a1c30",
+            artifacts: [
+              {
+                id: "art-1",
+                name: "connector-audit-findings.md",
+                kind: "markdown",
+              },
+              {
+                id: "art-2",
+                name: "connector-audit-appendix.md",
+                kind: "markdown",
+              },
+            ],
+          },
+          {
+            id: 2,
+            lane_key: "user:gui",
+            role: "assistant",
+            content: "Second run done.",
+            created_at: "2026-09-05T13:55:00Z",
+            task_id: "c52d9f13-0a4b-5d22-9g63-3c8e6f7b2d41",
+            artifacts: [
+              {
+                id: "art-3",
+                name: "audit-script.py",
+                kind: "code",
+              },
+            ],
+          },
+        ],
+        total: 2,
+        lane_key: "user:gui",
+      });
+
+    renderChat();
+
+    await screen.findByText("connector-audit-findings.md");
+    await screen.findByText("connector-audit-appendix.md");
+    await screen.findByText("audit-script.py");
+
+    const artifactFetches = requests.filter(
+      (r) => r.url.includes("/v1/files/") || r.url.includes("/v1/artifacts/"),
+    );
+    expect(artifactFetches).toHaveLength(0);
+  });
+
   it("takes the run pill to that run in the Work view", async () => {
     seedHistory();
     renderChat();
