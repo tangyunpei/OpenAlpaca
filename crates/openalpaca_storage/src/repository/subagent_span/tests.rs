@@ -1,7 +1,7 @@
 use super::*;
 use crate::repository::TaskRepository;
 use crate::{Task, TaskStatus};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 fn setup_db() -> Database {
     let dir = tempfile::tempdir().unwrap();
@@ -262,44 +262,121 @@ fn a_span_for_an_unknown_task_is_refused() {
     assert!(err.is_err(), "the FK to task(id) is enforced");
 }
 
-// ── Run counts per template (GAP-20) ──────────────────────────────
+// ── Run counts per template (GAP-20, T48) ──────────────────────────
 
-/// One grouped query answers the whole template list: every span the template
-/// ever opened, and when it last started one. Counting spans rather than
-/// `agent_task_history` rows means a run in flight is counted the moment it is
-/// spawned, which is the number the Agents panel claims to show.
+/// Backdates a span's `started_at` directly — the only way to put a row
+/// outside a `since` cutoff, since [`open`] always stamps "now".
+fn set_started_at(db: &Database, span_id: &str, started_at: &str) {
+    db.with_connection(|conn| {
+        conn.execute(
+            "UPDATE subagent_span SET started_at = ?1 WHERE id = ?2",
+            rusqlite::params![started_at, span_id],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// One grouped query answers the whole template list: every *completed* span
+/// the template opened within the window, and when the newest of those
+/// started. A run still in flight is not counted — the plan's spec is
+/// "completed runs", not "runs, including the ones still going" (T48; that
+/// wording was this repository's own P8 interim, now closed).
 #[test]
-fn run_counts_group_every_span_by_its_template() {
+fn run_counts_group_every_completed_span_by_its_template() {
     let db = setup_db();
     make_task(&db, "t1", TaskStatus::Running);
     make_task(&db, "t2", TaskStatus::Completed);
     open(&db, "t1", "n1", "review_agent");
-    open(&db, "t1", "n2", "review_agent");
+    open(&db, "t1", "n2", "review_agent"); // stays running
     open(&db, "t2", "n3", "review_agent");
     let writing = open(&db, "t2", "n4", "writing_agent");
 
-    // A closed span still counts — the count is "runs", not "runs in flight".
-    SubagentSpanRepository::new(&db)
-        .close("n1", SpanState::Done, None, None)
-        .unwrap();
+    let repo = SubagentSpanRepository::new(&db);
+    repo.close("n1", SpanState::Done, None, None).unwrap();
+    repo.close("n3", SpanState::Failed, None, None).unwrap();
+    repo.close("n4", SpanState::Cancelled, None, None).unwrap();
 
-    let counts = SubagentSpanRepository::new(&db)
-        .run_counts_by_template()
-        .unwrap();
+    let counts = repo.run_counts_by_template(None).unwrap();
 
     assert_eq!(counts.len(), 2, "one entry per template, not per span");
     let review = counts.get("review_agent").expect("review_agent counted");
-    assert_eq!(review.run_count, 3);
+    // n1 (done) and n3 (failed) count; n2 (still running) does not.
+    assert_eq!(review.run_count, 2);
     let writing_count = counts.get("writing_agent").expect("writing_agent counted");
-    assert_eq!(writing_count.run_count, 1);
+    assert_eq!(writing_count.run_count, 1, "a cancelled run still counts");
     assert_eq!(
         writing_count.last_run_at.as_deref(),
         Some(writing.started_at.as_str()),
-        "last_run_at is the newest span's start"
+        "last_run_at is the newest completed span's start"
     );
     // A template that never ran has no entry at all: the caller reports 0
     // rather than this query inventing a row.
     assert!(counts.get("research_agent").is_none());
+}
+
+/// A template whose only spans are still running has no *completed* run at
+/// all, so it is absent from the map the same way a template with zero spans
+/// is — not present with `run_count: 0` baked into a row, which would be this
+/// query inventing an entry for it.
+#[test]
+fn a_template_with_only_running_spans_is_absent_from_the_map() {
+    let db = setup_db();
+    make_task(&db, "t1", TaskStatus::Running);
+    open(&db, "t1", "n1", "review_agent");
+
+    let counts = SubagentSpanRepository::new(&db)
+        .run_counts_by_template(None)
+        .unwrap();
+
+    assert!(counts.get("review_agent").is_none());
+}
+
+/// `since` is the cutoff `?window=7d|30d` compiles down to: a completed span
+/// started before it does not count, and does not win `last_run_at` either.
+#[test]
+fn run_counts_respect_a_since_cutoff() {
+    let db = setup_db();
+    make_task(&db, "t1", TaskStatus::Running);
+    let old = open(&db, "t1", "n-old", "review_agent");
+    let recent = open(&db, "t1", "n-recent", "review_agent");
+    let repo = SubagentSpanRepository::new(&db);
+    repo.close("n-old", SpanState::Done, None, None).unwrap();
+    repo.close("n-recent", SpanState::Done, None, None).unwrap();
+    set_started_at(&db, "n-old", "2000-01-01T00:00:00.000Z");
+    let _ = old; // the span's return value is not needed once backdated
+
+    let cutoff = DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let counts = repo.run_counts_by_template(Some(cutoff)).unwrap();
+
+    let review = counts.get("review_agent").expect("counted");
+    assert_eq!(
+        review.run_count, 1,
+        "the span before the cutoff is excluded"
+    );
+    assert_eq!(
+        review.last_run_at.as_deref(),
+        Some(recent.started_at.as_str())
+    );
+}
+
+/// `since: None` is `?window=all` — no time filter, only the completed-only
+/// one. Same table as the cutoff test, opposite pole.
+#[test]
+fn run_counts_with_no_cutoff_include_every_completed_span_ever() {
+    let db = setup_db();
+    make_task(&db, "t1", TaskStatus::Running);
+    open(&db, "t1", "n-old", "review_agent");
+    open(&db, "t1", "n-recent", "review_agent");
+    let repo = SubagentSpanRepository::new(&db);
+    repo.close("n-old", SpanState::Done, None, None).unwrap();
+    repo.close("n-recent", SpanState::Done, None, None).unwrap();
+    set_started_at(&db, "n-old", "2000-01-01T00:00:00.000Z");
+
+    let counts = repo.run_counts_by_template(None).unwrap();
+    assert_eq!(counts.get("review_agent").unwrap().run_count, 2);
 }
 
 /// An empty table is an empty map, not an error — a fresh install's Agents
@@ -309,7 +386,7 @@ fn run_counts_on_an_empty_table_are_empty() {
     let db = setup_db();
     assert!(
         SubagentSpanRepository::new(&db)
-            .run_counts_by_template()
+            .run_counts_by_template(None)
             .unwrap()
             .is_empty()
     );

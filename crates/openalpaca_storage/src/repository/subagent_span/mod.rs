@@ -76,17 +76,18 @@ pub struct SubagentSpanRecord {
     pub output_preview: Option<String>,
 }
 
-/// How often one agent template has been run, and when it last started
-/// (GAP-20). Counted from `subagent_span`, so a run is counted from the moment
-/// it is spawned — `agent_task_history` only ever knew about runs that had
-/// already returned.
+/// How often one agent template has completed a run, and when the newest of
+/// those started (GAP-20, T48). Counted from `subagent_span` rather than
+/// `agent_task_history`, which only ever knew about runs that had already
+/// returned and carried no start time.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TemplateRunCount {
-    /// Every span this template has opened, lifetime. In-flight runs included.
+    /// Completed spans this template opened within the query's window —
+    /// `state != 'running'`. A run still in flight is not a run yet.
     pub run_count: i64,
-    /// The newest span's `started_at` (RFC 3339, UTC); `None` is impossible
-    /// for a template that has an entry at all, and is carried as an `Option`
-    /// only because `MAX()` is nullable in SQL.
+    /// The newest counted span's `started_at` (RFC 3339, UTC); `None` is
+    /// impossible for a template that has an entry at all, and is carried as
+    /// an `Option` only because `MAX()` is nullable in SQL.
     pub last_run_at: Option<String>,
 }
 
@@ -145,6 +146,19 @@ pub fn short_template(template_id: &str) -> String {
     } else {
         cleaned
     }
+}
+
+/// Row mapper for [`SubagentSpanRepository::run_counts_by_template`], shared
+/// between its cutoff and no-cutoff query shapes so the two branches cannot
+/// drift.
+fn row_to_run_count(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, TemplateRunCount)> {
+    Ok((
+        row.get::<_, String>(0)?,
+        TemplateRunCount {
+            run_count: row.get(1)?,
+            last_run_at: row.get(2)?,
+        },
+    ))
 }
 
 fn now_rfc3339() -> String {
@@ -295,33 +309,45 @@ impl<'a> SubagentSpanRepository<'a> {
         })
     }
 
-    /// Run counts for every template that has ever opened a span, keyed by
-    /// template id (GAP-20).
+    /// Run counts for every template that has at least one *completed* span
+    /// within the window, keyed by template id (GAP-20, T48).
+    ///
+    /// "Completed" is `state != 'running'` — done, failed, blocked-resolved
+    /// and cancelled all count; a span still open does not, because a
+    /// subagent the lead is still waiting on has not produced a run yet.
+    /// `since` is the UTC instant `started_at` must fall at or after; `None`
+    /// is `?window=all` — no time filter, just the completed-only one.
     ///
     /// One grouped query for the whole list — the Agents panel renders every
     /// template from one call, and a per-template count would be an N+1 over a
-    /// list that grows with the config directory. A template with no span is
-    /// absent from the map; the caller reports it as `0` rather than this
-    /// query inventing rows for ids it has never seen.
-    pub fn run_counts_by_template(&self) -> Result<std::collections::HashMap<String, TemplateRunCount>>
-    {
+    /// list that grows with the config directory. A template with no matching
+    /// span is absent from the map; the caller reports it as `0` rather than
+    /// this query inventing rows for ids it has never seen.
+    pub fn run_counts_by_template(
+        &self,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<std::collections::HashMap<String, TemplateRunCount>> {
         self.db.with_connection(|conn| {
-            let mut stmt = conn.prepare(
+            let cutoff = since.map(|dt| dt.to_rfc3339_opts(SecondsFormat::Millis, true));
+            let mut sql = String::from(
                 "SELECT template_id, COUNT(*), MAX(started_at) \
-                 FROM subagent_span GROUP BY template_id",
-            )?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        TemplateRunCount {
-                            run_count: row.get(1)?,
-                            last_run_at: row.get(2)?,
-                        },
-                    ))
-                })?
-                .collect::<std::result::Result<std::collections::HashMap<_, _>, _>>()
-                .context("Failed to read subagent span run counts")?;
+                 FROM subagent_span WHERE state != 'running'",
+            );
+            if cutoff.is_some() {
+                sql.push_str(" AND started_at >= ?1");
+            }
+            sql.push_str(" GROUP BY template_id");
+
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = match &cutoff {
+                Some(cutoff) => stmt
+                    .query_map(rusqlite::params![cutoff], row_to_run_count)?
+                    .collect::<std::result::Result<std::collections::HashMap<_, _>, _>>(),
+                None => stmt
+                    .query_map([], row_to_run_count)?
+                    .collect::<std::result::Result<std::collections::HashMap<_, _>, _>>(),
+            }
+            .context("Failed to read subagent span run counts")?;
             Ok(rows)
         })
     }

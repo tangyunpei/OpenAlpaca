@@ -21,7 +21,7 @@
 |---|---|---|---|---|---|---|
 | GET | `/` | `none` | `root_handler` | - | - | `apps/openalpacad/src/router.rs` |
 | GET | `/v1/agent-instances` | `bearer` | `list_instances_handler` | - | - | `apps/openalpacad/src/routes/agents.rs` |
-| GET | `/v1/agent-templates` | `bearer` | `list_templates_handler` | - | - | `apps/openalpacad/src/routes/agents.rs` |
+| GET | `/v1/agent-templates` | `bearer` | `list_templates_handler` | - | `ListTemplatesQuery` | `apps/openalpacad/src/routes/agents.rs` |
 | POST | `/v1/agent-templates` | `bearer` | `create_template_handler` | `CreateTemplateRequest` | - | `apps/openalpacad/src/routes/agents.rs` |
 | GET | `/v1/agent-templates/{id}` | `bearer` | `get_template_handler` | - | - | `apps/openalpacad/src/routes/agents.rs` |
 | PUT | `/v1/agent-templates/{id}` | `bearer` | `update_template_handler` | `UpdateTemplateRequest` | - | `apps/openalpacad/src/routes/agents.rs` |
@@ -171,6 +171,10 @@
 - External or generic type; see handler source.
 
 ### `ListTasksQuery`
+
+- External or generic type; see handler source.
+
+### `ListTemplatesQuery`
 
 - External or generic type; see handler source.
 

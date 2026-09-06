@@ -10,7 +10,7 @@
 //! DELETE /v1/agents/{id}      -> delete (archive) agent
 //!
 //! Template endpoints:
-//! GET    /v1/agent-templates              -> list all templates
+//! GET    /v1/agent-templates              -> list all templates (query: window)
 //! GET    /v1/agent-templates/{id}         -> get template (JSON)
 //! POST   /v1/agent-templates              -> create template (JSON body)
 //! PUT    /v1/agent-templates/{id}         -> update template
@@ -23,16 +23,37 @@ use axum::{
     Json,
     extract::{Path, Query, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
-use chrono::Utc;
+use chrono::{DateTime, Duration, Utc};
 use std::sync::Arc;
 
 use openalpaca_core::events::SystemEvent;
 use openalpaca_storage::{SubAgentConfig, SubAgentRepository, SubagentSpanRepository};
 
 use super::agents_types::*;
+use super::api_error;
 use crate::AppState;
+
+/// `?window=` on `GET /v1/agent-templates` (GAP-20, T48). Resolves to the
+/// label the client echoes back on every row and the UTC cutoff the grouped
+/// span query filters on; `all` has none. Anything else is the caller's
+/// mistake — reported back as the token itself, so the 400 names exactly what
+/// it did not recognise rather than guessing a default.
+///
+/// Default is `7d`, per the plan: an empty query string behaves the same as
+/// asking for it explicitly.
+fn resolve_window(
+    raw: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<(&'static str, Option<DateTime<Utc>>), String> {
+    match raw.unwrap_or("7d") {
+        "7d" => Ok(("7d", Some(now - Duration::days(7)))),
+        "30d" => Ok(("30d", Some(now - Duration::days(30)))),
+        "all" => Ok(("all", None)),
+        other => Err(other.to_string()),
+    }
+}
 
 // ── Handlers ──────────────────────────────────────────────────────
 
@@ -437,15 +458,29 @@ pub async fn delete_agent_handler(
 // ── Template Handlers ─────────────────────────────────────────────
 
 /// GET /v1/agent-templates
-pub async fn list_templates_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_templates_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ListTemplatesQuery>,
+) -> Response {
+    let (window, since) = match resolve_window(query.window.as_deref(), Utc::now()) {
+        Ok(resolved) => resolved,
+        Err(bad) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "UNKNOWN_WINDOW",
+                format!("Unknown window '{bad}' — use 7d, 30d, or all"),
+            );
+        }
+    };
+
     let templates = state.gateway.shared_context.agent_registry.list_templates();
 
-    // GAP-20: one grouped query for the whole page, not one per template.
+    // GAP-20/T48: one grouped query for the whole page, not one per template.
     // A read failure costs the counts, not the list — the panel then shows
     // every template with `0 runs`, which is what an empty span table means
     // too, so nothing renders as a fabricated number.
     let runs = SubagentSpanRepository::new(&state.db)
-        .run_counts_by_template()
+        .run_counts_by_template(since)
         .unwrap_or_else(|e| {
             tracing::warn!("Failed to read template run counts: {e}");
             std::collections::HashMap::new()
@@ -453,13 +488,14 @@ pub async fn list_templates_handler(State(state): State<Arc<AppState>>) -> impl 
 
     let response: Vec<TemplateResponse> = templates
         .iter()
-        .map(|t| TemplateResponse::from_template(t, runs.get(&t.frontmatter.id)))
+        .map(|t| TemplateResponse::from_template(t, runs.get(&t.frontmatter.id), window))
         .collect();
 
     (
         StatusCode::OK,
         Json(serde_json::to_value(response).unwrap()),
     )
+        .into_response()
 }
 
 /// GET /v1/agent-templates/{id}
@@ -474,13 +510,19 @@ pub async fn get_template_handler(
         .get_template(&id)
     {
         Some(template) => {
+            // Not exposed as a query parameter here (only the list route
+            // takes `?window=`, per the plan) — the single-template read
+            // still needs *a* window to stay consistent with the same
+            // `TemplateResponse` shape, so it takes the list route's default.
+            let (window, since) =
+                resolve_window(None, Utc::now()).expect("the default window always resolves");
             let runs = SubagentSpanRepository::new(&state.db)
-                .run_counts_by_template()
+                .run_counts_by_template(since)
                 .unwrap_or_else(|e| {
                     tracing::warn!("Failed to read template run counts: {e}");
                     std::collections::HashMap::new()
                 });
-            let response = TemplateResponse::from_template(&template, runs.get(&id));
+            let response = TemplateResponse::from_template(&template, runs.get(&id), window);
             (
                 StatusCode::OK,
                 Json(serde_json::to_value(response).unwrap()),
@@ -644,3 +686,46 @@ pub async fn list_instances_handler(State(state): State<Arc<AppState>>) -> impl 
     )
 }
 
+// ── `?window=` parsing (GAP-20, T48) ────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn now() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 9, 6, 12, 0, 0).unwrap()
+    }
+
+    /// No `?window=` at all is the plan's default — `7d` — not an error.
+    #[test]
+    fn an_absent_window_defaults_to_7d() {
+        let (label, since) = resolve_window(None, now()).unwrap();
+        assert_eq!(label, "7d");
+        assert_eq!(since, Some(now() - Duration::days(7)));
+    }
+
+    #[test]
+    fn window_30d_cuts_off_30_days_back() {
+        let (label, since) = resolve_window(Some("30d"), now()).unwrap();
+        assert_eq!(label, "30d");
+        assert_eq!(since, Some(now() - Duration::days(30)));
+    }
+
+    /// `all` is the one value with no cutoff at all.
+    #[test]
+    fn window_all_has_no_cutoff() {
+        let (label, since) = resolve_window(Some("all"), now()).unwrap();
+        assert_eq!(label, "all");
+        assert_eq!(since, None);
+    }
+
+    /// An unrecognised window is refused with the token itself, so the 400 the
+    /// handler builds from it can say exactly what it did not understand
+    /// rather than a generic complaint.
+    #[test]
+    fn an_unknown_window_is_rejected_with_its_own_token() {
+        assert_eq!(resolve_window(Some("90d"), now()), Err("90d".to_string()));
+        assert_eq!(resolve_window(Some(""), now()), Err(String::new()));
+    }
+}
