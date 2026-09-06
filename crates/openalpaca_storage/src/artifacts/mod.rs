@@ -1351,7 +1351,7 @@ fn escape_like(input: &str) -> String {
 /// `(added, removed)` for a line diff: the `+` and `-` lines its unified patch
 /// will carry, counted from the diff itself rather than re-derived — the
 /// patch's own totals and the numbers reported beside it are one computation.
-fn change_counts<'a, T>(diff: &TextDiff<'a, 'a, '_, T>) -> (i64, i64)
+fn change_counts<'a, T>(diff: &TextDiff<'a, 'a, T>) -> (i64, i64)
 where
     T: similar::DiffableStr + ?Sized,
 {
