@@ -2,9 +2,10 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { SkillCatalogEntry } from "@/lib/api/types";
 import { useUiStore } from "@/stores/ui";
 
-import { ToolsSection } from "./ToolsSection";
+import { ToolsSection, skillsByLogKey } from "./ToolsSection";
 
 const state = vi.hoisted(() => ({
   tools: [] as unknown[],
@@ -159,5 +160,29 @@ describe("ToolsSection (ADR-030 §9.3)", () => {
 
     expect(screen.getByText("connector_audit")).toBeInTheDocument();
     expect(screen.queryByText("Connector Audit")).toBeNull();
+  });
+
+  /**
+   * The daemon's `resolve_skill_key` breaks a shared frontmatter name on the
+   * **lowest** id, so two reads of an unchanged catalog agree. The client
+   * mirrors that rule, or the same log key would name one skill here and count
+   * towards another in `GET /v1/skills`.
+   */
+  it("breaks a shared frontmatter name on the lowest id, in either order", () => {
+    const a = {
+      ...catalogued,
+      id: "a_audit",
+      name: "Audit",
+    } as SkillCatalogEntry;
+    const z = {
+      ...catalogued,
+      id: "z_audit",
+      name: "Audit",
+    } as SkillCatalogEntry;
+
+    expect(skillsByLogKey([a, z]).get("audit")?.id).toBe("a_audit");
+    expect(skillsByLogKey([z, a]).get("audit")?.id).toBe("a_audit");
+    // An id still wins outright over another entry's name.
+    expect(skillsByLogKey([a, z]).get("z_audit")?.id).toBe("z_audit");
   });
 });

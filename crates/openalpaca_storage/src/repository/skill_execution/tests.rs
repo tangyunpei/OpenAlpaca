@@ -606,3 +606,78 @@ fn test_skill_invocations_since_counts_from_the_instant() {
     let none = repo.skill_invocations_since("2026-09-06 00:00:00").unwrap();
     assert!(none.is_empty(), "{none:?}");
 }
+
+// ── resolve_skill_key — the one copy of the id-then-name rule ─────────────
+
+/// `(id, frontmatter name)` pairs, the shape every caller can produce.
+const CATALOG: &[(&str, &str)] = &[
+    ("daily-digest", "Daily Digest"),
+    ("code-review", "Code Review"),
+];
+
+#[test]
+fn resolve_skill_key_hits_the_id() {
+    assert_eq!(
+        resolve_skill_key("Daily-Digest", CATALOG.iter().copied()),
+        Some("daily-digest"),
+        "a logged key that is already a catalog id resolves to itself, case-folded"
+    );
+}
+
+#[test]
+fn resolve_skill_key_hits_the_frontmatter_name() {
+    // What every live writer actually logs: the display name, spaces and all.
+    assert_eq!(
+        resolve_skill_key("Daily Digest", CATALOG.iter().copied()),
+        Some("daily-digest"),
+        "the frontmatter name resolves onto the catalog id"
+    );
+    assert_eq!(
+        resolve_skill_key("DAILY DIGEST", CATALOG.iter().copied()),
+        Some("daily-digest"),
+        "case-folded on both sides"
+    );
+    assert_eq!(
+        resolve_skill_key("Daily", CATALOG.iter().copied()),
+        None,
+        "a name is matched whole, never by prefix"
+    );
+}
+
+#[test]
+fn resolve_skill_key_misses_a_key_no_entry_claims() {
+    assert_eq!(
+        resolve_skill_key("deleted-skill", CATALOG.iter().copied()),
+        None,
+        "a key the catalog does not claim belongs to nobody — never to an arbitrary row"
+    );
+    assert_eq!(resolve_skill_key("", CATALOG.iter().copied()), None);
+    assert_eq!(
+        resolve_skill_key("daily-digest", std::iter::empty()),
+        None,
+        "an empty catalog resolves nothing"
+    );
+}
+
+#[test]
+fn resolve_skill_key_prefers_an_id_over_another_entrys_name() {
+    // One entry's id is another's frontmatter name. Ids win, wherever the two
+    // sit in the iteration order — the name arm is checked only after the whole
+    // catalog has failed to match on id.
+    let forward = [("shipping", "Fulfilment"), ("orders", "shipping")];
+    let reversed = [("orders", "shipping"), ("shipping", "Fulfilment")];
+    assert_eq!(resolve_skill_key("shipping", forward.iter().copied()), Some("shipping"));
+    assert_eq!(resolve_skill_key("shipping", reversed.iter().copied()), Some("shipping"));
+}
+
+#[test]
+fn resolve_skill_key_breaks_a_name_collision_on_the_lowest_id() {
+    // Two entries can share a frontmatter name — across scopes, or between a
+    // file skill and a plugin one. The count has to land somewhere; it must at
+    // least land in the *same* place on two reads, whatever order the caller's
+    // `HashMap` hands the entries over in.
+    let one = [("a-digest", "Digest"), ("z-digest", "Digest")];
+    let other = [("z-digest", "Digest"), ("a-digest", "Digest")];
+    assert_eq!(resolve_skill_key("digest", one.iter().copied()), Some("a-digest"));
+    assert_eq!(resolve_skill_key("digest", other.iter().copied()), Some("a-digest"));
+}

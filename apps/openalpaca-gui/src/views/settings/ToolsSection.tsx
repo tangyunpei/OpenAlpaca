@@ -24,8 +24,9 @@
  * `skill_execution_log.skill_id` is **not** the catalog id — every invocation
  * path resolves the entry and then logs `frontmatter.name` (`/slash` and
  * router selection through `Intent::SkillInvocation`, and the model's
- * `invoke_skill`) — so a health row is resolved the way `SkillCatalog::get`
- * resolves one: lowercased, id first, then frontmatter name.
+ * `invoke_skill`) — so a health row is resolved by the daemon's rule, which
+ * `resolve_skill_key` owns and `skillsByLogKey` below mirrors: lowercased, id
+ * first, then frontmatter name.
  *
  * A health row for a skill the catalog no longer holds (a deleted directory, a
  * disabled plugin's withdrawn contribution) keeps showing the id it has: that
@@ -41,17 +42,34 @@ import { GapNote, ListCard, ListRow, ListState } from "./primitives";
 import { percent } from "./format";
 
 /**
- * `SkillCatalog::get`'s rule, on the client: a logged `skill_id` resolves by id
- * first, then by frontmatter name, both lowercased. Ids are inserted last so
- * they win a collision, exactly as the daemon's id map is consulted before its
- * name scan.
+ * The daemon's rule, mirrored on the client — it cannot be imported, so it is
+ * pinned by test instead. The rule and the record of *why* the column needs one
+ * live in `resolve_skill_key`
+ * (`crates/openalpaca_storage/src/repository/skill_execution/mod.rs`), which
+ * both `SkillCatalog::get` and `GET /v1/skills` use:
+ *
+ *  * lowercase both sides;
+ *  * an **id** hit wins outright over any entry's frontmatter name;
+ *  * a frontmatter name shared by two entries resolves to the **lowest id**, so
+ *    two reads of an unchanged catalog agree.
+ *
+ * Ids are therefore inserted last (they overwrite), names first and only where
+ * the key is still free, walking the catalog in id order.
  */
 export function skillsByLogKey(
   catalog: SkillCatalogEntry[],
 ): Map<string, SkillCatalogEntry> {
+  // Code-unit order, not `localeCompare` — the daemon compares `&str` bytes,
+  // and a locale collation would disagree with it on `-` versus `_`.
+  const byId = [...catalog].sort((a, b) =>
+    a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
+  );
   const byKey = new Map<string, SkillCatalogEntry>();
-  for (const skill of catalog) byKey.set(skill.name.toLowerCase(), skill);
-  for (const skill of catalog) byKey.set(skill.id.toLowerCase(), skill);
+  for (const skill of byId) {
+    const name = skill.name.toLowerCase();
+    if (!byKey.has(name)) byKey.set(name, skill);
+  }
+  for (const skill of byId) byKey.set(skill.id.toLowerCase(), skill);
   return byKey;
 }
 

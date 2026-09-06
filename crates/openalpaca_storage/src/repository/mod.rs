@@ -38,7 +38,7 @@ pub use llm_usage::LlmUsageRepository;
 pub use memory::MemoryRepository;
 pub use orchestrator_latency::OrchestratorLatencyRepository;
 pub use preference::PreferenceRepository;
-pub use skill_execution::SkillExecutionRepository;
+pub use skill_execution::{SkillExecutionRepository, resolve_skill_key};
 pub use subagent::SubAgentRepository;
 pub use subagent_span::{
     NewSubagentSpan, SPAN_DETAIL_INTERRUPTED, SpanState, SubagentSpanRecord, SubagentSpanRepository,

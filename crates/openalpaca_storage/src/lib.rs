@@ -40,7 +40,7 @@ pub use repository::{
     LlmUsageRepository, MemoryRepository,
     MessageFeedbackRepository, OrchestratorLatencyRepository, PreferenceRepository,
     SESSION_ACTIVE, SESSION_ARCHIVED, SessionFilter, SkillExecutionRepository, StorageBytes,
-    SubAgentRepository, SubagentSpanRepository, TaskRepository,
+    SubAgentRepository, SubagentSpanRepository, TaskRepository, resolve_skill_key,
 };
 pub use repository::llm_usage::LlmUsageDaily;
 pub use repository::subagent_span::{

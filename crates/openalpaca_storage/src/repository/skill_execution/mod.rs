@@ -413,5 +413,68 @@ fn parse_datetime(s: &str) -> Option<DateTime<Utc>> {
         .map(|ndt| ndt.and_utc())
 }
 
+/// Resolve a value read out of `skill_execution_log.skill_id` onto the catalog
+/// id that owns it. Returns `None` when no entry claims the key.
+///
+/// # Why this exists: the column does not hold what it is named
+///
+/// `skill_execution_log.skill_id` holds the skill's **`frontmatter.name`**, not
+/// its catalog id (the lowercased directory name). Every live invocation path
+/// resolves the catalog entry and then passes the display name on as the
+/// invocation identity — `/slash` and router selection through
+/// `Intent::SkillInvocation` (`orchestrator/intent/skill_match.rs`), and the
+/// model's `invoke_skill` tool — and both writers persist that string:
+/// `orchestrator/skill/handler.rs` and `tools/builtins/invoke_skill.rs`. The
+/// scheduled-skill path injects `/{command}` through the gateway, so it logs
+/// the frontmatter name too. Only historical rows carry the id spelling.
+///
+/// Two consequences the callers of this function are working around, both real:
+///
+///  * renaming a skill silently **splits its history** — new rows land under
+///    the new display name while the old ones keep the old one;
+///  * `GET /v1/skills/health` groups on a display name, so the two catalogs
+///    disagree about what a "skill id" is.
+///
+/// # The rule
+///
+/// A logged key is resolved the way `SkillCatalog::get`
+/// (`openalpaca_core/src/orchestrator/skill/catalog/mod.rs`) resolves one:
+/// lowercased, **id first, then frontmatter name**. Ids win outright — the name
+/// arm is only consulted after the whole catalog has failed to match on id — so
+/// one entry's id is never shadowed by another entry's name. A name collision
+/// (possible across scopes, and between a file skill and a plugin one) is
+/// broken on the **lowest id**, which is what makes two reads of an unchanged
+/// catalog agree however the caller's `HashMap` ordered the entries.
+///
+/// # The fix this defers
+///
+/// The real repair is to log the catalog id and migrate the column
+/// (`UPDATE skill_execution_log SET skill_id = <catalog id>` for the rows whose
+/// value matches a known frontmatter name, or an accepted split), plus changing
+/// the two writers above. That is a change to an invocation identity shared
+/// with the skill executor's catalog lookups and its cycle checks, and it needs
+/// a backfill decision, so it is **not** done here. The plan's §11 migration
+/// ledger reserves 035–039 for other work and holds **no number for it** — one
+/// has to be allocated when the owner takes it.
+///
+/// `entries` is `(catalog id, frontmatter name)`, the shape every caller can
+/// produce; the returned `&str` borrows from it.
+pub fn resolve_skill_key<'a, I>(id_or_name: &str, entries: I) -> Option<&'a str>
+where
+    I: IntoIterator<Item = (&'a str, &'a str)>,
+{
+    let key = id_or_name.to_lowercase();
+    let mut by_name: Option<&'a str> = None;
+    for (id, name) in entries {
+        if id.to_lowercase() == key {
+            return Some(id);
+        }
+        if name.to_lowercase() == key && by_name.is_none_or(|prev| id < prev) {
+            by_name = Some(id);
+        }
+    }
+    by_name
+}
+
 #[cfg(test)]
 mod tests;

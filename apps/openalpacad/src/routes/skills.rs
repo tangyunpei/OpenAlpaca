@@ -25,7 +25,7 @@ use std::sync::Arc;
 use axum::{Json, extract::State, http::StatusCode, response::{IntoResponse, Response}};
 use openalpaca_core::orchestrator::skill_catalog::{SkillCatalog, SkillSource};
 use openalpaca_core::tools::extensions::{ExtensionId, ExtensionLedger};
-use openalpaca_storage::SkillExecutionRepository;
+use openalpaca_storage::{SkillExecutionRepository, resolve_skill_key};
 
 use crate::AppState;
 
@@ -79,34 +79,27 @@ fn invocations_today(db: &openalpaca_storage::Database) -> HashMap<String, i64> 
 
 /// Today's counts, re-keyed from what the **log** holds onto the catalog id.
 ///
-/// `skill_execution_log.skill_id` is not the catalog id. Every invocation path
-/// resolves the entry and then passes `entry.frontmatter.name` on as the id it
-/// logs: `/slash` and router selection build `Intent::SkillInvocation` from it
-/// (`intent/skill_match.rs:31,55` → `skill/invocation.rs:140`), and the model's
-/// `invoke_skill` does the same (`builtins/invoke_skill.rs:173`). Older rows,
-/// and the cron arm, can carry the id instead.
-///
-/// So a logged key is resolved the way `SkillCatalog::get` resolves one —
-/// lowercased, **id first, then frontmatter name** — and both spellings of one
-/// skill add up. A key no entry claims is counted for nobody rather than
-/// attached to a row it does not belong to.
+/// `skill_execution_log.skill_id` is not the catalog id — it holds
+/// `frontmatter.name`. The rule for resolving one back, and the record of why
+/// the column is like that and what would fix it, live in one place:
+/// [`resolve_skill_key`] in `openalpaca_storage`, which `SkillCatalog::get`
+/// also uses. Both spellings of one skill therefore add up here, and a key no
+/// entry claims is counted for nobody rather than attached to a row it does not
+/// belong to.
 fn counts_by_skill_id(
     entries: &[(String, openalpaca_core::orchestrator::skill_catalog::SkillEntry)],
     counts: &HashMap<String, i64>,
 ) -> HashMap<String, i64> {
-    let mut key_to_id: HashMap<String, &str> = HashMap::new();
-    for (id, entry) in entries {
-        key_to_id.insert(entry.frontmatter.name.to_lowercase(), id.as_str());
-    }
-    // Ids win: `get` tries the id map before it scans names.
-    for (id, _) in entries {
-        key_to_id.insert(id.to_lowercase(), id.as_str());
-    }
-
     let mut by_id: HashMap<String, i64> = HashMap::new();
     for (logged, count) in counts {
-        if let Some(id) = key_to_id.get(&logged.to_lowercase()) {
-            *by_id.entry((*id).to_string()).or_insert(0) += count;
+        let resolved = resolve_skill_key(
+            logged,
+            entries
+                .iter()
+                .map(|(id, entry)| (id.as_str(), entry.frontmatter.name.as_str())),
+        );
+        if let Some(id) = resolved {
+            *by_id.entry(id.to_string()).or_insert(0) += count;
         }
     }
     by_id

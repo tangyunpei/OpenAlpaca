@@ -16,6 +16,7 @@ use crate::middleware::skill::{
     SkillDocument, SkillFrontmatter, SkillScope, parse_skill_frontmatter, parse_skill_markdown,
 };
 use chrono::Utc;
+use openalpaca_storage::resolve_skill_key;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -475,19 +476,21 @@ impl SkillCatalog {
 
     /// Look up a skill by ID (directory name) or by frontmatter name (case-insensitive).
     ///
-    /// Tries ID lookup first (O(1)), then falls back to scanning by name.
+    /// The id-then-name rule itself lives in `openalpaca_storage`'s
+    /// [`resolve_skill_key`] — the same function `GET /v1/skills` uses to map a
+    /// logged `skill_execution_log.skill_id` back onto a catalog id, because
+    /// that column holds a frontmatter name. Its doc comment carries the
+    /// column's inconsistency and the migration that would end it. One rule,
+    /// one copy: the catalog resolves a key exactly the way the route does.
     pub fn get(&self, name: &str) -> Option<SkillEntry> {
         let guard = self.entries.read().ok()?;
-        let lower = name.to_lowercase();
-        // Try direct ID lookup
-        if let Some(entry) = guard.get(&lower) {
-            return Some(entry.clone());
-        }
-        // Fallback: search by frontmatter name
-        guard
-            .values()
-            .find(|e| e.frontmatter.name.to_lowercase() == lower)
-            .cloned()
+        let id = resolve_skill_key(
+            name,
+            guard
+                .iter()
+                .map(|(id, entry)| (id.as_str(), entry.frontmatter.name.as_str())),
+        )?;
+        guard.get(id).cloned()
     }
 
     /// Look up a skill by slash command (e.g. "review" -> SkillEntry).
