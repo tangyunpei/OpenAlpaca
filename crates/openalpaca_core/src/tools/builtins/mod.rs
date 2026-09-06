@@ -5,6 +5,7 @@ mod invoke_skill;
 mod main_loop;
 mod memory_ops;
 mod memory_search;
+mod read_result;
 mod send;
 mod shell_execute;
 mod start_workflow;
@@ -44,6 +45,7 @@ pub type ConnectorSendLock = Arc<RwLock<Option<Arc<dyn ConnectorSendProvider>>>>
 use self::artifact_write::artifact_write_tool;
 use self::file_ops::{file_read_tool, file_write_tool};
 use self::memory_search::memory_search_tool;
+use self::read_result::read_result_tool;
 use self::shell_execute::shell_execute_tool;
 use self::update_persona::update_persona_tool;
 use self::web_fetch::web_fetch_tool;
@@ -330,6 +332,12 @@ pub fn builtin_tools(
         file_read_tool(ws_root.clone()),
         file_write_tool(ws_root),
         shell_execute_tool(),
+        // §5.4's counterpart to the `results/` spill. Registered on every
+        // surface because the stub the loop emits names it on every surface —
+        // owner decision T15 (whether it is *appended* to an allowlist) is
+        // pending and is implemented as no change, so an agent that was not
+        // granted it is refused by the gate.
+        read_result_tool(None),
         // Registered unconditionally, like the workspace tools: the definition
         // has to exist for capability resolution even where no database was
         // wired (tests, the CLI), and the tool refuses at call time instead.
@@ -566,7 +574,9 @@ impl BuiltInTool for ScriptToolBuiltIn {
 /// Returns `None` for unknown names; callers default to `None` (no special treatment).
 pub(crate) fn annotations_for_builtin(name: &str) -> Option<openalpaca_mcp::ToolAnnotations> {
     match name {
-        "file_read" | "workspace_read" | "memory_search" => Some(read_only_annotations()),
+        "file_read" | "workspace_read" | "memory_search" | "read_result" => {
+            Some(read_only_annotations())
+        }
         "web_fetch" | "web_search" => Some(read_only_open_world_annotations()),
         "file_write" | "workspace_write" | "artifact_write" | "update_persona" => {
             Some(destructive_local_annotations())

@@ -3,8 +3,8 @@ use super::*;
 #[test]
 fn test_builtin_tools_count_without_db() {
     let tools = builtin_tools(None, None, None, None, None);
-    // 6 base tools (incl. artifact_write) + 2 workspace tools
-    assert_eq!(tools.len(), 8);
+    // 7 base tools (incl. artifact_write and read_result) + 2 workspace tools
+    assert_eq!(tools.len(), 9);
 }
 
 #[test]
@@ -13,8 +13,8 @@ fn test_builtin_tools_count_with_db() {
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
     let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
     let tools = builtin_tools(Some(db), None, Some(dc), None, None);
-    // 7 base tools (with memory_search) + 2 workspace tools
-    assert_eq!(tools.len(), 9);
+    // 8 base tools (with memory_search) + 2 workspace tools
+    assert_eq!(tools.len(), 10);
 }
 
 #[test]
@@ -42,8 +42,8 @@ fn test_builtin_tools_with_persona_context_includes_update_persona() {
     };
     let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
     let tools = builtin_tools_with_persona_context(Some(db), None, ctx, Some(dc), None, None, None);
-    // 9 base (7 + 2 workspace) + 1 update_persona = 10 (no send since connector_send_provider is None)
-    assert_eq!(tools.len(), 10, "Should have 10 tools (9 base + update_persona)");
+    // 10 base (8 + 2 workspace) + 1 update_persona = 11 (no send since connector_send_provider is None)
+    assert_eq!(tools.len(), 11, "Should have 11 tools (10 base + update_persona)");
     assert!(
         tools.iter().any(|t| t.definition.name == "update_persona"),
         "update_persona tool must be present"
@@ -175,8 +175,8 @@ fn test_builtin_tools_uses_explicit_workspace_root() {
 
     // Pass an explicit workspace root — should not fall back to current_dir()
     let tools = builtin_tools(None, None, None, None, Some(ws_root.clone()));
-    // 6 base tools (incl. artifact_write) + 2 workspace tools
-    assert_eq!(tools.len(), 8);
+    // 7 base tools (incl. artifact_write and read_result) + 2 workspace tools
+    assert_eq!(tools.len(), 9);
 
     // Verify tools were created (they compile and register without error
     // when given an explicit workspace root).
@@ -190,8 +190,8 @@ fn test_builtin_tools_falls_back_to_current_dir_when_none() {
     // When workspace_root is None, should fall back to current_dir()
     // This must not panic even if current_dir() is available.
     let tools = builtin_tools(None, None, None, None, None);
-    // 6 base tools (incl. artifact_write) + 2 workspace tools
-    assert_eq!(tools.len(), 8);
+    // 7 base tools (incl. artifact_write and read_result) + 2 workspace tools
+    assert_eq!(tools.len(), 9);
 }
 
 // --- json_to_cli_args ---
@@ -752,6 +752,261 @@ mod workspace_artifact_spill {
             !PathBuf::from(&asset.storage_path).starts_with(fx.project_root()),
             "a connector turn's spill must not land in the daemon's project: {}",
             asset.storage_path
+        );
+    }
+}
+
+/// `read_result` — the scoped reader for a spilled tool result (§5.4).
+///
+/// Everything here turns on one sentence: it "resolves **only** inside the
+/// current session's `results/` (session id from `ToolContext`; `file_read` is
+/// **not** widened to the home root)".
+mod read_result {
+    use super::*;
+    use crate::tools::registry::{RegisteredTool, ToolBackend, ToolContext};
+    use std::path::Path;
+
+    fn tool(root: &Path) -> RegisteredTool {
+        super::super::read_result::read_result_tool(Some(root.to_path_buf()))
+    }
+
+    async fn call(registered: &RegisteredTool, ctx: &ToolContext, args: serde_json::Value) -> Result<String, String> {
+        match &registered.backend {
+            ToolBackend::BuiltIn(t) => t.execute_with_context(&args, ctx).await,
+            _ => panic!("read_result is a builtin"),
+        }
+    }
+
+    fn ctx_for(session: &str) -> ToolContext {
+        ToolContext {
+            session_id: Some(session.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn spill(root: &Path, session: &str, name: &str, body: &str) -> String {
+        let dir = root.join(session).join("results");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(name), body).unwrap();
+        format!("file:results/{name}")
+    }
+
+    #[tokio::test]
+    async fn it_pages_a_spilled_result_by_offset_and_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let body: String = (0..5000).map(|i| (b'a' + (i % 26) as u8) as char).collect();
+        let rel = spill(dir.path(), "sess-a", "000012-abc-shell_execute.txt", &body);
+        let registered = tool(dir.path());
+        let ctx = ctx_for("sess-a");
+
+        let head = call(&registered, &ctx, serde_json::json!({"result_ref": rel, "limit": 100}))
+            .await
+            .unwrap();
+        assert!(head.starts_with(&body[..100]), "the page leads with the bytes");
+        assert!(head.contains("next offset=100"), "a partial page names its cursor: {head}");
+
+        let middle = call(
+            &registered,
+            &ctx,
+            serde_json::json!({"result_ref": rel, "offset": 100, "limit": 50}),
+        )
+        .await
+        .unwrap();
+        assert!(middle.starts_with(&body[100..150]));
+
+        let tail = call(
+            &registered,
+            &ctx,
+            serde_json::json!({"result_ref": rel, "offset": 4990, "limit": 100}),
+        )
+        .await
+        .unwrap();
+        assert!(tail.starts_with(&body[4990..]));
+        assert!(!tail.contains("next offset="), "the last page has no cursor: {tail}");
+
+        // Past the end is an empty page, not an error.
+        let past = call(
+            &registered,
+            &ctx,
+            serde_json::json!({"result_ref": rel, "offset": 9999}),
+        )
+        .await
+        .unwrap();
+        assert!(past.contains("5000"), "the page still reports the size: {past}");
+    }
+
+    /// The reference is a name under this session's `results/`, and nothing
+    /// else. A `..` is refused before it can be resolved.
+    #[tokio::test]
+    async fn a_traversing_reference_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        spill(dir.path(), "sess-a", "000001-x-dump.txt", "mine");
+        std::fs::write(dir.path().join("secret.txt"), "not yours").unwrap();
+        let registered = tool(dir.path());
+        let ctx = ctx_for("sess-a");
+
+        for reference in [
+            "file:results/../../secret.txt",
+            "results/../secret.txt",
+            "file:../secret.txt",
+            "file:/etc/passwd",
+            "file:results/nested/other.txt",
+        ] {
+            let err = call(&registered, &ctx, serde_json::json!({"result_ref": reference}))
+                .await
+                .unwrap_err();
+            assert!(
+                err.contains("not a result reference") || err.contains("outside"),
+                "{reference} must be refused, got: {err}"
+            );
+        }
+    }
+
+    /// A reference is scoped by the session in `ToolContext`, so one session
+    /// can never page another's spill even though both live under the same
+    /// sessions root.
+    #[tokio::test]
+    async fn another_sessions_reference_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let rel = spill(dir.path(), "sess-b", "000003-y-dump.txt", "b's secret");
+        let registered = tool(dir.path());
+
+        let err = call(&registered, &ctx_for("sess-a"), serde_json::json!({"result_ref": rel.clone()}))
+            .await
+            .unwrap_err();
+        assert!(err.contains("no spilled result"), "got: {err}");
+
+        // The same reference from its own session resolves.
+        let ok = call(&registered, &ctx_for("sess-b"), serde_json::json!({"result_ref": rel}))
+            .await
+            .unwrap();
+        assert!(ok.contains("b's secret"));
+    }
+
+    /// Off a session there is no `results/` to scope to, so the call refuses
+    /// rather than falling back to a root.
+    #[tokio::test]
+    async fn without_a_session_the_call_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let registered = tool(dir.path());
+        let err = call(
+            &registered,
+            &ToolContext::default(),
+            serde_json::json!({"result_ref": "file:results/000001-x-dump.txt"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("session"), "got: {err}");
+    }
+
+    /// Owner decision T15 is **not** adopted: `read_result` is registered and
+    /// the stub is emitted everywhere, but the capability is appended to no
+    /// allowlist. So the gate refuses it, fail-closed, exactly like any other
+    /// capability an agent was not granted.
+    #[tokio::test]
+    async fn denied_read_result_is_refused() {
+        use crate::bus::EventBus;
+        use crate::security::capabilities::Allowlist;
+        use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+        use crate::tools::ToolRegistry;
+
+        let dir = tempfile::tempdir().unwrap();
+        let rel = spill(dir.path(), "sess-a", "000001-x-dump.txt", "spilled bytes");
+
+        let registry = ToolRegistry::default();
+        registry.register(tool(dir.path())).unwrap();
+        let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+
+        let policy = SandboxPolicy {
+            agent_id: "research_agent::a1".to_string(),
+            // What every template's resolved allowlist looks like today: the
+            // capability was never appended anywhere.
+            allowed_capabilities: Allowlist::Only(vec!["file_read".to_string()]),
+            denied_capabilities: vec![],
+            require_confirmation_for: vec![],
+            max_tool_calls: None,
+            max_tool_runtime_secs: 30,
+            stream_id: None,
+            lane_key: None,
+            confirmation_timeout_secs: None,
+            auto_approve: false,
+        };
+        let call = openalpaca_llm::ToolCall {
+            id: "tu-denied".to_string(),
+            name: "read_result".to_string(),
+            arguments: serde_json::json!({"result_ref": rel}),
+        };
+        let err = sandbox
+            .execute_tool(&call, &policy, &ctx_for("sess-a"))
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("read_result") && err.contains("not in allow list"),
+            "the gate refuses and says so: {err}"
+        );
+        assert!(
+            !err.contains("spilled bytes"),
+            "a refusal never leaks the payload"
+        );
+    }
+
+    /// The T15 slot. If the owner decides `read_result` becomes an ambient
+    /// capability (appended constructor-side, the way `workspace_read/write`
+    /// already are for subagents), this is the test that must pass — an
+    /// `Only(empty)` policy from Phase 0 A0 would otherwise leave an agent
+    /// unable to page into its own spilled result. Ignored until decided:
+    /// nothing appends the entry today.
+    #[tokio::test]
+    #[ignore = "owner decision T15 pending — read_result is on no allowlist"]
+    async fn only_empty_allowlist_can_still_read_result() {
+        use crate::bus::EventBus;
+        use crate::security::capabilities::Allowlist;
+        use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+        use crate::tools::ToolRegistry;
+
+        let dir = tempfile::tempdir().unwrap();
+        let rel = spill(dir.path(), "sess-a", "000001-x-dump.txt", "spilled bytes");
+        let registry = ToolRegistry::default();
+        registry.register(tool(dir.path())).unwrap();
+        let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+        let policy = SandboxPolicy {
+            agent_id: "research_agent::a1".to_string(),
+            allowed_capabilities: Allowlist::Only(vec![]),
+            denied_capabilities: vec![],
+            require_confirmation_for: vec![],
+            max_tool_calls: None,
+            max_tool_runtime_secs: 30,
+            stream_id: None,
+            lane_key: None,
+            confirmation_timeout_secs: None,
+            auto_approve: false,
+        };
+        let call = openalpaca_llm::ToolCall {
+            id: "tu-ambient".to_string(),
+            name: "read_result".to_string(),
+            arguments: serde_json::json!({"result_ref": rel}),
+        };
+        let out = sandbox
+            .execute_tool(&call, &policy, &ctx_for("sess-a"))
+            .await
+            .expect("an ambient capability is admitted by an empty allowlist");
+        assert!(out.contains("spilled bytes"));
+    }
+
+    /// It is registered in the builtin set — the stub the loop emits names a
+    /// tool that has to exist on every surface, decided allowlist or not.
+    #[test]
+    fn it_is_registered_with_the_builtins() {
+        let tools = builtin_tools(None, None, None, None, None);
+        let found = tools
+            .iter()
+            .find(|t| t.definition.name == "read_result")
+            .expect("read_result is a builtin");
+        assert_eq!(found.provides_capabilities, vec!["read_result".to_string()]);
+        assert_eq!(
+            found.annotations.as_ref().and_then(|a| a.read_only_hint),
+            Some(true),
+            "paging a spilled result reads and nothing more"
         );
     }
 }

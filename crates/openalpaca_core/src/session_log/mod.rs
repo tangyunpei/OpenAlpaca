@@ -349,6 +349,16 @@ fn slug(name: &str) -> String {
     }
 }
 
+/// The directory name a session's log lives under, relative to the sessions
+/// root — the one place an id becomes a path segment.
+///
+/// Public because `read_result` (T42) and the boot sweep resolve a session's
+/// `results/` from an id and must use the identical mapping;
+/// [`SessionLogService::session_dir`] is this joined onto the root.
+pub fn session_dir_name(session_id: &str) -> String {
+    safe_dir_name(session_id)
+}
+
 /// Reduce a session id to one safe path segment.
 ///
 /// Session ids are UUIDs, so this never fires in practice; it exists so that
