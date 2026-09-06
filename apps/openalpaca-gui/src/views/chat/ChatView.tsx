@@ -5,6 +5,12 @@
  * whose inner column is 720px (780 when dense), the composer, and — only when
  * `workOpen || panelArt` — a 7px resizer and the aside.
  *
+ * To the left of all of that sits the conversation column (§5.7), which the
+ * design does not draw: it is a resizable, collapsible pane like the app's
+ * other three (`chatSessionsW`), because a fourth *fixed* column would put the
+ * transcript below the width `AppShell`'s minimum window budgets for it.
+ * Collapsed, the header carries the way back, the same shape the aside uses.
+ *
  * The aside is **one slot with two modes** (§8.4): the Work pane when
  * `panelArt === null`, the file panel otherwise. They are never both rendered.
  * `‹ Work` restores the pane, `›` collapses the aside, and with the aside
@@ -68,6 +74,10 @@ export default function ChatView({
   const workClosed = useUiStore(selectWorkClosed);
   const panelArtifactId = useUiStore((s) => s.panelArtifactId);
   const asideWidth = useUiStore((s) => s.paneWidths.workW);
+  const sessionsOpen = useUiStore((s) => s.sessionsOpen);
+  const sessionsWidth = useUiStore((s) => s.paneWidths.chatSessionsW);
+  const openSessions = useUiStore((s) => s.openSessions);
+  const closeSessions = useUiStore((s) => s.closeSessions);
   const openWorkPane = useUiStore((s) => s.openWorkPane);
   const closeWorkPane = useUiStore((s) => s.closeWorkPane);
   const setView = useUiStore((s) => s.setView);
@@ -124,25 +134,47 @@ export default function ChatView({
   return (
     <>
       {/* A lane holds many conversations since migration 039; this is the one
-          surface that says so, and the only place "New chat" exists. */}
-      <SessionSidebar
-        sessions={sidebar.sessions}
-        selectedId={sidebar.selectedId}
-        loading={sidebar.loading}
-        error={sidebar.error}
-        busyId={sidebar.busyId}
-        creating={sidebar.creating}
-        actionError={sidebar.actionError}
-        windowProject={sidebar.windowProject}
-        onNewChat={sidebar.newChat}
-        onSelect={sidebar.select}
-        onRename={sidebar.rename}
-        onArchive={sidebar.archive}
-        onDelete={sidebar.remove}
-      />
+          surface that says so, and the only place "New chat" exists. It is a
+          resizable, collapsible column like the app's other three — a fourth
+          fixed one would have broken `AppShell`'s minimum-window budget. */}
+      {sessionsOpen && (
+        <>
+          <SessionSidebar
+            sessions={sidebar.sessions}
+            selectedId={sidebar.selectedId}
+            loading={sidebar.loading}
+            error={sidebar.error}
+            busyId={sidebar.busyId}
+            creating={sidebar.creating}
+            actionError={sidebar.actionError}
+            windowProject={sidebar.windowProject}
+            width={sessionsWidth}
+            onCollapse={closeSessions}
+            onNewChat={sidebar.newChat}
+            onSelect={sidebar.select}
+            onRename={sidebar.rename}
+            onArchive={sidebar.archive}
+            onDelete={sidebar.remove}
+          />
+          <Resizer
+            paneKey="chatSessionsW"
+            direction={1}
+            label="conversations pane"
+          />
+        </>
+      )}
 
       <section className="flex min-w-0 flex-1 flex-col bg-main">
         <PaneHeader title="Chat" variant="chat" meta={formatHeaderDate()}>
+          {!sessionsOpen && (
+            <button
+              type="button"
+              onClick={openSessions}
+              className="cursor-pointer border-none bg-transparent p-0 font-mono text-2xs tracking-label text-muted-fg uppercase transition-colors duration-[120ms] hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue"
+            >
+              Conversations
+            </button>
+          )}
           {workClosed && activeCount > 0 && (
             <RunningNowPill count={activeCount} onOpen={openWorkPane} />
           )}

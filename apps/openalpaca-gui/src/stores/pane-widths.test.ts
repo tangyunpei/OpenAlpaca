@@ -31,6 +31,8 @@ describe("clampPaneWidth", () => {
     expect(clampPaneWidth("workListW", 999)).toBe(480);
     expect(clampPaneWidth("libListW", 100)).toBe(260);
     expect(clampPaneWidth("libListW", 999)).toBe(480);
+    expect(clampPaneWidth("chatSessionsW", 100)).toBe(200);
+    expect(clampPaneWidth("chatSessionsW", 999)).toBe(360);
   });
 
   it("passes an in-range value through, rounded to whole pixels", () => {
@@ -58,6 +60,24 @@ describe("parsePaneWidths", () => {
       workW: 500,
       workListW: PANE_DEFAULTS.workListW,
       libListW: PANE_DEFAULTS.libListW,
+      chatSessionsW: PANE_DEFAULTS.chatSessionsW,
+    });
+  });
+
+  /**
+   * The conversation column joined the store after the layout shipped, so
+   * every existing user's payload is missing it. Its absence is a default,
+   * never a reset of the three widths they did drag.
+   */
+  it("defaults the conversation column in a payload written before it existed", () => {
+    const parsed = parsePaneWidths(
+      JSON.stringify({ workW: 500, workListW: 300, libListW: 400 }),
+    );
+    expect(parsed).toEqual({
+      workW: 500,
+      workListW: 300,
+      libListW: 400,
+      chatSessionsW: PANE_DEFAULTS.chatSessionsW,
     });
   });
 
@@ -69,16 +89,18 @@ describe("parsePaneWidths", () => {
 describe("persistence", () => {
   it("round-trips through the legacy `oa-pane-widths` key", () => {
     const storage = memoryStorage();
-    savePaneWidths({ workW: 500, workListW: 300, libListW: 400 }, storage);
-
-    expect(storage.values[PANE_WIDTHS_STORAGE_KEY]).toBe(
-      '{"workW":500,"workListW":300,"libListW":400}',
-    );
-    expect(loadPaneWidths(storage)).toEqual({
+    const widths = {
       workW: 500,
       workListW: 300,
       libListW: 400,
-    });
+      chatSessionsW: 260,
+    };
+    savePaneWidths(widths, storage);
+
+    expect(storage.values[PANE_WIDTHS_STORAGE_KEY]).toBe(
+      '{"workW":500,"workListW":300,"libListW":400,"chatSessionsW":260}',
+    );
+    expect(loadPaneWidths(storage)).toEqual(widths);
   });
 
   it("survives a storage that throws (private mode, blocked site data)", () => {

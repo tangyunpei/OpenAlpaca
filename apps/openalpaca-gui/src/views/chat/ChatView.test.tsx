@@ -1346,6 +1346,50 @@ describe("ChatView — the conversation sidebar (§5.7)", () => {
   });
 
   /**
+   * `AppShell`'s minimum window is budgeted pane by pane, so a fourth fixed
+   * column has to be closable — and closing it must leave a way back that is
+   * not "reopen the app".
+   */
+  it("collapses the conversation column and offers a way back", async () => {
+    seedSessions([sessionRow({ id: "sess-live" })]);
+    renderChat();
+    await screen.findByRole("complementary", { name: "Conversations" });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Collapse conversations" }),
+    );
+
+    expect(
+      screen.queryByRole("complementary", { name: "Conversations" }),
+    ).toBeNull();
+    // The Work pane is a different slot and is untouched by this.
+    expect(
+      screen.getByRole("complementary", { name: "Work pane" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Conversations" }));
+    expect(
+      screen.getByRole("complementary", { name: "Conversations" }),
+    ).toBeInTheDocument();
+  });
+
+  it("resizes the conversation column through the shared pane store", async () => {
+    seedSessions([sessionRow({ id: "sess-live" })]);
+    renderChat();
+    await screen.findByRole("complementary", { name: "Conversations" });
+
+    const resizer = screen.getByRole("separator", {
+      name: "Resize conversations pane",
+    });
+    fireEvent.keyDown(resizer, { key: "ArrowRight" });
+
+    expect(useUiStore.getState().paneWidths.chatSessionsW).toBe(252);
+    expect(
+      screen.getByRole("complementary", { name: "Conversations" }),
+    ).toHaveStyle({ width: "252px" });
+  });
+
+  /**
    * R50. `session.workspace_id` is a **canonical project root**; the picker
    * holds free text that is only checked for absoluteness. `/repo/apps/gui`
    * resolves to `/repo`, which is exactly what this conversation is bound to,

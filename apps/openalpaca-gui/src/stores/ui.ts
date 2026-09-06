@@ -81,6 +81,13 @@ export interface UiState {
   panelTab: ArtifactTab;
   pickerOpen: boolean;
 
+  /**
+   * The chat view's conversation column. Its own state, not the aside's: it
+   * sits on the other side of the transcript and collapsing one must never
+   * take the other with it.
+   */
+  sessionsOpen: boolean;
+
   // Composer
   /** `null` until the daemon's default model is known — never a hardcoded id. */
   model: string | null;
@@ -106,6 +113,8 @@ export interface UiState {
 
   openWorkPane: () => void;
   closeWorkPane: () => void;
+  openSessions: () => void;
+  closeSessions: () => void;
   /** File row in a run card → open the aside's file panel. */
   openSidePanel: (artifactId: string) => void;
   /** `‹ Work` — back to the Work pane. */
@@ -163,6 +172,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   panelArtifactId: null,
   panelTab: "preview",
   pickerOpen: false,
+  sessionsOpen: true,
 
   model: null,
   modelPickerOpen: false,
@@ -186,6 +196,8 @@ export const useUiStore = create<UiState>((set, get) => ({
 
   openWorkPane: () => set({ workOpen: true, panelArtifactId: null }),
   closeWorkPane: () => set({ workOpen: false }),
+  openSessions: () => set({ sessionsOpen: true }),
+  closeSessions: () => set({ sessionsOpen: false }),
   openSidePanel: (artifactId) =>
     set({
       view: "chat",

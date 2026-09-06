@@ -12,6 +12,7 @@ import {
 const initial: Partial<UiState> = {
   view: "chat",
   workOpen: true,
+  sessionsOpen: true,
   panelArtifactId: null,
   pickerOpen: false,
   paletteOpen: false,
@@ -82,6 +83,33 @@ describe("aside modes", () => {
     expect(state.openArtifactId).toBe("findings");
     expect(state.libraryTab).toBe("history");
     expect(state.panelArtifactId).toBeNull();
+  });
+});
+
+describe("the conversation column", () => {
+  /**
+   * It is a fourth fixed column in a shell whose minimum window is budgeted
+   * pane by pane, so it has to be closable — and the state is its own, not the
+   * aside's: collapsing the conversations must not take the Work pane with it.
+   */
+  it("collapses and reopens without touching the aside", () => {
+    expect(useUiStore.getState().sessionsOpen).toBe(true);
+
+    useUiStore.getState().closeSessions();
+    expect(useUiStore.getState().sessionsOpen).toBe(false);
+    expect(useUiStore.getState().workOpen).toBe(true);
+
+    useUiStore.getState().openSessions();
+    expect(useUiStore.getState().sessionsOpen).toBe(true);
+  });
+
+  it("has a width in the same store as the other three columns", () => {
+    const { setPaneWidth } = useUiStore.getState();
+    setPaneWidth("chatSessionsW", 9000);
+    expect(useUiStore.getState().paneWidths.chatSessionsW).toBe(360);
+
+    setPaneWidth("chatSessionsW", 10);
+    expect(useUiStore.getState().paneWidths.chatSessionsW).toBe(200);
   });
 });
 

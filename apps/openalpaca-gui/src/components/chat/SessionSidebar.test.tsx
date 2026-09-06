@@ -35,6 +35,8 @@ function renderSidebar(props: Partial<Parameters<typeof SessionSidebar>[0]>) {
       creating={false}
       actionError={null}
       windowProject={null}
+      width={236}
+      onCollapse={vi.fn()}
       onNewChat={vi.fn()}
       onSelect={vi.fn()}
       onRename={vi.fn()}
@@ -246,5 +248,31 @@ describe("SessionSidebar — R49, the resumed project", () => {
       windowProject: "/Users/dev/other",
     });
     expect(screen.queryByText(/runs in/)).not.toBeInTheDocument();
+  });
+});
+
+describe("SessionSidebar — the column itself", () => {
+  /**
+   * A fourth fixed column in a shell whose minimum window is budgeted pane by
+   * pane has to be closable, and its width belongs in the same store as the
+   * other three rather than being a literal in the class list.
+   */
+  it("takes its width from the caller, not from a hardcoded class", () => {
+    renderSidebar({ width: 300 });
+    expect(
+      screen.getByRole("complementary", { name: "Conversations" }),
+    ).toHaveStyle({
+      width: "300px",
+    });
+  });
+
+  it("offers a way to collapse itself", () => {
+    const onCollapse = vi.fn();
+    renderSidebar({ onCollapse });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Collapse conversations" }),
+    );
+    expect(onCollapse).toHaveBeenCalledTimes(1);
   });
 });

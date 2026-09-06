@@ -47,6 +47,10 @@ export interface SessionSidebarProps {
    * root (R50). `null` while it is unknown, and the line then stays away.
    */
   windowProject: string | null;
+  /** From `stores/pane-widths`, like the app's other three resizable columns. */
+  width: number;
+  /** `›` — the column is one of four in a budgeted window, so it collapses. */
+  onCollapse: () => void;
   onNewChat: () => void;
   onSelect: (id: string) => void;
   onRename: (id: string, title: string) => void;
@@ -77,6 +81,8 @@ export function SessionSidebar({
   creating,
   actionError,
   windowProject,
+  width,
+  onCollapse,
   onNewChat,
   onSelect,
   onRename,
@@ -104,9 +110,10 @@ export function SessionSidebar({
   return (
     <aside
       aria-label="Conversations"
-      className="flex w-[236px] shrink-0 flex-col border-r border-line-strong bg-canvas"
+      style={{ width }}
+      className="flex shrink-0 flex-col border-r border-line-strong bg-canvas"
     >
-      <div className="flex h-[46px] shrink-0 items-center justify-between border-b border-line-strong px-[14px]">
+      <div className="flex h-[46px] shrink-0 items-center gap-[10px] border-b border-line-strong px-[14px]">
         <span className="font-mono text-2xs tracking-label text-muted-fg uppercase">
           Conversations
         </span>
@@ -114,9 +121,18 @@ export function SessionSidebar({
           type="button"
           disabled={creating}
           onClick={onNewChat}
-          className={verb}
+          className={cn(verb, "ml-auto")}
         >
           {creating ? "opening…" : "New chat"}
+        </button>
+        <button
+          type="button"
+          aria-label="Collapse conversations"
+          title="Collapse conversations"
+          onClick={onCollapse}
+          className={verb}
+        >
+          ›
         </button>
       </div>
 

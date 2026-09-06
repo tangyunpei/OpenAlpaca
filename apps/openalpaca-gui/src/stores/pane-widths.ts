@@ -2,10 +2,13 @@
  * Resizable pane widths (DESIGN_SPEC §4.6).
  *
  * The storage key and value shape are deliberately unchanged from the retired
- * SvelteKit build so an existing user's layout survives the rework.
+ * SvelteKit build so an existing user's layout survives the rework. The chat
+ * view's conversation column (`chatSessionsW`) joined later, which is why
+ * `parsePaneWidths` falls back **per key**: an older payload is missing it and
+ * must not lose the three widths it does carry.
  */
 
-export type PaneKey = "workW" | "workListW" | "libListW";
+export type PaneKey = "workW" | "workListW" | "libListW" | "chatSessionsW";
 
 export interface PaneWidths {
   /** Chat aside. */
@@ -14,6 +17,8 @@ export interface PaneWidths {
   workListW: number;
   /** Library view's left column. */
   libListW: number;
+  /** Chat view's conversation column. */
+  chatSessionsW: number;
 }
 
 export const PANE_WIDTHS_STORAGE_KEY = "oa-pane-widths";
@@ -22,15 +27,24 @@ export const PANE_DEFAULTS: PaneWidths = {
   workW: 396,
   workListW: 340,
   libListW: 326,
+  chatSessionsW: 236,
 };
 
 export const PANE_BOUNDS: Record<PaneKey, { min: number; max: number }> = {
   workW: { min: 300, max: 600 },
   workListW: { min: 260, max: 480 },
   libListW: { min: 260, max: 480 },
+  // Narrower than the other columns: a row is a title, a meta line and three
+  // verbs, and its minimum is part of `AppShell`'s minimum-window budget.
+  chatSessionsW: { min: 200, max: 360 },
 };
 
-export const PANE_KEYS: readonly PaneKey[] = ["workW", "workListW", "libListW"];
+export const PANE_KEYS: readonly PaneKey[] = [
+  "workW",
+  "workListW",
+  "libListW",
+  "chatSessionsW",
+];
 
 /** Clamp to the pane's range. `NaN` has no position on the axis, so it resets. */
 export function clampPaneWidth(key: PaneKey, value: number): number {
