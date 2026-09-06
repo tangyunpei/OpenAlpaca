@@ -519,6 +519,19 @@ fn launch_refusal(error: TaskLaunchError, verb: LaunchVerb) -> Response {
                  re-running it."
             ),
         ),
+        // `start` only (R43). A `start` re-launches the row *in place*, so a
+        // finished run would lose its result to the relaunch; `409` because the
+        // request is fine and the row's state is what refuses it, and the
+        // message names `rerun` because that verb does exactly what the caller
+        // wanted, without spending the first run's answer.
+        TaskLaunchError::NotStartable { current } => api_error(
+            StatusCode::CONFLICT,
+            "TASK_NOT_STARTABLE",
+            format!(
+                "This run has already finished ({current}) — re-run it instead of starting it \
+                 again, which would discard its result."
+            ),
+        ),
         // `start` only, and the reason the verb needs a compare-and-set rather
         // than a look: two of these would put two lead agents on one id.
         TaskLaunchError::AlreadyRunning => api_error(
@@ -528,6 +541,13 @@ fn launch_refusal(error: TaskLaunchError, verb: LaunchVerb) -> Response {
         ),
         // `422`, not `400`: the request is well-formed and names a real run —
         // it is the stored row that has nothing a lead agent could be given.
+        //
+        // `start`'s word here is `TASK_NOT_DISPATCHABLE`, not the obvious
+        // `TASK_NOT_STARTABLE` (R44): that one is spent above, on the `409` for
+        // a run that has already finished. One code word cannot carry two
+        // conditions at two statuses — a client that switched on it could not
+        // tell "this row has no goal" from "this run is over", and the two want
+        // opposite next steps.
         TaskLaunchError::NoDescription => match verb {
             LaunchVerb::Rerun => api_error(
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -537,7 +557,7 @@ fn launch_refusal(error: TaskLaunchError, verb: LaunchVerb) -> Response {
             ),
             LaunchVerb::Start => api_error(
                 StatusCode::UNPROCESSABLE_ENTITY,
-                "TASK_NOT_STARTABLE",
+                "TASK_NOT_DISPATCHABLE",
                 "This task has no description to dispatch — there is no goal to give a \
                  lead agent.",
             ),
@@ -2076,13 +2096,69 @@ mod tests {
     /// A title-only row — `POST /v1/tasks` allows one — has no goal to
     /// dispatch. Same `422`, its own code: nothing was ever run to re-run.
     #[tokio::test]
-    async fn starting_a_row_with_no_goal_is_a_422_task_not_startable() {
+    async fn starting_a_row_with_no_goal_is_a_422_task_not_dispatchable() {
         let (_dir, db) = launch_db(TaskStatus::Queued, None);
         let orchestrator = launch_orchestrator(&db, true);
 
         let (code, body) = split(start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
         assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(body["error"]["code"], "TASK_NOT_STARTABLE");
+        assert_eq!(body["error"]["code"], "TASK_NOT_DISPATCHABLE");
+    }
+
+    /// R43 — `start` re-launches a row **in place**, so a finished run is not
+    /// startable: doing it would clear the summary, outcome and artifact count
+    /// that run produced. `409`, and its own code word, because the caller can
+    /// still `rerun` — which keeps this row and answers with a new id.
+    #[tokio::test]
+    async fn starting_a_finished_run_is_a_409_task_not_startable() {
+        for status in [
+            TaskStatus::Completed,
+            TaskStatus::Failed,
+            TaskStatus::Cancelled,
+        ] {
+            let (_dir, db) = launch_db(status, Some("write the changelog"));
+            TaskRepository::new(&db)
+                .set_result("task-1", "the first run's answer")
+                .expect("store a result worth protecting");
+            let before = TaskRepository::new(&db).get("task-1").unwrap().unwrap();
+            let orchestrator = launch_orchestrator(&db, true);
+
+            let (code, body) = split(start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
+            assert_eq!(code, StatusCode::CONFLICT, "status {status:?}");
+            assert_eq!(body["error"]["code"], "TASK_NOT_STARTABLE");
+            assert!(
+                body["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("re-run"),
+                "the refusal has to name the verb that does work",
+            );
+
+            // The finished run's row is exactly as it was.
+            let after = TaskRepository::new(&db).get("task-1").unwrap().unwrap();
+            assert_eq!(after.status, before.status);
+            assert_eq!(after.result_summary, before.result_summary);
+            assert_eq!(after.completed_at, before.completed_at);
+            assert_eq!(after.state_version, before.state_version);
+            assert_eq!(TaskRepository::new(&db).list_recent(10).unwrap().len(), 1);
+        }
+    }
+
+    /// `pause` does not cancel the run's token, so a paused row is still live
+    /// and `start` answers the running refusal rather than R43's. Asserted
+    /// because it holds by construction, and construction changes.
+    #[tokio::test]
+    async fn starting_a_paused_run_is_a_409_task_already_running() {
+        let (_dir, db) = launch_db(TaskStatus::Paused, Some("write the changelog"));
+        let orchestrator = launch_orchestrator(&db, true);
+        orchestrator.shared_context.register_cancellation_token(
+            "task-1",
+            tokio_util::sync::CancellationToken::new(),
+        );
+
+        let (code, body) = split(start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
+        assert_eq!(code, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "TASK_ALREADY_RUNNING");
     }
 
     #[tokio::test]

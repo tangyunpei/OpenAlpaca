@@ -111,8 +111,36 @@ fn temp_db() -> (tempfile::TempDir, Database) {
 /// A stored run: `status`, a goal unless `description` says otherwise, on lane
 /// `user-1:gui`.
 fn store_task(db: &Database, id: &str, status: TaskStatus, description: Option<&str>) -> Task {
+    let task = store_task_row(id, status, description, Utc::now());
+    TaskRepository::new(db).create(&task).expect("create task");
+    task
+}
+
+/// A run that has already finished and has something to lose: a summary, a
+/// completion time and a state version that a re-launch under the same id
+/// would wipe (`upsert_queued`'s conflict tail).
+fn store_finished_task(db: &Database, id: &str, status: TaskStatus) -> Task {
     let now = Utc::now();
     let task = Task {
+        result_summary: Some("the first run's answer".to_string()),
+        state_json: Some("{\"steps\":[]}".to_string()),
+        state_version: 7,
+        artifact_count: 3,
+        ..store_task_row(id, status, Some("write the changelog"), now)
+    };
+    TaskRepository::new(db).create(&task).expect("create task");
+    task
+}
+
+/// The row [`store_task`] writes, unwritten — so a variant can change a field
+/// or two without repeating twenty.
+fn store_task_row(
+    id: &str,
+    status: TaskStatus,
+    description: Option<&str>,
+    now: chrono::DateTime<Utc>,
+) -> Task {
+    Task {
         id: id.to_string(),
         title: "Ship the release".to_string(),
         description: description.map(str::to_string),
@@ -133,9 +161,7 @@ fn store_task(db: &Database, id: &str, status: TaskStatus, description: Option<&
         artifact_count: 0,
         workspace_id: None,
         source_task_id: None,
-    };
-    TaskRepository::new(db).create(&task).expect("create task");
-    task
+    }
 }
 
 // ── rerun: a new run, linked back to the old one ──────────────────────
@@ -280,6 +306,59 @@ async fn starting_the_same_run_twice_refuses_the_second() {
 async fn start_refuses_a_run_that_is_already_live() {
     let (_dir, db) = temp_db();
     store_task(&db, "t1", TaskStatus::Running, Some("write the changelog"));
+    let (orchestrator, ctx) = ready(&db);
+    ctx.register_cancellation_token("t1", tokio_util::sync::CancellationToken::new());
+
+    assert_eq!(
+        orchestrator.start_task("t1"),
+        Err(TaskLaunchError::AlreadyRunning)
+    );
+}
+
+/// R43 — a finished run is not startable. `start` re-launches a row **under
+/// its own id**, and `upsert_queued`'s conflict tail clears the summary, the
+/// outcome, the artifact count and the state version; doing that to a run that
+/// already produced an answer destroys the answer with no record that it ever
+/// existed. `rerun` is the verb for "run this goal again", and it keeps the
+/// original row.
+#[tokio::test]
+async fn start_refuses_a_run_that_has_already_finished() {
+    let (_dir, db) = temp_db();
+    for (id, status, word) in [
+        ("t-completed", TaskStatus::Completed, "completed"),
+        ("t-failed", TaskStatus::Failed, "failed"),
+        ("t-cancelled", TaskStatus::Cancelled, "cancelled"),
+    ] {
+        let before = store_finished_task(&db, id, status);
+        let (orchestrator, ctx) = ready(&db);
+
+        assert_eq!(
+            orchestrator.start_task(id),
+            Err(TaskLaunchError::NotStartable { current: word }),
+            "a {word} run must not be re-launched in place",
+        );
+
+        // The refusal is total: the row still describes the run that finished.
+        let after = TaskRepository::new(&db).get(id).unwrap().expect("the row");
+        assert_eq!(after.status, status);
+        assert_eq!(after.result_summary, before.result_summary);
+        assert_eq!(after.completed_at.is_some(), before.completed_at.is_some());
+        assert_eq!(after.state_version, before.state_version);
+        assert_eq!(after.artifact_count, before.artifact_count);
+        // …and nothing claimed the id on the way out.
+        assert!(ctx.claim_run_slot(id), "a refusal must not hold the slot");
+    }
+    // No copy was dispatched either — `rerun` is what makes those.
+    assert_eq!(TaskRepository::new(&db).list_recent(10).unwrap().len(), 3);
+}
+
+/// A paused run keeps its cancellation token — `pause` is a status change, not
+/// a cancel — so it is still live and `start` answers the running refusal, not
+/// R43's. Asserted because it holds by construction, and construction changes.
+#[tokio::test]
+async fn start_on_a_paused_run_is_still_the_already_running_refusal() {
+    let (_dir, db) = temp_db();
+    store_task(&db, "t1", TaskStatus::Paused, Some("write the changelog"));
     let (orchestrator, ctx) = ready(&db);
     ctx.register_cancellation_token("t1", tokio_util::sync::CancellationToken::new());
 

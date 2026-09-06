@@ -265,6 +265,7 @@ describe("launchErrorMessage", () => {
       "TASK_NOT_TERMINAL",
       "TASK_ALREADY_RUNNING",
       "TASK_NOT_RERUNNABLE",
+      "TASK_NOT_DISPATCHABLE",
       "TASK_NOT_STARTABLE",
       "DISPATCH_FAILED",
       "NOT_FOUND",
@@ -283,7 +284,10 @@ describe("launchErrorMessage", () => {
     expect(messages[1]).toMatch(/already running/i);
     expect(messages[2]).toMatch(/re-run/i);
     expect(messages[3]).toMatch(/start/i);
-    expect(messages[4]).toMatch(/no agent is free/i);
+    // R43's 409: a finished run is not startable — `Re-run` is the way back.
+    expect(messages[4]).toMatch(/finished/i);
+    expect(messages[4]).toMatch(/re-run/i);
+    expect(messages[5]).toMatch(/no agent is free/i);
   });
 
   it("falls back to the daemon's own message for an unknown code", () => {

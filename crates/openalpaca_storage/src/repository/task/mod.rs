@@ -83,10 +83,10 @@ impl<'a> TaskRepository<'a> {
     ///
     /// What survives is identity, not history: `id`, `created_at` and
     /// `priority` are the row's own and are never re-minted. Note the
-    /// consequence, which is deliberate and is why the route in front of this
-    /// refuses a live run: re-launching a *finished* row discards that run's
-    /// result. `rerun` is the verb that keeps it — it copies the goal onto a
-    /// new id and leaves the original untouched.
+    /// consequence, which is why the caller in front of this refuses both a
+    /// live run and a finished one (R43): re-launching a *finished* row would
+    /// discard that run's result. `rerun` is the verb that keeps it — it copies
+    /// the goal onto a new id and leaves the original untouched.
     pub fn upsert_queued(&self, task: &Task) -> Result<()> {
         self.insert_row(task, RELAUNCH_ON_CONFLICT, "Failed to upsert queued task")
     }

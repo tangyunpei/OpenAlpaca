@@ -11,6 +11,8 @@
 //!   is settled decision D5: a client that queued a task through
 //!   `POST /v1/tasks` is already holding that id, and handing it a different
 //!   one back would mean every reference it stored is now to the wrong row.
+//!   Because it re-launches the row *in place*, it takes only rows that have
+//!   not finished (R43) — a finished one would lose its result.
 //!
 //! Neither verb is a chat turn: the caller addresses a run, so nothing here
 //! goes through the gateway, the lane's history, or the model.
@@ -33,6 +35,11 @@ pub enum TaskLaunchError {
     /// The row carries no description, so there is no goal to dispatch. A
     /// `POST /v1/tasks` row may legitimately be title-only.
     NoDescription,
+    /// `start` on a run that has already finished (R43). `start` re-launches a
+    /// row **in place**, and a finished row's summary, outcome and artifact
+    /// count are the only record that run ever happened; `rerun` is the verb
+    /// that runs the goal again without spending them.
+    NotStartable { current: &'static str },
     /// `start` on an id that already has a live run.
     AlreadyRunning,
     /// Database read failure.
@@ -156,11 +163,26 @@ impl Orchestrator {
 
     /// D5's `start` — dispatch a stored row under its own id.
     ///
-    /// The run slot is claimed before anything else happens, so two
-    /// simultaneous starts cannot both dispatch; a claim that fails is the
-    /// `AlreadyRunning` answer, and a dispatch that fails releases it.
+    /// Refuses a run that has already finished (`NotStartable`, R43) and one
+    /// with nothing to dispatch (`NoDescription`). The run slot is then claimed
+    /// before anything else happens, so two simultaneous starts cannot both
+    /// dispatch; a claim that fails is the `AlreadyRunning` answer, and a
+    /// dispatch that fails releases it.
+    ///
+    /// The terminal check comes first for the same reason `rerun`'s does: a
+    /// re-launch under this id goes through `TaskRepository::upsert_queued`,
+    /// which resets the row to a fresh queued run — summary, outcome, artifact
+    /// count, `completed_at` and `state_version` all cleared. On a finished run
+    /// that is the destruction of the only record it left, with nothing (not
+    /// even `source_task_id`, which a `start` never sets) to say a first run
+    /// happened. `rerun` exists so this is never the way to run a goal twice.
     pub fn start_task(&self, task_id: &str) -> Result<StartOutcome, TaskLaunchError> {
         let row = self.launchable_row(task_id)?;
+        if row.status.is_terminal() {
+            return Err(TaskLaunchError::NotStartable {
+                current: row.status.as_str(),
+            });
+        }
         let plan = RunPlan::from_row(&row)?;
 
         if !self.shared_context.claim_run_slot(&row.id) {

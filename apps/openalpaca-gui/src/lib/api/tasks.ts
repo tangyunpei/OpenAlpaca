@@ -157,6 +157,10 @@ export async function rerunTask(id: string): Promise<RerunResult> {
  *
  * D5: the id does not change, so the response is the same `{task_id, status}`
  * the other actions answer with and every reference you hold stays valid.
+ *
+ * Only a run that has not finished can be started — it is re-launched in
+ * place, so a finished one would lose its result (`409 TASK_NOT_STARTABLE`;
+ * {@link rerunTask} is the verb for that case).
  */
 export async function startTaskNow(id: string): Promise<TaskActionResponse> {
   return await performTaskAction(id, "start");
@@ -168,8 +172,10 @@ export async function startTaskNow(id: string): Promise<TaskActionResponse> {
  * One line per code the two verbs can answer with, because "Request failed
  * with status 409" tells nobody what to do next, and a run that did *not*
  * start must never read like one that did. Two codes differ only by verb —
- * `TASK_NOT_RERUNNABLE` and `TASK_NOT_STARTABLE` — so the daemon says which
- * without the client having to remember what it asked.
+ * `TASK_NOT_RERUNNABLE` and `TASK_NOT_DISPATCHABLE` — so the daemon says which
+ * without the client having to remember what it asked. `TASK_NOT_STARTABLE` is
+ * a different refusal at a different status (409, R43): the run is over, and
+ * `Re-run` is the way to run it again.
  *
  * An unrecognised code falls back to the daemon's own message rather than to a
  * shrug.
@@ -183,8 +189,10 @@ export function launchErrorMessage(error: unknown): string {
         return "That run is already running.";
       case "TASK_NOT_RERUNNABLE":
         return "That run has no description to re-dispatch — there is nothing to re-run.";
-      case "TASK_NOT_STARTABLE":
+      case "TASK_NOT_DISPATCHABLE":
         return "That task has no description to dispatch — there is nothing to start.";
+      case "TASK_NOT_STARTABLE":
+        return "That run has already finished — use Re-run, which keeps its result.";
       case "DISPATCH_FAILED":
         return "No agent is free to lead a run right now — try again shortly.";
       case "NOT_FOUND":
