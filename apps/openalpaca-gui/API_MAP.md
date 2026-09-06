@@ -215,7 +215,7 @@ below for what shipped). The design's `ARTS[]` fixture shape is:
 | `key added 12 Jul`                                                      | ⚠️ present inside the `GET /v1/settings/llm` config payload; verify the field survives redaction before relying on it                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `41k tok today` per provider                                            | ⚠️ `ProviderUsageSummary.total_tokens` is **lifetime**, not today; per-day-per-provider requires client math over `/v1/llm/usage?limit=` (`LlmCallLog { timestamp, agent_id, task_id, provider, model, key_id, input_tokens, output_tokens, cost_usd, status, latency_ms, error_message }`) — **GAP-08c**                                                                                                                                                                                                                                                                     |
 | `Add provider` / key CRUD                                               | ✅ `PUT /v1/settings/llm` (upsert), `DELETE /v1/settings/llm/keys/{provider}/{key_id}`, `PUT .../keys/reorder`, `PUT .../keys/priority`, `POST .../validate`, `GET .../credentials`, `POST .../credentials/rescan`, `GET .../cli-backends`                                                                                                                                                                                                                                                                                                                                    |                                                                                                                                  |
-| provider on/off toggle                                                  | ❌ **GAP-15** — no enable/disable route; only add/remove keys                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| provider on/off toggle                                                  | ✅ `PUT /v1/settings/llm/providers/{provider}/enabled` `{ enabled }` → `200 { id, enabled }`; `404 PROVIDER_NOT_FOUND`, `409 PROVIDER_IS_DEFAULT` when it serves the default model. Writes `llm.toml` through the one atomic writer, then unloads or reloads the provider live                                                                                                                                                                                                                                                                                                |
 | **Connectors** rows                                                     | ⚠️ `GET /v1/connectors` → `[{ id, name, status, configured }]`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Name mapping is **hardcoded** for `telegram`/`imessage` only; MCP servers and plugin-declared connectors do not appear           |
 | toggle / delete                                                         | ✅ `POST /v1/connectors/{id}/action` `{ action: "enable"\|"disable"\|"delete" }`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |                                                                                                                                  |
 | config / settings                                                       | ✅ `POST /v1/connectors/{id}/config` `{ token }`; `GET\|PUT /v1/connectors/{id}/settings` (`{ settings: Record<string,string> }`, keys must be `"{id}."`-prefixed and present in `config_schema::CONFIG_KEYS`)                                                                                                                                                                                                                                                                                                                                                                |                                                                                                                                  |
@@ -936,26 +936,49 @@ daemon that is up but slow to answer.
 
 ---
 
-### GAP-15 — No provider enable/disable
+### GAP-15 — No provider enable/disable — **RESOLVED**
 
-**UI needs:** the per-provider toggle in Settings → Models & keys (`Local (Ollama)`
-shown `off`), and the model picker's `off` group badge.
-
-**Why nothing fits:** the key routes are add/remove/reorder/priority/validate only
-(`router.rs` `/v1/settings/llm/*`). `grep -rn "enabled" apps/openalpacad/src/routes/settings.rs`
-finds no provider-enable path. Removing every key is the only way to "turn a provider
-off", which is destructive and not what the toggle implies.
-
-**Proposal:**
-
-```
-PUT /v1/settings/llm/providers/{provider}/enabled
-{ "enabled": false }
-→ 200 { "provider": "ollama", "enabled": false }
-```
-
-and add `enabled: bool` to each provider entry in the `GET /v1/settings/llm` payload
-and to `ProviderUsageSummary`.
+> **Closed in Phase 8.** The bit was already on the wire — `ProviderInfo.enabled`
+> in `GET /v1/settings/llm`, and the boot builder has always skipped a provider
+> with `enabled = false`. Only the write was missing:
+>
+> ```http
+> PUT /v1/settings/llm/providers/{provider}/enabled
+> { "enabled": false }
+> → 200 { "id": "ollama", "enabled": false }
+> ```
+>
+> `id`, not the `provider` the original proposal named: every other row this
+> API serves keys itself `id`, and the path segment already says which provider
+> was addressed.
+>
+> **Write-first.** `llm.toml` is the disposition, so it lands before the router
+> is touched and a refused write leaves the loaded providers exactly as they
+> were. The write goes through `config_io::atomic_write_with_backup` (plan §1.4,
+> P-11) — tmp → fsync → rotate → rename, five versions under `state/backups/` —
+> which every `/v1/settings/llm*` write now shares, not just this one.
+>
+> **Then the hot path.** A disable calls `deregister_provider`: in-flight calls
+> finish, new ones fall through to the fallback chain or fail as unconfigured,
+> and the provider's models leave the registry with it. An enable re-registers,
+> puts back the catalogue the disable stripped (compiled defaults plus the
+> config's own `[models]` rows) and refreshes from the provider's API —
+> without that restore, a disable/enable cycle left the model picker empty
+> until the daemon restarted.
+>
+> **`409 PROVIDER_IS_DEFAULT`** for the provider that serves the default model:
+> turning it off would leave every request with nowhere to go, so it is refused
+> rather than done and reported. Only the _default model's_ provider — a
+> provider that merely appears in a fallback chain is not protected, because a
+> chain is already a list of things that may be unavailable. A name this build
+> cannot serve is **`404 PROVIDER_NOT_FOUND`**.
+>
+> **Not added: `enabled` on `ProviderUsageSummary`.** The proposal asked for it;
+> the settings payload already carries the flag, and a second copy on a usage
+> row is a second thing to keep in sync. The model picker's `off` group badge is
+> not drawn either — that view is built from `GET /v1/models`, which lists
+> models rather than providers, so a disabled provider has no row there to
+> badge.
 
 ---
 
@@ -1299,8 +1322,10 @@ sections above. GAP-08's remaining piece (the cap and a real usage-summary rollu
 continues below as GAP-08c. **GAP-22 closed in C7** (the six `plugin_*` variants were
 deleted, and their replacements carry `ts`/`instance_id`), **GAP-19 became GAP-24**
 (widened to both extension kinds), and **GAP-18 closed in both halves** —
-`GET /v1/tools` took the tool one and `GET /v1/skills` the skill one, so its row
-is struck below — eighteen remain.
+`GET /v1/tools` took the tool one and `GET /v1/skills` the skill one. **GAP-15
+closed** with `PUT /v1/settings/llm/providers/{provider}/enabled`, which writes
+the bit and then unloads or reloads the provider — its row is struck below too;
+seventeen remain.
 
 | #   | Gap                                         | Blocks                                 | Fix size                         |
 | --- | ------------------------------------------- | -------------------------------------- | -------------------------------- |
@@ -1310,7 +1335,6 @@ is struck below — eighteen remain.
 | 06  | no `rerun` / `start` action                 | Re-run, Start now                      | **S**                            |
 | 02  | no steer endpoint                           | Steer button                           | **S–M**                          |
 | 03  | no follow-up API                            | Queue follow-up                        | **M**                            |
-| 15  | no provider enable/disable                  | Models toggles                         | **S**                            |
 | 21  | no conversation rename/delete               | Conversations rows                     | **S**                            |
 | 13  | per-chat model override is global           | model picker                           | **M**                            |
 | 20  | no template run counts / enabled            | Agents section                         | **M**                            |
@@ -1323,7 +1347,7 @@ is struck below — eighteen remain.
 | 05  | no artifact versions / diff                 | History + Diff tabs                    | **L** (migration + routes)       |
 | 12  | no pin state                                | ★ Pin                                  | **XS** — do it in `localStorage` |
 
-**Recommended order:** the XS/S column first (08c, 11, 14, 06, 02, 15, 21) unblocks roughly two-thirds of the design for a handful of one-file changes. Then
+**Recommended order:** the XS/S column first (08c, 11, 14, 06, 02, 21) unblocks roughly two-thirds of the design for a handful of one-file changes. Then
 04 + 05 + 09 as one "run observability + artifacts" milestone, since they share the
 same storage work and are what the Work and Library views are actually built around.
 Ship the UI with those three surfaces feature-flagged/empty-stated until then.
