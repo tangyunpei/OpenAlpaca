@@ -135,12 +135,12 @@ export const GAPS: Record<GapId, GapDescriptor> = {
   // rule (null for a file skill, which is on no ENABLE axis). The health rows
   // are named from it and keep showing their id when the catalog no longer
   // holds one.
-  // The counts half of GAP-20 closed with P8's replacement data: a template
-  // row now carries `run_count` and `last_run_at`, grouped out of
-  // `subagent_span` in one query per list, so `12 runs` is the daemon's
-  // number. Interim semantics: the count is lifetime and includes in-flight
-  // runs, and the row says `last <date>`; Phase 8 item 5 (T48) adds
-  // `?window=7d` (400 on unknown windows) and counts completed runs only.
+  // The counts half of GAP-20 closed with P8's replacement data and Phase 8
+  // item 5 (T48) finished it: a template row carries `run_count`,
+  // `last_run_at` and `window`, grouped out of `subagent_span` in one query
+  // per list — `?window=7d|30d|all` (default `7d`, 400 `UNKNOWN_WINDOW`
+  // otherwise), counting *completed* runs only (`state != 'running'`), so
+  // `12 runs · 7d` is the daemon's own number over the window it says it used.
   // What is left is the toggle: a template has no `enabled` field and
   // nothing would enforce one in the spawn path.
   "GAP-20": {

@@ -37,6 +37,7 @@ function template(overrides: Record<string, unknown> = {}) {
     persona: "You review.",
     body: "",
     run_count: 0,
+    window: "7d",
     ...overrides,
   };
 }
@@ -46,19 +47,49 @@ beforeEach(() => {
   state.instances = [];
 });
 
-describe("AgentsSection run counts (GAP-20, counts half)", () => {
+describe("AgentsSection run counts (GAP-20, counts half — T48)", () => {
   /**
-   * The count is the daemon's, from `subagent_span` — the number the design's
-   * `12 runs` chip promised and the registry called unavailable until now.
+   * The count and its window are both the daemon's — `subagent_span`,
+   * completed runs only, and the window it was asked about (T48) — giving the
+   * design's `12 runs 7d` chip exactly.
    */
-  it("renders the run count the server sent", () => {
+  it("renders the run count and window the server sent", () => {
     state.templates = [
-      template({ run_count: 12, last_run_at: "2026-09-04T09:15:00.000Z" }),
+      template({
+        run_count: 12,
+        last_run_at: "2026-09-04T09:15:00.000Z",
+        window: "7d",
+      }),
     ];
 
     render(<AgentsSection />);
 
-    expect(screen.getByText(/12 runs/)).toBeInTheDocument();
+    expect(screen.getByText("12 runs · 7d")).toBeInTheDocument();
+  });
+
+  /** A different window on the row relabels the card, not just the count. */
+  it("relabels the card when the server reports a different window", () => {
+    state.templates = [template({ run_count: 4, window: "30d" })];
+
+    render(<AgentsSection />);
+
+    expect(screen.getByText("4 runs · 30d")).toBeInTheDocument();
+  });
+
+  /**
+   * A daemon that predates T48 sends `run_count` but no `window` field at
+   * all. The card must not fabricate a window it was not told about — it
+   * drops the label rather than guessing `7d` for a count that might be
+   * lifetime-and-in-flight (the old interim shape).
+   */
+  it("drops the window label when the server did not send one", () => {
+    state.templates = [template({ run_count: 5 })];
+    delete (state.templates[0] as Record<string, unknown>).window;
+
+    render(<AgentsSection />);
+
+    expect(screen.getByText("5 runs")).toBeInTheDocument();
+    expect(screen.queryByText(/undefined/)).toBeNull();
   });
 
   /** A template nothing has spawned says so; it does not borrow a number. */
@@ -92,7 +123,7 @@ describe("AgentsSection run counts (GAP-20, counts half)", () => {
 
     render(<AgentsSection />);
 
-    expect(screen.getByText("1 run")).toBeInTheDocument();
+    expect(screen.getByText("1 run · 7d")).toBeInTheDocument();
     expect(screen.queryByText(/1 runs/)).toBeNull();
   });
 

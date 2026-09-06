@@ -1,8 +1,9 @@
 /**
  * Settings → Agents (DESIGN_SPEC §5.4, API_MAP §2.4).
  *
- * Real: the template list (`GET /v1/agent-templates`), its per-template run
- * count and last-run stamp (GAP-20's counts half, from `subagent_span`), and,
+ * Real: the template list (`GET /v1/agent-templates`), its per-template
+ * *completed*-run count and the window it was counted over (GAP-20's counts
+ * half, closed by T48: `?window=7d|30d|all` against `subagent_span`), and,
  * separately, which instances are running right now
  * (`GET /v1/agent-instances`) — the design's rows are templates, so the
  * running count is shown as meta rather than conflated with them.
@@ -20,18 +21,21 @@ import {
 } from "@/hooks/useAgents";
 import type { AgentTemplate } from "@/lib/api/types";
 
-import { shortDate } from "./format";
 import { GapNote, ListCard, ListRow, ListState, Toggle } from "./primitives";
 
 /**
- * `1 running · 12 runs · last 4 Sep`. A template nothing has ever spawned says
- * so in words: `0 runs` reads like a metric that failed to load.
+ * `1 running · 12 runs · 7d`. A template with no completed run in the window
+ * says so in words: `0 runs` reads like a metric that failed to load.
  *
- * The falsy test is deliberate. `run_count` is typed as always present, but
- * `apiFetch` casts the response rather than validating it, so a daemon older
- * than the field serves a row without one — `=== 0` would let that row through
- * to render the literal string `undefined runs`. Absent and zero mean the same
- * thing here, and read the same.
+ * The falsy test on `run_count` is deliberate. It is typed as always present,
+ * but `apiFetch` casts the response rather than validating it, so a daemon
+ * older than the field serves a row without one — `=== 0` would let that row
+ * through to render the literal string `undefined runs`. Absent and zero mean
+ * the same thing here, and read the same. `window` gets the same treatment:
+ * a pre-T48 daemon sends `run_count` with no `window` at all, and that count
+ * was lifetime-and-in-flight, not this window's completed runs — so the label
+ * is dropped rather than guessing `7d` for a number that was never scoped to
+ * one.
  */
 function templateMeta(template: AgentTemplate, running: number): string {
   const parts: string[] = [];
@@ -39,12 +43,11 @@ function templateMeta(template: AgentTemplate, running: number): string {
   if (!template.run_count) {
     parts.push("No runs yet");
   } else {
-    const last =
-      template.last_run_at === undefined
-        ? ""
-        : ` · last ${shortDate(template.last_run_at)}`;
     const noun = template.run_count === 1 ? "run" : "runs";
-    parts.push(`${template.run_count} ${noun}${last}`);
+    const windowed = template.window
+      ? `${template.run_count} ${noun} · ${template.window}`
+      : `${template.run_count} ${noun}`;
+    parts.push(windowed);
   }
   return parts.join(" · ");
 }

@@ -572,14 +572,19 @@ export interface AgentTemplate {
   persona: string;
   body: string;
   /**
-   * Lifetime runs of this template (GAP-20, counts half), counted from
-   * `subagent_span` — one row per spawned subagent, opened at spawn time, so
-   * a run still in flight is included. Always sent; `0` for a template
-   * nothing has spawned.
+   * Completed runs of this template within `window` (GAP-20, T48), counted
+   * from `subagent_span` — a run still in flight does not count. Always
+   * sent; `0` for a template with no completed run in the window.
    */
   run_count: number;
-  /** When the newest of those runs started. Absent when there are none. */
+  /** When the newest of those completed runs started. Absent when there are none. */
   last_run_at?: string;
+  /**
+   * The window `run_count`/`last_run_at` were computed over —
+   * `"7d" | "30d" | "all"` — so the card can label itself with what the
+   * daemon actually counted rather than assuming.
+   */
+  window: string;
 }
 
 export interface AgentInstance {
