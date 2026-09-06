@@ -277,17 +277,40 @@ impl<'a> FileAssetRepository<'a> {
         })
     }
 
-    /// Get all attachment file_ids for a message.
+    /// Get the [`ATTACHMENT_ROLE`] file_ids for a message — the files a user
+    /// turn carried in, not the run's produced artifacts (see
+    /// [`Self::get_artifacts_for_message`]).
     pub fn get_attachments_for_message(
         &self,
         message_id: i64,
     ) -> Result<Vec<(String, i32, Option<String>)>> {
+        self.attachments_for_message_with_role(message_id, ATTACHMENT_ROLE)
+    }
+
+    /// Get the [`ARTIFACT_ROLE`] file_ids for a message — the files the
+    /// message's run produced (GAP-23), not what the user attached.
+    pub fn get_artifacts_for_message(
+        &self,
+        message_id: i64,
+    ) -> Result<Vec<(String, i32, Option<String>)>> {
+        self.attachments_for_message_with_role(message_id, ARTIFACT_ROLE)
+    }
+
+    /// The `role`-filtered rows shared by [`Self::get_attachments_for_message`]
+    /// and [`Self::get_artifacts_for_message`] — same table, same message, only
+    /// the role predicate differs.
+    fn attachments_for_message_with_role(
+        &self,
+        message_id: i64,
+        role: &str,
+    ) -> Result<Vec<(String, i32, Option<String>)>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT file_id, sort_order, caption FROM conversation_message_attachments WHERE message_id = ?1 ORDER BY sort_order ASC",
+                "SELECT file_id, sort_order, caption FROM conversation_message_attachments
+                 WHERE message_id = ?1 AND role = ?2 ORDER BY sort_order ASC",
             )?;
             let mut results = Vec::new();
-            let mut rows = stmt.query(rusqlite::params![message_id])?;
+            let mut rows = stmt.query(rusqlite::params![message_id, role])?;
             while let Some(row) = rows.next()? {
                 results.push((row.get(0)?, row.get(1)?, row.get(2)?));
             }

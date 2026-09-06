@@ -218,6 +218,33 @@ fn link_to_message_with_role_writes_the_artifact_role() {
         .unwrap();
 
     assert_eq!(role_of(&db, msg, "produced-1"), "artifact");
+    // The artifact row must not come back from the attachment-only reader.
+    assert!(repo.get_attachments_for_message(msg).unwrap().is_empty());
+}
+
+/// A message with one upload and one artifact link: each accessor returns
+/// exactly its own row, never the other's (Important #1 — `Self::get_attachments_for_message`
+/// had no `role` predicate and returned both).
+#[test]
+fn attachments_and_artifacts_readers_stay_split() {
+    let db = test_db();
+    let repo = FileAssetRepository::new(&db);
+    repo.insert(&asset("upload-1", 10)).unwrap();
+    repo.insert(&asset("produced-1", 20)).unwrap();
+    produced_by(&db, "produced-1", "task-1", "markdown");
+    let msg = message(&db, "user:gui", "the report");
+
+    repo.link_to_message(msg, "upload-1", 0, None).unwrap();
+    repo.link_to_message_with_role(msg, "produced-1", 1, None, ARTIFACT_ROLE)
+        .unwrap();
+
+    let attachments = repo.get_attachments_for_message(msg).unwrap();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0].0, "upload-1");
+
+    let artifacts = repo.get_artifacts_for_message(msg).unwrap();
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts[0].0, "produced-1");
 }
 
 #[test]
