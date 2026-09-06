@@ -22,7 +22,9 @@ pub mod task;
 
 pub use agent::AgentRepository;
 pub use config::ConfigRepository;
-pub use conversation::ConversationRepository;
+pub use conversation::{
+    ConversationRepository, SESSION_ACTIVE, SESSION_ARCHIVED, SessionFilter,
+};
 pub use dispatch_decision::DispatchDecisionRepository;
 pub use event_log::{EventLogQuery, EventLogRepository};
 pub use feedback::MessageFeedbackRepository;

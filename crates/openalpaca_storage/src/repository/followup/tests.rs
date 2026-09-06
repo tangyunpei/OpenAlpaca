@@ -209,3 +209,83 @@ fn test_mark_done_and_cancelled() {
     assert!(repo.list_queued_by_lane("user:cli").unwrap().is_empty());
     assert!(repo.claim_next("user:cli").unwrap().is_none());
 }
+
+// ── §5.3: a follow-up runs in the conversation it was promised in ────
+
+#[test]
+fn a_queued_followup_is_pinned_to_the_lanes_active_session() {
+    let db = setup_db();
+    let conv = crate::ConversationRepository::new(&db);
+    let repo = FollowupRepository::new(&db);
+
+    let origin = conv
+        .get_or_create_active_session("user:cli", "cli", None)
+        .unwrap();
+    let id = queue_item(&repo, "user:cli", FOLLOWUP_KIND_FOLLOWUP, "later");
+
+    let row = repo.get(id).unwrap().unwrap();
+    assert_eq!(row.session_id.as_deref(), Some(origin.id.as_str()));
+}
+
+#[test]
+fn claiming_a_followup_reactivates_the_session_it_was_queued_in() {
+    let db = setup_db();
+    let conv = crate::ConversationRepository::new(&db);
+    let repo = FollowupRepository::new(&db);
+
+    let origin = conv
+        .get_or_create_active_session("user:cli", "cli", None)
+        .unwrap();
+    queue_item(&repo, "user:cli", FOLLOWUP_KIND_FOLLOWUP, "continue that");
+
+    // The user opens a new chat on the same lane before the follow-up runs.
+    let usurper = conv.create_session("user:cli", "cli", None, None).unwrap();
+    assert_eq!(
+        conv.active_session_id("user:cli").unwrap().as_deref(),
+        Some(usurper.id.as_str())
+    );
+
+    let claimed = repo.claim_next("user:cli").unwrap().unwrap();
+    assert_eq!(claimed.status, "running");
+    assert_eq!(claimed.session_id.as_deref(), Some(origin.id.as_str()));
+
+    // The turn about to run resolves the lane → the originating session.
+    assert_eq!(
+        conv.active_session_id("user:cli").unwrap().as_deref(),
+        Some(origin.id.as_str()),
+        "the follow-up's own conversation is live again"
+    );
+    assert_eq!(
+        conv.get_session(&usurper.id).unwrap().unwrap().status,
+        crate::SESSION_ARCHIVED
+    );
+}
+
+#[test]
+fn a_pre_039_followup_row_falls_back_to_the_lanes_active_session() {
+    let db = setup_db();
+    let conv = crate::ConversationRepository::new(&db);
+    let repo = FollowupRepository::new(&db);
+
+    // A row queued before the column existed carries no session.
+    let id = queue_item(&repo, "user:cli", FOLLOWUP_KIND_FOLLOWUP, "legacy");
+    db.with_connection(|c| {
+        c.execute(
+            "UPDATE lane_followups SET session_id = NULL WHERE id = ?1",
+            [id],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let current = conv
+        .get_or_create_active_session("user:cli", "cli", None)
+        .unwrap();
+
+    let claimed = repo.claim_next("user:cli").unwrap().unwrap();
+    assert!(claimed.session_id.is_none());
+    assert_eq!(
+        conv.active_session_id("user:cli").unwrap().as_deref(),
+        Some(current.id.as_str()),
+        "nothing to re-home; the lane's active session is untouched"
+    );
+}

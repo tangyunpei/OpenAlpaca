@@ -28,6 +28,11 @@ pub struct FollowupRecord {
     pub workspace_path: Option<String>,
     /// Task the item was queued from, if any.
     pub source_task_id: Option<String>,
+    /// The session the item was queued *in* (§5.3). A follow-up is a promise
+    /// to continue that conversation, so the turn it later runs as belongs
+    /// there — not in whatever session the lane happens to be showing by then.
+    /// `None` for pre-039 rows, which fall back to the lane's active session.
+    pub session_id: Option<String>,
     /// "queued" | "running" | "done" | "cancelled"
     pub status: String,
     pub created_at: String,
@@ -35,7 +40,7 @@ pub struct FollowupRecord {
 }
 
 const SELECT_COLUMNS: &str = "id, lane_key, kind, content, principal_json, \
-     workspace_path, source_task_id, status, created_at, updated_at";
+     workspace_path, source_task_id, status, created_at, updated_at, session_id";
 
 fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<FollowupRecord> {
     Ok(FollowupRecord {
@@ -49,6 +54,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<FollowupRecord> {
         status: row.get(7)?,
         created_at: row.get(8)?,
         updated_at: row.get(9)?,
+        session_id: row.get(10)?,
     })
 }
 
@@ -63,6 +69,9 @@ impl<'a> FollowupRepository<'a> {
     }
 
     /// Queue a new follow-up item. Returns the row ID.
+    ///
+    /// The row is pinned to the lane's active session as it is written (§5.3):
+    /// the conversation the promise was made in is knowable now and not later.
     pub fn queue(
         &self,
         lane_key: &str,
@@ -73,10 +82,18 @@ impl<'a> FollowupRepository<'a> {
         source_task_id: Option<&str>,
     ) -> Result<i64> {
         self.db.with_connection(|conn| {
+            let session_id: Option<String> = conn
+                .query_row(
+                    "SELECT id FROM session WHERE lane_key = ?1 AND status = 'active'",
+                    rusqlite::params![lane_key],
+                    |row| row.get(0),
+                )
+                .optional()
+                .context("Failed to resolve the lane's active session")?;
             conn.execute(
                 "INSERT INTO lane_followups \
-                 (lane_key, kind, content, principal_json, workspace_path, source_task_id) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 (lane_key, kind, content, principal_json, workspace_path, source_task_id, session_id) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![
                     lane_key,
                     kind,
@@ -84,6 +101,7 @@ impl<'a> FollowupRepository<'a> {
                     principal_json,
                     workspace_path,
                     source_task_id,
+                    session_id,
                 ],
             )
             .context("Failed to insert lane followup")?;
@@ -124,9 +142,24 @@ impl<'a> FollowupRepository<'a> {
     /// queued → running (CAS on status). Returns `None` when nothing is queued
     /// or a concurrent claimer won. `unprocessed_steering` items are never
     /// claimed — they must not auto-execute.
+    ///
+    /// The claim also **re-activates the item's session** (§5.3): a follow-up
+    /// is a promise to continue *that* conversation, and the turn it is about
+    /// to run as resolves its session from the lane. Without this, a follow-up
+    /// queued in conversation A silently appends to whatever conversation B the
+    /// user opened since. The re-activation shares the claim's transaction
+    /// because the two must not be separable: a claimed row whose session was
+    /// not re-activated runs in the wrong place, and a re-activated session
+    /// whose claim then lost would have moved the user's chat window for
+    /// nothing. Pre-039 rows (`session_id IS NULL`) fall back to whatever the
+    /// lane's active session already is.
     pub fn claim_next(&self, lane_key: &str) -> Result<Option<FollowupRecord>> {
-        self.db.with_connection(|conn| {
-            let candidate: Option<i64> = conn
+        self.db.with_connection_mut(|conn| {
+            let tx = conn
+                .transaction()
+                .context("Failed to begin followup claim transaction")?;
+
+            let candidate: Option<i64> = tx
                 .query_row(
                     "SELECT id FROM lane_followups \
                      WHERE lane_key = ?1 AND status = 'queued' AND kind = 'followup' \
@@ -141,7 +174,7 @@ impl<'a> FollowupRepository<'a> {
             };
 
             // CAS: only wins if the row is still queued.
-            let changed = conn
+            let changed = tx
                 .execute(
                     "UPDATE lane_followups \
                      SET status = 'running', updated_at = datetime('now') \
@@ -153,11 +186,33 @@ impl<'a> FollowupRepository<'a> {
                 return Ok(None);
             }
 
-            let record = conn.query_row(
+            let record = tx.query_row(
                 &format!("SELECT {SELECT_COLUMNS} FROM lane_followups WHERE id = ?1"),
                 rusqlite::params![id],
                 row_to_record,
             )?;
+
+            // Re-home the turn: archive the usurper, then re-activate the
+            // session this item was queued in. Order matters — the partial
+            // unique index allows only one active session per lane.
+            if let Some(ref session_id) = record.session_id {
+                tx.execute(
+                    "UPDATE session SET status = 'archived', ended_at = datetime('now'), \
+                     updated_at = datetime('now') \
+                     WHERE lane_key = ?1 AND status = 'active' AND id <> ?2",
+                    rusqlite::params![record.lane_key, session_id],
+                )
+                .context("Failed to archive the usurping session")?;
+                tx.execute(
+                    "UPDATE session SET status = 'active', ended_at = NULL, \
+                     updated_at = datetime('now') WHERE id = ?1",
+                    rusqlite::params![session_id],
+                )
+                .context("Failed to re-activate the follow-up's session")?;
+            }
+
+            tx.commit()
+                .context("Failed to commit followup claim transaction")?;
             Ok(Some(record))
         })
     }

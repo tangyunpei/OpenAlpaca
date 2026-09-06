@@ -8,7 +8,7 @@ fn test_database_creation() {
 
     let db = Database::open(&db_path).unwrap();
     assert!(db_path.exists());
-    assert_eq!(db.schema_version().unwrap(), 38);
+    assert_eq!(db.schema_version().unwrap(), 39);
 }
 
 #[test]
@@ -20,14 +20,14 @@ fn test_migrations_idempotent() {
     let _db1 = Database::open(&db_path).unwrap();
     let db2 = Database::open(&db_path).unwrap();
 
-    assert_eq!(db2.schema_version().unwrap(), 38);
+    assert_eq!(db2.schema_version().unwrap(), 39);
 }
 
 #[test]
 fn test_migration_035_drops_planner_telemetry() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 38);
+    assert_eq!(db.schema_version().unwrap(), 39);
 
     db.with_connection(|conn| {
         let columns = |table: &str| -> rusqlite::Result<Vec<String>> {
@@ -183,7 +183,7 @@ fn insert_asset(
 fn test_migration_036_adds_artifact_columns() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 38);
+    assert_eq!(db.schema_version().unwrap(), 39);
 
     db.with_connection(|conn| {
         let columns = |table: &str| -> rusqlite::Result<Vec<String>> {
@@ -365,7 +365,7 @@ fn test_migration_036_artifact_versions_cascade() {
 fn test_migration_037_run_observability_schema() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 38);
+    assert_eq!(db.schema_version().unwrap(), 39);
 
     db.with_connection(|conn| {
         let columns = |table: &str| -> rusqlite::Result<Vec<String>> {
@@ -450,7 +450,7 @@ fn test_migration_037_run_observability_schema() {
 fn test_migration_038_message_run_links() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 38);
+    assert_eq!(db.schema_version().unwrap(), 39);
 
     db.with_connection(|conn| {
         let columns: Vec<String> = conn
@@ -499,6 +499,175 @@ fn test_migration_038_message_run_links() {
         )?;
         assert!(bare.is_none());
 
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn test_migration_039_rebuilds_conversations_as_session() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+
+    db.with_connection(|conn| {
+        // The old table is gone — rebuilt, not shadowed by a second
+        // transcript container.
+        let leftover: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'conversations'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(leftover, 0, "`conversations` should have been dropped");
+
+        let columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(session)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for expected in [
+            "id",
+            "lane_key",
+            "source",
+            "title",
+            "workspace_id",
+            "status",
+            "message_count",
+            "last_message_at",
+            "summary",
+            "summary_version",
+            "last_summarized_message_id",
+            "summary_updated_at",
+            "ended_at",
+            "created_at",
+            "updated_at",
+        ] {
+            assert!(
+                columns.contains(&expected.to_string()),
+                "session.{expected} should exist: {columns:?}"
+            );
+        }
+
+        // `session_id` reaches every table §5.2 keys by it.
+        let has_column = |table: &str, column: &str| -> rusqlite::Result<bool> {
+            let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+            let names = stmt
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(names.contains(&column.to_string()))
+        };
+        for table in [
+            "conversation_messages",
+            "task",
+            "lane_followups",
+            "tool_execution_log",
+        ] {
+            assert!(
+                has_column(table, "session_id")?,
+                "{table}.session_id should exist"
+            );
+        }
+        for column in ["task_id", "log_seq", "args_preview", "result_preview", "result_ref"] {
+            assert!(
+                has_column("tool_execution_log", column)?,
+                "tool_execution_log.{column} should exist"
+            );
+        }
+
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn test_migration_039_partial_index_allows_one_active_session_per_lane() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+
+    db.with_connection(|conn| {
+        conn.execute(
+            "INSERT INTO session (id, lane_key, source, status) VALUES ('s1', 'u:gui', 'gui', 'active')",
+            [],
+        )?;
+
+        // A second *active* session on the same lane is refused by the DB —
+        // one-active-per-lane is an invariant, not a convention.
+        let clash = conn.execute(
+            "INSERT INTO session (id, lane_key, source, status) VALUES ('s2', 'u:gui', 'gui', 'active')",
+            [],
+        );
+        assert!(clash.is_err(), "a second active session must be rejected");
+
+        // Archived siblings are unlimited — that is the whole point of
+        // dropping 011's column-level UNIQUE(lane_key).
+        conn.execute(
+            "INSERT INTO session (id, lane_key, source, status) VALUES ('s2', 'u:gui', 'gui', 'archived')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO session (id, lane_key, source, status) VALUES ('s3', 'u:gui', 'gui', 'archived')",
+            [],
+        )?;
+        let total: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM session WHERE lane_key = 'u:gui'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(total, 3);
+
+        // And the status domain is checked.
+        assert!(
+            conn.execute(
+                "INSERT INTO session (id, lane_key, source, status) VALUES ('s4', 'u:cli', 'cli', 'paused')",
+                [],
+            )
+            .is_err(),
+            "status must be 'active' or 'archived'"
+        );
+
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn test_migration_039_backfills_one_active_session_per_existing_lane() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("test.db");
+
+    // Build a pre-039 database, stop at 38, then seed it the way 011..038 left it.
+    {
+        let db = Database::open(&path).unwrap();
+        db.with_connection(|conn| {
+            conn.execute("DELETE FROM session", [])?;
+            conn.execute(
+                "INSERT INTO session (id, lane_key, source, title, message_count, summary)
+                 VALUES ('legacy-1', 'alice:gui', 'gui', 'Old chat', 2, 'a summary')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO conversation_messages (lane_key, role, content, session_id)
+                 VALUES ('alice:gui', 'user', 'hello', 'legacy-1')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    let db = Database::open(&path).unwrap();
+    db.with_connection(|conn| {
+        let (status, workspace): (String, Option<String>) = conn.query_row(
+            "SELECT status, workspace_id FROM session WHERE id = 'legacy-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(status, "active", "a carried-over lane keeps today's semantics");
+        assert!(workspace.is_none(), "no workspace is known for a legacy row");
+        let linked: String = conn.query_row(
+            "SELECT session_id FROM conversation_messages WHERE content = 'hello'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(linked, "legacy-1");
         Ok(())
     })
     .unwrap();

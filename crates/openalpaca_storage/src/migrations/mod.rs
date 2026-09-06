@@ -201,4 +201,9 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "message_run_links",
         sql: include_str!("038_message_run_links.sql"),
     },
+    Migration {
+        version: 39,
+        name: "sessions",
+        sql: include_str!("039_sessions.sql"),
+    },
 ];

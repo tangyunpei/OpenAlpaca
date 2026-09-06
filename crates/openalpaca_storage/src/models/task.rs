@@ -136,5 +136,14 @@ pub struct Task {
     /// verb keeps the id (D5), so there are not two runs to link. Column and
     /// index added by migration 037.
     pub source_task_id: Option<String>,
+    /// The session this run was started from — written at dispatch from the
+    /// lane's active session (migration 039, §5.1).
+    ///
+    /// It is what makes the completion report land in the conversation that
+    /// asked for the work, even when the user has since opened another one.
+    /// `None` for a run dispatched on a lane that had no session row, and for
+    /// every pre-039 row. Not a foreign key: deleting a session nulls this
+    /// rather than taking the run's record with it.
+    pub session_id: Option<String>,
 }
 
