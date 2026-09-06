@@ -8,6 +8,50 @@ pub struct OrchestratorConfig {
     pub costs: CostsConfig,
     pub prompt_budgets: PromptBudgetsConfig,
     pub routing: RoutingConfig,
+    pub sessions: SessionsConfig,
+}
+
+/// Session event log limits (`[orchestrator.sessions]`, plan §5.4).
+///
+/// The log is bounded, not unbounded history: a trim loses loop-interior
+/// detail (rounds, tool payloads) but never the conversation, which lives in
+/// SQLite.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionsConfig {
+    /// Per session, counting `log.jsonl` segments **plus** `results/`. On
+    /// exceed the writer drops whole oldest segments (never the live one) and
+    /// writes a `log_trimmed` record naming the dropped seq range.
+    #[serde(default = "default_log_max_session_bytes")]
+    pub log_max_session_bytes: u64,
+    /// Across all sessions, evicting oldest-touched archived sessions first;
+    /// an active session's log is never evicted. Read by the boot sweep.
+    #[serde(default = "default_log_max_total_bytes")]
+    pub log_max_total_bytes: u64,
+    /// Age-based sweep of archived session logs. `0` disables it — the
+    /// default, pending owner decision T12; it is not an oversight, and the
+    /// sweep machinery ships regardless of the value (P-21).
+    #[serde(default = "default_log_retention_days")]
+    pub log_retention_days: u32,
+}
+
+fn default_log_max_session_bytes() -> u64 {
+    256 * 1024 * 1024
+}
+fn default_log_max_total_bytes() -> u64 {
+    2 * 1024 * 1024 * 1024
+}
+fn default_log_retention_days() -> u32 {
+    0
+}
+
+impl Default for SessionsConfig {
+    fn default() -> Self {
+        Self {
+            log_max_session_bytes: default_log_max_session_bytes(),
+            log_max_total_bytes: default_log_max_total_bytes(),
+            log_retention_days: default_log_retention_days(),
+        }
+    }
 }
 
 /// Routing V2 configuration (`[orchestrator.routing]`).

@@ -16,6 +16,7 @@ pub mod middleware;
 pub mod orchestrator;
 pub mod runner;
 pub mod security;
+pub mod session_log;
 pub mod tools;
 pub mod types;
 pub mod utils;

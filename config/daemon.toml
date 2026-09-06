@@ -98,6 +98,22 @@ tool_selection = "core_union"
 # jobs without editing the skills themselves.
 scheduled_skills_enabled = true
 
+# Session event log (~/.openalpaca/sessions/<id>/log.jsonl): the append-only
+# per-turn narrative — rounds, tool calls and their payloads, steering drains,
+# compaction, subagent spans. The conversation itself lives in SQLite, so a
+# trim here loses loop-interior detail, never the transcript.
+[orchestrator.sessions]
+# Per session, counting the log segments plus the results/ spill directory.
+# On exceed, whole oldest segments are dropped (never the live one) and a
+# `log_trimmed` record names the seq range that went.
+log_max_session_bytes = 268435456
+# Across all sessions; archived sessions are evicted oldest-touched first and
+# an active session's log is never evicted.
+log_max_total_bytes = 2147483648
+# Age-based sweep of archived session logs, in days. 0 disables it: size is
+# for disk, age is for exposure, and the two are deliberately separate.
+log_retention_days = 0
+
 [security]
 max_input_length = 32768
 auto_approve_confirmations = false
