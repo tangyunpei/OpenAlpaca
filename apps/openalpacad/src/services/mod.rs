@@ -82,6 +82,11 @@ pub async fn initialize_services(
                     .log_max_session_bytes,
                 ..Default::default()
             };
+            // §5.4's global cap, "once at boot for the global cap". It runs
+            // here — after the store movers, before any writer is handed out,
+            // so nothing it examines is being appended to underneath it. The
+            // per-session cap is the writer's and needs no boot pass.
+            sweep_session_logs(&root, db, daemon_config).await;
             shared_context.set_session_log(Arc::new(
                 openalpaca_core::session_log::SessionLogService::new(
                     root,
@@ -257,4 +262,64 @@ pub async fn initialize_services(
         connector_send_lock,
         mcp_supervisor,
     })
+}
+
+/// Enforce §5.4's cross-session cap, once, at boot.
+///
+/// > `log_max_total_bytes` — 2 GB — Across all sessions. Evict oldest-touched
+/// > **archived** sessions' logs first, LRU; an active session's log is never
+/// > evicted.
+///
+/// The active set comes from the database, so "archived" means what the
+/// session rows say it means. The walk is filesystem work on a directory that
+/// may hold thousands of files, so it goes to a blocking thread rather than
+/// stalling the boot runtime; a failure is a warning, never a boot failure —
+/// the daemon runs with a log that is over its cap rather than not at all.
+async fn sweep_session_logs(
+    root: &Path,
+    db: &Database,
+    daemon_config: &Arc<ArcSwap<openalpaca_core::daemon_config::DaemonConfig>>,
+) {
+    let max_total = daemon_config.load().orchestrator.sessions.log_max_total_bytes;
+    let active: std::collections::HashSet<String> =
+        match openalpaca_storage::ConversationRepository::new(db).active_session_ids() {
+            Ok(ids) => ids.into_iter().collect(),
+            Err(e) => {
+                // Without the protected set the sweep could evict a live
+                // session's log, which §5.4 forbids outright. Skipping is the
+                // only safe answer.
+                tracing::warn!("Session log sweep skipped — active sessions unreadable: {e}");
+                return;
+            }
+        };
+
+    let root = root.to_path_buf();
+    let swept = tokio::task::spawn_blocking(move || {
+        openalpaca_core::session_log::sweep::enforce_total_cap(&root, max_total, &active)
+    })
+    .await;
+
+    match swept {
+        Ok(Ok(report)) if report.files_removed == 0 => {
+            tracing::debug!(
+                sessions = report.sessions_visited,
+                bytes = report.bytes_before,
+                max_total,
+                "Session logs are within their total cap"
+            );
+        }
+        Ok(Ok(report)) => tracing::info!(
+            sessions_visited = report.sessions_visited,
+            sessions_evicted = report.sessions_evicted,
+            files_removed = report.files_removed,
+            bytes_freed = report.bytes_freed,
+            bytes_before = report.bytes_before,
+            bytes_after = report.bytes_after,
+            still_over_cap = report.over_cap_after,
+            max_total,
+            "Session log sweep completed"
+        ),
+        Ok(Err(e)) => tracing::warn!("Session log sweep failed: {e}"),
+        Err(e) => tracing::warn!("Session log sweep task failed: {e}"),
+    }
 }

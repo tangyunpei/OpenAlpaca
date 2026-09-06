@@ -1051,3 +1051,167 @@ fn a_session_id_can_never_escape_the_sessions_root() {
         );
     }
 }
+
+// ── The boot sweep (the global cap) ─────────────────────────────────
+
+/// Give a session's files a known age so "oldest-touched" is testable.
+fn age(root: &Path, session: &str, secs_ago: u64) {
+    let when = std::time::SystemTime::now() - Duration::from_secs(secs_ago);
+    let dir = root.join(session);
+    let mut stack = vec![dir];
+    while let Some(next) = stack.pop() {
+        for entry in fs::read_dir(&next).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Ok(file) = fs::OpenOptions::new().write(true).open(&path) {
+                let _ = file.set_modified(when);
+            }
+        }
+    }
+}
+
+/// Lay down a session with a live segment, one rotated segment and `spills`
+/// spill files, each `bytes` long.
+fn seed_session(root: &Path, session: &str, spills: usize, bytes: usize) {
+    let dir = root.join(session);
+    fs::create_dir_all(dir.join("results")).unwrap();
+    fs::write(dir.join(LIVE_SEGMENT), "x".repeat(bytes)).unwrap();
+    fs::write(dir.join("log.1-9.jsonl"), "x".repeat(bytes)).unwrap();
+    for i in 0..spills {
+        fs::write(dir.join(format!("results/00000{i}-t-dump.txt")), "y".repeat(bytes)).unwrap();
+    }
+}
+
+fn total_bytes(root: &Path) -> u64 {
+    let mut total = 0;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(next) = stack.pop() {
+        for entry in fs::read_dir(&next).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                total += entry.metadata().map(|m| m.len()).unwrap_or(0);
+            }
+        }
+    }
+    total
+}
+
+/// §5.4's `log_max_total_bytes`: "Across all sessions. Evict oldest-touched
+/// **archived** sessions' logs first, LRU; an active session's log is never
+/// evicted."
+#[test]
+fn the_boot_sweep_evicts_the_oldest_archived_sessions_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for (session, age_secs) in [("oldest", 9_000), ("middle", 6_000), ("newest", 100)] {
+        seed_session(root, session, 4, 1_000);
+        age(root, session, age_secs);
+    }
+    // 3 sessions x (live + rotated + 4 spills) x 1 000 bytes.
+    let before = total_bytes(root);
+    assert_eq!(before, 18_000);
+
+    let active: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let report = sweep::enforce_total_cap(root, 12_000, &active).unwrap();
+
+    assert!(report.bytes_freed > 0);
+    assert!(total_bytes(root) <= 12_000, "the sweep brought the root under its cap");
+    // The oldest gave up its spill first; the newest was not touched at all.
+    assert!(
+        !root.join("oldest").join("results/000000-t-dump.txt").exists(),
+        "the oldest session's spill went first"
+    );
+    assert!(
+        root.join("newest").join("results/000000-t-dump.txt").exists(),
+        "the newest session was not reached"
+    );
+    // The live segment of every session survives — §5.4 never drops one.
+    for session in ["oldest", "middle", "newest"] {
+        assert!(
+            root.join(session).join(LIVE_SEGMENT).exists(),
+            "{session}'s live segment must survive"
+        );
+    }
+}
+
+/// "An active session's log is never evicted" — even when it is the oldest
+/// thing on disk and the cap cannot be met without it.
+#[test]
+fn the_boot_sweep_never_touches_a_live_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_session(root, "live", 6, 2_000);
+    age(root, "live", 100_000);
+    seed_session(root, "archived", 2, 1_000);
+    age(root, "archived", 10);
+
+    let active: std::collections::HashSet<String> = ["live".to_string()].into_iter().collect();
+    let report = sweep::enforce_total_cap(root, 1_000, &active).unwrap();
+
+    for i in 0..6 {
+        assert!(
+            root.join("live").join(format!("results/00000{i}-t-dump.txt")).exists(),
+            "an active session's spill is never evicted"
+        );
+    }
+    assert!(root.join("live").join("log.1-9.jsonl").exists());
+    // The cap could not be met, and the sweep says so rather than pretending.
+    assert!(report.bytes_after > 1_000);
+    assert!(report.over_cap_after, "the report admits the cap was not met");
+    assert!(
+        !root.join("archived").join("results/000000-t-dump.txt").exists(),
+        "everything evictable went"
+    );
+}
+
+/// The sweep's only record is the files it removed, so a crash between two
+/// deletions is a re-run, not a repair. Re-running it must free nothing more
+/// and must not error on what is already gone.
+#[test]
+fn the_boot_sweep_is_idempotent_across_a_crash_mid_eviction() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_session(root, "a", 4, 1_000);
+    age(root, "a", 9_000);
+    seed_session(root, "b", 4, 1_000);
+    age(root, "b", 100);
+
+    let active = std::collections::HashSet::new();
+    // The crash: a file the sweep was about to remove is already gone,
+    // exactly as a half-finished previous run would have left it.
+    fs::remove_file(root.join("a").join("results/000001-t-dump.txt")).unwrap();
+
+    let first = sweep::enforce_total_cap(root, 8_000, &active).unwrap();
+    assert!(first.bytes_freed > 0);
+    let after_first = total_bytes(root);
+
+    let second = sweep::enforce_total_cap(root, 8_000, &active).unwrap();
+    assert_eq!(second.bytes_freed, 0, "a second pass has nothing left to do");
+    assert_eq!(total_bytes(root), after_first, "and changes nothing");
+}
+
+/// §1.3 rule 3: the store deletes only what it created. A stray name at the
+/// sessions root is counted (it is taking disk) but never removed.
+#[test]
+fn the_boot_sweep_leaves_names_it_did_not_create_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_session(root, "a", 4, 1_000);
+    age(root, "a", 9_000);
+    fs::write(root.join("NOTES.md"), "not the store's").unwrap();
+    fs::create_dir_all(root.join("a").join("snapshots")).unwrap();
+    fs::write(root.join("a").join("snapshots/keep.png"), "reserved").unwrap();
+
+    let active = std::collections::HashSet::new();
+    sweep::enforce_total_cap(root, 1, &active).unwrap();
+
+    assert!(root.join("NOTES.md").exists(), "an unknown name is left alone");
+    assert!(
+        root.join("a").join("snapshots/keep.png").exists(),
+        "snapshots/ is reserved for Phase 8, not the sweep's to empty"
+    );
+    assert!(root.join("a").join(LIVE_SEGMENT).exists());
+}

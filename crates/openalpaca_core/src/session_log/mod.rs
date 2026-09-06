@@ -31,6 +31,7 @@
 
 mod reader;
 mod record;
+pub mod sweep;
 mod writer;
 
 #[cfg(test)]

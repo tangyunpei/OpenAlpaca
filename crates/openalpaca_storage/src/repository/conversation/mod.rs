@@ -574,6 +574,21 @@ impl<'a> ConversationRepository<'a> {
         })
     }
 
+    /// Every lane's active session id.
+    ///
+    /// The boot sweep's protected set (plan §5.4: "an active session's log is
+    /// never evicted"). One query rather than one per lane, because the sweep
+    /// runs before anything else knows which lanes exist.
+    pub fn active_session_ids(&self) -> Result<Vec<String>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare("SELECT id FROM session WHERE status = 'active'")?;
+            let ids = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            Ok(ids)
+        })
+    }
+
     /// Get a session by ID.
     pub fn get_session(&self, id: &str) -> Result<Option<Conversation>> {
         self.db.with_connection(|conn| {

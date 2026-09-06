@@ -804,3 +804,34 @@ fn task_counts_by_session_is_one_query_for_a_page() {
     assert_eq!(counts.get(&b.id), Some(&1));
     assert!(repo.task_counts_by_session(&[], "interrupted").unwrap().is_empty());
 }
+
+/// The boot sweep's protected set (plan §5.4: "an active session's log is
+/// never evicted"). One query across every lane, because the sweep runs before
+/// anything else knows which lanes exist.
+#[test]
+fn active_session_ids_names_every_lanes_live_session() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+
+    let gui = repo
+        .get_or_create_active_session("user1:gui", "gui", None)
+        .unwrap();
+    let cli = repo
+        .get_or_create_active_session("user1:cli", "cli", None)
+        .unwrap();
+    // A second session on the gui lane archives the first in the same
+    // transaction, so only the newer one may be protected.
+    let gui_second = repo
+        .create_session("user1:gui", "gui", None, Some("Second"))
+        .unwrap();
+
+    let mut ids = repo.active_session_ids().unwrap();
+    ids.sort();
+    let mut expected = vec![cli.id.clone(), gui_second.id.clone()];
+    expected.sort();
+    assert_eq!(ids, expected);
+    assert!(
+        !ids.contains(&gui.id),
+        "the archived session is not protected from the sweep"
+    );
+}
