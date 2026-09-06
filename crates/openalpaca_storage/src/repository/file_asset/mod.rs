@@ -46,6 +46,15 @@ pub struct FileAssetRepository<'a> {
     db: &'a Database,
 }
 
+/// The two totals of §4.8's size accounting, read together.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct StorageBytes {
+    /// Quota-bearing: what the user uploaded, wherever it was placed.
+    pub upload_bytes: i64,
+    /// Informational: what agents produced. Never charged against the cap.
+    pub produced_bytes: i64,
+}
+
 impl<'a> FileAssetRepository<'a> {
     pub fn new(db: &'a Database) -> Self {
         Self { db }
@@ -122,6 +131,37 @@ impl<'a> FileAssetRepository<'a> {
                 |row| row.get(0),
             )?;
             Ok(total)
+        })
+    }
+
+    /// Both size numbers §4.8 insists on — "two numbers, never one" — from a
+    /// single grouped scan.
+    ///
+    /// `upload_bytes` is the quota-bearing total [`Self::total_storage_bytes`]
+    /// already serves; `produced_bytes` is everything else, which today means
+    /// `origin = 'produced'` and tomorrow means any origin the artifact store
+    /// grows: the split is `= 'upload'` vs. the rest, so a new origin lands on
+    /// the informational side rather than silently against the upload cap.
+    /// Read by `GET /v1/status`.
+    pub fn storage_bytes_by_origin(&self) -> Result<StorageBytes> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT origin, COALESCE(SUM(size_bytes), 0) FROM file_assets GROUP BY origin",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?;
+
+            let mut totals = StorageBytes::default();
+            for row in rows {
+                let (origin, bytes) = row?;
+                if origin == "upload" {
+                    totals.upload_bytes += bytes;
+                } else {
+                    totals.produced_bytes += bytes;
+                }
+            }
+            Ok(totals)
         })
     }
 

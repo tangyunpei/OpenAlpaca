@@ -32,6 +32,7 @@ pub use state::AppState;
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
+use chrono::Utc;
 use events::EventBroadcaster;
 use openalpaca_core::{
     bus::EventBus,
@@ -156,6 +157,11 @@ async fn async_main(
     config_base_dir: PathBuf,
     shutdown_flag: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
+    // Step 0: the run's own clock. Taken before anything can block — the bind,
+    // the migrations, the boot sweep — so `GET /v1/status`'s `uptime_secs`
+    // covers the whole of this daemon's life.
+    let started_at = Utc::now();
+
     // Step 1: Bind to dynamic port (127.0.0.1:0 -> OS assigns port)
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -644,6 +650,7 @@ async fn async_main(
 
     let state = Arc::new(AppState {
         instance_id: instance_id.clone(),
+        started_at,
         token,
         event_broadcaster: event_broadcaster.clone(),
         db,

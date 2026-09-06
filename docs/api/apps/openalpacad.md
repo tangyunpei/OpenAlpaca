@@ -513,6 +513,27 @@
 | `sessions` | `Vec<SessionView>` |
 | `total` | `i64` |
 
+### `status::StatusResponse`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/status.rs`
+
+| Field | Type |
+|---|---|
+| `home_root` | `String` |
+| `state_dir` | `String` |
+| `db_path` | `String` |
+| `project_root` | `Option<String>` |
+| `started_at` | `String` |
+| `uptime_secs` | `u64` |
+| `schema_version` | `i32` |
+| `log_path` | `Option<String>` |
+| `upload_bytes` | `i64` |
+| `produced_bytes` | `i64` |
+| `sessions` | `SessionsStatus` |
+| `last_sweep` | `Option<SweepStatus>` |
+| `dropped_records` | `u64` |
+
 ## Streaming
 
 - WebSocket `GET /v1/events?token=...` sends `openalpaca_api::events::ServerEvent` JSON payloads.

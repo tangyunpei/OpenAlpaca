@@ -39,8 +39,8 @@ pub use repository::{
     FileAssetRepository, FollowupRecord, FollowupRepository, IdentityRepository,
     LlmUsageRepository, MemoryRepository,
     MessageFeedbackRepository, OrchestratorLatencyRepository, PreferenceRepository,
-    SESSION_ACTIVE, SESSION_ARCHIVED, SessionFilter, SkillExecutionRepository, SubAgentRepository,
-    SubagentSpanRepository, TaskRepository,
+    SESSION_ACTIVE, SESSION_ARCHIVED, SessionFilter, SkillExecutionRepository, StorageBytes,
+    SubAgentRepository, SubagentSpanRepository, TaskRepository,
 };
 pub use repository::llm_usage::LlmUsageDaily;
 pub use repository::subagent_span::{

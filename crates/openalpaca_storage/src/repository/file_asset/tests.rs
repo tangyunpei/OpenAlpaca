@@ -123,6 +123,31 @@ fn quota_counts_uploads_only() {
     assert_eq!(repo.total_storage_bytes().unwrap(), 1_000);
 }
 
+/// §4.8's "two numbers, never one", read in one pass: the quota-bearing upload
+/// total and the informational produced total, from the same grouped scan.
+#[test]
+fn storage_bytes_split_upload_from_produced_in_one_query() {
+    let db = test_db();
+    let repo = FileAssetRepository::new(&db);
+
+    let empty = repo.storage_bytes_by_origin().unwrap();
+    assert_eq!(empty.upload_bytes, 0);
+    assert_eq!(empty.produced_bytes, 0);
+
+    repo.insert(&asset("upload-1", 700)).unwrap();
+    repo.insert(&asset("upload-2", 300)).unwrap();
+    repo.insert(&asset("produced-1", 5_000)).unwrap();
+    mark(&db, "produced-1", "produced", 0, 0);
+    repo.insert(&asset("produced-2", 11)).unwrap();
+    mark(&db, "produced-2", "produced", 0, 0);
+
+    let split = repo.storage_bytes_by_origin().unwrap();
+    assert_eq!(split.upload_bytes, 1_000);
+    assert_eq!(split.produced_bytes, 5_011);
+    // The quota reader and the split must never disagree about uploads.
+    assert_eq!(split.upload_bytes, repo.total_storage_bytes().unwrap());
+}
+
 #[test]
 fn readers_tolerate_the_new_columns() {
     let db = test_db();

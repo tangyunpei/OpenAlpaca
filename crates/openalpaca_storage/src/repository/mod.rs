@@ -28,7 +28,7 @@ pub use conversation::{
 pub use dispatch_decision::DispatchDecisionRepository;
 pub use event_log::{EventLogQuery, EventLogRepository};
 pub use feedback::MessageFeedbackRepository;
-pub use file_asset::{ARTIFACT_ROLE, ATTACHMENT_ROLE, FileAssetRepository};
+pub use file_asset::{ARTIFACT_ROLE, ATTACHMENT_ROLE, FileAssetRepository, StorageBytes};
 pub use followup::{
     FOLLOWUP_KIND_FOLLOWUP, FOLLOWUP_KIND_UNPROCESSED_STEERING, FollowupRecord, FollowupRepository,
     RecoveredSteering,

@@ -91,6 +91,25 @@ fn home_root_honours_the_env_override() {
     assert_eq!(home_root().unwrap(), tmp.path());
 }
 
+/// One name for the daemon log, shared by the CLI that writes it and the
+/// status route that reports it — and naming it must not create `state/logs`,
+/// because `GET /v1/status` asks whether the file *exists*.
+#[test]
+fn the_daemon_log_is_named_once_and_creating_nothing() {
+    let tmp = tempdir().unwrap();
+    let _guard = HomeStoreGuard::set(tmp.path());
+
+    let log = daemon_log_path().unwrap();
+    assert_eq!(log, tmp.path().join("state").join("logs").join("daemon.log"));
+    assert!(
+        !tmp.path().join("state").join("logs").exists(),
+        "daemon_log_path() must not create the logs directory"
+    );
+
+    // …and it is the same file `logs_dir()` hands the writer.
+    assert_eq!(log, logs_dir().unwrap().join("daemon.log"));
+}
+
 /// The former `paths.rs::test_paths_are_consistent`, re-targeted at `state_dir()`.
 #[test]
 fn test_paths_are_consistent() {

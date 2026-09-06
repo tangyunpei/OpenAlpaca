@@ -17,6 +17,10 @@ use openalpaca_storage::Database;
 #[derive(Clone)]
 pub struct AppState {
     pub instance_id: String,
+    /// When this run began — stamped at the top of `async_main`, before the
+    /// listener binds, so `GET /v1/status`'s `uptime_secs` measures the
+    /// daemon's own life and not the process table's idea of it.
+    pub started_at: chrono::DateTime<chrono::Utc>,
     pub token: String,
     pub event_broadcaster: EventBroadcaster,
     pub db: Database,

@@ -122,11 +122,25 @@ pub fn master_key_dir() -> Result<PathBuf> {
 
 /// `state/logs` — created if missing.
 pub fn logs_dir() -> Result<PathBuf> {
-    let dir = state_dir()?.join("logs");
+    let dir = state_dir()?.join(LOGS_DIR);
     fs::create_dir_all(&dir)
         .with_context(|| format!("Failed to create logs directory: {}", dir.display()))?;
     Ok(dir)
 }
+
+/// `state/logs/daemon.log` — the log the CLI-managed daemon writes to.
+///
+/// One name, two consumers: `openalpaca`'s process manager opens it (rotating
+/// first, so it stays bounded) and `GET /v1/status` reports it when it exists.
+/// Non-creating, like [`database_path`] — naming a file is not a reason to
+/// make its directory, and the status route's question is whether the file is
+/// *there*.
+pub fn daemon_log_path() -> Result<PathBuf> {
+    Ok(state_dir_path()?.join(LOGS_DIR).join(DAEMON_LOG_FILE))
+}
+
+const LOGS_DIR: &str = "logs";
+const DAEMON_LOG_FILE: &str = "daemon.log";
 
 /// `state/backups` — created if missing. The atomic config writer's rotation target.
 pub fn backups_dir() -> Result<PathBuf> {
