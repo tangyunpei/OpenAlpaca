@@ -6,11 +6,12 @@
  * from the task, the duration from `created_at → completed_at`, the artifact
  * chips from the run outcome's own artifact refs. Cost has no source *here*:
  * this report is built entirely from live `workflow_started`/`task_status`
- * WS frames (GAP-23 — a stored message carries no run link, so there is no
- * REST fetch to attach one to), and neither event carries a cost field, even
- * though `GET /v1/tasks` now does (GAP-08b). The `$` segment is **omitted**
- * rather than printed as `$0.00`; `note` is where the card says why something
- * is missing.
+ * WS frames — the status, duration and summary it shows are on those frames
+ * and on no stored message, which is why the *card* stays session-local even
+ * now that the run link itself survives a reload (GAP-23, closed) — and
+ * neither event carries a cost field, even though `GET /v1/tasks` now does
+ * (GAP-08b). The `$` segment is **omitted** rather than printed as `$0.00`;
+ * `note` is where the card says why something is missing.
  */
 
 import { FileBadge, type FileKind } from "@/components/ui";

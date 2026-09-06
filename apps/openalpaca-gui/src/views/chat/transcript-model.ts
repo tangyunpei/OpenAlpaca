@@ -11,17 +11,23 @@
  *     turn exists twice — once live, once persisted. The live copy is dropped
  *     as soon as history carries it (`done.content` is byte-identical to what
  *     was stored), never by a timer;
- *   * nothing links a message to the run or artifacts it produced (GAP-23), so
- *     run reports are session-local: they are rebuilt from the delegation this
- *     client started and the `task_status` frames it saw, and they do not
- *     survive a reload. That is a gap, not a bug in this file.
+ *   * a stored message now names the run it started or reported on, and a
+ *     report names the files that run produced (GAP-23, closed): the run pill
+ *     and the artifact chips are read straight off history and survive a
+ *     reload. The recap *card* is still session-local — it is drawn from the
+ *     `task_status` frame this client saw, which carries the status, the
+ *     duration and the summary that no stored message does.
  */
 
 import type { AssistantMeta } from "@/components/chat";
 import type { SteerRef } from "@/components/chat";
 import type { Resolution } from "@/components/chat";
 import type { RunReportStatus } from "@/components/chat";
-import type { AttachmentDisplay, ChatMessage } from "@/lib/api/types";
+import type {
+  AttachmentDisplay,
+  ChatMessage,
+  MessageArtifact,
+} from "@/lib/api/types";
 import type { ChatStreamState } from "@/lib/chat-stream";
 
 /**
@@ -58,10 +64,11 @@ export interface RunReportData {
 /**
  * One `artifact_written` frame, as the transcript shows it.
  *
- * Session-local like the run reports, and for the same reason (GAP-23): a
- * stored message carries no artifact link, so a card is drawn from the frame
- * this client saw and does not survive a reload. The Library is where the file
- * is permanent.
+ * Session-local like the run reports: the frame carries a *version*, which the
+ * card prints and no stored link records. A file the run produced comes back
+ * after a reload as a chip on the completion report (GAP-23, closed); this
+ * card is the moment it was written. The Library is where the file is
+ * permanent either way.
  */
 export interface WrittenArtifact {
   artifactId: string;
@@ -130,6 +137,12 @@ export interface AttachmentInfo {
   /** `null` when only the id is known (`done.attachments_used`). */
   filename: string | null;
   mimeType: string | null;
+  /**
+   * The daemon's snake_case `ArtifactKind`, when the server named it (an
+   * artifact link does; a file id does not). `null` falls back to the badge
+   * the filename and mime type imply.
+   */
+  kind: string | null;
 }
 
 export type TranscriptItem =
@@ -146,7 +159,12 @@ export type TranscriptItem =
       text: string;
       meta: AssistantMeta | null;
       streamPhase: StreamPhaseLabel;
+      /** Files the turn carried in (`role='attachment'`). */
       attachments: AttachmentInfo[];
+      /** Files the turn's run produced (`role='artifact'`, GAP-23). */
+      artifacts: AttachmentInfo[];
+      /** The run this turn started or reported on — `null` for plain chat. */
+      runId: string | null;
     }
   | { kind: "report"; key: string; report: RunReportData }
   | { kind: "artifact"; key: string; entry: WrittenArtifact }
@@ -188,6 +206,21 @@ function toAttachments(
     fileId: attachment.file_id,
     filename: attachment.filename,
     mimeType: attachment.mime_type,
+    kind: null,
+  }));
+}
+
+/** A message's `role='artifact'` links, as the same card reads them. */
+function toArtifacts(
+  artifacts: MessageArtifact[] | undefined,
+): AttachmentInfo[] {
+  return (artifacts ?? []).map((artifact) => ({
+    fileId: artifact.id,
+    filename: artifact.name,
+    // The artifact link names the file, not its bytes; the kind the daemon
+    // stored is a better badge than anything the mime type would guess.
+    mimeType: null,
+    kind: artifact.kind,
   }));
 }
 
@@ -282,6 +315,8 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
       meta: messageMeta(message),
       streamPhase: null,
       attachments: toAttachments(message.attachments),
+      artifacts: toArtifacts(message.artifacts),
+      runId: message.task_id ?? null,
     });
   }
 
@@ -357,6 +392,7 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
         fileId,
         filename: null,
         mimeType: null,
+        kind: null,
       })) ?? [];
 
     push(Number.MAX_SAFE_INTEGER, {
@@ -366,6 +402,10 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
       meta,
       streamPhase: streamPhaseLabel(stream),
       attachments,
+      // The live turn's own delegation reaches the transcript as a report card,
+      // and the pill arrives with the row when history catches up.
+      artifacts: [],
+      runId: null,
     });
   }
 

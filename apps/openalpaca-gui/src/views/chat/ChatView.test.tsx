@@ -76,6 +76,8 @@ function json(payload: unknown): Response {
   return new Response(JSON.stringify(payload), { status: 200 });
 }
 
+/** What `GET /v1/chat/history` answers; swapped per test to seed a transcript. */
+let historyReply: () => Response;
 /** What `POST /v1/tasks/{id}/steer` answers; swapped per test to refuse. */
 let steerReply: () => Response;
 /** What `GET /v1/lanes/{lane}/followups` answers — the lane's pending queue. */
@@ -96,7 +98,7 @@ function installFetch() {
     });
 
     if (url.includes("/v1/chat/history")) {
-      return json({ messages: [], total: 0, lane_key: "user:gui" });
+      return historyReply();
     }
     if (url.includes("/v1/chat/confirmations/")) {
       return new Response("", { status: 200 });
@@ -183,6 +185,7 @@ async function sendMessage(text: string): Promise<FakeEventSource> {
 beforeEach(() => {
   requests = [];
   FakeEventSource.instances = [];
+  historyReply = () => json({ messages: [], total: 0, lane_key: "user:gui" });
   steerReply = () =>
     json({
       task_id: "run-1",
@@ -755,5 +758,83 @@ describe("ChatView — queueing a follow-up (GAP-03, closed)", () => {
     await waitFor(() =>
       expect(useUiStore.getState().toast).toMatch(/already started/i),
     );
+  });
+});
+
+describe("ChatView — the run link and artifact chips after a reload (GAP-23)", () => {
+  /** A lane as the daemon answers it once a workflow has finished on it. */
+  function seedHistory() {
+    historyReply = () =>
+      json({
+        messages: [
+          {
+            id: 1,
+            lane_key: "user:gui",
+            role: "user",
+            content: "audit the connectors",
+            created_at: "2026-09-05T13:35:00Z",
+            artifacts: [],
+            task_id: null,
+          },
+          {
+            id: 2,
+            lane_key: "user:gui",
+            role: "assistant",
+            content: "Starting that now.",
+            created_at: "2026-09-05T13:36:00Z",
+            task_id: "b41c8e02-9f3a-4c11-8f52-2b7d5e6a1c30",
+            artifacts: [],
+          },
+          {
+            id: 3,
+            lane_key: "user:gui",
+            role: "assistant",
+            content: "Done — three connectors are stale.",
+            created_at: "2026-09-05T13:41:00Z",
+            task_id: "b41c8e02-9f3a-4c11-8f52-2b7d5e6a1c30",
+            artifacts: [
+              {
+                id: "art-1",
+                name: "connector-audit-findings.md",
+                kind: "markdown",
+              },
+            ],
+          },
+        ],
+        total: 3,
+        lane_key: "user:gui",
+      });
+  }
+
+  it("rebuilds the run pill and the artifact chip from history alone", async () => {
+    seedHistory();
+    renderChat();
+
+    // Both messages of the run wear the pill; the report carries the chip.
+    const pills = await screen.findAllByRole("button", {
+      name: "run → b41c8e02",
+    });
+    expect(pills).toHaveLength(2);
+    expect(screen.getByText("connector-audit-findings.md")).toBeInTheDocument();
+    // The daemon's `markdown` becomes the design's `MD` badge — no guess from
+    // the extension, and no second request needed to learn the kind.
+    expect(screen.getByText("MD")).toBeInTheDocument();
+
+    // Nothing was streamed and no WS frame arrived: this is history only.
+    expect(FakeEventSource.instances).toHaveLength(0);
+  });
+
+  it("takes the run pill to that run in the Work view", async () => {
+    seedHistory();
+    renderChat();
+
+    const pills = await screen.findAllByRole("button", {
+      name: "run → b41c8e02",
+    });
+    fireEvent.click(pills[0] as HTMLElement);
+
+    const state = useUiStore.getState();
+    expect(state.view).toBe("work");
+    expect(state.selectedRunId).toBe("b41c8e02-9f3a-4c11-8f52-2b7d5e6a1c30");
   });
 });

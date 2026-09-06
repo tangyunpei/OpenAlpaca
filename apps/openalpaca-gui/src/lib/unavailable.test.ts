@@ -31,11 +31,13 @@ describe("gap registry", () => {
   // the follow-up queue (GAP-03), where `/v1/lanes/{lane_key}/followups` reads,
   // writes and cancels it — and re-run/start (GAP-06), where
   // `POST /v1/tasks/{id}/rerun` dispatches a new run from a finished one's goal
-  // and `{ action: "start" }` runs a queued row under its own id. GAP-20 is
-  // *narrowed*, not closed: its run counts are served now, its toggle is not —
-  // so the count is 10.
-  it("covers the 10 gaps still open from API_MAP §3", () => {
-    expect(listGaps()).toHaveLength(10);
+  // and `{ action: "start" }` runs a queued row under its own id. Phase 6
+  // closed the message → run link (GAP-23): migration 038's
+  // `conversation_messages.task_id` plus the report's `role='artifact'` links,
+  // both served by the two history routes. GAP-20 is *narrowed*, not closed:
+  // its run counts are served now, its toggle is not — so the count is 9.
+  it("covers the 9 gaps still open from API_MAP §3", () => {
+    expect(listGaps()).toHaveLength(9);
     expect(listGaps()[0]?.id).toBe("GAP-08c");
     expect(listGaps().at(-1)?.id).toBe("GAP-24");
     for (const closed of [
@@ -50,6 +52,7 @@ describe("gap registry", () => {
       "GAP-12",
       "GAP-19",
       "GAP-22",
+      "GAP-23",
     ]) {
       expect(listGaps().map((gap) => gap.id)).not.toContain(closed);
     }

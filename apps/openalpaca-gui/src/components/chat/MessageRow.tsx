@@ -89,12 +89,24 @@ export function UserMessage({
 /** `null` while nothing is streaming; otherwise the live SSE phase. */
 export type StreamPhase = "thinking" | "streaming" | null;
 
+/**
+ * The run a stored assistant turn belongs to (GAP-23) — the turn that started
+ * it, or the report that closed it. The pill is the user's way back to the run.
+ */
+export interface RunRef {
+  /** The short id the pill shows; the full id is the caller's business. */
+  label: string;
+  onOpen: () => void;
+}
+
 export interface AssistantMessageProps {
   text: string;
   /** The SSE `done` payload, mapped 1:1 onto the meta line. */
   meta?: AssistantMeta | null;
   streamPhase?: StreamPhase;
   dense?: boolean;
+  /** Set when this message started a workflow, or reported one (§5.1). */
+  run?: RunRef | null;
   /** Inline content below the body — the artifact card (§3.13). */
   children?: React.ReactNode;
 }
@@ -104,6 +116,7 @@ export function AssistantMessage({
   meta = null,
   streamPhase = null,
   dense = false,
+  run = null,
   children,
 }: AssistantMessageProps) {
   const metaLine = meta === null ? null : assistantMetaLine(meta);
@@ -112,6 +125,15 @@ export function AssistantMessage({
     <article className={messageGapClass(dense)}>
       <div className="mb-[8px] flex items-center gap-[9px]">
         <SpeakerLabel tone="assistant">Alpaca</SpeakerLabel>
+        {run !== null && (
+          <button
+            type="button"
+            onClick={run.onOpen}
+            className="cursor-pointer rounded-sm border-0 bg-blue-tint px-[6px] py-[2px] font-mono text-2xs tracking-label text-blue hover:bg-blue-tint/70 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue"
+          >
+            run → {run.label}
+          </button>
+        )}
         {streamPhase === "thinking" ? (
           <ThinkingIndicator />
         ) : (

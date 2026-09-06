@@ -144,7 +144,19 @@ export interface ToolConfirmation {
   status: "pending" | "approved" | "denied" | "expired";
 }
 
-/** `ConversationMessage`. Has no `task_id` and no artifact refs — GAP-23. */
+/**
+ * One `role='artifact'` link on a stored message (GAP-23, closed): a file the
+ * message's *run* produced, as the daemon resolves it — the id the Library
+ * opens, the name to show, and the kind the badge is drawn from.
+ */
+export interface MessageArtifact {
+  id: string;
+  name: string;
+  /** The daemon's snake_case `ArtifactKind`; `null` for a pre-036 row. */
+  kind: string | null;
+}
+
+/** `ConversationMessageView` — the stored row, plus its artifact links. */
 export interface ChatMessage {
   id: number;
   lane_key: string;
@@ -160,6 +172,16 @@ export interface ChatMessage {
   content_json?: string | null;
   display_text?: string | null;
   confirmation?: ToolConfirmation;
+  /**
+   * The run this message started (a delegating turn) or reported on (a
+   * completion report) — migration 038's column. `null` for ordinary chat.
+   */
+  task_id?: string | null;
+  /**
+   * Files this message's run produced. Served on every message (`[]` for the
+   * overwhelming majority), so no client has to tell "none" from "not served".
+   */
+  artifacts?: MessageArtifact[];
 }
 
 export interface ChatSendRequest {

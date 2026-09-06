@@ -24,9 +24,12 @@
  *     now honours for the rest of the session (GAP-01, closed) — the toast
  *     uses the design's own copy (§4.4): `{tool} added to the allowlist — it
  *     won't ask again`.
- *   * **GAP-23** messages carry no run link, so run reports are session-local:
- *     built from the delegation this client started plus the `task_status`
- *     frames it saw. They do not survive a reload.
+ *   * **GAP-23 (closed)** a stored message carries the run it started or
+ *     reported on, and a report carries the files its run produced, so the run
+ *     pill and the artifact chips are read off history. The recap *card* is
+ *     still built here from the delegation this client started plus the
+ *     `task_status` frames it saw: the status, duration and summary it prints
+ *     are on those frames and on no stored message.
  *   * The blocked run is resolved through `agent_status`
  *     (`agent_id → current_task_id`) — the only real mapping available. When
  *     that mapping is unknown it stays `null` rather than being guessed.
@@ -208,8 +211,8 @@ export function useChatSession(): ChatSession {
     if (!isTerminal(event.status)) return;
 
     const origin = started.current.get(event.task_id);
-    // Only report workflows this lane actually started (GAP-23: nothing links
-    // a stored message to a run, so a foreign run has no place in this lane).
+    // Only report workflows this lane actually started — a foreign run's card
+    // has no place in this lane.
     if (origin === undefined) return;
     started.current.delete(event.task_id);
 

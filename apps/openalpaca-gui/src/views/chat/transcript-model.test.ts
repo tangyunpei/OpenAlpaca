@@ -381,3 +381,107 @@ describe("buildTranscript", () => {
     ]);
   });
 });
+
+describe("the run link and artifact chips (GAP-23)", () => {
+  it("carries the run a stored assistant turn started", () => {
+    const items = buildTranscript(
+      input({
+        history: [
+          message({ id: 1, role: "user", content: "do the thing" }),
+          message({
+            id: 2,
+            role: "assistant",
+            content: "Starting that now.",
+            task_id: "b41c8e02-9f3a-4c11-8f52-2b7d5e6a1c30",
+          }),
+        ],
+      }),
+    );
+
+    const [user, assistant] = items;
+    expect(user?.kind).toBe("user");
+    expect(assistant).toMatchObject({
+      kind: "assistant",
+      runId: "b41c8e02-9f3a-4c11-8f52-2b7d5e6a1c30",
+      artifacts: [],
+    });
+  });
+
+  it("turns a completion report's links into chips beside its attachments", () => {
+    const items = buildTranscript(
+      input({
+        history: [
+          message({
+            id: 3,
+            role: "assistant",
+            content: "Done — two files written.",
+            task_id: "b41c8e02",
+            attachments: [
+              {
+                file_id: "upload-1",
+                filename: "spec.pdf",
+                mime_type: "application/pdf",
+                size_bytes: 12,
+              },
+            ],
+            artifacts: [
+              { id: "produced-1", name: "notes.md", kind: "markdown" },
+              { id: "produced-2", name: "run.log", kind: null },
+            ],
+          }),
+        ],
+      }),
+    );
+
+    expect(items[0]).toMatchObject({
+      kind: "assistant",
+      runId: "b41c8e02",
+      // The upload the turn carried stays where it was…
+      attachments: [
+        {
+          fileId: "upload-1",
+          filename: "spec.pdf",
+          mimeType: "application/pdf",
+          kind: null,
+        },
+      ],
+      // …and the run's own output is a separate list, kind included.
+      artifacts: [
+        {
+          fileId: "produced-1",
+          filename: "notes.md",
+          mimeType: null,
+          kind: "markdown",
+        },
+        {
+          fileId: "produced-2",
+          filename: "run.log",
+          mimeType: null,
+          kind: null,
+        },
+      ],
+    });
+  });
+
+  it("leaves an ordinary chat turn with no run and no chips", () => {
+    const items = buildTranscript(
+      input({
+        history: [message({ id: 4, role: "assistant", content: "Sure." })],
+      }),
+    );
+    expect(items[0]).toMatchObject({
+      kind: "assistant",
+      runId: null,
+      artifacts: [],
+    });
+  });
+
+  it("gives the live turn no run link — the delegation is only stored once", () => {
+    const items = buildTranscript(
+      input({
+        stream: drive(OPEN, { type: "delta", content: "Wor" }),
+      }),
+    );
+    expect(items[0]).toMatchObject({ kind: "assistant", runId: null });
+  });
+});

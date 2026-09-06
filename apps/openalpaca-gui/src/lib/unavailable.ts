@@ -24,7 +24,6 @@ export type GapId =
   | "GAP-18"
   | "GAP-20"
   | "GAP-21"
-  | "GAP-23"
   | "GAP-24";
 
 export type GapFixSize = "XS" | "S" | "S–M" | "M" | "L";
@@ -178,14 +177,13 @@ export const GAPS: Record<GapId, GapDescriptor> = {
   // GAP-22 (the six `plugin_*` variants carrying no `ts`/`instance_id`) is
   // closed: C7 deleted those variants with `/v1/plugins*`, and the extension
   // family that replaced them carries both on every frame (ADR-030 §7.3).
-  "GAP-23": {
-    id: "GAP-23",
-    label: "Message → run links",
-    missingApi: "ConversationMessage has no task_id and no artifact refs",
-    proposedEndpoint: "add task_id and artifact_ids to ConversationMessage",
-    blocks: "Rebuilding run-report and artifact cards after a reload",
-    fixSize: "M",
-  },
+  // GAP-23 (a stored message had no run link and no artifact refs) is closed:
+  // migration 038 added `conversation_messages.task_id`, the delegating turn
+  // and the completion report both write it, the report also writes a
+  // `role='artifact'` link per file its run produced, and both history routes
+  // serve them. The transcript reads the run pill and the chips off history;
+  // the recap *card* stays session-local, because the status, duration and
+  // summary it prints live on the `task_status` frame, not on a message.
   // Was GAP-19 ("plugin install"), widened to both extension kinds: the same
   // mechanism is missing for an MCP server, which had no gap id at all
   // (ADR-030 §9.1). `DELETE /v1/extensions/plugin/{id}` removes an orphan's

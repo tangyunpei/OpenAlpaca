@@ -32,6 +32,7 @@ export interface TranscriptProps {
 
 export function Transcript({ items, dense }: TranscriptProps) {
   const openArtifact = useUiStore((s) => s.openArtifact);
+  const focusRun = useUiStore((s) => s.focusRun);
   return (
     <>
       {items.map((item) => {
@@ -55,8 +56,18 @@ export function Transcript({ items, dense }: TranscriptProps) {
                 meta={item.meta}
                 streamPhase={item.streamPhase}
                 dense={dense}
+                run={
+                  item.runId === null
+                    ? null
+                    : {
+                        label: shortRunId(item.runId),
+                        // The run's own lane in the Work view — the same place
+                        // the report card's title goes.
+                        onOpen: () => focusRun(item.runId as string),
+                      }
+                }
               >
-                {item.attachments.map((attachment) => (
+                {[...item.attachments, ...item.artifacts].map((attachment) => (
                   <TranscriptArtifact
                     key={attachment.fileId}
                     attachment={attachment}

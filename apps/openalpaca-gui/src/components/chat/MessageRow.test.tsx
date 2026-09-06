@@ -1,5 +1,5 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 
 import { AssistantMessage, UserMessage, messageGapClass } from "./MessageRow";
 
@@ -97,5 +97,22 @@ describe("AssistantMessage (§3.10, §3.11)", () => {
     const code = container.querySelector("code");
     expect(code).not.toBeNull();
     expect(code).toHaveTextContent("cargo tree");
+  });
+
+  // GAP-23: the pill is the way back to the run a stored turn belongs to.
+  it("shows the run pill only for a message that names a run", () => {
+    const onOpen = vi.fn();
+    const { rerender } = render(<AssistantMessage text="Sure." />);
+    expect(screen.queryByText(/run →/)).toBeNull();
+
+    rerender(
+      <AssistantMessage
+        text="Starting that now."
+        run={{ label: "b41c8e02", onOpen }}
+      />,
+    );
+    const pill = screen.getByRole("button", { name: "run → b41c8e02" });
+    fireEvent.click(pill);
+    expect(onOpen).toHaveBeenCalledTimes(1);
   });
 });
