@@ -86,6 +86,16 @@ pub enum SetProviderEnabledError {
         "'{provider}' serves the default model '{model}'; choose a different default model first"
     )]
     IsDefaultProvider { provider: String, model: String },
+    /// The default model resolves to no provider at all, so no provider can be
+    /// shown *not* to be the one that was going to answer. Fails closed: every
+    /// disable is refused until the default names a model this daemon can
+    /// place (R61).
+    #[error(
+        "the default model '{model}' does not name any provider this daemon knows, \
+         so '{provider}' cannot be shown to be safe to turn off; set a default model \
+         the daemon can place first"
+    )]
+    DefaultModelUnresolved { provider: String, model: String },
     #[error("{0}")]
     Persist(String),
 }
@@ -771,15 +781,26 @@ impl LlmSettingsService {
 
         // Turning off the provider that serves the default model would leave
         // every request with nowhere to go, so it is refused rather than done
-        // and reported.
-        if !enabled
-            && let Some((model, owner)) = self.default_model_provider(&current)
-            && owner == provider_type
-        {
-            return Err(SetProviderEnabledError::IsDefaultProvider {
-                provider: provider.to_string(),
-                model,
-            });
+        // and reported — and so is *any* disable while the default model
+        // resolves to nothing, because then no provider can be shown not to be
+        // the one that was going to answer (R61).
+        if !enabled {
+            let (model, owner) = self.default_model_provider(&current);
+            match owner {
+                Some(owner) if owner == provider_type => {
+                    return Err(SetProviderEnabledError::IsDefaultProvider {
+                        provider: provider.to_string(),
+                        model,
+                    });
+                }
+                None => {
+                    return Err(SetProviderEnabledError::DefaultModelUnresolved {
+                        provider: provider.to_string(),
+                        model,
+                    });
+                }
+                Some(_) => {}
+            }
         }
 
         let name = provider.to_string();
@@ -837,10 +858,18 @@ impl LlmSettingsService {
         Ok(outcome)
     }
 
-    /// The default model and the provider that serves it, as far as anything
-    /// can say: the registry first, then the config's own `[models]` table for
-    /// a model the registry has never seen.
-    fn default_model_provider(&self, config: &LlmRouterConfig) -> Option<(String, ProviderType)> {
+    /// The default model, and the provider that serves it as far as anything
+    /// can say.
+    ///
+    /// Three rungs, in order: the live `ModelRegistry`; the config's own
+    /// `[models]` table, for a model the registry has never seen (a disabled
+    /// provider's rows are no longer in the registry, so this rung carries
+    /// them); and finally what the model id itself says
+    /// ([`provider_hint_for_model`]).
+    ///
+    /// `None` for the provider means the default model places nowhere, which
+    /// the caller treats as a refusal rather than as permission (R61).
+    fn default_model_provider(&self, config: &LlmRouterConfig) -> (String, Option<ProviderType>) {
         let model = config
             .orchestrator
             .as_ref()
@@ -857,8 +886,9 @@ impl LlmSettingsService {
                     .as_ref()
                     .and_then(|models| models.get(&model))
                     .and_then(|entry| parse_provider_type(&entry.provider))
-            })?;
-        Some((model, provider))
+            })
+            .or_else(|| provider_hint_for_model(&model));
+        (model, provider)
     }
 
     /// Build and register a provider that wasn't in the router at startup.
@@ -1034,6 +1064,34 @@ impl LlmSettingsService {
     pub fn secret_store(&self) -> &Arc<dyn SecretStore> {
         &self.secret_store
     }
+}
+
+/// The last rung of the default model's provider ladder: what the id itself
+/// says.
+///
+/// Only the two shapes that are unambiguous — an explicit `provider/model` or
+/// `provider:model` prefix, and the vendors' own naming conventions. It is
+/// deliberately narrow: a wrong guess here would let a disable through that
+/// strands the daemon, and a `None` only ever *refuses* one (R61).
+fn provider_hint_for_model(model: &str) -> Option<ProviderType> {
+    if let Some((prefix, rest)) = model.split_once(['/', ':'])
+        && !rest.is_empty()
+        && let Some(provider) = parse_provider_type(prefix)
+    {
+        return Some(provider);
+    }
+
+    let id = model.to_ascii_lowercase();
+    if id.starts_with("claude") {
+        return Some(ProviderType::Anthropic);
+    }
+    if id.starts_with("gpt") || id.starts_with("chatgpt") || id.starts_with("o1")
+        || id.starts_with("o3")
+        || id.starts_with("o4")
+    {
+        return Some(ProviderType::OpenAI);
+    }
+    None
 }
 
 fn parse_provider_type(name: &str) -> Option<ProviderType> {

@@ -37,21 +37,40 @@ provider = "ollama"
 context = 8192
 "#;
 
+/// As `CONFIG`, but the default model places nowhere: the registry has never
+/// seen it, `[models]` does not declare it, and its shape names no provider.
+const UNPLACEABLE_DEFAULT: &str = r#"[orchestrator]
+model = "my-local-thing"
+
+[providers.anthropic]
+enabled = true
+strategy = "round_robin"
+
+[providers.ollama]
+enabled = false
+base_url = "http://localhost:11434/v1"
+"#;
+
 struct Harness {
     home: TempDir,
     _env: HomeStoreGuard,
     _config: TempDir,
     path: std::path::PathBuf,
+    seed: &'static str,
     service: Arc<openalpaca_llm::LlmSettingsService>,
 }
 
 impl Harness {
     fn new() -> Self {
+        Self::with_config(CONFIG)
+    }
+
+    fn with_config(seed: &'static str) -> Self {
         let home = TempDir::new().expect("home");
         let env = HomeStoreGuard::set_with_master_key(home.path());
         let config = TempDir::new().expect("config");
         let path = config.path().join("llm.toml");
-        std::fs::write(&path, CONFIG).expect("seed llm.toml");
+        std::fs::write(&path, seed).expect("seed llm.toml");
 
         let router = Arc::new(openalpaca_llm::build_router(&path).expect("router"));
         let secret_store: Arc<dyn openalpaca_llm::SecretStore> =
@@ -73,6 +92,7 @@ impl Harness {
             _env: env,
             _config: config,
             path,
+            seed,
             service: Arc::new(service),
         }
     }
@@ -208,7 +228,7 @@ async fn an_unknown_provider_is_a_404() {
             .contains("groq")
     );
     assert!(body["error"].get("status").is_none(), "§7: no duplicated status");
-    assert_eq!(h.text(), CONFIG, "nothing was written");
+    assert_eq!(h.text(), h.seed, "nothing was written");
 }
 
 #[tokio::test]
@@ -226,7 +246,7 @@ async fn disabling_the_default_models_provider_is_a_409() {
             .contains("claude-haiku-4-5-20251001"),
         "the refusal names the model that is in the way: {body}"
     );
-    assert_eq!(h.text(), CONFIG, "nothing was written");
+    assert_eq!(h.text(), h.seed, "nothing was written");
     assert!(h.backups().is_empty(), "a refusal rotates nothing");
 }
 
@@ -268,4 +288,28 @@ async fn an_enable_the_router_cannot_load_says_so_on_the_wire() {
             .configured_providers()
             .contains(&ProviderType::Anthropic)
     );
+}
+
+/// R61's second arm, at the wire. When the default model resolves to nothing,
+/// *every* disable is refused — there would be no way to tell whether the one
+/// being turned off is the one that was going to answer — and the message names
+/// the model so the owner knows what to fix. Same code word as the first arm:
+/// the remedy is the same, pick a default the daemon can place.
+#[tokio::test]
+async fn a_default_model_that_places_nowhere_refuses_with_the_same_code_word() {
+    let h = Harness::with_config(UNPLACEABLE_DEFAULT);
+
+    let (status, body) = h.put("anthropic", false).await;
+
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"]["code"], "PROVIDER_IS_DEFAULT");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("my-local-thing"),
+        "the refusal names the default it could not place: {body}"
+    );
+    assert_eq!(h.text(), h.seed, "nothing was written");
+    assert!(h.backups().is_empty(), "a refusal rotates nothing");
 }

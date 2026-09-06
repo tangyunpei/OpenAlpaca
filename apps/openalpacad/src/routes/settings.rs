@@ -546,9 +546,17 @@ pub async fn get_provider_usage(State(state): State<Arc<AppState>>) -> impl Into
 /// The bit lives in `llm.toml`, so the write lands first and the router is
 /// only touched once it has: a disable unloads the provider (in-flight calls
 /// finish, new ones fall through to the fallback chain), an enable
-/// re-registers it and refreshes its models. Disabling the provider that
-/// serves the default model is refused — `409 PROVIDER_IS_DEFAULT` — because
-/// nothing would be left to answer with.
+/// re-registers it and refreshes its models.
+///
+/// **The 409 rule.** `[orchestrator] model` is resolved to a provider by three
+/// rungs in order: the live model registry, the config's own `[models]` table,
+/// then what the model id itself says (`claude-…` → Anthropic, `gpt-…`/`o3-…`
+/// → OpenAI, or an explicit `provider/model` prefix). The disable is refused
+/// with `409 PROVIDER_IS_DEFAULT` when that resolves to the provider being
+/// turned off — nothing would be left to answer with — **and** when it
+/// resolves to nothing at all, in which case every provider disable is refused
+/// and the message names the unresolved default so the owner fixes it first.
+/// The guard fails closed: it never allows a disable on a guess.
 ///
 /// The 200 body is `{id, enabled, loaded, warning}`. `enabled` is the
 /// disposition now on disk; `loaded` is whether the router holds the provider.
@@ -597,9 +605,13 @@ pub(crate) async fn provider_enabled_response(
         Err(e @ SetProviderEnabledError::UnknownProvider(_)) => {
             api_error(StatusCode::NOT_FOUND, "PROVIDER_NOT_FOUND", e.to_string())
         }
-        Err(e @ SetProviderEnabledError::IsDefaultProvider { .. }) => {
-            api_error(StatusCode::CONFLICT, "PROVIDER_IS_DEFAULT", e.to_string())
-        }
+        // One code word for both arms of the guard: the remedy is the same —
+        // point `[orchestrator] model` at something else — and the daemon's
+        // message says which arm it was.
+        Err(
+            e @ (SetProviderEnabledError::IsDefaultProvider { .. }
+            | SetProviderEnabledError::DefaultModelUnresolved { .. }),
+        ) => api_error(StatusCode::CONFLICT, "PROVIDER_IS_DEFAULT", e.to_string()),
         Err(e @ SetProviderEnabledError::Persist(_)) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "DISK_WRITE_FAILED",

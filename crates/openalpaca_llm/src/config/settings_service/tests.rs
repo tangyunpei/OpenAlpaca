@@ -22,9 +22,17 @@ use std::sync::Mutex;
 const SECRET: &str = "enc:v1:YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXo=";
 
 fn hand_authored() -> String {
+    hand_authored_with(DEFAULT_MODEL)
+}
+
+/// The default model the fixture names. Anthropic's, and one the compiled
+/// registry knows — so the 409 guard resolves it on the first rung.
+const DEFAULT_MODEL: &str = "claude-haiku-4-5-20251001";
+
+fn hand_authored_with(model: &str) -> String {
     format!(
         r#"[orchestrator]
-model = "claude-haiku-4-5-20251001"
+model = "{model}"
 
 [providers.anthropic]
 enabled = true
@@ -73,16 +81,22 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
+        Self::with_default_model(DEFAULT_MODEL)
+    }
+
+    /// A fixture whose `[orchestrator] model` is `model` — the input to the
+    /// 409 guard's resolution ladder.
+    fn with_default_model(model: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("llm.toml");
-        std::fs::write(&path, hand_authored()).unwrap();
+        std::fs::write(&path, hand_authored_with(model)).unwrap();
 
         let router = Arc::new(LlmRouter::new(
             HashMap::new(),
             ModelRegistry::with_defaults(),
             HashMap::new(),
             Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
-            "claude-haiku-4-5-20251001".to_string(),
+            model.to_string(),
         ));
 
         let writes = Arc::new(Mutex::new(Vec::new()));
@@ -378,4 +392,95 @@ async fn a_web_search_write_goes_through_the_locked_writer_too() {
     let text = h.text();
     assert!(text.contains("enabled = false"), "{text}");
     assert!(text.contains("timeout_secs = 9"), "{text}");
+}
+
+// ── R61: the 409 guard fails closed ─────────────────────────────────────────
+
+/// Review finding #5. The guard used to allow the disable when it could not
+/// place the default model at all — and that is not exotic territory: the
+/// compiled registry contains **no** Ollama entries, and Ollama discovery needs
+/// a non-empty key pool, so a local-first owner whose default is an Ollama
+/// model not declared in `[models]` got no protection whatever. The daemon
+/// would be left with a default model no enabled provider can serve.
+#[tokio::test]
+async fn a_default_model_that_places_nowhere_refuses_every_disable() {
+    let h = Harness::with_default_model("my-local-thing");
+    h.register_stub(ProviderType::OpenAI);
+
+    let err = h
+        .service
+        .set_provider_enabled("openai", false)
+        .await
+        .expect_err("with nothing to answer with, nothing may be turned off");
+    match &err {
+        SetProviderEnabledError::DefaultModelUnresolved { provider, model } => {
+            assert_eq!(provider, "openai");
+            assert_eq!(model, "my-local-thing", "the refusal names what to fix");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    assert!(h.writes.lock().unwrap().is_empty(), "nothing was written");
+    assert!(
+        h.router.configured_providers().contains(&ProviderType::OpenAI),
+        "and nothing was unloaded"
+    );
+}
+
+/// The ladder's third rung. A model id the registry has never seen and
+/// `[models]` does not declare can still say whose it is, and then the guard
+/// protects the right provider and lets the other one go.
+#[tokio::test]
+async fn the_default_models_provider_can_be_read_off_the_model_id() {
+    let h = Harness::with_default_model("claude-experimental-9");
+    h.register_stub(ProviderType::Anthropic);
+    h.register_stub(ProviderType::OpenAI);
+
+    let err = h
+        .service
+        .set_provider_enabled("anthropic", false)
+        .await
+        .unwrap_err();
+    match &err {
+        SetProviderEnabledError::IsDefaultProvider { provider, model } => {
+            assert_eq!(provider, "anthropic");
+            assert_eq!(model, "claude-experimental-9");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // …and the disable that is not in the way is still allowed: the guard
+    // fails closed on "nobody", not on "somebody else".
+    let outcome = h.service.set_provider_enabled("openai", false).await.unwrap();
+    assert!(!outcome.enabled);
+    assert!(!h.router.configured_providers().contains(&ProviderType::OpenAI));
+}
+
+/// The `[models]` rung, between the registry and the id's own shape.
+#[tokio::test]
+async fn the_default_models_provider_can_come_from_the_models_table() {
+    let h = Harness::with_default_model("house-model");
+    std::fs::write(
+        &h.path,
+        format!(
+            "{}
+[models.\"house-model\"]
+provider = \"openai\"
+context = 8192
+",
+            hand_authored_with("house-model")
+        ),
+    )
+    .unwrap();
+    h.register_stub(ProviderType::OpenAI);
+
+    let err = h
+        .service
+        .set_provider_enabled("openai", false)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, SetProviderEnabledError::IsDefaultProvider { model, .. } if model == "house-model"),
+        "{err:?}"
+    );
 }

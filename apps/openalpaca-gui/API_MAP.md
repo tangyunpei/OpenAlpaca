@@ -983,6 +983,17 @@ daemon that is up but slow to answer.
 > chain is already a list of things that may be unavailable. A name this build
 > cannot serve is **`404 PROVIDER_NOT_FOUND`**.
 >
+> **The guard fails closed.** `[orchestrator] model` is placed by three rungs in
+> order: the live model registry, the config's own `[models]` table, then what
+> the model id itself says (`claude-…` → Anthropic, `gpt-…`/`o3-…` → OpenAI, or
+> an explicit `provider/model` prefix). When all three come up empty the disable
+> is refused too — the same `409`, with the message naming the unresolved
+> default — because no provider can then be shown _not_ to be the one that was
+> going to answer. This is not exotic-model-id territory: the compiled registry
+> holds no Ollama entries and Ollama discovery needs a non-empty key pool, so a
+> local-first owner whose default is an Ollama model not declared in `[models]`
+> previously got no protection at all. Fixing the default model id clears it.
+>
 > **Not added: `enabled` on `ProviderUsageSummary`.** The proposal asked for it;
 > the settings payload already carries the flag, and a second copy on a usage
 > row is a second thing to keep in sync. The model picker's `off` group badge is
