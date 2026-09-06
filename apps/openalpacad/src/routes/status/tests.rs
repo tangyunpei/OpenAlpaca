@@ -13,6 +13,7 @@ use super::*;
 use crate::test_util::HomeStoreGuard;
 use axum::body::to_bytes;
 use chrono::TimeDelta;
+use openalpaca_core::daemon_config::SessionsConfig;
 use openalpaca_core::session_log::{SessionLogLimits, SessionLogService};
 use openalpaca_storage::{Database, FileAssetRepository};
 use openalpaca_storage::models::file_asset::{FileAsset, FileAssetStatus};
@@ -32,12 +33,16 @@ fn test_db(dir: &TempDir) -> Database {
     Database::open(&dir.path().join("status-test.db")).expect("database should open")
 }
 
+/// `managed_log: true` and the config's own defaults — the ordinary case for
+/// every test that is not exercising those two fields specifically.
 fn inputs<'a>(db: &'a Database, started_at: DateTime<Utc>) -> StatusInputs<'a> {
     StatusInputs {
         started_at,
         now: started_at,
         db,
         session_log: None,
+        managed_log: true,
+        sessions_config: SessionsConfig::default(),
     }
 }
 
@@ -224,6 +229,30 @@ async fn names_the_daemon_log_only_once_the_file_exists() {
     assert_eq!(body["log_path"], log.to_string_lossy().as_ref());
 }
 
+/// Important #3 (T44 fix round 1): the file existing is not enough — a
+/// daemon this run did not launch (the GUI sidecar, a bare `cargo run`) must
+/// not claim an earlier CLI daemon's leftover `daemon.log`, even though it is
+/// sitting at the exact path this daemon would also write to.
+#[tokio::test]
+async fn an_unmanaged_daemon_reports_null_even_when_a_log_file_exists() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().canonicalize().unwrap().join(".openalpaca");
+    let _guard = HomeStoreGuard::set(&home);
+    let db = test_db(&tmp);
+
+    let log = openalpaca_storage::store::daemon_log_path().unwrap();
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    std::fs::write(&log, b"a previous CLI daemon's run\n").unwrap();
+
+    let mut unmanaged = inputs(&db, Utc::now());
+    unmanaged.managed_log = false;
+    let body = body_of(status_response(&unmanaged, &headers_with(None))).await;
+    assert!(
+        body["log_path"].is_null(),
+        "this run never opened the file, so it is not this run's to report: {body}"
+    );
+}
+
 /// The session-log extras 7b left for this route, read from the service that
 /// owns them — and present, with `last_sweep: null`, on a daemon that has no
 /// session log at all.
@@ -275,6 +304,33 @@ async fn reports_the_boot_sweep_and_the_records_the_writers_dropped() {
         "a root still over its cap has to be able to say so: {body}"
     );
     assert_eq!(body["sessions"]["dropped_records"], 0);
+}
+
+/// Important #1 (T44 fix round 1): the brief's `retention` block (§1, P-27),
+/// read from `orchestrator.sessions` — the values the boot sweep and the
+/// writer's per-session trim actually enforce, not a hardcoded copy.
+#[tokio::test]
+async fn serves_the_retention_limits_the_daemon_actually_enforces() {
+    let tmp = TempDir::new().unwrap();
+    let _guard = HomeStoreGuard::set(&tmp.path().join(".openalpaca"));
+    let db = test_db(&tmp);
+
+    let mut with_config = inputs(&db, Utc::now());
+    with_config.sessions_config = SessionsConfig {
+        log_max_session_bytes: 111,
+        log_max_total_bytes: 222,
+        log_retention_days: 3,
+        tool_result_inline_bytes: 4_096,
+    };
+
+    let body = body_of(status_response(&with_config, &headers_with(None))).await;
+    assert_eq!(body["retention"]["log_max_session_bytes"], 111);
+    assert_eq!(body["retention"]["log_max_total_bytes"], 222);
+    assert_eq!(body["retention"]["log_retention_days"], 3);
+    // Only the three fields the brief names — `tool_result_inline_bytes`
+    // governs tool-result spill, not retention, and is not part of this
+    // block.
+    assert!(body["retention"].get("tool_result_inline_bytes").is_none());
 }
 
 fn asset(id: &str, size_bytes: i64) -> FileAsset {

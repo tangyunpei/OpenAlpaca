@@ -162,6 +162,12 @@ async fn async_main(
     // covers the whole of this daemon's life.
     let started_at = Utc::now();
 
+    // Step 0b: whether `openalpaca daemon start` opened this run's log for
+    // it. Read once, up front — `GET /v1/status`'s `log_path` must be `null`
+    // for a daemon this env var was never set on, even when `daemon.log`
+    // exists at the usual path (Important #3, T44 fix round 1).
+    let managed_log = std::env::var_os(store::MANAGED_LOG_ENV).is_some();
+
     // Step 1: Bind to dynamic port (127.0.0.1:0 -> OS assigns port)
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -651,6 +657,7 @@ async fn async_main(
     let state = Arc::new(AppState {
         instance_id: instance_id.clone(),
         started_at,
+        managed_log,
         token,
         event_broadcaster: event_broadcaster.clone(),
         db,

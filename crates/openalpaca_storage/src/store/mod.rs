@@ -142,6 +142,15 @@ pub fn daemon_log_path() -> Result<PathBuf> {
 const LOGS_DIR: &str = "logs";
 const DAEMON_LOG_FILE: &str = "daemon.log";
 
+/// Set on the environment of the child `openalpaca daemon start` spawns —
+/// marks *this* daemon instance as the one whose stdout/stderr the manager
+/// rotated and opened `daemon_log_path()` for. `GET /v1/status` gates
+/// `log_path` on this in addition to the file existing, so a daemon started
+/// any other way (the GUI sidecar, a bare `cargo run`) never reports a path
+/// to some *other* daemon's leftover `daemon.log` just because one happens to
+/// be sitting there (T44 fix round 1, Important #3).
+pub const MANAGED_LOG_ENV: &str = "OPENALPACA_MANAGED_LOG";
+
 /// `state/backups` — created if missing. The atomic config writer's rotation target.
 pub fn backups_dir() -> Result<PathBuf> {
     let dir = state_dir()?.join("backups");

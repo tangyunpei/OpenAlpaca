@@ -14,10 +14,13 @@
 //! process table's) with `uptime_secs`, and `schema_version` read from the
 //! database rather than counted from `MIGRATIONS`: the DB is what the daemon
 //! actually opened, and a binary that failed to migrate must not report the
-//! version it wished for. **How much disk is this costing?** — §4.8's two
-//! numbers, never one: `upload_bytes` (quota-bearing) and `produced_bytes`
-//! (informational), from one grouped scan, plus what the boot session-log
-//! sweep did and how many log records the writers dropped.
+//! version it wished for. **How much disk is this costing, and against what
+//! limits?** — §4.8's two numbers, never one: `upload_bytes` (quota-bearing)
+//! and `produced_bytes` (informational), from one grouped scan; what the boot
+//! session-log sweep did and how many log records the writers dropped; and
+//! `retention` (§1, P-27) — the three `orchestrator.sessions` limits those
+//! numbers are measured against, read from `AppState.daemon_config` rather
+//! than copied, so a hand-edited `daemon.toml` is what the client sees.
 //!
 //! **`project_root` is a question about the caller's own turn.** The daemon
 //! holds no per-lane record of a workspace — the request root is threaded
@@ -32,11 +35,15 @@
 //!
 //! **`log_path` is the CLI-managed log, or nothing** (N2, resolved: serve it).
 //! `openalpaca daemon start` points the child's stdout and stderr at
-//! `state/logs/daemon.log` and rotates it at 16 MB; a daemon started any other
-//! way — `cargo run`, the GUI sidecar — has no such file, and the honest answer
-//! there is `null`, not a path to something that was never written. Phase B (a
-//! real in-daemon appender, and un-discarding the sidecar's stdout) is a
-//! separate task; this route reports what exists today.
+//! `state/logs/daemon.log`, rotates it at 16 MB, and marks the child with
+//! `store::MANAGED_LOG_ENV` — this run's own claim to the file, not just
+//! *a* file that happens to be there. A daemon started any other way
+//! (`cargo run`, the GUI sidecar), or one that inherited someone else's
+//! leftover `daemon.log` without the marker, reports `null`: the honest
+//! answer for a path this run never opened, never a path to something it did
+//! not write (Important #3, T44 fix round 1). Phase B (a real in-daemon
+//! appender, and un-discarding the sidecar's stdout) is a separate task; this
+//! route reports what exists today.
 
 use std::sync::Arc;
 
@@ -47,6 +54,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Utc};
+use openalpaca_core::daemon_config::SessionsConfig;
 use openalpaca_core::session_log::{SessionLogService, sweep::SweepReport};
 use openalpaca_storage::{Database, FileAssetRepository, store};
 use serde::Serialize;
@@ -82,8 +90,39 @@ pub struct StatusResponse {
     pub upload_bytes: i64,
     /// Bytes agents produced. Informational: never charged against the cap.
     pub produced_bytes: i64,
+    /// The limits `upload_bytes`/`produced_bytes`/the boot sweep are measured
+    /// against — the brief's `retention` block (§1, P-27).
+    pub retention: RetentionStatus,
     /// What the session event log has to say for itself.
     pub sessions: SessionsStatus,
+}
+
+/// The three `orchestrator.sessions` limits this daemon is actually
+/// enforcing, read from `AppState.daemon_config` rather than hardcoded — a
+/// hand-edited `daemon.toml` changes these with no code change, and the
+/// Storage card's "raise the cap" advice needs the number it is asking the
+/// owner to raise (Important #1, T44 fix round 1).
+#[derive(Debug, Serialize)]
+pub struct RetentionStatus {
+    /// Per session, counting `log.jsonl` segments plus `results/`.
+    pub log_max_session_bytes: u64,
+    /// Across all sessions — the denominator `sessions.last_sweep`'s
+    /// `over_cap_after` is measured against.
+    pub log_max_total_bytes: u64,
+    /// Age-based sweep of archived session logs; `0` means the sweep is
+    /// disabled (pending owner decision T12), not that the field was left
+    /// unset.
+    pub log_retention_days: u32,
+}
+
+impl From<&SessionsConfig> for RetentionStatus {
+    fn from(config: &SessionsConfig) -> Self {
+        Self {
+            log_max_session_bytes: config.log_max_session_bytes,
+            log_max_total_bytes: config.log_max_total_bytes,
+            log_retention_days: config.log_retention_days,
+        }
+    }
 }
 
 /// The session-log numbers, from the service the runner already holds.
@@ -140,6 +179,12 @@ pub(crate) struct StatusInputs<'a> {
     pub now: DateTime<Utc>,
     pub db: &'a Database,
     pub session_log: Option<&'a SessionLogService>,
+    /// Whether `openalpaca daemon start` marked *this* run as the owner of
+    /// `store::daemon_log_path()` (Important #3). Gates `log_path` alongside
+    /// the file existing — the file alone is not proof this run wrote it.
+    pub managed_log: bool,
+    /// `orchestrator.sessions`, as this daemon is actually enforcing it.
+    pub sessions_config: SessionsConfig,
 }
 
 /// `GET /v1/status`
@@ -150,6 +195,8 @@ pub async fn status_handler(State(state): State<Arc<AppState>>, headers: HeaderM
             now: Utc::now(),
             db: &state.db,
             session_log: state.gateway.shared_context.session_log().map(Arc::as_ref),
+            managed_log: state.managed_log,
+            sessions_config: state.daemon_config.load().orchestrator.sessions.clone(),
         },
         &headers,
     )
@@ -187,9 +234,10 @@ fn status_response(inputs: &StatusInputs<'_>, headers: &HeaderMap) -> Response {
         started_at: inputs.started_at.to_rfc3339(),
         uptime_secs: (inputs.now - inputs.started_at).num_seconds().max(0) as u64,
         schema_version,
-        log_path: daemon_log_path(),
+        log_path: daemon_log_path(inputs.managed_log),
         upload_bytes: bytes.upload_bytes,
         produced_bytes: bytes.produced_bytes,
+        retention: RetentionStatus::from(&inputs.sessions_config),
         sessions: SessionsStatus {
             last_sweep: inputs
                 .session_log
@@ -226,13 +274,22 @@ fn store_roots() -> anyhow::Result<(String, String, String)> {
     ))
 }
 
-/// The CLI-managed daemon log, reported only when it is really there.
+/// The CLI-managed daemon log, reported only when it is really there *and*
+/// this run is the one that opened it.
 ///
 /// `store::daemon_log_path()` creates nothing, so asking the question does not
 /// answer it: a daemon the CLI never started has no `state/logs/daemon.log`
 /// and says so with `null` rather than handing the GUI a path whose Copy
-/// button would put a non-existent file on the clipboard.
-fn daemon_log_path() -> Option<String> {
+/// button would put a non-existent file on the clipboard. The file existing
+/// is not enough on its own, though — a GUI- or `cargo run`-launched daemon
+/// can find a previous CLI daemon's log sitting at the exact same path, and
+/// reporting that would hand the owner a file whose newest line predates the
+/// running daemon (Important #3, T44 fix round 1). `managed` is that second
+/// check: only a run `openalpaca daemon start` itself opened the file for.
+fn daemon_log_path(managed: bool) -> Option<String> {
+    if !managed {
+        return None;
+    }
     let path = store::daemon_log_path().ok()?;
     path.is_file().then(|| display(path))
 }

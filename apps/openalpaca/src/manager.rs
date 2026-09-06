@@ -265,6 +265,10 @@ fn daemon_launch_command(launch: &DaemonLaunch, runtime_dir: &Path, config_dir: 
 
     cmd.current_dir(runtime_dir);
     cmd.env(DAEMON_CONFIG_ENV, config_dir);
+    // This run is the one that rotated and opened `daemon.log` for the child
+    // — mark it so `GET /v1/status` can tell it apart from a daemon the CLI
+    // never touched (Important #3, T44 fix round 1).
+    cmd.env(store::MANAGED_LOG_ENV, "1");
     cmd
 }
 
@@ -537,6 +541,27 @@ mod tests {
         assert_eq!(read("daemon.log.2"), "live");
         assert_eq!(read("daemon.log.3"), "gen1");
         assert!(!root.path().join("daemon.log.4").exists());
+    }
+
+    /// `GET /v1/status` must never hand a GUI- or `cargo run`-launched daemon
+    /// some earlier CLI daemon's leftover `daemon.log` just because the file
+    /// exists — so the manager marks every child it spawns as the log's
+    /// owner, and the daemon gates on the marker as well as the file
+    /// (Important #3, T44 fix round 1).
+    #[test]
+    fn daemon_launch_command_marks_the_child_as_the_logs_owner() {
+        let launch = DaemonLaunch::Binary(PathBuf::from("/usr/local/bin/openalpacad"));
+        let cmd = daemon_launch_command(
+            &launch,
+            Path::new("/tmp/runtime"),
+            Path::new("/tmp/config"),
+        );
+
+        let managed = cmd
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new(store::MANAGED_LOG_ENV))
+            .and_then(|(_, value)| value);
+        assert_eq!(managed, Some(std::ffi::OsStr::new("1")));
     }
 
     #[test]

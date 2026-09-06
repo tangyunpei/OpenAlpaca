@@ -21,6 +21,14 @@ pub struct AppState {
     /// listener binds, so `GET /v1/status`'s `uptime_secs` measures the
     /// daemon's own life and not the process table's idea of it.
     pub started_at: chrono::DateTime<chrono::Utc>,
+    /// Whether `openalpaca daemon start` marked this run as the owner of
+    /// `store::daemon_log_path()` — read once, from
+    /// `store::MANAGED_LOG_ENV`, before anything else touches the
+    /// environment. `GET /v1/status`'s `log_path` is `null` whenever this is
+    /// `false`, even if `daemon.log` happens to exist: a GUI- or
+    /// `cargo run`-launched daemon must not claim a file some other daemon's
+    /// CLI manager wrote (Important #3, T44 fix round 1).
+    pub managed_log: bool,
     pub token: String,
     pub event_broadcaster: EventBroadcaster,
     pub db: Database,
