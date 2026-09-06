@@ -3,7 +3,12 @@
 use serde::{Deserialize, Serialize};
 
 /// A single message in a conversation, persisted to SQLite.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Default` is derived deliberately: every writer names the three or four
+/// columns it actually sets and takes the rest from `..Default::default()`, so
+/// a new nullable column is one field on this struct and one line in the
+/// queries that read it — not an edit at every literal in the workspace.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConversationMessage {
     pub id: i64,
     pub lane_key: String,

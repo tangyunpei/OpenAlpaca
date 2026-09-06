@@ -7,18 +7,10 @@ fn test_insert_and_list() {
     let repo = ConversationRepository::new(&db);
 
     let msg = ConversationMessage {
-        id: 0,
         lane_key: "user:gui".to_string(),
         role: "user".to_string(),
         content: "Hello world".to_string(),
-        source: None,
-        model: None,
-        tokens_in: None,
-        tokens_out: None,
-        duration_ms: None,
-        created_at: String::new(),
-        content_json: None,
-        display_text: None,
+        ..Default::default()
     };
 
     let id = repo.insert(&msg).unwrap();
@@ -37,18 +29,10 @@ fn test_count_and_delete() {
 
     for i in 0..3 {
         repo.insert(&ConversationMessage {
-            id: 0,
             lane_key: "user:gui".to_string(),
             role: "user".to_string(),
             content: format!("Message {i}"),
-            source: None,
-            model: None,
-            tokens_in: None,
-            tokens_out: None,
-            duration_ms: None,
-            created_at: String::new(),
-            content_json: None,
-            display_text: None,
+            ..Default::default()
         })
         .unwrap();
     }
@@ -68,18 +52,10 @@ fn test_list_with_offset() {
 
     for i in 0..5 {
         repo.insert(&ConversationMessage {
-            id: 0,
             lane_key: "user:gui".to_string(),
             role: "user".to_string(),
             content: format!("Message {i}"),
-            source: None,
-            model: None,
-            tokens_in: None,
-            tokens_out: None,
-            duration_ms: None,
-            created_at: String::new(),
-            content_json: None,
-            display_text: None,
+            ..Default::default()
         })
         .unwrap();
     }
@@ -96,18 +72,14 @@ fn test_insert_with_metadata() {
     let repo = ConversationRepository::new(&db);
 
     let msg = ConversationMessage {
-        id: 0,
         lane_key: "user:gui".to_string(),
         role: "assistant".to_string(),
         content: "Response text".to_string(),
-        source: None,
         model: Some("claude-3".to_string()),
         tokens_in: Some(100),
         tokens_out: Some(200),
         duration_ms: Some(1500),
-        created_at: String::new(),
-        content_json: None,
-        display_text: None,
+        ..Default::default()
     };
 
     repo.insert(&msg).unwrap();
@@ -127,18 +99,10 @@ fn test_list_recent_by_lane() {
 
     for i in 0..10 {
         repo.insert(&ConversationMessage {
-            id: 0,
             lane_key: "user:gui".to_string(),
             role: "user".to_string(),
             content: format!("Message {i}"),
-            source: None,
-            model: None,
-            tokens_in: None,
-            tokens_out: None,
-            duration_ms: None,
-            created_at: String::new(),
-            content_json: None,
-            display_text: None,
+            ..Default::default()
         })
         .unwrap();
     }
@@ -191,18 +155,10 @@ fn test_list_recent_fewer_than_limit() {
 
     for i in 0..2 {
         repo.insert(&ConversationMessage {
-            id: 0,
             lane_key: "user:gui".to_string(),
             role: "user".to_string(),
             content: format!("Message {i}"),
-            source: None,
-            model: None,
-            tokens_in: None,
-            tokens_out: None,
-            duration_ms: None,
-            created_at: String::new(),
-            content_json: None,
-            display_text: None,
+            ..Default::default()
         })
         .unwrap();
     }
@@ -314,18 +270,10 @@ fn test_list_by_lane_id_range() {
     for i in 0..10 {
         let id = repo
             .insert(&ConversationMessage {
-                id: 0,
                 lane_key: "user:gui".to_string(),
                 role: "user".to_string(),
                 content: format!("Message {i}"),
-                source: None,
-                model: None,
-                tokens_in: None,
-                tokens_out: None,
-                duration_ms: None,
-                created_at: String::new(),
-                content_json: None,
-                display_text: None,
+                ..Default::default()
             })
             .unwrap();
         ids.push(id);

@@ -337,6 +337,8 @@ impl<'a> ConversationRepository<'a> {
         })
     }
 
+    /// The ten-column projection: `content_json` / `display_text` are not
+    /// selected by its callers and stay at their `Default` (`None`).
     fn row_to_message(row: &rusqlite::Row<'_>) -> Result<ConversationMessage> {
         Ok(ConversationMessage {
             id: row.get(0)?,
@@ -349,8 +351,7 @@ impl<'a> ConversationRepository<'a> {
             tokens_out: row.get(7)?,
             duration_ms: row.get(8)?,
             created_at: row.get(9)?,
-            content_json: None,
-            display_text: None,
+            ..Default::default()
         })
     }
 

@@ -360,7 +360,6 @@ pub fn persist_conversation(
     }
 
     let msg = openalpaca_storage::ConversationMessage {
-        id: 0,
         lane_key: lane_key.to_string(),
         role: "assistant".to_string(),
         content,
@@ -369,9 +368,7 @@ pub fn persist_conversation(
         tokens_in: Some(tokens_in),
         tokens_out: Some(tokens_out),
         duration_ms: Some(runtime_secs * 1000),
-        created_at: String::new(),
-        content_json: None,
-        display_text: None,
+        ..Default::default()
     };
 
     match conv_repo.insert(&msg) {

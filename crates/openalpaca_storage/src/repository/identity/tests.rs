@@ -77,18 +77,11 @@ fn test_migrate_lane_on_link() {
     let new_lane = "global1:telegram";
 
     let msg = ConversationMessage {
-        id: 0,
         lane_key: old_lane.to_string(),
         role: "user".to_string(),
         content: "hello".to_string(),
         source: Some("telegram".to_string()),
-        model: None,
-        tokens_in: None,
-        tokens_out: None,
-        duration_ms: None,
-        created_at: String::new(),
-        content_json: None,
-        display_text: None,
+        ..Default::default()
     };
     conv_repo.insert(&msg).unwrap();
     conv_repo
@@ -152,18 +145,11 @@ fn test_migrate_lane_relink_no_unique_violation() {
 
     // First link: create messages under old lane, migrate
     let msg = ConversationMessage {
-        id: 0,
         lane_key: "tg456:telegram".to_string(),
         role: "user".to_string(),
         content: "first".to_string(),
         source: Some("telegram".to_string()),
-        model: None,
-        tokens_in: None,
-        tokens_out: None,
-        duration_ms: None,
-        created_at: String::new(),
-        content_json: None,
-        display_text: None,
+        ..Default::default()
     };
     conv_repo.insert(&msg).unwrap();
 

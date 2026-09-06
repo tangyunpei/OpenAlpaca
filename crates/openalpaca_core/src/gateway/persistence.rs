@@ -31,18 +31,11 @@ impl GatewayPersistence {
         let repo = ConversationRepository::new(&self.db);
         repo.get_or_create_conversation(lane_key, source)?;
         let id = repo.insert(&ConversationMessage {
-            id: 0,
             lane_key: lane_key.to_string(),
             role: "user".to_string(),
             content: content.to_string(),
             source: Some(source.to_string()),
-            model: None,
-            tokens_in: None,
-            tokens_out: None,
-            duration_ms: None,
-            created_at: String::new(),
-            content_json: None,
-            display_text: None,
+            ..Default::default()
         })?;
         repo.increment_message_count(lane_key)?;
         Ok(id)
@@ -108,18 +101,11 @@ impl GatewayPersistence {
         };
 
         let msg = ConversationMessage {
-            id: 0,
             lane_key: lane_key.to_string(),
             role: "user".to_string(),
             content: content.to_string(),
             source: Some(source.to_string()),
-            model: None,
-            tokens_in: None,
-            tokens_out: None,
-            duration_ms: None,
-            created_at: String::new(),
-            content_json: None,
-            display_text: None,
+            ..Default::default()
         };
 
         let id = repo.insert_with_structured(&msg, &content_json, &display_text)?;
@@ -154,18 +140,12 @@ impl GatewayPersistence {
         }
         let repo = ConversationRepository::new(&self.db);
         let id = repo.insert(&ConversationMessage {
-            id: 0,
             lane_key: lane_key.to_string(),
             role: "assistant".to_string(),
             content: content.to_string(),
             source: Some(source.to_string()),
-            model: None,
-            tokens_in: None,
-            tokens_out: None,
             duration_ms,
-            created_at: String::new(),
-            content_json: None,
-            display_text: None,
+            ..Default::default()
         })?;
         repo.increment_message_count(lane_key)?;
         Ok(id)
