@@ -1151,3 +1151,40 @@ async fn test_streaming_non_retryable_error_fails_immediately() {
         "Non-retryable errors should fail immediately"
     );
 }
+
+// ── R58(c): the CLI backend does not outlive the provider it belongs to ─────
+
+/// A disable leaves exactly one trace in the router: the provider is gone from
+/// `providers`. The CLI-backend branch of the fallback resolves its target
+/// from the *model registry*, which is a different map, so without this gate a
+/// call naming a model of the provider the owner just switched off could still
+/// be served — by Claude Code or Codex on that owner's machine.
+#[tokio::test]
+async fn the_cli_backend_will_not_serve_a_provider_that_is_not_loaded() {
+    let cli_provider = Arc::new(MockProvider::new(
+        "claude_cli",
+        vec![Ok(MockProvider::ok_response("claude_cli"))],
+    ));
+
+    // No `providers` entry — this is what a disabled provider looks like.
+    let router = LlmRouter::new(
+        HashMap::new(),
+        ModelRegistry::with_defaults(),
+        HashMap::new(),
+        Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+        "claude-sonnet-4-5-20250929".to_string(),
+    );
+    router.register_cli_backend(ProviderType::Anthropic, cli_provider.clone());
+
+    let err = router
+        .try_fallback("claude-sonnet-4-5-20250929", &make_request(None))
+        .await
+        .expect_err("a provider that is not loaded may not be served at all");
+
+    assert!(matches!(err, LlmRouterError::AllFallbacksFailed), "{err:?}");
+    assert_eq!(
+        cli_provider.call_count.load(Ordering::SeqCst),
+        0,
+        "the CLI backend was never reached"
+    );
+}

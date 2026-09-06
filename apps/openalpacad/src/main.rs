@@ -493,7 +493,6 @@ async fn async_main(
     let recent_soul_hashes = hot_reload::new_recent_hashes();
     let recent_user_hashes = hot_reload::new_recent_hashes();
     let recent_identity_hashes = hot_reload::new_recent_hashes();
-    let recent_llm_hashes = hot_reload::new_recent_hashes();
 
     hot_reload::spawn_file_watcher(
         hot_reload::FileWatcherContext {
@@ -523,7 +522,7 @@ async fn async_main(
             soul_hashes: recent_soul_hashes.clone(),
             user_hashes: recent_user_hashes.clone(),
             identity_hashes: recent_identity_hashes.clone(),
-            llm_hashes: recent_llm_hashes,
+            llm_hashes: svcs.llm_config_hashes,
         },
         wake_rx,
         event_broadcaster.clone(),

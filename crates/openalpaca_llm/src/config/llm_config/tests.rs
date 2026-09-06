@@ -72,3 +72,48 @@ fn test_parse_provider_type_fn() {
     assert_eq!(parse_provider_type("ollama"), Some(ProviderType::Ollama));
     assert_eq!(parse_provider_type("unknown"), None);
 }
+
+// ── R58(b): a disabled provider contributes no models ───────────────────────
+
+/// A provider the owner turned off must not be in the catalogue after a
+/// restart either — neither its `[models]` rows nor its compiled defaults.
+/// Otherwise `GET /v1/models` re-lists it, the picker offers it, and the call
+/// fails with `ProviderNotConfigured` (or worse, reaches the provider's CLI
+/// backend).
+#[test]
+fn a_disabled_provider_contributes_no_models_at_boot() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("llm.toml");
+    std::fs::write(
+        &path,
+        r#"[orchestrator]
+model = "claude-haiku-4-5-20251001"
+
+[providers.openai]
+enabled = false
+
+[models."gpt-hand-written"]
+provider = "openai"
+context = 128000
+"#,
+    )
+    .unwrap();
+
+    let router = build_router(&path).expect("router");
+    let registry = router.model_registry();
+
+    assert_eq!(
+        registry.resolve_provider("gpt-hand-written"),
+        None,
+        "the disabled provider's own [models] row must stay out"
+    );
+    assert_eq!(
+        registry.resolve_provider("gpt-5.2"),
+        None,
+        "and so must its compiled defaults"
+    );
+    assert!(
+        registry.resolve_provider("claude-haiku-4-5-20251001").is_some(),
+        "the enabled providers are untouched"
+    );
+}

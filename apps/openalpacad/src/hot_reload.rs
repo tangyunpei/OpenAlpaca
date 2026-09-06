@@ -20,6 +20,61 @@ pub fn new_recent_hashes() -> RecentHashes {
     Arc::new(Mutex::new(VecDeque::with_capacity(8)))
 }
 
+/// How many of the daemon's own writes a dedup ring remembers.
+const OWN_WRITE_RING: usize = 8;
+
+/// The `llm.toml` dedup ring (R58a).
+///
+/// Same job as [`RecentHashes`], different lock: this one is *written* from a
+/// synchronous context — the settings service's injected `ConfigWriter`
+/// closure, which runs inside `persist_only` — so it cannot be a
+/// `tokio::sync::Mutex`. Nothing holds it across an await.
+pub type ConfigHashes = Arc<std::sync::Mutex<VecDeque<String>>>;
+
+/// Create a new bounded hash ring for the daemon's own config writes.
+pub fn new_config_hashes() -> ConfigHashes {
+    Arc::new(std::sync::Mutex::new(VecDeque::with_capacity(
+        OWN_WRITE_RING,
+    )))
+}
+
+fn content_hash(contents: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(contents.as_bytes()))
+}
+
+fn lock_ring(ring: &ConfigHashes) -> std::sync::MutexGuard<'_, VecDeque<String>> {
+    ring.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Remember bytes the daemon is about to put on disk, so the watcher can tell
+/// them apart from a hand edit.
+///
+/// Recorded *before* the write lands, the way the MCP supervisor does it: the
+/// watcher must never observe the new file without the hash already in the
+/// ring.
+pub fn record_own_config_write(ring: &ConfigHashes, contents: &str) {
+    let mut ring = lock_ring(ring);
+    ring.push_back(content_hash(contents));
+    while ring.len() > OWN_WRITE_RING {
+        ring.pop_front();
+    }
+}
+
+/// Did the daemon write these bytes? Consumes the match, so one recorded write
+/// swallows exactly one event.
+fn swallow_own_config_write(ring: &ConfigHashes, contents: &str) -> bool {
+    let hash = content_hash(contents);
+    let mut ring = lock_ring(ring);
+    match ring.iter().position(|h| *h == hash) {
+        Some(pos) => {
+            ring.remove(pos);
+            true
+        }
+        None => false,
+    }
+}
+
 /// All context needed by the file watcher task.
 pub struct FileWatcherContext {
     pub soul_path: PathBuf,
@@ -59,7 +114,9 @@ pub struct FileWatcherContext {
     pub soul_hashes: RecentHashes,
     pub user_hashes: RecentHashes,
     pub identity_hashes: RecentHashes,
-    pub llm_hashes: RecentHashes,
+    /// What the settings service has written to `llm.toml` (R58a). Populated by
+    /// the injected `ConfigWriter` the daemon builds in `services::llm`.
+    pub llm_hashes: ConfigHashes,
 }
 
 /// Spawn the file watcher task that handles hot-reloading of config files.
@@ -124,7 +181,7 @@ pub fn spawn_file_watcher(
 
                 // LLM config (llm.toml) hot-reload
                 if bootstrap::is_same_file_path(&changed_path, &ctx.llm_config_path) {
-                    handle_llm_config_change(&ctx).await;
+                    handle_llm_config_change(&ctx);
                 }
 
                 // Daemon config (daemon.toml) hot-reload
@@ -318,86 +375,106 @@ async fn handle_bootstrap_change(ctx: &FileWatcherContext, bp: &Path) {
     }
 }
 
-async fn handle_llm_config_change(ctx: &FileWatcherContext) {
-    // Dedup: skip if this write was from settings_service
-    let should_skip = if let Ok(content) = std::fs::read(&ctx.llm_config_path) {
-        use sha2::{Digest, Sha256};
-        let hash = format!("{:x}", Sha256::digest(&content));
-        let hashes = ctx.llm_hashes.lock().await;
-        hashes.contains(&hash)
-    } else {
-        false
+fn handle_llm_config_change(ctx: &FileWatcherContext) {
+    let Some(ref router) = ctx.llm_router else {
+        return;
+    };
+    llm_config_watcher_tick(
+        &ctx.llm_hashes,
+        router,
+        &*ctx.secret_store,
+        &ctx.web_search_config,
+        &ctx.llm_config_path,
+    );
+}
+
+/// One `llm.toml` watcher event: swallow the daemon's own write, otherwise
+/// re-read the file into the live router. Returns whether it reloaded.
+///
+/// Split out of [`handle_llm_config_change`] because the thing worth testing —
+/// that a settings write does **not** put a just-disabled provider's models
+/// back — needs a router, a ring and a path, not a whole `FileWatcherContext`.
+///
+/// The dedup ring is the reason this is not a no-op fix: the toggle's own write
+/// wakes the poll watcher, and step 2 below re-applies `[models]`. Both halves
+/// are needed — the ring so the reload does not run at all, and
+/// `reload_from_config`'s own skip so that a *hand* edit (or a dropped
+/// filesystem event) still cannot re-list a disabled provider's models (R58).
+pub(crate) fn llm_config_watcher_tick(
+    hashes: &ConfigHashes,
+    router: &openalpaca_llm::LlmRouter,
+    secret_store: &dyn openalpaca_llm::SecretStore,
+    web_search_config: &ArcSwap<openalpaca_llm::WebSearchConfig>,
+    path: &Path,
+) -> bool {
+    if let Ok(contents) = std::fs::read_to_string(path)
+        && swallow_own_config_write(hashes, &contents)
+    {
+        info!("Skipping LLM config reload (settings-service write dedup)");
+        return false;
+    }
+
+    let new_config = match openalpaca_llm::read_config(path) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(
+                "LLM config reload failed for {}: {e}; keeping current config",
+                path.display()
+            );
+            return false;
+        }
     };
 
-    if !should_skip {
-        if let Some(ref router) = ctx.llm_router {
-            match openalpaca_llm::read_config(&ctx.llm_config_path) {
-                Ok(new_config) => {
-                    // 1. Reload runtime config (timeouts, endpoints, env vars, provider defaults)
-                    let runtime = openalpaca_llm::LlmRuntimeConfig::from(&new_config);
-                    router.reload_runtime_config(runtime);
+    // 1. Reload runtime config (timeouts, endpoints, env vars, provider defaults)
+    let runtime = openalpaca_llm::LlmRuntimeConfig::from(&new_config);
+    router.reload_runtime_config(runtime);
 
-                    // 2. Reload model registry entries from config
-                    if let Some(ref models) = new_config.models {
-                        router.model_registry().reload_from_config(models);
+    // 2. Reload model registry entries from config — less the providers the
+    //    file says are off, which contribute no models anywhere (R58b).
+    let disabled = openalpaca_llm::config::disabled_providers(&new_config);
+    if let Some(ref models) = new_config.models {
+        router.model_registry().reload_from_config(models, &disabled);
+    }
+
+    // 3. Reload default model
+    if let Some(ref orch) = new_config.orchestrator {
+        router.set_default_model(orch.model.clone());
+    }
+
+    // 4. Reload key pools for each configured provider
+    if let Some(ref providers) = new_config.providers {
+        for (provider_name, provider_config) in providers {
+            if provider_config.enabled == Some(false) {
+                continue;
+            }
+            if let Some(provider_type) =
+                openalpaca_llm::config::parse_provider_type_pub(provider_name)
+            {
+                match openalpaca_llm::config::settings_service::build_key_pool_from_provider_config(
+                    provider_config,
+                    provider_type.clone(),
+                    Some(secret_store),
+                ) {
+                    Ok(pool) => {
+                        router.reload_keys(&provider_type, pool);
                     }
-
-                    // 3. Reload default model
-                    if let Some(ref orch) = new_config.orchestrator {
-                        router.set_default_model(orch.model.clone());
+                    Err(e) => {
+                        warn!(
+                            "LLM config reload: failed to rebuild key pool for {}: {}",
+                            provider_name, e
+                        );
                     }
-
-                    // 4. Reload key pools for each configured provider
-                    if let Some(ref providers) = new_config.providers {
-                        for (provider_name, provider_config) in providers {
-                            if provider_config.enabled == Some(false) {
-                                continue;
-                            }
-                            if let Some(provider_type) =
-                                openalpaca_llm::config::parse_provider_type_pub(provider_name)
-                            {
-                                match openalpaca_llm::config::settings_service::build_key_pool_from_provider_config(
-                                    provider_config,
-                                    provider_type.clone(),
-                                    Some(&*ctx.secret_store),
-                                ) {
-                                    Ok(pool) => {
-                                        router.reload_keys(&provider_type, pool);
-                                    }
-                                    Err(e) => {
-                                        warn!(
-                                            "LLM config reload: failed to rebuild key pool for {}: {}",
-                                            provider_name, e
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // 5. Reload web_search config
-                    let ws_cfg = new_config
-                        .web_search
-                        .clone()
-                        .unwrap_or_default();
-                    ctx.web_search_config.store(Arc::new(ws_cfg));
-
-                    info!(
-                        "LLM config hot-reloaded from {}",
-                        ctx.llm_config_path.display()
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        "LLM config reload failed for {}: {e}; keeping current config",
-                        ctx.llm_config_path.display()
-                    );
                 }
             }
         }
-    } else {
-        info!("Skipping LLM config reload (settings-service write dedup)");
     }
+
+    // 5. Reload web_search config
+    let ws_cfg = new_config.web_search.clone().unwrap_or_default();
+    web_search_config.store(Arc::new(ws_cfg));
+
+    info!("LLM config hot-reloaded from {}", path.display());
+    true
 }
 
 /// **Edge case 15.** A change to `config/mcp.toml`.
@@ -534,6 +611,9 @@ async fn handle_agents_change(ctx: &FileWatcherContext, changed_path: &Path) {
         }
     }
 }
+
+#[cfg(test)]
+mod llm_dedup_tests;
 
 /// Spawn soul hot-reload subscriber via EventBus (agent-initiated updates).
 ///

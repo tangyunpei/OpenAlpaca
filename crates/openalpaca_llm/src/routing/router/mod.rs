@@ -181,6 +181,15 @@ impl LlmRouter {
         self.fallback_chains.get(model)
     }
 
+    /// Is this provider loaded right now?
+    ///
+    /// The router keeps no `enabled` bit of its own — a disabled provider is
+    /// simply not in the map — so this is what "the owner has it switched on
+    /// and it loaded" looks like from inside (R58c, R60).
+    pub fn has_provider(&self, provider_type: &ProviderType) -> bool {
+        self.providers.contains_key(provider_type)
+    }
+
     /// Get list of configured providers.
     pub fn configured_providers(&self) -> Vec<ProviderType> {
         self.providers.iter().map(|entry| entry.key().clone()).collect()

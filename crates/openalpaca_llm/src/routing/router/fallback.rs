@@ -23,8 +23,18 @@ impl LlmRouter {
             }
         }
 
-        // 2. Try CLI backend fallback
-        let provider_type = self.model_registry.resolve_provider(original_model);
+        // 2. Try CLI backend fallback.
+        //
+        // Only for a provider that is actually loaded. The CLI backends are a
+        // map of their own, keyed by provider, and they outlive a
+        // `deregister_provider` — so without this gate a model whose provider
+        // the owner had just switched off could still be answered by Claude
+        // Code or Codex on that owner's machine. A disable unloads what it
+        // turns off, including its stand-in (R58c).
+        let provider_type = self
+            .model_registry
+            .resolve_provider(original_model)
+            .filter(|pt| self.has_provider(pt));
         if let Some(pt) = provider_type
             && let Some(cli_backend) = self.cli_backends.get(&pt)
         {

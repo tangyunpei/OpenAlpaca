@@ -39,6 +39,10 @@ pub struct InitializedServices {
     /// Shared lock for the `send` tool's connector send provider.
     /// Populated post-construction in main.rs after the ConnectorSendBridge is created.
     pub connector_send_lock: ConnectorSendLock,
+    /// What the settings service has written to `llm.toml`, for the file
+    /// watcher's dedup (R58a). Created here because the writer that fills it is
+    /// injected into the settings service at construction, which happens here.
+    pub llm_config_hashes: crate::hot_reload::ConfigHashes,
     /// The MCP half of the ENABLE axis (extension design ADR-030, C2).
     ///
     /// Parked here between C2 and C6: the file watcher finds it here for edge
@@ -111,8 +115,14 @@ pub async fn initialize_services(
     let llm_router = llm::build_llm_router(&llm_config_path, &*secret_store);
 
     // Build LLM settings service
-    let llm_settings_service =
-        llm::build_llm_settings_service(&llm_router, &llm_config_path, &secret_store).await;
+    let llm_config_hashes = crate::hot_reload::new_config_hashes();
+    let llm_settings_service = llm::build_llm_settings_service(
+        &llm_router,
+        &llm_config_path,
+        &secret_store,
+        &llm_config_hashes,
+    )
+    .await;
 
     // Load LLM config for embedder / token manager
     let llm_config: Option<openalpaca_llm::LlmRouterConfig> = if llm_config_path.exists() {
@@ -253,6 +263,7 @@ pub async fn initialize_services(
         shared_context,
         llm_router,
         llm_settings_service,
+        llm_config_hashes,
         token_manager,
         provider_usage_tracker,
         embedder,

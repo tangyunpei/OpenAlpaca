@@ -778,7 +778,10 @@ impl LlmSettingsService {
                 .model_registry()
                 .restore_defaults_for_provider(&provider_type);
             if let Some(models) = config.models.as_ref() {
-                self.router.model_registry().reload_from_config(models);
+                let disabled = crate::config::disabled_providers(&config);
+                self.router
+                    .model_registry()
+                    .reload_from_config(models, &disabled);
             }
             if let Err(e) = self.register_provider_from_config(&config, provider_type) {
                 tracing::warn!(provider = %provider, error = %e, "provider enabled in config but not loaded");

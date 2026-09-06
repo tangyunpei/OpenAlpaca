@@ -64,7 +64,9 @@ impl Harness {
         .expect("settings service")
         // The daemon's own hook — the point of the test is that this is the
         // writer the route uses.
-        .with_config_writer(crate::services::llm::atomic_config_writer());
+        .with_config_writer(crate::services::llm::atomic_config_writer(
+            crate::hot_reload::new_config_hashes(),
+        ));
 
         Self {
             home,

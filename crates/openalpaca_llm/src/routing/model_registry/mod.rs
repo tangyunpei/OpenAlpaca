@@ -2,7 +2,7 @@
 
 use crate::keys::key_pool::ProviderType;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
 /// Pricing information for a model.
@@ -195,39 +195,40 @@ impl ModelRegistry {
 
     /// Create a registry with well-known models, overridden by config models.
     /// Config models take precedence over compiled defaults.
+    ///
+    /// `disabled` names the providers `llm.toml` says are off
+    /// ([`crate::config::disabled_providers`]). **A disabled provider
+    /// contributes nothing** — neither its `[models]` rows nor its compiled
+    /// defaults (R58b). A catalogue entry the router has no provider for is a
+    /// model the picker offers and the call cannot serve.
     pub fn with_defaults_and_config(
         config_models: &HashMap<String, crate::config::ModelConfigEntry>,
+        disabled: &HashSet<ProviderType>,
     ) -> Self {
-        let registry = Self::with_defaults();
-        for (model_id, entry) in config_models {
-            if let Some(provider) = crate::config::parse_provider_type_pub(&entry.provider) {
-                registry.register(
-                    model_id.clone(),
-                    ModelInfo {
-                        provider,
-                        input_price_per_million: entry.input_price.unwrap_or(0.0),
-                        output_price_per_million: entry.output_price.unwrap_or(0.0),
-                        context_window: entry.context.unwrap_or(200_000),
-                        discovered: false,
-                        supports_image: entry.supports_image.unwrap_or(false),
-                        supports_audio: entry.supports_audio.unwrap_or(false),
-                        supports_document: entry.supports_document.unwrap_or(false),
-                        supports_reasoning: entry.supports_reasoning.unwrap_or(false),
-                    },
-                );
-            }
-        }
+        let mut models = Self::default_models();
+        models.retain(|_, info| !disabled.contains(&info.provider));
+        let registry = Self::new(models);
+        registry.reload_from_config(config_models, disabled);
         registry
     }
 
     /// Reload model registry entries from config (hot-reload).
     /// Config models override any existing entries.
+    ///
+    /// Rows belonging to a provider in `disabled` are skipped — see
+    /// [`Self::with_defaults_and_config`]. The watcher runs this on every
+    /// `llm.toml` change, so without the skip a hand edit (or a settings write
+    /// the dedup ring missed) would undo a disable's half of the work.
     pub fn reload_from_config(
         &self,
         config_models: &HashMap<String, crate::config::ModelConfigEntry>,
+        disabled: &HashSet<ProviderType>,
     ) {
         for (model_id, entry) in config_models {
             if let Some(provider) = crate::config::parse_provider_type_pub(&entry.provider) {
+                if disabled.contains(&provider) {
+                    continue;
+                }
                 self.register(
                     model_id.clone(),
                     ModelInfo {

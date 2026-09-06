@@ -36,6 +36,23 @@ pub fn parse_provider_type_pub(name: &str) -> Option<ProviderType> {
     parse_provider_type(name)
 }
 
+/// The providers `llm.toml` says are off.
+///
+/// One disable has to reach three places, or the daemon holds three different
+/// answers for one on-disk state (R58): the router does not build the provider,
+/// the model registry takes neither its `[models]` rows nor its compiled
+/// defaults, and the CLI-backend fallback will not stand in for it. This is the
+/// single reading of the bit that all three use.
+pub fn disabled_providers(config: &LlmRouterConfig) -> std::collections::HashSet<ProviderType> {
+    config
+        .providers
+        .iter()
+        .flatten()
+        .filter(|(_, pc)| pc.enabled == Some(false))
+        .filter_map(|(name, _)| parse_provider_type(name))
+        .collect()
+}
+
 /// Read a hierarchical LLM config from a TOML file.
 pub fn read_config(path: &std::path::Path) -> Result<LlmRouterConfig, LlmError> {
     let content = std::fs::read_to_string(path)

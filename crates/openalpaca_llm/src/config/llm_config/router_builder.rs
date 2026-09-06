@@ -45,6 +45,10 @@ fn build_router_from_hierarchical(
         .map_err(|e| LlmError::Config(format!("Failed to parse router config: {}", e)))?;
 
     let runtime_config = LlmRuntimeConfig::from(&config);
+    // Read the ENABLE bit once, before anything is moved out of `config`: the
+    // provider loop below skips a disabled provider, and so must the catalogue
+    // (R58b).
+    let disabled = super::disabled_providers(&config);
     let mut providers_map: HashMap<ProviderType, ProviderEntry> = HashMap::new();
 
     // Shared HTTP client for all providers (connection pool reuse).
@@ -262,12 +266,13 @@ fn build_router_from_hierarchical(
         }
     }
 
-    // Build model registry (config models override compiled defaults)
-    let model_registry = if let Some(ref models) = config.models {
-        ModelRegistry::with_defaults_and_config(models)
-    } else {
-        ModelRegistry::with_defaults()
-    };
+    // Build model registry (config models override compiled defaults, and a
+    // disabled provider contributes neither).
+    let no_models = HashMap::new();
+    let model_registry = ModelRegistry::with_defaults_and_config(
+        config.models.as_ref().unwrap_or(&no_models),
+        &disabled,
+    );
 
     // Default model
     let default_model = config
