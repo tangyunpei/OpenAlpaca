@@ -1212,6 +1212,92 @@ fn line_counts_are_recorded_at_write_time() {
     assert_eq!(rows[0].size_bytes, 20);
 }
 
+/// The stored pair and the patch are one computation: whatever a reader counts
+/// in the unified diff is what the version row already said.
+///
+/// A *moved* line proves it. Under a real line diff it is one delete and one
+/// insert — which is exactly what the patch shows — where the multiset tally
+/// this replaced called it neither.
+#[test]
+fn the_stored_line_counts_are_the_patch_totals() {
+    let f = Fixture::new();
+    let id = versions_of(&f, ArtifactKind::Markdown, &["a\nb\nc\n", "b\nc\na\n"]);
+
+    let rows = f.store().versions(&id).unwrap();
+    let diff = f.store().diff(&id, 1, 2).unwrap();
+
+    assert_eq!(
+        (diff.added_lines, diff.removed_lines),
+        (1, 1),
+        "the moved line is one add and one delete"
+    );
+    assert_eq!(rows[0].added_lines, Some(diff.added_lines));
+    assert_eq!(rows[0].removed_lines, Some(diff.removed_lines));
+    assert_eq!(
+        patch_totals(&diff.patch),
+        (diff.added_lines, diff.removed_lines)
+    );
+}
+
+/// The T23 re-review's Minor 8. An interrupted put parks *uncommitted* bytes at
+/// the head while the committed v(N−1) waits under `.versions/`; the recovering
+/// put discards that head. Counting the new version against it would compare it
+/// to bytes no row ever described — the pair belongs to the two versions the
+/// rows claim, which is where `write_bytes` says v(N−1) actually is.
+#[test]
+fn the_line_counts_are_taken_against_the_committed_previous_version() {
+    let f = Fixture::new();
+    let scope = f.scope();
+
+    let mut first = NewArtifact::new(
+        OWNER,
+        &scope,
+        ArtifactKind::Markdown,
+        "Notes",
+        b"alpha\nbeta\n",
+    );
+    first.created = at(1);
+    let (v1, _) = f.store().put(first).unwrap();
+
+    {
+        let _crash = CrashGuard::after(WriteStep::HeadRenamed);
+        let mut orphan =
+            NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"gamma\n");
+        orphan.created = at(1);
+        f.store().put(orphan).unwrap_err();
+    }
+    let dir = f.artifacts_root().join("loose/2026-09-01");
+    assert_eq!(
+        fs::read_to_string(dir.join("01-notes.md")).unwrap(),
+        "gamma\n",
+        "the orphaned head is what a naive count would read"
+    );
+
+    let mut retry = NewArtifact::new(
+        OWNER,
+        &scope,
+        ArtifactKind::Markdown,
+        "Notes",
+        b"alpha\nbeta\ndelta\n",
+    );
+    retry.created = at(1);
+    let (v2, _) = f.store().put(retry).unwrap();
+    assert_eq!(v2.version, 2);
+
+    let rows = f.store().versions(&v1.id).unwrap();
+    assert_eq!(rows[0].version, 2);
+    assert_eq!(
+        (rows[0].added_lines, rows[0].removed_lines),
+        (Some(1), Some(0)),
+        "counted against v1's committed bytes (+delta), not the orphan (+3 −1)"
+    );
+
+    // …and the patch over the pair the rows describe says the same thing.
+    let diff = f.store().diff(&v1.id, 1, 2).unwrap();
+    assert_eq!((diff.added_lines, diff.removed_lines), (1, 0));
+    assert_eq!(patch_totals(&diff.patch), (1, 0));
+}
+
 #[test]
 fn line_counts_are_absent_for_a_binary_kind() {
     let f = Fixture::new();

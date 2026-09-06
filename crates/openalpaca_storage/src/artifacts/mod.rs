@@ -62,7 +62,6 @@
 //! bytes land and before `tx.commit()` (an FK violation on `task_id`, a unique
 //! index conflict, a disk-full `INSERT`) leaves exactly the same thing on disk.
 
-use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::io::Write as _;
@@ -464,19 +463,6 @@ impl<'a> ArtifactStore<'a> {
             let head_rel = format!("{rel_dir}/{head_name}");
             let version = existing.map(|r| r.version + 1).unwrap_or(1);
 
-            // Line counts are recorded at write time (§4.9) — read the bytes
-            // being superseded before the rotate moves them.
-            let previous = existing
-                .filter(|_| head_path.exists())
-                .and_then(|_| fs::read(&head_path).ok());
-            let (added_lines, removed_lines) = match (&previous, is_text_kind(new.kind)) {
-                (Some(old), true) => {
-                    let (a, r) = line_counts(old, new.content);
-                    (Some(a), Some(r))
-                }
-                _ => (None, None),
-            };
-
             // --- The §4.2 write protocol -------------------------------------
             fs::create_dir_all(&dir)
                 .with_context(|| format!("failed to create {}", dir.display()))?;
@@ -488,6 +474,36 @@ impl<'a> ArtifactStore<'a> {
                 new.content,
                 existing.map(|r| r.version),
             )?;
+
+            // Line counts are recorded at write time (§4.9), against the bytes
+            // of the version the *rows* describe — which is what `write_bytes`
+            // just reported. Reading the head before the rotate instead would
+            // count an interrupted put's orphaned head, bytes no committed row
+            // ever described (the T23 re-review's Minor 8); after the rotate
+            // there is only one candidate and it is the right one. `None` is
+            // v1, a non-text kind, or a v(N-1) whose bytes are gone.
+            let (added_lines, removed_lines) = match (&rotated_rel, is_text_kind(new.kind)) {
+                (Some(rel), true) => {
+                    let previous = artifacts_root.join(rel);
+                    match fs::read(&previous) {
+                        Ok(bytes) => {
+                            let (a, r) = line_counts(&bytes, new.content);
+                            (Some(a), Some(r))
+                        }
+                        Err(e) => {
+                            // Advisory numbers: a version history without them
+                            // beats refusing a write whose bytes are already on
+                            // disk.
+                            tracing::warn!(
+                                "Failed to read {} for this version's line counts: {e}",
+                                previous.display()
+                            );
+                            (None, None)
+                        }
+                    }
+                }
+                _ => (None, None),
+            };
 
             // --- The rows ----------------------------------------------------
             let id = match existing {
@@ -1252,31 +1268,18 @@ where
     (added, removed)
 }
 
-/// `(added, removed)` between two texts, as a multiset difference of lines.
+/// `(added, removed)` between two texts: the `+`/`-` lines the unified patch of
+/// the same pair carries.
 ///
-/// Deliberately not an LCS: `added_lines`/`removed_lines` are written at *write*
-/// time (§4.9) on the hot path, and a moved line is neither added nor removed
-/// under this counting. Phase 3's `similar` replaces it with the real thing.
+/// The same [`TextDiff`] [`ArtifactStore::diff`] renders from, so the numbers
+/// stored on a version row and the patch a reader is later shown of that very
+/// pair are one computation. The multiset tally this replaced was cheaper but
+/// answered a different question — under it a *moved* line was neither added
+/// nor removed, while the patch it was supposed to summarise showed both.
 fn line_counts(old: &[u8], new: &[u8]) -> (i64, i64) {
-    fn tally(bytes: &[u8]) -> HashMap<String, i64> {
-        let text = String::from_utf8_lossy(bytes);
-        let mut counts: HashMap<String, i64> = HashMap::new();
-        for line in text.lines() {
-            *counts.entry(line.to_string()).or_default() += 1;
-        }
-        counts
-    }
-    let before = tally(old);
-    let after = tally(new);
-    let mut added = 0i64;
-    let mut removed = 0i64;
-    for (line, count) in &after {
-        added += (count - before.get(line).copied().unwrap_or(0)).max(0);
-    }
-    for (line, count) in &before {
-        removed += (count - after.get(line).copied().unwrap_or(0)).max(0);
-    }
-    (added, removed)
+    let old = String::from_utf8_lossy(old);
+    let new = String::from_utf8_lossy(new);
+    change_counts(&TextDiff::from_lines(old.as_ref(), new.as_ref()))
 }
 
 #[cfg(test)]
