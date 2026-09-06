@@ -114,6 +114,11 @@ fastembed = "4"
 # Already vendored transitively (pdf-extract → openalpacad); promoted to a
 # direct dependency for the artifact-grammar slugifier's NFKD step (store/artifact.rs).
 unicode-normalization = "0.1.25"
+# The artifact store's line diff: the write-time added/removed counts and the
+# unified patch `GET /v1/artifacts/{id}/diff` serves both come out of one
+# `TextDiff`, so the two can never disagree. Pure Rust, no build script,
+# default features only (`text`).
+similar = "2.7.0"
 
 # config
 toml = "0.9"

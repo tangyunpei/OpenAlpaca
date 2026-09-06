@@ -803,18 +803,48 @@ async fn an_unknown_version_is_a_404() {
 }
 
 // ============================================================================
-// Diff — 409 until T29 lands the patch
+// Diff
 // ============================================================================
 
 #[tokio::test]
-async fn a_text_diff_is_a_409_until_the_patch_lands() {
+async fn a_text_diff_is_a_200_unified_patch() {
     let f = Fixture::new();
     let row = f.put(OWNER, "Notes", "one\n", None);
     f.put_again(OWNER, "Notes", "one\ntwo\n", None);
 
     let (status, body) = split(artifact_diff(&f.db, OWNER, &row.id, 1, 2)).await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(error_code(&body), "DIFF_UNAVAILABLE");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["from"], 1);
+    assert_eq!(body["to"], 2);
+    assert_eq!(body["format"], "unified");
+    assert_eq!(body["added_lines"], 1);
+    assert_eq!(body["removed_lines"], 0);
+    let patch = body["patch"].as_str().expect("patch is a string");
+    assert!(patch.starts_with("--- v1\n+++ v2\n"), "{patch:?}");
+    assert!(patch.contains("+two\n"), "{patch:?}");
+}
+
+/// An owner who cannot see the row cannot diff it either — `404`, never the
+/// patch and never a `403`.
+#[tokio::test]
+async fn a_diff_of_another_owners_artifact_is_a_404() {
+    let f = Fixture::new();
+    let row = f.put(OWNER, "Notes", "one\n", None);
+    f.put_again(OWNER, "Notes", "one\ntwo\n", None);
+
+    let (status, body) = split(artifact_diff(&f.db, OTHER, &row.id, 1, 2)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(error_code(&body), "ARTIFACT_NOT_FOUND");
+}
+
+#[tokio::test]
+async fn a_diff_of_an_unknown_version_is_a_404() {
+    let f = Fixture::new();
+    let row = f.put(OWNER, "Notes", "one\n", None);
+
+    let (status, body) = split(artifact_diff(&f.db, OWNER, &row.id, 1, 9)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(error_code(&body), "ARTIFACT_VERSION_NOT_FOUND");
 }
 
 #[tokio::test]

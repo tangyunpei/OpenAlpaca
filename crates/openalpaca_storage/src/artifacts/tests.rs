@@ -1012,25 +1012,141 @@ fn diff_rejects_the_non_text_kinds() {
     }
 }
 
-#[test]
-fn diff_on_a_text_kind_is_typed_unavailable_until_phase_3() {
-    let f = Fixture::new();
-    let scope = f.scope();
-    let mut one = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"a\n");
-    one.created = at(1);
-    let (record, _) = f.store().put(one).unwrap();
-    let mut two = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"a\nb\n");
-    two.created = at(1);
-    f.store().put(two).unwrap();
+/// The `+`/`-` totals a human reading the patch would count: the two file
+/// header lines are consumed first, then `@@` hunk headers and the
+/// `\ No newline at end of file` hint are skipped. Content lines never reach
+/// column 0 — every one of them carries a `+`, `-` or space prefix — so no
+/// payload beginning with `@@` or `\` can be mistaken for a marker.
+fn patch_totals(patch: &str) -> (i64, i64) {
+    if patch.is_empty() {
+        return (0, 0);
+    }
+    let mut lines = patch.lines();
+    let from = lines.next().unwrap_or_default();
+    let to = lines.next().unwrap_or_default();
+    assert!(from.starts_with("--- "), "no `---` header line: {patch:?}");
+    assert!(to.starts_with("+++ "), "no `+++` header line: {patch:?}");
 
-    let err = f.store().diff(&record.id, 1, 2).unwrap_err();
-    assert_eq!(
-        err.downcast_ref::<ArtifactError>().unwrap().code(),
-        "DIFF_UNAVAILABLE"
+    let mut added = 0i64;
+    let mut removed = 0i64;
+    for line in lines {
+        if line.starts_with("@@") || line.starts_with('\\') {
+            continue;
+        }
+        match line.as_bytes().first() {
+            Some(b'+') => added += 1,
+            Some(b'-') => removed += 1,
+            _ => {}
+        }
+    }
+    (added, removed)
+}
+
+/// Writes `bodies` in order to one address, returning the artifact id.
+fn versions_of(f: &Fixture, kind: ArtifactKind, bodies: &[&str]) -> String {
+    let scope = f.scope();
+    let mut id = String::new();
+    for body in bodies {
+        let mut new = NewArtifact::new(OWNER, &scope, kind, "Notes", body.as_bytes());
+        new.created = at(1);
+        let (record, _) = f.store().put(new).unwrap();
+        id = record.id;
+    }
+    id
+}
+
+#[test]
+fn diff_returns_a_unified_patch_between_two_versions() {
+    let f = Fixture::new();
+    let id = versions_of(
+        &f,
+        ArtifactKind::Markdown,
+        &["one\ntwo\nthree\n", "one\nthree\nfour\n"],
     );
 
-    // The versions themselves are still validated.
-    let err = f.store().diff(&record.id, 1, 9).unwrap_err();
+    let diff = f.store().diff(&id, 1, 2).unwrap();
+
+    assert_eq!((diff.from, diff.to), (1, 2));
+    assert_eq!(diff.format, "unified");
+    assert!(
+        diff.patch.starts_with("--- v1\n+++ v2\n"),
+        "the header names the two versions: {:?}",
+        diff.patch
+    );
+    assert!(diff.patch.contains("-two\n"), "{:?}", diff.patch);
+    assert!(diff.patch.contains("+four\n"), "{:?}", diff.patch);
+    assert!(diff.patch.contains(" one\n"), "context is kept: {:?}", diff.patch);
+    assert_eq!((diff.added_lines, diff.removed_lines), (1, 1));
+    assert_eq!(
+        patch_totals(&diff.patch),
+        (diff.added_lines, diff.removed_lines),
+        "the reported counts are the patch's own totals"
+    );
+}
+
+/// The patch is directional: asking for `2 → 1` is the inverse edit, not the
+/// same one relabelled.
+#[test]
+fn diff_is_directional() {
+    let f = Fixture::new();
+    let id = versions_of(&f, ArtifactKind::Markdown, &["one\n", "one\ntwo\n"]);
+
+    let forward = f.store().diff(&id, 1, 2).unwrap();
+    assert_eq!((forward.added_lines, forward.removed_lines), (1, 0));
+    assert!(forward.patch.contains("+two\n"));
+
+    let backward = f.store().diff(&id, 2, 1).unwrap();
+    assert_eq!((backward.from, backward.to), (2, 1));
+    assert!(backward.patch.starts_with("--- v2\n+++ v1\n"));
+    assert_eq!((backward.added_lines, backward.removed_lines), (0, 1));
+    assert!(backward.patch.contains("-two\n"));
+    assert_eq!(patch_totals(&backward.patch), (0, 1));
+}
+
+/// Identical bytes are an empty patch and a zero pair — never an error, and
+/// never a patch a client would have to read as "no changes".
+#[test]
+fn diff_of_a_version_against_itself_is_empty() {
+    let f = Fixture::new();
+    let id = versions_of(&f, ArtifactKind::Markdown, &["one\ntwo\n", "one\ntwo\nthree\n"]);
+
+    let same = f.store().diff(&id, 2, 2).unwrap();
+    assert_eq!(same.patch, "");
+    assert_eq!((same.added_lines, same.removed_lines), (0, 0));
+}
+
+/// A patch over more than one context radius is several hunks, and the counts
+/// still sum over all of them.
+#[test]
+fn diff_spans_several_hunks() {
+    let f = Fixture::new();
+    let old: String = (1..=30).map(|n| format!("line {n}\n")).collect();
+    let new: String = (1..=30)
+        .map(|n| match n {
+            3 => "line 3 edited\n".to_string(),
+            27 => "line 27 edited\n".to_string(),
+            _ => format!("line {n}\n"),
+        })
+        .collect();
+    let id = versions_of(&f, ArtifactKind::Markdown, &[&old, &new]);
+
+    let diff = f.store().diff(&id, 1, 2).unwrap();
+    assert_eq!(
+        diff.patch.matches("@@").count(),
+        4,
+        "two hunks, two `@@` markers each: {:?}",
+        diff.patch
+    );
+    assert_eq!((diff.added_lines, diff.removed_lines), (2, 2));
+    assert_eq!(patch_totals(&diff.patch), (2, 2));
+}
+
+#[test]
+fn diff_still_validates_the_artifact_and_its_versions() {
+    let f = Fixture::new();
+    let id = versions_of(&f, ArtifactKind::Markdown, &["a\n", "a\nb\n"]);
+
+    let err = f.store().diff(&id, 1, 9).unwrap_err();
     assert_eq!(
         err.downcast_ref::<ArtifactError>().unwrap().code(),
         "ARTIFACT_VERSION_NOT_FOUND"
@@ -1039,6 +1155,25 @@ fn diff_on_a_text_kind_is_typed_unavailable_until_phase_3() {
     assert_eq!(
         err.downcast_ref::<ArtifactError>().unwrap().code(),
         "ARTIFACT_NOT_FOUND"
+    );
+}
+
+/// A version whose bytes were deleted is `ARTIFACT_GONE`, exactly as reading it
+/// through `resolve_content` is — the diff reads the same files.
+#[test]
+fn diff_reports_a_deleted_version_as_gone() {
+    let f = Fixture::new();
+    let id = versions_of(&f, ArtifactKind::Markdown, &["a\n", "a\nb\n"]);
+    fs::remove_file(
+        f.artifacts_root()
+            .join("loose/2026-09-01/.versions/01-notes/v1.md"),
+    )
+    .unwrap();
+
+    let err = f.store().diff(&id, 1, 2).unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<ArtifactError>().unwrap().code(),
+        "ARTIFACT_GONE"
     );
 }
 

@@ -109,19 +109,13 @@ fn page_limit(requested: Option<i64>) -> Option<i64> {
 // ── Status mapping ───────────────────────────────────────────────
 
 /// The §4.9 status codes. Nothing below this line decides one.
-///
-/// `DiffUnavailable` is a `409` for the same reason `NotDiffable` is: the
-/// request is well-formed and the answer is "not from this build". T29 removes
-/// the arm by removing the error.
 fn artifact_error_status(error: &ArtifactError) -> StatusCode {
     match error {
         ArtifactError::NotFound { .. } | ArtifactError::VersionNotFound { .. } => {
             StatusCode::NOT_FOUND
         }
         ArtifactError::Gone { .. } => StatusCode::GONE,
-        ArtifactError::NotDiffable { .. } | ArtifactError::DiffUnavailable { .. } => {
-            StatusCode::CONFLICT
-        }
+        ArtifactError::NotDiffable { .. } => StatusCode::CONFLICT,
     }
 }
 
@@ -389,11 +383,11 @@ pub(crate) fn list_artifact_versions(db: &Database, owner_id: &str, id: &str) ->
     }
 }
 
-/// `GET /v1/artifacts/{id}/diff?from=&to=`.
+/// `GET /v1/artifacts/{id}/diff?from=&to=` — the unified patch between two
+/// versions, with the `+`/`-` totals the store counted from the same diff.
 ///
-/// Until T29 lands the unified patch every diffable artifact answers `409`
-/// `DIFF_UNAVAILABLE`; an image or a binary answers `409` `NOT_DIFFABLE`, and
-/// that answer is final.
+/// An image or a binary answers `409` `NOT_DIFFABLE`, and that answer is
+/// final; a version whose bytes are gone is `410`, as reading it is.
 pub(crate) fn artifact_diff(db: &Database, owner_id: &str, id: &str, from: u32, to: u32) -> Response {
     if let Err(response) = visible(db, owner_id, id) {
         return response;

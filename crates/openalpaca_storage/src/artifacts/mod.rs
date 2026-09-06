@@ -71,6 +71,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
+use similar::{ChangeTag, TextDiff};
 
 use crate::Database;
 use crate::content_io::{fsync_dir, remove_best_effort, sha256_hex};
@@ -89,6 +90,10 @@ pub const DEFAULT_MAX_VERSIONS_PER_ARTIFACT: u32 = 20;
 /// [`ArtifactQuery::limit`]'s default page size when the caller leaves it unset.
 pub const DEFAULT_LIST_LIMIT: i64 = 50;
 
+/// Unchanged lines kept either side of a change in [`ArtifactStore::diff`]'s
+/// patch — the unified-diff default, and what every diff viewer expects.
+const DIFF_CONTEXT_RADIUS: usize = 3;
+
 // ============================================================================
 // Errors
 // ============================================================================
@@ -106,10 +111,6 @@ pub enum ArtifactError {
     VersionNotFound { id: String, version: u32 },
     /// §4.9: `kind ∈ {image, binary}` → **409** `NOT_DIFFABLE`.
     NotDiffable { id: String, kind: &'static str },
-    /// A text artifact that *is* diffable, but the unified patch needs the
-    /// `similar` crate, which Phase 3 adds. Typed rather than faked so no
-    /// caller can mistake an empty patch for "no changes".
-    DiffUnavailable { id: String },
 }
 
 impl ArtifactError {
@@ -120,7 +121,6 @@ impl ArtifactError {
             Self::Gone { .. } => "ARTIFACT_GONE",
             Self::VersionNotFound { .. } => "ARTIFACT_VERSION_NOT_FOUND",
             Self::NotDiffable { .. } => "NOT_DIFFABLE",
-            Self::DiffUnavailable { .. } => "DIFF_UNAVAILABLE",
         }
     }
 }
@@ -138,10 +138,6 @@ impl fmt::Display for ArtifactError {
             Self::NotDiffable { id, kind } => {
                 write!(f, "artifact {id} of kind {kind} is not diffable")
             }
-            Self::DiffUnavailable { id } => write!(
-                f,
-                "a unified diff for artifact {id} is not available in this build"
-            ),
         }
     }
 }
@@ -692,61 +688,9 @@ impl<'a> ArtifactStore<'a> {
     /// absent *older* version is equally `Gone` but does not mark the row —
     /// `missing` describes the head, which may be perfectly fine.
     pub fn resolve_content(&self, id: &str, version: Option<u32>) -> Result<PathBuf> {
-        use rusqlite::OptionalExtension;
-
         self.db.with_connection(|conn| {
             let record = load_by_id(conn, id)?.ok_or_else(|| not_found(id))?;
-            let head_rel = record
-                .rel_path
-                .clone()
-                .with_context(|| format!("artifact {id} has no rel_path"))?;
-            let (rel, is_head) = match version {
-                None => (head_rel, true),
-                Some(v) if v == record.version => (head_rel, true),
-                Some(v) => {
-                    let rel: Option<String> = conn
-                        .query_row(
-                            "SELECT rel_path FROM artifact_versions
-                             WHERE artifact_id = ?1 AND version = ?2",
-                            rusqlite::params![id, v],
-                            |row| row.get(0),
-                        )
-                        .optional()?;
-                    let rel = rel.ok_or_else(|| {
-                        anyhow::Error::new(ArtifactError::VersionNotFound {
-                            id: id.to_string(),
-                            version: v,
-                        })
-                    })?;
-                    (rel, false)
-                }
-            };
-
-            let root = artifacts_root_for(&record)?;
-            let candidate = root.join(&rel);
-            // Belt and braces (the rel_path came out of our own grammar). A
-            // deleted project has no root to canonicalize against — that is a
-            // gone artifact, not a confinement failure.
-            let path = match confine_to_root(&root, &candidate) {
-                Ok(path) => path,
-                Err(_) if !root.exists() => candidate,
-                Err(e) => return Err(e),
-            };
-
-            if !path.exists() {
-                if is_head && record.missing_since.is_none() {
-                    conn.execute(
-                        "UPDATE file_assets SET missing_since = datetime('now'),
-                            updated_at = datetime('now') WHERE id = ?1",
-                        rusqlite::params![id],
-                    )?;
-                }
-                return Err(anyhow::Error::new(ArtifactError::Gone {
-                    id: id.to_string(),
-                    path: path.to_string_lossy().to_string(),
-                }));
-            }
-            Ok(path)
+            resolve_version_path(conn, &record, version)
         })
     }
 
@@ -778,14 +722,19 @@ impl<'a> ArtifactStore<'a> {
         })
     }
 
-    /// Validates a diff request and, for now, refuses it in a typed way.
+    /// The unified patch from version `from` to version `to` (§4.9).
     ///
     /// `kind ∈ {image, binary}` is [`ArtifactError::NotDiffable`] (§4.9's 409)
-    /// and that answer is final. Every other kind is genuinely diffable, but
-    /// the unified patch needs the `similar` crate that Phase 3 adds, so this
-    /// build answers [`ArtifactError::DiffUnavailable`] rather than returning an
-    /// [`ArtifactDiff`] with an empty `patch` that a client would render as
-    /// "no changes". Phase 3 replaces only the final arm.
+    /// and that answer is final. Every other kind is read off disk and diffed
+    /// line by line: a version whose bytes are gone is [`ArtifactError::Gone`]
+    /// and a version that never existed is [`ArtifactError::VersionNotFound`],
+    /// the same answers reading the version through [`Self::resolve_content`]
+    /// gives — the diff opens the very same files.
+    ///
+    /// `added_lines`/`removed_lines` are counted from the same [`TextDiff`] the
+    /// patch is rendered from, so the pair and the patch's own `+`/`-` totals
+    /// cannot disagree. Identical versions are an **empty** patch and `(0, 0)`,
+    /// not an error.
     pub fn diff(&self, id: &str, from: u32, to: u32) -> Result<ArtifactDiff> {
         self.db.with_connection(|conn| {
             let record = load_by_id(conn, id)?.ok_or_else(|| not_found(id))?;
@@ -797,23 +746,25 @@ impl<'a> ArtifactStore<'a> {
                     kind: kind.as_str(),
                 }));
             }
-            for version in [from, to] {
-                let present: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM artifact_versions
-                     WHERE artifact_id = ?1 AND version = ?2",
-                    rusqlite::params![id, version],
-                    |row| row.get(0),
-                )?;
-                if present == 0 {
-                    return Err(anyhow::Error::new(ArtifactError::VersionNotFound {
-                        id: id.to_string(),
-                        version,
-                    }));
-                }
-            }
-            Err(anyhow::Error::new(ArtifactError::DiffUnavailable {
-                id: id.to_string(),
-            }))
+
+            let old = read_version_text(conn, &record, from)?;
+            let new = read_version_text(conn, &record, to)?;
+            let diff = TextDiff::from_lines(old.as_str(), new.as_str());
+            let (added_lines, removed_lines) = change_counts(&diff);
+            let patch = diff
+                .unified_diff()
+                .context_radius(DIFF_CONTEXT_RADIUS)
+                .header(&format!("v{from}"), &format!("v{to}"))
+                .to_string();
+
+            Ok(ArtifactDiff {
+                from,
+                to,
+                added_lines,
+                removed_lines,
+                format: "unified",
+                patch,
+            })
         })
     }
 
@@ -956,6 +907,84 @@ fn load_by_id(conn: &Connection, id: &str) -> Result<Option<ArtifactRecord>> {
 
 fn not_found(id: &str) -> anyhow::Error {
     anyhow::Error::new(ArtifactError::NotFound { id: id.to_string() })
+}
+
+/// The absolute path of one version's bytes, and the two typed failures that
+/// answer for it — [`ArtifactStore::resolve_content`]'s whole body, factored
+/// out because [`ArtifactStore::diff`] needs the same answer for two versions
+/// *inside* one `with_connection` (the connection mutex is not reentrant).
+///
+/// `version` of `None`, or the current version number, is the head; only a
+/// missing **head** stamps `missing_since`, since `missing` describes the head
+/// and an absent older version says nothing about it.
+fn resolve_version_path(
+    conn: &Connection,
+    record: &ArtifactRecord,
+    version: Option<u32>,
+) -> Result<PathBuf> {
+    use rusqlite::OptionalExtension;
+
+    let id = record.id.as_str();
+    let head_rel = record
+        .rel_path
+        .clone()
+        .with_context(|| format!("artifact {id} has no rel_path"))?;
+    let (rel, is_head) = match version {
+        None => (head_rel, true),
+        Some(v) if v == record.version => (head_rel, true),
+        Some(v) => {
+            let rel: Option<String> = conn
+                .query_row(
+                    "SELECT rel_path FROM artifact_versions
+                     WHERE artifact_id = ?1 AND version = ?2",
+                    rusqlite::params![id, v],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let rel = rel.ok_or_else(|| {
+                anyhow::Error::new(ArtifactError::VersionNotFound {
+                    id: id.to_string(),
+                    version: v,
+                })
+            })?;
+            (rel, false)
+        }
+    };
+
+    let root = artifacts_root_for(record)?;
+    let candidate = root.join(&rel);
+    // Belt and braces (the rel_path came out of our own grammar). A deleted
+    // project has no root to canonicalize against — that is a gone artifact,
+    // not a confinement failure.
+    let path = match confine_to_root(&root, &candidate) {
+        Ok(path) => path,
+        Err(_) if !root.exists() => candidate,
+        Err(e) => return Err(e),
+    };
+
+    if !path.exists() {
+        if is_head && record.missing_since.is_none() {
+            conn.execute(
+                "UPDATE file_assets SET missing_since = datetime('now'),
+                    updated_at = datetime('now') WHERE id = ?1",
+                rusqlite::params![id],
+            )?;
+        }
+        return Err(anyhow::Error::new(ArtifactError::Gone {
+            id: id.to_string(),
+            path: path.to_string_lossy().to_string(),
+        }));
+    }
+    Ok(path)
+}
+
+/// One version's bytes as text. Lossy on purpose: the kind is already known to
+/// be text, and a stray invalid byte is worth a replacement character in the
+/// patch rather than a failed diff.
+fn read_version_text(conn: &Connection, record: &ArtifactRecord, version: u32) -> Result<String> {
+    let path = resolve_version_path(conn, record, Some(version))?;
+    let bytes = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// One produced head sitting directly in a run/loose directory.
@@ -1202,6 +1231,25 @@ fn escape_like(input: &str) -> String {
         out.push(ch);
     }
     out
+}
+
+/// `(added, removed)` for a line diff: the `+` and `-` lines its unified patch
+/// will carry, counted from the diff itself rather than re-derived — the
+/// patch's own totals and the numbers reported beside it are one computation.
+fn change_counts<'a, T>(diff: &TextDiff<'a, 'a, '_, T>) -> (i64, i64)
+where
+    T: similar::DiffableStr + ?Sized,
+{
+    let mut added = 0i64;
+    let mut removed = 0i64;
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Insert => added += 1,
+            ChangeTag::Delete => removed += 1,
+            ChangeTag::Equal => {}
+        }
+    }
+    (added, removed)
 }
 
 /// `(added, removed)` between two texts, as a multiset difference of lines.
