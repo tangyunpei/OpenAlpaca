@@ -12,8 +12,13 @@
 //! way for a *client* to see the queue, add to it, or take something back out —
 //! so the GUI's `Queue follow-up` control had nothing to call.
 //!
-//! Three things this module is deliberate about:
+//! Four things this module is deliberate about:
 //!
+//! * **The two mutating verbs are owner-scoped; `GET` is not.** A queued
+//!   follow-up is not a note filed against a lane — the daemon claims it and
+//!   runs it as a fresh turn on the lane it names, and posts the answer there.
+//!   `POST` and `DELETE` therefore refuse a lane whose `user_id` is not the
+//!   local user's, with the same `404` an absent row gets (R42).
 //! * **`FollowupRecord` is never serialized.** It carries `principal_json` —
 //!   the identity a queued item re-enters the front door with. [`FollowupView`]
 //!   is the wire shape, and it has no principal in any form.
@@ -122,6 +127,36 @@ fn invalid_lane_key() -> Response {
     )
 }
 
+/// The refusal a mutating verb owes this lane key, if any: `None` means the
+/// key parses **and** names a lane the local user owns.
+///
+/// The two mutating verbs are owner-scoped; `GET` is not (R42). A follow-up is
+/// not a note filed against a lane — the daemon later claims it and **runs it
+/// as a fresh turn** on the lane it names (`dispatcher/lead_agent.rs` →
+/// `followup.rs`, with `lane_override`), and its answer is posted there. That
+/// puts `POST` on the injecting side of R40's own line, where the steer route
+/// already refuses a run the caller does not own; `DELETE` drops pending work
+/// that would otherwise run. Neither is this caller's to do on
+/// `4242:telegram`.
+///
+/// The refusal is `404`, never `403`, and it is the same `404` an absent row
+/// gets: a lane key must not be probeable for existence by a caller who does
+/// not hold it. Byte for byte what `routes/tasks.rs`'s steer route answers for
+/// a run belonging to someone else.
+fn lane_refusal(lane_key: &str, owner_id: &str) -> Option<Response> {
+    let Some(lane) = LaneKey::from_str(lane_key) else {
+        return Some(invalid_lane_key());
+    };
+    if lane.user_id != owner_id {
+        return Some(api_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "No such lane",
+        ));
+    }
+    None
+}
+
 fn db_error(e: impl std::fmt::Display) -> Response {
     api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string())
 }
@@ -152,13 +187,15 @@ fn list_followups(db: &Database, lane_key: &str) -> Response {
 
 // ── POST /v1/lanes/{lane_key}/followups ──────────────────────────────
 
-/// Queue one follow-up on behalf of the local user.
+/// Queue one follow-up on the local user's own lane.
 ///
 /// The principal is the daemon's own user, exactly as the model's
 /// `queue_followup` tool records it, because that is who the re-entered turn
 /// will run as. `workspace_path` comes from the request's `x-workspace-path`
 /// header through the one resolver every route shares — never from the body,
-/// which would let a client scope a future turn anywhere.
+/// which would let a client scope a future turn anywhere. And the lane must be
+/// one this user owns ([`lane_refusal`]), because that is where the turn will run
+/// and where its answer will be posted.
 fn queue_followup(
     db: &Database,
     bus: &EventBus,
@@ -167,8 +204,8 @@ fn queue_followup(
     workspace_path: Option<&str>,
     request: QueueFollowupRequest,
 ) -> Response {
-    if !lane_key_ok(lane_key) {
-        return invalid_lane_key();
+    if let Some(refusal) = lane_refusal(lane_key, owner_id) {
+        return refusal;
     }
 
     let content = request.content.trim();
@@ -248,9 +285,18 @@ fn queue_followup(
 /// indistinguishable from one that never existed, while a row that *is* this
 /// lane's but has already been claimed has to say so — the turn is running,
 /// and reporting "cancelled" would be a lie the client acts on.
-fn cancel_followup(db: &Database, bus: &EventBus, lane_key: &str, id: &str) -> Response {
-    if !lane_key_ok(lane_key) {
-        return invalid_lane_key();
+///
+/// A lane the local user does not own answers the same `404` ([`lane_refusal`]):
+/// another user's pending work is not this caller's to drop.
+fn cancel_followup(
+    db: &Database,
+    bus: &EventBus,
+    owner_id: &str,
+    lane_key: &str,
+    id: &str,
+) -> Response {
+    if let Some(refusal) = lane_refusal(lane_key, owner_id) {
+        return refusal;
     }
 
     let not_found = || {
@@ -334,7 +380,13 @@ pub async fn cancel_followup_handler(
     State(state): State<Arc<AppState>>,
     Path((lane_key, id)): Path<(String, String)>,
 ) -> Response {
-    cancel_followup(&state.db, &state.gateway.bus, &lane_key, &id)
+    cancel_followup(
+        &state.db,
+        &state.gateway.bus,
+        &state.local_user_id,
+        &lane_key,
+        &id,
+    )
 }
 
 #[cfg(test)]
@@ -577,9 +629,72 @@ mod tests {
                 split(queue_followup(&db, &bus, OWNER, lane, None, request("go"))).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "POST {lane}");
 
-            let (status, _) = split(cancel_followup(&db, &bus, lane, "1")).await;
+            let (status, _) = split(cancel_followup(&db, &bus, OWNER, lane, "1")).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "DELETE {lane}");
         }
+    }
+
+    /// A `POST` may only name a lane the local user owns. A follow-up is text
+    /// the daemon will later **run as a fresh turn** on the lane it names, so
+    /// this verb is on the injecting side of R40's line — the same side the
+    /// steer route is on, and it refuses a run the caller does not own with
+    /// `404`. Without the check, a caller holding the bearer token could park a
+    /// turn on a connector lane such as `4242:telegram` and have its answer
+    /// land in someone else's chat.
+    #[tokio::test]
+    async fn queueing_on_another_users_lane_is_a_404() {
+        let (_dir, db) = db();
+        let bus = EventBus::default();
+        let mut rx = bus.subscribe();
+
+        let (status, body) = split(queue_followup(
+            &db,
+            &bus,
+            OWNER,
+            "4242:telegram",
+            None,
+            request("post this to their chat"),
+        ))
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            body["error"]["code"], "NOT_FOUND",
+            "a lane this caller does not own is indistinguishable from one that is not there — \
+             never a 403"
+        );
+        assert!(
+            FollowupRepository::new(&db)
+                .list_queued_by_lane("4242:telegram")
+                .unwrap()
+                .is_empty(),
+            "nothing was written to the other lane"
+        );
+        assert!(rx.try_recv().is_err(), "and nothing was announced");
+    }
+
+    /// `DELETE` likewise: another user's pending work is not this caller's to
+    /// drop, and the refusal must not confirm the row exists.
+    #[tokio::test]
+    async fn cancelling_on_another_users_lane_is_a_404() {
+        let (_dir, db) = db();
+        let bus = EventBus::default();
+        let mut rx = bus.subscribe();
+        let foreign = seed(&db, "4242:telegram", FOLLOWUP_KIND_FOLLOWUP, "theirs");
+
+        let (status, body) = split(cancel_followup(
+            &db,
+            &bus,
+            OWNER,
+            "4242:telegram",
+            &foreign.to_string(),
+        ))
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "NOT_FOUND");
+        assert_eq!(status_of(&db, foreign), "queued", "their row is untouched");
+        assert!(rx.try_recv().is_err());
     }
 
     // ── GET ───────────────────────────────────────────────────────
@@ -609,6 +724,20 @@ mod tests {
         );
     }
 
+    /// `GET` stays unscoped where `POST`/`DELETE` are not (R42): reading a
+    /// queue changes nothing, and it is the same read/list line every other
+    /// task-surface route already sits on.
+    #[tokio::test]
+    async fn the_list_is_not_owner_scoped() {
+        let (_dir, db) = db();
+        let id = seed(&db, "4242:telegram", FOLLOWUP_KIND_FOLLOWUP, "theirs");
+
+        let (status, body) = split(list_followups(&db, "4242:telegram")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.as_array().expect("an array").len(), 1);
+        assert_eq!(body[0]["id"], id);
+    }
+
     /// A lane with nothing pending is an empty array, not a 404.
     #[tokio::test]
     async fn an_empty_lane_lists_nothing() {
@@ -629,7 +758,7 @@ mod tests {
         let mut rx = bus.subscribe();
         let id = seed(&db, LANE, FOLLOWUP_KIND_FOLLOWUP, "never mind");
 
-        let (status, body) = split(cancel_followup(&db, &bus, LANE, &id.to_string())).await;
+        let (status, body) = split(cancel_followup(&db, &bus, OWNER, LANE, &id.to_string())).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["id"], id);
         assert_eq!(body["status"], "cancelled");
@@ -675,7 +804,7 @@ mod tests {
             .expect("the autostart claims it");
         assert_eq!(claimed.id, id);
 
-        let (status, body) = split(cancel_followup(&db, &bus, LANE, &id.to_string())).await;
+        let (status, body) = split(cancel_followup(&db, &bus, OWNER, LANE, &id.to_string())).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["error"]["code"], "FOLLOWUP_NOT_QUEUED");
         assert_eq!(
@@ -697,10 +826,10 @@ mod tests {
         let bus = EventBus::default();
         let id = seed(&db, LANE, FOLLOWUP_KIND_FOLLOWUP, "never mind");
 
-        let (status, _) = split(cancel_followup(&db, &bus, LANE, &id.to_string())).await;
+        let (status, _) = split(cancel_followup(&db, &bus, OWNER, LANE, &id.to_string())).await;
         assert_eq!(status, StatusCode::OK);
 
-        let (status, body) = split(cancel_followup(&db, &bus, LANE, &id.to_string())).await;
+        let (status, body) = split(cancel_followup(&db, &bus, OWNER, LANE, &id.to_string())).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["error"]["code"], "FOLLOWUP_NOT_QUEUED");
     }
@@ -714,7 +843,7 @@ mod tests {
         let foreign = seed(&db, "someone:cli", FOLLOWUP_KIND_FOLLOWUP, "not yours");
 
         for id in ["999", "not-a-number", &foreign.to_string()] {
-            let (status, body) = split(cancel_followup(&db, &bus, LANE, id)).await;
+            let (status, body) = split(cancel_followup(&db, &bus, OWNER, LANE, id)).await;
             assert_eq!(status, StatusCode::NOT_FOUND, "id {id}");
             assert_eq!(body["error"]["code"], "NOT_FOUND");
         }
