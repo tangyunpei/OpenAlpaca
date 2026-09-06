@@ -14,6 +14,22 @@ pub struct GatewayPersistence {
     db: Database,
 }
 
+/// What a turn's user-message persist resolved.
+///
+/// `session_id` is the load-bearing field. §5.1 resolves lane → session **once
+/// per turn**, and the assistant half of that turn is written seconds to
+/// minutes later — long enough for a `POST /v1/sessions` ("New chat") to have
+/// re-pointed the lane. So the resolve hands its answer back here and the
+/// caller pins it, instead of letting the later insert re-read whatever the
+/// lane's active session has become by then.
+#[derive(Debug, Clone)]
+pub struct PersistedUserMessage {
+    /// Row id of the message that was written.
+    pub message_id: i64,
+    /// The session the turn belongs to, for the rest of the turn.
+    pub session_id: String,
+}
+
 impl GatewayPersistence {
     const PERSISTED_ATTACHMENT_TEXT_CHARS: usize = 4000;
 
@@ -33,24 +49,31 @@ impl GatewayPersistence {
     /// the message rows below take their `session_id` from the row this call
     /// guarantees exists. `workspace_path` binds the session's project the
     /// first time one is seen and is ignored thereafter.
+    ///
+    /// The resolved id comes back to the caller so the assistant half of the
+    /// same turn can be pinned to it — see [`PersistedUserMessage`].
     pub fn persist_user_message(
         &self,
         lane_key: &str,
         content: &str,
         source: &str,
         workspace_path: Option<&str>,
-    ) -> Result<i64> {
+    ) -> Result<PersistedUserMessage> {
         let repo = ConversationRepository::new(&self.db);
-        repo.get_or_create_active_session(lane_key, source, workspace_path)?;
-        let id = repo.insert(&ConversationMessage {
+        let session = repo.get_or_create_active_session(lane_key, source, workspace_path)?;
+        let message_id = repo.insert(&ConversationMessage {
             lane_key: lane_key.to_string(),
             role: "user".to_string(),
             content: content.to_string(),
             source: Some(source.to_string()),
+            session_id: Some(session.id.clone()),
             ..Default::default()
         })?;
-        repo.increment_message_count(lane_key)?;
-        Ok(id)
+        repo.increment_message_count_for_session(&session.id)?;
+        Ok(PersistedUserMessage {
+            message_id,
+            session_id: session.id,
+        })
     }
 
     /// Persist a user message with file attachments.
@@ -61,9 +84,9 @@ impl GatewayPersistence {
         source: &str,
         workspace_path: Option<&str>,
         attachments: &[ResolvedAttachment],
-    ) -> Result<i64> {
+    ) -> Result<PersistedUserMessage> {
         let repo = ConversationRepository::new(&self.db);
-        repo.get_or_create_active_session(lane_key, source, workspace_path)?;
+        let session = repo.get_or_create_active_session(lane_key, source, workspace_path)?;
 
         // Build content_json
         let mut parts = Vec::with_capacity(attachments.len() + 1);
@@ -118,6 +141,7 @@ impl GatewayPersistence {
             role: "user".to_string(),
             content: content.to_string(),
             source: Some(source.to_string()),
+            session_id: Some(session.id.clone()),
             ..Default::default()
         };
 
@@ -135,8 +159,11 @@ impl GatewayPersistence {
             }
         }
 
-        repo.increment_message_count(lane_key)?;
-        Ok(id)
+        repo.increment_message_count_for_session(&session.id)?;
+        Ok(PersistedUserMessage {
+            message_id: id,
+            session_id: session.id,
+        })
     }
 
     /// Persist an assistant message. Skips empty content to avoid polluting history.
@@ -146,6 +173,14 @@ impl GatewayPersistence {
     /// message the delegation came from. It is `None` for ordinary chat — the
     /// caller reads it off `HandleResult::delegation`, never off whatever the
     /// lane happens to be running.
+    ///
+    /// `session_id` is the turn's session, as the user-message persist
+    /// resolved it. It is passed explicitly — the same way
+    /// `persist_completion_report` pins — because the handler in between takes
+    /// as long as an agentic loop takes, and re-resolving the lane here would
+    /// file the answer in whatever conversation a mid-turn "New chat" left
+    /// active. `None` (a turn whose user half failed to persist) falls back to
+    /// the lane's active session.
     pub fn persist_assistant_message(
         &self,
         lane_key: &str,
@@ -153,6 +188,7 @@ impl GatewayPersistence {
         duration_ms: Option<i64>,
         source: &str,
         task_id: Option<&str>,
+        session_id: Option<&str>,
     ) -> Result<i64> {
         if content.trim().is_empty() {
             tracing::debug!("Skipping empty assistant message for lane {}", lane_key);
@@ -166,9 +202,13 @@ impl GatewayPersistence {
             source: Some(source.to_string()),
             duration_ms,
             task_id: task_id.map(str::to_string),
+            session_id: session_id.map(str::to_string),
             ..Default::default()
         })?;
-        repo.increment_message_count(lane_key)?;
+        match session_id {
+            Some(id) => repo.increment_message_count_for_session(id)?,
+            None => repo.increment_message_count(lane_key)?,
+        }
         Ok(id)
     }
 }
@@ -215,7 +255,7 @@ mod tests {
         let id = persistence
             .persist_user_message_with_attachments("user1:gui", "", "gui", None, &[sample_attachment()])
             .expect("persist message");
-        assert!(id > 0);
+        assert!(id.message_id > 0);
 
         let repo = ConversationRepository::new(&db);
         let msgs = repo
@@ -254,7 +294,7 @@ mod tests {
                 &[sample_attachment()],
             )
             .expect("persist message");
-        assert!(id > 0);
+        assert!(id.message_id > 0);
 
         let repo = ConversationRepository::new(&db);
         let msgs = repo
@@ -293,7 +333,7 @@ mod tests {
                 )],
             )
             .expect("persist message");
-        assert!(id > 0);
+        assert!(id.message_id > 0);
 
         let repo = ConversationRepository::new(&db);
         let msgs = repo

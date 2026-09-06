@@ -583,3 +583,83 @@ async fn test_handle_event_malformed_lane_override_falls_back() {
     assert_eq!(resp.lane_key.user_id, "junpei");
     assert_eq!(resp.lane_key.source, "internal");
 }
+
+/// A handler that opens a **new** session on the lane while the turn is still
+/// running — what `POST /v1/sessions` (the GUI's "New chat") does to a lane
+/// whose agentic loop is mid-flight.
+struct NewChatMidTurnHandler {
+    db: openalpaca_storage::Database,
+}
+
+#[async_trait]
+impl MessageHandler for NewChatMidTurnHandler {
+    async fn handle(
+        &self,
+        _request_id: Uuid,
+        _source: String,
+        _content: String,
+        _principal: Principal,
+        _scope: Scope,
+        lane_key: String,
+        _workspace_path: Option<String>,
+        _stream_id: Option<String>,
+    ) -> Result<HandleResult, String> {
+        openalpaca_storage::ConversationRepository::new(&self.db)
+            .create_session(&lane_key, "gui", None, Some("New chat"))
+            .map_err(|e| e.to_string())?;
+        Ok(HandleResult::text("answer".to_string()))
+    }
+}
+
+/// §5.1: the gateway resolves lane → session **once per turn**. A "New chat"
+/// that lands between the question and the answer must not split the turn
+/// across two conversations — the answer belongs where the question was asked,
+/// not wherever the lane is pointing by the time the loop returns.
+#[tokio::test]
+async fn test_a_new_chat_mid_turn_keeps_the_turn_in_one_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let gw = Gateway::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        Arc::new(NewChatMidTurnHandler { db: db.clone() }),
+        EventBus::default(),
+        Some(db.clone()),
+    );
+
+    gw.handle_event(GatewayRequest {
+        source: EventSource::Gui {
+            connection_id: "user1".to_string(),
+        },
+        content: "question".to_string(),
+        principal: Principal::System,
+        scope: Scope::Global,
+        attachments: Vec::new(),
+        workspace_path: None,
+        stream_id: None,
+        lane_override: None,
+    })
+    .await;
+
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    let messages = repo.list_by_lane("user1:gui", 50, 0).unwrap();
+    assert_eq!(messages.len(), 2);
+    let asked_in = messages[0]
+        .session_id
+        .clone()
+        .expect("the user message names the session it was asked in");
+    assert_eq!(
+        messages[1].session_id.as_deref(),
+        Some(asked_in.as_str()),
+        "the answer must land in the session the question was asked in"
+    );
+
+    // And that session is the one the turn started in — the "New chat" the
+    // handler opened archived it, and the turn stayed behind with it.
+    let session = repo.get_session(&asked_in).unwrap().expect("session");
+    assert_eq!(session.status, "archived");
+    assert_eq!(
+        session.message_count, 2,
+        "both halves of the turn are counted where they landed"
+    );
+}

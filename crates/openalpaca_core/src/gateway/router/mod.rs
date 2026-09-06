@@ -206,7 +206,11 @@ impl Gateway {
 
         // Persist user message. This is where the turn resolves lane →
         // session (§5.1): the workspace the request carried binds the
-        // session's project the first time one is seen.
+        // session's project the first time one is seen. The id it resolves is
+        // held for the whole turn — the handler below runs a full agentic loop,
+        // and the assistant half must land in the conversation the question was
+        // asked in, not wherever a mid-turn "New chat" left the lane pointing.
+        let mut turn_session: Option<String> = None;
         if let Some(ref p) = self.persistence {
             // The canonical project root, not the raw header: a session's
             // `workspace_id` is the same key `task.workspace_id` and memory
@@ -219,20 +223,20 @@ impl Gateway {
                 )
                 .request_workspace_root;
             let workspace_path = workspace_root.as_deref();
-            if req.attachments.is_empty() {
-                if let Err(e) =
-                    p.persist_user_message(&lane_key_str, &req.content, &source_name, workspace_path)
-                {
-                    tracing::warn!("Failed to persist user message: {e}");
-                }
-            } else if let Err(e) = p.persist_user_message_with_attachments(
-                &lane_key_str,
-                &req.content,
-                &source_name,
-                workspace_path,
-                &req.attachments,
-            ) {
-                tracing::warn!("Failed to persist user message with attachments: {e}");
+            let persisted = if req.attachments.is_empty() {
+                p.persist_user_message(&lane_key_str, &req.content, &source_name, workspace_path)
+            } else {
+                p.persist_user_message_with_attachments(
+                    &lane_key_str,
+                    &req.content,
+                    &source_name,
+                    workspace_path,
+                    &req.attachments,
+                )
+            };
+            match persisted {
+                Ok(turn) => turn_session = Some(turn.session_id),
+                Err(e) => tracing::warn!("Failed to persist user message: {e}"),
             }
         }
 
@@ -282,6 +286,8 @@ impl Gateway {
                         // it started, so the link survives the reload that the
                         // SSE `done` frame below does not.
                         result.delegation.as_ref().map(|d| d.task_id.as_str()),
+                        // §5.1: the session this turn resolved when it began.
+                        turn_session.as_deref(),
                     ) {
                         Ok(message_id) if message_id > 0 => {
                             if let Err(e) = openalpaca_storage::SkillExecutionRepository::new(p.db())
