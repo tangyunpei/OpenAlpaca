@@ -939,14 +939,20 @@ async fn run_agentic_loop_core(
                     let tool_started = Instant::now();
 
                     let effective_ctx = effective_ctx;
+                    // The **untruncated** output. §5.4 makes the JSONL the
+                    // source of truth for tool payloads, so the cut to
+                    // `MAX_TOOL_RESULT_SIZE` happens once, below, on the copy
+                    // that goes into the model's context — never on the copy
+                    // the log records. The envelope cap still bounds what
+                    // lands inline in the record.
                     let tool_futures = executable.iter().map(|&tc| {
                         let ctx_ref = &effective_ctx;
                         async move {
                             if let (Some(sbx), Some(policy)) = (sandbox, sandbox_policy) {
                                 match sbx.execute_tool(tc, policy, ctx_ref).await {
-                                    Ok(output) => truncate_tool_result(output),
+                                    Ok(output) => output,
                                     Err(err) => {
-                                        truncate_tool_result(format_tool_error_with_hint(&tc.name, &err.to_string()))
+                                        format_tool_error_with_hint(&tc.name, &err.to_string())
                                     }
                                 }
                             } else {
@@ -1008,6 +1014,12 @@ async fn run_agentic_loop_core(
                                 "ext": tool_extension(sandbox, &tc.name),
                             }),
                         );
+                        // The model's copy: head-only at
+                        // `MAX_TOOL_RESULT_SIZE` so a long result cannot blow
+                        // the context window. The record above kept the whole
+                        // thing — that split is §5.4's, and it is what lets
+                        // T42 spill the tail instead of destroying it.
+                        let model_text = truncate_tool_result(result_text.clone());
                         persist_span.in_scope(|| {
                             tracing::debug!(
                                 agent_id = agent_id,
@@ -1016,11 +1028,12 @@ async fn run_agentic_loop_core(
                                 tool_call_number = state.tool_calls_made,
                                 success = !result_text.starts_with("[tool_error]"),
                                 result_len = result_text.len(),
+                                model_visible_len = model_text.len(),
                                 "Tool execution completed"
                             );
                         });
                         Arc::make_mut(&mut messages)
-                            .push(ChatMessage::tool_result(&tc.id, result_text));
+                            .push(ChatMessage::tool_result(&tc.id, &model_text));
                     }
 
                     // Over-budget tools get error

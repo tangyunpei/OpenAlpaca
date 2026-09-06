@@ -974,6 +974,10 @@ struct MockRouterProvider {
     /// notice is not persisted into the conversation (i.e., the request
     /// never carries more than the original single system prompt).
     system_count_per_call: std::sync::Mutex<Vec<usize>>,
+    /// The content of every `Role::Tool` message the backend has been sent —
+    /// what the *model* actually sees of a tool result, which is not what the
+    /// session log records (§5.4: the log keeps the untruncated payload).
+    tool_results_seen: std::sync::Mutex<Vec<String>>,
 }
 
 impl MockRouterProvider {
@@ -983,7 +987,17 @@ impl MockRouterProvider {
             call_count: AtomicUsize::new(0),
             notices: std::sync::Mutex::new(Vec::new()),
             system_count_per_call: std::sync::Mutex::new(Vec::new()),
+            tool_results_seen: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// The tool-result texts the model was given, newest call last.
+    #[allow(dead_code)]
+    fn tool_results_seen(&self) -> Vec<String> {
+        self.tool_results_seen
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// Snapshot the notices observed across all `chat()` calls so far.
@@ -1029,6 +1043,17 @@ impl LlmProvider for MockRouterProvider {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .push(system_count);
+        {
+            let mut seen = self
+                .tool_results_seen
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            for message in request.messages.iter() {
+                if matches!(message.role, openalpaca_llm::Role::Tool) {
+                    seen.push(message.content.clone());
+                }
+            }
+        }
         let idx = self.call_count.fetch_add(1, Ordering::SeqCst);
         if idx < self.responses.len() {
             self.responses[idx].clone()
@@ -2477,6 +2502,165 @@ async fn the_loop_narrates_rounds_tools_and_its_exit_into_the_session_log() {
     assert_eq!(task, "task-9");
     assert_eq!(log_seq, 2, "log_seq points at the tool_call record");
     assert_eq!(result_ref, "log:3");
+}
+
+/// §5.4 makes the JSONL the source of truth for tool payloads: the log keeps
+/// the result whole and the *model* gets the 32 KB head-only copy. Truncating
+/// before the record was written destroyed the tail of a long result for both
+/// readers, and put every big result under the envelope cap so the
+/// `spilled_pending` marker T42 converts could never fire here.
+#[tokio::test]
+async fn the_log_keeps_the_whole_tool_result_and_the_model_gets_the_truncated_copy() {
+    use crate::bus::EventBus;
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+    use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+    use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+    use crate::tools::ToolRegistry;
+
+    /// 40 KB: over `MAX_TOOL_RESULT_SIZE` (32 KB), under the 64 KB envelope
+    /// cap — the band where the two bounds disagree.
+    const RESULT_BYTES: usize = 40 * 1024;
+
+    struct BigOutputTool;
+    #[async_trait]
+    impl BuiltInTool for BigOutputTool {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+            Ok("q".repeat(RESULT_BYTES))
+        }
+    }
+
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "dump".to_string(),
+                description: "Dump".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(Arc::new(BigOutputTool)),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+    let policy = SandboxPolicy {
+        agent_id: "research_agent::a1".to_string(),
+        allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
+        denied_capabilities: vec![],
+        require_confirmation_for: vec![],
+        max_tool_calls: None,
+        max_tool_runtime_secs: 60,
+        stream_id: None,
+        lane_key: None,
+        confirmation_timeout_secs: None,
+        auto_approve: false,
+    };
+
+    let provider = Arc::new(MockRouterProvider::new(vec![
+        Ok(ChatResponse {
+            content: "Dumping.".to_string(),
+            tool_calls: vec![openalpaca_llm::ToolCall {
+                id: "tc_big".to_string(),
+                name: "dump".to_string(),
+                arguments: serde_json::json!({}),
+            }],
+            model: "claude-sonnet-4-20250514".to_string(),
+            usage: Usage::default(),
+            finish_reason: FinishReason::ToolUse,
+            thinking: None,
+            parts: None,
+        }),
+        Ok(ChatResponse {
+            content: "Done.".to_string(),
+            tool_calls: vec![],
+            model: "claude-sonnet-4-20250514".to_string(),
+            usage: Usage::default(),
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        }),
+    ]));
+    let router = LlmRouter::single_provider(
+        provider.clone(),
+        ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&db_dir.path().join("t.db")).unwrap();
+    let service = SessionLogService::new(
+        dir.path().to_path_buf(),
+        Some(db.clone()),
+        SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-big-result");
+
+    let config = LoopConfig {
+        model: Some("claude-sonnet-4-20250514".to_string()),
+        enable_caching: false,
+        session_log: Some(handle.clone()),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop_routed(
+        &router,
+        vec![ChatMessage::user("dump it")],
+        vec![],
+        &config,
+        Some(&sandbox),
+        "research_agent::a1",
+        Some(&policy),
+        Some("task-big"),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+    assert!(handle.flush().await);
+
+    let records = read_records(&dir.path().join("sess-big-result")).unwrap();
+    let logged = records
+        .iter()
+        .find(|r| r.kind == "tool_result")
+        .expect("the result is narrated");
+    let logged_result = logged.data["result"].as_str().unwrap();
+    assert_eq!(
+        logged_result.len(),
+        RESULT_BYTES,
+        "the JSONL carries the untruncated result"
+    );
+    assert!(!logged_result.contains("[... truncated"), "no head-only cut");
+
+    // What the model was handed for the same call.
+    let seen = provider.tool_results_seen();
+    assert_eq!(seen.len(), 1, "one tool result reached the backend: {seen:?}");
+    assert!(
+        seen[0].len() < RESULT_BYTES && seen[0].contains("[... truncated: showing first"),
+        "the model sees the 32 KB head plus the marker, {} bytes",
+        seen[0].len()
+    );
+
+    // The index row previews what landed inline, which is now the whole result.
+    let preview: String = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT result_preview FROM tool_execution_log",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert!(preview.chars().count() <= openalpaca_storage::PREVIEW_CHARS);
 }
 
 /// A loop with no session log writes nothing and behaves identically — the
