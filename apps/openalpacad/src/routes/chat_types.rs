@@ -36,15 +36,55 @@ pub struct ConversationsResponse {
     pub conversations: Vec<openalpaca_storage::Conversation>,
 }
 
+/// A stored message as the two history routes answer it (GAP-23).
+///
+/// Additive by construction: the row is flattened, so every field a client
+/// already reads — `task_id` among them, straight off the 038 column — keeps
+/// its place, and `artifacts` is the one thing added. It is the message's
+/// `role='artifact'` links, resolved to what a transcript chip needs, and it is
+/// always present (`[]` for the overwhelming majority of rows) so the client
+/// never has to distinguish "no artifacts" from "not served".
+#[derive(Serialize)]
+pub struct ConversationMessageView {
+    #[serde(flatten)]
+    pub message: openalpaca_storage::ConversationMessage,
+    pub artifacts: Vec<openalpaca_storage::MessageArtifact>,
+}
+
+/// Resolve a whole page of messages' artifact links in **one** query, so the
+/// client gets the run link and its chips in one round trip and the daemon
+/// spends one statement, not one per message.
+pub(super) fn with_artifacts(
+    db: &openalpaca_storage::Database,
+    messages: Vec<openalpaca_storage::ConversationMessage>,
+) -> Vec<ConversationMessageView> {
+    let ids: Vec<i64> = messages.iter().map(|m| m.id).collect();
+    let mut links = openalpaca_storage::FileAssetRepository::new(db)
+        .artifact_links_for_messages(&ids)
+        .unwrap_or_else(|e| {
+            // The transcript is the payload; its chips are decoration. A read
+            // failure answers messages without chips, never a 500.
+            tracing::warn!("Failed to read artifact links for a history page: {e}");
+            Default::default()
+        });
+    messages
+        .into_iter()
+        .map(|message| ConversationMessageView {
+            artifacts: links.remove(&message.id).unwrap_or_default(),
+            message,
+        })
+        .collect()
+}
+
 #[derive(Serialize)]
 pub struct ConversationMessagesResponse {
-    pub messages: Vec<openalpaca_storage::ConversationMessage>,
+    pub messages: Vec<ConversationMessageView>,
     pub total: i64,
 }
 
 #[derive(Serialize)]
 pub struct ChatHistoryResponse {
-    pub messages: Vec<openalpaca_storage::ConversationMessage>,
+    pub messages: Vec<ConversationMessageView>,
     pub total: i64,
     pub lane_key: String,
 }
@@ -134,5 +174,116 @@ mod tests {
         let body: ConfirmationBody =
             serde_json::from_str(r#"{"approved":true,"approval_scope":"these_args"}"#).unwrap();
         assert_eq!(body.approval_scope, Some(ApprovalScope::TheseArgs));
+    }
+
+    // ── GAP-23: what a reloaded transcript reads ────────────────────
+
+    /// A lane with three messages: a plain turn, a delegating turn carrying
+    /// only its run id, and the completion report carrying the run *and* the
+    /// two files it produced.
+    fn history_fixture() -> (tempfile::TempDir, openalpaca_storage::Database) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).expect("db");
+        db.with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO task (id, title, created_by, source_lane)
+                 VALUES ('task-1', 'A run', 'user1', 'user1:gui')",
+                [],
+            )?;
+            for (id, name) in [("produced-1", "notes.md"), ("produced-2", "diff.patch")] {
+                conn.execute(
+                    "INSERT INTO file_assets (id, owner_id, sha256, filename, mime_type, size_bytes, storage_path, status, origin, task_id, kind)
+                     VALUES (?1, 'user1', ?1, ?2, 'text/markdown', 10, ?3, 'ready', 'produced', 'task-1', 'markdown')",
+                    [id.to_string(), name.to_string(), format!("/tmp/{name}")],
+                )?;
+            }
+            Ok(())
+        })
+        .expect("seed");
+
+        let repo = openalpaca_storage::ConversationRepository::new(&db);
+        repo.insert(&openalpaca_storage::ConversationMessage {
+            lane_key: "user1:gui".to_string(),
+            role: "user".to_string(),
+            content: "do the thing".to_string(),
+            ..Default::default()
+        })
+        .expect("user turn");
+        repo.insert(&openalpaca_storage::ConversationMessage {
+            lane_key: "user1:gui".to_string(),
+            role: "assistant".to_string(),
+            content: "Starting that now.".to_string(),
+            task_id: Some("task-1".to_string()),
+            ..Default::default()
+        })
+        .expect("delegating turn");
+        let report = repo
+            .insert(&openalpaca_storage::ConversationMessage {
+                lane_key: "user1:gui".to_string(),
+                role: "assistant".to_string(),
+                content: "Done.".to_string(),
+                task_id: Some("task-1".to_string()),
+                ..Default::default()
+            })
+            .expect("report");
+
+        let files = openalpaca_storage::FileAssetRepository::new(&db);
+        for (i, id) in ["produced-1", "produced-2"].iter().enumerate() {
+            files
+                .link_to_message_with_role(
+                    report,
+                    id,
+                    i as i32,
+                    None,
+                    openalpaca_storage::ARTIFACT_ROLE,
+                )
+                .expect("link");
+        }
+        (dir, db)
+    }
+
+    #[test]
+    fn test_history_view_serialises_the_run_link_and_the_artifact_chips() {
+        let (_dir, db) = history_fixture();
+        let messages = openalpaca_storage::ConversationRepository::new(&db)
+            .list_by_lane("user1:gui", 50, 0)
+            .expect("history");
+
+        let views = with_artifacts(&db, messages);
+        let json: serde_json::Value =
+            serde_json::to_value(&views).expect("the view serialises");
+
+        // The plain turn: no run, no chips — and every field it always had.
+        assert_eq!(json[0]["role"], "user");
+        assert_eq!(json[0]["content"], "do the thing");
+        assert!(json[0]["task_id"].is_null());
+        assert_eq!(json[0]["artifacts"], serde_json::json!([]));
+        // The row's own columns survive the flatten.
+        for field in ["id", "lane_key", "created_at", "content_json"] {
+            assert!(
+                json[0].get(field).is_some(),
+                "{field} should still be on the wire"
+            );
+        }
+
+        // The delegating turn: the run link, and nothing it could not know.
+        assert_eq!(json[1]["task_id"], "task-1");
+        assert_eq!(json[1]["artifacts"], serde_json::json!([]));
+
+        // The completion report: the run link and one chip per produced file.
+        assert_eq!(json[2]["task_id"], "task-1");
+        assert_eq!(
+            json[2]["artifacts"],
+            serde_json::json!([
+                {"id": "produced-1", "name": "notes.md", "kind": "markdown"},
+                {"id": "produced-2", "name": "diff.patch", "kind": "markdown"},
+            ])
+        );
+    }
+
+    #[test]
+    fn test_history_view_of_an_empty_page_is_empty() {
+        let (_dir, db) = history_fixture();
+        assert!(with_artifacts(&db, Vec::new()).is_empty());
     }
 }

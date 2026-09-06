@@ -226,8 +226,10 @@ pub async fn get_chat_history_handler(
     }
 
     match chat_service.get_history(lane_key, limit, offset) {
+        // GAP-23: the run link rides the row; the chips are one extra query
+        // for the whole page, never one per message.
         Ok((messages, total)) => Json(ChatHistoryResponse {
-            messages,
+            messages: with_artifacts(&state.db, messages),
             total,
             lane_key: lane_key.to_string(),
         })
@@ -350,7 +352,11 @@ pub async fn get_conversation_messages_handler(
     match repo.list_by_lane(&conv.lane_key, limit, offset) {
         Ok(messages) => {
             let total = repo.count_by_lane(&conv.lane_key).unwrap_or(0);
-            Json(ConversationMessagesResponse { messages, total }).into_response()
+            Json(ConversationMessagesResponse {
+                messages: with_artifacts(&state.db, messages),
+                total,
+            })
+            .into_response()
         }
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
