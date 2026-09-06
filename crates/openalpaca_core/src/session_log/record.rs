@@ -137,6 +137,46 @@ impl RecordType {
     }
 }
 
+/// The directory a session's spilled tool results live in, relative to the
+/// session directory (§5.4's `results/`).
+pub const RESULTS_DIR: &str = "results";
+
+/// A tool result too large to sit inline: the bytes travel with the record and
+/// the writer puts them in `results/` once, on its blocking thread (§5.4's
+/// "Spill, don't truncate").
+///
+/// The reference is reserved by the emitter — [`SessionLogHandle::reserve_spill`](
+/// crate::session_log::SessionLogHandle::reserve_spill) — because the
+/// **model-visible** stub naming it has to be produced synchronously on the
+/// loop's path, which cannot wait for the writer.
+#[derive(Debug, Clone)]
+pub struct Spill {
+    /// `results/<seq>-<uid8>-<tool>.txt`, relative to the session directory.
+    pub rel: String,
+    /// The whole result. Written once; the record keeps only a preview.
+    pub content: String,
+}
+
+/// The **model-visible** stub §5.4 specifies, verbatim.
+///
+/// One function so the loop, the writer's record and every test agree on the
+/// wording — a model that has been taught to look for `result_ref=` must find
+/// exactly this shape on every surface.
+pub fn spill_stub(bytes: usize, preview: &str, rel: &str) -> String {
+    format!(
+        "[result too large: {bytes} bytes; first 2 KB follow]\n{preview}\n\
+         [full result: result_ref=file:{rel} — use read_result to page]"
+    )
+}
+
+/// The first [`PREVIEW_CHARS`] characters of a result — the same bytes the
+/// record, the stub and `tool_execution_log.result_preview` all carry, so the
+/// expanded-turn view renders without touching `results/` and a replay can
+/// inline the preview after a spill file has been evicted (§5.4).
+pub fn spill_preview(content: &str) -> String {
+    content.chars().take(PREVIEW_CHARS).collect()
+}
+
 /// One event, before the writer stamps it with a `seq`.
 ///
 /// `ts` is taken when the record is *made*, not when it is written: a record
@@ -155,6 +195,10 @@ pub struct Record {
     pub agent: Option<String>,
     /// The payload. Always an object once written.
     pub data: Value,
+    /// Bytes for `results/` that must never sit inline (§5.4). The writer
+    /// creates the file, then rewrites `data.result` into the reference plus a
+    /// preview — so the payload is stored once, not twice.
+    pub spill: Option<Spill>,
 }
 
 impl Record {
@@ -166,11 +210,18 @@ impl Record {
             span_id: None,
             agent: None,
             data: Value::Object(Map::new()),
+            spill: None,
         }
     }
 
     pub fn with_data(mut self, data: Value) -> Self {
         self.data = data;
+        self
+    }
+
+    /// Attach the bytes the writer must put in `results/` under `rel`.
+    pub fn with_spill(mut self, rel: String, content: String) -> Self {
+        self.spill = Some(Spill { rel, content });
         self
     }
 

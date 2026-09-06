@@ -5,7 +5,7 @@
 //! what makes the sequence gap-free: a record dropped by a full channel never
 //! reaches here, so it never consumes a number.
 
-use super::record::{Record, RecordType, cap_data};
+use super::record::{RESULTS_DIR, Record, RecordType, Spill, cap_data, spill_preview};
 use super::reader::{LIVE_SEGMENT, segment_first_seq, segment_range};
 use openalpaca_storage::{Database, SkillExecutionRepository, ToolExecutionEntry};
 use serde_json::Value;
@@ -13,6 +13,8 @@ use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
@@ -80,6 +82,9 @@ struct Writer {
     limits: SessionLogLimits,
     log: Option<OpenLog>,
     pending: PendingCalls,
+    /// Published for the handle's spill reservation: the highest seq actually
+    /// on disk (§5.4 — the emitter names a spill file without waiting here).
+    written_seq: Arc<AtomicU64>,
     /// Set once the directory could not be opened: the writer is done, and
     /// dropping its receiver tells every handle so.
     gave_up: bool,
@@ -104,7 +109,16 @@ impl Writer {
                         // §5.4/P-22: the directory is created by the first
                         // record, never by asking for a handle.
                         match OpenLog::open(&self.dir) {
-                            Ok(opened) => self.log = Some(opened),
+                            Ok(opened) => {
+                                // A reopened session resumes its numbering, so
+                                // the handle's spill reservations must resume
+                                // with it rather than restarting at 1.
+                                self.written_seq.fetch_max(
+                                    opened.next_seq.saturating_sub(1),
+                                    Ordering::Relaxed,
+                                );
+                                self.log = Some(opened);
+                            }
                             Err(e) => {
                                 tracing::warn!(
                                     session_id = self.session_id,
@@ -124,6 +138,7 @@ impl Writer {
                         &self.db,
                         &mut self.pending,
                         &self.limits,
+                        &self.written_seq,
                     );
                 }
                 Msg::Sync(ack) => {
@@ -158,6 +173,7 @@ pub(super) async fn run(
     mut rx: mpsc::Receiver<Msg>,
     db: Option<Database>,
     limits: SessionLogLimits,
+    written_seq: Arc<AtomicU64>,
 ) {
     let sync_interval = limits.sync_interval;
     let idle_close = limits.idle_close;
@@ -168,6 +184,7 @@ pub(super) async fn run(
         limits,
         log: None,
         pending: PendingCalls::default(),
+        written_seq,
         gave_up: false,
     };
     let mut dirty = false;
@@ -243,8 +260,14 @@ fn write_record(
     db: &Option<Database>,
     pending: &mut PendingCalls,
     limits: &SessionLogLimits,
+    written_seq: &Arc<AtomicU64>,
 ) {
     let kind = record.kind;
+    let spilled = record.spill.is_some();
+    // The spill runs before the cap: once the payload is a reference plus a
+    // preview there is nothing left for the 64 KB envelope bound to cut, which
+    // is §5.4's "spilled results never sit inline".
+    let record = spill_result(session_id, log, record);
     let (data, truncated) = cap_data(record.data);
     let mut record = Record { data, ..record };
 
@@ -284,25 +307,160 @@ fn write_record(
             return;
         }
     };
+    written_seq.fetch_max(seq, Ordering::Relaxed);
 
     index_tool_call(session_id, &record, seq, db, pending);
 
-    match log.rotate_if_needed(limits) {
-        Ok(Some(dropped)) => {
-            // The trim is itself a record (§5.4): the log says what it lost.
-            let notice = Record::new(RecordType::LogTrimmed).with_data(serde_json::json!({
-                "from_seq": dropped.from_seq,
-                "to_seq": dropped.to_seq,
-                "segments": dropped.segments,
-                "bytes_freed": dropped.bytes_freed,
-            }));
-            if let Err(e) = log.write(&notice) {
-                tracing::warn!(session_id, "Failed to record the log trim: {e}");
-            }
+    // A spill grows `results/`, which the per-session cap counts (§5.4). The
+    // rotation check alone would never see it: a session can fill `results/`
+    // without its live segment ever reaching the rotation bound. Gated on the
+    // spill so the ordinary record path keeps §5.4's "cheap, no scan".
+    let mut trim = match spilled.then(|| log.enforce_cap_now(limits)) {
+        Some(Ok(trimmed)) => trimmed,
+        Some(Err(e)) => {
+            tracing::warn!(session_id, "Session cap enforcement failed: {e}");
+            None
         }
+        None => None,
+    };
+
+    match log.rotate_if_needed(limits) {
+        Ok(Some(dropped)) => trim = Some(merge_trims(trim.take(), dropped)),
         Ok(None) => {}
         Err(e) => tracing::warn!(session_id, "Session log rotation failed: {e}"),
     }
+
+    if let Some(dropped) = trim {
+        // The trim is itself a record (§5.4): the log says what it lost.
+        let notice = Record::new(RecordType::LogTrimmed).with_data(serde_json::json!({
+            "from_seq": dropped.from_seq,
+            "to_seq": dropped.to_seq,
+            "segments": dropped.segments,
+            "bytes_freed": dropped.bytes_freed,
+        }));
+        if let Err(e) = log.write(&notice) {
+            tracing::warn!(session_id, "Failed to record the log trim: {e}");
+        }
+    }
+}
+
+/// Fold two trims into the one `log_trimmed` record they are owed.
+fn merge_trims(previous: Option<Trimmed>, next: Trimmed) -> Trimmed {
+    match previous {
+        None => next,
+        Some(prev) => Trimmed {
+            from_seq: prev.from_seq.min(next.from_seq),
+            to_seq: prev.to_seq.max(next.to_seq),
+            segments: prev.segments + next.segments,
+            bytes_freed: prev.bytes_freed + next.bytes_freed,
+        },
+    }
+}
+
+// ── The `results/` spill ────────────────────────────────────────────
+
+/// Put an oversized tool result in `results/` and leave the record holding the
+/// reference plus a preview (§5.4's "Spill, don't truncate").
+///
+/// The file is written with T26/T29's protocol — a temporary sibling, `fsync`,
+/// then `rename` — so a reader never sees a half-written result, and an
+/// existing file is **never overwritten**: the reference names one call, so a
+/// second arrival is the same bytes and re-writing them would only risk
+/// clobbering what the model was already told to read.
+fn spill_result(session_id: &str, log: &OpenLog, record: Record) -> Record {
+    let Some(Spill { rel, content }) = record.spill.clone() else {
+        return record;
+    };
+    let mut record = Record { spill: None, ..record };
+
+    let bytes = content.len();
+    let preview = spill_preview(&content);
+    let sha256 = sha256_hex(content.as_bytes());
+
+    match write_spill_file(&log.dir, &rel, content.as_bytes()) {
+        Ok(()) => {
+            if let Some(map) = record.data.as_object_mut() {
+                // One copy of the payload: the file. The record keeps what the
+                // expanded-turn view needs without touching `results/`.
+                map.insert(
+                    "result".into(),
+                    serde_json::json!({
+                        "spill": {
+                            "rel": rel,
+                            "bytes": bytes,
+                            "sha256": sha256,
+                            "mime": SPILL_MIME,
+                        },
+                        "preview": preview,
+                    }),
+                );
+                map.insert("result_ref".into(), Value::from(format!("file:{rel}")));
+            }
+        }
+        Err(e) => {
+            // The result is not lost: the record keeps the preview and says
+            // the spill failed, which is more honest than a reference to a
+            // file that is not there.
+            tracing::warn!(session_id, rel = %rel, "Failed to spill a tool result: {e}");
+            if let Some(map) = record.data.as_object_mut() {
+                map.insert("result".into(), Value::from(preview));
+                map.insert("spill_error".into(), Value::from(e.to_string()));
+            }
+        }
+    }
+    record
+}
+
+/// Every spilled tool result is text: the sandbox hands the loop a `String`.
+const SPILL_MIME: &str = "text/plain; charset=utf-8";
+
+fn write_spill_file(dir: &Path, rel: &str, bytes: &[u8]) -> io::Result<()> {
+    let target = dir.join(rel);
+    if target.exists() {
+        // Never overwrite: the reference names one call, and the model may
+        // already be paging the bytes that are there.
+        return Ok(());
+    }
+    let parent = target
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "spill has no parent"))?;
+    fs::create_dir_all(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+    }
+    let tmp = parent.join(format!(
+        ".{}.tmp",
+        target
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "spill".to_string())
+    ));
+    {
+        let mut file = File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_data()?;
+    }
+    match fs::rename(&tmp, &target) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+/// The spill's content hash, as §5.4's stub carries it.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 // ── The tool-call index row ─────────────────────────────────────────
@@ -420,14 +578,22 @@ fn index_tool_call(
                 // nothing honest to point at.
                 log_seq: call.as_ref().map(|c| c.seq as i64),
                 args_preview: call.map(|c| c.args_preview),
-                result_preview: record
-                    .data
-                    .get("result")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                // Inline in the JSONL for now; T42's spill rewrites this to
-                // `file:results/<…>` at the same site.
-                result_ref: Some(format!("log:{seq}")),
+                // The bytes that actually landed in the record: the whole
+                // result when it sat inline, the spill's preview when it did
+                // not. Either way the row and the record agree, and the row
+                // still renders a turn after the spill file has been evicted.
+                result_preview: result_preview(&record.data),
+                // §5.4: a spilled result's row points at the same file the
+                // record and the model's stub name; an inline one points back
+                // at the record that holds it.
+                result_ref: Some(
+                    record
+                        .data
+                        .get("result_ref")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("log:{seq}")),
+                ),
                 ..Default::default()
             };
             if let Err(e) = SkillExecutionRepository::new(db).attach_session_index(&entry) {
@@ -435,6 +601,19 @@ fn index_tool_call(
             }
         }
         _ => {}
+    }
+}
+
+/// The preview the index row stores: a `tool_result`'s inline string, or the
+/// preview a spill left behind in its place.
+fn result_preview(data: &Value) -> Option<String> {
+    match data.get("result") {
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(Value::Object(spilled)) => spilled
+            .get("preview")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        _ => None,
     }
 }
 
@@ -547,6 +726,16 @@ impl OpenLog {
         self.dirty = false;
         enforce_session_cap(&self.dir, limits.max_session_bytes)
     }
+
+    /// Enforce the per-session cap without waiting for a rotation.
+    ///
+    /// §5.4 counts `results/` inside `log_max_session_bytes`, and a session can
+    /// fill it with spilled results while its live segment stays far below the
+    /// rotation bound — so the cheap "on rotation" check alone would never see
+    /// the bytes that grew. Only ever called after a spill wrote a file.
+    fn enforce_cap_now(&self, limits: &SessionLogLimits) -> io::Result<Option<Trimmed>> {
+        enforce_session_cap(&self.dir, limits.max_session_bytes)
+    }
 }
 
 /// Drop whole oldest **archived** segments (never the live one) until the
@@ -575,17 +764,20 @@ fn enforce_session_cap(dir: &Path, max_bytes: u64) -> io::Result<Option<Trimmed>
     }
     archived.sort_by_key(|(first, ..)| *first);
 
-    let results_dir = dir.join("results");
     let mut trimmed: Option<Trimmed> = None;
     for (first, last, path, len) in archived {
         if total <= max_bytes {
             break;
         }
+        // Read the references out *before* deleting the segment that holds
+        // them — §5.4 drops "the spill files they reference", and the segment
+        // is the only thing that knows which those are.
+        let refs = spill_refs_in(&path);
         if fs::remove_file(&path).is_err() {
             continue;
         }
         total = total.saturating_sub(len);
-        let freed_spill = drop_spilled_results(&results_dir, first, last);
+        let freed_spill = drop_spilled_results(dir, &refs);
         total = total.saturating_sub(freed_spill);
         trimmed = Some(match trimmed {
             None => Trimmed {
@@ -605,28 +797,53 @@ fn enforce_session_cap(dir: &Path, max_bytes: u64) -> io::Result<Option<Trimmed>
     Ok(trimmed)
 }
 
-/// Spill files are named `results/<seq>-<span8>-<tool>.<ext>` (§5.4), so the
-/// dropped segment's seq range names exactly the files it owned. A no-op
-/// until T42 writes any.
-fn drop_spilled_results(results_dir: &Path, from_seq: u64, to_seq: u64) -> u64 {
-    let Ok(entries) = fs::read_dir(results_dir) else {
-        return 0;
+/// Every `results/` file a segment's records point at (§5.4's "the spill files
+/// they reference"), streamed so a 64 MiB segment is not materialised.
+///
+/// Reading the references rather than parsing a seq out of the filename is
+/// what makes the trim exact: the numeric prefix a spill is named after is the
+/// emitter's watermark reservation, which is ordering, not identity.
+pub(super) fn spill_refs_in(segment: &Path) -> Vec<String> {
+    let Ok(file) = File::open(segment) else {
+        return Vec::new();
     };
-    let mut freed = 0;
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(seq) = name
-            .split('-')
-            .next()
-            .and_then(|s| s.trim_start_matches('0').parse::<u64>().ok().or(Some(0)))
-        else {
-            continue;
+    let mut refs = Vec::new();
+    use std::io::BufRead;
+    for line in io::BufReader::new(file).lines() {
+        let Ok(line) = line else { break };
+        let Ok(record) = serde_json::from_str::<super::reader::LoggedRecord>(&line) else {
+            // §5.4: an unparseable line is end-of-log for this segment.
+            break;
         };
-        if seq >= from_seq && seq <= to_seq {
-            let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            if fs::remove_file(entry.path()).is_ok() {
-                freed += len;
-            }
+        if let Some(rel) = spill_ref_of(&record.data) {
+            refs.push(rel);
+        }
+    }
+    refs
+}
+
+/// `data.result_ref` as a session-relative path, when it names a spill file.
+pub(super) fn spill_ref_of(data: &Value) -> Option<String> {
+    let raw = data.get("result_ref").and_then(Value::as_str)?;
+    let rel = raw.strip_prefix("file:")?;
+    let rel = rel.strip_prefix(&format!("{RESULTS_DIR}/"))?;
+    // A reference is one filename under `results/`; anything else is not one
+    // this writer produced, and is left alone rather than guessed at.
+    if rel.is_empty() || rel.contains('/') || rel.contains("..") {
+        return None;
+    }
+    Some(format!("{RESULTS_DIR}/{rel}"))
+}
+
+/// Delete the spill files a dropped segment referenced, returning the bytes
+/// freed. A file already gone (a re-run of the same trim) is not an error.
+fn drop_spilled_results(dir: &Path, refs: &[String]) -> u64 {
+    let mut freed = 0;
+    for rel in refs {
+        let path = dir.join(rel);
+        let len = path.metadata().map(|m| m.len()).unwrap_or(0);
+        if fs::remove_file(&path).is_ok() {
+            freed += len;
         }
     }
     freed

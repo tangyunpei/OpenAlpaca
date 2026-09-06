@@ -37,7 +37,10 @@ mod writer;
 mod tests;
 
 pub use reader::{LIVE_SEGMENT, LoggedRecord, read_records, read_records_after, segments};
-pub use record::{ENVELOPE_DATA_CAP_BYTES, ENVELOPE_VERSION, PREVIEW_CHARS, Record, RecordType};
+pub use record::{
+    ENVELOPE_DATA_CAP_BYTES, ENVELOPE_VERSION, PREVIEW_CHARS, RESULTS_DIR, Record, RecordType,
+    Spill, spill_preview, spill_stub,
+};
 pub use writer::SessionLogLimits;
 
 use dashmap::DashMap;
@@ -190,10 +193,13 @@ impl SessionLogService {
 
     fn spawn(&self, session_id: &str) -> SessionLogHandle {
         let (tx, rx) = mpsc::channel(self.limits.channel_capacity.max(1));
+        let written_seq = Arc::new(AtomicU64::new(0));
         let handle = SessionLogHandle {
             session_id: Arc::from(session_id),
             tx,
             dropped: Arc::new(AtomicU64::new(0)),
+            written_seq: written_seq.clone(),
+            next_spill: Arc::new(AtomicU64::new(1)),
         };
         tokio::spawn(writer::run(
             session_id.to_string(),
@@ -201,6 +207,7 @@ impl SessionLogService {
             rx,
             self.db.clone(),
             self.limits.clone(),
+            written_seq,
         ));
         handle
     }
@@ -217,11 +224,48 @@ pub struct SessionLogHandle {
     session_id: Arc<str>,
     tx: mpsc::Sender<Msg>,
     dropped: Arc<AtomicU64>,
+    /// The highest `seq` the writer has actually put on disk. Published by the
+    /// writer so [`reserve_spill`](Self::reserve_spill) can name a file after
+    /// roughly the record it belongs to without asking the writer — which the
+    /// emit path may never wait for.
+    written_seq: Arc<AtomicU64>,
+    /// The next spill number this boot will hand out, never below
+    /// `written_seq + 1`.
+    next_spill: Arc<AtomicU64>,
 }
 
 impl SessionLogHandle {
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Reserve the `results/` reference for a tool result too large to sit
+    /// inline, and return it relative to the session directory.
+    ///
+    /// The **model-visible** stub has to name the file synchronously, on the
+    /// loop's own path — the loop cannot wait for the writer, and the writer is
+    /// the only thing that assigns a `seq` (that is what keeps the sequence
+    /// gap-free). So the number here is the writer's published watermark plus
+    /// one, which is the record's seq whenever nothing was dropped in between,
+    /// and always at least it. Ordering is all the number carries: what makes
+    /// the name **unique** is the call's own `tool_use_id`, and what makes a
+    /// trim delete the right files is the reference the record itself holds,
+    /// never this prefix (§5.4: "the spill files they reference").
+    pub fn reserve_spill(&self, tool_name: &str, tool_use_id: &str) -> String {
+        let floor = self.written_seq.load(Ordering::Relaxed) + 1;
+        let mut number = floor;
+        let _ = self
+            .next_spill
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                number = current.max(floor);
+                Some(number + 1)
+            });
+        format!(
+            "{}/{number:06}-{}-{}.txt",
+            record::RESULTS_DIR,
+            call_tag(tool_use_id),
+            slug(tool_name),
+        )
     }
 
     /// Queue one record. Returns whether it was accepted.
@@ -271,6 +315,37 @@ impl SessionLogHandle {
             return false;
         }
         wait.await.is_ok()
+    }
+}
+
+/// Eight characters that identify the call a spill belongs to.
+///
+/// Provider tool-use ids share a prefix (`toolu_01…`, `call_…`), so the tail is
+/// what distinguishes them; a provider that issues none (Ollama) gets a random
+/// tag rather than a shared one, so two id-less calls never claim one file.
+fn call_tag(tool_use_id: &str) -> String {
+    let cleaned: String = tool_use_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    if cleaned.is_empty() {
+        return uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+    }
+    let start = cleaned.len().saturating_sub(8);
+    cleaned[start..].to_string()
+}
+
+/// A tool name reduced to a filename-safe slug.
+fn slug(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .take(48)
+        .collect();
+    if cleaned.is_empty() {
+        "tool".to_string()
+    } else {
+        cleaned
     }
 }
 

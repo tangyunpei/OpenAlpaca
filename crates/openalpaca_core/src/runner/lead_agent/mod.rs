@@ -473,6 +473,13 @@ pub async fn run_lead_agent(
     // the run's session log, under the lead's own span.
     loop_config.session_log = session_log.clone();
     loop_config.span_id = Some(lead_span_id.to_string());
+    // §5.4's one threshold: above it a tool result is spilled to the session's
+    // `results/` rather than cut head-only.
+    loop_config.tool_result_inline_bytes = daemon_config
+        .load()
+        .orchestrator
+        .sessions
+        .tool_result_inline_bytes;
 
     // Instantiate ContextBudgetManager for budget-aware compaction
     let context_budget = {

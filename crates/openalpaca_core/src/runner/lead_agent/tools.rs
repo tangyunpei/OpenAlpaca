@@ -403,6 +403,12 @@ impl BuiltInTool for SpawnSubagentTool {
         // this span id, never in a file of their own.
         loop_config.session_log = session_log.clone();
         loop_config.span_id = Some(node_id.clone());
+        loop_config.tool_result_inline_bytes = self
+            .daemon_config
+            .load()
+            .orchestrator
+            .sessions
+            .tool_result_inline_bytes;
 
         // 8. Build messages with context distillation via PromptBuilder
         let default_model = self.router.default_model();

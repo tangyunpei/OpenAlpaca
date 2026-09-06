@@ -113,6 +113,10 @@ log_max_total_bytes = 2147483648
 # Age-based sweep of archived session logs, in days. 0 disables it: size is
 # for disk, age is for exposure, and the two are deliberately separate.
 log_retention_days = 0
+# A tool result larger than this is written once to the session's results/ and
+# the model is handed a stub naming it — `read_result` pages the rest. Below it
+# the result travels inline unchanged.
+tool_result_inline_bytes = 32768
 
 [security]
 max_input_length = 32768

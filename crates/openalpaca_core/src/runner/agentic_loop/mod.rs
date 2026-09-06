@@ -12,19 +12,21 @@ pub use config::{LoopConfig, LoopFinishReason, LoopResult, StreamCallback};
 // Internal re-exports so the core loop and tests can access submodule items
 use backend::LlmBackend;
 pub(crate) use context::{compress_context, estimate_messages_tokens, estimate_tools_tokens};
-use tool_helpers::{format_tool_error, format_tool_error_with_hint, truncate_tool_result};
+use tool_helpers::{
+    format_tool_error, format_tool_error_with_hint, head_tail_tool_result, truncate_tool_result_to,
+};
 #[cfg(test)]
-use tool_helpers::MAX_TOOL_RESULT_SIZE;
+use tool_helpers::{MAX_TOOL_RESULT_SIZE, truncate_tool_result};
 
 use chrono::Utc;
 use crate::runner::steering::SteeringMsg;
 use crate::security::capabilities::CapabilityManager;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
-use crate::session_log::{Record, RecordType};
+use crate::session_log::{Record, RecordType, spill_preview, spill_stub};
 use crate::tools::registry::ToolContext;
 use serde_json::{Value, json};
 use openalpaca_llm::{
-    ChatMessage, FinishReason, LlmProvider, LlmRouter, LlmRouterError, RequestContext,
+    ChatMessage, FinishReason, LlmProvider, LlmRouter, LlmRouterError, RequestContext, ToolCall,
     ToolDefinition,
 };
 #[cfg(test)]
@@ -199,6 +201,53 @@ fn log_event(
                 .with_data(data),
         );
     }
+}
+
+/// Narrate a record that carries bytes for `results/` (§5.4's spill).
+///
+/// Separate from [`log_event`] only because the spill is the one record whose
+/// payload does not travel inside `data`.
+fn log_spill_event(
+    config: &LoopConfig,
+    task_id: Option<&str>,
+    agent_id: &str,
+    data: Value,
+    spill: Option<(String, String)>,
+) {
+    if let Some(ref log) = config.session_log {
+        let mut record = Record::new(RecordType::ToolResult)
+            .task(task_id)
+            .span(config.span_id.as_deref())
+            .agent(Some(agent_id))
+            .with_data(data);
+        if let Some((rel, content)) = spill {
+            record = record.with_spill(rel, content);
+        }
+        log.emit(record);
+    }
+}
+
+/// Decide whether a tool result spills, and reserve its reference if so.
+///
+/// Three conditions, all from §5.4: it must be over
+/// `tool_result_inline_bytes`; it must be an `Ok` result (an `Err` "stays
+/// inline but switches to head+tail" — the diagnosis is at both ends and is
+/// small); and there must be a session log, since `results/` is a session's
+/// directory and a loop without one has nowhere to put the bytes.
+fn spill_plan(
+    config: &LoopConfig,
+    call: &ToolCall,
+    result_text: &str,
+    ok: bool,
+) -> Option<(String, String)> {
+    if !ok || result_text.len() <= config.tool_result_inline_bytes {
+        return None;
+    }
+    let log = config.session_log.as_ref()?;
+    Some((
+        log.reserve_spill(&call.name, &call.id),
+        result_text.to_string(),
+    ))
 }
 
 /// `ext {kind, id, generation}` for a tool that belongs to an extension
@@ -1011,30 +1060,57 @@ async fn run_agentic_loop_core(
                     for (tc, result_text) in executable.iter().zip(results.iter()) {
                         state.tool_calls_made += 1;
                         let ok = !result_text.starts_with("[tool_error]");
-                        log_event(
-                            config,
-                            task_id,
-                            agent_id,
-                            RecordType::ToolResult,
-                            json!({
-                                "tool_use_id": tc.id,
-                                "name": tc.name,
-                                "ok": ok,
-                                "duration_ms": batch_duration_ms,
-                                // On a refusal this is the S4 string the gate
-                                // answered with, which is what makes a
-                                // withheld capability auditable per session.
-                                "error": (!ok).then(|| result_text.clone()),
-                                "result": result_text,
-                                "ext": tool_extension(sandbox, &tc.name),
-                            }),
-                        );
-                        // The model's copy: head-only at
-                        // `MAX_TOOL_RESULT_SIZE` so a long result cannot blow
-                        // the context window. The record above kept the whole
-                        // thing — that split is §5.4's, and it is what lets
-                        // T42 spill the tail instead of destroying it.
-                        let model_text = truncate_tool_result(result_text.clone());
+                        // §5.4's "Spill, don't truncate". A result over the
+                        // threshold is written once to the session's
+                        // `results/` and the model is handed a stub naming it,
+                        // so the tail of a `cargo test` or a `web_fetch` is
+                        // reachable through `read_result` instead of gone.
+                        //
+                        // The reference has to be known *here*: the model's
+                        // copy is built on this path and the loop can never
+                        // wait for the writer, so the emitter reserves the
+                        // name and the writer honours it.
+                        let spill = spill_plan(config, tc, result_text, ok);
+                        let mut record = json!({
+                            "tool_use_id": tc.id,
+                            "name": tc.name,
+                            "ok": ok,
+                            "duration_ms": batch_duration_ms,
+                            // On a refusal this is the S4 string the gate
+                            // answered with, which is what makes a
+                            // withheld capability auditable per session.
+                            "error": (!ok).then(|| result_text.clone()),
+                            "result": result_text,
+                            "ext": tool_extension(sandbox, &tc.name),
+                        });
+                        if spill.is_some()
+                            && let Some(map) = record.as_object_mut()
+                        {
+                            // The writer replaces this with the reference and
+                            // the preview once the file is on disk; sending
+                            // the bytes twice is exactly what §5.4 forbids.
+                            map.insert("result".into(), Value::Null);
+                        }
+                        log_spill_event(config, task_id, agent_id, record, spill.clone());
+                        // What the model is handed. The spill's stub above the
+                        // threshold; an `Err`'s head **and tail**, because a
+                        // compiler or test failure is at the tail; otherwise
+                        // the result itself.
+                        let model_text = match spill {
+                            Some((rel, _)) => spill_stub(
+                                result_text.len(),
+                                &spill_preview(result_text),
+                                &rel,
+                            ),
+                            None if !ok => head_tail_tool_result(
+                                result_text.clone(),
+                                config.tool_result_inline_bytes,
+                            ),
+                            None => truncate_tool_result_to(
+                                result_text.clone(),
+                                config.tool_result_inline_bytes,
+                            ),
+                        };
                         persist_span.in_scope(|| {
                             tracing::debug!(
                                 agent_id = agent_id,

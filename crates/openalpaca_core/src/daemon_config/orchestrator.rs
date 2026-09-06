@@ -32,6 +32,15 @@ pub struct SessionsConfig {
     /// sweep machinery ships regardless of the value (P-21).
     #[serde(default = "default_log_retention_days")]
     pub log_retention_days: u32,
+    /// The one threshold two consumers share (§5.4, P-16/C-2): a tool result
+    /// larger than this is written once to the session's `results/` and the
+    /// **model** is handed a stub naming it, instead of a head-only cut that
+    /// destroyed the tail. Below it the result travels inline, unchanged.
+    ///
+    /// Only sessions can spill, so a loop with no session log falls back to
+    /// the head-only cut at this same size — one number, never two.
+    #[serde(default = "default_tool_result_inline_bytes")]
+    pub tool_result_inline_bytes: usize,
 }
 
 fn default_log_max_session_bytes() -> u64 {
@@ -43,6 +52,9 @@ fn default_log_max_total_bytes() -> u64 {
 fn default_log_retention_days() -> u32 {
     0
 }
+fn default_tool_result_inline_bytes() -> usize {
+    32 * 1024
+}
 
 impl Default for SessionsConfig {
     fn default() -> Self {
@@ -50,6 +62,7 @@ impl Default for SessionsConfig {
             log_max_session_bytes: default_log_max_session_bytes(),
             log_max_total_bytes: default_log_max_total_bytes(),
             log_retention_days: default_log_retention_days(),
+            tool_result_inline_bytes: default_tool_result_inline_bytes(),
         }
     }
 }

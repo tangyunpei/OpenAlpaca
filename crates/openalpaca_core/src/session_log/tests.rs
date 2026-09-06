@@ -702,6 +702,217 @@ async fn a_capped_result_still_indexes_its_inline_preview() {
     assert_eq!(success, 0);
 }
 
+// ── The `results/` spill ────────────────────────────────────────────
+
+/// §5.4's "Spill, don't truncate": the payload is written **once**, to
+/// `results/`, and the record keeps the reference, the hash and a preview.
+/// `tool_execution_log.result_ref` points at the same file — no second copy
+/// anywhere.
+#[tokio::test]
+async fn a_large_tool_result_spills_to_results_and_the_record_keeps_the_reference() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&db_dir.path().join("t.db")).unwrap();
+    let svc = service_with(&dir, Some(db.clone()), SessionLogLimits::default());
+    let handle = svc.handle_for("sess-spill");
+
+    let payload = "s".repeat(200 * 1024);
+    let rel = handle.reserve_spill("shell_execute", "toolu_01ABCDEF");
+    assert!(rel.starts_with("results/"), "the reference is session-relative: {rel}");
+    assert!(rel.ends_with("-shell_execute.txt"), "{rel}");
+
+    handle.emit(Record::new(RecordType::ToolCall).with_data(serde_json::json!({
+        "tool_use_id": "toolu_01ABCDEF", "name": "shell_execute", "input": {"cmd": "cargo test"},
+    })));
+    handle.emit(
+        Record::new(RecordType::ToolResult)
+            .with_data(serde_json::json!({
+                "tool_use_id": "toolu_01ABCDEF",
+                "name": "shell_execute",
+                "ok": true,
+                "duration_ms": 9,
+                "result": serde_json::Value::Null,
+            }))
+            .with_spill(rel.clone(), payload.clone()),
+    );
+    assert!(handle.flush().await);
+
+    // The file holds the whole result, once.
+    let spilled = dir.path().join("sess-spill").join(&rel);
+    assert_eq!(fs::read_to_string(&spilled).unwrap(), payload);
+    // No temporary file survives the rename.
+    let leftovers: Vec<String> = fs::read_dir(dir.path().join("sess-spill").join("results"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with('.') || n.ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "tmp → rename leaves nothing behind: {leftovers:?}");
+
+    let rows = lines(&log_path(dir.path(), "sess-spill"));
+    let data = &rows[1]["data"];
+    assert_eq!(data["result_ref"], format!("file:{rel}"));
+    assert_eq!(data["result"]["spill"]["rel"], rel);
+    assert_eq!(data["result"]["spill"]["bytes"], payload.len());
+    assert_eq!(data["result"]["spill"]["mime"], "text/plain; charset=utf-8");
+    assert_eq!(
+        data["result"]["spill"]["sha256"].as_str().unwrap().len(),
+        64,
+        "the stub carries a full sha256"
+    );
+    assert_eq!(
+        data["result"]["preview"].as_str().unwrap().chars().count(),
+        PREVIEW_CHARS,
+        "the record keeps the first 2 KB and nothing more"
+    );
+    assert!(
+        serde_json::to_string(data).unwrap().len() <= ENVELOPE_DATA_CAP_BYTES,
+        "a spilled result never trips the envelope cap"
+    );
+    assert!(
+        data.get("_truncated").is_none(),
+        "nothing was truncated — it was spilled: {data}"
+    );
+
+    let (preview, result_ref): (String, String) = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT result_preview, result_ref FROM tool_execution_log",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(result_ref, format!("file:{rel}"), "the index row names the same file");
+    assert_eq!(
+        preview,
+        data["result"]["preview"].as_str().unwrap(),
+        "the row's preview is the identical bytes the record kept"
+    );
+}
+
+/// The reference names one call, and the model may already be paging the bytes
+/// behind it. A second arrival must not clobber them.
+#[tokio::test]
+async fn a_spill_never_overwrites_an_existing_result_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = service(&dir);
+    let handle = svc.handle_for("sess-once");
+
+    let rel = handle.reserve_spill("dump", "tu-once");
+    for body in ["first", "second"] {
+        handle.emit(
+            Record::new(RecordType::ToolResult)
+                .with_data(serde_json::json!({"tool_use_id": "tu-once", "name": "dump", "ok": true}))
+                .with_spill(rel.clone(), body.to_string()),
+        );
+    }
+    assert!(handle.flush().await);
+
+    assert_eq!(
+        fs::read_to_string(dir.path().join("sess-once").join(&rel)).unwrap(),
+        "first"
+    );
+}
+
+/// The spill's number tracks the writer's watermark, so a session reopened
+/// after a restart keeps climbing instead of restarting at 1 and colliding
+/// with the files a previous boot left.
+#[tokio::test]
+async fn a_reopened_sessions_spill_numbering_resumes_from_the_log() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let svc = service(&dir);
+        let handle = svc.handle_for("sess-resume");
+        for i in 0..5 {
+            handle.emit(Record::new(RecordType::Round).with_data(serde_json::json!({"round": i})));
+        }
+        assert!(handle.flush().await);
+    }
+
+    let svc = service(&dir);
+    let handle = svc.handle_for("sess-resume");
+    // The writer publishes its watermark when it opens the existing log, so
+    // the first reservation of the new boot has to wait for that to happen.
+    handle.emit(Record::new(RecordType::Round).with_data(serde_json::json!({"round": 5})));
+    assert!(handle.flush().await);
+
+    let rel = handle.reserve_spill("dump", "tu-resume");
+    let number: u64 = rel
+        .trim_start_matches("results/")
+        .split('-')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(number > 5, "the numbering resumed from the log, got {rel}");
+}
+
+/// §5.4: a trim drops "the spill files they reference" — read out of the
+/// segment being dropped, never guessed from a filename. The live segment's
+/// spill survives.
+#[tokio::test]
+async fn a_trim_drops_exactly_the_spill_files_the_dropped_segment_referenced() {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = service_with(
+        &dir,
+        None,
+        SessionLogLimits {
+            rotate_bytes: 700,
+            max_session_bytes: 2_000,
+            ..SessionLogLimits::default()
+        },
+    );
+    let handle = svc.handle_for("sess-trim");
+    let session_dir = dir.path().join("sess-trim");
+
+    let mut rels = Vec::new();
+    for i in 0..30 {
+        let rel = handle.reserve_spill("dump", &format!("tu-{i}"));
+        rels.push(rel.clone());
+        handle.emit(
+            Record::new(RecordType::ToolResult)
+                .with_data(serde_json::json!({
+                    "tool_use_id": format!("tu-{i}"), "name": "dump", "ok": true,
+                }))
+                .with_spill(rel, "p".repeat(200)),
+        );
+    }
+    assert!(handle.flush().await);
+
+    let surviving: Vec<&String> = rels
+        .iter()
+        .filter(|rel| session_dir.join(rel).exists())
+        .collect();
+    assert!(!surviving.is_empty(), "the newest spills survive");
+    assert!(surviving.len() < rels.len(), "the oldest spills were evicted");
+
+    // Every surviving file is still referenced by a surviving record, and
+    // every surviving record's reference still resolves.
+    let referenced: Vec<String> = read_records(&session_dir)
+        .unwrap()
+        .into_iter()
+        .filter_map(|r| {
+            r.data
+                .get("result_ref")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim_start_matches("file:").to_string())
+        })
+        .collect();
+    for rel in &referenced {
+        assert!(
+            session_dir.join(rel).exists(),
+            "a surviving record's spill was evicted under it: {rel}"
+        );
+    }
+    for rel in &surviving {
+        assert!(
+            referenced.contains(rel),
+            "an evicted record left its spill file behind: {rel}"
+        );
+    }
+}
+
 // ── Lifecycle ───────────────────────────────────────────────────────
 
 /// An idle writer closes its file and exits; the next emit transparently

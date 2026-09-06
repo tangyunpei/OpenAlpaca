@@ -2661,13 +2661,13 @@ async fn the_loop_narrates_rounds_tools_and_its_exit_into_the_session_log() {
     assert_eq!(result_ref, "log:3");
 }
 
-/// §5.4 makes the JSONL the source of truth for tool payloads: the log keeps
-/// the result whole and the *model* gets the 32 KB head-only copy. Truncating
-/// before the record was written destroyed the tail of a long result for both
-/// readers, and put every big result under the envelope cap so the
-/// `spilled_pending` marker T42 converts could never fire here.
+/// §5.4's "Spill, don't truncate", end to end through the loop: a result over
+/// `tool_result_inline_bytes` is written once to the session's `results/`, the
+/// record keeps the reference and a preview, and the **model** is handed the
+/// stub naming the reference — so the tail of a long result is reachable
+/// through `read_result` instead of destroyed.
 #[tokio::test]
-async fn the_log_keeps_the_whole_tool_result_and_the_model_gets_the_truncated_copy() {
+async fn a_result_over_the_inline_threshold_spills_and_the_model_gets_the_stub() {
     use crate::bus::EventBus;
     use crate::security::sandbox::{SandboxManager, SandboxPolicy};
     use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
@@ -2785,39 +2785,77 @@ async fn the_log_keeps_the_whole_tool_result_and_the_model_gets_the_truncated_co
     assert_eq!(result.finish_reason, LoopFinishReason::Complete);
     assert!(handle.flush().await);
 
-    let records = read_records(&dir.path().join("sess-big-result")).unwrap();
+    let session_dir = dir.path().join("sess-big-result");
+    let records = read_records(&session_dir).unwrap();
     let logged = records
         .iter()
         .find(|r| r.kind == "tool_result")
         .expect("the result is narrated");
-    let logged_result = logged.data["result"].as_str().unwrap();
-    assert_eq!(
-        logged_result.len(),
-        RESULT_BYTES,
-        "the JSONL carries the untruncated result"
-    );
-    assert!(!logged_result.contains("[... truncated"), "no head-only cut");
+    let rel = logged.data["result"]["spill"]["rel"].as_str().unwrap();
+    assert_eq!(logged.data["result_ref"], format!("file:{rel}"));
+    assert_eq!(logged.data["result"]["spill"]["bytes"], RESULT_BYTES);
 
-    // What the model was handed for the same call.
+    // One copy of the payload, in the file the record names.
+    let spilled = std::fs::read_to_string(session_dir.join(rel)).unwrap();
+    assert_eq!(spilled.len(), RESULT_BYTES, "the whole result is on disk");
+    assert!(
+        serde_json::to_string(&logged.data).unwrap().len()
+            <= crate::session_log::ENVELOPE_DATA_CAP_BYTES,
+        "a spilled record never trips the envelope cap"
+    );
+
+    // What the model was handed for the same call: §5.4's stub, verbatim.
     let seen = provider.tool_results_seen();
     assert_eq!(seen.len(), 1, "one tool result reached the backend: {seen:?}");
-    assert!(
-        seen[0].len() < RESULT_BYTES && seen[0].contains("[... truncated: showing first"),
-        "the model sees the 32 KB head plus the marker, {} bytes",
-        seen[0].len()
+    assert_eq!(
+        seen[0],
+        crate::session_log::spill_stub(
+            RESULT_BYTES,
+            &"q".repeat(crate::session_log::PREVIEW_CHARS),
+            rel,
+        ),
+        "the model sees the stub naming the reference, not a head-only cut"
     );
+    assert!(seen[0].contains("use read_result to page"));
 
-    // The index row previews what landed inline, which is now the whole result.
-    let preview: String = db
+    // The index row points at the same file and previews the same bytes.
+    let (preview, result_ref): (String, String) = db
         .with_connection(|conn| {
             Ok(conn.query_row(
-                "SELECT result_preview FROM tool_execution_log",
+                "SELECT result_preview, result_ref FROM tool_execution_log",
                 [],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )?)
         })
         .unwrap();
-    assert!(preview.chars().count() <= openalpaca_storage::PREVIEW_CHARS);
+    assert_eq!(result_ref, format!("file:{rel}"));
+    assert_eq!(preview.chars().count(), crate::session_log::PREVIEW_CHARS);
+}
+
+/// §5.4: "`Err` results stay inline but switch to head+tail (compiler/test
+/// errors sit at the tail)." A failing `cargo test` whose assertion is in the
+/// last hundred bytes must still reach the model.
+#[test]
+fn an_error_result_keeps_its_head_and_its_tail() {
+    let limit = 1024;
+    let text = format!(
+        "{}{}{}",
+        "HEAD-MARKER",
+        "m".repeat(8 * 1024),
+        "TAIL-ASSERTION-FAILED"
+    );
+    let cut = head_tail_tool_result(text.clone(), limit);
+
+    assert!(cut.len() < text.len());
+    assert!(cut.starts_with("HEAD-MARKER"), "the head survives: {}", &cut[..40]);
+    assert!(
+        cut.ends_with("TAIL-ASSERTION-FAILED"),
+        "the tail survives — that is the point"
+    );
+    assert!(cut.contains("the tail follows"), "the elision is named");
+
+    // Under the bound nothing is touched.
+    assert_eq!(head_tail_tool_result("small".to_string(), limit), "small");
 }
 
 /// A loop with no session log writes nothing and behaves identically — the

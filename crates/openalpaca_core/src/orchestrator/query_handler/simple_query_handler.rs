@@ -231,6 +231,14 @@ impl Orchestrator {
             _ => None,
         };
 
+        // §5.4's one threshold, shared by the spill and the inline cut.
+        let inline_bytes = self
+            .daemon_config
+            .load()
+            .orchestrator
+            .sessions
+            .tool_result_inline_bytes;
+
         let (tools_for_loop, policy_opt, config_for_loop);
         if !tool_defs.is_empty() {
             tracing::info!(
@@ -276,6 +284,7 @@ impl Orchestrator {
                 enable_caching: true,
                 thinking: None,
                 session_log: session_log.clone(),
+                tool_result_inline_bytes: inline_bytes,
                 ..self.loop_config.clone()
             };
             tools_for_loop = tool_defs;
@@ -284,6 +293,7 @@ impl Orchestrator {
             policy_opt = None;
             config_for_loop = LoopConfig {
                 session_log: session_log.clone(),
+                tool_result_inline_bytes: inline_bytes,
                 ..self.loop_config.clone()
             };
         }

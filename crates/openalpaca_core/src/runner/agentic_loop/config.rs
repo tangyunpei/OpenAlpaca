@@ -78,6 +78,12 @@ pub struct LoopConfig {
     /// `lead::<task_id>` or a subagent's node id. `None` for a main-loop turn,
     /// which has no span.
     pub span_id: Option<String>,
+    /// `[orchestrator.sessions] tool_result_inline_bytes` (§5.4, P-16/C-2):
+    /// above it a tool result is spilled to the session's `results/` and the
+    /// model is handed the stub that names it. With no `session_log` there is
+    /// nowhere to spill, so the same number is the head-only cut instead —
+    /// one threshold, never two.
+    pub tool_result_inline_bytes: usize,
 }
 
 impl Clone for LoopConfig {
@@ -104,6 +110,7 @@ impl Clone for LoopConfig {
             steering: self.steering.clone(),
             session_log: self.session_log.clone(),
             span_id: self.span_id.clone(),
+            tool_result_inline_bytes: self.tool_result_inline_bytes,
         }
     }
 }
@@ -131,6 +138,7 @@ impl std::fmt::Debug for LoopConfig {
             .field("steering", &self.steering.is_some())
             .field("session_log", &self.session_log.is_some())
             .field("span_id", &self.span_id)
+            .field("tool_result_inline_bytes", &self.tool_result_inline_bytes)
             .finish()
     }
 }
@@ -159,6 +167,7 @@ impl Default for LoopConfig {
             steering: None,
             session_log: None,
             span_id: None,
+            tool_result_inline_bytes: super::tool_helpers::MAX_TOOL_RESULT_SIZE,
         }
     }
 }
@@ -227,6 +236,7 @@ impl LoopConfig {
             steering: None,
             session_log: None,
             span_id: None,
+            tool_result_inline_bytes: super::tool_helpers::MAX_TOOL_RESULT_SIZE,
         }
     }
 
