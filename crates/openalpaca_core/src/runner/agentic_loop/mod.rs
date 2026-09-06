@@ -207,23 +207,62 @@ fn log_event(
 ///
 /// Separate from [`log_event`] only because the spill is the one record whose
 /// payload does not travel inside `data`.
+///
+/// **Returns whether the record reached the writer.** A full channel or a
+/// writer that has gone drops the record (§5.5's counted loss) — and with it
+/// the `Spill{content}`, so no file is ever written. The caller must know,
+/// because the model's copy is built from the same decision: a reference to a
+/// file that will never exist is worse than the head-only cut the spill
+/// replaced. `false` also when there is no session log at all, which is the
+/// case [`spill_plan`] already refuses to spill in.
 fn log_spill_event(
     config: &LoopConfig,
     task_id: Option<&str>,
     agent_id: &str,
     data: Value,
     spill: Option<(String, String)>,
-) {
-    if let Some(ref log) = config.session_log {
-        let mut record = Record::new(RecordType::ToolResult)
-            .task(task_id)
-            .span(config.span_id.as_deref())
-            .agent(Some(agent_id))
-            .with_data(data);
-        if let Some((rel, content)) = spill {
-            record = record.with_spill(rel, content);
+) -> bool {
+    let Some(ref log) = config.session_log else {
+        return false;
+    };
+    let mut record = Record::new(RecordType::ToolResult)
+        .task(task_id)
+        .span(config.span_id.as_deref())
+        .agent(Some(agent_id))
+        .with_data(data);
+    if let Some((rel, content)) = spill {
+        record = record.with_spill(rel, content);
+    }
+    log.emit(record)
+}
+
+/// What the model is handed for one tool result (§5.4).
+///
+/// `spill_ref` is `Some` **only** when the spill record actually reached the
+/// writer: the stub promises a file, and the only thing that can write it is
+/// the record the loop just emitted. When that record was dropped the model
+/// gets the inline head instead — no reference, nothing to page.
+///
+/// One case remains best-effort and cannot be caught here: `write_spill_file`
+/// failing *after* the record was accepted (a full disk, a permission change).
+/// The record is honest about that — it keeps the preview and gains
+/// `spill_error` plus the reference it could not honour — and `read_result`
+/// reads that record so the model is told the spill was never written rather
+/// than that the reference does not exist.
+fn model_visible_result(
+    config: &LoopConfig,
+    result_text: &str,
+    ok: bool,
+    spill_ref: Option<&str>,
+) -> String {
+    match spill_ref {
+        Some(rel) => spill_stub(result_text.len(), &spill_preview(result_text), rel),
+        // An `Err`'s head **and** tail, because a compiler or test failure is
+        // at the tail.
+        None if !ok => {
+            head_tail_tool_result(result_text.to_string(), config.tool_result_inline_bytes)
         }
-        log.emit(record);
+        None => truncate_tool_result_to(result_text.to_string(), config.tool_result_inline_bytes),
     }
 }
 
@@ -1071,6 +1110,10 @@ async fn run_agentic_loop_core(
                         // wait for the writer, so the emitter reserves the
                         // name and the writer honours it.
                         let spill = spill_plan(config, tc, result_text, ok);
+                        // The reference, not the payload: the stub needs the
+                        // name two lines below and the bytes belong to the
+                        // record, which is about to take ownership of them.
+                        let spill_ref = spill.as_ref().map(|(rel, _)| rel.clone());
                         let mut record = json!({
                             "tool_use_id": tc.id,
                             "name": tc.name,
@@ -1091,26 +1134,17 @@ async fn run_agentic_loop_core(
                             // the bytes twice is exactly what §5.4 forbids.
                             map.insert("result".into(), Value::Null);
                         }
-                        log_spill_event(config, task_id, agent_id, record, spill.clone());
+                        let emitted = log_spill_event(config, task_id, agent_id, record, spill);
                         // What the model is handed. The spill's stub above the
-                        // threshold; an `Err`'s head **and tail**, because a
-                        // compiler or test failure is at the tail; otherwise
-                        // the result itself.
-                        let model_text = match spill {
-                            Some((rel, _)) => spill_stub(
-                                result_text.len(),
-                                &spill_preview(result_text),
-                                &rel,
-                            ),
-                            None if !ok => head_tail_tool_result(
-                                result_text.clone(),
-                                config.tool_result_inline_bytes,
-                            ),
-                            None => truncate_tool_result_to(
-                                result_text.clone(),
-                                config.tool_result_inline_bytes,
-                            ),
-                        };
+                        // threshold — but only when the record carrying the
+                        // bytes was accepted: a dropped record writes no file,
+                        // and the head is better than a reference to nothing.
+                        let model_text = model_visible_result(
+                            config,
+                            result_text,
+                            ok,
+                            spill_ref.as_deref().filter(|_| emitted),
+                        );
                         persist_span.in_scope(|| {
                             tracing::debug!(
                                 agent_id = agent_id,

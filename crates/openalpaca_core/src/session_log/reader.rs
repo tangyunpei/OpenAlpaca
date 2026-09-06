@@ -97,6 +97,52 @@ pub fn read_records(dir: &Path) -> io::Result<Vec<LoggedRecord>> {
     read_records_after(dir, None, usize::MAX)
 }
 
+/// The `spill_error` the log recorded for a `results/` reference, if any.
+///
+/// `write_spill_file` fails *after* the loop has already handed the model the
+/// stub, so the reference the model holds can name a file that was never
+/// written. The writer's record says so — it keeps the preview and gains
+/// `spill_error` plus the `spill_ref` it could not honour — and this is how
+/// `read_result` finds it, so a page request for that reference is answered
+/// with what happened instead of "no such result".
+///
+/// Lines are byte-searched for the reference before anything is parsed: a
+/// failed spill is rare, and a scan of a whole session's log must not cost a
+/// `serde_json` parse per record.
+pub fn spill_failure(dir: &Path, rel: &str) -> io::Result<Option<String>> {
+    let needle = rel.as_bytes();
+    for path in segments(dir)? {
+        let file = match File::open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        for line in BufReader::new(file).lines() {
+            let Ok(line) = line else { break };
+            if !contains(line.as_bytes(), needle) {
+                continue;
+            }
+            let Ok(record) = serde_json::from_str::<LoggedRecord>(&line) else {
+                break;
+            };
+            if record.data.get("spill_ref").and_then(Value::as_str) == Some(rel)
+                && let Some(error) = record.data.get("spill_error").and_then(Value::as_str)
+            {
+                return Ok(Some(error.to_string()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// `haystack.contains(needle)`, on bytes.
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    needle.len() <= haystack.len()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
 /// Up to `limit` records with `seq > after_seq` — the cursor form.
 ///
 /// Stops at the first unparseable line of a segment (end of log) and, for an

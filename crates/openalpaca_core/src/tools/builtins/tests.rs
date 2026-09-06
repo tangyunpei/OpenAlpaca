@@ -899,6 +899,69 @@ mod read_result {
         assert!(err.contains("session"), "got: {err}");
     }
 
+    /// A spill the writer could not write is named as such.
+    ///
+    /// `write_spill_file` fails asynchronously — the loop has already handed
+    /// the model the stub — and the record it wrote instead keeps the preview
+    /// and gains `spill_error` plus the reference that was not honoured. The
+    /// tool consults that record so the model is told what actually happened,
+    /// rather than "no spilled result", which reads like "you made this up".
+    #[tokio::test]
+    async fn a_spill_the_writer_never_wrote_is_named_as_such() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = dir.path().join("sess-a");
+        std::fs::create_dir_all(&session).unwrap();
+        let line = serde_json::json!({
+            "v": 1,
+            "seq": 7,
+            "ts": "2026-09-05T10:22:03.114Z",
+            "type": "tool_result",
+            "data": {
+                "tool_use_id": "tc_1",
+                "name": "dump",
+                "ok": true,
+                "result": "the first 2 KB",
+                "spill_ref": "results/000007-tc1-dump.txt",
+                "spill_error": "No space left on device (os error 28)",
+            },
+        });
+        std::fs::write(
+            session.join(crate::session_log::LIVE_SEGMENT),
+            format!("{line}\n"),
+        )
+        .unwrap();
+
+        let registered = tool(dir.path());
+        let err = call(
+            &registered,
+            &ctx_for("sess-a"),
+            serde_json::json!({"result_ref": "file:results/000007-tc1-dump.txt"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.contains("was not written"),
+            "the honest message names the failed spill: {err}"
+        );
+        assert!(
+            err.contains("spill_error"),
+            "and points at the record that says why: {err}"
+        );
+
+        // A reference the log knows nothing about keeps the plain refusal.
+        let missing = call(
+            &registered,
+            &ctx_for("sess-a"),
+            serde_json::json!({"result_ref": "file:results/000009-none-dump.txt"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            missing.contains("no spilled result"),
+            "an ordinary miss is unchanged: {missing}"
+        );
+    }
+
     /// Owner decision T15 is **not** adopted: `read_result` is registered and
     /// the stub is emitted everywhere, but the capability is appended to no
     /// allowlist. So the gate refuses it, fail-closed, exactly like any other

@@ -76,24 +76,21 @@ impl BuiltInTool for ReadResultTool {
         })?;
 
         let name = result_file_name(reference)?;
-        let results_dir = self
-            .root()?
-            .join(crate::session_log::session_dir_name(session_id))
-            .join(crate::session_log::RESULTS_DIR);
+        let session_dir = self.root()?.join(crate::session_log::session_dir_name(session_id));
+        let results_dir = session_dir.join(crate::session_log::RESULTS_DIR);
         // A session that has never spilled has no directory — that is a
         // missing result, not a broken tool.
-        let path = openalpaca_storage::store::confine_to_root(
-            &results_dir,
-            &results_dir.join(&name),
-        )
-        .map_err(|_| {
-            format!("read_result: no spilled result '{name}' for this session")
-        })?;
+        let path =
+            match openalpaca_storage::store::confine_to_root(&results_dir, &results_dir.join(&name))
+            {
+                Ok(path) => path,
+                Err(_) => return Err(not_there(&session_dir, &name).await),
+            };
 
-        let total = tokio::fs::metadata(&path)
-            .await
-            .map_err(|_| format!("read_result: no spilled result '{name}' for this session"))?
-            .len() as usize;
+        let total = match tokio::fs::metadata(&path).await {
+            Ok(meta) => meta.len() as usize,
+            Err(_) => return Err(not_there(&session_dir, &name).await),
+        };
 
         let offset = arguments
             .get("offset")
@@ -125,6 +122,39 @@ impl BuiltInTool for ReadResultTool {
         }
         out.push(']');
         Ok(out)
+    }
+}
+
+/// The plain refusal: this session has no such spilled result.
+fn missing(name: &str) -> String {
+    format!("read_result: no spilled result '{name}' for this session")
+}
+
+/// The refusal for a reference whose file is not on disk.
+///
+/// A spill can fail to be written *after* the loop handed the model the stub
+/// (a full disk, a permission change): the writer's record then carries
+/// `spill_error` and the `spill_ref` it could not honour. Consulting the log
+/// costs a scan of the session's segments, which is why it happens only on the
+/// miss — and it is the difference between telling the model what happened and
+/// telling it the reference it read from its own context does not exist.
+async fn not_there(session_dir: &std::path::Path, name: &str) -> String {
+    let rel = format!("{}/{name}", crate::session_log::RESULTS_DIR);
+    let dir = session_dir.to_path_buf();
+    let probe = rel.clone();
+    let failure = tokio::task::spawn_blocking(move || {
+        crate::session_log::spill_failure(&dir, &probe).ok().flatten()
+    })
+    .await
+    .ok()
+    .flatten();
+    match failure {
+        Some(error) => format!(
+            "read_result: the spill for 'file:{rel}' was not written — the session log \
+             record's spill_error says: {error}. The first 2 KB are in the transcript; \
+             the rest of that result is gone."
+        ),
+        None => missing(name),
     }
 }
 

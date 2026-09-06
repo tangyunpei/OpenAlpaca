@@ -2832,6 +2832,218 @@ async fn a_result_over_the_inline_threshold_spills_and_the_model_gets_the_stub()
     assert_eq!(preview.chars().count(), crate::session_log::PREVIEW_CHARS);
 }
 
+/// A record the session log **dropped** must not leave the model holding a
+/// reference to a file that will never exist.
+///
+/// `emit` returns `false` precisely because a full channel drops the record
+/// (§5.5's accepted, counted loss) — and a dropped `tool_result` takes its
+/// `Spill{content}` with it, so nothing is ever written to `results/`. The
+/// model then gets the inline head, which is what T42 replaced, rather than
+/// 2 KB and a `result_ref` `read_result` can only refuse.
+#[tokio::test]
+async fn a_dropped_spill_record_leaves_the_model_an_inline_head_not_a_reference() {
+    use crate::session_log::{Record, RecordType, SessionLogLimits, SessionLogService};
+
+    let dir = tempfile::tempdir().unwrap();
+    let service = SessionLogService::new(
+        dir.path().to_path_buf(),
+        None,
+        SessionLogLimits {
+            channel_capacity: 2,
+            ..SessionLogLimits::default()
+        },
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-dropped");
+    // Nothing is awaited between these emits, so on a current-thread runtime
+    // the writer task is never polled and the channel stays full — §5.5's
+    // drop, deterministically.
+    for _ in 0..64 {
+        handle.emit(Record::new(RecordType::Round).with_data(serde_json::json!({})));
+    }
+    assert!(handle.dropped() > 0, "the channel is full");
+
+    let config = LoopConfig {
+        session_log: Some(handle.clone()),
+        tool_result_inline_bytes: 1024,
+        ..Default::default()
+    };
+    let call = ToolCall {
+        id: "tc_drop".to_string(),
+        name: "dump".to_string(),
+        arguments: serde_json::json!({}),
+    };
+    let result_text = "z".repeat(8 * 1024);
+
+    let spill =
+        spill_plan(&config, &call, &result_text, true).expect("a big Ok result plans a spill");
+    let rel = spill.0.clone();
+    let emitted = log_spill_event(&config, None, "a1", serde_json::json!({}), Some(spill));
+    assert!(!emitted, "a full channel drops the record instead of writing it");
+
+    let model_text =
+        model_visible_result(&config, &result_text, true, emitted.then_some(rel.as_str()));
+    assert!(
+        !model_text.contains("result_ref"),
+        "no reference to a file that will never exist: {model_text}"
+    );
+    assert!(!model_text.contains(&rel));
+    assert_eq!(
+        model_text,
+        truncate_tool_result_to(result_text.clone(), 1024),
+        "the model keeps the inline head instead"
+    );
+
+    // And nothing was written under `results/`: the bytes went with the record.
+    assert!(handle.flush().await);
+    assert!(!dir.path().join("sess-dropped").join("results").exists());
+}
+
+/// The same, end to end, for the other way a record is lost: a writer that
+/// **gave up** because it could not open its session directory. Its task
+/// returns, every handle sees a closed channel, and `emit` answers `false` —
+/// so the loop must hand the model a head, not a reference.
+#[tokio::test]
+async fn a_writer_that_gave_up_leaves_the_model_an_inline_head_not_a_reference() {
+    use crate::bus::EventBus;
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+    use crate::session_log::{SessionLogLimits, SessionLogService};
+    use crate::tools::ToolRegistry;
+    use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+
+    const RESULT_BYTES: usize = 40 * 1024;
+
+    struct BigOutputTool;
+    #[async_trait]
+    impl BuiltInTool for BigOutputTool {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+            Ok("q".repeat(RESULT_BYTES))
+        }
+    }
+
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "dump".to_string(),
+                description: "Dump".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(Arc::new(BigOutputTool)),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+    let policy = SandboxPolicy {
+        agent_id: "research_agent::a1".to_string(),
+        allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
+        denied_capabilities: vec![],
+        require_confirmation_for: vec![],
+        max_tool_calls: None,
+        max_tool_runtime_secs: 60,
+        stream_id: None,
+        lane_key: None,
+        confirmation_timeout_secs: None,
+        auto_approve: false,
+    };
+
+    let provider = Arc::new(MockRouterProvider::new(vec![
+        Ok(ChatResponse {
+            content: "Dumping.".to_string(),
+            tool_calls: vec![openalpaca_llm::ToolCall {
+                id: "tc_big".to_string(),
+                name: "dump".to_string(),
+                arguments: serde_json::json!({}),
+            }],
+            model: "claude-sonnet-4-20250514".to_string(),
+            usage: Usage::default(),
+            finish_reason: FinishReason::ToolUse,
+            thinking: None,
+            parts: None,
+        }),
+        Ok(ChatResponse {
+            content: "Done.".to_string(),
+            tool_calls: vec![],
+            model: "claude-sonnet-4-20250514".to_string(),
+            usage: Usage::default(),
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        }),
+    ]));
+    let router = LlmRouter::single_provider(
+        provider.clone(),
+        ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    // A file sits exactly where the session directory would go, so the
+    // writer's `create_dir_all` fails and it gives up for good.
+    std::fs::write(dir.path().join("sess-gone"), "not a directory").unwrap();
+    let service = SessionLogService::new(
+        dir.path().to_path_buf(),
+        None,
+        SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-gone");
+    handle.emit(crate::session_log::Record::new(
+        crate::session_log::RecordType::SessionStart,
+    ));
+    for _ in 0..200 {
+        if handle.is_closed() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(handle.is_closed(), "the writer gave up and its channel closed");
+
+    let config = LoopConfig {
+        model: Some("claude-sonnet-4-20250514".to_string()),
+        enable_caching: false,
+        session_log: Some(handle.clone()),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop_routed(
+        &router,
+        vec![ChatMessage::user("dump it")],
+        vec![],
+        &config,
+        Some(&sandbox),
+        "research_agent::a1",
+        Some(&policy),
+        Some("task-gone"),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+
+    let seen = provider.tool_results_seen();
+    assert_eq!(seen.len(), 1, "one tool result reached the backend: {seen:?}");
+    assert!(
+        !seen[0].contains("result_ref"),
+        "a lost record must not leave a reference behind: {}",
+        &seen[0][..seen[0].len().min(200)]
+    );
+    assert_eq!(
+        seen[0],
+        truncate_tool_result_to("q".repeat(RESULT_BYTES), config.tool_result_inline_bytes),
+        "the model gets the inline head — the behaviour the spill replaced"
+    );
+}
+
 /// §5.4: "`Err` results stay inline but switch to head+tail (compiler/test
 /// errors sit at the tail)." A failing `cargo test` whose assertion is in the
 /// last hundred bytes must still reach the model.

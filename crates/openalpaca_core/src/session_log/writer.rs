@@ -399,12 +399,17 @@ fn spill_result(session_id: &str, log: &OpenLog, record: Record) -> Record {
         }
         Err(e) => {
             // The result is not lost: the record keeps the preview and says
-            // the spill failed, which is more honest than a reference to a
-            // file that is not there.
+            // the spill failed, which is more honest than a `result_ref` to a
+            // file that is not there. The model, though, was handed the stub
+            // on the loop's own path long before this ran — nothing here can
+            // reach it. So the record also names the reference that was **not**
+            // honoured (`spill_ref`, deliberately not `result_ref`), which is
+            // what lets `read_result` answer that page request honestly.
             tracing::warn!(session_id, rel = %rel, "Failed to spill a tool result: {e}");
             if let Some(map) = record.data.as_object_mut() {
                 map.insert("result".into(), Value::from(preview));
                 map.insert("spill_error".into(), Value::from(e.to_string()));
+                map.insert("spill_ref".into(), Value::from(rel));
             }
         }
     }
