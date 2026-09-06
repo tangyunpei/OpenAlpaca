@@ -15,6 +15,11 @@
  *     means "the lane's active session", and the daemon answers that on every
  *     read; the highlighted row is the one `GET /v1/chat/history` reports as
  *     its `session_id`, not a local memory of what was clicked.
+ *   * **It never pins the conversation it creates.** A pin is a deliberate
+ *     resume — a row the user clicked — and it lasts only while the daemon
+ *     still calls that row active. "New chat" therefore pins nothing, and a
+ *     conversation archived elsewhere releases the pin rather than sending the
+ *     next turn at an archived session.
  *
  * Ordering is the controller's: the live conversation first, then the archived
  * ones by `updated_at`. The daemon already sorts `updated_at DESC, id DESC`,
