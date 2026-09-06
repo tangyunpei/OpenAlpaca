@@ -75,6 +75,26 @@ impl DaemonClient {
         Ok(resp.json().await?)
     }
 
+    /// POST with JSON body, per-request headers, and JSON response.
+    ///
+    /// The one caller is chat: `x-workspace-path` is header-only on
+    /// `POST /v1/chat`, and it must not become a default header on the client
+    /// — every other route would then receive a project it never asked for.
+    pub async fn post_with_headers<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+        headers: &[(&str, String)],
+    ) -> Result<T> {
+        let url = format!("{}{}", self.base_url, path);
+        let mut request = self.http.post(&url).json(body);
+        for (name, value) in headers {
+            request = request.header(*name, value);
+        }
+        let resp = check_response(request.send().await?).await?;
+        Ok(resp.json().await?)
+    }
+
     /// POST returning raw Response.
     pub async fn post_raw<B: Serialize>(&self, path: &str, body: &B) -> Result<Response> {
         let url = format!("{}{}", self.base_url, path);

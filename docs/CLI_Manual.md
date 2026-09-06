@@ -71,6 +71,10 @@ openalpaca tasks list --status active
 
 # Open interactive chat
 openalpaca chat
+
+# List stored conversations, then continue one
+openalpaca sessions
+openalpaca chat --resume
 ```
 
 ## Top-Level Commands
@@ -257,6 +261,25 @@ Notes:
   value the manifest declares as a secret reads `<redacted>`, and nothing
   prints it in the clear.
 
+### `sessions`
+
+List the conversations a lane holds. A lane keeps many of them and exactly one
+is live at a time; these are the ids `chat --session` takes.
+
+```bash
+openalpaca sessions
+openalpaca sessions --workspace .          # only this project's conversations
+openalpaca sessions --workspace /repo/one
+openalpaca sessions --all                  # every lane, connectors included
+openalpaca sessions --limit 10 --format json
+```
+
+Notes:
+- The table is `ID`, `STATUS` (`active` / `archived`), `TITLE`, `WORKSPACE` and `UPDATED`, newest first. A conversation that has never been renamed prints `(untitled)`; one bound to no project prints `-`, which is the normal state for a connector lane.
+- With no flags the list is the lane the CLI and the GUI share (`{user}:gui`) — the lane a `openalpaca chat` turn lands on, read from `GET /v1/me`. `--all` widens to every lane the daemon holds.
+- `--workspace <path>` narrows to one project. The path is resolved the same way a turn's project is — up to the nearest `.openalpaca`/`.git` — so `--workspace .` works from anywhere inside a repository. A directory under no such marker is an error, not a filter that matches nothing.
+- An empty result says which kind of empty it is: no conversations at all, or none in the project that was filtered for.
+
 ### `chat`
 
 Interactive or one-shot chat through daemon orchestrator.
@@ -266,10 +289,18 @@ openalpaca chat
 openalpaca chat --message "hello"
 openalpaca chat --message "summarize these" --file a.txt --file b.png
 echo "hello" | openalpaca chat
+
+# Continue a stored conversation
+openalpaca chat --resume
+openalpaca chat --session 0f2c9a41-3b7d-4e58-9a10-6c1f2d3e4b55
 ```
 
 Notes:
 - `--file <PATH>` is repeatable and uploads the files as message attachments; it requires `--message` (attachments are not supported in interactive or pipe mode).
+- Every turn carries the CLI's working directory as its project (`x-workspace-path`), the same way the GUI sends the project chosen in its window. The daemon resolves it up to the nearest `.openalpaca`/`.git` marker; that root is what a run records as its `workspace_id` and where the files it writes land. A directory the CLI cannot canonicalize sends no project at all rather than a path the daemon would resolve against its own directory.
+- `--resume` continues a stored conversation instead of the lane's current one. With a terminal it opens a picker over this lane's conversations, newest first; with stdin piped it takes the most recent — the row the picker would have opened on — because a prompt written into a pipe is a hang, not a question. `--session <id>` names one directly; `openalpaca sessions` lists the ids. The two are mutually exclusive.
+- Resuming **re-opens** the conversation (`POST /v1/sessions/{id}/activate`) before anything is sent. A lane holds exactly one live conversation, so resuming an archived one archives whatever was live; the CLI prints the conversation it resumed, and its project, so that is visible rather than discovered later. The last few turns are printed before the prompt opens.
+- A resumed conversation's own project governs the turn, overriding the working directory: one conversation belongs to one project. A conversation that has no project yet takes the working directory's and is bound by it.
 - With no `--message` and a TTY on stdin, an interactive REPL opens: streaming replies, tab completion, and client-side slash commands (`/help`, `/model`, `/models`, `/agents`, `/keys`, `/usage`, `/clear`, `/verbose`). Exit with `exit`, `quit`, or Ctrl-D.
 - If stdin is piped, the CLI reads all of stdin, sends it as one message, and streams the reply.
 - Routing is decided by the daemon: the model answers directly or starts a background workflow via a tool call. When a reply delegates work to a workflow, the daemon returns structured delegation metadata (task id + title) and the CLI polls that task by id, printing the result when it completes (Ctrl-C stops waiting; the task keeps running — check it later with `openalpaca tasks status <task_id>`).

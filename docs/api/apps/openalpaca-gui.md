@@ -118,10 +118,16 @@
 - Exported functions: none
 - Endpoints: none
 
+### `sessions.test.ts`
+
+- Source: `apps/openalpaca-gui/src/lib/api/sessions.test.ts`
+- Exported functions: none
+- Endpoints: none
+
 ### `sessions.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/sessions.ts`
-- Exported functions: `getSessionMessages`, `listSessions`
+- Exported functions: `activateSession`, `archiveSession`, `createSession`, `deleteSession`, `getSessionMessages`, `listSessions`, `updateSession`
 - Endpoints: none
 
 ### `settings.ts`

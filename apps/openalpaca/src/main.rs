@@ -11,6 +11,7 @@
 //! - agents: Manage agents (list, status, config, create, remove)
 //! - llm: Manage LLM settings, keys, and usage
 //! - chat: Chat with the Orchestrator
+//! - sessions: List the conversations a lane holds
 
 mod chat_stream;
 mod client;
@@ -56,6 +57,9 @@ enum Commands {
     /// Chat with the Orchestrator
     Chat(commands::chat::ChatArgs),
 
+    /// List the conversations a lane holds (plan §5.7)
+    Sessions(commands::sessions::SessionsArgs),
+
     /// Manage plugins (list, approve, deny, enable, disable, config)
     Plugin(commands::plugin::PluginArgs),
 
@@ -76,6 +80,7 @@ async fn main() -> Result<()> {
         Commands::Agents(args) => commands::agents::run(args).await,
         Commands::Llm(args) => commands::llm::run(args).await,
         Commands::Chat(args) => commands::chat::run(args).await,
+        Commands::Sessions(args) => commands::sessions::run(args).await,
         Commands::Plugin(args) => commands::plugin::run(args).await,
         Commands::Ext(args) => commands::ext::run(args).await,
     }

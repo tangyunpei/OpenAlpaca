@@ -12,6 +12,7 @@ pub mod ext;
 pub mod gui;
 pub mod llm;
 pub mod plugin;
+pub mod sessions;
 mod llm_keys;
 mod llm_status;
 pub mod status;

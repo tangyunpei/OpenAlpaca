@@ -25,6 +25,7 @@
 | `openalpaca agents` | Manage agents (list, status, config, create, remove) | `apps/openalpaca/src/commands/agents.rs` |
 | `openalpaca llm` | Manage LLM settings, keys, and usage | `apps/openalpaca/src/commands/llm.rs` |
 | `openalpaca chat` | Chat with the Orchestrator | `apps/openalpaca/src/commands/chat.rs` |
+| `openalpaca sessions` | List the conversations a lane holds (plan §5.7) | `apps/openalpaca/src/commands/sessions.rs` |
 | `openalpaca plugin` | Manage plugins (list, approve, deny, enable, disable, config) | `apps/openalpaca/src/commands/plugin.rs` |
 | `openalpaca ext` | Manage extensions — MCP servers and plugins (list, info, enable, disable, reload, approve, deny, remove) | `apps/openalpaca/src/commands/ext.rs` |
 
@@ -79,7 +80,7 @@
 
 - Source: `apps/openalpaca/src/commands/chat.rs`
 - No `Subcommand` enum found in module.
-- Parsed flags: none
+- Parsed flags: `--file`
 
 ### `config`
 
@@ -193,6 +194,12 @@
   - `set` (fields: `key`, `value`)
   - `get` (fields: `key`)
 - Parsed flags: `--format`
+
+### `sessions`
+
+- Source: `apps/openalpaca/src/commands/sessions.rs`
+- No `Subcommand` enum found in module.
+- Parsed flags: `--total`
 
 ### `status`
 
