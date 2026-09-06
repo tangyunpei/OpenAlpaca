@@ -80,6 +80,31 @@ fn config_tool(name: &str) -> RegisteredTool {
     }
 }
 
+struct PluginExec(&'static str);
+
+#[async_trait::async_trait]
+impl openalpaca_api::plugin_traits::PluginToolExecutor for PluginExec {
+    async fn execute(&self, _tool: &str, _arguments: &serde_json::Value) -> Result<String, String> {
+        Ok(String::new())
+    }
+    fn plugin_id(&self) -> &str {
+        self.0
+    }
+}
+
+fn plugin_tool(plugin: &'static str, name: &str) -> RegisteredTool {
+    RegisteredTool {
+        definition: definition(name),
+        backend: ToolBackend::Plugin(Arc::new(PluginExec(plugin))),
+        provides_capabilities: vec![name.to_string()],
+        exempt_from_timeout: false,
+        annotations: None,
+        version: "2.0.0".to_string(),
+        author: format!("plugin:{plugin}"),
+        created_at: chrono::Utc::now(),
+    }
+}
+
 fn find<'a>(rows: &'a [serde_json::Value], name: &str) -> &'a serde_json::Value {
     rows.iter()
         .find(|r| r["name"] == name)
@@ -233,4 +258,91 @@ fn invocations_today_is_per_name_and_defaults_to_zero() {
     let rows = tools_json(&registry, registry.extensions(), &counts);
     assert_eq!(find(&rows, "srv__called")["invocations_today"], 12);
     assert_eq!(find(&rows, "srv__uncalled")["invocations_today"], 0);
+}
+
+/// The fourth `source` value, and the second `origin.kind`. A plugin tool's
+/// origin is read through `RegisteredTool::extension_id()`, which derives the
+/// plugin's **directory** name from the `plugin:<id>` author prefix
+/// (`registry/mod.rs:220`) — the same key the ledger and the supervisor use.
+#[test]
+fn a_plugin_row_carries_its_plugins_origin() {
+    let registry = ToolRegistry::new().expect("registry");
+    let ext = ExtensionId::plugin("notion");
+    registry
+        .extensions()
+        .upsert(&ext, false, ExtensionState::Disabled);
+    registry
+        .register(plugin_tool("notion", "notion::create_page"))
+        .expect("register the plugin tool");
+
+    let rows = tools_json(&registry, registry.extensions(), &HashMap::new());
+    let row = find(&rows, "notion::create_page");
+    assert_eq!(row["source"], "plugin");
+    assert_eq!(
+        row["origin"],
+        serde_json::json!({
+            "kind": "plugin", "id": "notion", "enabled": false, "state": "disabled"
+        }),
+        "a plugin row reads the ledger the same way an MCP row does"
+    );
+    assert_eq!(row["author"], "plugin:notion");
+    assert_eq!(row["version"], "2.0.0");
+}
+
+/// **The §8 shape, exactly** — nine keys per row and no tenth, on every one of
+/// the four sources. The two fields this contract supersedes (`denied`, the
+/// ADR-029 boolean) and folds away (`provider`, into `origin.id`) are covered
+/// by the same assertion: any key not in §8 fails it.
+#[test]
+fn every_row_carries_the_nine_section_8_keys_and_no_others() {
+    let registry = ToolRegistry::new().expect("registry");
+    registry.register(builtin_tool("remember")).expect("builtin");
+    registry.register(config_tool("weather")).expect("config");
+    registry
+        .register(mcp_tool("github", "github__create_issue"))
+        .expect("mcp");
+    registry
+        .register(plugin_tool("notion", "notion::create_page"))
+        .expect("plugin");
+
+    let expected = [
+        "name",
+        "description",
+        "source",
+        "origin",
+        "provides_capabilities",
+        "requires_confirmation",
+        "invocations_today",
+        "version",
+        "author",
+    ];
+    let rows = tools_json(&registry, registry.extensions(), &HashMap::new());
+    assert_eq!(rows.len(), 4);
+    for row in &rows {
+        let object = row.as_object().expect("each row is an object");
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        let mut want = expected;
+        want.sort_unstable();
+        assert_eq!(keys, want, "row is not the §8 shape: {row}");
+        // Types, field for field.
+        assert!(row["name"].is_string());
+        assert!(row["description"].is_string());
+        assert!(row["provides_capabilities"].is_array());
+        assert!(row["requires_confirmation"].is_boolean());
+        assert!(row["invocations_today"].is_i64());
+        assert!(row["version"].is_string());
+        assert!(row["author"].is_string());
+        assert!(
+            ["builtin", "mcp", "plugin", "config"].contains(&row["source"].as_str().unwrap()),
+            "unknown source: {row}"
+        );
+        // `origin` is null exactly for the two off-axis sources.
+        let off_axis = matches!(row["source"].as_str(), Some("builtin") | Some("config"));
+        assert_eq!(
+            row["origin"].is_null(),
+            off_axis,
+            "the origin-null rule does not hold for {row}"
+        );
+    }
 }
