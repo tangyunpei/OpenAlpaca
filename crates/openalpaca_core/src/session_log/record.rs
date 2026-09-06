@@ -220,14 +220,17 @@ impl Record {
     }
 }
 
-/// The keys that carry a record's **identity** rather than its payload.
+/// The keys that carry a record's **identity** rather than its payload, at the
+/// top level of `data`.
 ///
-/// A cut never touches one of these, at any depth. The reason is concrete:
-/// `tool_use_id` is what pairs a `tool_call` with its `tool_result` and what
-/// the writer's index row keys `log_seq` on, and the per-element `id`/`name`
-/// are what make `round`'s verbatim `tool_use` block replayable (§5.4). A
-/// truncated record that lost them is not a smaller record, it is an
-/// anonymous one.
+/// A cut never touches one of these. The reason is concrete: `tool_use_id` is
+/// what pairs a `tool_call` with its `tool_result` and what the writer's index
+/// row keys `log_seq` on, and the rest name the call, the run and the model. A
+/// truncated record that lost them is not a smaller record, it is an anonymous
+/// one.
+///
+/// Deeper down the rule narrows to [`is_pairing_key`]: a key called `name` or
+/// `id` inside a tool's own `input` is payload the caller chose, not identity.
 const IDENTITY_KEYS: &[&str] = &[
     "tool_use_id",
     "id",
@@ -251,6 +254,23 @@ const CUT_WORTH_IT: usize = 128;
 
 fn is_identity(key: &str) -> bool {
     IDENTITY_KEYS.contains(&key)
+}
+
+/// The keys that **pair** records with each other below the top level, and are
+/// therefore protected at depth.
+///
+/// Exactly two positions qualify: `tool_use_id` wherever it appears (it is the
+/// join key for `tool_call`/`tool_result` and for the index row), and the
+/// `id`/`name` **directly under** `tool_use[i]`, which are what make `round`'s
+/// verbatim block replayable (§5.4). Everything else — including a key that
+/// happens to be called `name` inside a tool's `input` — is payload, and
+/// refusing to cut it collapses the record into the fallback stub for nothing.
+fn is_pairing_key(path: &[Seg], key: &str) -> bool {
+    if key == "tool_use_id" {
+        return true;
+    }
+    matches!(key, "id" | "name")
+        && matches!(path, [Seg::Key(container), Seg::Idx(_)] if container == "tool_use")
 }
 
 /// One step of a path to a cuttable string: `input.content`,
@@ -358,7 +378,7 @@ fn collect_cuttable(value: &Value, path: &mut Vec<Seg>, out: &mut Vec<(Vec<Seg>,
         }
         Value::Object(fields) => {
             for (key, field) in fields {
-                if is_identity(key) {
+                if is_pairing_key(path, key) {
                     continue;
                 }
                 path.push(Seg::Key(key.clone()));

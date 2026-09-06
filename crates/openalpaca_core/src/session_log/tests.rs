@@ -603,6 +603,71 @@ async fn a_tool_call_and_its_result_write_one_index_row() {
     assert_eq!(result_ref, "log:2", "result_ref names the tool_result record");
 }
 
+/// A provider that issues no tool-call id (Ollama leaves it
+/// `unwrap_or_default()`) must not get a second `tool_execution_log` row: the
+/// daemon's audit path already wrote one, an empty `request_id` is excluded
+/// from the merge on purpose, and the writer inserting anyway double-counts
+/// the call in `GET /v1/tools`' `invocations_today`.
+#[tokio::test]
+async fn an_empty_tool_use_id_is_not_indexed() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&db_dir.path().join("t.db")).unwrap();
+    let svc = service_with(&dir, Some(db.clone()), SessionLogLimits::default());
+    let handle = svc.handle_for("sess-anon");
+
+    handle.emit(Record::new(RecordType::ToolCall).with_data(serde_json::json!({
+        "tool_use_id": "", "name": "shell_execute", "input": {"cmd": "ls"},
+    })));
+    handle.emit(Record::new(RecordType::ToolResult).with_data(serde_json::json!({
+        "tool_use_id": "", "name": "shell_execute", "ok": true,
+        "duration_ms": 1, "result": "a\nb\n",
+    })));
+    assert!(handle.flush().await);
+
+    let rows: i64 = db
+        .with_connection(|conn| {
+            Ok(conn.query_row("SELECT COUNT(*) FROM tool_execution_log", [], |r| r.get(0))?)
+        })
+        .unwrap();
+    assert_eq!(
+        rows, 0,
+        "an id-less call is left to the daemon's audit row — indexing it makes two"
+    );
+    // The records themselves are still written: only the index row stands down.
+    assert_eq!(lines(&log_path(dir.path(), "sess-anon")).len(), 2);
+}
+
+/// The identity skip protects the keys that **pair** records — `tool_use_id`,
+/// and the `id`/`name` directly under `tool_use[i]`. A key that happens to be
+/// called `name` inside a tool's own `input` is payload, and refusing to cut
+/// it collapses the whole record into the fallback stub for no reason.
+#[tokio::test]
+async fn a_big_value_inside_a_tools_input_is_cut_even_when_its_key_is_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = service(&dir);
+    let handle = svc.handle_for("sess-inner-name");
+
+    let huge = "n".repeat(200 * 1024);
+    handle.emit(Record::new(RecordType::ToolCall).with_data(serde_json::json!({
+        "tool_use_id": "tu-inner",
+        "name": "artifact_write",
+        "input": {"name": huge, "path": "report.md"},
+    })));
+    assert!(handle.flush().await);
+
+    let rows = lines(&log_path(dir.path(), "sess-inner-name"));
+    let data = &rows[0]["data"];
+    assert_eq!(data["_truncated"]["fields"][0], "input.name");
+    assert_eq!(data["tool_use_id"], "tu-inner", "the pairing key survives");
+    assert_eq!(data["name"], "artifact_write", "so does the tool's own name");
+    assert_eq!(data["input"]["path"], "report.md");
+    assert!(
+        data.get("preview").is_none(),
+        "cutting the inner value kept the record's shape: {data}"
+    );
+}
+
 /// A result that hits the envelope cap still gets an index row, and its
 /// preview is the bytes that actually landed inline.
 #[tokio::test]

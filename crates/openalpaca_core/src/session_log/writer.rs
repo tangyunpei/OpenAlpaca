@@ -358,7 +358,17 @@ fn index_tool_call(
     db: &Option<Database>,
     pending: &mut PendingCalls,
 ) {
-    let Some(id) = record.data.get("tool_use_id").and_then(Value::as_str) else {
+    // An empty id is not an id. A provider that issues none (Ollama leaves
+    // `id` as `unwrap_or_default()`) is excluded from the R51 merge on
+    // purpose, so a row written here could never find the daemon's audit row
+    // for the same call — it would simply be a second row, double-counting the
+    // call in `GET /v1/tools`' `invocations_today`. The audit row stands alone.
+    let Some(id) = record
+        .data
+        .get("tool_use_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+    else {
         return;
     };
     match record.kind {

@@ -976,6 +976,122 @@ async fn test_compaction_triggers_during_agentic_loop() {
     assert!(compaction.data["summary_msg_id"].is_null());
 }
 
+/// P-14 again, on the field the single-compaction test cannot distinguish from
+/// "this compaction's delta": `cumulative_dropped_tokens` is what the **run**
+/// has dropped so far, so a second compaction reports the sum of both, not its
+/// own. Without this the accumulator could be a plain assignment and nothing
+/// would notice.
+#[tokio::test]
+async fn test_two_compactions_accumulate_dropped_tokens() {
+    use crate::context_budget::ContextBudgetManager;
+    use crate::daemon_config::ContextBudgetConfig;
+
+    // A tighter window than the single-compaction test's 800 so the trigger is
+    // crossed twice inside one run: each fat round adds ~200 tokens, and the
+    // tail the compactor keeps is immediately refilled.
+    let budget_config = ContextBudgetConfig::default();
+    let budget = ContextBudgetManager::new(600, &budget_config);
+
+    let make_fat_tool_response = |id: &str| ChatResponse {
+        content: "x".repeat(400),
+        tool_calls: vec![openalpaca_llm::ToolCall {
+            id: id.to_string(),
+            name: "search".to_string(),
+            arguments: serde_json::json!({"query": "a]".repeat(200)}),
+        }],
+        model: "mock-model".to_string(),
+        usage: Usage {
+            input_tokens: 50,
+            output_tokens: 50,
+            ..Default::default()
+        },
+        finish_reason: FinishReason::ToolUse,
+        thinking: None,
+        parts: None,
+    };
+
+    let provider = MockProvider::new(vec![
+        Ok(make_fat_tool_response("tc_a")),
+        Ok(make_fat_tool_response("tc_b")),
+        Ok(make_fat_tool_response("tc_c")),
+        Ok(make_fat_tool_response("tc_d")),
+        Ok(make_fat_tool_response("tc_e")),
+        Ok(make_fat_tool_response("tc_f")),
+        Ok(make_fat_tool_response("tc_g")),
+        Ok(make_fat_tool_response("tc_h")),
+        Ok(MockProvider::simple_response("Done.")),
+    ]);
+
+    let messages = vec![
+        ChatMessage::system("You are a helpful assistant."),
+        ChatMessage::user("Search for information repeatedly."),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let service = crate::session_log::SessionLogService::new(
+        dir.path().to_path_buf(),
+        None,
+        crate::session_log::SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-two-compactions");
+
+    let config = LoopConfig {
+        max_rounds: 12,
+        max_cost: 10.0,
+        enable_caching: false,
+        thinking: None,
+        context_tail_keep: 2,
+        session_log: Some(handle.clone()),
+        ..Default::default()
+    };
+
+    let _ = run_agentic_loop(
+        &provider,
+        messages,
+        vec![],
+        &config,
+        None,
+        "test_two_compactions",
+        None,
+        Some(&budget),
+        None,
+        None,
+    )
+    .await;
+
+    assert!(handle.flush().await);
+    let records =
+        crate::session_log::read_records(&dir.path().join("sess-two-compactions")).unwrap();
+    let compactions: Vec<_> = records.iter().filter(|r| r.kind == "compaction").collect();
+    assert!(
+        compactions.len() >= 2,
+        "this run must compact at least twice, got {}",
+        compactions.len()
+    );
+
+    let mut expected = 0u64;
+    for (i, record) in compactions.iter().enumerate() {
+        let delta = record.data["pre_tokens"]
+            .as_u64()
+            .unwrap()
+            .saturating_sub(record.data["post_tokens"].as_u64().unwrap());
+        expected += delta;
+        assert_eq!(
+            record.data["cumulative_dropped_tokens"].as_u64(),
+            Some(expected),
+            "compaction {i} reports the run's running total, not its own delta"
+        );
+    }
+    assert!(
+        expected
+            > compactions[0].data["pre_tokens"]
+                .as_u64()
+                .unwrap()
+                .saturating_sub(compactions[0].data["post_tokens"].as_u64().unwrap()),
+        "the total must exceed the first compaction's own delta"
+    );
+}
+
 #[test]
 fn test_truncate_min_cut_guard_skips_distant_sentence() {
     // Sentence boundary exists but is below the 75% threshold — should fall through
