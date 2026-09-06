@@ -302,7 +302,13 @@ impl EventBroadcaster {
                         "status": status,
                         "duration_ms": duration_ms,
                     });
-                    repo.log("dag_node_status", Some(agent_id), Some(&detail), None)
+                    repo.log_for_task(
+                        "dag_node_status",
+                        Some(agent_id),
+                        Some(task_id),
+                        Some(&detail),
+                        None,
+                    )
                 }
                 ServerEvent::ToolConfirmationRequested {
                     request_id,
@@ -353,7 +359,7 @@ impl EventBroadcaster {
                         "lane_key": lane_key,
                         "title": title,
                     });
-                    repo.log("workflow_started", None, Some(&detail), None)
+                    repo.log_for_task("workflow_started", None, Some(task_id), Some(&detail), None)
                 }
                 ServerEvent::WorkflowSteered {
                     task_id, lane_key, ..
@@ -375,7 +381,13 @@ impl EventBroadcaster {
                         "lane_key": lane_key,
                         "message": message,
                     });
-                    repo.log("workflow_progress", None, Some(&detail), None)
+                    repo.log_for_task(
+                        "workflow_progress",
+                        None,
+                        Some(task_id),
+                        Some(&detail),
+                        None,
+                    )
                 }
                 ServerEvent::FollowupQueued {
                     lane_key,
@@ -660,6 +672,9 @@ mod tests {
             Some("t-1"),
         );
         eb.workflow_steered("t-1", "junpei:cli");
+        eb.workflow_started("t-1", "junpei:cli", "A run");
+        eb.workflow_progress("t-1", "junpei:cli", "read 12 files");
+        eb.dag_node_status("t-1", "node-1", "review", "review_agent", "started", None, None);
         eb.artifact_written(
             "a-1",
             Some("t-1"),
@@ -692,6 +707,9 @@ mod tests {
             "llm_call_completed",
             "tool_confirmation_requested",
             "workflow_steered",
+            "workflow_started",
+            "workflow_progress",
+            "dag_node_status",
             "artifact_written",
             "subagent_span",
         ] {
