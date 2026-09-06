@@ -160,10 +160,11 @@ export const GAPS: Record<GapId, GapDescriptor> = {
   // The counts half of GAP-20 closed with P8's replacement data: a template
   // row now carries `run_count` and `last_run_at`, grouped out of
   // `subagent_span` in one query per list, so `12 runs` is the daemon's
-  // number. The window (`?window=7d`) is struck with it — the count is
-  // lifetime, and the row says `last <date>` rather than implying a period it
-  // does not compute. What is left is the toggle: a template has no `enabled`
-  // field and nothing would enforce one in the spawn path.
+  // number. Interim semantics: the count is lifetime and includes in-flight
+  // runs, and the row says `last <date>`; Phase 8 item 5 (T48) adds
+  // `?window=7d` (400 on unknown windows) and counts completed runs only.
+  // What is left is the toggle: a template has no `enabled` field and
+  // nothing would enforce one in the spawn path.
   "GAP-20": {
     id: "GAP-20",
     label: "Agent template enable/disable",
