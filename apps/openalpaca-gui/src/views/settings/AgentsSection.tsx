@@ -41,7 +41,10 @@ function templateMeta(template: AgentTemplate, running: number): string {
   const parts: string[] = [];
   if (running > 0) parts.push(`${running} running`);
   if (!template.run_count) {
-    parts.push("No runs yet");
+    // A windowed zero only says "none in this window"; only an unwindowed or
+    // all-time zero can honestly claim the template has never run.
+    const scoped = template.window && template.window !== "all";
+    parts.push(scoped ? `No runs · ${template.window}` : "No runs yet");
   } else {
     const noun = template.run_count === 1 ? "run" : "runs";
     const windowed = template.window

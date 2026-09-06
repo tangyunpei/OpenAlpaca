@@ -11,9 +11,10 @@ pub struct ListAgentsQuery {
     pub limit: Option<usize>,
 }
 
-/// `GET /v1/agent-templates?window=` (GAP-20, T48). `None` (the key absent,
-/// or `?window=`'s value omitted entirely) resolves to the plan's default of
-/// `7d` — see `resolve_window`.
+/// `GET /v1/agent-templates?window=` (GAP-20, T48). `None` (the key absent)
+/// resolves to the plan's default of `7d` — see `resolve_window`. A present
+/// but empty value (`?window=`) deserialises as `Some("")` and is refused with
+/// `400 UNKNOWN_WINDOW` like any other unknown spelling.
 #[derive(Debug, Deserialize)]
 pub struct ListTemplatesQuery {
     pub window: Option<String>,

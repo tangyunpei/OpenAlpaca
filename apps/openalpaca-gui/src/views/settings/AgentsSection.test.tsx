@@ -92,9 +92,23 @@ describe("AgentsSection run counts (GAP-20, counts half — T48)", () => {
     expect(screen.queryByText(/undefined/)).toBeNull();
   });
 
-  /** A template nothing has spawned says so; it does not borrow a number. */
-  it("says a template has never run rather than showing a bare 0", () => {
-    state.templates = [template({ run_count: 0 })];
+  /**
+   * A windowed zero says only what the data says — none in this window — and
+   * never claims the template has never run.
+   */
+  it("says no runs in the window rather than never, for a windowed zero", () => {
+    state.templates = [template({ run_count: 0, window: "7d" })];
+
+    render(<AgentsSection />);
+
+    expect(screen.getByText(/No runs · 7d/)).toBeInTheDocument();
+    expect(screen.queryByText(/No runs yet/)).toBeNull();
+    expect(screen.queryByText(/0 runs/)).toBeNull();
+  });
+
+  /** An all-time zero is the one case that can honestly say "never". */
+  it("says a template has never run for an all-time zero", () => {
+    state.templates = [template({ run_count: 0, window: "all" })];
 
     render(<AgentsSection />);
 
@@ -113,7 +127,7 @@ describe("AgentsSection run counts (GAP-20, counts half — T48)", () => {
 
     render(<AgentsSection />);
 
-    expect(screen.getByText(/No runs yet/)).toBeInTheDocument();
+    expect(screen.getByText(/No runs/)).toBeInTheDocument();
     expect(screen.queryByText(/undefined/)).toBeNull();
   });
 
