@@ -26,16 +26,18 @@ describe("gap registry", () => {
   // server-side pins (GAP-12). Phase 4 closed two: the subagent timeline
   // (GAP-09), served by `subagent_span` + `GET /v1/tasks/{id}/timeline`, and
   // the per-run event log (GAP-10), served by `event_log.task_id` +
-  // `GET /v1/events/history?task_id=`. Phase 5 closed steering (GAP-02):
-  // `POST /v1/tasks/{id}/steer` addresses a run rather than a lane. GAP-20 is
-  // *narrowed*, not closed: its run counts are served now, its toggle is not —
-  // so the count is 12.
-  it("covers the 12 gaps still open from API_MAP §3", () => {
-    expect(listGaps()).toHaveLength(12);
-    expect(listGaps()[0]?.id).toBe("GAP-03");
+  // `GET /v1/events/history?task_id=`. Phase 5 closed two: steering (GAP-02),
+  // where `POST /v1/tasks/{id}/steer` addresses a run rather than a lane, and
+  // the follow-up queue (GAP-03), where `/v1/lanes/{lane_key}/followups` reads,
+  // writes and cancels it. GAP-20 is *narrowed*, not closed: its run counts are
+  // served now, its toggle is not — so the count is 11.
+  it("covers the 11 gaps still open from API_MAP §3", () => {
+    expect(listGaps()).toHaveLength(11);
+    expect(listGaps()[0]?.id).toBe("GAP-06");
     expect(listGaps().at(-1)?.id).toBe("GAP-24");
     for (const closed of [
       "GAP-02",
+      "GAP-03",
       "GAP-04",
       "GAP-05",
       "GAP-09",
@@ -72,12 +74,12 @@ describe("gap registry", () => {
 
 describe("Unavailable results", () => {
   it("carries a note that names the missing API", () => {
-    const result = unavailable("GAP-03");
+    const result = unavailable("GAP-06");
 
     expect(isAvailable(result)).toBe(false);
-    expect(result.reason).toBe("Follow-up API not yet available");
-    expect(result.missingApi).toContain("/followups");
-    expect(result.gap.id).toBe("GAP-03");
+    expect(result.reason).toBe("Re-run and Start actions not yet available");
+    expect(result.missingApi).toContain("/v1/tasks/{id}/action");
+    expect(result.gap.id).toBe("GAP-06");
   });
 
   it("uses the override phrasing where the generic sentence would read wrong", () => {
@@ -93,6 +95,6 @@ describe("Unavailable results", () => {
   });
 
   it("unwraps to the fallback rather than to fabricated data", () => {
-    expect(unwrapOr(unavailable("GAP-03"), [])).toEqual([]);
+    expect(unwrapOr(unavailable("GAP-06"), [])).toEqual([]);
   });
 });

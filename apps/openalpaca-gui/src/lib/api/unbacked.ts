@@ -65,48 +65,12 @@ export function startTaskNow(
 // `inbox_depth` synchronously instead of leaving the client to infer the
 // outcome from a later `workflow_steered` frame.
 
-// ── Follow-ups (GAP-03) ─────────────────────────────────────────────────────
-
-export interface FollowupRecord {
-  id: number;
-  lane_key: string;
-  kind: "followup" | "unprocessed_steering";
-  content: string;
-  source_task_id: string | null;
-  status: "queued" | "running" | "done" | "cancelled";
-  created_at: string;
-  updated_at: string;
-}
-
-/** GAP-03 — storage and the `followup_queued` event exist; no routes do. */
-export function listFollowups(
-  _laneKey: string,
-): Availability<FollowupRecord[]> {
-  void _laneKey;
-  return unavailable("GAP-03");
-}
-
-/** GAP-03 — the only writer is the model's own `queue_followup` tool. */
-export function queueFollowup(
-  _laneKey: string,
-  _content: string,
-  _sourceTaskId?: string,
-): Availability<FollowupRecord> {
-  void _laneKey;
-  void _content;
-  void _sourceTaskId;
-  return unavailable("GAP-03");
-}
-
-/** GAP-03 — no cancel route either. */
-export function cancelFollowup(
-  _laneKey: string,
-  _followupId: number,
-): Availability<FollowupRecord> {
-  void _laneKey;
-  void _followupId;
-  return unavailable("GAP-03");
-}
+// Follow-ups left this file when Phase 5 landed `/v1/lanes/{lane_key}/followups`:
+// `FollowupRecord` is a wire type in `api/followups.ts` now, fetched, written
+// and cancelled by real functions there. What was GAP-03 is served — including
+// the read-back the `followup_queued` frame never carried (it announces an id,
+// not the item), and a cancel that compare-and-swaps against the daemon's own
+// autostart instead of racing it.
 
 // ── Daemon status detail (GAP-14) ───────────────────────────────────────────
 

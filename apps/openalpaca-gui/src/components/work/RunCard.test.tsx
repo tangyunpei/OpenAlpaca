@@ -61,15 +61,17 @@ describe("RunCard (§3.19)", () => {
     );
   });
 
-  it("shows the five live controls, with the gapped two disabled", () => {
+  // On a *running* card all five are live: GAP-06's `Start now` only appears
+  // on a queued run, and GAP-03 closed with the follow-up routes.
+  it("shows the five live controls, all enabled", () => {
     card({ status: "running" });
     expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Steer" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Jump to chat" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
     expect(
       screen.getByRole("button", { name: "Queue follow-up" }),
-    ).toBeDisabled();
+    ).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Jump to chat" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
   });
 
   /**

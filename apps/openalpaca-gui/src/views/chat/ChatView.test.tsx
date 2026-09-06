@@ -78,6 +78,10 @@ function json(payload: unknown): Response {
 
 /** What `POST /v1/tasks/{id}/steer` answers; swapped per test to refuse. */
 let steerReply: () => Response;
+/** What `GET /v1/lanes/{lane}/followups` answers — the lane's pending queue. */
+let followupListReply: () => Response;
+/** What `POST` / `DELETE …/followups` answer; swapped per test to refuse. */
+let followupWriteReply: () => Response;
 
 function installFetch() {
   const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
@@ -102,6 +106,9 @@ function installFetch() {
     }
     if (url.includes("/steer")) {
       return steerReply();
+    }
+    if (url.includes("/followups")) {
+      return method === "GET" ? followupListReply() : followupWriteReply();
     }
     if (url.includes("/v1/tasks")) return json([]);
     if (url.includes("/v1/models")) {
@@ -182,6 +189,18 @@ beforeEach(() => {
       accepted: true,
       inbox_depth: 1,
       lane_key: "user:gui",
+    });
+  followupListReply = () => json([]);
+  followupWriteReply = () =>
+    json({
+      id: 42,
+      lane_key: "user:gui",
+      kind: "followup",
+      content: "then write it up",
+      source_task_id: "run-1",
+      status: "queued",
+      created_at: "2026-09-05 10:00:00",
+      updated_at: "2026-09-05 10:00:00",
     });
   resetConnection();
   useUiStore.setState({ ...initialUi, model: null, view: "chat" });
@@ -553,4 +572,188 @@ describe("ChatView — steering a run (GAP-02, closed)", () => {
       );
     },
   );
+});
+
+/**
+ * GAP-03, closed. The composer's queue mode parks the text on the *lane*
+ * through `POST /v1/lanes/{lane_key}/followups`; the daemon claims it when the
+ * current workflow finalizes. Like a steer it never goes down `/v1/chat` — it
+ * is not a turn in the conversation — and the lane's pending queue is read
+ * back above the composer, with a cancel per row.
+ */
+describe("ChatView — queueing a follow-up (GAP-03, closed)", () => {
+  /** The one write a queued send makes. */
+  function queuePost(): RecordedRequest {
+    const post = requests.find(
+      (request) =>
+        request.method === "POST" && request.url.includes("/followups"),
+    );
+    if (post === undefined) throw new Error("no POST …/followups recorded");
+    return post;
+  }
+
+  /**
+   * A follow-up is addressed at the lane, so the send waits for the lane key to
+   * arrive from `GET /v1/chat/history` first — which the queue read-back proves,
+   * because it is the query that is disabled until the lane is known.
+   */
+  async function queueSend(text: string) {
+    await waitFor(() =>
+      expect(
+        requests.some(
+          (r) => r.method === "GET" && r.url.includes("/followups"),
+        ),
+      ).toBe(true),
+    );
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: text },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() =>
+      expect(
+        requests.some(
+          (r) => r.method === "POST" && r.url.includes("/followups"),
+        ),
+      ).toBe(true),
+    );
+  }
+
+  it("posts to the lane's queue and opens no chat stream", async () => {
+    useUiStore.setState({ steerTargetRunId: "run-1", composerMode: "queue" });
+    renderChat();
+    await queueSend("then write it up");
+
+    expect(queuePost().url).toContain("/v1/lanes/user%3Agui/followups");
+    // The run it was queued behind rides along; the daemon supplies the rest.
+    expect(queuePost().body).toEqual({
+      content: "then write it up",
+      source_task_id: "run-1",
+    });
+    expect(FakeEventSource.instances).toHaveLength(0);
+    expect(
+      requests.some(
+        (r) =>
+          r.method === "POST" &&
+          r.url.includes("/v1/chat") &&
+          !r.url.includes("/v1/chat/history"),
+      ),
+    ).toBe(false);
+
+    // It still shows in the transcript, and the target is released.
+    expect(await screen.findByText("then write it up")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(useUiStore.getState().steerTargetRunId).toBeNull(),
+    );
+  });
+
+  /**
+   * Unlike a steer, a follow-up *does* carry the picker's project: the user is
+   * queueing work now, from here, and that is the project the re-entered turn
+   * belongs to — the same rule an ordinary chat turn follows.
+   */
+  it("sends the selected project as the workspace header", async () => {
+    useProjectStore.setState({ path: "/Users/dev/openalpaca" });
+    useUiStore.setState({ steerTargetRunId: "run-1", composerMode: "queue" });
+    renderChat();
+    await queueSend("then write it up");
+
+    expect(queuePost().headers.get("x-workspace-path")).toBe(
+      "/Users/dev/openalpaca",
+    );
+  });
+
+  it.each([
+    [400, "EMPTY_CONTENT", /cannot be empty/i],
+    [400, "INVALID_LANE_KEY", /no lane yet/i],
+  ])(
+    "renders %i %s with its own message and keeps the draft",
+    async (status, code, expected) => {
+      followupWriteReply = () =>
+        new Response(
+          JSON.stringify({ error: { code, message: "raw daemon text" } }),
+          { status },
+        );
+      useUiStore.setState({ steerTargetRunId: "run-1", composerMode: "queue" });
+      renderChat();
+      await queueSend("then write it up");
+
+      expect(await screen.findByText(expected)).toBeInTheDocument();
+      // Nothing was queued, so the target stays aimed and the text comes back.
+      expect(useUiStore.getState().steerTargetRunId).toBe("run-1");
+      await waitFor(() =>
+        expect(screen.getByLabelText("Message")).toHaveValue(
+          "then write it up",
+        ),
+      );
+    },
+  );
+
+  it("reads the lane's pending queue back and cancels a row from it", async () => {
+    followupListReply = () =>
+      json([
+        {
+          id: 42,
+          lane_key: "user:gui",
+          kind: "followup",
+          content: "then write it up",
+          source_task_id: "run-1",
+          status: "queued",
+          created_at: "2026-09-05 10:00:00",
+          updated_at: "2026-09-05 10:00:00",
+        },
+      ]);
+    followupWriteReply = () => json({ id: 42, status: "cancelled" });
+    renderChat();
+
+    expect(await screen.findByText("then write it up")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "cancel" }));
+
+    await waitFor(() =>
+      expect(
+        requests.some(
+          (r) =>
+            r.method === "DELETE" &&
+            r.url.endsWith("/v1/lanes/user%3Agui/followups/42"),
+        ),
+      ).toBe(true),
+    );
+  });
+
+  /**
+   * The race the route exists to report: the daemon claimed the item first, so
+   * the cancel lost its compare-and-swap. "Already started" is a different fact
+   * from "gone", and the user acts on the difference.
+   */
+  it("says a follow-up already started when the cancel loses the race", async () => {
+    followupListReply = () =>
+      json([
+        {
+          id: 42,
+          lane_key: "user:gui",
+          kind: "followup",
+          content: "then write it up",
+          source_task_id: "run-1",
+          status: "queued",
+          created_at: "2026-09-05 10:00:00",
+          updated_at: "2026-09-05 10:00:00",
+        },
+      ]);
+    followupWriteReply = () =>
+      new Response(
+        JSON.stringify({
+          error: { code: "FOLLOWUP_NOT_QUEUED", message: "raw daemon text" },
+        }),
+        { status: 409 },
+      );
+    renderChat();
+
+    expect(await screen.findByText("then write it up")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "cancel" }));
+
+    // The refusal is a toast (the app shell renders it, not this view), so the
+    // assertion is on the slot it lands in.
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toMatch(/already started/i),
+    );
+  });
 });

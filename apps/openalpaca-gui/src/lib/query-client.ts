@@ -68,8 +68,14 @@ export function invalidationKeysFor(
     case "dag_node_status":
       return [qk.tasks.detail(event.task_id), qk.tasks.timeline(event.task_id)];
 
+    // A follow-up queued or cancelled changes the lane's pending list; the
+    // queued half also changes what the run list will do next (the daemon
+    // autostarts one when a workflow finalizes).
     case "followup_queued":
       return [qk.followups.all(), qk.tasks.all()];
+
+    case "followup_cancelled":
+      return [qk.followups.all()];
 
     // `["artifacts"]` is a prefix of the list, versions and diff keys, so one
     // entry refreshes whichever Library surface is mounted. Not `tasks`: a

@@ -56,6 +56,10 @@ export type ServerEvent =
   | { type: "workflow_steered"; task_id: string; lane_key: string; ts: string; instance_id: string; _id: number }
   | { type: "workflow_progress"; task_id: string; lane_key: string; message: string; ts: string; instance_id: string; _id: number }
   | { type: "followup_queued"; lane_key: string; followup_id: number; kind: string; ts: string; instance_id: string; _id: number }
+  // GAP-03's other half. Fired only when the cancel actually won its CAS
+  // against the autostart claim, so a pending chip retired on this frame is
+  // never one that is about to run. No `kind`: the row is named by id.
+  | { type: "followup_cancelled"; lane_key: string; followup_id: number; ts: string; instance_id: string; _id: number }
   // A produced artifact (plan §4.9). `name` is the head file's own name and
   // `path` its absolute location; `task_id`/`agent_id` are null for a loose
   // artifact — a chat turn that ran no workflow. Never fired for uploads.

@@ -14,8 +14,12 @@
  *     is session-local, like the run reports beside it. Every refusal code
  *     gets its own toast; a steer that did not land never looks like one that
  *     did.
- *   * **GAP-03** queueing a follow-up has no write route at all, so the
- *     composer refuses and says why instead of quietly sending a chat message.
+ *   * Queueing a follow-up (GAP-03, closed) is
+ *     `POST /v1/lanes/{lane_key}/followups`: it parks the text on the lane and
+ *     the daemon runs it when the current workflow finalizes. Like a steer it
+ *     is not a chat turn, so its transcript row is session-local; unlike a
+ *     steer it is addressed at the *lane*, and `source_task_id` records which
+ *     run it was queued behind. Every refusal code gets its own toast.
  *   * `Always allow` sends `approval_scope: "entire_tool"`, which the daemon
  *     now honours for the rest of the session (GAP-01, closed) — the toast
  *     uses the design's own copy (§4.4): `{tool} added to the allowlist — it
@@ -40,10 +44,15 @@ import {
 import { toUiStatus, type UiStatus } from "@/components/ui";
 import { useChatHistory, useChatStream } from "@/hooks/useChat";
 import { useServerEvent } from "@/hooks/useDaemonEvents";
+import {
+  useCancelFollowup,
+  useFollowups,
+  useQueueFollowup,
+} from "@/hooks/useFollowups";
 import { useTasks } from "@/hooks/useTasks";
+import { followupErrorMessage, type FollowupRecord } from "@/lib/api/followups";
 import { steerErrorMessage, steerTask } from "@/lib/api/tasks";
 import type { ApprovalScope } from "@/lib/api/types";
-import { GAPS, gapNote } from "@/lib/unavailable";
 import { useProjectStore, workspaceOption } from "@/stores/project";
 import { useUiStore, type ComposerMode } from "@/stores/ui";
 
@@ -113,6 +122,14 @@ export interface ChatSession {
 
   activeRuns: ActiveRun[];
   steer: { mode: ComposerMode; label: string } | null;
+
+  /** The lane's pending follow-up queue, oldest first (claim order). */
+  followups: FollowupRecord[];
+  /** The queue could not be read; items may still be pending. */
+  followupsError: Error | null;
+  cancelFollowup: (followupId: number) => void;
+  /** The row a cancel is in flight for. */
+  cancellingFollowupId: number | null;
 }
 
 function isTerminal(
@@ -133,6 +150,17 @@ export function useChatSession(): ChatSession {
   const history = useChatHistory({ limit: HISTORY_LIMIT });
   const stream = useChatStream();
   const activeTasks = useTasks({ status: "active" });
+
+  /** The lane this session is on — `null` until its first turn has a key. */
+  const laneKey = history.data?.lane_key ?? stream.state.laneKey;
+
+  const followupQueue = useFollowups(laneKey);
+  const { mutateAsync: queueFollowup } = useQueueFollowup();
+  const { mutate: cancelFollowupMutation, isPending: cancelPending } =
+    useCancelFollowup();
+  const [cancellingFollowupId, setCancellingFollowupId] = useState<
+    number | null
+  >(null);
 
   const model = useUiStore((s) => s.model);
   const steerTargetRunId = useUiStore((s) => s.steerTargetRunId);
@@ -348,9 +376,53 @@ export function useChatSession(): ChatSession {
     if (text === "" || sending) return;
 
     if (steerTargetRunId !== null && composerMode === "queue") {
-      // There is no follow-up write route; sending this as ordinary chat would
-      // silently do something else than the user asked for.
-      showToast(gapNote(GAPS["GAP-03"]));
+      // A follow-up is parked on the *lane*, not on the run: the daemon claims
+      // it when whatever is running finishes, so — unlike a steer — the target
+      // run need not still be listening. `source_task_id` is what records
+      // which run it was queued behind.
+      if (laneKey === null) {
+        // Nothing to park it on: a conversation with no turn yet has no lane.
+        showToast(
+          "This conversation has no lane yet — send a message first, then queue a follow-up.",
+        );
+        return;
+      }
+      const label = steer?.label ?? shortTitle(steerTargetRunId);
+      const targetId = steerTargetRunId;
+      setSendError(null);
+      setSending(true);
+      setDraft("");
+      void queueFollowup({
+        laneKey,
+        content: text,
+        sourceTaskId: targetId,
+        // The picker's project, like a chat turn: the user is queueing work
+        // *now*, from here, and that is the project it should re-enter in.
+        ...(projectPath === null ? {} : { workspacePath: projectPath }),
+      })
+        .then(() => {
+          setSteers((current) => [
+            ...current,
+            {
+              id: `${targetId}-q${current.length}-${Date.now()}`,
+              text,
+              mode: "queue",
+              label,
+              at: new Date().toISOString(),
+            },
+          ]);
+          clearSteerTarget();
+        })
+        .catch((error: unknown) => {
+          // Never silent: each refusal gets its own sentence, and the text goes
+          // back in the composer so a rejected queue does not cost the user
+          // their message.
+          const message = followupErrorMessage(error);
+          setSendError(message);
+          showToast(message);
+          setDraft(text);
+        })
+        .finally(() => setSending(false));
       return;
     }
 
@@ -377,6 +449,7 @@ export function useChatSession(): ChatSession {
             {
               id: `${targetId}-${current.length}-${Date.now()}`,
               text,
+              mode: "steer",
               label,
               at: new Date().toISOString(),
             },
@@ -435,8 +508,34 @@ export function useChatSession(): ChatSession {
     stream,
     model,
     projectPath,
+    laneKey,
+    queueFollowup,
     clearSteerTarget,
   ]);
+
+  /**
+   * Take one item back out of the lane's queue.
+   *
+   * The daemon's cancel is a compare-and-swap against its own autostart, so
+   * `409 FOLLOWUP_NOT_QUEUED` is a real answer and not a retryable failure: the
+   * item is running now. It gets its own sentence rather than a generic
+   * failure toast, and the list refetches either way (`useCancelFollowup`
+   * invalidates on settle), so the row leaves the strip in both outcomes.
+   */
+  const cancelFollowup = useCallback(
+    (followupId: number) => {
+      if (laneKey === null || cancelPending) return;
+      setCancellingFollowupId(followupId);
+      cancelFollowupMutation(
+        { laneKey, followupId },
+        {
+          onError: (error: Error) => showToast(followupErrorMessage(error)),
+          onSettled: () => setCancellingFollowupId(null),
+        },
+      );
+    },
+    [laneKey, cancelPending, cancelFollowupMutation, showToast],
+  );
 
   // The mutation object is a fresh identity every render; holding it in a ref
   // keeps `approve`/`deny` stable, which is what the window key binding wants.
@@ -491,7 +590,7 @@ export function useChatSession(): ChatSession {
     items,
     historyLoading: history.isLoading,
     historyError: history.error,
-    laneKey: history.data?.lane_key ?? stream.state.laneKey,
+    laneKey,
 
     draft,
     setDraft,
@@ -509,5 +608,10 @@ export function useChatSession(): ChatSession {
 
     activeRuns,
     steer,
+
+    followups: followupQueue.data ?? [],
+    followupsError: followupQueue.error,
+    cancelFollowup,
+    cancellingFollowupId,
   };
 }

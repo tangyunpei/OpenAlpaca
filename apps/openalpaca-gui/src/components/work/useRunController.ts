@@ -2,9 +2,11 @@
  * The one place a run action turns into an effect.
  *
  * Three of the design's verbs are real HTTP (`POST /v1/tasks/{id}/action`);
- * three are pure navigation; two do not exist and are never reachable because
- * their buttons render disabled (see `run-actions.ts`). The controller still
- * handles them defensively — a disabled button is a UI fact, not a guarantee.
+ * three are pure navigation — `Steer` and `Queue follow-up` aim the composer,
+ * `Jump to chat` just switches view; two do not exist and are never reachable
+ * because their buttons render disabled (see `run-actions.ts`). The controller
+ * still handles those defensively — a disabled button is a UI fact, not a
+ * guarantee.
  *
  * Toast copy is §4.4's, with the run's full title in place of the design's
  * hand-written `short` (there is no short title on the wire).
@@ -86,8 +88,9 @@ export function useRunController(): RunController {
           setSteerTarget(run.id, "steer");
           return;
         case "queue":
-          // Unreachable: the control is disabled (GAP-03). If a follow-up
-          // route lands, this becomes `setSteerTarget(run.id, "queue")`.
+          // Same shape as `steer`: the button aims the composer, and the chat
+          // view POSTs to `/v1/lanes/{lane_key}/followups` when the user sends.
+          setSteerTarget(run.id, "queue");
           return;
         case "jump":
           clearSteerTarget();

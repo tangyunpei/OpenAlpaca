@@ -65,6 +65,21 @@ describe("invalidationKeysFor", () => {
     ]);
   });
 
+  /**
+   * A follow-up queued changes what the run list will do next — the daemon
+   * autostarts one when a workflow finalizes — while a cancel only shortens
+   * the lane's pending queue, so it does not re-list every run.
+   */
+  it("refreshes the lane's queue from a follow-up frame", () => {
+    expect(invalidationKeysFor(event("followup_queued"))).toEqual([
+      qk.followups.all(),
+      qk.tasks.all(),
+    ]);
+    expect(invalidationKeysFor(event("followup_cancelled"))).toEqual([
+      qk.followups.all(),
+    ]);
+  });
+
   it("scopes a subagent node to its own run", () => {
     expect(
       invalidationKeysFor(event("dag_node_status", { task_id: "run-1" })),

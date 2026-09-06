@@ -1,14 +1,19 @@
 /**
  * The run action catalogue (DESIGN_SPEC §3.19 action bar, §3.26 action group).
  *
- * Three of the design's seven verbs do not exist on the daemon. They are still
+ * Two of the design's seven verbs do not exist on the daemon. They are still
  * rendered — a hidden affordance cannot be reported — but as **disabled**
  * controls whose tooltip names the missing route (API_MAP §3):
  *
  *   `Start now` / `Re-run`  GAP-06 — `apply_task_action` accepts exactly
  *                           `cancel`, `pause`, `resume`.
- *   `Queue follow-up`       GAP-03 — the storage and the `followup_queued`
- *                           event exist; no HTTP route does.
+ *
+ * `Queue follow-up` left that list with Phase 5. Like `Steer`, the button
+ * itself only aims the composer (§4.4) — the send behind it is
+ * `POST /v1/lanes/{lane_key}/followups`, which parks the text on the lane for
+ * the daemon to run when the current workflow finalizes. What used to be
+ * GAP-03 (storage and a `followup_queued` event, with no route to reach
+ * either) is served, so the control carries no gap.
  *
  * `Steer` was the awkward one and no longer is. The design's own handler
  * (`r.steer`, §4.4) sends nothing — it aims the chat composer at the run — and
@@ -90,6 +95,21 @@ export function steerAction(reason: string | null = null): RunActionDescriptor {
   return { ...STEER, enabled: false, title: reason };
 }
 
+/**
+ * `Queue follow-up` — the composer's other aiming mode (§4.4).
+ *
+ * Enabled on every live run: unlike `Steer`, queueing does not need the
+ * workflow to be listening. The item lands on the *lane*, and the daemon
+ * claims it when whatever is running finishes — so a run that has stopped
+ * taking steering messages can still have work parked behind it.
+ */
+const QUEUE: RunActionDescriptor = {
+  id: "queue",
+  label: "Queue follow-up",
+  tone: "secondary",
+  enabled: true,
+};
+
 const JUMP: RunActionDescriptor = {
   id: "jump",
   label: "Jump to chat",
@@ -125,7 +145,7 @@ export function liveRunActions(
   return [
     pauseAction(status),
     steerAction(steerReason),
-    blocked("queue", "Queue follow-up", "GAP-03"),
+    QUEUE,
     JUMP,
     { id: "cancel", label: "Cancel", tone: "danger", enabled: true },
   ];

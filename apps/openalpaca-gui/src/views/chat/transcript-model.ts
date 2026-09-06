@@ -102,19 +102,22 @@ export interface PendingTurn {
 }
 
 /**
- * A steer this client sent through `POST /v1/tasks/{id}/steer`.
+ * A steer this client pushed through `POST /v1/tasks/{id}/steer`, or a
+ * follow-up it queued through `POST /v1/lanes/{lane_key}/followups`.
  *
  * Session-local by construction, and for a reason the run reports do not share:
- * a steer is not a chat turn, so the daemon stores no message for it and a
- * reload has nothing to rebuild from. The design still shows it as a user
- * message carrying the `steer → {run}` pill (§5.1.4), so the row is drawn from
- * what this client sent — never inferred from a `workflow_steered` frame, which
- * carries no text.
+ * neither is a chat turn, so the daemon stores no message for either and a
+ * reload has nothing to rebuild from. The design still shows both as user
+ * messages carrying the `steer → {run}` / `follow-up → {run}` pill (§5.1.4), so
+ * the row is drawn from what this client sent — never inferred from a
+ * `workflow_steered` or `followup_queued` frame, neither of which carries text.
  */
 export interface SteerEntry {
   /** Client-side id; only ever a React key. */
   id: string;
   text: string;
+  /** Which pill the row wears — the composer mode it was sent in. */
+  mode: SteerRef["mode"];
   /** The run's short title — the pill's label. */
   label: string;
   at: string;
@@ -316,16 +319,16 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
     });
   }
 
-  // A steer is a user message in the design (§5.1.4) even though it never went
-  // down the chat channel, so it takes the same row — with the pill naming the
-  // run it was addressed to.
+  // A steer or a queued follow-up is a user message in the design (§5.1.4) even
+  // though neither went down the chat channel, so both take the same row — with
+  // the pill naming the run it was addressed to and which of the two it was.
   for (const entry of steers) {
     push(timestamp(entry.at), {
       kind: "user",
       key: `s${entry.id}`,
       text: entry.text,
       time: entry.at,
-      steer: { mode: "steer", label: entry.label },
+      steer: { mode: entry.mode, label: entry.label },
     });
   }
 

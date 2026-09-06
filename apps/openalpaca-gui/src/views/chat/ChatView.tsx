@@ -20,6 +20,7 @@ import { useEffect, useRef } from "react";
 import {
   Composer,
   DensityToggle,
+  FollowupQueue,
   RunningNowPill,
   formatHeaderDate,
 } from "@/components/chat";
@@ -149,6 +150,20 @@ export default function ChatView({
                 {session.sendError}
               </p>
             )}
+          </div>
+        </div>
+
+        {/* The lane's pending follow-ups sit with the control that fills
+            them: `Queue follow-up` aims the composer, and this is what the
+            queue looks like afterwards. */}
+        <div className="shrink-0 bg-main px-[26px]">
+          <div className="mx-auto max-w-transcript">
+            <FollowupQueue
+              followups={session.followups}
+              error={session.followupsError}
+              cancellingId={session.cancellingFollowupId}
+              onCancel={session.cancelFollowup}
+            />
           </div>
         </div>
 

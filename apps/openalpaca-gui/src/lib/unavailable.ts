@@ -16,7 +16,6 @@
  */
 
 export type GapId =
-  | "GAP-03"
   | "GAP-06"
   | "GAP-08c"
   | "GAP-13"
@@ -54,15 +53,13 @@ export const GAPS: Record<GapId, GapDescriptor> = {
   // running, and the queue answers `accepted`/`inbox_depth` rather than
   // nothing. The chat prefix is untouched; it is still the CLI's and
   // Telegram's only channel.
-  "GAP-03": {
-    id: "GAP-03",
-    label: "Follow-up API",
-    missingApi:
-      "no /v1/lanes/{lane}/followups routes (storage exists, routes do not)",
-    proposedEndpoint: "POST|GET|DELETE /v1/lanes/{lane_key}/followups",
-    blocks: "Queue follow-up button; pending follow-ups list",
-    fixSize: "M",
-  },
+  // GAP-03 (no follow-up API) closed with Phase 5:
+  // `GET|POST /v1/lanes/{lane_key}/followups` and
+  // `DELETE …/{id}` serve the queue the model's `queue_followup` tool already
+  // wrote to. The `Queue follow-up` control and the pending list are real, and
+  // cancel is a compare-and-swap against the daemon's autostart — a follow-up
+  // that has already been claimed answers `409` rather than reporting a cancel
+  // that did not happen.
   // GAP-04 (no artifact resource), GAP-05 (no versions or diff), GAP-11
   // (content unloadable by the browser) and GAP-12 (no server-side pins) all
   // closed with Phase 3: `/v1/artifacts*` lists, reads, versions, diffs and

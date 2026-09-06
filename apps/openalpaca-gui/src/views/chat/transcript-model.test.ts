@@ -171,6 +171,7 @@ describe("buildTranscript — steers sent to a run's own route", () => {
           {
             id: "run-1-0",
             text: "check telegram first",
+            mode: "steer",
             label: "connector audit",
             at: "2026-09-05T14:22:30Z",
           },
@@ -184,6 +185,30 @@ describe("buildTranscript — steers sent to a run's own route", () => {
     expect(steered.text).toBe("check telegram first");
     expect(steered.steer).toEqual({ mode: "steer", label: "connector audit" });
     expect(steered.key).toBe("srun-1-0");
+  });
+
+  // A queued follow-up rides the same row with the other pill (GAP-03): it is
+  // not a chat turn either, so nothing is stored for it and the transcript is
+  // the only place it is visible in the moment it was sent.
+  it("shows a queued follow-up with the `follow-up` pill, not the steer one", () => {
+    const items = buildTranscript(
+      input({
+        steers: [
+          {
+            id: "run-1-q0",
+            text: "then write it up",
+            mode: "queue",
+            label: "connector audit",
+            at: "2026-09-05T14:23:00Z",
+          },
+        ],
+      }),
+    );
+
+    const queued = items[0];
+    if (queued?.kind !== "user") throw new Error("expected a user row");
+    expect(queued.text).toBe("then write it up");
+    expect(queued.steer).toEqual({ mode: "queue", label: "connector audit" });
   });
 });
 

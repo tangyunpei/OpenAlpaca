@@ -49,9 +49,25 @@ describe("liveRunActions", () => {
     expect(byId.get("cancel")?.tone).toBe("danger");
   });
 
-  it("disables Queue follow-up — there is no write route (GAP-03)", () => {
-    expect(byId.get("queue")?.enabled).toBe(false);
-    expect(byId.get("queue")?.gap).toBe("GAP-03");
+  // GAP-03 closed: `POST /v1/lanes/{lane_key}/followups` parks the text on the
+  // lane, so the control carries no gap and no apologetic tooltip any more.
+  it("keeps Queue follow-up enabled and unmarked — the write route exists now", () => {
+    const queue = byId.get("queue");
+    expect(queue?.enabled).toBe(true);
+    expect(queue?.gap).toBeUndefined();
+    expect(queue?.title).toBeUndefined();
+  });
+
+  /**
+   * Queueing is *not* gated on `steerable`: a follow-up lands on the lane and
+   * is claimed when the current workflow finalizes, so a run that has stopped
+   * taking steering messages can still have work parked behind it.
+   */
+  it("leaves Queue follow-up enabled even when Steer is not", () => {
+    const queue = liveRunActions("running", "Run has finished.").find(
+      (action) => action.id === "queue",
+    );
+    expect(queue?.enabled).toBe(true);
   });
 
   // GAP-02 closed: the send behind the composer is `POST /v1/tasks/{id}/steer`,
@@ -129,11 +145,12 @@ describe("runActions", () => {
 describe("unavailableActionNotes", () => {
   it("lists only the disabled verbs, each naming its proposed route", () => {
     const notes = unavailableActionNotes(liveRunActions("queued"));
-    expect(notes).toHaveLength(2);
+    // `Start now` is the only gapped verb on a live run now — GAP-03 closed.
+    expect(notes).toHaveLength(1);
     expect(notes[0]).toContain("Start now");
     expect(notes[0]).toContain("cancel|pause|resume");
-    expect(notes[1]).toContain("Queue follow-up");
     expect(notes.join(" ")).not.toContain("Steer");
+    expect(notes.join(" ")).not.toContain("Queue follow-up");
   });
 
   it("is empty when every action works", () => {
