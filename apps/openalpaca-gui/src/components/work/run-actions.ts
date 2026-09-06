@@ -15,7 +15,13 @@
  * the send behind it is now `POST /v1/tasks/{id}/steer`, which takes the run's
  * id. What used to be GAP-02 (the daemon's only channel was the chat text
  * prefix `/steer …`, which targets the lane's active workflow and cannot name
- * a run) is served, so the control carries no tooltip and no gap.
+ * a run) is served, so the control carries no gap.
+ *
+ * It can still be *disabled*, which is a different thing from gapped: the
+ * route is owner-scoped and only reaches a live workflow, so a run the daemon
+ * would refuse (`steerable: false` on the row — R40) renders disabled with the
+ * reason as its tooltip. That is a property of the run, not a missing API, so
+ * it carries no `gap` and stays out of the unavailable-actions footnote.
  *
  * `Cancel` / `Pause` / `Resume` are real and wired to `POST /v1/tasks/{id}/action`.
  */
@@ -74,6 +80,16 @@ const STEER: RunActionDescriptor = {
   enabled: true,
 };
 
+/**
+ * `Steer`, disabled with `reason` as its tooltip when the run cannot take a
+ * message — `steerDisabledReason(run)` (`run-model.ts`) is what produces it
+ * from the daemon's `steerable` hint.
+ */
+export function steerAction(reason: string | null = null): RunActionDescriptor {
+  if (reason === null) return STEER;
+  return { ...STEER, enabled: false, title: reason };
+}
+
 const JUMP: RunActionDescriptor = {
   id: "jump",
   label: "Jump to chat",
@@ -96,11 +112,19 @@ export function pauseAction(status: UiStatus): RunActionDescriptor {
   return { id: "pause", label: "Pause", tone: "secondary", enabled: true };
 }
 
-/** The live action bar, left to right, exactly as §3.19 orders it. */
-export function liveRunActions(status: UiStatus): RunActionDescriptor[] {
+/**
+ * The live action bar, left to right, exactly as §3.19 orders it.
+ *
+ * `steerReason` is the run's own answer to "why not?" — `null` (the default)
+ * leaves `Steer` enabled.
+ */
+export function liveRunActions(
+  status: UiStatus,
+  steerReason: string | null = null,
+): RunActionDescriptor[] {
   return [
     pauseAction(status),
-    STEER,
+    steerAction(steerReason),
     blocked("queue", "Queue follow-up", "GAP-03"),
     JUMP,
     { id: "cancel", label: "Cancel", tone: "danger", enabled: true },
@@ -113,10 +137,13 @@ export function terminalRunActions(): RunActionDescriptor[] {
 }
 
 /** Whichever set the status calls for. */
-export function runActions(status: UiStatus): RunActionDescriptor[] {
+export function runActions(
+  status: UiStatus,
+  steerReason: string | null = null,
+): RunActionDescriptor[] {
   return status === "done" || status === "cancelled" || status === "failed"
     ? terminalRunActions()
-    : liveRunActions(status);
+    : liveRunActions(status, steerReason);
 }
 
 /**

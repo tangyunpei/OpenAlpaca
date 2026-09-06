@@ -509,23 +509,28 @@ describe("ChatView — steering a run (GAP-02, closed)", () => {
     );
   });
 
-  it("carries the project in the body — the route takes no header", async () => {
+  /**
+   * The picker's project is the wrong authority for a message aimed at
+   * somebody else's run: the daemon defaults `workspace_path` to the run's own
+   * `workspace_id`, so a leftover that re-enters as an `unprocessed_steering`
+   * follow-up is filed where the run was — not where the user has since
+   * navigated. The client therefore sends no project at all.
+   */
+  it("sends no workspace_path, even with a project selected", async () => {
     useProjectStore.setState({ path: "/Users/dev/openalpaca" });
     useUiStore.setState({ steerTargetRunId: "run-1", composerMode: "steer" });
     renderChat();
     await steerSend("try the other branch");
 
-    expect(steerPost().body).toEqual({
-      message: "try the other branch",
-      workspace_path: "/Users/dev/openalpaca",
-    });
+    expect(steerPost().body).toEqual({ message: "try the other branch" });
+    expect(steerPost().headers.has("x-workspace-path")).toBe(false);
   });
 
   it.each([
     [409, "STEERING_INBOX_FULL", /queue is full/i],
     [409, "TASK_NOT_STEERABLE", /no longer running/i],
     [503, "STEERING_DISABLED", /disabled/i],
-    [404, "NOT_FOUND", /gone/i],
+    [404, "NOT_FOUND", /no longer exists/i],
   ])(
     "renders %i %s with its own message and keeps the draft",
     async (status, code, expected) => {

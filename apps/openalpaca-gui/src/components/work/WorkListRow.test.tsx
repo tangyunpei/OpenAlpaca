@@ -21,6 +21,8 @@ const run = (patch: Partial<Run> = {}): Run => ({
   finishedAt: null,
   costUsd: null,
   subagentCount: null,
+  steerable: true,
+  startedElsewhere: false,
   ...patch,
 });
 

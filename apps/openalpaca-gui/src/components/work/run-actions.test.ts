@@ -62,6 +62,35 @@ describe("liveRunActions", () => {
     expect(steer?.gap).toBeUndefined();
     expect(steer?.title).toBeUndefined();
   });
+
+  /**
+   * R40 — the run row's own `steerable` hint. A run the daemon would refuse
+   * gets a disabled control whose tooltip says why, rather than a button that
+   * answers 404 the first time it is used.
+   */
+  it("disables Steer with the reason when the run cannot take one", () => {
+    const steer = liveRunActions(
+      "running",
+      "Started from another channel.",
+    ).find((action) => action.id === "steer");
+    expect(steer?.enabled).toBe(false);
+    expect(steer?.title).toBe("Started from another channel.");
+    // Not a missing API — no gap id, so it stays out of the gap footnote.
+    expect(steer?.gap).toBeUndefined();
+  });
+
+  it("leaves the other four controls alone when Steer is disabled", () => {
+    const actions = liveRunActions("running", "Run has finished.");
+    expect(actions.map((action) => action.id)).toEqual([
+      "pause",
+      "steer",
+      "queue",
+      "jump",
+      "cancel",
+    ]);
+    expect(actions.find((a) => a.id === "cancel")?.enabled).toBe(true);
+    expect(unavailableActionNotes(actions).join(" ")).not.toContain("Steer");
+  });
 });
 
 describe("terminalRunActions", () => {
@@ -86,6 +115,14 @@ describe("runActions", () => {
 
   it("picks the live set otherwise", () => {
     expect(runActions("queued")).toHaveLength(5);
+  });
+
+  it("passes the steer reason through to the live set", () => {
+    const steer = runActions("running", "Run has finished.").find(
+      (action) => action.id === "steer",
+    );
+    expect(steer?.enabled).toBe(false);
+    expect(steer?.title).toBe("Run has finished.");
   });
 });
 

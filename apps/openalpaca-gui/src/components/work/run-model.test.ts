@@ -12,6 +12,7 @@ import {
   parseTimestamp,
   partitionRuns,
   runMeta,
+  steerDisabledReason,
   toRun,
 } from "./run-model";
 
@@ -170,6 +171,45 @@ describe("toRun", () => {
     expect(toRun(task()).subagentCount).toBeNull();
     expect(toRun(task({ subagent_count: 0 })).subagentCount).toBe(0);
     expect(toRun(task({ subagent_count: 4 })).subagentCount).toBe(4);
+  });
+
+  it("carries the daemon's `steerable` hint, and trusts a row without it", () => {
+    expect(toRun(task({ steerable: true })).steerable).toBe(true);
+    expect(toRun(task({ steerable: false })).steerable).toBe(false);
+    // A daemon too old to serve the field: leave the control alone rather
+    // than disabling a button that works.
+    expect(toRun(task()).steerable).toBe(true);
+  });
+
+  it("reads a connector run off `created_by`", () => {
+    expect(toRun(task()).startedElsewhere).toBe(false);
+    expect(toRun(task({ created_by: "telegram:4242" })).startedElsewhere).toBe(
+      true,
+    );
+  });
+});
+
+describe("steerDisabledReason", () => {
+  it("is null for a run the daemon says it would take a message for", () => {
+    expect(steerDisabledReason(toRun(task({ steerable: true })))).toBeNull();
+  });
+
+  it("names the channel a run it cannot steer came from", () => {
+    const run = toRun(task({ steerable: false, created_by: "telegram:4242" }));
+    expect(steerDisabledReason(run)).toMatch(/another channel/i);
+  });
+
+  it("says a finished run is finished", () => {
+    const run = toRun(task({ steerable: false, status: "completed" }));
+    expect(steerDisabledReason(run)).toMatch(/finished/i);
+  });
+
+  it("does not guess a reason it cannot know", () => {
+    const reason = steerDisabledReason(
+      toRun(task({ steerable: false, status: "queued" })),
+    );
+    expect(reason).not.toBeNull();
+    expect(reason).not.toMatch(/another channel|finished/i);
   });
 });
 

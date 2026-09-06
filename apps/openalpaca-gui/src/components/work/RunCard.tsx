@@ -34,6 +34,7 @@ import {
 import {
   isRaisedRun,
   isTerminalRun,
+  steerDisabledReason,
   type OutcomeArtifact,
   type Run,
 } from "./run-model";
@@ -75,7 +76,9 @@ export function RunCard({
 }: RunCardProps) {
   const raised = isRaisedRun(run.status);
   const terminal = isTerminalRun(run.status);
-  const actions = terminal ? terminalRunActions() : liveRunActions(run.status);
+  const actions = terminal
+    ? terminalRunActions()
+    : liveRunActions(run.status, steerDisabledReason(run));
   const rerun = actions.find((action) => action.id === "rerun");
   const visible = run.artifacts.slice(0, MAX_FILE_ROWS);
   const overflow = Math.max(0, run.artifactCount - visible.length);

@@ -29,6 +29,8 @@ const run = (patch: Partial<Run> = {}): Run => ({
   finishedAt: null,
   costUsd: null,
   subagentCount: null,
+  steerable: true,
+  startedElsewhere: false,
   ...patch,
 });
 
@@ -68,6 +70,20 @@ describe("RunCard (§3.19)", () => {
     expect(
       screen.getByRole("button", { name: "Queue follow-up" }),
     ).toBeDisabled();
+  });
+
+  /**
+   * R40 — a run the daemon would refuse a steer for (another channel's run,
+   * or one with no live workflow) renders `Steer` disabled with the reason,
+   * instead of a button that answers 404 the first time it is used.
+   */
+  it("disables Steer, with the reason, on a run it cannot steer", () => {
+    card({ status: "running", steerable: false, startedElsewhere: true });
+    const steer = screen.getByRole("button", { name: "Steer" });
+    expect(steer).toBeDisabled();
+    expect(steer.getAttribute("title")).toMatch(/another channel/i);
+    // Not a missing API — it stays out of the gap footnote.
+    expect(screen.queryByText(/Steer —/)).not.toBeInTheDocument();
   });
 
   it("offers `Start now` on a queued run, disabled and explained", () => {

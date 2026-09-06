@@ -219,6 +219,39 @@ export interface Run {
    * as the `0` a run the lead handled alone reports.
    */
   subagentCount: number | null;
+  /**
+   * `task.steerable` (R40): whether `POST /v1/tasks/{id}/steer` would take a
+   * message for this run right now. A daemon that does not serve the field
+   * leaves this `true` — a control that works must not be disabled on a guess.
+   */
+  steerable: boolean;
+  /**
+   * This run was started from a connector, not from this daemon's local user:
+   * `created_by` is `"<provider>:<id>"` (`start_workflow` formats an
+   * `External` principal that way), while the local user id is a UUID. It is
+   * the only part of "not yours to steer" the row itself can state.
+   */
+  startedElsewhere: boolean;
+}
+
+/**
+ * Why `Steer` is disabled for this run, or `null` when it is available.
+ *
+ * The daemon serves the *fact* (`steerable`); the reason is the client's to
+ * read off the row it already holds. Nothing is guessed: when neither the
+ * channel nor the status explains the refusal — a queued run, or steering
+ * switched off on the daemon — it says so plainly instead of inventing a
+ * cause.
+ */
+export function steerDisabledReason(run: Run): string | null {
+  if (run.steerable) return null;
+  if (run.startedElsewhere) {
+    return "Started from another channel — steer it where it was started.";
+  }
+  if (isTerminalRun(run.status)) {
+    return "Run has finished — steering only reaches a running run.";
+  }
+  return "This run is not accepting steering messages right now.";
 }
 
 /**
@@ -308,6 +341,12 @@ export function toRun(task: Task, now: Date = new Date()): Run {
     costUsd: typeof task.cost_usd === "number" ? task.cost_usd : null,
     subagentCount:
       typeof task.subagent_count === "number" ? task.subagent_count : null,
+    // Only an explicit `false` disables the control: an older daemon omits
+    // the field entirely, and that is not a refusal.
+    steerable: task.steerable !== false,
+    // `created_by` is non-optional on the wire; the guard is there so a row
+    // missing it cannot blank the view over a tooltip.
+    startedElsewhere: task.created_by?.includes(":") === true,
   };
 }
 

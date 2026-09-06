@@ -63,6 +63,16 @@ export interface Task {
    * and on a daemon older than the field.
    */
   subagent_count?: number;
+  /**
+   * R40 — whether `POST /v1/tasks/{id}/steer` would take a message for this
+   * run right now: it is the local user's, it is not terminal, and a workflow
+   * is still attached to it. Computed at read time, never stored, and served
+   * by both task routes (on the detail it sits beside `task`, not inside it).
+   *
+   * Absent on a daemon older than the field — which is not the same as
+   * `false`, so treat only an explicit `false` as a refusal.
+   */
+  steerable?: boolean;
 }
 
 /**
@@ -77,6 +87,11 @@ export interface Task {
 export interface TaskDetailResponse {
   task: Task;
   outcome?: ParsedOutcome;
+  /**
+   * R40's steerability hint. It sits beside `task` rather than inside it
+   * because it is not one of the run's columns — see {@link Task.steerable}.
+   */
+  steerable?: boolean;
 }
 
 export interface CreateTaskRequest {

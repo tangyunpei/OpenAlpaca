@@ -135,6 +135,25 @@ describe("steerErrorMessage", () => {
     expect(messages[4]).toMatch(/gone|not found|no longer/i);
   });
 
+  // A `404` has two very different causes, and the client is the only side
+  // that knows which one it is looking at: the daemon answers the same body
+  // for a run that never existed and one that belongs to another channel.
+  it("distinguishes a run it can still see from one that is gone", () => {
+    const notFound = new ApiError("Task not found", 404, "NOT_FOUND");
+
+    // The row is on screen and updating — "gone" would be a lie.
+    const onScreen = steerErrorMessage(notFound, true);
+    expect(onScreen).toMatch(/can't be steered/i);
+    expect(onScreen).not.toMatch(/gone|no longer exists/i);
+
+    // Nothing on screen for it: "no longer exists" is the honest reading.
+    expect(steerErrorMessage(notFound, false)).toMatch(/no longer exists/i);
+    // Unknown by default — the same sentence as an explicit `false`.
+    expect(steerErrorMessage(notFound)).toBe(
+      steerErrorMessage(notFound, false),
+    );
+  });
+
   it("falls back to the daemon's own message for an unknown code", () => {
     expect(
       steerErrorMessage(new ApiError("something specific", 500, "DB_ERROR")),

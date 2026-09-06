@@ -361,10 +361,16 @@ export function useChatSession(): ChatSession {
       // for it — and it is only added once the queue has actually taken it.
       const label = steer?.label ?? shortTitle(steerTargetRunId);
       const targetId = steerTargetRunId;
+      // No `workspace_path`: the daemon defaults it to the *run's* own
+      // `workspace_id`, which is the project this message belongs to. The
+      // picker says where the user is now, and a steer that outlives its
+      // workflow re-enters as an `unprocessed_steering` follow-up — filed
+      // under the picker's project, it would land in the wrong one.
+      const onScreen = steerRun !== null;
       setSendError(null);
       setSending(true);
       setDraft("");
-      void steerTask(targetId, text, projectPath ?? undefined)
+      void steerTask(targetId, text)
         .then(() => {
           setSteers((current) => [
             ...current,
@@ -380,8 +386,10 @@ export function useChatSession(): ChatSession {
         .catch((error: unknown) => {
           // Never silent, and never a shrug: each refusal code has its own
           // sentence, and the text goes back in the composer so a full queue
-          // or a finished run does not cost the user their message.
-          const message = steerErrorMessage(error);
+          // or a finished run does not cost the user their message. Whether
+          // the run is still on screen is the client's to know — it decides
+          // which of the two `NOT_FOUND` readings is honest.
+          const message = steerErrorMessage(error, onScreen);
           setSendError(message);
           showToast(message);
           setDraft(text);
@@ -423,6 +431,7 @@ export function useChatSession(): ChatSession {
     composerMode,
     showToast,
     steer,
+    steerRun,
     stream,
     model,
     projectPath,

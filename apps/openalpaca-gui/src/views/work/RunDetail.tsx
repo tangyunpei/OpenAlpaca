@@ -29,6 +29,7 @@ import {
   type RunActionId,
 } from "@/components/work/run-actions";
 import {
+  steerDisabledReason,
   toRun,
   type OutcomeArtifact,
   type Run,
@@ -68,9 +69,12 @@ export function RunDetail({
   const eventLog = useRunEventLog(runId);
 
   const task = detail.data?.task;
+  // `steerable` (R40) is served beside `task`, not inside it — it is not one
+  // of the run's columns — so it is folded in here for `toRun` to read.
+  const steerable = detail.data?.steerable;
   const run = useMemo<Run | null>(() => {
     if (task === undefined) return fallbackRun;
-    const detailRun = toRun(task);
+    const detailRun = toRun({ ...task, steerable });
     const costUsd = fallbackRun?.costUsd ?? null;
     if (detailRun.costUsd !== null || costUsd === null) return detailRun;
     // The detail route carries no cost_usd; fold in the list row's figure
@@ -80,7 +84,7 @@ export function RunDetail({
       .filter((segment) => segment !== "")
       .join(" · ");
     return { ...detailRun, costUsd, meta };
-  }, [task, fallbackRun]);
+  }, [task, steerable, fallbackRun]);
 
   // The design draws up to six rows (§5.2); the query fetches a wider page so
   // the dropped `dag_node_status` duplicates cannot empty the card.
@@ -119,7 +123,9 @@ export function RunDetail({
   }
 
   const live = isLive(run.status);
-  const actions = live ? liveRunActions(run.status) : terminalRunActions();
+  const actions = live
+    ? liveRunActions(run.status, steerDisabledReason(run))
+    : terminalRunActions();
   const blocked = blockedRunId === run.id;
 
   return (

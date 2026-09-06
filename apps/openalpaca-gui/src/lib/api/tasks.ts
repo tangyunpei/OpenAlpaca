@@ -168,8 +168,17 @@ export async function steerTask(
  * not land must never look like one that did, and "Request failed with status
  * 409" tells nobody what to do next. An unrecognised code falls back to the
  * daemon's own message rather than to a shrug.
+ *
+ * `runOnScreen` disambiguates the one code the daemon cannot: `NOT_FOUND`
+ * covers both a run that never existed and one started from another channel
+ * (the route is owner-scoped, and answers the two identically on purpose, so
+ * it cannot leak which ids exist). The client is the side that knows whether
+ * it is holding the row — pass `true` when the run is in the list on screen,
+ * and "gone" is not claimed about a run whose progress is still updating.
+ * With the `steerable` hint (R40) the control is disabled before it comes to
+ * this, so this is the belt to that braces.
  */
-export function steerErrorMessage(error: unknown): string {
+export function steerErrorMessage(error: unknown, runOnScreen = false): string {
   if (error instanceof ApiError) {
     switch (error.code) {
       case "STEERING_INBOX_FULL":
@@ -181,7 +190,9 @@ export function steerErrorMessage(error: unknown): string {
       case "EMPTY_MESSAGE":
         return "A steering message cannot be empty.";
       case "NOT_FOUND":
-        return "That run is gone — nothing was queued.";
+        return runOnScreen
+          ? "This run can't be steered from here — it was started somewhere else."
+          : "That run no longer exists — nothing was queued.";
       default:
         break;
     }
