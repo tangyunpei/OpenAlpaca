@@ -625,40 +625,26 @@ pub async fn get_daemon_providers(State(state): State<Arc<AppState>>) -> impl In
 }
 
 /// PUT /v1/daemon/config/providers/web-search — update web search provider config (writes to llm.toml)
+///
+/// Through the settings service, which holds `llm.toml.lock` across the whole
+/// read-modify-write and rotates a backup. It used to read → mutate → write the
+/// document itself with an unlocked `fs::write`, so a request overlapping a
+/// provider toggle wrote the pre-toggle `enabled` bit back over it.
 pub async fn update_web_search_config(
     State(state): State<Arc<AppState>>,
     Json(body): Json<UpdateWebSearchRequest>,
 ) -> impl IntoResponse {
-    // Load current LLM config from disk to preserve all fields
-    let mut llm_cfg = match openalpaca_llm::read_config(&state.llm_config_path) {
-        Ok(c) => c,
-        Err(e) => {
-            return settings_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "CONFIG_READ_FAILED",
-                &format!("Failed to read llm.toml: {}", e),
-            )
-            .into_response();
-        }
+    let Some(service) = &state.llm_settings_service else {
+        return settings_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "LLM_NOT_CONFIGURED",
+            "LLM settings service is not configured, so llm.toml cannot be written",
+        )
+        .into_response();
     };
 
-    // Ensure web_search section exists
-    let ws = llm_cfg.web_search.get_or_insert_with(Default::default);
-
-    // Apply patches
-    if let Some(ref key) = body.api_key {
-        ws.api_key = key.clone();
-    }
-    if let Some(timeout) = body.timeout_secs {
-        ws.timeout_secs = timeout;
-    }
-
-    // Snapshot the updated config before releasing the mutable borrow.
-    let updated_ws = ws.clone();
-
-    // Write back to llm.toml
-    match openalpaca_llm::write_config(&state.llm_config_path, &llm_cfg) {
-        Ok(()) => {}
+    let updated_ws = match service.update_web_search_config(body.api_key, body.timeout_secs) {
+        Ok(ws) => ws,
         Err(e) => {
             return settings_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -667,7 +653,7 @@ pub async fn update_web_search_config(
             )
             .into_response();
         }
-    }
+    };
 
     // Immediately update the in-memory ArcSwap so subsequent GET reads
     // return the fresh value without waiting for the file-watcher hot-reload.

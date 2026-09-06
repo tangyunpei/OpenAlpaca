@@ -323,3 +323,59 @@ async fn an_enable_restores_the_catalogue_the_disable_stripped() {
     assert!(outcome.warning.is_some(), "{outcome:?}");
     assert!(h.text().contains("enabled = true"));
 }
+
+// ── One writer for llm.toml ─────────────────────────────────────────────────
+
+/// Review finding #3. `update_orchestrator_config` read → mutated → wrote the
+/// whole document with a plain `fs::write`, taking neither `llm.toml.lock` nor
+/// a backup slot. Overlapping a toggle, it wrote back the pre-toggle `enabled`
+/// value: the file then said `enabled = true` while the router had the provider
+/// unloaded, and the two disagreed until restart. The two writers sit on the
+/// same GUI screen — the model picker calls one, the switch beside it the
+/// other — and the 409's own remedy copy tells the owner to run them back to
+/// back.
+#[tokio::test]
+async fn an_orchestrator_write_goes_through_the_same_locked_writer_as_a_toggle() {
+    let h = Harness::new();
+    h.service.set_provider_enabled("openai", false).await.unwrap();
+
+    h.service
+        .update_orchestrator_config(UpdateOrchestratorRequest {
+            model: "claude-sonnet-4-6".to_string(),
+            fallback_models: vec![],
+        })
+        .unwrap();
+
+    assert_eq!(
+        h.writes.lock().unwrap().len(),
+        2,
+        "both writes are the injected one — the lock and the backup ring are not optional"
+    );
+    let text = h.text();
+    assert!(
+        text.contains("enabled = false"),
+        "the toggle's bit survived the orchestrator write:\n{text}"
+    );
+    assert!(text.contains(r#"model = "claude-sonnet-4-6""#), "{text}");
+    assert!(text.contains(SECRET), "and the encrypted key is still verbatim");
+}
+
+/// The daemon's other `llm.toml` writer, `PUT /v1/daemon/config/providers/
+/// web-search`, had the same exposure and now takes the same lock.
+#[tokio::test]
+async fn a_web_search_write_goes_through_the_locked_writer_too() {
+    let h = Harness::new();
+    h.service.set_provider_enabled("openai", false).await.unwrap();
+
+    let updated = h
+        .service
+        .update_web_search_config(Some("brave-key".to_string()), Some(9))
+        .unwrap();
+
+    assert_eq!(updated.api_key, "brave-key");
+    assert_eq!(updated.timeout_secs, 9);
+    assert_eq!(h.writes.lock().unwrap().len(), 2);
+    let text = h.text();
+    assert!(text.contains("enabled = false"), "{text}");
+    assert!(text.contains("timeout_secs = 9"), "{text}");
+}

@@ -4,7 +4,7 @@
 //! config persistence, and hot-reload via ArcSwap.
 
 use crate::config::{
-    KeyConfig, LlmRouterConfig, ProviderConfig, read_config, render_config, write_config,
+    KeyConfig, LlmRouterConfig, ProviderConfig, WebSearchConfig, read_config, render_config,
 };
 use crate::keys::key_encryption::KeyEncryptor;
 use crate::keys::key_pool::{
@@ -609,28 +609,53 @@ impl LlmSettingsService {
 
     /// Update orchestrator config (model + fallback_models).
     /// Takes effect on next restart (no hot-reload of orchestrator model).
+    ///
+    /// Through [`Self::persist_only`] like every other `llm.toml` write: this
+    /// one used to read → mutate → write the whole document with a plain
+    /// `fs::write`, so overlapping a provider toggle it wrote the pre-toggle
+    /// `enabled` value back and the file and the router disagreed until
+    /// restart. The two sit on the same GUI screen.
     pub fn update_orchestrator_config(&self, req: UpdateOrchestratorRequest) -> Result<(), String> {
-        let mut config =
-            read_config(&self.config_path).map_err(|e| format!("Failed to read config: {e}"))?;
-
-        let orch =
-            config
-                .orchestrator
-                .get_or_insert_with(|| crate::config::OrchestratorLlmConfig {
-                    model: "claude-sonnet-4-5-20250929".to_string(),
-                    fallback_models: None,
-                });
-        orch.model = req.model;
-        orch.fallback_models = if req.fallback_models.is_empty() {
-            None
-        } else {
-            Some(req.fallback_models)
-        };
-
-        write_config(&self.config_path, &config)
-            .map_err(|e| format!("Failed to write config: {e}"))?;
+        self.persist_only(|config| {
+            let orch =
+                config
+                    .orchestrator
+                    .get_or_insert_with(|| crate::config::OrchestratorLlmConfig {
+                        model: "claude-sonnet-4-5-20250929".to_string(),
+                        fallback_models: None,
+                    });
+            orch.model = req.model;
+            orch.fallback_models = if req.fallback_models.is_empty() {
+                None
+            } else {
+                Some(req.fallback_models)
+            };
+        })?;
 
         Ok(())
+    }
+
+    /// Patch `[web_search]` and return it as it now stands.
+    ///
+    /// `PUT /v1/daemon/config/providers/web-search`'s half of the same
+    /// correction: the daemon's other `llm.toml` writer, on the same lock and
+    /// the same backup ring. `None` leaves a field as it was.
+    pub fn update_web_search_config(
+        &self,
+        api_key: Option<String>,
+        timeout_secs: Option<u64>,
+    ) -> Result<WebSearchConfig, String> {
+        let config = self.persist_only(|config| {
+            let ws = config.web_search.get_or_insert_with(Default::default);
+            if let Some(key) = api_key {
+                ws.api_key = key;
+            }
+            if let Some(timeout) = timeout_secs {
+                ws.timeout_secs = timeout;
+            }
+        })?;
+
+        Ok(config.web_search.unwrap_or_default())
     }
 
     /// Build a KeyPool from config file for a specific provider.
