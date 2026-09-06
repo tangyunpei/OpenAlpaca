@@ -8,7 +8,7 @@
 //! GET    /v1/sessions/{id}/events            → 501 SESSION_EVENTS_NOT_SERVED
 //! POST   /v1/sessions/{id}/activate
 //! POST   /v1/sessions/{id}/archive
-//! PATCH  /v1/sessions/{id} {title?, workspace_path?}
+//! PATCH  /v1/sessions/{id} {title?, workspace_path?}   (409 if already bound)
 //! DELETE /v1/sessions/{id}
 //! ```
 //!
@@ -118,6 +118,8 @@ pub struct PatchSessionRequest {
     #[serde(default)]
     pub title: Option<String>,
     /// A path binds the session's project; `""` unbinds it. Absent leaves it.
+    /// Present at all on a session that **already has** a project is
+    /// `409 SESSION_WORKSPACE_BOUND` (R48) — one project per session.
     #[serde(default)]
     pub workspace_path: Option<String>,
 }
@@ -482,10 +484,26 @@ pub(super) fn patch_session(deps: &Deps<'_>, id: &str, request: PatchSessionRequ
         Err(response) => return response,
     };
 
+    // R48: a session's project is bound once. Re-pointing it would leave the
+    // runs it already started disagreeing with it about which project they
+    // belong to, and `GET /v1/sessions?workspace_id=` would not list the
+    // conversation those runs came from. Unbinding is refused with it: unbind
+    // then bind is a re-point in two calls. §5.1's answer to a project change
+    // is a new session — the gateway opens one on the turn that changes
+    // project, and a client can ask for one with `POST /v1/sessions`.
+    if request.workspace_path.is_some() && session.workspace_id.is_some() {
+        return api_error(
+            StatusCode::CONFLICT,
+            "SESSION_WORKSPACE_BOUND",
+            "This conversation is already bound to a project. Start a new session to change it.",
+        );
+    }
+
     // Absent leaves the binding alone; an empty string unbinds; a path binds,
     // resolved to its project root the same way a chat turn's header is (R22).
     // A path under no project marker resolves to `None` — which unbinds rather
-    // than storing a root the daemon does not believe in.
+    // than storing a root the daemon does not believe in. On an unbound
+    // session both of those are the same no-op.
     let workspace = request.workspace_path.as_deref().map(|path| {
         if path.trim().is_empty() {
             None

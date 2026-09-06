@@ -342,11 +342,11 @@ async fn archiving_leaves_the_lane_with_no_active_session() {
 // ── PATCH ────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn patching_renames_and_unbinds_the_workspace() {
+async fn patching_renames_and_binds_a_workspace_the_session_does_not_have() {
     let h = Harness::new();
     let session = h
         .repo()
-        .get_or_create_active_session(LANE, "gui", Some("/repo/one"))
+        .get_or_create_active_session(LANE, "gui", None)
         .expect("session");
 
     let (status, body) = split(patch_session(
@@ -360,23 +360,75 @@ async fn patching_renames_and_unbinds_the_workspace() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["title"], "Renamed");
-    assert_eq!(
-        body["workspace_id"], "/repo/one",
+    assert!(
+        body["workspace_id"].is_null(),
         "an absent workspace_path leaves the binding alone"
     );
 
+    // An unbound session accepts a project, resolved to its root (R22).
+    let project = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(project.path().join(".git")).expect("marker");
+    let path = project.path().to_string_lossy().to_string();
     let (status, body) = split(patch_session(
         &h.deps(),
         &session.id,
         PatchSessionRequest {
             title: None,
-            workspace_path: Some(String::new()),
+            workspace_path: Some(path.clone()),
         },
     ))
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body["workspace_id"].is_null(), "an empty string unbinds");
+    assert_eq!(
+        body["workspace_id"].as_str(),
+        request_project_root(Some(&path)).as_deref()
+    );
     assert_eq!(body["title"], "Renamed", "and leaves the title alone");
+}
+
+/// R48: a session's project is bound once. Re-pointing it — or unbinding it,
+/// which is a re-point in two calls — would leave the runs it already started
+/// disagreeing with it about which project they belong to. §5.1's answer to a
+/// project change is a new session, and the gateway opens one on the turn that
+/// changes project; `PATCH` says so instead of quietly re-pointing.
+#[tokio::test]
+async fn patching_the_workspace_of_a_bound_session_is_409() {
+    let h = Harness::new();
+    let session = h
+        .repo()
+        .get_or_create_active_session(LANE, "gui", Some("/repo/one"))
+        .expect("session");
+
+    for workspace_path in [Some("/repo/two".to_string()), Some(String::new())] {
+        let (status, body) = split(patch_session(
+            &h.deps(),
+            &session.id,
+            PatchSessionRequest {
+                title: Some("Renamed".to_string()),
+                workspace_path,
+            },
+        ))
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "SESSION_WORKSPACE_BOUND");
+    }
+    let unchanged = h.repo().get_session(&session.id).unwrap().expect("session");
+    assert_eq!(unchanged.workspace_id.as_deref(), Some("/repo/one"));
+    assert_eq!(unchanged.title, "", "a refused PATCH changes nothing at all");
+
+    // Renaming a bound session is untouched — only the binding is frozen.
+    let (status, body) = split(patch_session(
+        &h.deps(),
+        &session.id,
+        PatchSessionRequest {
+            title: Some("Renamed".to_string()),
+            workspace_path: None,
+        },
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["title"], "Renamed");
+    assert_eq!(body["workspace_id"], "/repo/one");
 }
 
 // ── GET /v1/sessions/{id}/events ─────────────────────────────────────

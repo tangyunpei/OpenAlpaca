@@ -341,6 +341,12 @@ impl<'a> ConversationRepository<'a> {
     /// never re-binds a workspace. `workspace_path` binds only when the session
     /// has none yet: the first `x-workspace-path` the session sees wins, and
     /// changing project means a new session, not a re-pointed one.
+    ///
+    /// Opening that new session is the caller's half of the rule, not this
+    /// method's: `GatewayPersistence::resolve_turn_session` creates one on the
+    /// turn whose project differs from the binding, and `PATCH
+    /// /v1/sessions/{id}` answers `409 SESSION_WORKSPACE_BOUND` rather than
+    /// moving a binding that runs are already pinned to.
     pub fn get_or_create_active_session(
         &self,
         lane_key: &str,

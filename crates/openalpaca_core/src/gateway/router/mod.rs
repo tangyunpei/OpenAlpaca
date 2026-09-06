@@ -235,7 +235,22 @@ impl Gateway {
                 )
             };
             match persisted {
-                Ok(turn) => turn_session = Some(turn.session_id),
+                Ok(turn) => {
+                    // §5.1: the turn's project was not this lane's session's
+                    // project, so a new conversation was opened for it. Say so,
+                    // the way `POST /v1/sessions` does — a second window's
+                    // sidebar must not keep showing the session that just
+                    // stepped down.
+                    if turn.project_switched {
+                        let _ = self.bus.publish(crate::events::SystemEvent::SessionChanged {
+                            session_id: turn.session_id.clone(),
+                            lane_key: lane_key_str.clone(),
+                            status: "active".to_string(),
+                            timestamp: chrono::Utc::now(),
+                        });
+                    }
+                    turn_session = Some(turn.session_id);
+                }
                 Err(e) => tracing::warn!("Failed to persist user message: {e}"),
             }
         }

@@ -663,3 +663,93 @@ async fn test_a_new_chat_mid_turn_keeps_the_turn_in_one_session() {
         "both halves of the turn are counted where they landed"
     );
 }
+
+/// A project root the workspace resolver will recognise.
+fn project_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    dir
+}
+
+fn project_path(dir: &tempfile::TempDir) -> String {
+    dir.path().to_string_lossy().to_string()
+}
+
+/// §5.1: a session belongs to exactly one project, and changing project is a
+/// **new** session, never a re-pointed one. The repository half of that rule
+/// (never re-bind) was already there; this is the half that opens the new
+/// conversation, so a turn's session and the runs it starts cannot disagree
+/// about which project they belong to.
+#[tokio::test]
+async fn test_changing_project_opens_a_new_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let bus = EventBus::default();
+    let mut rx = bus.subscribe();
+    let gw = Gateway::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        Arc::new(StubHandler),
+        bus,
+        Some(db.clone()),
+    );
+
+    let one = project_dir();
+    let two = project_dir();
+    let turn = |workspace_path: Option<String>| GatewayRequest {
+        source: EventSource::Gui {
+            connection_id: "user1".to_string(),
+        },
+        content: "hello".to_string(),
+        principal: Principal::System,
+        scope: Scope::Global,
+        attachments: Vec::new(),
+        workspace_path,
+        stream_id: None,
+        lane_override: None,
+    };
+
+    gw.handle_event(turn(Some(project_path(&one)))).await;
+    gw.handle_event(turn(Some(project_path(&two)))).await;
+    // A turn that carries no project changes nothing: an absent header is not
+    // a project change (connector lanes never switch).
+    gw.handle_event(turn(None)).await;
+
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    let messages = repo.list_by_lane("user1:gui", 50, 0).unwrap();
+    assert_eq!(messages.len(), 6);
+    let session_of = |i: usize| messages[i].session_id.clone().expect("session id");
+    let first = session_of(0);
+    let second = session_of(2);
+    assert_eq!(session_of(1), first, "the first turn is one conversation");
+    assert_eq!(session_of(3), second, "and so is the second");
+    assert_ne!(first, second, "the project change opened a new session");
+    assert_eq!(session_of(4), second, "a turn with no project stays put");
+    assert_eq!(session_of(5), second);
+
+    // Each session is bound to the project its turns came from, resolved by
+    // the one resolver a dispatched run records as `task.workspace_id` (R22) —
+    // so the session and its runs agree about the project.
+    let root = |path: &str| {
+        crate::memory::scope_context::MemoryScopeContext::for_request(Some(path))
+            .request_workspace_root
+    };
+    let first = repo.get_session(&first).unwrap().expect("first session");
+    assert_eq!(first.workspace_id, root(&project_path(&one)));
+    assert_eq!(first.status, "archived", "the incumbent stepped down");
+    let second = repo.get_session(&second).unwrap().expect("second session");
+    assert_eq!(second.workspace_id, root(&project_path(&two)));
+    assert_eq!(second.status, "active");
+
+    // The switch is announced, so a second window's sidebar does not keep
+    // showing the conversation that is no longer the live one.
+    let announced = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|e| match e {
+            crate::events::SystemEvent::SessionChanged {
+                session_id, status, ..
+            } => Some((session_id, status)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(announced, vec![(second.id.clone(), "active".to_string())]);
+}

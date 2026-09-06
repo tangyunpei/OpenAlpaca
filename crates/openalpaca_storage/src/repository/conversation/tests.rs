@@ -548,10 +548,16 @@ fn the_first_workspace_binds_and_later_ones_do_not_rebind() {
     assert_eq!(bound.id, bare.id);
     assert_eq!(bound.workspace_id.as_deref(), Some("/repo/one"));
 
-    // Changing project is a new session, never a re-pointed one.
+    // A second project does not re-point this session. Opening the new session
+    // that the changed project belongs in is the *caller's* half of §5.1's
+    // rule — the gateway's resolve step does it on the turn that changes
+    // project (`GatewayPersistence::resolve_turn_session`), and a client can
+    // ask for one with `POST /v1/sessions`. This method only refuses to move
+    // the binding under runs that are already pinned to it.
     let same = repo
         .get_or_create_active_session("user1:gui", "gui", Some("/repo/two"))
         .unwrap();
+    assert_eq!(same.id, bound.id, "no new session appears from here");
     assert_eq!(same.workspace_id.as_deref(), Some("/repo/one"));
 
     // A brand-new session takes the workspace it is created with.
