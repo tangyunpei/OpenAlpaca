@@ -18,7 +18,7 @@ pub struct TasksArgs {
 pub enum TasksCommands {
     /// List tasks
     List {
-        /// Filter by status (queued, running, completed, failed, cancelled, paused, active)
+        /// Filter by status (queued, running, completed, failed, cancelled, paused, interrupted, active)
         #[arg(long)]
         status: Option<String>,
         /// Maximum number of results
@@ -641,6 +641,33 @@ mod tests {
         .unwrap();
         assert!(ok.get("lanes_error").is_none());
         assert_eq!(ok["lanes"].as_array().unwrap().len(), 1);
+    }
+
+    /// `GET /v1/tasks?status=` parses through `TaskStatus::from_str`, which
+    /// accepts `interrupted` (§5.6b) — the daemon writes it at boot for a run
+    /// it was driving when it went away. `--help` is what a user reads first,
+    /// and it must not disagree with `docs/CLI_Manual.md`'s documented set.
+    #[test]
+    fn tasks_list_status_help_names_interrupted() {
+        use clap::Args as _;
+
+        let cmd = TasksArgs::augment_args(clap::Command::new("tasks"));
+        let list = cmd
+            .find_subcommand("list")
+            .expect("tasks has a list subcommand");
+        let status_arg = list
+            .get_arguments()
+            .find(|arg| arg.get_id() == "status")
+            .expect("list has a --status flag");
+        let help = status_arg
+            .get_help()
+            .expect("--status carries help text")
+            .to_string();
+
+        assert!(
+            help.contains("interrupted"),
+            "the --status help must list interrupted, matching docs/CLI_Manual.md: {help}"
+        );
     }
 }
 
