@@ -4,8 +4,9 @@
 //! GET  /v1/tasks           -> list tasks (query: created_by, status, limit)
 //! GET  /v1/tasks/{id}      -> get a single task + agent runs
 //! GET  /v1/tasks/{id}/timeline -> the run's swimlanes (GAP-09)
-//! POST /v1/tasks/{id}/action -> perform action (cancel, pause, resume)
+//! POST /v1/tasks/{id}/action -> perform action (cancel, pause, resume, start)
 //! POST /v1/tasks/{id}/steer  -> inject a message into a running run (GAP-02)
+//! POST /v1/tasks/{id}/rerun  -> dispatch a new run from a finished one (GAP-06)
 //!
 //! Neither task shape carries agent runs any more: the legacy
 //! `assigned_agents` / `assignments` payload (read from `agent_task_history`)
@@ -26,7 +27,9 @@ use openalpaca_core::bus::EventBus;
 use openalpaca_core::context::SharedContext;
 use openalpaca_core::daemon_config::RoutingConfig;
 use openalpaca_core::events::SystemEvent;
-use openalpaca_core::orchestrator::{TaskActionError, apply_task_action, parse_outcome};
+use openalpaca_core::orchestrator::{
+    Orchestrator, TaskActionError, TaskLaunchError, apply_task_action, parse_outcome,
+};
 use openalpaca_core::runner::steering::{SteeringMsg, SteeringPushError, push_steering};
 use openalpaca_core::security::confirmation::ConfirmationBroker;
 use openalpaca_core::security::policy::{Principal, Scope};
@@ -371,7 +374,15 @@ pub async fn task_action_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(request): Json<TaskActionRequest>,
-) -> impl IntoResponse {
+) -> Response {
+    // D5 — `start` is answered here, before `apply_task_action`, because it is
+    // not a state transition at all: nothing about the row changes on its own,
+    // a lead agent is dispatched onto it. `apply_task_action` knows three
+    // transitions and would report `UnknownAction` for this one.
+    if request.action == START_ACTION {
+        return start_task(&state.orchestrator, &state.db, &state.local_user_id, &id);
+    }
+
     // Shared with the orchestrator chat handler: registry-first resolution with
     // DB fallback, transition validation, token cancel, persistence, lane sync,
     // and TaskUpdated event all live in core.
@@ -412,17 +423,180 @@ pub async fn task_action_handler(
                 "error": format!("Can only resume a paused task, current state: '{}'", current)
             })),
         ),
-        Err(TaskActionError::UnknownAction) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": format!("Unknown action: '{}'. Valid: cancel, pause, resume", request.action)
-            })),
-        ),
+        Err(TaskActionError::UnknownAction) => unknown_action(&request.action),
         Err(TaskActionError::Db(e)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e })),
         ),
     }
+    .into_response()
+}
+
+/// Every word `POST /v1/tasks/{id}/action` accepts: the three transitions
+/// `apply_task_action` knows, plus [`START_ACTION`], which this route answers
+/// itself. Named so the refusal cannot list a set the route does not honour.
+const VALID_ACTIONS: &str = "cancel, pause, resume, start";
+
+/// The `400` for a word that is none of [`VALID_ACTIONS`]. Keeps the ad-hoc
+/// `{"error": "…"}` envelope its three sibling arms use — §7 says not to
+/// retrofit those now, and half-converting one handler would be worse.
+fn unknown_action(action: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "error": format!("Unknown action: '{action}'. Valid: {VALID_ACTIONS}")
+        })),
+    )
+}
+
+// ── Re-run and start (GAP-06) ─────────────────────────────────────
+//
+// Two verbs, deliberately different shapes, because they are different things:
+//
+//   POST /v1/tasks/{id}/rerun            201, a **new** id
+//   POST /v1/tasks/{id}/action {"start"} 200, the **same** id (D5)
+//
+// A re-run is a second run of a finished run's goal, and both rows have to
+// survive — the first one's result is what the user is comparing against — so
+// it gets its own id and its own row, carrying `source_task_id` back to the
+// original. `start` is not a second anything: it dispatches a row that was
+// queued and never ran, and the client is already holding that id.
+//
+// `start` rides the existing action route rather than getting one of its own
+// because that is where a client already looks for "do something to this run",
+// and D5 fixed its shape (same id, `200`) to be exactly what the other three
+// actions answer with.
+//
+// Both are owner-scoped, on the same line `POST /v1/tasks/{id}/steer` drew
+// (R40): reading a run and cancelling it are not scoped, but a verb that puts
+// work into the daemon *as this user* is.
+
+/// The action word the route intercepts before [`apply_task_action`].
+const START_ACTION: &str = "start";
+
+/// `Ok(())` when `id` names a run this owner started; the refusal otherwise.
+///
+/// A run this caller cannot see gets the same `404` a missing one does — never
+/// a `403`, which would confirm that the id belongs to somebody.
+fn owned_run(db: &Database, owner_id: &str, id: &str) -> Result<(), Response> {
+    match TaskRepository::new(db).get(id) {
+        Ok(Some(task)) if task.created_by == owner_id => Ok(()),
+        Ok(_) => Err(api_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "Task not found",
+        )),
+        Err(e) => Err(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DB_ERROR",
+            e.to_string(),
+        )),
+    }
+}
+
+/// Which verb a [`TaskLaunchError`] came from — the two disagree about exactly
+/// one thing, which is what to call a row with no goal to dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchVerb {
+    Rerun,
+    Start,
+}
+
+/// One response per refusal, so a client can say which one happened without
+/// parsing prose.
+fn launch_refusal(error: TaskLaunchError, verb: LaunchVerb) -> Response {
+    match error {
+        TaskLaunchError::NotFound => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Task not found")
+        }
+        // `rerun` only. A run still in flight already has an agent on this
+        // goal; steering or cancelling it is the answer, not a second one.
+        TaskLaunchError::NotTerminal { current } => api_error(
+            StatusCode::CONFLICT,
+            "TASK_NOT_TERMINAL",
+            format!(
+                "This run has not finished ({current}) — steer or cancel it instead of \
+                 re-running it."
+            ),
+        ),
+        // `start` only, and the reason the verb needs a compare-and-set rather
+        // than a look: two of these would put two lead agents on one id.
+        TaskLaunchError::AlreadyRunning => api_error(
+            StatusCode::CONFLICT,
+            "TASK_ALREADY_RUNNING",
+            "This run is already running.",
+        ),
+        // `422`, not `400`: the request is well-formed and names a real run —
+        // it is the stored row that has nothing a lead agent could be given.
+        TaskLaunchError::NoDescription => match verb {
+            LaunchVerb::Rerun => api_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "TASK_NOT_RERUNNABLE",
+                "This run has no description to re-dispatch — there is no goal to give a \
+                 lead agent.",
+            ),
+            LaunchVerb::Start => api_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "TASK_NOT_STARTABLE",
+                "This task has no description to dispatch — there is no goal to give a \
+                 lead agent.",
+            ),
+        },
+        // Capacity, not a bug: every agent template that could lead a run is
+        // busy. `503` says so, and says it is worth trying again.
+        TaskLaunchError::Dispatch(reason) => {
+            api_error(StatusCode::SERVICE_UNAVAILABLE, "DISPATCH_FAILED", reason)
+        }
+        TaskLaunchError::Db(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e),
+    }
+}
+
+/// `POST /v1/tasks/{id}/rerun`, as a `Response`. Split out from the handler so
+/// every status code is provable without a router or an `AppState`.
+fn rerun_task(orchestrator: &Orchestrator, db: &Database, owner_id: &str, id: &str) -> Response {
+    if let Err(refusal) = owned_run(db, owner_id, id) {
+        return refusal;
+    }
+    match orchestrator.rerun_task(id) {
+        Ok(outcome) => (
+            StatusCode::CREATED,
+            Json(RerunTaskResponse {
+                task_id: outcome.task_id,
+                source_task_id: outcome.source_task_id,
+                title: outcome.title,
+                status: outcome.status,
+            }),
+        )
+            .into_response(),
+        Err(e) => launch_refusal(e, LaunchVerb::Rerun),
+    }
+}
+
+/// `POST /v1/tasks/{id}/action {"action":"start"}` (D5), as a `Response`.
+///
+/// The success body is the shape the other three actions answer with, because
+/// from the client's side that is what happened: the run it named changed
+/// state. The id in it is the id it sent.
+fn start_task(orchestrator: &Orchestrator, db: &Database, owner_id: &str, id: &str) -> Response {
+    if let Err(refusal) = owned_run(db, owner_id, id) {
+        return refusal;
+    }
+    match orchestrator.start_task(id) {
+        Ok(outcome) => Json(serde_json::json!({
+            "task_id": outcome.task_id,
+            "status": outcome.status,
+        }))
+        .into_response(),
+        Err(e) => launch_refusal(e, LaunchVerb::Start),
+    }
+}
+
+/// POST /v1/tasks/{id}/rerun
+pub async fn rerun_task_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    rerun_task(&state.orchestrator, &state.db, &state.local_user_id, &id)
 }
 
 // ── Steerability, in one place (R40) ──────────────────────────────
@@ -1669,5 +1843,271 @@ mod tests {
         assert_eq!(body["error"]["code"], "TASK_NOT_STEERABLE");
         // Nothing was queued past the refusal — only the accepted push above.
         assert_eq!(inbox.drain_all().len(), 1);
+    }
+
+    // ── Re-run and start (GAP-06) ─────────────────────────────────
+
+    use openalpaca_core::agent::template::parse_agent_markdown;
+    use openalpaca_core::lane::LaneManager;
+    use openalpaca_core::middleware::prompt::SystemPersona;
+    use openalpaca_core::orchestrator::{Orchestrator, skill_catalog, skill_router};
+    use openalpaca_core::runner::LoopConfig;
+    use openalpaca_core::security::gate::SecurityGate;
+    use openalpaca_core::security::sandbox::SandboxManager;
+    use openalpaca_core::tools::ToolRegistry;
+    use openalpaca_llm::{
+        ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, LlmRouter, ProviderType,
+        Usage,
+    };
+
+    const LAUNCH_OWNER: &str = "user-1";
+
+    /// A provider that answers anything in one line. Present so the dispatch
+    /// takes the same path production does; the run itself never gets far.
+    struct StubLlm;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for StubLlm {
+        fn name(&self) -> &str {
+            "stub"
+        }
+        fn supports_tools(&self) -> bool {
+            false
+        }
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            Ok(ChatResponse {
+                content: "done".to_string(),
+                tool_calls: vec![],
+                model: "stub-model".to_string(),
+                usage: Usage::default(),
+                finish_reason: FinishReason::Stop,
+                thinking: None,
+                parts: None,
+            })
+        }
+    }
+
+    /// An orchestrator over `db`, with a lead-agent template unless
+    /// `with_lead_agent` is false (which is how the `503` is reached).
+    fn launch_orchestrator(db: &Database, with_lead_agent: bool) -> Orchestrator {
+        let ctx = Arc::new(SharedContext::new());
+        if with_lead_agent {
+            let template = parse_agent_markdown(
+                "---\nid: \"lead_agent\"\nname: \"Lead Agent\"\n\
+                 description: \"leads runs\"\nsingleton: true\n\
+                 capabilities:\n  - \"orchestration\"\n---\n\nLead the run.\n",
+            )
+            .expect("the fixture template parses");
+            ctx.agent_registry.register_template(template);
+        }
+        let bus = EventBus::default();
+        let registry = Arc::new(ToolRegistry::default());
+        let gate = Arc::new(SecurityGate::new(Arc::new(SandboxManager::with_defaults(
+            registry.clone(),
+            bus.clone(),
+        ))));
+        Orchestrator::new(
+            ctx,
+            Arc::new(LaneManager::new()),
+            bus,
+            SystemPersona::default(),
+            Some(Arc::new(LlmRouter::single_provider(
+                Arc::new(StubLlm),
+                ProviderType::Anthropic,
+                "stub-model".to_string(),
+            ))),
+            LoopConfig::default(),
+            gate,
+            registry,
+            Some(db.clone()),
+            None,
+            Arc::new(skill_catalog::SkillCatalog::new()),
+            Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+            Arc::new(arc_swap::ArcSwap::from_pointee(
+                openalpaca_core::daemon_config::DaemonConfig::default(),
+            )),
+        )
+    }
+
+    /// A temp database holding one run owned by [`LAUNCH_OWNER`].
+    fn launch_db(status: TaskStatus, description: Option<&str>) -> (tempfile::TempDir, Database) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::open(&dir.path().join("test.db")).expect("open db");
+        let mut task = make_test_task();
+        task.status = status;
+        task.description = description.map(str::to_string);
+        task.source_lane = "user-1:gui".to_string();
+        task.completed_at = status.is_terminal().then(Utc::now);
+        TaskRepository::new(&db).create(&task).expect("create task");
+        (dir, db)
+    }
+
+    /// The verb's whole point: a re-run is a **new** run, and the response says
+    /// which one it came from — the id the caller sent.
+    #[tokio::test]
+    async fn re_running_a_finished_run_is_a_201_carrying_a_new_id() {
+        let (_dir, db) = launch_db(TaskStatus::Completed, Some("write the changelog"));
+        let orchestrator = launch_orchestrator(&db, true);
+
+        let response = rerun_task(&orchestrator, &db, LAUNCH_OWNER, "task-1");
+        let (status, body) = split(response).await;
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert_ne!(
+            body["task_id"], "task-1",
+            "201 means a run that is not this one"
+        );
+        assert_eq!(body["source_task_id"], "task-1");
+        assert_eq!(body["title"], "Test task");
+        assert!(body["status"].is_string());
+
+        // The link is stored, not just answered: it outlives the response.
+        let copy = TaskRepository::new(&db)
+            .get(body["task_id"].as_str().unwrap())
+            .unwrap()
+            .expect("the new row");
+        assert_eq!(copy.source_task_id.as_deref(), Some("task-1"));
+    }
+
+    /// A run still in flight already has an agent on this goal.
+    #[tokio::test]
+    async fn re_running_a_live_run_is_a_409_task_not_terminal() {
+        for status in [TaskStatus::Queued, TaskStatus::Running, TaskStatus::Paused] {
+            let (_dir, db) = launch_db(status, Some("write the changelog"));
+            let orchestrator = launch_orchestrator(&db, true);
+
+            let (code, body) = split(rerun_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
+            assert_eq!(code, StatusCode::CONFLICT, "status {status:?}");
+            assert_eq!(body["error"]["code"], "TASK_NOT_TERMINAL");
+            assert!(
+                body["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(status.as_str()),
+                "the refusal names the state it refused",
+            );
+            // Nothing was dispatched.
+            assert_eq!(TaskRepository::new(&db).list_recent(10).unwrap().len(), 1);
+        }
+    }
+
+    /// `422`, not `400`: the request is well-formed and names a real run — the
+    /// stored row is what has nothing to give a lead agent.
+    #[tokio::test]
+    async fn re_running_a_row_with_no_goal_is_a_422_task_not_rerunnable() {
+        for description in [None, Some("   \n ")] {
+            let (_dir, db) = launch_db(TaskStatus::Completed, description);
+            let orchestrator = launch_orchestrator(&db, true);
+
+            let (code, body) = split(rerun_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
+            assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(body["error"]["code"], "TASK_NOT_RERUNNABLE");
+        }
+    }
+
+    /// Owner-scoped, on the line `steer` drew (R40): a run this caller cannot
+    /// see reads exactly like one that does not exist.
+    #[tokio::test]
+    async fn re_running_an_unknown_or_foreign_run_is_a_404() {
+        let (_dir, db) = launch_db(TaskStatus::Completed, Some("write the changelog"));
+        let orchestrator = launch_orchestrator(&db, true);
+
+        let (code, body) = split(rerun_task(&orchestrator, &db, LAUNCH_OWNER, "no-such-run")).await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "NOT_FOUND");
+
+        let (code, foreign) = split(rerun_task(&orchestrator, &db, "someone-else", "task-1")).await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        assert_eq!(
+            foreign["error"], body["error"],
+            "a foreign run must not read differently from a missing one",
+        );
+        assert_eq!(TaskRepository::new(&db).list_recent(10).unwrap().len(), 1);
+    }
+
+    /// Every template that could lead a run is busy — capacity, not a bug, so
+    /// `503` and a message worth retrying on.
+    #[tokio::test]
+    async fn a_launch_with_no_lead_agent_available_is_a_503() {
+        let (_dir, db) = launch_db(TaskStatus::Completed, Some("write the changelog"));
+        let orchestrator = launch_orchestrator(&db, false);
+
+        let (code, body) = split(rerun_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "DISPATCH_FAILED");
+    }
+
+    /// D5 — `start` answers with the id the caller sent, in the same
+    /// `{task_id, status}` shape the other three actions use.
+    #[tokio::test]
+    async fn starting_a_queued_run_is_a_200_with_the_same_id() {
+        let (_dir, db) = launch_db(TaskStatus::Queued, Some("write the changelog"));
+        let orchestrator = launch_orchestrator(&db, true);
+
+        let (code, body) = split(start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body["task_id"], "task-1", "D5: the id does not change");
+        assert!(matches!(
+            body["status"].as_str(),
+            Some("queued") | Some("running")
+        ));
+        // One row before, one row after — and it is the same row.
+        assert_eq!(TaskRepository::new(&db).list_recent(10).unwrap().len(), 1);
+    }
+
+    /// The second `start` on one id loses. Both calls are made before anything
+    /// is awaited, so this is the real race the claim exists for, not a
+    /// sequence the runtime happened to order.
+    #[tokio::test]
+    async fn starting_the_same_run_twice_is_a_409_the_second_time() {
+        let (_dir, db) = launch_db(TaskStatus::Queued, Some("write the changelog"));
+        let orchestrator = launch_orchestrator(&db, true);
+
+        let first = start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1");
+        let second = start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1");
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let (code, body) = split(second).await;
+        assert_eq!(code, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "TASK_ALREADY_RUNNING");
+        assert_eq!(TaskRepository::new(&db).list_recent(10).unwrap().len(), 1);
+    }
+
+    /// A title-only row — `POST /v1/tasks` allows one — has no goal to
+    /// dispatch. Same `422`, its own code: nothing was ever run to re-run.
+    #[tokio::test]
+    async fn starting_a_row_with_no_goal_is_a_422_task_not_startable() {
+        let (_dir, db) = launch_db(TaskStatus::Queued, None);
+        let orchestrator = launch_orchestrator(&db, true);
+
+        let (code, body) = split(start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
+        assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"]["code"], "TASK_NOT_STARTABLE");
+    }
+
+    #[tokio::test]
+    async fn starting_an_unknown_or_foreign_run_is_a_404() {
+        let (_dir, db) = launch_db(TaskStatus::Queued, Some("write the changelog"));
+        let orchestrator = launch_orchestrator(&db, true);
+
+        let (code, body) = split(start_task(&orchestrator, &db, LAUNCH_OWNER, "no-such-run")).await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "NOT_FOUND");
+
+        let (code, _) = split(start_task(&orchestrator, &db, "someone-else", "task-1")).await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+    }
+
+    /// The refusal a client sees for a typo has to list the verb the route
+    /// actually grew, or `start` looks unimplemented.
+    #[test]
+    fn the_unknown_action_refusal_lists_start() {
+        let (status, Json(body)) = unknown_action("explode");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = body["error"].as_str().expect("a message");
+        assert!(message.contains("explode"));
+        for word in ["cancel", "pause", "resume", START_ACTION] {
+            assert!(message.contains(word), "the valid set must list {word}");
+        }
     }
 }

@@ -639,6 +639,7 @@ async fn async_main(
         shutdown_tx,
         connector_manager: connector_manager.clone(),
         gateway,
+        orchestrator: orchestrator.clone(),
         llm_settings_service: svcs.llm_settings_service,
         agent_config_service: Some(svcs.agent_config_service),
         chat_service: Some(chat_service),

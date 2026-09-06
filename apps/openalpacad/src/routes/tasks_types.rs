@@ -24,7 +24,32 @@ pub struct ListTasksQuery {
 
 #[derive(Debug, Deserialize)]
 pub struct TaskActionRequest {
-    pub action: String, // "cancel", "pause", "resume"
+    /// `"cancel"` | `"pause"` | `"resume"` — state transitions applied by
+    /// `apply_task_action` — plus `"start"`, which is not a transition at all
+    /// but a dispatch of the stored row under its own id (D5, GAP-06) and is
+    /// answered by the route before it reaches that function.
+    pub action: String,
+}
+
+/// `POST /v1/tasks/{id}/rerun` (GAP-06) — `201`, and the id in it is **not**
+/// the one in the path.
+///
+/// That asymmetry with `start` is the whole design: a re-run is a second run of
+/// the same goal, and the first one's result is the thing the user is comparing
+/// against, so it keeps its row and the copy gets a new id. `source_task_id` is
+/// the path's id echoed back, because a client that has just been handed an
+/// unfamiliar id needs to know what it came from — and it is a stored column,
+/// so the link outlives this response.
+#[derive(Debug, Serialize)]
+pub struct RerunTaskResponse {
+    /// The **new** run.
+    pub task_id: String,
+    /// The run it was copied from — the id in the request path.
+    pub source_task_id: String,
+    pub title: String,
+    /// `queued`, or `running` if the background half got there first. Read from
+    /// the registry rather than assumed; both are true.
+    pub status: String,
 }
 
 /// `POST /v1/tasks/{id}/steer` (GAP-02) — a user interjection addressed at one

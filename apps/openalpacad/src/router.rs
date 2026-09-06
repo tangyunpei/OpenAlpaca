@@ -74,6 +74,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/tasks/{id}/steer",
             post(crate::routes::steer_task_handler),
         )
+        // Re-run (GAP-06) — a *new* run from a finished one's goal, so it has
+        // its own route and answers 201 with an id the caller has not seen.
+        // Its sibling `start` (same id, D5) rides `/action` instead.
+        .route(
+            "/v1/tasks/{id}/rerun",
+            post(crate::routes::rerun_task_handler),
+        )
         // The lane follow-up queue (GAP-03) — the read-back, write and
         // race-safe cancel for the queue the model's `queue_followup` tool and
         // the steering-leftover conversion already write to.

@@ -49,6 +49,8 @@ pub struct RerunOutcome {
     /// The run it was copied from.
     pub source_task_id: String,
     pub title: String,
+    /// See [`StartOutcome::status`].
+    pub status: String,
 }
 
 /// What a `start` produced: the same id, now dispatched.
@@ -145,6 +147,7 @@ impl Orchestrator {
             .map_err(TaskLaunchError::Dispatch)?;
 
         Ok(RerunOutcome {
+            status: self.dispatched_status(&outcome.task_id),
             task_id: outcome.task_id,
             source_task_id: row.id,
             title: outcome.title,
@@ -181,18 +184,24 @@ impl Orchestrator {
             }
         };
 
-        let status = self
-            .shared_context
-            .task_registry
-            .get(&outcome.task_id)
-            .map(|entry| entry.status.as_str().to_string())
-            .unwrap_or_else(|| TaskStatus::Queued.as_str().to_string());
-
         Ok(StartOutcome {
+            status: self.dispatched_status(&outcome.task_id),
             task_id: outcome.task_id,
             title: outcome.title,
-            status,
         })
+    }
+
+    /// A just-dispatched run's status, read rather than assumed.
+    ///
+    /// The dispatch persists `queued` and its background half flips the row to
+    /// `running`; which of the two a caller sees depends on scheduling, and
+    /// both are true. Guessing "queued" would be a lie half the time.
+    fn dispatched_status(&self, task_id: &str) -> String {
+        self.shared_context
+            .task_registry
+            .get(task_id)
+            .map(|entry| entry.status.as_str().to_string())
+            .unwrap_or_else(|| TaskStatus::Queued.as_str().to_string())
     }
 }
 

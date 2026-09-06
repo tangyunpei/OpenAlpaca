@@ -8,6 +8,7 @@ use openalpaca_core::{
     agent::AgentConfigService,
     chat::{ChatService, ChatStreamManager},
     gateway::Gateway,
+    orchestrator::Orchestrator,
     security::confirmation::ConfirmationBroker,
 };
 use openalpaca_storage::Database;
@@ -22,6 +23,11 @@ pub struct AppState {
     pub shutdown_tx: mpsc::Sender<()>,
     pub connector_manager: crate::managers::connector::ConnectorManager,
     pub gateway: Arc<Gateway>,
+    /// The same orchestrator the gateway's handler wraps, held directly for the
+    /// routes that address a *run* rather than send a message: `rerun` and
+    /// `start` (GAP-06) dispatch stored rows, which is orchestrator work with
+    /// no turn, no lane history and no model behind it.
+    pub orchestrator: Arc<Orchestrator>,
     pub llm_settings_service: Option<Arc<openalpaca_llm::LlmSettingsService>>,
     pub agent_config_service: Option<Arc<AgentConfigService>>,
     pub chat_service: Option<Arc<ChatService>>,
