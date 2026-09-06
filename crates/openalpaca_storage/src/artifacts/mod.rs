@@ -1292,7 +1292,9 @@ struct HeadReservation<'a> {
 
 impl<'a> HeadReservation<'a> {
     /// Claim `path`, or [`ArtifactError::NameTaken`] if something already holds
-    /// it. The caller has already established that no row of this store does.
+    /// it. `reserve_head` calls this twice: once blind, and — after a failed
+    /// first claim proved no row of this store references `path` and the
+    /// row-less head was reclaimed — once more.
     fn claim(path: &'a Path) -> Result<Self> {
         match fs::OpenOptions::new()
             .write(true)
@@ -1549,7 +1551,9 @@ where
 ///
 /// The same [`TextDiff`] [`ArtifactStore::diff`] renders from, so the numbers
 /// stored on a version row and the patch a reader is later shown of that very
-/// pair are one computation. The multiset tally this replaced was cheaper but
+/// pair are one computation — except on a pair that trips the deadline below,
+/// where the stored counts summarise a non-minimal diff and the deadline-free
+/// read path may render a shorter patch. The multiset tally this replaced was cheaper but
 /// answered a different question — under it a *moved* line was neither added
 /// nor removed, while the patch it was supposed to summarise showed both.
 ///
@@ -1558,7 +1562,7 @@ where
 /// held — the size bound the read path uses is not available here, since the
 /// bytes are the ones this call is committing. On the deadline `similar`
 /// returns a valid but possibly non-minimal diff rather than failing, so the
-/// stored pair stays self-consistent with the patch that call rendered; only
+/// stored pair is still a true `+`/`-` count of *some* valid edit script; only
 /// its minimality, not its meaning, degrades on a pathological pair.
 fn line_counts(old: &[u8], new: &[u8]) -> (i64, i64) {
     let old = String::from_utf8_lossy(old);
