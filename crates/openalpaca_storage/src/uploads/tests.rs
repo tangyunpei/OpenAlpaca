@@ -6,8 +6,8 @@
 
 use super::*;
 use crate::FileAssetRepository;
-use crate::store::tests::HomeStoreGuard;
-use crate::store::{interim_asset_storage_path, store_root};
+use crate::store::store_root;
+use crate::store::tests::{HomeStoreGuard, interim_blob_path};
 use chrono::TimeZone;
 use std::path::PathBuf;
 use tempfile::{TempDir, tempdir};
@@ -509,10 +509,10 @@ fn a_produced_artifact_never_answers_an_upload_dedup() {
 // The rows that predate D2
 // ============================================================================
 
-/// Existing content-addressed blobs stay where they are (the re-home is Phase
-/// 8): their `storage_path` is untouched by a new upload, they still resolve,
-/// and a duplicate of their bytes dedups to them rather than being re-placed
-/// under `uploads/`.
+/// Existing content-addressed blobs stay where they are — moving them is the
+/// boot-time re-home's job, never a `put`'s: their `storage_path` is untouched
+/// by a new upload, they still resolve, and a duplicate of their bytes dedups to
+/// them rather than being re-placed under `uploads/`.
 #[test]
 fn pre_d2_content_addressed_rows_still_resolve_and_still_dedup() {
     let fx = Fixture::new();
@@ -520,7 +520,7 @@ fn pre_d2_content_addressed_rows_still_resolve_and_still_dedup() {
     // A row exactly as the pre-D2 writer left it: sharded under state/assets,
     // no project_root, no rel_path.
     let sha = crate::content_io::sha256_hex(b"legacy");
-    let legacy_path = interim_asset_storage_path(&sha).unwrap();
+    let legacy_path = interim_blob_path(&sha);
     std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
     std::fs::write(&legacy_path, b"legacy").unwrap();
     fx.repo()

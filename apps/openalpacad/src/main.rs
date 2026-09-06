@@ -192,6 +192,13 @@ async fn async_main(
     // Repairs the absolute file_asset paths the root move broke. Idempotent:
     // matches zero rows on every boot after the first.
     store::migrate::rebase_asset_paths(&db);
+    // …and then gives every upload written before D2 the address a new one
+    // already has (`uploads/<created-date>/NN-<name>.<ext>`), removing the
+    // interim `state/assets` directory once nothing is left in it. MUST follow
+    // the rebase — the paths it repairs are this pass's input — and precede the
+    // sweeps and every ingress: it is the one writer of upload bytes at boot,
+    // which is what lets it reclaim an address no row holds.
+    openalpaca_storage::uploads::rehome_pre_d2_uploads(&db);
     // §5.6b: recover the undelivered interjections of every run the previous
     // generation left in flight, then mark those runs `interrupted`. MUST stay
     // here — after the DB opens and before any ingress starts

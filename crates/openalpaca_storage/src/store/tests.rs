@@ -171,22 +171,18 @@ fn path_queries_do_not_create_the_store() {
     assert!(!root.exists(), "a path query created {}", root.display());
 }
 
-#[test]
-fn interim_asset_paths_are_sharded_under_state() {
-    let tmp = tempdir().unwrap();
-    let _guard = HomeStoreGuard::set(tmp.path());
-    let sha = "abcdef0123456789";
-    let path = interim_asset_storage_path(sha).unwrap();
-    assert_eq!(
-        path,
-        tmp.path()
-            .join("state")
-            .join("assets")
-            .join("ab")
-            .join("cd")
-            .join(sha)
-    );
-    assert!(interim_asset_storage_path("abc").is_err());
+/// Where a pre-D2 upload's bytes sat: `state/assets/ab/cd/<sha256>`.
+///
+/// A fixture, not a path the system computes any more — the one upload writer
+/// places bytes under `uploads/`, and the boot-time re-home takes what is left
+/// here from the rows' own `storage_path`. It lives here so the two test modules
+/// that reconstruct the old layout spell it the same way.
+pub(crate) fn interim_blob_path(sha256: &str) -> PathBuf {
+    interim_assets_dir()
+        .unwrap()
+        .join(&sha256[0..2])
+        .join(&sha256[2..4])
+        .join(sha256)
 }
 
 // ============================================================================

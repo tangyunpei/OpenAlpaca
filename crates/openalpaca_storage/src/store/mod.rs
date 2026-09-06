@@ -11,7 +11,6 @@
 //!   .layout            line 1: layout version; line 2 (home root only): install_id=<uuid-v4>
 //!   state/             MACHINE STATE — opaque, never user-edited, never committed
 //!     openalpaca.db (+ -wal, -shm), discovery.json, openalpacad.lock, .master_key
-//!     assets/          interim home for content-addressed uploads (until the D2 re-home)
 //!     backups/         rotated copies of hand-edited config files
 //!     logs/            daemon.log, gui.log
 //!   config/            USER-EDITED runtime config (GUI/CLI-managed daemons)
@@ -159,31 +158,16 @@ pub fn backups_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// `state/assets` — the interim home for content-addressed upload blobs.
+/// `state/assets` — where uploads lived before D2, content-addressed as
+/// `ab/cd/<sha256>`.
 ///
-/// Dies with the D2 re-home into `uploads/` (Phase 8); nothing new should be
-/// designed against it.
+/// Nothing writes here any more: [`crate::uploads::UploadStore`] is the one
+/// upload writer and it places bytes under `uploads/`. The directory exists only
+/// on an installation that predates D2, and only until the boot-time re-home
+/// ([`crate::uploads::rehome_pre_d2_uploads`]) has emptied and removed it — the
+/// one caller left. Nothing new is to be designed against it.
 pub fn interim_assets_dir() -> Result<PathBuf> {
     Ok(state_dir_path()?.join("assets"))
-}
-
-/// Sharded path for an upload blob under [`interim_assets_dir`], e.g.
-/// `state/assets/ab/cd/abcd…`.
-///
-/// Interim, like the directory it sits in: under D2 new uploads become
-/// human-named (`uploads/<date>/NN-<name>.<ext>`) and dedup keys off the
-/// `file_assets.sha256` column, at which point this function and
-/// [`interim_assets_dir`] are deleted together (Phase 8). It exists here only so
-/// the two upload writers keep producing the layout that
-/// [`migrate::rebase_asset_paths`] rebases.
-pub fn interim_asset_storage_path(sha256: &str) -> Result<PathBuf> {
-    if sha256.len() < 4 {
-        bail!("SHA-256 hash too short: {sha256}");
-    }
-    Ok(interim_assets_dir()?
-        .join(&sha256[0..2])
-        .join(&sha256[2..4])
-        .join(sha256))
 }
 
 /// `home_root()/plugins` — user-dropped plugin directories. Created if missing.
@@ -544,7 +528,6 @@ files only.
 | Entry | Holds | Retention class |
 |---|---|---|
 | `state/` | database (+ WAL/SHM), `discovery.json`, `openalpacad.lock`, `.master_key` | never swept — deleting it is a factory reset |
-| `state/assets/` | interim home for uploaded file bytes | swept: an upload attached to no message is deleted once past the grace period |
 | `state/backups/` | rotated copies of hand-edited config (`<name>.bak.<ts>`, `<name>.unparseable-<ts>`) | regenerable — swept freely; never user-edited |
 | `state/logs/` | `daemon.log`, `gui.log` | regenerable — swept freely |
 | `config/` | your runtime config: `llm.toml`, `daemon.toml`, `mcp.toml`, `agents/`, `skills/`, `orchestrator/`, `tools/` | yours — never swept |
