@@ -253,12 +253,21 @@ impl EventBroadcaster {
         let _ = self.tx.send(event);
     }
 
-    /// Broadcast a security violation event and persist it
-    pub fn security_violation(&self, agent_id: &str, tool_name: &str, reason: &str) {
+    /// Broadcast a security violation event and persist it.
+    ///
+    /// `task_id` is the run the refused call belonged to (GAP-10).
+    pub fn security_violation(
+        &self,
+        agent_id: &str,
+        tool_name: &str,
+        reason: &str,
+        task_id: Option<&str>,
+    ) {
         let event = ServerEvent::SecurityViolation {
             agent_id: agent_id.to_string(),
             tool_name: tool_name.to_string(),
             reason: reason.to_string(),
+            task_id: task_id.map(|t| t.to_string()),
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };
@@ -274,12 +283,14 @@ impl EventBroadcaster {
         tool_name: &str,
         consecutive_failures: usize,
         reset_after_secs: u64,
+        task_id: Option<&str>,
     ) {
         let event = ServerEvent::CircuitBreakerTripped {
             agent_id: agent_id.to_string(),
             tool_name: tool_name.to_string(),
             consecutive_failures,
             reset_after_secs,
+            task_id: task_id.map(|t| t.to_string()),
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };
@@ -288,13 +299,24 @@ impl EventBroadcaster {
         let _ = self.tx.send(event);
     }
 
-    /// Broadcast a tool executed event and persist it
-    pub fn tool_executed(&self, agent_id: &str, tool_name: &str, success: bool, duration_ms: u64) {
+    /// Broadcast a tool executed event and persist it.
+    ///
+    /// `task_id` is the run the call belonged to (GAP-10); `None` for a call
+    /// made outside a workflow.
+    pub fn tool_executed(
+        &self,
+        agent_id: &str,
+        tool_name: &str,
+        success: bool,
+        duration_ms: u64,
+        task_id: Option<&str>,
+    ) {
         let event = ServerEvent::ToolExecuted {
             agent_id: agent_id.to_string(),
             tool_name: tool_name.to_string(),
             success,
             duration_ms,
+            task_id: task_id.map(|t| t.to_string()),
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };
@@ -305,6 +327,7 @@ impl EventBroadcaster {
     }
 
     /// Broadcast an LLM call completed event and persist it
+    #[allow(clippy::too_many_arguments)]
     pub fn llm_call_completed(
         &self,
         agent_id: &str,
@@ -312,6 +335,7 @@ impl EventBroadcaster {
         input_tokens: u32,
         output_tokens: u32,
         cost_usd: f64,
+        task_id: Option<&str>,
     ) {
         let event = ServerEvent::LlmCallCompleted {
             agent_id: agent_id.to_string(),
@@ -319,6 +343,7 @@ impl EventBroadcaster {
             input_tokens,
             output_tokens,
             cost_usd,
+            task_id: task_id.map(|t| t.to_string()),
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };
@@ -404,6 +429,7 @@ impl EventBroadcaster {
         tool_arguments: &serde_json::Value,
         stream_id: Option<&str>,
         lane_key: Option<&str>,
+        task_id: Option<&str>,
     ) {
         let event = ServerEvent::ToolConfirmationRequested {
             request_id: request_id.to_string(),
@@ -412,6 +438,7 @@ impl EventBroadcaster {
             tool_arguments: tool_arguments.clone(),
             stream_id: stream_id.map(|s| s.to_string()),
             lane_key: lane_key.map(|s| s.to_string()),
+            task_id: task_id.map(|t| t.to_string()),
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };

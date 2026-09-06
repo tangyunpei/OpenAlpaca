@@ -726,6 +726,9 @@ impl Orchestrator {
                 input_tokens: result.total_input_tokens,
                 output_tokens: result.total_output_tokens,
                 cost_usd: call_cost,
+                // A main-loop turn belongs to no run — the same `None` the
+                // usage row beside it records (GAP-10).
+                task_id: None,
                 timestamp: Utc::now(),
             });
 
@@ -994,6 +997,8 @@ impl Orchestrator {
             input_tokens: result.total_input_tokens,
             output_tokens: result.total_output_tokens,
             cost_usd: call_cost,
+            // As above: a main-loop turn belongs to no run (GAP-10).
+            task_id: None,
             timestamp: Utc::now(),
         });
 

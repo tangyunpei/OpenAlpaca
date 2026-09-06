@@ -127,6 +127,8 @@ pub enum ServerEvent {
         agent_id: String,
         tool_name: String,
         reason: String,
+        /// The run this happened inside (GAP-10), or `null` outside one.
+        task_id: Option<String>,
         ts: DateTime<Utc>,
         instance_id: String,
     },
@@ -136,6 +138,8 @@ pub enum ServerEvent {
         tool_name: String,
         consecutive_failures: usize,
         reset_after_secs: u64,
+        /// The run whose call tripped it (GAP-10), or `null` outside one.
+        task_id: Option<String>,
         ts: DateTime<Utc>,
         instance_id: String,
     },
@@ -145,6 +149,8 @@ pub enum ServerEvent {
         tool_name: String,
         success: bool,
         duration_ms: u64,
+        /// The run this happened inside (GAP-10), or `null` outside one.
+        task_id: Option<String>,
         ts: DateTime<Utc>,
         instance_id: String,
     },
@@ -155,6 +161,8 @@ pub enum ServerEvent {
         input_tokens: u32,
         output_tokens: u32,
         cost_usd: f64,
+        /// The run this happened inside (GAP-10), or `null` outside one.
+        task_id: Option<String>,
         ts: DateTime<Utc>,
         instance_id: String,
     },
@@ -199,6 +207,8 @@ pub enum ServerEvent {
         tool_arguments: serde_json::Value,
         stream_id: Option<String>,
         lane_key: Option<String>,
+        /// The run waiting on this prompt (GAP-10), or `null` outside one.
+        task_id: Option<String>,
         ts: DateTime<Utc>,
         instance_id: String,
     },

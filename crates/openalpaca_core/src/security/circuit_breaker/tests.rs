@@ -200,3 +200,24 @@ fn test_tripped_event_emitted() {
         other => panic!("Expected CircuitBreakerTripped, got: {:?}", other),
     }
 }
+
+/// GAP-10 — the trip belongs to the run whose call failed, so the run's own
+/// event log shows why its tool stopped working. `None` when the failures came
+/// from outside a run.
+#[test]
+fn tripped_event_carries_the_run_it_belonged_to() {
+    let bus = EventBus::default();
+    let mut rx = bus.subscribe();
+    let config = make_config(2, 300);
+    let cb = ToolCircuitBreaker::new(&config, bus);
+
+    cb.record_failure_for_task("agent1", "web_search", Some("t-1"));
+    assert!(cb.record_failure_for_task("agent1", "web_search", Some("t-1")));
+
+    match rx.try_recv().unwrap() {
+        SystemEvent::CircuitBreakerTripped { task_id, .. } => {
+            assert_eq!(task_id.as_deref(), Some("t-1"));
+        }
+        other => panic!("Expected CircuitBreakerTripped, got: {:?}", other),
+    }
+}

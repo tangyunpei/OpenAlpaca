@@ -806,6 +806,9 @@ impl Orchestrator {
                 input_tokens: result.total_input_tokens,
                 output_tokens: result.total_output_tokens,
                 cost_usd: call_cost,
+                // A skill invocation is not a workflow — no run to attribute
+                // it to, and none invented (GAP-10).
+                task_id: None,
                 timestamp: Utc::now(),
             });
 

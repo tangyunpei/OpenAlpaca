@@ -96,6 +96,15 @@ fn make_ctx(agent_id: &str) -> ToolContext {
     }
 }
 
+/// A context that belongs to a run — what every call inside a workflow has.
+fn make_ctx_for_task(agent_id: &str, task_id: &str) -> ToolContext {
+    ToolContext {
+        agent_id: Some(agent_id.to_string()),
+        task_id: Some(task_id.to_string()),
+        ..Default::default()
+    }
+}
+
 #[tokio::test]
 async fn test_happy_path() {
     let sandbox = make_sandbox();
@@ -211,6 +220,95 @@ async fn test_tool_event_emitted() {
             assert!(success);
         }
         other => panic!("Expected ToolExecuted, got: {:?}", other),
+    }
+}
+
+// ── GAP-10: the run the call belonged to ────────────────────────────────────
+
+/// `ctx.task_id` is already at the emit site; the frame now carries it, so the
+/// event log can be filtered to one run instead of guessing from `agent_id`.
+#[tokio::test]
+async fn tool_executed_carries_the_run_it_belonged_to() {
+    let bus = EventBus::default();
+    let mut rx = bus.subscribe();
+    let sandbox = SandboxManager::new(make_registry(), bus, &CircuitBreakerConfig::default());
+    let policy = make_policy("agent1");
+    let tc = make_tool_call("web_search");
+    let ctx = make_ctx_for_task("agent1", "t-1");
+
+    let _ = sandbox.execute_tool(&tc, &policy, &ctx).await;
+
+    match rx.try_recv().unwrap() {
+        SystemEvent::ToolExecuted { task_id, .. } => {
+            assert_eq!(task_id.as_deref(), Some("t-1"));
+        }
+        other => panic!("Expected ToolExecuted, got: {:?}", other),
+    }
+}
+
+/// A refusal is attributed the same way — a run whose tool was denied shows the
+/// denial in its own log.
+#[tokio::test]
+async fn security_violation_carries_the_run_it_belonged_to() {
+    let bus = EventBus::default();
+    let mut rx = bus.subscribe();
+    let sandbox = SandboxManager::new(make_registry(), bus, &CircuitBreakerConfig::default());
+    let mut policy = make_policy("agent1");
+    policy.denied_capabilities = vec!["web_search".to_string()];
+    let tc = make_tool_call("web_search");
+    let ctx = make_ctx_for_task("agent1", "t-1");
+
+    let _ = sandbox.execute_tool(&tc, &policy, &ctx).await;
+
+    match rx.try_recv().unwrap() {
+        SystemEvent::SecurityViolation { task_id, .. } => {
+            assert_eq!(task_id.as_deref(), Some("t-1"));
+        }
+        other => panic!("Expected SecurityViolation, got: {:?}", other),
+    }
+}
+
+/// A call outside any run — a main-loop turn — carries no run, and says so
+/// rather than borrowing one.
+#[tokio::test]
+async fn a_call_outside_a_run_carries_no_task_id() {
+    let bus = EventBus::default();
+    let mut rx = bus.subscribe();
+    let sandbox = SandboxManager::new(make_registry(), bus, &CircuitBreakerConfig::default());
+    let policy = make_policy("agent1");
+    let tc = make_tool_call("web_search");
+    let ctx = make_ctx("agent1");
+
+    let _ = sandbox.execute_tool(&tc, &policy, &ctx).await;
+
+    match rx.try_recv().unwrap() {
+        SystemEvent::ToolExecuted { task_id, .. } => assert_eq!(task_id, None),
+        other => panic!("Expected ToolExecuted, got: {:?}", other),
+    }
+}
+
+/// The confirmation prompt is a run event too — §4.4's `blocked` lane and the
+/// run's own log both need to know which run is waiting.
+#[tokio::test]
+async fn tool_confirmation_requested_carries_the_run_it_belonged_to() {
+    let bus = EventBus::default();
+    let mut rx = bus.subscribe();
+    let mut sandbox =
+        SandboxManager::new(make_registry(), bus, &CircuitBreakerConfig::default());
+    sandbox.set_confirmation_broker(Arc::new(ConfirmationBroker::new()));
+    let mut policy = make_policy("agent1");
+    policy.require_confirmation_for = vec!["web_search".to_string()];
+    policy.confirmation_timeout_secs = Some(1);
+    let tc = make_tool_call("web_search");
+    let ctx = make_ctx_for_task("agent1", "t-1");
+
+    let _ = sandbox.execute_tool(&tc, &policy, &ctx).await;
+
+    match rx.try_recv().unwrap() {
+        SystemEvent::ToolConfirmationRequested { task_id, .. } => {
+            assert_eq!(task_id.as_deref(), Some("t-1"));
+        }
+        other => panic!("Expected ToolConfirmationRequested, got: {:?}", other),
     }
 }
 

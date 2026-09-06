@@ -101,6 +101,9 @@ pub enum SystemEvent {
         agent_id: String,
         tool_name: String,
         reason: String,
+        /// The run this happened inside (GAP-10), or `None` outside one — a
+        /// main-loop turn, a skill invocation, a scheduled sweep.
+        task_id: Option<String>,
         timestamp: DateTime<Utc>,
     },
     /// A tool was executed by an agent
@@ -109,6 +112,8 @@ pub enum SystemEvent {
         tool_name: String,
         success: bool,
         duration_ms: u64,
+        /// The run this happened inside (GAP-10), or `None` outside one.
+        task_id: Option<String>,
         timestamp: DateTime<Utc>,
     },
     /// An LLM call completed
@@ -118,6 +123,8 @@ pub enum SystemEvent {
         input_tokens: u32,
         output_tokens: u32,
         cost_usd: f64,
+        /// The run this happened inside (GAP-10), or `None` outside one.
+        task_id: Option<String>,
         timestamp: DateTime<Utc>,
     },
     /// An agent was denied access to a model
@@ -244,6 +251,8 @@ pub enum SystemEvent {
         tool_name: String,
         consecutive_failures: usize,
         reset_after_secs: u64,
+        /// The run whose call tripped it (GAP-10), or `None` outside one.
+        task_id: Option<String>,
         timestamp: DateTime<Utc>,
     },
     /// Dispatch decision record (Routing V2 tool path). Historical rows may
@@ -340,6 +349,9 @@ pub enum SystemEvent {
         stream_id: Option<String>,
         /// Lane key for routing to connectors (e.g. "telegram:12345")
         lane_key: Option<String>,
+        /// The run that is waiting on this prompt (GAP-10), or `None` outside
+        /// one — the same attribution §4.4's derived `blocked` lane uses.
+        task_id: Option<String>,
         timestamp: DateTime<Utc>,
     },
     /// Context budget was computed for a request (Phase A observability)

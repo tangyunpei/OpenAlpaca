@@ -81,7 +81,7 @@ impl EventBroadcaster {
                         "artifact_count": artifact_count,
                         "outcome_summary": outcome_summary,
                     });
-                    repo.log("task_status", None, Some(&detail), None)
+                    repo.log_for_task("task_status", None, Some(task_id), Some(&detail), None)
                 }
                 // Log key status changes
                 ServerEvent::KeyStatusChanged {
@@ -148,31 +148,42 @@ impl EventBroadcaster {
                     agent_id,
                     tool_name,
                     reason,
+                    task_id,
                     ..
                 } => {
                     let detail = serde_json::json!({
                         "agent_id": agent_id,
                         "tool_name": tool_name,
-                        "reason": reason
+                        "reason": reason,
+                        "task_id": task_id
                     });
-                    repo.log("security_violation", Some(agent_id), Some(&detail), None)
+                    repo.log_for_task(
+                        "security_violation",
+                        Some(agent_id),
+                        task_id.as_deref(),
+                        Some(&detail),
+                        None,
+                    )
                 }
                 ServerEvent::CircuitBreakerTripped {
                     agent_id,
                     tool_name,
                     consecutive_failures,
                     reset_after_secs,
+                    task_id,
                     ..
                 } => {
                     let detail = serde_json::json!({
                         "agent_id": agent_id,
                         "tool_name": tool_name,
                         "consecutive_failures": consecutive_failures,
-                        "reset_after_secs": reset_after_secs
+                        "reset_after_secs": reset_after_secs,
+                        "task_id": task_id
                     });
-                    repo.log(
+                    repo.log_for_task(
                         "circuit_breaker_tripped",
                         Some(agent_id),
+                        task_id.as_deref(),
                         Some(&detail),
                         None,
                     )
@@ -182,15 +193,23 @@ impl EventBroadcaster {
                     tool_name,
                     success,
                     duration_ms,
+                    task_id,
                     ..
                 } => {
                     let detail = serde_json::json!({
                         "agent_id": agent_id,
                         "tool_name": tool_name,
                         "success": success,
-                        "duration_ms": duration_ms
+                        "duration_ms": duration_ms,
+                        "task_id": task_id
                     });
-                    repo.log("tool_executed", Some(agent_id), Some(&detail), None)
+                    repo.log_for_task(
+                        "tool_executed",
+                        Some(agent_id),
+                        task_id.as_deref(),
+                        Some(&detail),
+                        None,
+                    )
                 }
                 ServerEvent::LlmCallCompleted {
                     agent_id,
@@ -198,6 +217,7 @@ impl EventBroadcaster {
                     input_tokens,
                     output_tokens,
                     cost_usd,
+                    task_id,
                     ..
                 } => {
                     let detail = serde_json::json!({
@@ -205,9 +225,16 @@ impl EventBroadcaster {
                         "model": model,
                         "input_tokens": input_tokens,
                         "output_tokens": output_tokens,
-                        "cost_usd": cost_usd
+                        "cost_usd": cost_usd,
+                        "task_id": task_id
                     });
-                    repo.log("llm_call_completed", Some(agent_id), Some(&detail), None)
+                    repo.log_for_task(
+                        "llm_call_completed",
+                        Some(agent_id),
+                        task_id.as_deref(),
+                        Some(&detail),
+                        None,
+                    )
                 }
                 ServerEvent::SkillCatalogUpdated {
                     skill_name, action, ..
@@ -281,14 +308,22 @@ impl EventBroadcaster {
                     request_id,
                     agent_id,
                     tool_name,
+                    task_id,
                     ..
                 } => {
                     let detail = serde_json::json!({
                         "request_id": request_id,
                         "agent_id": agent_id,
-                        "tool_name": tool_name
+                        "tool_name": tool_name,
+                        "task_id": task_id
                     });
-                    repo.log("tool_confirmation_requested", Some(agent_id), Some(&detail), None)
+                    repo.log_for_task(
+                        "tool_confirmation_requested",
+                        Some(agent_id),
+                        task_id.as_deref(),
+                        Some(&detail),
+                        None,
+                    )
                 }
                 // Log SOUL.md personality updates with actor attribution
                 ServerEvent::SoulUpdated {
@@ -327,7 +362,7 @@ impl EventBroadcaster {
                         "task_id": task_id,
                         "lane_key": lane_key,
                     });
-                    repo.log("workflow_steered", None, Some(&detail), None)
+                    repo.log_for_task("workflow_steered", None, Some(task_id), Some(&detail), None)
                 }
                 ServerEvent::WorkflowProgress {
                     task_id,
@@ -378,9 +413,10 @@ impl EventBroadcaster {
                         "version": version,
                         "path": path,
                     });
-                    repo.log(
+                    repo.log_for_task(
                         "artifact_written",
                         agent_id.as_deref(),
+                        task_id.as_deref(),
                         Some(&detail),
                         None,
                     )
@@ -416,9 +452,10 @@ impl EventBroadcaster {
                         "duration_ms": duration_ms,
                         "output_preview": output_preview,
                     });
-                    repo.log(
+                    repo.log_for_task(
                         "subagent_span",
                         Some(agent_instance_id.as_str()),
+                        Some(task_id.as_str()),
                         Some(&payload),
                         None,
                     )
@@ -597,6 +634,100 @@ mod tests {
         let detail = row.detail.as_ref().expect("the row carries a detail blob");
         assert!(detail["task_id"].is_null());
         assert!(detail["agent_id"].is_null());
+    }
+
+    // ── GAP-10: the run goes in the indexed column ──────────────────────
+
+    /// Every arm that knows its run writes the id to `event_log.task_id`, not
+    /// only into `detail` — that column is what `?task_id=` reads.
+    #[test]
+    fn the_run_scoped_arms_fill_the_task_column() {
+        let (_dir, db) = test_db();
+        let eb = EventBroadcaster::new(16, "inst-1".to_string(), Some(db.clone()));
+
+        eb.task_status("t-1", "A run", "running", None, None, None, None, None, None);
+        eb.tool_executed("research_agent::a1", "web_search", true, 12, Some("t-1"));
+        eb.security_violation("research_agent::a1", "shell", "denied", Some("t-1"));
+        eb.circuit_breaker_tripped("research_agent::a1", "web_search", 3, 300, Some("t-1"));
+        eb.llm_call_completed("research_agent::a1", "m", 1, 2, 0.1, Some("t-1"));
+        eb.tool_confirmation_requested(
+            "req-1",
+            "research_agent::a1",
+            "shell",
+            &serde_json::json!({}),
+            None,
+            None,
+            Some("t-1"),
+        );
+        eb.workflow_steered("t-1", "junpei:cli");
+        eb.artifact_written(
+            "a-1",
+            Some("t-1"),
+            Some("writing_agent"),
+            "01-report.md",
+            "markdown",
+            1,
+            "/p/.openalpaca/artifacts/run/01-report.md",
+        );
+        eb.subagent_span(
+            "t-1",
+            "node-1",
+            "review·1",
+            "review_agent",
+            "review_agent::a1b2",
+            "running",
+            None,
+            "2026-09-05T10:00:00.000Z",
+            None,
+            None,
+            None,
+        );
+
+        let rows = EventLogRepository::new(&db).recent(50).unwrap();
+        for event_type in [
+            "task_status",
+            "tool_executed",
+            "security_violation",
+            "circuit_breaker_tripped",
+            "llm_call_completed",
+            "tool_confirmation_requested",
+            "workflow_steered",
+            "artifact_written",
+            "subagent_span",
+        ] {
+            let row = rows
+                .iter()
+                .find(|r| r.event_type == event_type)
+                .unwrap_or_else(|| panic!("{event_type} must reach the event log"));
+            assert_eq!(
+                row.task_id.as_deref(),
+                Some("t-1"),
+                "{event_type} must carry its run in the indexed column"
+            );
+            // Still in `detail` too — readers written before the column exists
+            // keep working.
+            assert_eq!(
+                row.detail.as_ref().and_then(|d| d["task_id"].as_str()),
+                Some("t-1"),
+                "{event_type} keeps the id in its detail blob"
+            );
+        }
+    }
+
+    /// An event with no run leaves the column NULL rather than borrowing one.
+    #[test]
+    fn a_task_less_event_leaves_the_column_null() {
+        let (_dir, db) = test_db();
+        let eb = EventBroadcaster::new(16, "inst-1".to_string(), Some(db.clone()));
+
+        eb.tool_executed("orchestrator", "web_search", true, 5, None);
+        eb.connector_status("telegram", "connected");
+
+        let rows = EventLogRepository::new(&db).recent(10).unwrap();
+        for event_type in ["tool_executed", "connector_status"] {
+            let row = rows.iter().find(|r| r.event_type == event_type).unwrap();
+            assert_eq!(row.task_id, None);
+        }
     }
 
     /// A lane's open and its close are two rows, both carrying the whole span

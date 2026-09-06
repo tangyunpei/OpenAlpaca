@@ -147,7 +147,7 @@ impl TelegramConnector {
                         tool_arguments,
                         stream_id: _,
                         lane_key: Some(ref lane_key),
-                        timestamp: _,
+                        ..
                     }) if lane_key.ends_with(":telegram") => {
                         // Resolve chat_id from lane_key via DB lookup
                         let identity_repo = IdentityRepository::new(&db);

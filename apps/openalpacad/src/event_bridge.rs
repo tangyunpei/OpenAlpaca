@@ -104,24 +104,32 @@ pub fn spawn_event_bridge(
                     agent_id,
                     tool_name,
                     reason,
+                    task_id,
                     ..
                 } => {
                     tracing::warn!(
                         "Security violation: agent={agent_id}, tool={tool_name}, reason={reason}"
                     );
-                    eb.security_violation(&agent_id, &tool_name, &reason);
+                    eb.security_violation(&agent_id, &tool_name, &reason, task_id.as_deref());
                 }
                 openalpaca_core::events::SystemEvent::ToolExecuted {
                     agent_id,
                     tool_name,
                     success,
                     duration_ms,
+                    task_id,
                     ..
                 } => {
                     tracing::debug!(
                         "Tool executed: agent={agent_id}, tool={tool_name}, success={success}, duration={duration_ms}ms"
                     );
-                    eb.tool_executed(&agent_id, &tool_name, success, duration_ms);
+                    eb.tool_executed(
+                        &agent_id,
+                        &tool_name,
+                        success,
+                        duration_ms,
+                        task_id.as_deref(),
+                    );
                 }
                 openalpaca_core::events::SystemEvent::LlmCallCompleted {
                     agent_id,
@@ -129,18 +137,27 @@ pub fn spawn_event_bridge(
                     input_tokens,
                     output_tokens,
                     cost_usd,
+                    task_id,
                     ..
                 } => {
                     tracing::info!(
                         "LLM call: agent={agent_id}, model={model}, tokens={input_tokens}/{output_tokens}, cost=${cost_usd:.6}"
                     );
-                    eb.llm_call_completed(&agent_id, &model, input_tokens, output_tokens, cost_usd);
+                    eb.llm_call_completed(
+                        &agent_id,
+                        &model,
+                        input_tokens,
+                        output_tokens,
+                        cost_usd,
+                        task_id.as_deref(),
+                    );
                 }
                 openalpaca_core::events::SystemEvent::CircuitBreakerTripped {
                     agent_id,
                     tool_name,
                     consecutive_failures,
                     reset_after_secs,
+                    task_id,
                     ..
                 } => {
                     tracing::warn!(
@@ -151,6 +168,7 @@ pub fn spawn_event_bridge(
                         &tool_name,
                         consecutive_failures,
                         reset_after_secs,
+                        task_id.as_deref(),
                     );
                 }
                 openalpaca_core::events::SystemEvent::SkillCatalogUpdated {
@@ -420,6 +438,7 @@ pub fn spawn_event_bridge(
                     ref tool_arguments,
                     ref stream_id,
                     ref lane_key,
+                    ref task_id,
                     ..
                 } => {
                     tracing::info!(
@@ -433,6 +452,7 @@ pub fn spawn_event_bridge(
                         tool_arguments,
                         stream_id.as_deref(),
                         lane_key.as_deref(),
+                        task_id.as_deref(),
                     );
                     // 2. Forward to SSE chat stream (CLI + GUI active chat)
                     if let (Some(csm), Some(sid)) = (&chat_streams, &stream_id) {
@@ -943,6 +963,115 @@ mod tests {
                 assert_eq!(output_preview.as_deref(), Some("partial"));
             }
             other => panic!("Expected SubagentSpan, got {other:?}"),
+        }
+        cancel.cancel();
+    }
+
+    // ── GAP-10: the run crosses the bridge with the frame ──────────────
+
+    /// The five security/tool frames carry `task_id` from the core bus to the
+    /// client-facing twin, so a socket consumer can scope them to a run and
+    /// the persistence arm has an id to index on.
+    #[tokio::test]
+    async fn test_tool_and_security_events_bridge_their_task_id() {
+        let (bus, mut rx, cancel) = setup_bridge();
+
+        bus.publish(SystemEvent::ToolExecuted {
+            agent_id: "research_agent::a1".into(),
+            tool_name: "web_search".into(),
+            success: true,
+            duration_ms: 12,
+            task_id: Some("t-1".into()),
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::ToolExecuted { task_id, .. } => {
+                assert_eq!(task_id.as_deref(), Some("t-1"))
+            }
+            other => panic!("Expected ToolExecuted, got {other:?}"),
+        }
+
+        bus.publish(SystemEvent::SecurityViolation {
+            agent_id: "research_agent::a1".into(),
+            tool_name: "shell".into(),
+            reason: "denied".into(),
+            task_id: Some("t-1".into()),
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::SecurityViolation { task_id, .. } => {
+                assert_eq!(task_id.as_deref(), Some("t-1"))
+            }
+            other => panic!("Expected SecurityViolation, got {other:?}"),
+        }
+
+        bus.publish(SystemEvent::CircuitBreakerTripped {
+            agent_id: "research_agent::a1".into(),
+            tool_name: "web_search".into(),
+            consecutive_failures: 3,
+            reset_after_secs: 300,
+            task_id: Some("t-1".into()),
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::CircuitBreakerTripped { task_id, .. } => {
+                assert_eq!(task_id.as_deref(), Some("t-1"))
+            }
+            other => panic!("Expected CircuitBreakerTripped, got {other:?}"),
+        }
+
+        bus.publish(SystemEvent::LlmCallCompleted {
+            agent_id: "research_agent::a1".into(),
+            model: "m".into(),
+            input_tokens: 1,
+            output_tokens: 2,
+            cost_usd: 0.1,
+            task_id: Some("t-1".into()),
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::LlmCallCompleted { task_id, .. } => {
+                assert_eq!(task_id.as_deref(), Some("t-1"))
+            }
+            other => panic!("Expected LlmCallCompleted, got {other:?}"),
+        }
+
+        bus.publish(SystemEvent::ToolConfirmationRequested {
+            request_id: "req-1".into(),
+            agent_id: "research_agent::a1".into(),
+            tool_name: "shell".into(),
+            tool_arguments: serde_json::json!({}),
+            stream_id: None,
+            lane_key: None,
+            task_id: Some("t-1".into()),
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::ToolConfirmationRequested { task_id, .. } => {
+                assert_eq!(task_id.as_deref(), Some("t-1"))
+            }
+            other => panic!("Expected ToolConfirmationRequested, got {other:?}"),
+        }
+
+        cancel.cancel();
+    }
+
+    /// A frame from outside any run bridges with `task_id: None` — the bridge
+    /// never invents attribution.
+    #[tokio::test]
+    async fn test_a_task_less_tool_event_bridges_without_a_task_id() {
+        let (bus, mut rx, cancel) = setup_bridge();
+        bus.publish(SystemEvent::ToolExecuted {
+            agent_id: "orchestrator".into(),
+            tool_name: "web_search".into(),
+            success: true,
+            duration_ms: 12,
+            task_id: None,
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::ToolExecuted { task_id, .. } => assert_eq!(task_id, None),
+            other => panic!("Expected ToolExecuted, got {other:?}"),
         }
         cancel.cancel();
     }

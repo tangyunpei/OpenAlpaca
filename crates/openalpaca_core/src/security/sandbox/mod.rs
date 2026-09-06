@@ -140,6 +140,9 @@ impl SandboxManager {
         ctx: &ToolContext,
     ) -> Result<String, String> {
         let agent_id = ctx.agent_id.as_deref().unwrap_or("unknown");
+        // The run every event below is attributed to (GAP-10); `None` for a
+        // call made outside a workflow.
+        let task_id = ctx.task_id.as_deref();
 
         // 1. Capability check
         if let Err(violation) = CapabilityManager::check_agent_capability(
@@ -148,7 +151,7 @@ impl SandboxManager {
             &policy.allowed_capabilities,
             &policy.denied_capabilities,
         ) {
-            self.emit_security_violation(agent_id, &tool_call.name, &violation.to_string());
+            self.emit_security_violation(agent_id, &tool_call.name, &violation.to_string(), task_id);
             return Err(violation.to_string());
         }
 
@@ -161,7 +164,7 @@ impl SandboxManager {
             &registered,
             &shell_like,
         ) {
-            self.emit_security_violation(agent_id, &tool_call.name, &violation.to_string());
+            self.emit_security_violation(agent_id, &tool_call.name, &violation.to_string(), task_id);
             return Err(violation.to_string());
         }
 
@@ -193,12 +196,14 @@ impl SandboxManager {
                     let detail = serde_json::json!({
                         "tool_name": tool_call.name,
                         "reason": "auto_approve policy bypass",
+                        "task_id": task_id,
                     });
                     let result = serde_json::json!({ "outcome": "auto_approved" });
                     let repo = openalpaca_storage::repository::EventLogRepository::new(db);
-                    if let Err(e) = repo.log(
+                    if let Err(e) = repo.log_for_task(
                         "tool_auto_approved",
                         Some(agent_id),
+                        task_id,
                         Some(&detail),
                         Some(&result),
                     ) {
@@ -235,6 +240,7 @@ impl SandboxManager {
                     tool_arguments: tool_call.arguments.clone(),
                     stream_id: policy.stream_id.clone(),
                     lane_key: policy.lane_key.clone(),
+                    task_id: ctx.task_id.clone(),
                     timestamp: Utc::now(),
                 });
                 let timeout_secs = policy.confirmation_timeout_secs.unwrap_or(300);
@@ -286,14 +292,14 @@ impl SandboxManager {
                     tool = %tool_call.name,
                     "Tool blocked: fail-closed"
                 );
-                self.emit_security_violation(agent_id, &tool_call.name, &reason);
+                self.emit_security_violation(agent_id, &tool_call.name, &reason, task_id);
                 return Err(reason);
             }
         }
 
         // 4. Circuit breaker check
         if let Err(reason) = self.circuit_breaker.check(agent_id, &tool_call.name) {
-            self.emit_tool_executed(agent_id, &tool_call.name, false, 0);
+            self.emit_tool_executed(agent_id, &tool_call.name, false, 0, task_id);
             return Err(reason);
         }
 
@@ -339,16 +345,16 @@ impl SandboxManager {
 
         match result {
             Ok(Ok(output)) => {
-                self.emit_tool_executed(agent_id, &tool_call.name, true, duration_ms);
+                self.emit_tool_executed(agent_id, &tool_call.name, true, duration_ms, task_id);
                 self.circuit_breaker
                     .record_success(agent_id, &tool_call.name);
                 Ok(output)
             }
             Ok(Err(err)) => {
-                self.emit_tool_executed(agent_id, &tool_call.name, false, duration_ms);
+                self.emit_tool_executed(agent_id, &tool_call.name, false, duration_ms, task_id);
                 if is_transient_tool_error(&err) {
                     self.circuit_breaker
-                        .record_failure(agent_id, &tool_call.name);
+                        .record_failure_for_task(agent_id, &tool_call.name, task_id);
                 }
                 Err(err)
             }
@@ -357,20 +363,29 @@ impl SandboxManager {
                     "Tool '{}' timed out after {}s",
                     tool_call.name, policy.max_tool_runtime_secs
                 );
-                self.emit_security_violation(agent_id, &tool_call.name, &reason);
+                self.emit_security_violation(agent_id, &tool_call.name, &reason, task_id);
                 // Timeouts are transient — record for circuit breaker
                 self.circuit_breaker
-                    .record_failure(agent_id, &tool_call.name);
+                    .record_failure_for_task(agent_id, &tool_call.name, task_id);
                 Err(reason)
             }
         }
     }
 
-    fn emit_security_violation(&self, agent_id: &str, tool_name: &str, reason: &str) {
+    /// `task_id` is the run the refused call belonged to (GAP-10), or `None`
+    /// outside one — never guessed from the agent.
+    fn emit_security_violation(
+        &self,
+        agent_id: &str,
+        tool_name: &str,
+        reason: &str,
+        task_id: Option<&str>,
+    ) {
         self.bus.publish(SystemEvent::SecurityViolation {
             agent_id: agent_id.to_string(),
             tool_name: tool_name.to_string(),
             reason: reason.to_string(),
+            task_id: task_id.map(|t| t.to_string()),
             timestamp: Utc::now(),
         });
 
@@ -379,12 +394,14 @@ impl SandboxManager {
             let detail = serde_json::json!({
                 "tool_name": tool_name,
                 "reason": reason,
+                "task_id": task_id,
             });
             let result = serde_json::json!({ "outcome": "denied" });
             let repo = openalpaca_storage::repository::EventLogRepository::new(db);
-            if let Err(e) = repo.log(
+            if let Err(e) = repo.log_for_task(
                 "security_violation",
                 Some(agent_id),
+                task_id,
                 Some(&detail),
                 Some(&result),
             ) {
@@ -393,12 +410,20 @@ impl SandboxManager {
         }
     }
 
-    fn emit_tool_executed(&self, agent_id: &str, tool_name: &str, success: bool, duration_ms: u64) {
+    fn emit_tool_executed(
+        &self,
+        agent_id: &str,
+        tool_name: &str,
+        success: bool,
+        duration_ms: u64,
+        task_id: Option<&str>,
+    ) {
         self.bus.publish(SystemEvent::ToolExecuted {
             agent_id: agent_id.to_string(),
             tool_name: tool_name.to_string(),
             success,
             duration_ms,
+            task_id: task_id.map(|t| t.to_string()),
             timestamp: Utc::now(),
         });
     }
