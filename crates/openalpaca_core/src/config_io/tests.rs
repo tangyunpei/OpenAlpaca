@@ -128,6 +128,65 @@ fn five_backups_are_kept_and_the_sixth_is_rotated_out() {
     );
 }
 
+// ── The byte-level primitive (plan §1.4, P-11) ──────────────────────────────
+//
+// `llm.toml`'s writer (`LlmSettingsService::persist_only`) holds the whole
+// file's text, because that config is serialised from its typed form rather
+// than edited in place. It writes through the same tmp → fsync → rotate →
+// rename tail as the two surgical writers, and these are that tail's tests.
+
+#[test]
+fn the_byte_writer_replaces_the_file_and_keeps_what_it_replaced() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _home = HomeStoreGuard::set(&tmp.path().join("home"));
+    let path = tmp.path().join("llm.toml");
+    std::fs::write(&path, "first = 1\n").unwrap();
+
+    atomic_write_with_backup(&path, "second = 2\n").unwrap();
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "second = 2\n");
+    let backups = openalpaca_storage::store::backups_dir().unwrap();
+    let kept: Vec<PathBuf> = std::fs::read_dir(&backups)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| file_name(p).starts_with("llm.toml.bak."))
+        .collect();
+    assert_eq!(kept.len(), 1, "the replaced version is recoverable: {kept:?}");
+    assert_eq!(std::fs::read_to_string(&kept[0]).unwrap(), "first = 1\n");
+}
+
+#[test]
+fn the_byte_writer_keeps_five_versions_and_creates_a_missing_parent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _home = HomeStoreGuard::set(&tmp.path().join("home"));
+    let path = tmp.path().join("nested").join("llm.toml");
+
+    // A first write into a directory that does not exist yet rotates nothing.
+    atomic_write_with_backup(&path, "n = 0\n").unwrap();
+    let backups = openalpaca_storage::store::backups_dir().unwrap();
+    assert_eq!(std::fs::read_dir(&backups).unwrap().count(), 0);
+
+    for n in 1..=7 {
+        atomic_write_with_backup(&path, &format!("n = {n}\n")).unwrap();
+    }
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "n = 7\n");
+    let mut kept: Vec<String> = std::fs::read_dir(&backups)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("llm.toml.bak."))
+        .collect();
+    kept.sort();
+    assert_eq!(kept.len(), BACKUPS_KEPT, "seven writes keep five: {kept:?}");
+    assert_eq!(
+        std::fs::read_to_string(backups.join(kept.last().unwrap())).unwrap(),
+        "n = 6\n",
+        "the newest backup is the version the last write replaced"
+    );
+}
+
 #[test]
 fn an_unparseable_file_is_copied_once() {
     let tmp = tempfile::tempdir().unwrap();

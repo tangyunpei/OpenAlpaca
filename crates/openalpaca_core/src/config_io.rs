@@ -1,5 +1,7 @@
 //! The atomic, comment-preserving writer both extension stores use
-//! (extension design §2.1).
+//! (extension design §2.1) — and, through
+//! [`atomic_write_with_backup`], the one every writer of hand-edited config
+//! shares (plan §1.4, P-11).
 //!
 //! `config/mcp.toml` and `<plugins root>/.permissions.toml` are hand-authored
 //! files the daemon also writes. Three properties follow from that, and this
@@ -120,6 +122,44 @@ where
         reason,
     })?;
 
+    write_locked(path, &rendered, original.as_deref())
+}
+
+/// Replace `path`'s bytes atomically, keeping the version being replaced.
+///
+/// This is the primitive §1.4 names: sibling temp file → `sync_all` → rotate
+/// the current file into `state/backups/<name>.bak.<ts>` (five kept) → rename.
+/// [`atomic_write_toml`] is this plus a surgical `toml_edit` pass, and it is
+/// the shape a writer that already holds the whole file's text needs:
+/// `llm.toml` is serialised from its typed form, not edited in place, so
+/// `LlmSettingsService::persist_only` renders the document itself and writes it
+/// through here — one implementation of the crash semantics, three writers.
+///
+/// **The caller owns `<path>.lock`.** `file_lock` locks per descriptor, so
+/// taking the lock here as well would deadlock the callers that already hold
+/// it (`atomic_write_toml`; `persist_only`, through
+/// `openalpaca_llm`'s `acquire_config_write_lock`, which names the same file).
+pub fn atomic_write_with_backup(path: &Path, contents: &str) -> Result<(), ConfigWriteError> {
+    let original = match std::fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(source) => {
+            return Err(ConfigWriteError::Read {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    write_locked(path, contents, original.as_deref())
+}
+
+/// The tmp → fsync → rotate → rename tail, with `original` (the text being
+/// replaced, `None` when the file is new) already read under the caller's lock.
+fn write_locked(
+    path: &Path,
+    rendered: &str,
+    original: Option<&str>,
+) -> Result<(), ConfigWriteError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).map_err(|source| ConfigWriteError::Write {
         path: parent.to_path_buf(),
@@ -144,7 +184,7 @@ where
 
     // Rotate the version being replaced *before* the rename, so a crash
     // between the two leaves the original in place and a spare copy beside it.
-    if let Some(text) = &original {
+    if let Some(text) = original {
         rotate_backup(path, text);
     }
 
