@@ -145,7 +145,7 @@
 ### `tasks.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/tasks.ts`
-- Exported functions: `createTask`, `getTask`, `getTaskTimeline`, `listTasks`, `performTaskAction`, `steerTask`
+- Exported functions: `createTask`, `getTask`, `getTaskTimeline`, `listTasks`, `performTaskAction`, `rerunTask`, `startTaskNow`, `steerTask`
 - Endpoints: none
 
 ### `telemetry.ts`
