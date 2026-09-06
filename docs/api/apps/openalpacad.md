@@ -530,9 +530,8 @@
 | `log_path` | `Option<String>` |
 | `upload_bytes` | `i64` |
 | `produced_bytes` | `i64` |
+| `retention` | `RetentionStatus` |
 | `sessions` | `SessionsStatus` |
-| `last_sweep` | `Option<SweepStatus>` |
-| `dropped_records` | `u64` |
 
 ## Streaming
 
