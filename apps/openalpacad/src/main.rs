@@ -384,6 +384,8 @@ async fn async_main(
 
     let llm_router_for_reload = svcs.llm_router.clone();
     let llm_router_for_shutdown = svcs.llm_router.clone();
+    // The session log's writers buffer: shutdown has to drain them (§5.5).
+    let session_log_for_shutdown = svcs.shared_context.session_log().cloned();
     let web_search_config_for_reload = svcs.web_search_config.clone();
     let lane_manager = Arc::new(LaneManager::new());
 
@@ -709,6 +711,25 @@ async fn async_main(
     // Flush CostTracker to DB (defense-in-depth)
     if let Some(ref router) = llm_router_for_shutdown {
         services::flush_cost_tracker(router, &db_for_shutdown, &cost_tracker_date).await;
+    }
+
+    // Drain the session event logs. `emit` is a non-blocking `try_send` and
+    // the writer syncs only on §5.4's boundaries and a 5 s timer, so up to
+    // `channel_capacity` records per session would otherwise be discarded
+    // when the runtime drops the writer tasks. Bounded by what is left of the
+    // force-exit window, like the extension sweep below.
+    if let Some(ref session_log) = session_log_for_shutdown {
+        info!("Flushing session logs...");
+        let budget = force_exit_at
+            .get()
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or(FORCE_EXIT_GRACE);
+        if tokio::time::timeout(budget, session_log.flush_all())
+            .await
+            .is_err()
+        {
+            warn!("Session log flush timed out; buffered records may be missing");
+        }
     }
 
     // Close every live MCP connection and every plugin child. Nothing tore

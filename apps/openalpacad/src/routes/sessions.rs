@@ -237,6 +237,16 @@ impl Deps<'_> {
     }
 }
 
+/// Put the buffered records on disk before a transcript is archived or
+/// deleted — after either, this session's writer may never be asked again,
+/// and `emit` is a `try_send` that syncs on §5.4's boundaries and a 5 s timer.
+/// The same barrier the daemon's shutdown path awaits.
+async fn flush_session_logs(state: &AppState) {
+    if let Some(service) = state.gateway.shared_context.session_log() {
+        service.flush_all().await;
+    }
+}
+
 fn deps(state: &AppState) -> Deps<'_> {
     Deps {
         db: &state.db,
@@ -450,6 +460,7 @@ pub async fn archive_session_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    flush_session_logs(&state).await;
     archive_session(&deps(&state), &id)
 }
 
@@ -532,6 +543,7 @@ pub async fn delete_session_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    flush_session_logs(&state).await;
     delete_session(&deps(&state), &id)
 }
 

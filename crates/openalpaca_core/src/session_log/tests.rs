@@ -622,6 +622,35 @@ async fn an_idle_writer_closes_and_the_next_emit_respawns_it() {
     assert_eq!(rows[1]["seq"], 2);
 }
 
+/// The shutdown barrier: `emit` is a non-blocking `try_send` and the writer
+/// syncs only on boundaries and a 5 s timer, so on SIGTERM everything still
+/// queued would go with the runtime. `flush_all` drains every live writer and
+/// syncs it — the daemon awaits it before its writer tasks are dropped, and
+/// the session routes await it before archiving or deleting a transcript.
+#[tokio::test]
+async fn flush_all_drains_every_live_writer_before_shutdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = service(&dir);
+    let a = svc.handle_for("sess-a");
+    let b = svc.handle_for("sess-b");
+
+    // Nothing has awaited yet, so on a current-thread runtime these are all
+    // still sitting in their channels.
+    for i in 0..64 {
+        assert!(a.emit(Record::new(RecordType::Round).with_data(serde_json::json!({"round": i}))));
+        assert!(b.emit(Record::new(RecordType::Round).with_data(serde_json::json!({"round": i}))));
+    }
+
+    svc.flush_all().await;
+
+    for session in ["sess-a", "sess-b"] {
+        let rows = lines(&log_path(dir.path(), session));
+        assert_eq!(rows.len(), 64, "{session} was drained, not dropped");
+        assert_eq!(rows[63]["data"]["round"], 63);
+    }
+    assert_eq!(svc.dropped_total(), 0);
+}
+
 /// Session ids reach the filesystem as directory names; nothing may escape
 /// the sessions root.
 #[test]

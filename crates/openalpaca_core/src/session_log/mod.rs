@@ -152,6 +152,24 @@ impl SessionLogService {
         }
     }
 
+    /// Wait until every live writer has put what it holds on disk.
+    ///
+    /// The barrier §5.5's durability policy needs at the two points where a
+    /// writer may never be asked again: the daemon's shutdown path, before
+    /// the runtime drops the writer tasks with up to `channel_capacity`
+    /// records still queued, and a session's archive or delete. Everything
+    /// else relies on the per-record `write` and the boundary/timer syncs.
+    pub async fn flush_all(&self) {
+        // Collected first: a `DashMap` reference may not be held across an
+        // await, and a writer that idles out mid-flush must not deadlock the
+        // map for the ones after it.
+        let handles: Vec<SessionLogHandle> =
+            self.handles.iter().map(|h| h.value().clone()).collect();
+        for handle in handles {
+            handle.flush().await;
+        }
+    }
+
     /// How many records this boot has dropped for `session_id` — a full
     /// channel, or a writer that could not open its directory (§5.5 chose
     /// drops over stalls; this is how a reader learns the log has a hole).
