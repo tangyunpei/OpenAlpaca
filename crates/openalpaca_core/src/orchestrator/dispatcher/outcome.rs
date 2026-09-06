@@ -339,6 +339,13 @@ pub(super) fn completion_status_line(
 /// only `role === "system"`) — and it should be the lane's own source, because
 /// `get_or_create_conversation` creates a missing conversation with whatever
 /// `source` it is handed.
+///
+/// `task_id` is GAP-23's run link, and only the two messages the design names
+/// carry one: the turn that *started* a workflow (written at the gateway) and
+/// the completion report that closed it ([`persist_completion_report`]). Every
+/// other caller — the lead's `post_update` progress note, the daemon's
+/// extension notices — passes `None`: those are lane chatter, not the run's
+/// own record. Returns the new message's id, or `None` if nothing was written.
 #[allow(clippy::too_many_arguments)]
 pub fn persist_conversation(
     db: &openalpaca_storage::Database,
@@ -349,14 +356,15 @@ pub fn persist_conversation(
     tokens_in: i64,
     tokens_out: i64,
     runtime_secs: i64,
-) {
+    task_id: Option<&str>,
+) -> Option<i64> {
     let conv_repo = openalpaca_storage::ConversationRepository::new(db);
     if let Err(e) = conv_repo.get_or_create_conversation(lane_key, source) {
         tracing::warn!(
             "persist_conversation: failed to get/create conversation for lane '{}': {e}",
             lane_key
         );
-        return;
+        return None;
     }
 
     let msg = openalpaca_storage::ConversationMessage {
@@ -368,22 +376,89 @@ pub fn persist_conversation(
         tokens_in: Some(tokens_in),
         tokens_out: Some(tokens_out),
         duration_ms: Some(runtime_secs * 1000),
+        task_id: task_id.map(str::to_string),
         ..Default::default()
     };
 
     match conv_repo.insert(&msg) {
-        Ok(_) => {
+        Ok(message_id) => {
             if let Err(e) = conv_repo.increment_message_count(lane_key) {
                 tracing::warn!(
                     "persist_conversation: failed to increment message count for lane '{}': {e}",
                     lane_key
                 );
             }
+            Some(message_id)
         }
         Err(e) => {
             tracing::warn!(
                 "persist_conversation: failed to insert assistant message for lane '{}': {e}",
                 lane_key
+            );
+            None
+        }
+    }
+}
+
+/// Persist a workflow's completion report — GAP-23's second link.
+///
+/// The report is the one message that can name the run's *output*: by the time
+/// it is written, `file_assets` has a row for everything the run produced,
+/// which is why the delegating turn (written before the work happened) carries
+/// only the run id. Each produced file gets a `role='artifact'` row beside the
+/// message, so a reloaded transcript draws the report card and its chips from
+/// history alone instead of from the frames one client happened to watch.
+///
+/// A failure to link is logged, never fatal: the report itself is the record of
+/// the run, and losing a chip must not lose the message.
+#[allow(clippy::too_many_arguments)]
+pub fn persist_completion_report(
+    db: &openalpaca_storage::Database,
+    lane_key: &str,
+    source: &str,
+    content: String,
+    model: Option<String>,
+    tokens_in: i64,
+    tokens_out: i64,
+    runtime_secs: i64,
+    task_id: &str,
+) {
+    let Some(message_id) = persist_conversation(
+        db,
+        lane_key,
+        source,
+        content,
+        model,
+        tokens_in,
+        tokens_out,
+        runtime_secs,
+        Some(task_id),
+    ) else {
+        return;
+    };
+
+    let file_repo = openalpaca_storage::FileAssetRepository::new(db);
+    let produced = match file_repo.produced_ids_for_task(task_id) {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task_id,
+                "Failed to read the run's produced artifacts for its report: {e}"
+            );
+            return;
+        }
+    };
+    for (i, file_id) in produced.iter().enumerate() {
+        if let Err(e) = file_repo.link_to_message_with_role(
+            message_id,
+            file_id,
+            i as i32,
+            None,
+            openalpaca_storage::ARTIFACT_ROLE,
+        ) {
+            tracing::warn!(
+                task_id = %task_id,
+                "Failed to link artifact {file_id} to completion report {message_id}: {e}"
             );
         }
     }

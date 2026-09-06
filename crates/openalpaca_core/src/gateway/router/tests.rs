@@ -144,6 +144,80 @@ async fn test_handle_event_propagates_delegation() {
     assert_eq!(delegation.title, "Research Rust");
 }
 
+/// GAP-23: the delegating turn is stored *carrying* its run, so a reload can
+/// still tell which assistant message started which workflow.
+#[tokio::test]
+async fn test_delegating_turn_persists_its_task_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let gw = Gateway::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        Arc::new(DelegatingHandler),
+        EventBus::default(),
+        Some(db.clone()),
+    );
+
+    gw.handle_event(GatewayRequest {
+        source: EventSource::Gui {
+            connection_id: "user1".to_string(),
+        },
+        content: "do a big task".to_string(),
+        principal: Principal::System,
+        scope: Scope::Global,
+        attachments: Vec::new(),
+        workspace_path: None,
+        stream_id: None,
+        lane_override: None,
+    })
+    .await;
+
+    let messages = openalpaca_storage::ConversationRepository::new(&db)
+        .list_by_lane("user1:gui", 50, 0)
+        .unwrap();
+    assert_eq!(messages.len(), 2);
+    // The user's own turn started nothing.
+    assert_eq!(messages[0].role, "user");
+    assert!(messages[0].task_id.is_none());
+    assert_eq!(messages[1].role, "assistant");
+    assert_eq!(messages[1].task_id.as_deref(), Some("task-42"));
+}
+
+/// A plain chat turn stores no run link — the column stays `NULL` rather than
+/// picking up whatever the lane happens to be running.
+#[tokio::test]
+async fn test_plain_turn_persists_no_task_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let gw = Gateway::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        Arc::new(StubHandler),
+        EventBus::default(),
+        Some(db.clone()),
+    );
+
+    gw.handle_event(GatewayRequest {
+        source: EventSource::Gui {
+            connection_id: "user1".to_string(),
+        },
+        content: "hello".to_string(),
+        principal: Principal::System,
+        scope: Scope::Global,
+        attachments: Vec::new(),
+        workspace_path: None,
+        stream_id: None,
+        lane_override: None,
+    })
+    .await;
+
+    let messages = openalpaca_storage::ConversationRepository::new(&db)
+        .list_by_lane("user1:gui", 50, 0)
+        .unwrap();
+    assert_eq!(messages.len(), 2);
+    assert!(messages.iter().all(|m| m.task_id.is_none()));
+}
+
 #[tokio::test]
 async fn test_handle_event_creates_lane() {
     let gw = make_gateway();

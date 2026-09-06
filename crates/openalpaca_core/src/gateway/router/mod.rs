@@ -262,6 +262,10 @@ impl Gateway {
                         &result.content,
                         Some(duration_ms),
                         &source_name,
+                        // GAP-23: a delegating turn is stored carrying the run
+                        // it started, so the link survives the reload that the
+                        // SSE `done` frame below does not.
+                        result.delegation.as_ref().map(|d| d.task_id.as_str()),
                     ) {
                         Ok(message_id) if message_id > 0 => {
                             if let Err(e) = openalpaca_storage::SkillExecutionRepository::new(p.db())

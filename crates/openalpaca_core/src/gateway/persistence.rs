@@ -127,12 +127,19 @@ impl GatewayPersistence {
     }
 
     /// Persist an assistant message. Skips empty content to avoid polluting history.
+    ///
+    /// `task_id` is GAP-23's first link: the turn that *started* a workflow is
+    /// stored carrying that run's id, so a reload can tell which assistant
+    /// message the delegation came from. It is `None` for ordinary chat — the
+    /// caller reads it off `HandleResult::delegation`, never off whatever the
+    /// lane happens to be running.
     pub fn persist_assistant_message(
         &self,
         lane_key: &str,
         content: &str,
         duration_ms: Option<i64>,
         source: &str,
+        task_id: Option<&str>,
     ) -> Result<i64> {
         if content.trim().is_empty() {
             tracing::debug!("Skipping empty assistant message for lane {}", lane_key);
@@ -145,6 +152,7 @@ impl GatewayPersistence {
             content: content.to_string(),
             source: Some(source.to_string()),
             duration_ms,
+            task_id: task_id.map(str::to_string),
             ..Default::default()
         })?;
         repo.increment_message_count(lane_key)?;

@@ -1179,6 +1179,9 @@ impl BuiltInTool for PostUpdateTool {
             .ok_or_else(|| "Missing required parameter: message".to_string())?;
 
         if let Some(ref db) = self.db {
+            // A progress note is lane chatter, not the run's own record: no
+            // run link, so nothing else in the transcript claims to be the
+            // report (GAP-23).
             crate::orchestrator::dispatcher::outcome::persist_conversation(
                 db,
                 &self.lane_key,
@@ -1188,6 +1191,7 @@ impl BuiltInTool for PostUpdateTool {
                 0,
                 0,
                 0,
+                None,
             );
         }
         self.bus.publish(SystemEvent::WorkflowProgress {

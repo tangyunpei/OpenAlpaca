@@ -13,6 +13,7 @@ pub(crate) mod usage;
 /// `NotificationDispatcher` writes T1 step 3's cron notice through it
 /// (extension design §7.3 step 2).
 pub use outcome::persist_conversation;
+pub(crate) use outcome::persist_completion_report;
 
 use crate::bus::EventBus;
 use crate::context::SharedContext;

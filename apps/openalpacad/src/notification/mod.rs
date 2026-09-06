@@ -298,6 +298,8 @@ impl NotificationDispatcher {
             0,
             0,
             0,
+            // An extension notice belongs to no run (GAP-23).
+            None,
         );
 
         // Push — the same cross-channel fan-out `handle_failure` uses for

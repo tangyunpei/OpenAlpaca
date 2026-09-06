@@ -3,7 +3,7 @@ use super::update_state_with_retry;
 use super::usage;
 use super::{
     DispatchOutcome, TaskDispatcher, finalize_task_with_outcome, format_task_result,
-    persist_conversation, spawn_task_memory_extraction,
+    persist_completion_report, spawn_task_memory_extraction,
 };
 use crate::agent::registry::DestroyOutcome;
 use crate::agent::subagent::SubAgent;
@@ -629,7 +629,10 @@ impl TaskDispatcher {
                     .as_deref()
                     .or(lead_agent.llm_config.model.as_deref())
                     .unwrap_or(&default_model);
-                persist_conversation(
+                // GAP-23: the report carries the run it closed *and* a
+                // `role='artifact'` link per file the run produced — the two
+                // things a reloaded transcript cannot otherwise know.
+                persist_completion_report(
                     db,
                     &lane_key,
                     &source,
@@ -638,6 +641,7 @@ impl TaskDispatcher {
                     result.loop_result.total_input_tokens as i64,
                     result.loop_result.total_output_tokens as i64,
                     runtime_secs,
+                    &task_id,
                 );
             }
 

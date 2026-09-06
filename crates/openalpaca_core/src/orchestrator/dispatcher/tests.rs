@@ -876,6 +876,150 @@ async fn test_lead_agent_completion_report_persists_final_content_verbatim() {
     let msg = wait_for_conversation_message(&db, "user1:cli").await;
     assert_eq!(msg.role, "assistant");
     assert_eq!(msg.content, report);
+
+    // GAP-23: and it names the run it reports on, so a reload can rebuild the
+    // report card without the `task_status` frames this client happened to see.
+    let task_id = msg.task_id.expect("the completion report carries its run");
+    let exists: i64 = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT count(*) FROM task WHERE id = ?1",
+                [&task_id],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(exists, 1, "task_id should name a real run");
+}
+
+/// GAP-23's second link: the completion report carries `task_id` *and* one
+/// `role='artifact'` row per file the run produced — the message
+/// `RunReportCard` renders after a reload.
+#[test]
+fn test_completion_report_links_the_runs_produced_artifacts() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+
+    db.with_connection(|conn| {
+        conn.execute(
+            "INSERT INTO task (id, title, created_by, source_lane)
+             VALUES ('task-1', 'A run', 'user1', 'user1:cli'),
+                    ('task-2', 'Another run', 'user1', 'user1:cli')",
+            [],
+        )?;
+        for (id, origin, task) in [
+            ("produced-1", "produced", "task-1"),
+            ("produced-2", "produced", "task-1"),
+            // The user's own upload during the run — not the run's output.
+            ("upload-1", "upload", "task-1"),
+            // Another run's file.
+            ("elsewhere", "produced", "task-2"),
+        ] {
+            conn.execute(
+                "INSERT INTO file_assets (id, owner_id, sha256, filename, mime_type, size_bytes, storage_path, status, origin, task_id, kind)
+                 VALUES (?1, 'user1', ?1, ?2, 'text/markdown', 10, ?3, 'ready', ?4, ?5, 'markdown')",
+                [
+                    id.to_string(),
+                    format!("{id}.md"),
+                    format!("/tmp/{id}.md"),
+                    origin.to_string(),
+                    task.to_string(),
+                ],
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+
+    outcome::persist_completion_report(
+        &db,
+        "user1:cli",
+        "cli",
+        "Done — two files written.".to_string(),
+        None,
+        0,
+        0,
+        0,
+        "task-1",
+    );
+
+    let messages = openalpaca_storage::ConversationRepository::new(&db)
+        .list_by_lane("user1:cli", 50, 0)
+        .unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].task_id.as_deref(), Some("task-1"));
+
+    let links = openalpaca_storage::FileAssetRepository::new(&db)
+        .artifact_links_for_messages(&[messages[0].id])
+        .unwrap();
+    let artifacts = links.get(&messages[0].id).expect("artifact links");
+    assert_eq!(
+        artifacts.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+        vec!["produced-1", "produced-2"],
+    );
+    assert_eq!(artifacts[0].name, "produced-1.md");
+    assert_eq!(artifacts[0].kind.as_deref(), Some("markdown"));
+}
+
+/// A run that wrote nothing still gets its run link — and no attachment rows.
+#[test]
+fn test_completion_report_with_no_artifacts_links_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+
+    outcome::persist_completion_report(
+        &db,
+        "user1:cli",
+        "cli",
+        "Done — nothing to show.".to_string(),
+        None,
+        0,
+        0,
+        0,
+        "task-1",
+    );
+
+    let messages = openalpaca_storage::ConversationRepository::new(&db)
+        .list_by_lane("user1:cli", 50, 0)
+        .unwrap();
+    assert_eq!(messages[0].task_id.as_deref(), Some("task-1"));
+
+    let rows: i64 = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT count(*) FROM conversation_message_attachments",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(rows, 0);
+}
+
+/// The lead agent's `post_update` progress notes and the daemon's own notices
+/// go through the *plain* writer, which links nothing and stamps no run.
+#[test]
+fn test_plain_persist_conversation_leaves_the_run_link_null() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+
+    outcome::persist_conversation(
+        &db,
+        "user1:cli",
+        "cli",
+        "Halfway there.".to_string(),
+        None,
+        0,
+        0,
+        0,
+        None,
+    );
+
+    let messages = openalpaca_storage::ConversationRepository::new(&db)
+        .list_by_lane("user1:cli", 50, 0)
+        .unwrap();
+    assert_eq!(messages.len(), 1);
+    assert!(messages[0].task_id.is_none());
 }
 
 #[tokio::test]
