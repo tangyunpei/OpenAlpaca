@@ -135,10 +135,16 @@ struct TaskTimeline {
 
 /// `openalpaca tasks status --format json` — the task plus its lanes, so the
 /// JSON path shows the runs the table path does.
+///
+/// `lanes_error` is present, and `lanes` empty, when the timeline call failed:
+/// a script has to be able to tell "this run spawned nothing" from "the lanes
+/// could not be read". It is absent whenever the timeline loaded.
 #[derive(Debug, Serialize)]
 struct TaskStatusJson<'a> {
     task: &'a TaskInner,
     lanes: &'a [TimelineLane],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lanes_error: Option<&'a str>,
 }
 
 /// One row of `GET /v1/events/history`.
@@ -241,88 +247,131 @@ async fn list_tasks(status: Option<String>, limit: usize, format: OutputFormat) 
     Ok(())
 }
 
+/// The table form of `tasks status`. `lanes` is `Err(message)` when the
+/// timeline call failed.
+///
+/// Rendering is separated from fetching so both outcomes are testable, and so
+/// the task — which the *first* call already returned in full — is printed
+/// before anything can go wrong with the second.
+fn render_task_status(t: &TaskInner, lanes: Result<&[TimelineLane], &str>) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+
+    let _ = writeln!(out, "{} {}", "Task:".dimmed(), t.id);
+    let _ = writeln!(out, "{} {}", "Title:".dimmed(), t.title);
+    if let Some(ref desc) = t.description {
+        let _ = writeln!(out, "{} {}", "Description:".dimmed(), desc);
+    }
+    let _ = writeln!(out, "{} {}", "Status:".dimmed(), status_color(&t.status));
+    let _ = writeln!(out, "{} {}", "Priority:".dimmed(), t.priority);
+    if let (Some(cur), Some(total)) = (t.progress_current, t.progress_total) {
+        let pct = if total > 0 { (cur * 100) / total } else { 0 };
+        let filled = (pct as usize) / 5; // 20-char bar
+        let empty = 20_usize.saturating_sub(filled);
+        let _ = writeln!(
+            out,
+            "{} [{}{}] {}/{}",
+            "Progress:".dimmed(),
+            "█".repeat(filled).green(),
+            "░".repeat(empty),
+            cur,
+            total
+        );
+    }
+    if let Some(ref summary) = t.result_summary {
+        let _ = writeln!(out, "{} {}", "Result:".dimmed(), summary);
+    }
+    let _ = writeln!(out, "{} {}", "Created by:".dimmed(), t.created_by);
+    let _ = writeln!(out, "{} {}", "Source:".dimmed(), t.source_lane);
+    let _ = writeln!(out, "{} {}", "Created:".dimmed(), t.created_at);
+    let _ = writeln!(out, "{} {}", "Updated:".dimmed(), t.updated_at);
+    if let Some(ref completed) = t.completed_at {
+        let _ = writeln!(out, "{} {}", "Completed:".dimmed(), completed);
+    }
+
+    match lanes {
+        // A run that spawned nothing gets no `Lanes:` block at all — the
+        // absence is the answer, and there is nothing to announce.
+        Ok(lanes) if lanes.is_empty() => {}
+        Ok(lanes) => {
+            let _ = writeln!(out);
+            let _ = writeln!(out, "{}", "Lanes:".dimmed());
+            // Served oldest-first by the daemon.
+            for lane in lanes {
+                let started = lane.started_at.chars().take(19).collect::<String>();
+                let window = match lane.ended_at.as_deref() {
+                    Some(ended) => format!(
+                        " {} → {}",
+                        started,
+                        ended.chars().take(19).collect::<String>()
+                    ),
+                    None => format!(" {} → …", started),
+                };
+                let detail_label = lane
+                    .detail
+                    .as_deref()
+                    .map(|d| format!(" — {}", d))
+                    .unwrap_or_default();
+                let _ = writeln!(
+                    out,
+                    "  {} {} ({}){}{}",
+                    status_color(&lane.state),
+                    lane.label,
+                    lane.template_id,
+                    window.dimmed(),
+                    detail_label.dimmed()
+                );
+            }
+        }
+        // Withheld, and said so: an empty lane list here would report the run
+        // as having spawned nothing.
+        Err(message) => {
+            let _ = writeln!(out);
+            let _ = writeln!(
+                out,
+                "{}",
+                format!("Lanes: could not be loaded — {message}").yellow()
+            );
+        }
+    }
+
+    out
+}
+
 async fn task_status(task_id: &str, format: OutputFormat) -> Result<()> {
     let client = DaemonClient::connect()?;
     let detail: TaskDetail = client.get(&format!("/v1/tasks/{}", task_id)).await?;
     // The agent runs come from the timeline now — the task routes stopped
-    // carrying them with P8.
-    let timeline: TaskTimeline = client
+    // carrying them with P8. It is a second call, so it fails independently:
+    // a transient error, or a CLI newer than the daemon it is talking to, must
+    // not cost the user the task the first call already returned.
+    let timeline: std::result::Result<TaskTimeline, String> = client
         .get(&format!("/v1/tasks/{}/timeline", task_id))
-        .await?;
+        .await
+        .map_err(|e| e.to_string());
 
     match format {
         OutputFormat::Json => {
+            let (lanes, lanes_error) = match timeline {
+                Ok(ref timeline) => (timeline.lanes.as_slice(), None),
+                Err(ref message) => (&[][..], Some(message.as_str())),
+            };
             println!(
                 "{}",
                 serde_json::to_string_pretty(&TaskStatusJson {
                     task: &detail.task,
-                    lanes: &timeline.lanes,
+                    lanes,
+                    lanes_error,
                 })
                 .unwrap_or_default()
             );
         }
         OutputFormat::Table => {
-            let t = &detail.task;
-            println!("{} {}", "Task:".dimmed(), t.id);
-            println!("{} {}", "Title:".dimmed(), t.title);
-            if let Some(ref desc) = t.description {
-                println!("{} {}", "Description:".dimmed(), desc);
-            }
-            println!("{} {}", "Status:".dimmed(), status_color(&t.status));
-            println!("{} {}", "Priority:".dimmed(), t.priority);
-            if let (Some(cur), Some(total)) = (t.progress_current, t.progress_total) {
-                let pct = if total > 0 { (cur * 100) / total } else { 0 };
-                let filled = (pct as usize) / 5; // 20-char bar
-                let empty = 20_usize.saturating_sub(filled);
-                println!(
-                    "{} [{}{}] {}/{}",
-                    "Progress:".dimmed(),
-                    "█".repeat(filled).green(),
-                    "░".repeat(empty),
-                    cur,
-                    total
-                );
-            }
-            if let Some(ref summary) = t.result_summary {
-                println!("{} {}", "Result:".dimmed(), summary);
-            }
-            println!("{} {}", "Created by:".dimmed(), t.created_by);
-            println!("{} {}", "Source:".dimmed(), t.source_lane);
-            println!("{} {}", "Created:".dimmed(), t.created_at);
-            println!("{} {}", "Updated:".dimmed(), t.updated_at);
-            if let Some(ref completed) = t.completed_at {
-                println!("{} {}", "Completed:".dimmed(), completed);
-            }
-
-            if !timeline.lanes.is_empty() {
-                println!();
-                println!("{}", "Lanes:".dimmed());
-                // Served oldest-first by the daemon.
-                for lane in &timeline.lanes {
-                    let started = lane.started_at.chars().take(19).collect::<String>();
-                    let window = match lane.ended_at.as_deref() {
-                        Some(ended) => format!(
-                            " {} → {}",
-                            started,
-                            ended.chars().take(19).collect::<String>()
-                        ),
-                        None => format!(" {} → …", started),
-                    };
-                    let detail_label = lane
-                        .detail
-                        .as_deref()
-                        .map(|d| format!(" — {}", d))
-                        .unwrap_or_default();
-                    println!(
-                        "  {} {} ({}){}{}",
-                        status_color(&lane.state),
-                        lane.label,
-                        lane.template_id,
-                        window.dimmed(),
-                        detail_label.dimmed()
-                    );
-                }
-            }
+            let lanes = match timeline {
+                Ok(ref timeline) => Ok(timeline.lanes.as_slice()),
+                Err(ref message) => Err(message.as_str()),
+            };
+            print!("{}", render_task_status(&detail.task, lanes));
         }
     }
     Ok(())
@@ -406,6 +455,109 @@ async fn create_task(description: Option<String>, priority: i32) -> Result<()> {
     let task_id = result["task_id"].as_str().unwrap_or("unknown");
     println!("{} Task created: {}", "✓".green(), task_id);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn task() -> TaskInner {
+        TaskInner {
+            id: "task-1".to_string(),
+            title: "Audit the connectors".to_string(),
+            description: Some("Read every adapter".to_string()),
+            status: "running".to_string(),
+            priority: 0,
+            progress_current: Some(5),
+            progress_total: Some(8),
+            result_summary: None,
+            created_by: "cli_user".to_string(),
+            source_lane: "cli_user:cli".to_string(),
+            created_at: "2026-09-04T09:15:00.000Z".to_string(),
+            updated_at: "2026-09-04T09:18:00.000Z".to_string(),
+            completed_at: None,
+        }
+    }
+
+    fn lane() -> TimelineLane {
+        TimelineLane {
+            label: "review·1".to_string(),
+            template_id: "review_agent".to_string(),
+            state: "running".to_string(),
+            detail: None,
+            started_at: "2026-09-04T09:15:00.000Z".to_string(),
+            ended_at: None,
+        }
+    }
+
+    /// The happy path: the task, then its lanes under a `Lanes:` heading.
+    #[test]
+    fn task_status_renders_the_lanes_under_the_task() {
+        let lanes = vec![lane()];
+        let out = render_task_status(&task(), Ok(&lanes));
+
+        assert!(out.contains("Audit the connectors"), "{out}");
+        assert!(out.contains("Lanes:"), "{out}");
+        assert!(out.contains("review·1"), "{out}");
+        assert!(out.contains("review_agent"), "{out}");
+        assert!(!out.contains("could not be loaded"), "{out}");
+    }
+
+    /// The timeline is a *second* daemon call, and it can fail on its own — a
+    /// transient DB error, or a CLI newer than the daemon it is talking to.
+    /// The task the first call already returned must still print, and the
+    /// missing lanes must be announced rather than silently read as "none".
+    #[test]
+    fn task_status_prints_the_task_when_the_timeline_call_fails() {
+        let out = render_task_status(&task(), Err("HTTP 404: Not Found"));
+
+        assert!(out.contains("task-1"), "{out}");
+        assert!(out.contains("Audit the connectors"), "{out}");
+        assert!(out.contains("Status:"), "{out}");
+        assert!(
+            out.contains("Lanes: could not be loaded — HTTP 404: Not Found"),
+            "{out}"
+        );
+    }
+
+    /// A run that spawned nothing is not the same as a run whose lanes could
+    /// not be read: it says neither.
+    #[test]
+    fn task_status_says_nothing_about_lanes_when_a_run_spawned_none() {
+        let out = render_task_status(&task(), Ok(&[]));
+
+        assert!(out.contains("Audit the connectors"), "{out}");
+        assert!(!out.contains("Lanes:"), "{out}");
+    }
+
+    /// `--format json` must stay valid JSON when the timeline fails, and must
+    /// distinguish "no lanes" from "lanes unknown" — an empty array alone
+    /// would tell a script the run spawned nothing.
+    #[test]
+    fn task_status_json_names_the_timeline_failure_instead_of_an_empty_array() {
+        let detail = task();
+        let value = serde_json::to_value(TaskStatusJson {
+            task: &detail,
+            lanes: &[],
+            lanes_error: Some("HTTP 500: Internal Server Error"),
+        })
+        .unwrap();
+
+        assert_eq!(value["task"]["id"], "task-1");
+        assert_eq!(value["lanes"], serde_json::json!([]));
+        assert_eq!(value["lanes_error"], "HTTP 500: Internal Server Error");
+
+        // A run whose timeline loaded carries no error key at all.
+        let lanes = vec![lane()];
+        let ok = serde_json::to_value(TaskStatusJson {
+            task: &detail,
+            lanes: &lanes,
+            lanes_error: None,
+        })
+        .unwrap();
+        assert!(ok.get("lanes_error").is_none());
+        assert_eq!(ok["lanes"].as_array().unwrap().len(), 1);
+    }
 }
 
 async fn task_action(task_id: &str, action: &str) -> Result<()> {
