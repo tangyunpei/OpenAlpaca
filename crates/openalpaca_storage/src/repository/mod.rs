@@ -24,7 +24,7 @@ pub use agent::AgentRepository;
 pub use config::ConfigRepository;
 pub use conversation::ConversationRepository;
 pub use dispatch_decision::DispatchDecisionRepository;
-pub use event_log::EventLogRepository;
+pub use event_log::{EventLogQuery, EventLogRepository};
 pub use feedback::MessageFeedbackRepository;
 pub use file_asset::FileAssetRepository;
 pub use followup::{
