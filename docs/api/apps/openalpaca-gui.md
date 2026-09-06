@@ -139,7 +139,7 @@
 ### `skills.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/skills.ts`
-- Exported functions: `getSkillHealth`
+- Exported functions: `getSkillHealth`, `listSkills`
 - Endpoints: none
 
 ### `status.test.ts`
