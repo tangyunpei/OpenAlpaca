@@ -139,6 +139,8 @@ impl Orchestrator {
                 Some(super::LoopOverrides::MainLoop { workspace_path }) => workspace_path.clone(),
                 _ => None,
             },
+            // Filled in by the sandbox at dispatch (T28), which owns the bus.
+            event_bus: None,
         };
 
         // Apply loop overrides if provided (main loop)

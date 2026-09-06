@@ -37,6 +37,38 @@ impl EventBroadcaster {
         let _ = self.tx.send(event);
     }
 
+    /// Broadcast a produced-artifact event and persist it (plan §4.9).
+    ///
+    /// `ts`/`instance_id` are stamped here, exactly as `task_status` stamps
+    /// them, so an artifact row in the event log is orderable against the run
+    /// rows around it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn artifact_written(
+        &self,
+        artifact_id: &str,
+        task_id: Option<&str>,
+        agent_id: Option<&str>,
+        name: &str,
+        kind: &str,
+        version: u32,
+        path: &str,
+    ) {
+        let event = ServerEvent::ArtifactWritten {
+            artifact_id: artifact_id.to_string(),
+            task_id: task_id.map(str::to_string),
+            agent_id: agent_id.map(str::to_string),
+            name: name.to_string(),
+            kind: kind.to_string(),
+            version,
+            path: path.to_string(),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
     /// Broadcast an agent status event and persist it
     pub fn agent_status(
         &self,

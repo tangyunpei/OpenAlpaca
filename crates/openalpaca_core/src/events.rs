@@ -410,6 +410,29 @@ pub enum SystemEvent {
         kind: String,
         timestamp: DateTime<Utc>,
     },
+    /// An agent wrote a **produced** artifact — `artifact_write`, or the
+    /// `workspace_write(entry_type = "artifact")` spill (plan §4.9).
+    ///
+    /// Published by the builtin itself, after a successful
+    /// `ArtifactStore::put`, from the [`EventBus`](crate::bus::EventBus) the
+    /// per-call [`ToolContext`](crate::tools::registry::ToolContext) carries.
+    /// Never fired for uploads ([`openalpaca_storage::UploadStore`]): an upload
+    /// has no agent and no version to announce.
+    ArtifactWritten {
+        artifact_id: String,
+        /// The run that produced it, when the turn had one.
+        task_id: Option<String>,
+        agent_id: Option<String>,
+        /// The head file's own name (`01-quarterly-report.md`), from the
+        /// record — not the model-supplied `name` argument.
+        name: String,
+        /// The snake_case `ArtifactKind` spelling.
+        kind: String,
+        version: u32,
+        /// The head file's absolute path (`ArtifactRecord::storage_path`).
+        path: String,
+        timestamp: DateTime<Utc>,
+    },
     /// An extension's observed state changed — T5, E5, `mark_failed`, T5-deny,
     /// T5-gone and §3.7's tool-list refresh (extension design ADR-030).
     ///

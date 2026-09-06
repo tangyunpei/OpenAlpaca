@@ -67,6 +67,42 @@ fn scope_from_context(ctx: &ToolContext) -> StoreScope {
     }
 }
 
+/// Announce a produced artifact on the context's bus (plan §4.9, T28).
+///
+/// Called from **both** `put` sites — the tool and the `workspace_write` spill
+/// — after the write has succeeded, so the event is a statement about a record
+/// that exists. Every field comes from the returned [`ArtifactRecord`] except
+/// `task_id`/`agent_id`, which are the caller's attribution; a record whose
+/// `kind` column is somehow `NULL` falls back to the MIME projection rather
+/// than inventing a spelling.
+///
+/// A context with no bus is the ordinary case in unit tests and on any path
+/// that never threaded one: log at `debug` and carry on. Announcing is not
+/// part of writing, and must never fail a write.
+fn announce_artifact_written(ctx: &ToolContext, record: &openalpaca_storage::ArtifactRecord) {
+    let Some(bus) = ctx.event_bus.as_ref() else {
+        tracing::debug!(
+            artifact_id = %record.id,
+            "artifact written with no event bus on the tool context — not announced"
+        );
+        return;
+    };
+    bus.publish(crate::events::SystemEvent::ArtifactWritten {
+        artifact_id: record.id.clone(),
+        task_id: record.task_id.clone(),
+        agent_id: record.agent_id.clone(),
+        name: record.name.clone(),
+        kind: record
+            .kind
+            .unwrap_or_else(|| ArtifactKind::for_mime(&record.mime_type))
+            .as_str()
+            .to_string(),
+        version: record.version,
+        path: record.storage_path.clone(),
+        timestamp: Utc::now(),
+    });
+}
+
 /// Split a model-supplied `name` into the artifact title and the extension
 /// hint the grammar reads.
 ///
@@ -198,9 +234,12 @@ impl BuiltInTool for ArtifactWriteTool {
         new.created = Utc::now();
         new.max_versions = Some(caps.max_versions_per_artifact);
 
+        // `created` is deliberately unread: a supersede is a write too, and the
+        // Library wants to hear about the new version.
         let (record, _created) = ArtifactStore::new(db)
             .put(new)
             .map_err(|e| format!("Failed to write artifact '{name}': {e}"))?;
+        announce_artifact_written(ctx, &record);
 
         serde_json::to_string(&serde_json::json!({
             "artifact_id": record.id,
@@ -285,6 +324,7 @@ pub(super) fn spill_workspace_entry(
     new.max_versions = Some(caps.max_versions_per_artifact);
 
     let (record, _created) = ArtifactStore::new(db).put(new).map_err(|e| e.to_string())?;
+    announce_artifact_written(ctx, &record);
     Ok(record.id)
 }
 
@@ -486,6 +526,30 @@ mod tests {
 
     fn parse(out: &str) -> serde_json::Value {
         serde_json::from_str(out).unwrap()
+    }
+
+    /// The same context, plus the bus the announcement rides (T28).
+    fn ctx_with_bus(
+        request_workspace_root: Option<&str>,
+        task_id: Option<&str>,
+        bus: &crate::bus::EventBus,
+    ) -> ToolContext {
+        let mut c = ctx(request_workspace_root, task_id);
+        c.event_bus = Some(bus.clone());
+        c
+    }
+
+    /// The next `ArtifactWritten` on the bus, or a panic naming what did arrive.
+    fn next_artifact_written(
+        rx: &mut tokio::sync::broadcast::Receiver<crate::events::SystemEvent>,
+    ) -> crate::events::SystemEvent {
+        loop {
+            match rx.try_recv() {
+                Ok(event @ crate::events::SystemEvent::ArtifactWritten { .. }) => return event,
+                Ok(_) => continue,
+                Err(e) => panic!("expected an ArtifactWritten on the bus: {e}"),
+            }
+        }
     }
 
     #[tokio::test]
@@ -943,6 +1007,189 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("owner context"), "{err}");
+    }
+
+    // ── T28: the ArtifactWritten announcement ──────────────────────────────
+
+    /// The event carries what the Library and the run log need, sourced from
+    /// the record `put` returned — never re-derived from the arguments.
+    #[tokio::test]
+    async fn a_successful_write_announces_the_artifact_on_the_bus() {
+        use crate::events::SystemEvent;
+
+        let fx = Fixture::new();
+        fx.task("t-6666dddd-0000-0000-0000-000000000000", "Announce run");
+        let root = fx.project_root();
+        let bus = crate::bus::EventBus::new(16);
+        let mut rx = bus.subscribe();
+
+        let out = fx
+            .tool()
+            .execute_with_context(
+                &serde_json::json!({
+                    "name": "quarterly-report.md",
+                    "kind": "markdown",
+                    "content": "# Q3\n"
+                }),
+                &ctx_with_bus(
+                    Some(root.to_str().unwrap()),
+                    Some("t-6666dddd-0000-0000-0000-000000000000"),
+                    &bus,
+                ),
+            )
+            .await
+            .unwrap();
+        let written = parse(&out);
+
+        match next_artifact_written(&mut rx) {
+            SystemEvent::ArtifactWritten {
+                artifact_id,
+                task_id,
+                agent_id,
+                name,
+                kind,
+                version,
+                path,
+                ..
+            } => {
+                assert_eq!(artifact_id, written["artifact_id"].as_str().unwrap());
+                assert_eq!(
+                    task_id.as_deref(),
+                    Some("t-6666dddd-0000-0000-0000-000000000000")
+                );
+                assert_eq!(agent_id.as_deref(), Some("writing_agent"));
+                // The head file's own name, not the model's `name` argument.
+                assert_eq!(name, "01-quarterly-report.md");
+                assert_eq!(kind, "markdown");
+                assert_eq!(version, 1);
+                assert_eq!(path, written["path"].as_str().unwrap());
+            }
+            other => panic!("Expected ArtifactWritten, got {other:?}"),
+        }
+    }
+
+    /// Superseding is a write: `put` returns `created == false` and a bumped
+    /// version, and the announcement carries the new version.
+    #[tokio::test]
+    async fn superseding_announces_the_new_version() {
+        use crate::events::SystemEvent;
+
+        let fx = Fixture::new();
+        let root = fx.project_root();
+        let bus = crate::bus::EventBus::new(16);
+        let mut rx = bus.subscribe();
+        let c = ctx_with_bus(Some(root.to_str().unwrap()), None, &bus);
+        let tool = fx.tool();
+
+        for content in ["v1\n", "v2\n"] {
+            tool.execute_with_context(
+                &serde_json::json!({"name": "report", "kind": "markdown", "content": content}),
+                &c,
+            )
+            .await
+            .unwrap();
+        }
+
+        let versions: Vec<u32> = (0..2)
+            .map(|_| match next_artifact_written(&mut rx) {
+                SystemEvent::ArtifactWritten { version, .. } => version,
+                other => panic!("Expected ArtifactWritten, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(versions, vec![1, 2]);
+    }
+
+    /// A context with no bus — a unit-test harness, a detached path that never
+    /// threaded one — writes the artifact and says nothing. Never an error.
+    #[tokio::test]
+    async fn a_context_without_a_bus_still_writes_the_artifact() {
+        let fx = Fixture::new();
+        let root = fx.project_root();
+
+        let out = fx
+            .tool()
+            .execute_with_context(
+                &serde_json::json!({"name": "quiet", "kind": "markdown", "content": "hi"}),
+                &ctx(Some(root.to_str().unwrap()), None),
+            )
+            .await
+            .unwrap();
+
+        let path = PathBuf::from(parse(&out)["path"].as_str().unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hi");
+    }
+
+    /// The wiring that makes the announcement reach production: the runner
+    /// hands the sandbox a context with no bus, and the sandbox fills in its
+    /// own before it dispatches — one site, no tool-name special case.
+    #[tokio::test]
+    async fn the_sandbox_supplies_its_own_bus_to_a_context_that_carries_none() {
+        use crate::agent::subagent::AgentConstraints;
+        use crate::bus::EventBus;
+        use crate::daemon_config::CircuitBreakerConfig;
+        use crate::events::SystemEvent;
+        use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+        use crate::tools::ToolRegistry;
+        use openalpaca_llm::ToolCall;
+
+        let fx = Fixture::new();
+        let project = fx.project_root();
+
+        let registry = ToolRegistry::default();
+        for tool in super::super::builtin_tools(
+            Some(fx.db.clone()),
+            None,
+            Some(Arc::new(ArcSwap::from_pointee(DaemonConfig::default()))),
+            None,
+            None,
+        ) {
+            registry.register(tool).unwrap();
+        }
+
+        let bus = EventBus::new(32);
+        let mut rx = bus.subscribe();
+        let sandbox = SandboxManager::new(
+            Arc::new(registry),
+            bus.clone(),
+            &CircuitBreakerConfig::default(),
+        );
+        let mut policy = SandboxPolicy::from_constraints(
+            "writing_agent",
+            &AgentConstraints {
+                allowed_capabilities: vec!["artifact_write".to_string()],
+                ..Default::default()
+            },
+        );
+        policy.auto_approve = true;
+
+        // The runner's context: no bus on it at all.
+        let call_ctx = ctx(Some(project.to_str().unwrap()), None);
+        assert!(call_ctx.event_bus.is_none());
+
+        sandbox
+            .execute_tool(
+                &ToolCall {
+                    id: "call-1".to_string(),
+                    name: "artifact_write".to_string(),
+                    arguments: serde_json::json!({
+                        "name": "deliverable",
+                        "kind": "markdown",
+                        "content": "# Deliverable\n"
+                    }),
+                },
+                &policy,
+                &call_ctx,
+            )
+            .await
+            .unwrap();
+
+        match next_artifact_written(&mut rx) {
+            SystemEvent::ArtifactWritten { name, kind, .. } => {
+                assert_eq!(name, "01-deliverable.md");
+                assert_eq!(kind, "markdown");
+            }
+            other => panic!("Expected ArtifactWritten, got {other:?}"),
+        }
     }
 
     /// The Phase 2 verify item, as far as a test without a live model can take

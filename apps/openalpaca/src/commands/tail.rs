@@ -24,6 +24,23 @@ enum ServerEvent {
         #[allow(dead_code)]
         instance_id: String,
     },
+    /// A produced artifact (plan §4.9). `task_id`/`agent_id` are absent for a
+    /// loose artifact — a chat turn that ran no workflow.
+    ArtifactWritten {
+        #[allow(dead_code)]
+        artifact_id: String,
+        #[allow(dead_code)]
+        task_id: Option<String>,
+        #[allow(dead_code)]
+        agent_id: Option<String>,
+        name: String,
+        kind: String,
+        version: u32,
+        path: String,
+        ts: DateTime<Utc>,
+        #[allow(dead_code)]
+        instance_id: String,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -131,8 +148,94 @@ fn print_event(event: &ServerEvent) {
                 format!("[{}...]", &request_id[..8]).dimmed()
             );
         }
+        ServerEvent::ArtifactWritten {
+            name,
+            kind,
+            version,
+            path,
+            ts,
+            ..
+        } => {
+            let time = ts.format("%H:%M:%S").to_string();
+            println!(
+                "{} 📄 {} {} {} {}",
+                time.dimmed(),
+                "artifact".green(),
+                name.bold(),
+                format!("[{kind} v{version}]").cyan(),
+                path.dimmed()
+            );
+        }
         ServerEvent::Unknown => {
             println!("{} unknown event", "?".dimmed());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// T28 — `artifact_written` has a real arm, so `openalpaca tail` names the
+    /// deliverable instead of printing "unknown event".
+    #[test]
+    fn artifact_written_deserializes_into_its_own_variant() {
+        let frame = r#"{
+            "type": "artifact_written",
+            "artifact_id": "a-1",
+            "task_id": "t-1",
+            "agent_id": "writing_agent",
+            "name": "01-quarterly-report.md",
+            "kind": "markdown",
+            "version": 2,
+            "path": "/p/.openalpaca/artifacts/run/01-quarterly-report.md",
+            "ts": "2026-09-05T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#;
+        match serde_json::from_str::<ServerEvent>(frame).unwrap() {
+            ServerEvent::ArtifactWritten {
+                artifact_id,
+                name,
+                kind,
+                version,
+                path,
+                ..
+            } => {
+                assert_eq!(artifact_id, "a-1");
+                assert_eq!(name, "01-quarterly-report.md");
+                assert_eq!(kind, "markdown");
+                assert_eq!(version, 2);
+                assert_eq!(path, "/p/.openalpaca/artifacts/run/01-quarterly-report.md");
+            }
+            other => panic!("Expected ArtifactWritten, got {other:?}"),
+        }
+    }
+
+    /// The loose case: no run, no agent. Both are optional on the wire.
+    #[test]
+    fn artifact_written_tolerates_a_missing_task_and_agent() {
+        let frame = r#"{
+            "type": "artifact_written",
+            "artifact_id": "a-2",
+            "task_id": null,
+            "agent_id": null,
+            "name": "01-notes.md",
+            "kind": "markdown",
+            "version": 1,
+            "path": "/h/.openalpaca/artifacts/loose/01-notes.md",
+            "ts": "2026-09-05T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#;
+        let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
+        assert!(matches!(
+            event,
+            ServerEvent::ArtifactWritten {
+                task_id: None,
+                agent_id: None,
+                ..
+            }
+        ));
+        // The print arm must survive both halves being absent.
+        print_event(&event);
     }
 }

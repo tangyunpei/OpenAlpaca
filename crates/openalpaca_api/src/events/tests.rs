@@ -150,6 +150,79 @@ fn test_followup_queued_serialization() {
     assert!(json.contains("\"kind\":\"followup\""));
 }
 
+// ── ServerEvent::ArtifactWritten (plan §4.9) ──────────────────────
+
+/// The wire shape the GUI union mirrors, field for field. `kind` is the
+/// snake_case `ArtifactKind` spelling and `path` is the head file's absolute
+/// `storage_path`.
+#[test]
+fn test_artifact_written_wire_shape() {
+    let event = ServerEvent::ArtifactWritten {
+        artifact_id: "a-1".into(),
+        task_id: Some("t-1".into()),
+        agent_id: Some("writing_agent".into()),
+        name: "01-quarterly-report.md".into(),
+        kind: "markdown".into(),
+        version: 2,
+        path: "/p/.openalpaca/artifacts/2026-09-05-run/01-quarterly-report.md".into(),
+        ts: Utc::now(),
+        instance_id: "inst-1".into(),
+    };
+    let value = serde_json::to_value(&event).unwrap();
+    assert_eq!(value["type"], "artifact_written");
+    assert_eq!(value["artifact_id"], "a-1");
+    assert_eq!(value["task_id"], "t-1");
+    assert_eq!(value["agent_id"], "writing_agent");
+    assert_eq!(value["name"], "01-quarterly-report.md");
+    assert_eq!(value["kind"], "markdown");
+    assert_eq!(value["version"], 2);
+    assert_eq!(
+        value["path"],
+        "/p/.openalpaca/artifacts/2026-09-05-run/01-quarterly-report.md"
+    );
+    assert!(value["ts"].is_string());
+    assert_eq!(value["instance_id"], "inst-1");
+}
+
+/// A loose artifact — a chat turn with no run and no agent attribution —
+/// keeps both fields on the wire as `null` rather than dropping them, so the
+/// client's union stays one shape.
+#[test]
+fn test_artifact_written_keeps_task_and_agent_nullable() {
+    let event = ServerEvent::ArtifactWritten {
+        artifact_id: "a-2".into(),
+        task_id: None,
+        agent_id: None,
+        name: "01-notes.md".into(),
+        kind: "markdown".into(),
+        version: 1,
+        path: "/h/.openalpaca/artifacts/loose/01-notes.md".into(),
+        ts: Utc::now(),
+        instance_id: "inst-1".into(),
+    };
+    let value = serde_json::to_value(&event).unwrap();
+    assert!(value["task_id"].is_null());
+    assert!(value["agent_id"].is_null());
+
+    let round_tripped: ServerEvent =
+        serde_json::from_str(&serde_json::to_string(&event).unwrap()).unwrap();
+    match round_tripped {
+        ServerEvent::ArtifactWritten {
+            artifact_id,
+            task_id,
+            agent_id,
+            version,
+            ..
+        } => {
+            assert_eq!(artifact_id, "a-2");
+            assert_eq!(task_id, None);
+            assert_eq!(agent_id, None);
+            assert_eq!(version, 1);
+        }
+        other => panic!("Expected ArtifactWritten, got {other:?}"),
+    }
+}
+
 // ── Existing tests ────────────────────────────────────────────────
 
 #[test]

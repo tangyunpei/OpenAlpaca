@@ -3,7 +3,10 @@ use tokio::sync::broadcast;
 
 /// The central nervous system of OpenAlpaca.
 /// A typed Event Bus using tokio::broadcast.
-#[derive(Clone)]
+///
+/// `Debug` is derived (the inner `Sender` prints as a placeholder) so the bus
+/// can ride on `ToolContext`, which is `Debug` and appears in tracing fields.
+#[derive(Clone, Debug)]
 pub struct EventBus {
     sender: broadcast::Sender<SystemEvent>,
 }

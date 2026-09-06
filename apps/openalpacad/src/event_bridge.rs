@@ -501,6 +501,30 @@ pub fn spawn_event_bridge(
                     tracing::info!(%lane_key, followup_id, %kind, "Follow-up queued");
                     eb.followup_queued(lane_key, followup_id, kind);
                 }
+                openalpaca_core::events::SystemEvent::ArtifactWritten {
+                    ref artifact_id,
+                    ref task_id,
+                    ref agent_id,
+                    ref name,
+                    ref kind,
+                    version,
+                    ref path,
+                    ..
+                } => {
+                    tracing::info!(
+                        %artifact_id, ?task_id, %name, %kind, version,
+                        "Artifact written"
+                    );
+                    eb.artifact_written(
+                        artifact_id,
+                        task_id.as_deref(),
+                        agent_id.as_deref(),
+                        name,
+                        kind,
+                        version,
+                        path,
+                    );
+                }
                 openalpaca_core::events::SystemEvent::ExtensionStateChanged {
                     ref extension, ref state, generation, tools_changed, ..
                 } => {
@@ -723,6 +747,76 @@ mod tests {
                 assert_eq!(instance_id, "test-instance");
             }
             other => panic!("Expected ExtensionCapabilityWithdrawn, got {other:?}"),
+        }
+        cancel.cancel();
+    }
+
+    /// T28 — the artifact announcement crosses the bridge with the bridge's own
+    /// `ts`/`instance_id`, exactly as `TaskStatus` does, and keeps `task_id` /
+    /// `agent_id` optional.
+    #[tokio::test]
+    async fn test_artifact_written_bridged_with_ts_and_instance_id() {
+        let (bus, mut rx, cancel) = setup_bridge();
+        let before = chrono::Utc::now();
+        bus.publish(SystemEvent::ArtifactWritten {
+            artifact_id: "a-1".into(),
+            task_id: Some("t-1".into()),
+            agent_id: Some("writing_agent".into()),
+            name: "01-quarterly-report.md".into(),
+            kind: "markdown".into(),
+            version: 2,
+            path: "/p/.openalpaca/artifacts/run/01-quarterly-report.md".into(),
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::ArtifactWritten {
+                artifact_id,
+                task_id,
+                agent_id,
+                name,
+                kind,
+                version,
+                path,
+                ts,
+                instance_id,
+            } => {
+                assert_eq!(artifact_id, "a-1");
+                assert_eq!(task_id.as_deref(), Some("t-1"));
+                assert_eq!(agent_id.as_deref(), Some("writing_agent"));
+                assert_eq!(name, "01-quarterly-report.md");
+                assert_eq!(kind, "markdown");
+                assert_eq!(version, 2);
+                assert_eq!(path, "/p/.openalpaca/artifacts/run/01-quarterly-report.md");
+                assert!(ts >= before);
+                assert_eq!(instance_id, "test-instance");
+            }
+            other => panic!("Expected ArtifactWritten, got {other:?}"),
+        }
+        cancel.cancel();
+    }
+
+    /// A loose artifact — no run, no agent — bridges with both fields absent.
+    #[tokio::test]
+    async fn test_artifact_written_bridges_without_a_task_or_agent() {
+        let (bus, mut rx, cancel) = setup_bridge();
+        bus.publish(SystemEvent::ArtifactWritten {
+            artifact_id: "a-2".into(),
+            task_id: None,
+            agent_id: None,
+            name: "01-notes.md".into(),
+            kind: "markdown".into(),
+            version: 1,
+            path: "/h/.openalpaca/artifacts/loose/01-notes.md".into(),
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::ArtifactWritten {
+                task_id, agent_id, ..
+            } => {
+                assert_eq!(task_id, None);
+                assert_eq!(agent_id, None);
+            }
+            other => panic!("Expected ArtifactWritten, got {other:?}"),
         }
         cancel.cancel();
     }

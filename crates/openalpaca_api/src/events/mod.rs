@@ -247,6 +247,29 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
+    /// An agent wrote a **produced** artifact — `artifact_write`, or the
+    /// `workspace_write(entry_type = "artifact")` spill (plan §4.9).
+    ///
+    /// Never fired for uploads: an upload has no agent and no version to
+    /// announce. A supersede is a write, so a second `put` of the same name
+    /// fires again with the bumped `version`.
+    ArtifactWritten {
+        artifact_id: String,
+        /// The run that produced it, when the turn had one. A chat turn with no
+        /// workflow writes a loose artifact and carries neither field.
+        task_id: Option<String>,
+        agent_id: Option<String>,
+        /// The head file's own name (`01-quarterly-report.md`), not the
+        /// model-supplied `name` argument.
+        name: String,
+        /// The snake_case `ArtifactKind` spelling the GUI's union declares.
+        kind: String,
+        version: u32,
+        /// The head file's absolute path (`file_assets.storage_path`).
+        path: String,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
     /// An extension's observed state changed — T5, E5, `mark_failed`, T5-deny,
     /// T5-gone and §3.7's tool-list refresh (extension design ADR-030).
     ///

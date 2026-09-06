@@ -626,6 +626,8 @@ impl Orchestrator {
                 principal: None,
                 scope: None,
                 workspace_path: None,
+                // Filled in by the sandbox at dispatch (T28), which owns the bus.
+                event_bus: None,
             };
             let needs_clone = !skill_doc.frontmatter.scripts.is_empty()
                 || !skill_doc.frontmatter.depends_on.is_empty();
@@ -1060,6 +1062,8 @@ impl Orchestrator {
             principal: None,
             scope: None,
             workspace_path: None,
+            // Filled in by the sandbox at dispatch (T28), which owns the bus.
+            event_bus: None,
         };
 
         let callback = SandboxToolCallback {

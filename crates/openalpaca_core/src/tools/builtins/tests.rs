@@ -441,6 +441,81 @@ mod workspace_artifact_spill {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
     }
 
+    /// T28: the spill writes a produced artifact, so it announces one too —
+    /// the Library must not have to wait for a `task_status` to learn that a
+    /// deliverable appeared.
+    #[tokio::test]
+    async fn the_spill_announces_the_artifact_it_wrote() {
+        use crate::events::SystemEvent;
+
+        let fx = Fixture::new();
+        let bus = crate::bus::EventBus::new(16);
+        let mut rx = bus.subscribe();
+        let mut ctx = fx.ctx();
+        ctx.event_bus = Some(bus.clone());
+
+        fx.tool()
+            .execute_with_context(
+                &serde_json::json!({
+                    "key": "draft_v1", "content": long_body(), "entry_type": "artifact"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let asset_id = fx.entry("draft_v1").file_asset_id.clone().unwrap();
+        match rx.try_recv().expect("the spill must announce on the bus") {
+            SystemEvent::ArtifactWritten {
+                artifact_id,
+                task_id,
+                agent_id,
+                name,
+                kind,
+                version,
+                path,
+                ..
+            } => {
+                assert_eq!(artifact_id, asset_id);
+                assert_eq!(task_id.as_deref(), Some(TASK_ID));
+                assert_eq!(agent_id.as_deref(), Some("writing_agent"));
+                assert_eq!(name, "01-draft-v1.md");
+                assert_eq!(kind, "markdown");
+                assert_eq!(version, 1);
+                assert!(
+                    PathBuf::from(&path)
+                        .starts_with(fx.project_root().join(".openalpaca").join("artifacts")),
+                    "announced {path}"
+                );
+            }
+            other => panic!("Expected ArtifactWritten, got {other:?}"),
+        }
+    }
+
+    /// A plain text entry writes nothing to the artifact store, so it announces
+    /// nothing either.
+    #[tokio::test]
+    async fn a_text_entry_announces_nothing() {
+        let fx = Fixture::new();
+        let bus = crate::bus::EventBus::new(16);
+        let mut rx = bus.subscribe();
+        let mut ctx = fx.ctx();
+        ctx.event_bus = Some(bus.clone());
+
+        fx.tool()
+            .execute_with_context(
+                &serde_json::json!({"key": "note", "content": "short", "entry_type": "text"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            rx.try_recv().is_err(),
+            "a text entry must not announce an artifact"
+        );
+    }
+
     /// The payoff chain: the pointer `collect_artifacts_from_workspace` builds
     /// now carries a resolvable id, so `artifact_count` counts something real
     /// and artifact delivery has a file to send.

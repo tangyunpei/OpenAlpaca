@@ -235,6 +235,8 @@ pub async fn run_lead_agent(
         principal: None,
         scope: None,
         workspace_path: None,
+        // Filled in by the sandbox at dispatch (T28), which owns the bus.
+        event_bus: None,
     };
 
     // Build a per-request ToolRegistry containing the base tools plus

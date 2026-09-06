@@ -355,6 +355,36 @@ impl EventBroadcaster {
                     });
                     repo.log("followup_queued", None, Some(&detail), None)
                 }
+                // A produced artifact (plan §4.9). Persisted like `task_status`
+                // so it appears in `GET /v1/events/history` and feeds GAP-10's
+                // per-run log; the agent goes in the indexed column so
+                // `?agent_id=` finds it.
+                ServerEvent::ArtifactWritten {
+                    artifact_id,
+                    task_id,
+                    agent_id,
+                    name,
+                    kind,
+                    version,
+                    path,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "artifact_id": artifact_id,
+                        "task_id": task_id,
+                        "agent_id": agent_id,
+                        "name": name,
+                        "kind": kind,
+                        "version": version,
+                        "path": path,
+                    });
+                    repo.log(
+                        "artifact_written",
+                        agent_id.as_deref(),
+                        Some(&detail),
+                        None,
+                    )
+                }
                 // Extension (MCP server / plugin) state transitions
                 ServerEvent::ExtensionStateChanged {
                     kind,
@@ -453,5 +483,81 @@ impl EventBroadcaster {
                 tracing::warn!("Failed to persist tool execution log: {e}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openalpaca_storage::Database;
+
+    fn test_db() -> (tempfile::TempDir, Database) {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let db = Database::open(&dir.path().join("test.db")).expect("open test db");
+        (dir, db)
+    }
+
+    /// T28 — `artifact_written` is persisted like `task_status`, so it shows up
+    /// in `GET /v1/events/history` and feeds GAP-10's per-run log. The agent id
+    /// goes in the indexed column, so `?agent_id=` finds the row.
+    #[test]
+    fn artifact_written_is_persisted_to_the_event_log() {
+        let (_dir, db) = test_db();
+        let eb = EventBroadcaster::new(16, "inst-1".to_string(), Some(db.clone()));
+
+        eb.artifact_written(
+            "a-1",
+            Some("t-1"),
+            Some("writing_agent"),
+            "01-quarterly-report.md",
+            "markdown",
+            2,
+            "/p/.openalpaca/artifacts/run/01-quarterly-report.md",
+        );
+
+        let rows = EventLogRepository::new(&db).recent(10).unwrap();
+        let row = rows
+            .iter()
+            .find(|r| r.event_type == "artifact_written")
+            .expect("the artifact write must reach the event log");
+        assert_eq!(row.agent_id.as_deref(), Some("writing_agent"));
+        let detail = row.detail.as_ref().expect("the row carries a detail blob");
+        assert_eq!(detail["artifact_id"], "a-1");
+        assert_eq!(detail["task_id"], "t-1");
+        assert_eq!(detail["agent_id"], "writing_agent");
+        assert_eq!(detail["name"], "01-quarterly-report.md");
+        assert_eq!(detail["kind"], "markdown");
+        assert_eq!(detail["version"], 2);
+        assert_eq!(
+            detail["path"],
+            "/p/.openalpaca/artifacts/run/01-quarterly-report.md"
+        );
+    }
+
+    /// A loose artifact still logs; it simply has no agent column to fill.
+    #[test]
+    fn a_loose_artifact_logs_without_an_agent() {
+        let (_dir, db) = test_db();
+        let eb = EventBroadcaster::new(16, "inst-1".to_string(), Some(db.clone()));
+
+        eb.artifact_written(
+            "a-2",
+            None,
+            None,
+            "01-notes.md",
+            "markdown",
+            1,
+            "/h/.openalpaca/artifacts/loose/01-notes.md",
+        );
+
+        let rows = EventLogRepository::new(&db).recent(10).unwrap();
+        let row = rows
+            .iter()
+            .find(|r| r.event_type == "artifact_written")
+            .expect("a loose artifact must still be logged");
+        assert_eq!(row.agent_id, None);
+        let detail = row.detail.as_ref().expect("the row carries a detail blob");
+        assert!(detail["task_id"].is_null());
+        assert!(detail["agent_id"].is_null());
     }
 }

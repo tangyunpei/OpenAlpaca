@@ -302,7 +302,20 @@ impl SandboxManager {
         let registry = self.registry.clone();
         let tool_name = tool_call.name.clone();
         let arguments = tool_call.arguments.clone();
-        let ctx_owned = ctx.clone();
+        // The one place a per-call context is finalized before dispatch, so the
+        // one place the bus is threaded onto it: a tool that announces its own
+        // side effects (`artifact_write`'s `ArtifactWritten`) gets a handle
+        // without every runner construction site learning about it. Nothing
+        // here is keyed on the tool name — the sandbox hands out the bus, the
+        // tool decides whether it has anything to say. A caller that already
+        // supplied one keeps it.
+        let ctx_owned = {
+            let mut owned = ctx.clone();
+            if owned.event_bus.is_none() {
+                owned.event_bus = Some(self.bus.clone());
+            }
+            owned
+        };
 
         let start = std::time::Instant::now();
         let result = if is_exempt {

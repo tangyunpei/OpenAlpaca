@@ -63,6 +63,16 @@ pub struct ToolContext {
     /// when one was provided. Persisted with steering/follow-up items so
     /// re-entry turns can restore the workspace scope (Routing V2).
     pub workspace_path: Option<String>,
+    /// The bus a tool announces its own side effects on — `artifact_write`'s
+    /// `SystemEvent::ArtifactWritten` today (plan §4.9).
+    ///
+    /// A cheap-to-clone broadcast handle, filled in by
+    /// [`SandboxManager::execute_tool`](crate::security::sandbox::SandboxManager::execute_tool)
+    /// from the sandbox's own bus when the caller's context carries none, so
+    /// every sandboxed call has one without 40 construction sites learning
+    /// about it. `None` is not an error: a tool that finds no bus logs at
+    /// `debug` and carries on.
+    pub event_bus: Option<crate::bus::EventBus>,
 }
 
 impl ToolContext {
