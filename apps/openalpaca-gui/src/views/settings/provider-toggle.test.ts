@@ -47,6 +47,33 @@ describe("providerToggleErrorCopy", () => {
     expect(copy).toMatch(/pick a different model/i);
   });
 
+  it("says the true thing when the default model places nowhere", () => {
+    const copy = providerToggleErrorCopy(
+      "anthropic",
+      apiError(
+        "DEFAULT_MODEL_UNRESOLVED",
+        "the default model 'my-local-thing' does not name any provider",
+      ),
+      "my-local-thing",
+    );
+
+    // The refusal is not about anthropic serving anything — saying so would be
+    // false — it is about the default model naming no provider at all.
+    expect(copy).toContain("my-local-thing");
+    expect(copy).toMatch(/does not resolve to any provider/i);
+    expect(copy).not.toMatch(/anthropic serves/i);
+  });
+
+  it("still names the fix when it does not know the default model id", () => {
+    const copy = providerToggleErrorCopy(
+      "anthropic",
+      apiError("DEFAULT_MODEL_UNRESOLVED", "x"),
+    );
+
+    expect(copy).toMatch(/does not resolve to any provider/i);
+    expect(copy).toMatch(/Settings . Models/i);
+  });
+
   it("renders its own sentence for every code the route can answer with", () => {
     expect(
       providerToggleErrorCopy("groq", apiError("PROVIDER_NOT_FOUND", "x", 404)),

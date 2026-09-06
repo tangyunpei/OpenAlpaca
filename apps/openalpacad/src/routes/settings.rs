@@ -553,10 +553,13 @@ pub async fn get_provider_usage(State(state): State<Arc<AppState>>) -> impl Into
 /// then what the model id itself says (`claude-…` → Anthropic, `gpt-…`/`o3-…`
 /// → OpenAI, or an explicit `provider/model` prefix). The disable is refused
 /// with `409 PROVIDER_IS_DEFAULT` when that resolves to the provider being
-/// turned off — nothing would be left to answer with — **and** when it
-/// resolves to nothing at all, in which case every provider disable is refused
-/// and the message names the unresolved default so the owner fixes it first.
-/// The guard fails closed: it never allows a disable on a guess.
+/// turned off — nothing would be left to answer with — and with
+/// `409 DEFAULT_MODEL_UNRESOLVED` when it resolves to nothing at all, in which
+/// case every provider disable is refused and the message names the unresolved
+/// default so the owner fixes it first. Two code words because the two assert
+/// different facts: the first says this provider serves the default model,
+/// which is precisely what the second could not establish. The guard fails
+/// closed: it never allows a disable on a guess.
 ///
 /// The 200 body is `{id, enabled, loaded, warning}`. `enabled` is the
 /// disposition now on disk; `loaded` is whether the router holds the provider.
@@ -605,13 +608,20 @@ pub(crate) async fn provider_enabled_response(
         Err(e @ SetProviderEnabledError::UnknownProvider(_)) => {
             api_error(StatusCode::NOT_FOUND, "PROVIDER_NOT_FOUND", e.to_string())
         }
-        // One code word for both arms of the guard: the remedy is the same —
-        // point `[orchestrator] model` at something else — and the daemon's
-        // message says which arm it was.
-        Err(
-            e @ (SetProviderEnabledError::IsDefaultProvider { .. }
-            | SetProviderEnabledError::DefaultModelUnresolved { .. }),
-        ) => api_error(StatusCode::CONFLICT, "PROVIDER_IS_DEFAULT", e.to_string()),
+        // A code word per arm. Both are 409 and both have the same remedy, but
+        // they assert different facts: `PROVIDER_IS_DEFAULT` says *this*
+        // provider serves the default model, which is exactly what the second
+        // arm could not establish. A client that renders per code — the GUI
+        // does — would otherwise say a false thing about the provider the owner
+        // just tried to turn off (R61a).
+        Err(e @ SetProviderEnabledError::IsDefaultProvider { .. }) => {
+            api_error(StatusCode::CONFLICT, "PROVIDER_IS_DEFAULT", e.to_string())
+        }
+        Err(e @ SetProviderEnabledError::DefaultModelUnresolved { .. }) => api_error(
+            StatusCode::CONFLICT,
+            "DEFAULT_MODEL_UNRESOLVED",
+            e.to_string(),
+        ),
         Err(e @ SetProviderEnabledError::Persist(_)) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "DISK_WRITE_FAILED",

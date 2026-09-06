@@ -13,15 +13,34 @@
 
 import { ApiError } from "@/lib/http";
 
-/** What the toast says when a toggle is refused. */
+/**
+ * What the toast says when a toggle is refused.
+ *
+ * `defaultModel` is what the daemon reports as `[orchestrator] model` — the
+ * same field the guard resolves — and is only used by
+ * `DEFAULT_MODEL_UNRESOLVED`, which is about that model rather than about the
+ * provider. Omitted, the sentence drops the id rather than inventing one.
+ */
 export function providerToggleErrorCopy(
   provider: string,
   error: Error,
+  defaultModel?: string,
 ): string {
   const code = error instanceof ApiError ? error.code : null;
   switch (code) {
     case "PROVIDER_IS_DEFAULT":
       return `${provider} serves the model you chat with — pick a different model first.`;
+    // Not the same sentence as the 409 above: there, this provider is the one
+    // that would have answered. Here nothing would have — the default model
+    // names no provider at all — so saying "<provider> serves the model you
+    // chat with" would be false about the row the owner just touched (R61a).
+    case "DEFAULT_MODEL_UNRESOLVED": {
+      const named =
+        defaultModel === undefined || defaultModel === ""
+          ? "The default model"
+          : `The default model ${defaultModel}`;
+      return `${named} does not resolve to any provider — fix it in Settings → Models before disabling a provider.`;
+    }
     case "PROVIDER_NOT_FOUND":
       return `This daemon does not know a provider called ${provider}.`;
     case "LLM_NOT_CONFIGURED":

@@ -293,16 +293,21 @@ async fn an_enable_the_router_cannot_load_says_so_on_the_wire() {
 /// R61's second arm, at the wire. When the default model resolves to nothing,
 /// *every* disable is refused — there would be no way to tell whether the one
 /// being turned off is the one that was going to answer — and the message names
-/// the model so the owner knows what to fix. Same code word as the first arm:
-/// the remedy is the same, pick a default the daemon can place.
+/// the model so the owner knows what to fix.
+///
+/// R61a: its **own** code word. The two arms share a remedy but not a fact:
+/// `PROVIDER_IS_DEFAULT` asserts that this provider serves the default model,
+/// which is exactly what this arm could not establish. A client that renders
+/// per code (the GUI does) would otherwise say a false thing about the provider
+/// the owner just tried to turn off.
 #[tokio::test]
-async fn a_default_model_that_places_nowhere_refuses_with_the_same_code_word() {
+async fn a_default_model_that_places_nowhere_gets_its_own_code_word() {
     let h = Harness::with_config(UNPLACEABLE_DEFAULT);
 
     let (status, body) = h.put("anthropic", false).await;
 
     assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error"]["code"], "PROVIDER_IS_DEFAULT");
+    assert_eq!(body["error"]["code"], "DEFAULT_MODEL_UNRESOLVED");
     assert!(
         body["error"]["message"]
             .as_str()
@@ -312,4 +317,31 @@ async fn a_default_model_that_places_nowhere_refuses_with_the_same_code_word() {
     );
     assert_eq!(h.text(), h.seed, "nothing was written");
     assert!(h.backups().is_empty(), "a refusal rotates nothing");
+}
+
+/// The other half of R61a: the arm that *can* name the provider keeps
+/// `PROVIDER_IS_DEFAULT`, so the two are told apart on the wire and not only in
+/// the prose of the message.
+///
+/// The two fixtures are built and dropped one at a time: `HomeStoreGuard` holds
+/// a process-wide `ENV_LOCK` for its lifetime, so two live at once deadlock.
+#[tokio::test]
+async fn the_two_409_arms_answer_different_code_words() {
+    let (placed_status, placed_body) = {
+        let h = Harness::new();
+        h.put("anthropic", false).await
+    };
+    let (unplaced_status, unplaced_body) = {
+        let h = Harness::with_config(UNPLACEABLE_DEFAULT);
+        h.put("anthropic", false).await
+    };
+
+    assert_eq!(placed_status, StatusCode::CONFLICT);
+    assert_eq!(unplaced_status, StatusCode::CONFLICT);
+    assert_eq!(placed_body["error"]["code"], "PROVIDER_IS_DEFAULT");
+    assert_eq!(unplaced_body["error"]["code"], "DEFAULT_MODEL_UNRESOLVED");
+    assert_ne!(
+        placed_body["error"]["code"], unplaced_body["error"]["code"],
+        "same status, different fact — the client renders per code"
+    );
 }

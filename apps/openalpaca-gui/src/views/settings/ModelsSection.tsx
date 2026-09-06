@@ -77,7 +77,11 @@ export function ModelsSection() {
               : `${row.id} on, but the daemon could not load it`,
           );
         },
-        onError: (error) => showToast(providerToggleErrorCopy(provider, error)),
+        // `activeModel` is the daemon's `[orchestrator] model` — the very field
+        // the 409 guard resolves — so the unresolved-default refusal can name
+        // the id the owner has to fix.
+        onError: (error) =>
+          showToast(providerToggleErrorCopy(provider, error, activeModel)),
       },
     );
   };
