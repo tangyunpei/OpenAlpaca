@@ -201,7 +201,11 @@ pub fn main_loop_tool_set(
     // ── Workflow-aware set (active workflows + steering only) ───────────
     let lane_has_workflows = !shared_context.workflows_for_lane(lane_key).is_empty();
     let steer_workflow = if lane_has_workflows && routing.steering_enabled {
-        let steer = Arc::new(SteerWorkflowTool::new(shared_context, bus.clone()));
+        let steer = Arc::new(SteerWorkflowTool::new(
+            shared_context,
+            bus.clone(),
+            db.clone(),
+        ));
         let steer_def = steer_workflow_tool_definition();
         definitions.push(steer_def.clone());
         instances.push((steer_def, steer.clone() as Arc<dyn BuiltInTool>));

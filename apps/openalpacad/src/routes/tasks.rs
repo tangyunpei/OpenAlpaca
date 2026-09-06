@@ -763,7 +763,14 @@ fn steer_task(
         received_at: Utc::now(),
     };
 
-    match push_steering(shared_context, bus, &task.id, &task.source_lane, msg) {
+    match push_steering(
+        shared_context,
+        bus,
+        &task.id,
+        &task.source_lane,
+        msg,
+        Some(db),
+    ) {
         Ok(inbox_depth) => Json(SteerTaskResponse {
             task_id: task.id,
             accepted: true,

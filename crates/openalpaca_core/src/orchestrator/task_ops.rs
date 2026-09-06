@@ -397,7 +397,14 @@ impl Orchestrator {
                     workspace_path,
                     received_at: Utc::now(),
                 };
-                match push_steering(&self.shared_context, &self.bus, task_id, lane_key, msg) {
+                match push_steering(
+                    &self.shared_context,
+                    &self.bus,
+                    task_id,
+                    lane_key,
+                    msg,
+                    self.db.as_ref(),
+                ) {
                     Ok(depth) => Ok(format!(
                         "Steering message queued for \"{}\" ({}). {} message{} waiting — the workflow picks it up at its next round.",
                         title,

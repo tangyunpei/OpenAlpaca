@@ -11,6 +11,8 @@ use crate::context::SharedContext;
 use crate::events::SystemEvent;
 use crate::security::policy::{Principal, Scope};
 use chrono::{DateTime, Utc};
+use openalpaca_storage::Database;
+use openalpaca_storage::repository::{FOLLOWUP_KIND_UNPROCESSED_STEERING, FollowupRepository};
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -57,12 +59,17 @@ impl SteeringMsg {
 /// Returns the queue depth after the push. `Err(Closed)` when no inbox is
 /// registered for `task_id` (the workflow already detached) or the inbox
 /// has closed; `Err(Full)` at the configured cap.
+///
+/// `db` is the same `Option<&Database>` precedent as the byte-cap eviction
+/// (T42): used only for the fallback below, and `None` is a legitimate
+/// "no index to keep consistent" answer — not an error.
 pub fn push_steering(
     shared_context: &SharedContext,
     bus: &EventBus,
     task_id: &str,
     lane_key: &str,
     msg: SteeringMsg,
+    db: Option<&Database>,
 ) -> Result<usize, SteeringPushError> {
     let inbox = shared_context
         .steering_inbox(task_id)
@@ -79,6 +86,7 @@ pub fn push_steering(
     // explicitly when the turn had no project, so "absent" always means "an
     // older build wrote this line".
     let principal = serde_json::to_value(&msg.principal).unwrap_or(serde_json::Value::Null);
+    let principal_json = serde_json::to_string(&msg.principal).ok();
     let workspace_path = msg.workspace_path.clone();
     let depth = inbox.push(msg)?;
     // §5.5: one line in the workflow's transcript, written on the *accepted*
@@ -86,7 +94,7 @@ pub fn push_steering(
     // a `steering` record with no later `steering_drained` naming its request
     // id is an interjection the workflow never delivered.
     if let Some(log) = shared_context.task_session_log(task_id) {
-        log.emit(
+        let recorded = log.emit(
             crate::session_log::Record::new(crate::session_log::RecordType::Steering)
                 .task(Some(task_id))
                 .with_data(serde_json::json!({
@@ -99,6 +107,31 @@ pub fn push_steering(
                     "workspace_path": workspace_path,
                 })),
         );
+        // `emit` returns `false` on a full channel or a writer that is
+        // already gone (T42) — the record never reaches disk, so the
+        // crash-recovery scan (`session_log::recovery::undrained_steering`)
+        // can never find it: this interjection is unrecoverable on a crash.
+        // File it as the same `unprocessed_steering` row the graceful path
+        // and the boot recovery both write, so a log-channel drop is no
+        // worse than a crash — the interjection still surfaces on the
+        // lane's next turn (`query_handler/unprocessed_steering.rs`)
+        // instead of vanishing outright.
+        if !recorded {
+            tracing::warn!(
+                task_id = %task_id,
+                request_id = %request_id,
+                "steering record dropped from the session log — this interjection will not \
+                 survive a crash; filing it as an unprocessed_steering follow-up instead"
+            );
+            file_dropped_steering(
+                db,
+                lane_key,
+                task_id,
+                &text,
+                principal_json.as_deref(),
+                workspace_path.as_deref(),
+            );
+        }
     }
     bus.publish(SystemEvent::WorkflowSteered {
         task_id: task_id.to_string(),
@@ -107,6 +140,51 @@ pub fn push_steering(
         timestamp: Utc::now(),
     });
     Ok(depth)
+}
+
+/// The fallback `push_steering` takes when the session log dropped its
+/// `steering` record. Writes exactly what
+/// `FollowupRepository::recover_unprocessed_steering` would write for this
+/// same interjection after a crash — same kind, same columns — so a
+/// log-channel drop degrades to "recovered late" rather than "lost".
+fn file_dropped_steering(
+    db: Option<&Database>,
+    lane_key: &str,
+    task_id: &str,
+    text: &str,
+    principal_json: Option<&str>,
+    workspace_path: Option<&str>,
+) {
+    let Some(db) = db else {
+        tracing::warn!(
+            task_id = %task_id,
+            "no database available to file the dropped steering record — this interjection \
+             is lost if the workflow crashes before draining it"
+        );
+        return;
+    };
+    let Some(principal_json) = principal_json else {
+        tracing::warn!(
+            task_id = %task_id,
+            "dropped steering record has an unserializable principal — cannot file it as a \
+             follow-up"
+        );
+        return;
+    };
+    let repo = FollowupRepository::new(db);
+    if let Err(e) = repo.queue(
+        lane_key,
+        FOLLOWUP_KIND_UNPROCESSED_STEERING,
+        text,
+        principal_json,
+        workspace_path,
+        Some(task_id),
+    ) {
+        tracing::warn!(
+            task_id = %task_id,
+            "failed to file the dropped steering record as a follow-up: {e}"
+        );
+    }
 }
 
 /// Why a push into a [`SteeringInbox`] was rejected.
@@ -392,7 +470,7 @@ mod tests {
 
         let m = msg("focus on the tests");
         let request_id = m.request_id;
-        assert_eq!(push_steering(&ctx, &bus, "task-1", "u:gui", m), Ok(1));
+        assert_eq!(push_steering(&ctx, &bus, "task-1", "u:gui", m, None), Ok(1));
         assert!(handle.flush().await);
 
         let records = read_records(&dir.path().join("sess-1")).unwrap();
@@ -432,7 +510,7 @@ mod tests {
             global_id: "u-42".to_string(),
         };
         m.workspace_path = Some("/repo".to_string());
-        assert_eq!(push_steering(&ctx, &bus, "task-1", "u:gui", m), Ok(1));
+        assert_eq!(push_steering(&ctx, &bus, "task-1", "u:gui", m, None), Ok(1));
         assert!(handle.flush().await);
 
         let records = read_records(&dir.path().join("sess-1")).unwrap();
@@ -469,7 +547,7 @@ mod tests {
         ctx.register_steering_inbox("task-1", Arc::new(SteeringInbox::default()));
         ctx.register_task_session_log("task-1", handle.clone());
         assert_eq!(
-            push_steering(&ctx, &bus, "task-1", "u:gui", msg("no project")),
+            push_steering(&ctx, &bus, "task-1", "u:gui", msg("no project"), None),
             Ok(1)
         );
         assert!(handle.flush().await);
@@ -505,11 +583,116 @@ mod tests {
         ctx.register_task_session_log("task-2", handle.clone());
 
         assert_eq!(
-            push_steering(&ctx, &bus, "task-2", "u:gui", msg("second")),
+            push_steering(&ctx, &bus, "task-2", "u:gui", msg("second"), None),
             Err(SteeringPushError::Full)
         );
         assert!(handle.flush().await);
         assert!(read_records(&dir.path().join("sess-2")).unwrap().is_empty());
+    }
+
+    /// §5.5's crash-recovery scan reads the `steering` record off disk — a
+    /// record `emit()` drops (a full channel, or a writer that has already
+    /// gone) never reaches it, and `push_steering` used to ignore that
+    /// return value entirely. On a drop, fall back to writing the same
+    /// `unprocessed_steering` row the graceful path and the boot recovery
+    /// both write, so a log-channel drop is no worse than a crash: the
+    /// interjection still surfaces on the lane's next turn
+    /// (`query_handler/unprocessed_steering.rs`) instead of vanishing.
+    #[tokio::test]
+    async fn a_dropped_steering_record_is_filed_as_a_followup() {
+        use crate::session_log::{SessionLogLimits, SessionLogService};
+        use openalpaca_storage::Database;
+        use openalpaca_storage::repository::{
+            FOLLOWUP_KIND_UNPROCESSED_STEERING, FollowupRepository,
+        };
+
+        let ctx = SharedContext::new();
+        let bus = EventBus::default();
+        let log_dir = tempfile::tempdir().unwrap();
+        // A one-slot channel: the first `emit` fills it, the second finds it
+        // full. Nothing awaits between the two pushes, so on this
+        // current-thread test runtime the writer never gets a chance to
+        // drain it first — same determinism as
+        // `session_log::tests::a_full_channel_drops_and_counts_instead_of_blocking`.
+        let service = SessionLogService::new(
+            log_dir.path().to_path_buf(),
+            None,
+            SessionLogLimits {
+                channel_capacity: 1,
+                ..SessionLogLimits::default()
+            },
+            "test".to_string(),
+        );
+        let handle = service.handle_for("sess-1");
+        ctx.register_steering_inbox("task-1", Arc::new(SteeringInbox::default()));
+        ctx.register_task_session_log("task-1", handle.clone());
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        let mut first = msg("first");
+        first.workspace_path = Some("/repo".to_string());
+        assert_eq!(
+            push_steering(&ctx, &bus, "task-1", "u:gui", first, Some(&db)),
+            Ok(1)
+        );
+
+        let mut second = msg("second");
+        second.workspace_path = Some("/repo".to_string());
+        assert_eq!(
+            push_steering(&ctx, &bus, "task-1", "u:gui", second, Some(&db)),
+            Ok(2)
+        );
+        assert!(
+            handle.dropped() > 0,
+            "the second push's record must have been dropped to exercise the fallback"
+        );
+
+        let repo = FollowupRepository::new(&db);
+        let rows = repo.list_queued_by_lane("u:gui").unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "only the dropped push should be filed as a follow-up: {rows:?}"
+        );
+        assert_eq!(rows[0].kind, FOLLOWUP_KIND_UNPROCESSED_STEERING);
+        assert_eq!(rows[0].content, "second");
+        assert_eq!(rows[0].source_task_id.as_deref(), Some("task-1"));
+        assert_eq!(rows[0].workspace_path.as_deref(), Some("/repo"));
+    }
+
+    /// With no database at all, a dropped record has nowhere to be filed.
+    /// The push itself must still succeed — the inbox already has the
+    /// message — and the caller is warned rather than the process panicking.
+    #[tokio::test]
+    async fn a_dropped_steering_record_with_no_database_does_not_panic() {
+        use crate::session_log::{SessionLogLimits, SessionLogService};
+
+        let ctx = SharedContext::new();
+        let bus = EventBus::default();
+        let dir = tempfile::tempdir().unwrap();
+        let service = SessionLogService::new(
+            dir.path().to_path_buf(),
+            None,
+            SessionLogLimits {
+                channel_capacity: 1,
+                ..SessionLogLimits::default()
+            },
+            "test".to_string(),
+        );
+        let handle = service.handle_for("sess-1");
+        ctx.register_steering_inbox("task-1", Arc::new(SteeringInbox::default()));
+        ctx.register_task_session_log("task-1", handle.clone());
+
+        assert_eq!(
+            push_steering(&ctx, &bus, "task-1", "u:gui", msg("first"), None),
+            Ok(1)
+        );
+        assert_eq!(
+            push_steering(&ctx, &bus, "task-1", "u:gui", msg("second"), None),
+            Ok(2)
+        );
+        assert!(handle.dropped() > 0);
     }
 
     #[test]
@@ -520,7 +703,7 @@ mod tests {
 
         // No inbox registered for the task → Closed, no event.
         assert_eq!(
-            push_steering(&ctx, &bus, "task-1", "lane-1", msg("early")),
+            push_steering(&ctx, &bus, "task-1", "lane-1", msg("early"), None),
             Err(SteeringPushError::Closed)
         );
         assert!(rx.try_recv().is_err());
@@ -529,7 +712,10 @@ mod tests {
         ctx.register_steering_inbox("task-1", inbox.clone());
         let m = msg("go");
         let expected_request_id = m.request_id;
-        assert_eq!(push_steering(&ctx, &bus, "task-1", "lane-1", m), Ok(1));
+        assert_eq!(
+            push_steering(&ctx, &bus, "task-1", "lane-1", m, None),
+            Ok(1)
+        );
 
         match rx.try_recv().expect("WorkflowSteered must be published") {
             SystemEvent::WorkflowSteered {
@@ -548,7 +734,7 @@ mod tests {
         // Closed inbox → Closed, and no event for the failed push.
         inbox.close_and_drain();
         assert_eq!(
-            push_steering(&ctx, &bus, "task-1", "lane-1", msg("late")),
+            push_steering(&ctx, &bus, "task-1", "lane-1", msg("late"), None),
             Err(SteeringPushError::Closed)
         );
         assert!(rx.try_recv().is_err());

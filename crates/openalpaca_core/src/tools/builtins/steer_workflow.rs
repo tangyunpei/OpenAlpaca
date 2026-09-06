@@ -23,13 +23,22 @@ use uuid::Uuid;
 pub struct SteerWorkflowTool {
     shared_context: Arc<SharedContext>,
     bus: EventBus,
+    /// Threaded through to `push_steering` — its fallback when the session
+    /// log drops a `steering` record (a full channel, or a writer that has
+    /// already gone). `None` when no database is configured.
+    db: Option<openalpaca_storage::Database>,
 }
 
 impl SteerWorkflowTool {
-    pub fn new(shared_context: Arc<SharedContext>, bus: EventBus) -> Self {
+    pub fn new(
+        shared_context: Arc<SharedContext>,
+        bus: EventBus,
+        db: Option<openalpaca_storage::Database>,
+    ) -> Self {
         Self {
             shared_context,
             bus,
+            db,
         }
     }
 }
@@ -109,7 +118,14 @@ impl BuiltInTool for SteerWorkflowTool {
             received_at: Utc::now(),
         };
 
-        match push_steering(&self.shared_context, &self.bus, task_id, lane_key, msg) {
+        match push_steering(
+            &self.shared_context,
+            &self.bus,
+            task_id,
+            lane_key,
+            msg,
+            self.db.as_ref(),
+        ) {
             Ok(depth) => {
                 Ok(format!(
                     "Steering message queued for workflow {} ({} message{} waiting). The \
@@ -200,7 +216,7 @@ mod tests {
     async fn test_steer_ok_queues_message_with_ctx_identity() {
         let (shared, bus, inbox) = setup_with_workflow(16);
         let mut rx = bus.subscribe();
-        let tool = SteerWorkflowTool::new(shared, bus.clone());
+        let tool = SteerWorkflowTool::new(shared, bus.clone(), None);
 
         let result = tool
             .execute_with_context(
@@ -241,7 +257,7 @@ mod tests {
     #[tokio::test]
     async fn test_steer_full_inbox_suggests_queue_followup() {
         let (shared, bus, inbox) = setup_with_workflow(1);
-        let tool = SteerWorkflowTool::new(shared, bus);
+        let tool = SteerWorkflowTool::new(shared, bus, None);
         inbox
             .push(SteeringMsg {
                 text: "earlier".to_string(),
@@ -266,7 +282,7 @@ mod tests {
     #[tokio::test]
     async fn test_steer_closed_inbox_reports_finished() {
         let (shared, bus, inbox) = setup_with_workflow(16);
-        let tool = SteerWorkflowTool::new(shared, bus);
+        let tool = SteerWorkflowTool::new(shared, bus, None);
         inbox.close_and_drain();
 
         let err = tool
@@ -282,7 +298,7 @@ mod tests {
     #[tokio::test]
     async fn test_steer_cross_lane_rejected() {
         let (shared, bus, inbox) = setup_with_workflow(16);
-        let tool = SteerWorkflowTool::new(shared.clone(), bus);
+        let tool = SteerWorkflowTool::new(shared.clone(), bus, None);
 
         // Another lane's workflow — not steerable from user1:cli.
         shared.register_workflow_for_lane("user2:telegram", "task-2");
@@ -306,7 +322,7 @@ mod tests {
     #[tokio::test]
     async fn test_steer_requires_lane_context() {
         let (shared, bus, _inbox) = setup_with_workflow(16);
-        let tool = SteerWorkflowTool::new(shared, bus);
+        let tool = SteerWorkflowTool::new(shared, bus, None);
         let err = tool
             .execute_with_context(
                 &serde_json::json!({"task_id": "task-1", "message": "hi"}),
