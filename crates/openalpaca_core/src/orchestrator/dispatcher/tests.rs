@@ -1057,6 +1057,8 @@ async fn the_run_slot_is_held_until_the_row_is_terminal() {
             tokio::time::Instant::now() < deadline,
             "the lead agent execution never finished"
         );
-        tokio::task::yield_now().await;
+        // A short sleep rather than a bare yield: the poll must not hot-spin
+        // against the wall-clock deadline on a loaded test runner.
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
     }
 }
