@@ -222,9 +222,10 @@ below for what shipped). The design's `ARTS[]` fixture shape is:
 | `184 calls 7d`, `unwired` tag, `Connect service`                        | ❌ **GAP-17**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |                                                                                                                                  |
 | live status                                                             | ✅ WS `connector_status` `{ id, status, ts, instance_id }`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |                                                                                                                                  |
 | **Tools** rows (`shell_execute`, `file_edit`, `github__create_issue`…)  | ✅ `GET /v1/tools` → `[{ name, description, source, origin, provides_capabilities, requires_confirmation, invocations_today, version, author }]` (ADR-030 §8). The design calls the section "Skills"; its rows are **tools**                                                                                                                                                                                                                                                                                                                                                  |
-| skill health                                                            | ✅ `GET /v1/skills/health` → `SkillHealthMetrics[] { skill_id, total_invocations, clean_success_rate, clean_success_rate_7d, repair_rate, repair_effectiveness, degraded_rate, avg_duration_ms, avg_cost_usd, avg_rounds, last_invoked_at?, user_satisfaction_rate?, feedback_count, feedback_coverage }`                                                                                                                                                                                                                                                                     | health only — no name/description/`asks`/enabled state                                                                           |
+| skill health                                                            | ✅ `GET /v1/skills/health` → `SkillHealthMetrics[] { skill_id, total_invocations, clean_success_rate, clean_success_rate_7d, repair_rate, repair_effectiveness, degraded_rate, avg_duration_ms, avg_cost_usd, avg_rounds, last_invoked_at?, user_satisfaction_rate?, feedback_count, feedback_coverage }`                                                                                                                                                                                                                                                                     | lifetime metrics; the name comes from the catalog row beside it                                                                  |
+| skill names / descriptions / triggers                                   | ✅ **GAP-18, closed** — `GET /v1/skills` → `[{ id, name, description, source, origin, requires_capabilities, triggers: { slash, keywords }, schedule, invocations_today, version, author }]`. The health rows join it on the id and show the name; a row the catalog no longer holds keeps its id                                                                                                                                                                                                                                                                             |                                                                                                                                  |
 | `asks` (requires confirmation) badge                                    | ✅ `requires_confirmation` on the tool row                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |                                                                                                                                  |
-| `9 uses today`                                                          | ⚠️ `total_invocations` is lifetime; no daily breakdown                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |                                                                                                                                  |
+| `9 uses today`                                                          | ✅ `invocations_today` on both catalog rows — `tool_execution_log` / `skill_execution_log` counted from today's local midnight converted to UTC. `SkillHealthMetrics.total_invocations` stays lifetime                                                                                                                                                                                                                                                                                                                                                                        |                                                                                                                                  |
 | skill lifecycle events                                                  | ✅ WS `skill_catalog_updated`, `skill_invocation_started` `{ request_id, skill_id, query_preview }`, `skill_completed` `{ request_id, skill_id, duration_ms, output_preview }`, `skill_failed` `{ request_id, skill_id, error }`                                                                                                                                                                                                                                                                                                                                              |                                                                                                                                  |
 | **Extensions** rows (MCP servers + plugins)                             | ✅ `GET /v1/extensions?include_orphaned=true` → the 23-field row of ADR-030 §8 (`kind, id, version, transport, enabled, consent, state, reason, actionable, detail, hint, missing_config_keys, added_capabilities, tools, skipped_tools, withdrawn_by_server, tools_changed_at, declared, skills, agents, connector, provider, since`)                                                                                                                                                                                                                                        |                                                                                                                                  |
 | enable/disable/reload/approve/deny/config/remove                        | ✅ `POST /v1/extensions/{kind}/{id}/{enable\|disable\|reload\|approve\|deny}`; `GET\|POST /v1/extensions/{kind}/{id}/config`; `DELETE /v1/extensions/plugin/{id}` (orphans only). `/v1/plugins*` was deleted in C7                                                                                                                                                                                                                                                                                                                                                            |                                                                                                                                  |
@@ -1028,6 +1029,47 @@ structured `detail`.
 
 ### GAP-18 — No skill catalog endpoint
 
+> **Closed in Phase 8**, in two halves. The tool half was `GET /v1/tools` (below).
+> The skill half is `GET /v1/skills` — a bare array, sorted by id:
+>
+> ```http
+> GET /v1/skills → 200 [ {
+>   "id": "daily-digest", "name": "Daily Digest", "description": "…",
+>   "source": "file" | "plugin",
+>   "origin": { "kind": "plugin", "id": "notion", "enabled": true,
+>               "state": "enabled" } | null,
+>   "requires_capabilities": ["notion::create_page"],
+>   "triggers": { "slash": "digest", "keywords": ["digest"] },
+>   "schedule": "0 9 * * *" | null,
+>   "invocations_today": 2, "version": "3.1.0" | null, "author": "plugin:notion"
+> } ]
+> ```
+>
+> Not the shape proposed below, and deliberately so. **No `scope`, and no
+> `command`** — the scope is folded into `author` (`file:project` / `file:user`,
+> matching `/v1/tools`' `mcp:<server>` / `plugin:<id>` convention), and the slash
+> command is one of two `triggers` beside the routing keywords, because a client
+> that shows how a skill fires needs both. **No embedded `health`** — the two
+> routes stay separate and the client joins them on the id: `/v1/skills/health` is
+> keyed by `skill_id` and outlives the catalog (a deleted directory, a disabled
+> plugin's withdrawn skill), so embedding it would have made a health row
+> unreachable the moment its catalog entry went away. Settings → Tools joins them
+> and falls back to the id.
+>
+> **`origin` is `/v1/tools`' rule one axis over**: the extension row read from the
+> ledger at render time for a plugin skill, and `null` for a file skill, which is
+> on no ENABLE axis at all and carries no enable field of any kind. There is no
+> per-skill toggle, and no route that would accept one (S1). **Nothing is
+> filtered**: T2 already removes a disabled plugin's skills from the catalog
+> (ADR-030 §10 case 5(a)), so a filter here would be a second enforcement point
+> rather than a rendering.
+>
+> **`invocations_today` is the tool catalog's count one table over** — one grouped
+> query over `skill_execution_log` from today's local midnight _converted to UTC_
+> (the column is `datetime('now')`, i.e. UTC text), served by `idx_sel_skill_ts`.
+> **`version` is `null`** when the frontmatter omits it, rather than an invented
+> number.
+
 **Closed half:** the tool catalog. `GET /v1/tools` ships with ADR-030 §8 —
 `{ name, description, source, origin, provides_capabilities, requires_confirmation,
 invocations_today, version, author }` — and backs the Settings → Tools rows, including
@@ -1037,15 +1079,16 @@ system; availability is _derived_ — (the agent's capabilities) ∩ (its extens
 enabled) — never asserted per tool (S1), so provenance is `origin: {kind, id, enabled,
 state} | null` and a builtin row carries no enable field at all.
 
-**Still missing:** the **skill** listing.
+**The skill listing, as it was missing** (`GET /v1/skills` now serves it):
 
 - `SkillCatalog` (`orchestrator/skill/catalog/mod.rs`) has `list_names()`,
   `catalog_summary() -> Vec<(String, String, Option<String>)>`, `entries_snapshot()`,
   `count()`, `validate_dependencies()` — in-process only. The **only** skill route is
-  `GET /v1/skills/health`, which returns `SkillHealthMetrics` keyed by `skill_id` with no
+  `GET /v1/skills/health`, which returned `SkillHealthMetrics` keyed by `skill_id` with no
   name, description or trigger, which is why the Skill health rows read as ids.
+  `entries_snapshot()` is what the route renders.
 
-**Proposal:**
+**Proposal (superseded by the shape above):**
 
 ```
 GET /v1/skills
@@ -1255,8 +1298,9 @@ Gaps 01, 07, 08.1, 08.2 and 16 shipped in Phase 0 (`88e8a3b`, `298bad3`, `a827dc
 sections above. GAP-08's remaining piece (the cap and a real usage-summary rollup)
 continues below as GAP-08c. **GAP-22 closed in C7** (the six `plugin_*` variants were
 deleted, and their replacements carry `ts`/`instance_id`), **GAP-19 became GAP-24**
-(widened to both extension kinds), and **GAP-18 lost its tool half** to
-`GET /v1/tools` — nineteen remain.
+(widened to both extension kinds), and **GAP-18 closed in both halves** —
+`GET /v1/tools` took the tool one and `GET /v1/skills` the skill one, so its row
+is struck below — eighteen remain.
 
 | #   | Gap                                         | Blocks                                 | Fix size                         |
 | --- | ------------------------------------------- | -------------------------------------- | -------------------------------- |
@@ -1269,7 +1313,6 @@ deleted, and their replacements carry `ts`/`instance_id`), **GAP-19 became GAP-2
 | 15  | no provider enable/disable                  | Models toggles                         | **S**                            |
 | 21  | no conversation rename/delete               | Conversations rows                     | **S**                            |
 | 13  | per-chat model override is global           | model picker                           | **M**                            |
-| 18  | no skill catalog listing                    | skill names in the Tools section       | **M**                            |
 | 20  | no template run counts / enabled            | Agents section                         | **M**                            |
 | 17  | connector call counts / unwired / add       | Connectors section                     | **M**                            |
 | 24  | no extension install / uninstall            | Add extension                          | **M**                            |
