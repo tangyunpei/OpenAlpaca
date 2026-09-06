@@ -130,6 +130,22 @@ pub fn span_state_for(finish: &LoopFinishReason) -> SpanState {
     }
 }
 
+/// The lane state a **plugin-backed** agent's exit means.
+///
+/// `PluginLoopOutcome` has no cancelled variant — a cancellation between steps
+/// comes back as `Failed { error: "Cancelled" }` — so the run's own cancel
+/// token is what tells the two apart. Reading the token rather than matching
+/// the error string keeps the distinction from resting on a message someone
+/// may reword, and it makes a plugin lane say the same word an LLM lane says
+/// for the same event.
+pub fn plugin_span_state(succeeded: bool, cancelled: bool) -> SpanState {
+    match (succeeded, cancelled) {
+        (true, _) => SpanState::Done,
+        (false, true) => SpanState::Cancelled,
+        (false, false) => SpanState::Failed,
+    }
+}
+
 /// The trailing detail a lane shows for a non-`done` exit, or `None` when the
 /// lane finished normally and the state word is the whole story.
 pub fn span_detail_for(finish: &LoopFinishReason) -> Option<String> {

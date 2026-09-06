@@ -633,16 +633,20 @@ impl BuiltInTool for SpawnSubagentTool {
                 });
 
                 // Close the lane (GAP-09). A plugin loop has no
-                // `LoopFinishReason` of its own: it either completed or
-                // failed, and a cancellation surfaces as the latter with the
-                // cancel message in `error`.
-                let (span_state, span_detail) = match &outcome {
-                    PluginLoopOutcome::Completed { .. } => {
-                        (openalpaca_storage::SpanState::Done, None)
-                    }
-                    PluginLoopOutcome::Failed { error, .. } => {
-                        (openalpaca_storage::SpanState::Failed, Some(error.clone()))
-                    }
+                // `LoopFinishReason` of its own — a cancellation between steps
+                // comes back as `Failed { error: "Cancelled" }` — so the
+                // cancel token is what separates a cancelled lane from a
+                // failed one, keeping this path's vocabulary identical to the
+                // LLM path's below.
+                let cancelled = child_token.as_ref().is_some_and(|t| t.is_cancelled());
+                let span_state = crate::runner::span::plugin_span_state(
+                    outcome.success(),
+                    cancelled,
+                );
+                let span_detail = match &outcome {
+                    PluginLoopOutcome::Completed { .. } => None,
+                    _ if cancelled => Some("cancelled".to_string()),
+                    PluginLoopOutcome::Failed { error, .. } => Some(error.clone()),
                 };
                 crate::runner::span::close_span(
                     db.as_ref(),

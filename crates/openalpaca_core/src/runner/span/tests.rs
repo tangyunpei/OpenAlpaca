@@ -313,6 +313,18 @@ fn cancellation_is_its_own_state_not_a_failure() {
 }
 
 #[test]
+fn a_cancelled_plugin_lane_is_cancelled_not_failed() {
+    // `PluginLoopOutcome::Failed { error: "Cancelled" }` is what a cancelled
+    // plugin agent returns, so the token — not the message — decides.
+    assert_eq!(plugin_span_state(false, true), SpanState::Cancelled);
+    assert_eq!(plugin_span_state(false, false), SpanState::Failed);
+    assert_eq!(plugin_span_state(true, false), SpanState::Done);
+    // A run cancelled *after* the plugin already reported success is still a
+    // completed lane: the work happened.
+    assert_eq!(plugin_span_state(true, true), SpanState::Done);
+}
+
+#[test]
 fn a_clean_finish_needs_no_trailing_detail() {
     assert!(span_detail_for(&LoopFinishReason::Complete).is_none());
     assert_eq!(
