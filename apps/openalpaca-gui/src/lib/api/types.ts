@@ -375,6 +375,12 @@ export interface LlmSettingsResponse {
   providers: Record<string, ProviderInfo>;
 }
 
+/** `PUT /v1/settings/llm/providers/{provider}/enabled` — the row as it stands. */
+export interface ProviderEnabledResponse {
+  id: string;
+  enabled: boolean;
+}
+
 export interface KeyStatusEntry {
   id: string;
   health: KeyHealthValue;

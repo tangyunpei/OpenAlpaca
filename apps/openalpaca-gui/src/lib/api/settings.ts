@@ -9,6 +9,7 @@ import type {
   KeyValidationResult,
   LlmSettingsResponse,
   ModelEntry,
+  ProviderEnabledResponse,
   ProviderUsageSummary,
   ReorderKeysRequest,
   SetKeyPriorityRequest,
@@ -54,6 +55,17 @@ export async function setKeyPriority(
     method: "PUT",
     body: req,
   });
+}
+
+/** `PUT /v1/settings/llm/providers/{provider}/enabled` — the ENABLE bit. */
+export async function setProviderEnabled(
+  provider: string,
+  enabled: boolean,
+): Promise<ProviderEnabledResponse> {
+  return await apiFetch<ProviderEnabledResponse>(
+    `/v1/settings/llm/providers/${encodeURIComponent(provider)}/enabled`,
+    { method: "PUT", body: { enabled } },
+  );
 }
 
 /** `POST /v1/settings/llm/validate` */

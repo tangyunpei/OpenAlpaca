@@ -7,9 +7,13 @@
  *
  * Two honesty notes ride with that write. It is **daemon-wide**, not
  * per-conversation (GAP-13), and the per-provider token figure the design shows
- * as "today" is lifetime (`ProviderUsageSummary.total_tokens`, GAP-08c). The
- * per-provider on/off switch has no route at all (GAP-15), so it is rendered as
- * the design draws it and disabled.
+ * as "today" is lifetime (`ProviderUsageSummary.total_tokens`, GAP-08c).
+ *
+ * The per-provider switch is real (GAP-15 closed):
+ * `PUT /v1/settings/llm/providers/{provider}/enabled` writes the bit to
+ * `llm.toml` and unloads or reloads the provider live. It moves optimistically
+ * and is put back if the daemon refuses — the refusal an owner will meet is
+ * the `409` on the provider that serves the chat model.
  */
 
 import { Button, Tag, chipVariant } from "@/components/ui";
@@ -22,14 +26,13 @@ import {
   useLlmSettings,
   useModels,
   useProviderUsage,
+  useSetProviderEnabled,
 } from "@/hooks/useSettings";
-import { GAPS, gapNote } from "@/lib/unavailable";
 import { useUiStore } from "@/stores/ui";
 
 import { GapNote, ListCard, ListRow, ListState, Toggle } from "./primitives";
 import { compactCount } from "./format";
-
-const PROVIDER_TOGGLE_NOTE = gapNote(GAPS["GAP-15"]);
+import { providerToggleErrorCopy } from "./provider-toggle";
 
 export function ModelsSection() {
   const llm = useLlmSettings();
@@ -37,11 +40,23 @@ export function ModelsSection() {
   const usage = useProviderUsage();
   const orchestrator = useOrchestratorConfig();
   const updateOrchestrator = useUpdateOrchestratorConfig();
+  const setProviderEnabled = useSetProviderEnabled();
   const setModel = useUiStore((s) => s.setModel);
   const showToast = useUiStore((s) => s.showToast);
 
   const providers = Object.entries(llm.data?.providers ?? {});
   const activeModel = orchestrator.data?.model ?? llm.data?.orchestrator.model;
+
+  const toggleProvider = (provider: string, next: boolean) => {
+    setProviderEnabled.mutate(
+      { provider, enabled: next },
+      {
+        onSuccess: (row) =>
+          showToast(`${row.id} ${row.enabled ? "on" : "off"}`),
+        onError: (error) => showToast(providerToggleErrorCopy(provider, error)),
+      },
+    );
+  };
 
   const pickModel = (modelId: string, provider: string) => {
     updateOrchestrator.mutate(
@@ -115,8 +130,9 @@ export function ModelsSection() {
                   <Toggle
                     checked={info.enabled}
                     label={`Enable ${provider}`}
-                    disabled
-                    disabledReason={PROVIDER_TOGGLE_NOTE}
+                    disabled={setProviderEnabled.isPending}
+                    disabledReason="switching…"
+                    onChange={(next) => toggleProvider(provider, next)}
                   />
                 }
               />
@@ -126,7 +142,6 @@ export function ModelsSection() {
       </ListCard>
 
       <GapNote>{MODEL_SCOPE_NOTE}.</GapNote>
-      <GapNote>{PROVIDER_TOGGLE_NOTE}.</GapNote>
       <GapNote>
         Per-provider token counts are lifetime totals; the daemon serves no
         per-day breakdown.

@@ -6,9 +6,9 @@
  *
  * `Toggle` is the one control the export leaves inert ("Settings toggles …
  * display-only in the mock", §5.6). Here it is a real `role="switch"`, and each
- * section decides whether it can be driven: the connector and plugin toggles
- * call the daemon, the provider and agent-template toggles cannot (GAP-15,
- * GAP-20) and are rendered disabled beside the note that says why.
+ * section decides whether it can be driven: the connector, extension and
+ * provider toggles call the daemon; the agent-template toggle cannot (GAP-20)
+ * and is rendered disabled beside the note that says why.
  */
 
 import { Button, Eyebrow, LogTag } from "@/components/ui";

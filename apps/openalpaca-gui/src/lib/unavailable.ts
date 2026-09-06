@@ -15,8 +15,7 @@
  * does not render.
  */
 
-export type GapId =
-  "GAP-08c" | "GAP-13" | "GAP-15" | "GAP-17" | "GAP-20" | "GAP-24";
+export type GapId = "GAP-08c" | "GAP-13" | "GAP-17" | "GAP-20" | "GAP-24";
 
 export type GapFixSize = "XS" | "S" | "S–M" | "M" | "L";
 
@@ -109,15 +108,16 @@ export const GAPS: Record<GapId, GapDescriptor> = {
   // sweep, so the Connection panel says what the store costs. The daemon log
   // is bounded in the same change (16 MB, three generations), because serving
   // a path to an unbounded file would be an invitation.
-  "GAP-15": {
-    id: "GAP-15",
-    label: "Provider enable/disable",
-    missingApi:
-      "no provider-enable route; removing every key is the only off switch",
-    proposedEndpoint: "PUT /v1/settings/llm/providers/{provider}/enabled",
-    blocks: "The per-provider toggle in Models & keys",
-    fixSize: "S",
-  },
+  // GAP-15 (no provider enable/disable) closed in Phase 8:
+  // `PUT /v1/settings/llm/providers/{provider}/enabled` writes the bit to
+  // `llm.toml` through the one atomic writer and then moves the router — a
+  // disable unloads the provider and takes its models out of the registry, an
+  // enable re-registers it and puts the catalogue back. Disabling the provider
+  // that serves the default model answers `409 PROVIDER_IS_DEFAULT` rather
+  // than stranding every request. `enabled` was already on the wire in
+  // `GET /v1/settings/llm`; only the write was missing. The model picker's
+  // `off` group badge is still not drawn — `GET /v1/models` lists models, not
+  // providers, and a disabled provider simply has none there.
   "GAP-17": {
     id: "GAP-17",
     label: "Connector detail",

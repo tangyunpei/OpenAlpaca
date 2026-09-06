@@ -2,9 +2,10 @@
  * `ModelPicker` (DESIGN_SPEC §3.17) — the popover above the composer.
  *
  * Two honest departures from the design:
- *   * the **off pill** on a disabled provider is not rendered: there is no
- *     provider-enable route and nothing on the wire says a provider is off
- *     (GAP-15), so an `off` badge would be a claim this client cannot make;
+ *   * the **off pill** on a disabled provider is not rendered: the picker is
+ *     built from `GET /v1/models`, which lists models rather than providers,
+ *     so a disabled provider has no row here to badge in the first place
+ *     (turning one off is served now — Settings → Models & keys);
  *   * the footer carries a one-line scope note, because picking a model here
  *     writes the daemon-wide default rather than a per-chat override (GAP-13).
  *     The design assumes a conversation-scoped picker; saying so is the only

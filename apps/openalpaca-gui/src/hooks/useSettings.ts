@@ -20,6 +20,7 @@ import {
   reorderKeys,
   rescanCredentials,
   setKeyPriority,
+  setProviderEnabled,
   upsertKey,
   validateKey,
 } from "@/lib/api/settings";
@@ -31,6 +32,7 @@ import type {
   KeyValidationResult,
   LlmSettingsResponse,
   ModelEntry,
+  ProviderEnabledResponse,
   ProviderUsageSummary,
   ReorderKeysRequest,
   SetKeyPriorityRequest,
@@ -135,6 +137,72 @@ export function useSetKeyPriority(): UseMutationResult<
   return useSettingsMutation<void, SetKeyPriorityRequest>((req) =>
     setKeyPriority(req),
   );
+}
+
+/**
+ * The settings payload with one provider's `enabled` flipped — the optimistic
+ * write, kept pure so the revert is just handing the old object back.
+ */
+export function withProviderEnabled(
+  settings: LlmSettingsResponse,
+  provider: string,
+  enabled: boolean,
+): LlmSettingsResponse {
+  const current = settings.providers[provider];
+  if (current === undefined) return settings;
+  return {
+    ...settings,
+    providers: { ...settings.providers, [provider]: { ...current, enabled } },
+  };
+}
+
+export interface ProviderEnabledInput {
+  provider: string;
+  enabled: boolean;
+}
+
+/**
+ * `PUT /v1/settings/llm/providers/{provider}/enabled` (GAP-15), optimistic in
+ * the settings cache.
+ *
+ * The switch moves under the finger and is put back verbatim if the daemon
+ * refuses — the 409 on the default model's provider is a refusal an owner will
+ * meet, and a switch that stayed moved would be a lie about the daemon's
+ * state. The models list is invalidated too: a disable takes the provider's
+ * models out of the registry with it.
+ */
+export function useSetProviderEnabled(): UseMutationResult<
+  ProviderEnabledResponse,
+  Error,
+  ProviderEnabledInput,
+  { previous: LlmSettingsResponse | undefined }
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ provider, enabled }: ProviderEnabledInput) =>
+      setProviderEnabled(provider, enabled),
+    onMutate: async ({ provider, enabled }) => {
+      await client.cancelQueries({ queryKey: qk.settings.llm() });
+      const previous = client.getQueryData<LlmSettingsResponse>(
+        qk.settings.llm(),
+      );
+      if (previous !== undefined) {
+        client.setQueryData(
+          qk.settings.llm(),
+          withProviderEnabled(previous, provider, enabled),
+        );
+      }
+      return { previous };
+    },
+    onError: (_error, _input, context) => {
+      if (context?.previous !== undefined)
+        client.setQueryData(qk.settings.llm(), context.previous);
+    },
+    onSettled: () => {
+      void client.invalidateQueries({ queryKey: qk.settings.all() });
+      void client.invalidateQueries({ queryKey: qk.models.all() });
+    },
+  });
 }
 
 export function useValidateKey(): UseMutationResult<

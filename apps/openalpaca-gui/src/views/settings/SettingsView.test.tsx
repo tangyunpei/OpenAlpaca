@@ -101,6 +101,7 @@ vi.mock("@/hooks/useSettings", () => ({
         external_usage: null,
       },
     ]),
+  useSetProviderEnabled: () => mutation(),
 }));
 
 vi.mock("@/hooks/useOrchestrator", async (importOriginal) => ({
@@ -365,18 +366,20 @@ describe("SettingsView (§2.5, §5.4)", () => {
     expect(screen.getByText(/no daemon\.log/i)).toBeInTheDocument();
   });
 
-  it("offers the provider's models and disables the switch it cannot flip", async () => {
+  it("offers the provider's models and a switch that reaches the daemon", async () => {
     render(<SettingsView />);
     await open("Models & keys");
     expect(
       screen.getByRole("button", { name: "✓ claude-sonnet-4-6" }),
     ).toBeInTheDocument();
+    // GAP-15 closed: the switch is live, and the note that said it was not is
+    // gone with it.
     expect(
       screen.getByRole("switch", { name: "Enable anthropic" }),
-    ).toBeDisabled();
+    ).toBeEnabled();
     expect(
-      screen.getByText(/Provider enable\/disable not yet available/),
-    ).toBeInTheDocument();
+      screen.queryByText(/Provider enable\/disable not yet available/),
+    ).toBeNull();
   });
 
   it("uses accurate extension copy and gates consent instead of drawing a switch", async () => {
