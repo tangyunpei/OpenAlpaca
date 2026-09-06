@@ -311,10 +311,9 @@ fn counterpart(
         }
     };
     use rusqlite::OptionalExtension;
-    Ok(conn
-        .query_row(sql, rusqlite::params![request_id, session_id], |r| r.get(0))
+    conn.query_row(sql, rusqlite::params![request_id, session_id], |r| r.get(0))
         .optional()
-        .context("Failed to look up a tool execution row")?)
+        .context("Failed to look up a tool execution row")
 }
 
 /// The one INSERT both halves fall back to when there is nothing to merge.

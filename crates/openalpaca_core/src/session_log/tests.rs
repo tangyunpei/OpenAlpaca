@@ -622,6 +622,69 @@ async fn an_idle_writer_closes_and_the_next_emit_respawns_it() {
     assert_eq!(rows[1]["seq"], 2);
 }
 
+/// R52: the writer must never block a runtime thread. Its file appends, its
+/// `sync_data` and its SQLite update all run inside `spawn_blocking`, so a
+/// slow disk — or, as here, the daemon's single connection mutex held by
+/// somebody else — stalls one blocking thread and nothing else.
+///
+/// The probe is a timer task on the same current-thread runtime: if the
+/// writer did its work inline, the runtime would be occupied for the whole
+///300 ms the connection is held and the ticker could not advance.
+#[tokio::test(flavor = "current_thread")]
+async fn the_writer_does_its_io_off_the_runtime_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&db_dir.path().join("t.db")).unwrap();
+    let svc = service_with(&dir, Some(db.clone()), SessionLogLimits::default());
+    let handle = svc.handle_for("sess-blocking");
+
+    // Somebody else holds the process-wide connection mutex.
+    let hold = db.clone();
+    let holder = std::thread::spawn(move || {
+        hold.with_connection(|_| {
+            std::thread::sleep(Duration::from_millis(300));
+            Ok(())
+        })
+        .unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let ticks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let ticker = ticks.clone();
+    let counting = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            ticker.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
+
+    handle.emit(Record::new(RecordType::ToolCall).with_data(serde_json::json!({
+        "tool_use_id": "tu-block", "name": "web_fetch", "input": {"url": "u"},
+    })));
+    handle.emit(Record::new(RecordType::ToolResult).with_data(serde_json::json!({
+        "tool_use_id": "tu-block", "name": "web_fetch", "ok": true,
+        "duration_ms": 1, "result": "body",
+    })));
+    assert!(handle.flush().await);
+    counting.abort();
+    holder.join().unwrap();
+
+    assert!(
+        ticks.load(std::sync::atomic::Ordering::Relaxed) >= 3,
+        "the runtime kept running while the writer waited on the DB: {} ticks",
+        ticks.load(std::sync::atomic::Ordering::Relaxed)
+    );
+
+    let rows = lines(&log_path(dir.path(), "sess-blocking"));
+    assert_eq!(rows.len(), 2);
+    let log_seq: i64 = db
+        .with_connection(|conn| {
+            Ok(conn.query_row("SELECT log_seq FROM tool_execution_log", [], |r| r.get(0))?)
+        })
+        .unwrap();
+    assert_eq!(log_seq, 1, "the index row landed all the same");
+}
+
 /// The shutdown barrier: `emit` is a non-blocking `try_send` and the writer
 /// syncs only on boundaries and a 5 s timer, so on SIGTERM everything still
 /// queued would go with the runtime. `flush_all` drains every live writer and

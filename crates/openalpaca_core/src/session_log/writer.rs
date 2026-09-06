@@ -65,7 +65,93 @@ pub(super) enum Msg {
     Sync(oneshot::Sender<()>),
 }
 
+/// How many queued messages one blocking hand-off carries at most. The
+/// channel holds `channel_capacity` (1024); a bound keeps a single blocking
+/// call from monopolising a pool thread while still amortising the hand-off
+/// over a whole round's worth of records.
+const MAX_BATCH: usize = 256;
+
+/// The state one session's writer owns between wakes — and the only thing
+/// that touches the filesystem or the database (R52).
+struct Writer {
+    session_id: String,
+    dir: PathBuf,
+    db: Option<Database>,
+    limits: SessionLogLimits,
+    log: Option<OpenLog>,
+    pending: PendingCalls,
+    /// Set once the directory could not be opened: the writer is done, and
+    /// dropping its receiver tells every handle so.
+    gave_up: bool,
+}
+
+impl Writer {
+    fn dirty(&self) -> bool {
+        self.log.as_ref().is_some_and(|l| l.dirty)
+    }
+
+    /// Write a batch, then sync if the caller asked (the 5 s timer, or the
+    /// final pass). Runs on a blocking thread — every `write`, `sync_data`
+    /// and SQLite statement in the session log happens inside here.
+    fn process(&mut self, batch: Vec<Msg>, sync_after: bool) {
+        for msg in batch {
+            match msg {
+                Msg::Record(record) => {
+                    if self.gave_up {
+                        continue;
+                    }
+                    if self.log.is_none() {
+                        // §5.4/P-22: the directory is created by the first
+                        // record, never by asking for a handle.
+                        match OpenLog::open(&self.dir) {
+                            Ok(opened) => self.log = Some(opened),
+                            Err(e) => {
+                                tracing::warn!(
+                                    session_id = self.session_id,
+                                    dir = %self.dir.display(),
+                                    "Session log unavailable, dropping records: {e}"
+                                );
+                                self.gave_up = true;
+                                continue;
+                            }
+                        }
+                    }
+                    let Some(log) = self.log.as_mut() else { continue };
+                    write_record(
+                        &self.session_id,
+                        log,
+                        record,
+                        &self.db,
+                        &mut self.pending,
+                        &self.limits,
+                    );
+                }
+                Msg::Sync(ack) => {
+                    self.sync("sync");
+                    let _ = ack.send(());
+                }
+            }
+        }
+        if sync_after {
+            self.sync("timer sync");
+        }
+    }
+
+    fn sync(&mut self, what: &str) {
+        if let Some(ref mut log) = self.log
+            && let Err(e) = log.sync()
+        {
+            tracing::warn!(session_id = self.session_id, "Session log {what} failed: {e}");
+        }
+    }
+}
+
 /// Run one session's writer until its channel closes or it goes idle.
+///
+/// The async half only waits: it takes a message, drains whatever else is
+/// already queued, and hands the whole batch to a blocking thread (R52). The
+/// loop it serves must never wait for the log, and a runtime worker must
+/// never wait for a disk or for the daemon's single connection mutex.
 pub(super) async fn run(
     session_id: String,
     dir: PathBuf,
@@ -73,59 +159,78 @@ pub(super) async fn run(
     db: Option<Database>,
     limits: SessionLogLimits,
 ) {
-    let mut log: Option<OpenLog> = None;
-    let mut pending = PendingCalls::default();
+    let sync_interval = limits.sync_interval;
+    let idle_close = limits.idle_close;
+    let mut writer = Writer {
+        session_id,
+        dir,
+        db,
+        limits,
+        log: None,
+        pending: PendingCalls::default(),
+        gave_up: false,
+    };
+    let mut dirty = false;
 
     loop {
-        let dirty = log.as_ref().is_some_and(|l| l.dirty);
-        let wait = if dirty { limits.sync_interval } else { limits.idle_close };
-        match tokio::time::timeout(wait, rx.recv()).await {
-            Ok(Some(Msg::Record(record))) => {
-                let opened = match log {
-                    Some(ref mut l) => l,
-                    // §5.4/P-22: the directory is created by the first record,
-                    // never by asking for a handle.
-                    None => match OpenLog::open(&dir) {
-                        Ok(l) => log.insert(l),
-                        Err(e) => {
-                            tracing::warn!(
-                                session_id,
-                                dir = %dir.display(),
-                                "Session log unavailable, dropping records: {e}"
-                            );
-                            return;
-                        }
-                    },
-                };
-                write_record(&session_id, opened, record, &db, &mut pending, &limits);
-            }
-            Ok(Some(Msg::Sync(ack))) => {
-                if let Some(ref mut l) = log
-                    && let Err(e) = l.sync()
-                {
-                    tracing::warn!(session_id, "Session log sync failed: {e}");
-                }
-                let _ = ack.send(());
-            }
+        let wait = if dirty { sync_interval } else { idle_close };
+        let first = match tokio::time::timeout(wait, rx.recv()).await {
+            Ok(Some(msg)) => msg,
             // Every handle is gone.
             Ok(None) => break,
+            // The 5 s timer, with something unsynced.
             Err(_elapsed) if dirty => {
-                if let Some(ref mut l) = log
-                    && let Err(e) = l.sync()
-                {
-                    tracing::warn!(session_id, "Session log timer sync failed: {e}");
-                }
+                let Some(next) = pump(writer, Vec::new(), true).await else {
+                    return;
+                };
+                writer = next;
+                dirty = writer.dirty();
+                continue;
             }
             // Idle with nothing unsynced: close the file and let the next
             // emit respawn the task.
             Err(_elapsed) => break,
+        };
+
+        // Everything already queued rides along, so one blocking hand-off
+        // covers a whole round's records rather than one each.
+        let mut batch = vec![first];
+        while batch.len() < MAX_BATCH {
+            match rx.try_recv() {
+                Ok(msg) => batch.push(msg),
+                Err(_) => break,
+            }
         }
+        let Some(next) = pump(writer, batch, false).await else {
+            return;
+        };
+        writer = next;
+        if writer.gave_up {
+            return;
+        }
+        dirty = writer.dirty();
     }
 
-    if let Some(ref mut l) = log
-        && let Err(e) = l.sync()
+    let _ = pump(writer, Vec::new(), true).await;
+}
+
+/// Hand the writer and its batch to a blocking thread and take it back.
+///
+/// `None` when that thread panicked: the writer is gone, and returning drops
+/// the receiver so every handle sees a closed channel instead of queueing
+/// into nothing.
+async fn pump(mut writer: Writer, batch: Vec<Msg>, sync_after: bool) -> Option<Writer> {
+    match tokio::task::spawn_blocking(move || {
+        writer.process(batch, sync_after);
+        writer
+    })
+    .await
     {
-        tracing::warn!(session_id, "Session log final sync failed: {e}");
+        Ok(writer) => Some(writer),
+        Err(e) => {
+            tracing::error!("Session log writer task failed: {e}");
+            None
+        }
     }
 }
 
