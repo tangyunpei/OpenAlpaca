@@ -20,7 +20,9 @@ pub use capabilities::{
 };
 
 /// Per-invocation execution context passed to tools that need identity.
-/// Lightweight — no Arc deps, no DB handles. Just identity values.
+/// Lightweight — no DB handles: identity values plus one cheap-to-clone
+/// event-bus handle (`event_bus`), filled in by the sandbox funnel so a
+/// builtin can announce what it produced.
 #[derive(Debug, Clone, Default)]
 pub struct ToolContext {
     pub agent_id: Option<String>,
