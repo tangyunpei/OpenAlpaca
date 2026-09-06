@@ -133,7 +133,7 @@
 ### `settings.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/settings.ts`
-- Exported functions: `getCliBackends`, `getDiscoveredCredentials`, `getKeyStatus`, `getLlmSettings`, `getProviderUsage`, `listModels`, `refreshModels`, `removeKey`, `reorderKeys`, `rescanCredentials`, `setKeyPriority`, `upsertKey`, `validateKey`
+- Exported functions: `getCliBackends`, `getDiscoveredCredentials`, `getKeyStatus`, `getLlmSettings`, `getProviderUsage`, `listModels`, `refreshModels`, `removeKey`, `reorderKeys`, `rescanCredentials`, `setKeyPriority`, `setProviderEnabled`, `upsertKey`, `validateKey`
 - Endpoints: none
 
 ### `skills.ts`
