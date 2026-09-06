@@ -169,7 +169,9 @@ the `POST /v1/chat` response. `GET /v1/me` (GAP-16, resolved `26b3eaf`) now also
 
 ### 2.3 Library view (artifacts)
 
-The whole view has **no backing API**. The design's `ARTS[]` fixture shape is:
+The view is backed end to end by `GET /v1/artifacts` (list, detail, content,
+versions, diff, pin — GAP-04/05/11/12, closed in Phase 3; see those sections
+below for what shipped). The design's `ARTS[]` fixture shape is:
 
 ```ts
 { id, name, kind: "md"|"code"|"term"|"table"|"plan"|"image"|"html",
@@ -181,7 +183,7 @@ The whole view has **no backing API**. The design's `ARTS[]` fixture shape is:
 | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Library · {{ artCount }} files` list                                 | ✅ `GET /v1/artifacts` — `total` is the unpaged count; `limit`/`offset` page it.                                                                                                                                                                        |
 | Kind filter chips (`All/Docs/Code/Output/Data/Media/Plans`)           | ✅ client-side over the loaded page (two labels cover two artifact kinds; `?kind=` takes one)                                                                                                                                                           |
-| `run` / `runName` / `agent` attribution                               | ❌ **GAP-04** — `FileAsset` has `{ id, owner_id, filename, mime_type, size_bytes, storage_path, status, extracted_text?, extract_error?, metadata_json?, created_at, updated_at }`; no `task_id`, no `agent_id`.                                        |
+| `run` / `runName` / `agent` attribution                               | ✅ **GAP-04, closed** — `GET /v1/artifacts` and `/{id}` serve `task_id`, `task_title`, `agent_id` and `agent_template_id` (`routes/artifacts.rs`); `LibraryRow` renders the subtitle from them.                                                         |
 | Preview tab                                                           | ✅ `GET /v1/artifacts/{id}/content` — `?token=` for `<img>`, header auth for text. HTML/SVG render as source (deferred review)                                                                                                                          |
 | `Diff v1→v2` tab                                                      | ✅ `GET /v1/artifacts/{id}/diff?from=&to=`                                                                                                                                                                                                              |
 | `History` tab (`versions[]`)                                          | ✅ `GET /v1/artifacts/{id}/versions`, with the stored `+a −r` per version                                                                                                                                                                               |
