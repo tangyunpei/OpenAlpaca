@@ -899,6 +899,77 @@ mod read_result {
         assert!(err.contains("session"), "got: {err}");
     }
 
+    /// Paging must **seek**, not read the file into memory and slice it.
+    ///
+    /// `log_max_session_bytes` is 256 MB, so a spill of that order is
+    /// representable — and paging one in 8 KB pages read it whole 25 000
+    /// times. The file here is that size (sparse: `set_len` allocates
+    /// nothing), and the tail is read with a small limit: a whole-file read
+    /// would need 256 MB of RAM to answer it.
+    #[tokio::test]
+    async fn a_huge_spill_is_paged_without_being_read_whole() {
+        const TOTAL: u64 = 256 * 1024 * 1024;
+        let dir = tempfile::tempdir().unwrap();
+        let results = dir.path().join("sess-a").join("results");
+        std::fs::create_dir_all(&results).unwrap();
+        let path = results.join("000042-big-shell_execute.txt");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(TOTAL).unwrap();
+        drop(file);
+
+        // The bounded read is the mechanism: at most `limit + 4` bytes leave
+        // the disk for one page, whatever the file's size.
+        let (buf, total) = super::super::read_result::read_page_bytes(&path, TOTAL - 4_096, 8_192)
+            .await
+            .unwrap();
+        assert_eq!(total, TOTAL as usize, "the size comes from the file's own metadata");
+        assert!(
+            buf.len() <= 8_192 + 4,
+            "one page reads a bounded buffer, not the file: {} bytes",
+            buf.len()
+        );
+        assert_eq!(buf.len(), 4_096, "and stops at the end of the file");
+
+        // And through the tool: the tail page reports the real total.
+        let registered = tool(dir.path());
+        let tail = call(
+            &registered,
+            &ctx_for("sess-a"),
+            serde_json::json!({
+                "result_ref": "file:results/000042-big-shell_execute.txt",
+                "offset": TOTAL - 100,
+                "limit": 8_192,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(tail.contains(&format!("of {TOTAL} from")), "{tail}");
+        assert!(!tail.contains("next offset="), "the last page has no cursor");
+    }
+
+    /// The reported range is the bytes the page actually covers, so a caller
+    /// that resumes from `next offset` neither re-reads nor skips.
+    #[tokio::test]
+    async fn the_reported_range_is_the_page_that_was_read() {
+        let dir = tempfile::tempdir().unwrap();
+        // Two-byte characters, so a raw offset can land mid-character.
+        let body = "é".repeat(100);
+        let rel = spill(dir.path(), "sess-a", "000003-x-dump.txt", &body);
+        let registered = tool(dir.path());
+
+        let page = call(
+            &registered,
+            &ctx_for("sess-a"),
+            serde_json::json!({"result_ref": rel, "offset": 1, "limit": 9}),
+        )
+        .await
+        .unwrap();
+        // Offset 1 is a continuation byte: the page starts at 2, and the
+        // footer says so rather than repeating the offset it was asked for.
+        assert!(page.contains("bytes 2–12 of 200"), "{page}");
+        assert!(page.contains("next offset=12"), "{page}");
+    }
+
     /// A spill the writer could not write is named as such.
     ///
     /// `write_spill_file` fails asynchronously — the loop has already handed

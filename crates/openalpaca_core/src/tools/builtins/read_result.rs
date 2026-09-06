@@ -30,7 +30,8 @@ use super::annotations_for_builtin;
 
 /// The default page, in bytes. Big enough to be worth a round trip, small
 /// enough that paging into a 200 MB result cannot refill the context the spill
-/// just emptied.
+/// just emptied — and, since [`read_page_bytes`] seeks, small enough that it
+/// cannot fill the daemon's memory either.
 const DEFAULT_LIMIT: usize = 8 * 1024;
 
 /// The largest page a single call will return.
@@ -87,15 +88,10 @@ impl BuiltInTool for ReadResultTool {
                 Err(_) => return Err(not_there(&session_dir, &name).await),
             };
 
-        let total = match tokio::fs::metadata(&path).await {
-            Ok(meta) => meta.len() as usize,
-            Err(_) => return Err(not_there(&session_dir, &name).await),
-        };
-
         let offset = arguments
             .get("offset")
             .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
+            .unwrap_or(0);
         let limit = arguments
             .get("limit")
             .and_then(|v| v.as_u64())
@@ -103,26 +99,89 @@ impl BuiltInTool for ReadResultTool {
             .unwrap_or(DEFAULT_LIMIT)
             .clamp(1, MAX_LIMIT);
 
-        let bytes = tokio::fs::read(&path)
-            .await
-            .map_err(|e| format!("read_result: failed to read '{name}': {e}"))?;
-        let page = page_of(&bytes, offset, limit);
-        let end = offset.min(bytes.len()) + page.len();
+        // One seek and one bounded read: the page is `limit` bytes wherever it
+        // sits in the file, and a 256 MB spill costs the same as a 4 KB one.
+        let (buf, total) = match read_page_bytes(&path, offset, limit).await {
+            Ok(read) => read,
+            // The file was there for `confine_to_root` and is not now, or it
+            // cannot be opened at all — answer it the way a miss is answered.
+            Err(_) => return Err(not_there(&session_dir, &name).await),
+        };
+        let from = (offset as usize).min(total);
+        let (start, end) = page_bounds(&buf, limit, from + buf.len() >= total);
+        let (page_start, page_end) = (from + start, from + end);
 
-        let mut out = String::from_utf8_lossy(page).into_owned();
+        let mut out = String::from_utf8_lossy(&buf[start..end]).into_owned();
         out.push_str(&format!(
-            "\n\n[read_result: bytes {}–{} of {} from {}",
-            offset.min(total),
-            end,
-            total,
-            name
+            "\n\n[read_result: bytes {page_start}–{page_end} of {total} from {name}"
         ));
-        if end < total {
-            out.push_str(&format!("; next offset={end}"));
+        if page_end < total {
+            out.push_str(&format!("; next offset={page_end}"));
         }
         out.push(']');
         Ok(out)
     }
+}
+
+/// Read at most `limit + 4` bytes from `offset`, plus the file's own size.
+///
+/// The seek is the point: `offset`/`limit` applied to a file already in RAM
+/// bounds the *context*, not the daemon — paging a 256 MB spill (the per-session
+/// cap, so a representable size) in 8 KB pages read 256 MB, 32 000 times over.
+/// The four extra bytes are what the forward char-boundary snap at the tail
+/// needs. `total` comes from this file's metadata rather than a second
+/// `metadata()` call, so the size reported is the size that was read from.
+pub(super) async fn read_page_bytes(
+    path: &std::path::Path,
+    offset: u64,
+    limit: usize,
+) -> std::io::Result<(Vec<u8>, usize)> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let mut file = tokio::fs::File::open(path).await?;
+    let total = file.metadata().await?.len();
+    let from = offset.min(total);
+    file.seek(std::io::SeekFrom::Start(from)).await?;
+    let want = (limit as u64).saturating_add(4).min(total - from);
+    let mut buf = Vec::with_capacity(want as usize);
+    (&mut file).take(want).read_to_end(&mut buf).await?;
+    Ok((buf, total as usize))
+}
+
+/// The slice of a page buffer to hand back: `[start, end)`, snapped **forward**
+/// to char boundaries.
+///
+/// Forward at both ends, so a page never splits a character and the next page's
+/// `offset` — the end this one reports — resumes exactly where it stopped.
+/// Nothing between two consecutive pages is lost.
+///
+/// `at_eof` says whether the buffer reaches the end of the file. When it does
+/// not and the forward snap runs out of buffer — only reachable for a
+/// caller-supplied offset that is itself mid-character — the end backs off to
+/// the previous boundary instead: those bytes lead the next page rather than
+/// being handed back as half a character.
+fn page_bounds(buf: &[u8], limit: usize, at_eof: bool) -> (usize, usize) {
+    let mut start = 0;
+    while start < buf.len() && is_continuation(buf[start]) {
+        start += 1;
+    }
+    let mut end = start.saturating_add(limit).min(buf.len());
+    while end < buf.len() && is_continuation(buf[end]) {
+        end += 1;
+    }
+    if end == buf.len() && !at_eof && end > start {
+        end -= 1;
+        while end > start && is_continuation(buf[end]) {
+            end -= 1;
+        }
+    }
+    (start, end)
+}
+
+/// A UTF-8 continuation byte is `10xxxxxx`; anything else starts a character.
+/// Done on raw bytes so a spill that is not valid UTF-8 still pages.
+fn is_continuation(byte: u8) -> bool {
+    (byte & 0xC0) == 0x80
 }
 
 /// The plain refusal: this session has no such spilled result.
@@ -156,29 +215,6 @@ async fn not_there(session_dir: &std::path::Path, name: &str) -> String {
         ),
         None => missing(name),
     }
-}
-
-/// Slice `[offset, offset+limit)`, snapped **forward** to char boundaries.
-///
-/// Forward at both ends, so a page never splits a character and the next
-/// page's `offset` — the end this one reports — resumes exactly where it
-/// stopped. Nothing between two consecutive pages is lost.
-fn page_of(bytes: &[u8], offset: usize, limit: usize) -> &[u8] {
-    let mut start = offset.min(bytes.len());
-    while start < bytes.len() && !is_char_boundary(bytes, start) {
-        start += 1;
-    }
-    let mut end = start.saturating_add(limit).min(bytes.len());
-    while end < bytes.len() && !is_char_boundary(bytes, end) {
-        end += 1;
-    }
-    &bytes[start..end]
-}
-
-/// A UTF-8 continuation byte is `10xxxxxx`; anything else starts a character.
-/// Done on raw bytes so a spill that is not valid UTF-8 still pages.
-fn is_char_boundary(bytes: &[u8], index: usize) -> bool {
-    index == 0 || index >= bytes.len() || (bytes[index] & 0xC0) != 0x80
 }
 
 /// Turn `file:results/<name>` (or the bare `results/<name>`) into `<name>`.
