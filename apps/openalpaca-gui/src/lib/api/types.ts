@@ -112,8 +112,16 @@ export interface TaskActionResponse {
   status: string;
 }
 
-/** The only verbs `apply_task_action` accepts. `rerun`/`start` are GAP-06. */
-export type TaskAction = "cancel" | "pause" | "resume";
+/**
+ * The verbs `POST /v1/tasks/{id}/action` accepts.
+ *
+ * The first three are state transitions. `start` is not: it dispatches a
+ * *stored* row — one `POST /v1/tasks` queued and nothing ever ran — under its
+ * own id (D5), which is why it answers with the id you sent. Re-running a
+ * finished run is a different route, `POST /v1/tasks/{id}/rerun`, because that
+ * one answers with an id you have not seen.
+ */
+export type TaskAction = "cancel" | "pause" | "resume" | "start";
 
 // ── Chat ────────────────────────────────────────────────────────────────────
 

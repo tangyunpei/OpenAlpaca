@@ -100,7 +100,13 @@ export async function getTaskTimeline(
   );
 }
 
-/** `POST /v1/tasks/{id}/action` — 409 on an illegal transition. `rerun`/`start` are GAP-06. */
+/**
+ * `POST /v1/tasks/{id}/action` — 409 on an illegal transition.
+ *
+ * Also carries `start` (D5), which is not a transition: it dispatches a stored
+ * row under its own id, so the response's `task_id` is the one you sent. Its
+ * refusals are {@link launchErrorMessage}'s, not a transition's.
+ */
 export async function performTaskAction(
   id: string,
   action: TaskAction,
@@ -112,6 +118,86 @@ export async function performTaskAction(
       body: { action },
     },
   );
+}
+
+// ── Re-run and start (`POST /v1/tasks/{id}/rerun`, action `start`) ───────────
+
+/**
+ * What a re-run produced. `task_id` is a run you have not seen: a re-run is a
+ * *second* run of the same goal, and the finished one keeps its row and its
+ * result — which is the thing you are re-running against. `source_task_id` is
+ * the id you asked about.
+ */
+export interface RerunResult {
+  /** The new run. */
+  task_id: string;
+  /** The run it was copied from — the id in the request. */
+  source_task_id: string;
+  title: string;
+  /** `queued`, or `running` if the daemon's background half got there first. */
+  status: string;
+}
+
+/**
+ * `POST /v1/tasks/{id}/rerun` — dispatch a new run from a finished one's goal.
+ *
+ * Throws `ApiError` with the daemon's code: `TASK_NOT_TERMINAL` (409),
+ * `TASK_NOT_RERUNNABLE` (422), `DISPATCH_FAILED` (503), `NOT_FOUND` (404).
+ * Render them through {@link launchErrorMessage}.
+ */
+export async function rerunTask(id: string): Promise<RerunResult> {
+  return await apiFetch<RerunResult>(
+    `/v1/tasks/${encodeURIComponent(id)}/rerun`,
+    { method: "POST" },
+  );
+}
+
+/**
+ * `POST /v1/tasks/{id}/action {"action":"start"}` — run a queued row now.
+ *
+ * D5: the id does not change, so the response is the same `{task_id, status}`
+ * the other actions answer with and every reference you hold stays valid.
+ */
+export async function startTaskNow(id: string): Promise<TaskActionResponse> {
+  return await performTaskAction(id, "start");
+}
+
+/**
+ * The sentence a failed re-run or start shows the user.
+ *
+ * One line per code the two verbs can answer with, because "Request failed
+ * with status 409" tells nobody what to do next, and a run that did *not*
+ * start must never read like one that did. Two codes differ only by verb —
+ * `TASK_NOT_RERUNNABLE` and `TASK_NOT_STARTABLE` — so the daemon says which
+ * without the client having to remember what it asked.
+ *
+ * An unrecognised code falls back to the daemon's own message rather than to a
+ * shrug.
+ */
+export function launchErrorMessage(error: unknown): string {
+  if (error instanceof ApiError) {
+    switch (error.code) {
+      case "TASK_NOT_TERMINAL":
+        return "That run hasn't finished — steer or cancel it instead of re-running it.";
+      case "TASK_ALREADY_RUNNING":
+        return "That run is already running.";
+      case "TASK_NOT_RERUNNABLE":
+        return "That run has no description to re-dispatch — there is nothing to re-run.";
+      case "TASK_NOT_STARTABLE":
+        return "That task has no description to dispatch — there is nothing to start.";
+      case "DISPATCH_FAILED":
+        return "No agent is free to lead a run right now — try again shortly.";
+      case "NOT_FOUND":
+        return "That run no longer exists — nothing was started.";
+      default:
+        break;
+    }
+    if (error.isTransport)
+      return "Could not reach the daemon — nothing was started.";
+    return error.message;
+  }
+  if (error instanceof Error) return error.message;
+  return "Could not start that run.";
 }
 
 // ── Steering (`POST /v1/tasks/{id}/steer`) ──────────────────────────────────

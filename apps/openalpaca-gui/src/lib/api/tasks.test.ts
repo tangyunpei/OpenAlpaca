@@ -1,5 +1,6 @@
 /**
- * `POST /v1/tasks/{id}/steer` (GAP-02, closed), over the real `apiFetch` stack.
+ * The run-addressed writes — `POST /v1/tasks/{id}/steer` (GAP-02) and the two
+ * launch verbs (GAP-06) — over the real `apiFetch` stack.
  *
  * Only the two edges are doubled — the Tauri discovery command and `fetch` — so
  * the method, path and body under test are the ones the daemon would receive.
@@ -11,7 +12,13 @@ import { ApiError } from "@/lib/http";
 
 import { resetConnection } from "@/lib/connection";
 
-import { steerErrorMessage, steerTask } from "./tasks";
+import {
+  launchErrorMessage,
+  rerunTask,
+  startTaskNow,
+  steerErrorMessage,
+  steerTask,
+} from "./tasks";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(async () => ({
@@ -166,5 +173,130 @@ describe("steerErrorMessage", () => {
     );
     expect(steerErrorMessage(new Error("boom"))).toBe("boom");
     expect(steerErrorMessage("not an error")).toMatch(/could not/i);
+  });
+});
+
+// ── Re-run and start (GAP-06) ───────────────────────────────────────────────
+
+describe("rerunTask", () => {
+  it("posts to the run's own rerun route and returns a run that is not it", async () => {
+    reply = () =>
+      json(
+        {
+          task_id: "task-2",
+          source_task_id: "task-1",
+          title: "Ship the release",
+          status: "queued",
+        },
+        201,
+      );
+
+    const result = await rerunTask("task-1");
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.method).toBe("POST");
+    expect(requests[0]?.url).toBe(
+      "http://127.0.0.1:9999/v1/tasks/task-1/rerun",
+    );
+    // Nothing to send: the goal comes from the stored row, not the client.
+    expect(requests[0]?.body).toBeNull();
+
+    expect(result.task_id).toBe("task-2");
+    expect(result.source_task_id).toBe("task-1");
+  });
+
+  it("escapes the task id rather than splicing it into the path raw", async () => {
+    reply = () =>
+      json(
+        {
+          task_id: "task-2",
+          source_task_id: "task/1 2",
+          title: "t",
+          status: "queued",
+        },
+        201,
+      );
+    await rerunTask("task/1 2");
+    expect(requests[0]?.url).toBe(
+      "http://127.0.0.1:9999/v1/tasks/task%2F1%202/rerun",
+    );
+  });
+
+  it("surfaces the daemon's code on the thrown ApiError", async () => {
+    reply = () =>
+      apiError(409, "TASK_NOT_TERMINAL", "This run has not finished (running)");
+
+    const error = await rerunTask("task-1").catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).status).toBe(409);
+    expect((error as ApiError).code).toBe("TASK_NOT_TERMINAL");
+  });
+});
+
+describe("startTaskNow", () => {
+  // D5 — the response's id is the id that was sent, which is why `start` can
+  // ride the same route and the same shape as the three transitions.
+  it("posts `start` to the action route and answers with the same id", async () => {
+    reply = () => json({ task_id: "task-1", status: "running" });
+
+    const result = await startTaskNow("task-1");
+
+    expect(requests[0]?.url).toBe(
+      "http://127.0.0.1:9999/v1/tasks/task-1/action",
+    );
+    expect(requests[0]?.body).toEqual({ action: "start" });
+    expect(result.task_id).toBe("task-1");
+  });
+
+  it("surfaces the daemon's code on the thrown ApiError", async () => {
+    reply = () =>
+      apiError(409, "TASK_ALREADY_RUNNING", "This run is already running.");
+
+    const error = await startTaskNow("task-1").catch(
+      (caught: unknown) => caught,
+    );
+    expect((error as ApiError).code).toBe("TASK_ALREADY_RUNNING");
+  });
+});
+
+describe("launchErrorMessage", () => {
+  it("gives every documented code its own sentence", () => {
+    const codes = [
+      "TASK_NOT_TERMINAL",
+      "TASK_ALREADY_RUNNING",
+      "TASK_NOT_RERUNNABLE",
+      "TASK_NOT_STARTABLE",
+      "DISPATCH_FAILED",
+      "NOT_FOUND",
+    ] as const;
+    const messages = codes.map((code) =>
+      launchErrorMessage(new ApiError("raw daemon text", 409, code)),
+    );
+
+    for (const message of messages) {
+      expect(message.length).toBeGreaterThan(0);
+      expect(message).not.toBe("raw daemon text");
+    }
+    // The two 422s differ only by verb, so they must not read the same.
+    expect(new Set(messages).size).toBe(codes.length);
+    expect(messages[0]).toMatch(/hasn't finished|steer or cancel/i);
+    expect(messages[1]).toMatch(/already running/i);
+    expect(messages[2]).toMatch(/re-run/i);
+    expect(messages[3]).toMatch(/start/i);
+    expect(messages[4]).toMatch(/no agent is free/i);
+  });
+
+  it("falls back to the daemon's own message for an unknown code", () => {
+    expect(
+      launchErrorMessage(new ApiError("something specific", 500, "DB_ERROR")),
+    ).toBe("something specific");
+  });
+
+  it("says the daemon is unreachable rather than nothing at all", () => {
+    expect(launchErrorMessage(new ApiError("fetch failed", 0, null))).toMatch(
+      /reach the daemon/i,
+    );
+    expect(launchErrorMessage(new Error("boom"))).toBe("boom");
+    expect(launchErrorMessage("not an error")).toMatch(/could not/i);
   });
 });

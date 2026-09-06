@@ -1,12 +1,13 @@
 /**
  * The run action catalogue (DESIGN_SPEC §3.19 action bar, §3.26 action group).
  *
- * Two of the design's seven verbs do not exist on the daemon. They are still
- * rendered — a hidden affordance cannot be reported — but as **disabled**
- * controls whose tooltip names the missing route (API_MAP §3):
- *
- *   `Start now` / `Re-run`  GAP-06 — `apply_task_action` accepts exactly
- *                           `cancel`, `pause`, `resume`.
+ * Every one of the design's seven verbs is real now. `Start now` and `Re-run`
+ * were the last two to arrive (Phase 5): what used to be GAP-06 — the action
+ * route accepted exactly `cancel`, `pause`, `resume`, and nothing dispatched a
+ * stored row — is served by `POST /v1/tasks/{id}/action {"action":"start"}`,
+ * which runs a queued row under its own id (D5), and by
+ * `POST /v1/tasks/{id}/rerun`, which copies a finished run's goal onto a new
+ * one. Neither control carries a gap.
  *
  * `Queue follow-up` left that list with Phase 5. Like `Steer`, the button
  * itself only aims the composer (§4.4) — the send behind it is
@@ -63,19 +64,6 @@ export function gapTooltip(id: GapId): string {
   return `${gapNote(gap)} · proposed ${gap.proposedEndpoint}`;
 }
 
-const blocked = (
-  id: RunActionId,
-  label: string,
-  gap: GapId,
-): RunActionDescriptor => ({
-  id,
-  label,
-  tone: "secondary",
-  enabled: false,
-  title: gapTooltip(gap),
-  gap,
-});
-
 const STEER: RunActionDescriptor = {
   id: "steer",
   label: "Steer",
@@ -126,8 +114,14 @@ export function pauseAction(status: UiStatus): RunActionDescriptor {
     return { id: "resume", label: "Resume", tone: "secondary", enabled: true };
   }
   if (status === "queued") {
-    // Promoting a queued task is GAP-06; `POST /v1/tasks` never dispatches.
-    return blocked("start", "Start now", "GAP-06");
+    // D5 — the dispatch keeps the row's id, so the card the user is looking at
+    // is the run that starts.
+    return {
+      id: "start",
+      label: "Start now",
+      tone: "secondary",
+      enabled: true,
+    };
   }
   return { id: "pause", label: "Pause", tone: "secondary", enabled: true };
 }
@@ -153,7 +147,10 @@ export function liveRunActions(
 
 /** The terminal banner's two controls (§3.26). The card shows only `Re-run`. */
 export function terminalRunActions(): RunActionDescriptor[] {
-  return [JUMP, blocked("rerun", "Re-run", "GAP-06")];
+  return [
+    JUMP,
+    { id: "rerun", label: "Re-run", tone: "secondary", enabled: true },
+  ];
 }
 
 /** Whichever set the status calls for. */
@@ -183,7 +180,13 @@ export function unavailableActionNotes(
   });
 }
 
-/** The design's toast copy for the three actions that really fire (§4.4). */
+/**
+ * The design's toast copy for the actions that really fire (§4.4).
+ *
+ * `rerun` is absent on purpose: it produces a run the user has not seen, and
+ * the toast for it names that run's id, which only the caller holding the
+ * response knows (`useRunController`).
+ */
 export function actionToast(action: RunActionId, title: string): string | null {
   switch (action) {
     case "pause":
@@ -192,6 +195,8 @@ export function actionToast(action: RunActionId, title: string): string | null {
       return `${title} resumed`;
     case "cancel":
       return `${title} cancelled`;
+    case "start":
+      return `${title} started`;
     default:
       return null;
   }

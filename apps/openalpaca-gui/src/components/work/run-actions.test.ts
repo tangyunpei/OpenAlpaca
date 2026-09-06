@@ -22,11 +22,14 @@ describe("pauseAction", () => {
     expect(pauseAction("paused").enabled).toBe(true);
   });
 
-  it("disables `Start now` and names GAP-06 in the tooltip", () => {
+  // GAP-06 closed: `POST /v1/tasks/{id}/action { action: "start" }` dispatches
+  // the queued row under its own id (D5), so the control is real and carries
+  // no gap or apologetic tooltip.
+  it("keeps `Start now` enabled and unmarked — the dispatch exists now", () => {
     const action = pauseAction("queued");
-    expect(action.enabled).toBe(false);
-    expect(action.gap).toBe("GAP-06");
-    expect(action.title).toContain("rerun");
+    expect(action.enabled).toBe(true);
+    expect(action.gap).toBeUndefined();
+    expect(action.title).toBeUndefined();
   });
 });
 
@@ -110,12 +113,15 @@ describe("liveRunActions", () => {
 });
 
 describe("terminalRunActions", () => {
-  it("offers Jump and a disabled Re-run", () => {
+  // GAP-06's other half: `POST /v1/tasks/{id}/rerun` dispatches a new run from
+  // this one's goal, so `Re-run` is a real control on a finished run.
+  it("offers Jump and a live Re-run", () => {
     const actions = terminalRunActions();
     expect(actions.map((action) => action.id)).toEqual(["jump", "rerun"]);
     expect(actions[0]?.enabled).toBe(true);
-    expect(actions[1]?.enabled).toBe(false);
-    expect(actions[1]?.gap).toBe("GAP-06");
+    expect(actions[1]?.enabled).toBe(true);
+    expect(actions[1]?.gap).toBeUndefined();
+    expect(actions[1]?.title).toBeUndefined();
   });
 });
 
@@ -143,14 +149,28 @@ describe("runActions", () => {
 });
 
 describe("unavailableActionNotes", () => {
-  it("lists only the disabled verbs, each naming its proposed route", () => {
-    const notes = unavailableActionNotes(liveRunActions("queued"));
-    // `Start now` is the only gapped verb on a live run now — GAP-03 closed.
+  // Nothing in the action bar is gapped any more — GAP-06 was the last one —
+  // so the footnote is empty on every run. The mechanism stays: it is what a
+  // future disabled verb would report through.
+  it("has nothing to say now that every run verb reaches the daemon", () => {
+    for (const status of ["queued", "running", "paused", "done"] as const) {
+      expect(unavailableActionNotes(runActions(status))).toEqual([]);
+    }
+  });
+
+  it("still lists a gapped action, naming its proposed route", () => {
+    const notes = unavailableActionNotes([
+      {
+        id: "start",
+        label: "Start now",
+        tone: "secondary",
+        enabled: false,
+        gap: "GAP-14",
+      },
+    ]);
     expect(notes).toHaveLength(1);
     expect(notes[0]).toContain("Start now");
-    expect(notes[0]).toContain("cancel|pause|resume");
-    expect(notes.join(" ")).not.toContain("Steer");
-    expect(notes.join(" ")).not.toContain("Queue follow-up");
+    expect(notes[0]).toContain("/v1/status");
   });
 
   it("is empty when every action works", () => {
@@ -183,7 +203,15 @@ describe("actionToast", () => {
     );
   });
 
-  it("stays silent for navigation and for actions that never fire", () => {
+  it("names the run that started, for D5's same-id dispatch", () => {
+    expect(actionToast("start", "Connector audit")).toBe(
+      "Connector audit started",
+    );
+  });
+
+  // `rerun` produces a run the user has not seen, so its toast is written by
+  // the controller from the *response*, not from the card's title.
+  it("stays silent for navigation and for the verb that answers a new id", () => {
     expect(actionToast("jump", "x")).toBeNull();
     expect(actionToast("rerun", "x")).toBeNull();
   });

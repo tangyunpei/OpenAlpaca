@@ -16,7 +16,6 @@
  */
 
 export type GapId =
-  | "GAP-06"
   | "GAP-08c"
   | "GAP-13"
   | "GAP-14"
@@ -67,15 +66,13 @@ export const GAPS: Record<GapId, GapDescriptor> = {
   // and `PUT …/pin` made the pin server state. HTML/SVG previews are *shown as
   // source* by choice, not by absence — rendering agent markup in the webview
   // is a security review, not a missing route, so it is not a gap.
-  "GAP-06": {
-    id: "GAP-06",
-    label: "Re-run and Start actions",
-    missingApi: "POST /v1/tasks/{id}/action accepts only cancel|pause|resume",
-    proposedEndpoint:
-      'POST /v1/tasks/{id}/action { action: "rerun" | "start" }',
-    blocks: "Re-run on a terminal run; Start now on a queued run",
-    fixSize: "S",
-  },
+  // GAP-06 (no way to re-run or to start a queued run) closed with Phase 5,
+  // and not in the shape §3 proposed: `start` is `POST /v1/tasks/{id}/action
+  // { action: "start" }` and keeps the run's id (D5), but `rerun` is its own
+  // route, `POST /v1/tasks/{id}/rerun`, answering `201` with a *new* id and
+  // the `source_task_id` it was copied from. A re-run is a second run, and the
+  // finished one keeps its row and its result — which is what the user is
+  // re-running against — so the two verbs cannot share a response shape.
   "GAP-08c": {
     id: "GAP-08c",
     label: "Usage summary",

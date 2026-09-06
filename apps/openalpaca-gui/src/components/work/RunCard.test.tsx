@@ -61,8 +61,8 @@ describe("RunCard (§3.19)", () => {
     );
   });
 
-  // On a *running* card all five are live: GAP-06's `Start now` only appears
-  // on a queued run, and GAP-03 closed with the follow-up routes.
+  // On a *running* card all five are live. `Start now` takes Pause's slot only
+  // on a queued run (§3.19).
   it("shows the five live controls, all enabled", () => {
     card({ status: "running" });
     expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
@@ -88,17 +88,19 @@ describe("RunCard (§3.19)", () => {
     expect(screen.queryByText(/Steer —/)).not.toBeInTheDocument();
   });
 
-  it("offers `Start now` on a queued run, disabled and explained", () => {
+  // GAP-06 closed: the action route dispatches the queued row under its own
+  // id (D5), so the control is live and has nothing to apologise for.
+  it("offers a live `Start now` on a queued run", () => {
     card({ status: "queued" });
     const start = screen.getByRole("button", { name: "Start now" });
-    expect(start).toBeDisabled();
-    expect(start).toHaveAttribute("title", expect.stringContaining("rerun"));
+    expect(start).toBeEnabled();
+    expect(start).not.toHaveAttribute("title");
   });
 
-  it("replaces the bar with a note and a disabled Re-run when terminal", () => {
+  it("replaces the bar with a note and a live Re-run when terminal", () => {
     card({ status: "done", note: "wrote 2 files" });
     expect(screen.getByText("wrote 2 files")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Re-run" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Re-run" })).toBeEnabled();
     expect(
       screen.queryByRole("button", { name: "Cancel" }),
     ).not.toBeInTheDocument();

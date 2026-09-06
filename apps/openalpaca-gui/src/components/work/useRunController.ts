@@ -1,12 +1,15 @@
 /**
  * The one place a run action turns into an effect.
  *
- * Three of the design's verbs are real HTTP (`POST /v1/tasks/{id}/action`);
- * three are pure navigation — `Steer` and `Queue follow-up` aim the composer,
- * `Jump to chat` just switches view; two do not exist and are never reachable
- * because their buttons render disabled (see `run-actions.ts`). The controller
- * still handles those defensively — a disabled button is a UI fact, not a
- * guarantee.
+ * Four of the design's verbs are `POST /v1/tasks/{id}/action`, one is
+ * `POST /v1/tasks/{id}/rerun`, and three are pure navigation — `Steer` and
+ * `Queue follow-up` aim the composer, `Jump to chat` just switches view.
+ * Nothing here is a dead branch any more: GAP-06 closed, so `Start now` and
+ * `Re-run` reach the daemon like the rest.
+ *
+ * The two launch verbs render the daemon's refusal rather than a generic
+ * failure: a run that did *not* start must never read like one that did, and
+ * the codes say which of five things went wrong (`launchErrorMessage`).
  *
  * Toast copy is §4.4's, with the run's full title in place of the design's
  * hand-written `short` (there is no short title on the wire).
@@ -15,18 +18,24 @@
 import { useCallback, useState } from "react";
 
 import { ApiError } from "@/lib/http";
-import { useTaskAction } from "@/hooks/useTasks";
+import { useRerunTask, useTaskAction } from "@/hooks/useTasks";
+import { launchErrorMessage } from "@/lib/api/tasks";
 import type { TaskAction } from "@/lib/api/types";
 import { useUiStore } from "@/stores/ui";
 
 import { actionToast, type RunActionId } from "./run-actions";
 import type { Run } from "./run-model";
 
-/** The three verbs `apply_task_action` accepts. */
+/**
+ * The verbs the action route takes. `start` is here with the three
+ * transitions because it shares their route and their response — D5 keeps the
+ * run's id, so a started run is the row the card is already showing.
+ */
 const HTTP_ACTIONS: Partial<Record<RunActionId, TaskAction>> = {
   pause: "pause",
   resume: "resume",
   cancel: "cancel",
+  start: "start",
 };
 
 export interface RunBusy {
@@ -46,6 +55,7 @@ export interface RunController {
 
 export function useRunController(): RunController {
   const mutation = useTaskAction();
+  const rerun = useRerunTask();
   const setView = useUiStore((s) => s.setView);
   const setSteerTarget = useUiStore((s) => s.setSteerTarget);
   const clearSteerTarget = useUiStore((s) => s.clearSteerTarget);
@@ -55,6 +65,7 @@ export function useRunController(): RunController {
   const [busy, setBusy] = useState<RunBusy | null>(null);
 
   const { mutate } = mutation;
+  const { mutate: mutateRerun } = rerun;
 
   const perform = useCallback(
     (action: RunActionId, run: Run) => {
@@ -69,8 +80,13 @@ export function useRunController(): RunController {
               if (toast !== null) showToast(toast);
             },
             onError: (error: Error) => {
-              // A 409 carries the daemon's own sentence ("cannot pause a
-              // completed task"); showing it beats inventing one.
+              // `start`'s refusals have their own codes and their own
+              // sentences; a transition's 409 carries the daemon's own
+              // ("cannot pause a completed task"), which beats inventing one.
+              if (action === "start") {
+                showToast(launchErrorMessage(error));
+                return;
+              }
               showToast(
                 error instanceof ApiError
                   ? error.message
@@ -96,15 +112,24 @@ export function useRunController(): RunController {
           clearSteerTarget();
           setView("chat");
           return;
-        case "start":
         case "rerun":
-          // Unreachable: both controls are disabled (GAP-06).
+          // Its own route, and the only verb that produces a run the user has
+          // not seen — so the toast says a *new* one started, rather than
+          // reading like this card changed state.
+          setBusy({ runId: run.id, action });
+          mutateRerun(run.id, {
+            onSuccess: (result) => {
+              showToast(`${result.title} re-running as a new run`);
+            },
+            onError: (error: Error) => showToast(launchErrorMessage(error)),
+            onSettled: () => setBusy(null),
+          });
           return;
         default:
           return;
       }
     },
-    [clearSteerTarget, mutate, setSteerTarget, setView, showToast],
+    [clearSteerTarget, mutate, mutateRerun, setSteerTarget, setView, showToast],
   );
 
   const openRunFiles = useCallback(

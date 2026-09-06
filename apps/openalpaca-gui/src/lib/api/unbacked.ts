@@ -8,9 +8,9 @@
  *
  * Not every adapter has a `hooks/useUnbacked` wrapper: where a surface has a
  * working alternative rather than an empty state, the view handles the gap at
- * the point of use — `components/work/run-actions` disables `Start now`,
- * `Re-run` and `Queue follow-up` and names the missing route. The adapters
- * below stay as the shape those routes take.
+ * the point of use. The run action bar was the last such caller — every one of
+ * its seven verbs reaches the daemon now — so what is left below is the one
+ * adapter still waiting on a route.
  */
 
 import { unavailable, type Availability } from "../unavailable";
@@ -35,27 +35,13 @@ import { unavailable, type Availability } from "../unavailable";
 // was GAP-10 is served — including the tool rows the socket could never
 // attribute to a run, and surviving a restart, which a live ring cannot.
 
-// ── Task actions the daemon rejects (GAP-06) ────────────────────────────────
-
-export interface RerunResult {
-  task_id: string;
-  status: string;
-  source_task_id: string;
-}
-
-/** GAP-06 — `apply_task_action` accepts only cancel/pause/resume. */
-export function rerunTask(_taskId: string): Availability<RerunResult> {
-  void _taskId;
-  return unavailable("GAP-06");
-}
-
-/** GAP-06 — no way to promote a queued task; `POST /v1/tasks` never dispatches. */
-export function startTaskNow(
-  _taskId: string,
-): Availability<{ task_id: string; status: string }> {
-  void _taskId;
-  return unavailable("GAP-06");
-}
+// Re-run and start left this file when Phase 5 landed their routes:
+// `RerunResult` is a wire type in `api/tasks.ts` now, fetched by a real
+// `rerunTask` there, and `startTaskNow` is `POST /v1/tasks/{id}/action
+// { action: "start" }`. What was GAP-06 is served — asymmetrically, because
+// the two verbs are different things: `start` dispatches a queued row under
+// its own id (D5), while `rerun` answers `201` with a *new* id, leaving the
+// finished run its row and its result to be compared against.
 
 // Steering left this file when Phase 5 landed `POST /v1/tasks/{id}/steer`:
 // `SteerResult` is a wire type in `api/tasks.ts`, pushed by a real `steerTask`

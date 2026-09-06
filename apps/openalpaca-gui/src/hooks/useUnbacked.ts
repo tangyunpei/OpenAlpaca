@@ -11,13 +11,11 @@
  * subagent timeline in Phase 4: `useTaskTimeline` is a real query in
  * `useTasks` now that `GET /v1/tasks/{id}/timeline` exists.
  *
- * Only the gaps a view actually renders through get a hook. Two others —
- * follow-ups (GAP-03) and re-run/start (GAP-06) — are handled where they
- * surface instead, because each has a disabled control rather than an empty
- * state: `run-actions` disables the verbs and names the route. Their adapters
- * stay in `lib/api/unbacked` as the shape the routes would take. Steering
- * (GAP-02) is no longer among them — `useChatSession` POSTs to the run's own
- * `/steer` route.
+ * Only the gaps a view actually renders through get a hook. The run action bar
+ * used to be the exception — it disabled its gapped verbs at the point of use
+ * rather than showing an empty state — and it no longer needs to: steering
+ * (GAP-02), follow-ups (GAP-03) and re-run/start (GAP-06) are all served, and
+ * `run-actions` names no route it cannot reach.
  */
 
 import { useMemo } from "react";

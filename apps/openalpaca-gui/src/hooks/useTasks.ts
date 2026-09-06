@@ -13,7 +13,9 @@ import {
   getTaskTimeline,
   listTasks,
   performTaskAction,
+  rerunTask,
   type ListTasksQuery,
+  type RerunResult,
   type TaskTimeline,
 } from "@/lib/api/tasks";
 import type {
@@ -69,7 +71,13 @@ export interface TaskActionInput {
   action: TaskAction;
 }
 
-/** `POST /v1/tasks/{id}/action` — 409 carries a human message for the toast. */
+/**
+ * `POST /v1/tasks/{id}/action` — 409 carries a human message for the toast.
+ *
+ * Also the path for D5's `start`: same route, same response shape, same
+ * invalidation, because the run it dispatches keeps the id that was asked
+ * about. Only its refusals differ (`lib/api/tasks.ts` renders them).
+ */
 export function useTaskAction(): UseMutationResult<
   TaskActionResponse,
   Error,
@@ -82,6 +90,27 @@ export function useTaskAction(): UseMutationResult<
     onSuccess: (_data, input) => {
       void client.invalidateQueries({ queryKey: qk.tasks.all() });
       void client.invalidateQueries({ queryKey: qk.tasks.detail(input.id) });
+    },
+  });
+}
+
+/**
+ * `POST /v1/tasks/{id}/rerun` — a **new** run from a finished one's goal.
+ *
+ * Both rows are invalidated: the list gains the copy, and the original's
+ * detail is refetched because a re-run is the sort of thing a reader wants to
+ * see reflected on the run they launched it from.
+ */
+export function useRerunTask(): UseMutationResult<RerunResult, Error, string> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => rerunTask(id),
+    onSuccess: (result, id) => {
+      void client.invalidateQueries({ queryKey: qk.tasks.all() });
+      void client.invalidateQueries({ queryKey: qk.tasks.detail(id) });
+      void client.invalidateQueries({
+        queryKey: qk.tasks.detail(result.task_id),
+      });
     },
   });
 }
