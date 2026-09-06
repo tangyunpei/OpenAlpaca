@@ -173,6 +173,14 @@ impl SharedContext {
     /// two lead agents on one task id fight over its `state_version` and its
     /// run log.
     ///
+    /// "Running" here means **through finalisation**, not "inside the agentic
+    /// loop" (R45): a lead agent's background half keeps writing to the row
+    /// long after its loop returns, and the terminal status and result land
+    /// last. So a run releases its token only after
+    /// `finalize_task_with_outcome` (`dispatcher/lead_agent.rs`) — otherwise
+    /// this claim would succeed on a row that still says `running`, and the
+    /// finishing run's result would land on the row the new one now owns.
+    ///
     /// The token registered here is a placeholder that nothing holds yet — the
     /// dispatch replaces it with the run's real one a few lines later. A caller
     /// that claims and then fails to dispatch must
@@ -208,6 +216,10 @@ impl SharedContext {
     }
 
     /// Remove a cancellation token after the task has finished (cleanup).
+    ///
+    /// "Finished" means the row is terminal, not that the agentic loop
+    /// returned — see [`claim_run_slot`](Self::claim_run_slot) for why the
+    /// difference matters.
     pub fn remove_cancellation_token(&self, task_id: &str) {
         let mut tokens = self
             .cancellation_tokens

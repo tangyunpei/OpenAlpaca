@@ -427,8 +427,15 @@ impl TaskDispatcher {
             )
             .await;
 
-            // Cleanup cancellation token
-            ctx.remove_cancellation_token(&task_id);
+            // The cancellation token is NOT released here (R45). It is also
+            // the run slot `Orchestrator::start_task` claims, and everything
+            // below — lane teardown, the steering drain, the state write, the
+            // completion report, the span close — happens while the row still
+            // says `running`. Releasing it now would leave that whole stretch
+            // unclaimed on a non-terminal row, and a `start` arriving in it
+            // would re-queue the row under a second lead agent that this run's
+            // own `finalize_task_with_outcome` would then write over. It is
+            // released immediately after that finalize instead.
 
             // Remove the task lane — task lanes are per-execution and would
             // otherwise accumulate for the daemon's lifetime (slow leak).
@@ -665,6 +672,14 @@ impl TaskDispatcher {
                 &final_content,
                 result.success,
             );
+
+            // Now the id is genuinely free (R45): the row is terminal and
+            // carries this run's result, so the next `start` on it is refused
+            // by R43's guard rather than racing this tail. Nothing between
+            // `run_lead_agent` returning and here reads the token — the only
+            // other readers are `cancel_task` (a cancel during the tail already
+            // had nothing left to stop) and `claim_run_slot` itself.
+            ctx.remove_cancellation_token(&task_id);
 
             // Routing V2: auto-start the next queued follow-up for this lane.
             // Inert unless a runner is wired AND a `followup` row is queued

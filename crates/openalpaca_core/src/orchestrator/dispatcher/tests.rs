@@ -987,3 +987,76 @@ fn dispatch_without_a_request_workspace_leaves_workspace_id_null() {
         "the daemon CWD must never be recorded as the run's project"
     );
 }
+
+// ── R45: the run slot outlives the run ────────────────────────────────
+
+/// A registered cancellation token is what `claim_run_slot` reads to mean
+/// "this id is running" — it is D5's `start` lock
+/// (`context/shared/mod.rs`). The background half of a lead-agent run keeps
+/// working long after `run_lead_agent` returns: lane teardown, the steering
+/// close-and-drain, the `lead_agent_step_complete` state write, the agent
+/// destroy, usage, the completion report, the span close — and only then
+/// `finalize_task_with_outcome`, which is what writes the terminal status,
+/// the result and the outcome.
+///
+/// Release the slot before that and there is a stretch of awaits and DB
+/// round-trips in which the row still says `running` and the id is unclaimed —
+/// non-terminal, so R43's guard does not close it either. A `start` arriving
+/// there re-queues the row (`upsert_queued`) under a second lead agent, and
+/// then *this* run's tail writes its own summary, outcome and artifact count
+/// over the row that by now belongs to the other run.
+///
+/// So: sample the slot exactly as `start` would, and require that the first
+/// moment it is free, the row is already terminal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_run_slot_is_held_until_the_row_is_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let dispatcher = setup_with_router_and_db(
+        vec![make_agent("lead-01", vec!["orchestration"])],
+        DaemonConfig::default(),
+        db.clone(),
+    );
+
+    let task_id = dispatcher
+        .dispatch_lead_agent(
+            "Write the changelog",
+            "Run slot liveness".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+        )
+        .unwrap()
+        .task_id;
+
+    let repo = openalpaca_storage::repository::TaskRepository::new(&db);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        // Precisely what `Orchestrator::start_task` does at this instant.
+        if dispatcher.shared_context.claim_run_slot(&task_id) {
+            let row = repo.get(&task_id).unwrap().expect("the run's row");
+            // Give the id back: nothing is running under our placeholder.
+            dispatcher
+                .shared_context
+                .remove_cancellation_token(&task_id);
+            assert!(
+                row.status.is_terminal(),
+                "the run slot was free while the row still said '{}' — a `start` \
+                 arriving here would re-queue the row under a second lead agent, \
+                 and this run's tail would then write its result over it",
+                row.status.as_str(),
+            );
+            assert!(
+                row.result_summary.is_some(),
+                "a terminal row must already carry the run's result",
+            );
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the lead agent execution never finished"
+        );
+        tokio::task::yield_now().await;
+    }
+}

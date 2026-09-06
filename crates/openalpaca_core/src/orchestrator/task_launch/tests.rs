@@ -368,6 +368,48 @@ async fn start_on_a_paused_run_is_still_the_already_running_refusal() {
     );
 }
 
+/// R45's window, from the caller's side. Between `run_lead_agent` returning
+/// and `finalize_task_with_outcome` the row still says `running` and the id
+/// still holds its token, so a `start` arriving there is refused as already
+/// running — it never reaches `upsert_queued` to re-queue the row under a
+/// second lead agent. Once the tail finalises, the row is terminal and carries
+/// *that* run's result, and `start` is refused again, now by R43. There is no
+/// instant between the two refusals.
+///
+/// (What proves the ordering in production is
+/// `dispatcher::tests::the_run_slot_is_held_until_the_row_is_terminal`; this
+/// states what the ordering buys the caller.)
+#[tokio::test]
+async fn a_start_during_the_old_runs_finalisation_cannot_take_the_row() {
+    let (_dir, db) = temp_db();
+    store_task(&db, "t1", TaskStatus::Running, Some("write the changelog"));
+    let (orchestrator, ctx) = ready(&db);
+    ctx.register_cancellation_token("t1", tokio_util::sync::CancellationToken::new());
+
+    assert_eq!(
+        orchestrator.start_task("t1"),
+        Err(TaskLaunchError::AlreadyRunning),
+        "the tail is still writing to this row",
+    );
+
+    // …and now the tail finalises: the terminal status and the run's result.
+    let repo = TaskRepository::new(&db);
+    repo.set_result("t1", "the first run's answer").unwrap();
+    repo.update_status("t1", TaskStatus::Completed).unwrap();
+    ctx.remove_cancellation_token("t1");
+
+    assert_eq!(
+        orchestrator.start_task("t1"),
+        Err(TaskLaunchError::NotStartable {
+            current: "completed"
+        }),
+        "the slot is free, so R43 is what refuses now",
+    );
+    let row = repo.get("t1").unwrap().unwrap();
+    assert_eq!(row.result_summary.as_deref(), Some("the first run's answer"));
+    assert_eq!(repo.list_recent(10).unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn start_of_an_unknown_run_is_not_found() {
     let (_dir, db) = temp_db();
