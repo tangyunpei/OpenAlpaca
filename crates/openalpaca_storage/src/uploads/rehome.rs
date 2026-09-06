@@ -301,7 +301,8 @@ fn rehome_row(
 
         let rel_path = format!("{rel_dir}/{head_name}");
         if let Err(e) = tx.execute(
-            "UPDATE file_assets SET storage_path = ?2, rel_path = ?3, project_root = ?4
+            "UPDATE file_assets SET storage_path = ?2, rel_path = ?3, project_root = ?4,
+                                    missing_since = NULL
               WHERE id = ?1",
             rusqlite::params![
                 row.id,

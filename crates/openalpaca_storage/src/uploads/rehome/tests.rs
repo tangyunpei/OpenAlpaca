@@ -445,6 +445,38 @@ fn a_row_already_marked_missing_does_not_rewarn_on_a_second_boot() {
     });
 }
 
+/// T23's convention is a pair: the stamp and its clear. A row marked missing on
+/// one boot whose bytes are restored (the owner's backup) re-homes on the next
+/// boot and comes back unflagged — otherwise the Library would hide a healthy file.
+#[test]
+fn a_restored_blob_rehomes_and_clears_missing_since() {
+    let fx = Fixture::new();
+    fs::create_dir_all(fx.assets()).unwrap();
+    let ghost = interim_blob_path(&crate::content_io::sha256_hex(b"back again"));
+    fx.insert_row("up-1", "owner-1", "back.txt", &ghost, b"back again", CREATED);
+
+    rehome_inner(&fx.db, None);
+    assert!(fx.missing_since("up-1").is_some(), "boot 1 marks the row");
+
+    fs::create_dir_all(ghost.parent().unwrap()).unwrap();
+    fs::write(&ghost, b"back again").unwrap();
+
+    assert_eq!(
+        rehome_inner(&fx.db, None),
+        RehomeSummary {
+            moved: 1,
+            ..Default::default()
+        }
+    );
+    let (_storage_path, rel_path, _project_root) = fx.address("up-1");
+    assert!(rel_path.is_some(), "boot 2 re-homes the restored row");
+    assert_eq!(
+        fx.missing_since("up-1"),
+        None,
+        "the stamp is cleared when the bytes come back"
+    );
+}
+
 /// The day directory comes from the row's `created_at`, not from today. An
 /// unreadable value is the one case that falls back — the address has to be some
 /// day, and the row keeps its own record of when it arrived.
