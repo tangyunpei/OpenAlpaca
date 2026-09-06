@@ -1346,6 +1346,36 @@ describe("ChatView — the conversation sidebar (§5.7)", () => {
   });
 
   /**
+   * The list asked for one page of 100 and stopped, with no "load more" and no
+   * search box: everything older than the newest hundred was unreachable from
+   * the GUI, and the list looked complete. `total` says otherwise and was
+   * already on the envelope.
+   */
+  it("reaches past the first page instead of silently capping at 100", async () => {
+    seedSessions(
+      Array.from({ length: 101 }, (_, index) =>
+        sessionRow({
+          id: `sess-${index + 1}`,
+          title: `Conversation ${index + 1}`,
+          status: index === 0 ? "active" : "archived",
+        }),
+      ),
+    );
+    renderChat();
+
+    await screen.findByText("Conversation 1");
+    expect(screen.queryByText("Conversation 101")).toBeNull();
+    expect(screen.getByText("100 of 101 loaded")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show more" }));
+
+    expect(await screen.findByText("Conversation 101")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Show more" })).toBeNull(),
+    );
+  });
+
+  /**
    * `AppShell`'s minimum window is budgeted pane by pane, so a fourth fixed
    * column has to be closable — and closing it must leave a way back that is
    * not "reopen the app".

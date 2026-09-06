@@ -49,6 +49,12 @@ export interface SessionSidebarProps {
   windowProject: string | null;
   /** From `stores/pane-widths`, like the app's other three resizable columns. */
   width: number;
+  /** Conversations fetched so far. */
+  loaded: number;
+  /** Conversations the daemon says match the query (`SessionsResponse.total`). */
+  total: number;
+  loadingMore: boolean;
+  onLoadMore: () => void;
   /** `›` — the column is one of four in a budgeted window, so it collapses. */
   onCollapse: () => void;
   onNewChat: () => void;
@@ -82,6 +88,10 @@ export function SessionSidebar({
   actionError,
   windowProject,
   width,
+  loaded,
+  total,
+  loadingMore,
+  onLoadMore,
   onCollapse,
   onNewChat,
   onSelect,
@@ -284,6 +294,27 @@ export function SessionSidebar({
               );
             })}
           </ul>
+        )}
+
+        {/* The daemon says how many conversations match; a list that stopped
+            at one page without saying so would look complete when it is not.
+            The figures are about the *fetch* — `total` is the query's count,
+            before this window's lane filter — so the copy says "loaded", not
+            "conversations". */}
+        {loaded < total && (
+          <div className="mt-[12px] flex flex-col items-start gap-[3px]">
+            <button
+              type="button"
+              disabled={loadingMore}
+              onClick={onLoadMore}
+              className={verb}
+            >
+              {loadingMore ? "loading…" : "Show more"}
+            </button>
+            <span className="font-mono text-2xs text-faint">
+              {loaded} of {total} loaded
+            </span>
+          </div>
         )}
       </div>
     </aside>

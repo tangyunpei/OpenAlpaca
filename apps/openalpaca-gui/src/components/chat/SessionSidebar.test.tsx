@@ -36,6 +36,10 @@ function renderSidebar(props: Partial<Parameters<typeof SessionSidebar>[0]>) {
       actionError={null}
       windowProject={null}
       width={236}
+      loaded={0}
+      total={0}
+      loadingMore={false}
+      onLoadMore={vi.fn()}
       onCollapse={vi.fn()}
       onNewChat={vi.fn()}
       onSelect={vi.fn()}
@@ -274,5 +278,44 @@ describe("SessionSidebar — the column itself", () => {
       screen.getByRole("button", { name: "Collapse conversations" }),
     );
     expect(onCollapse).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("SessionSidebar — the list is longer than the page", () => {
+  /**
+   * The envelope's `total` was fetched and thrown away, so a lane with more
+   * conversations than one page showed the newest hundred and looked complete.
+   * The number that says otherwise was already in hand.
+   */
+  it("says how much of the list it has, and offers the rest", () => {
+    const onLoadMore = vi.fn();
+    renderSidebar({
+      sessions: [session()],
+      loaded: 100,
+      total: 143,
+      onLoadMore,
+    });
+
+    expect(screen.getByText("100 of 143 loaded")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show more" }));
+    expect(onLoadMore).toHaveBeenCalledTimes(1);
+  });
+
+  it("says nothing once the whole list is in hand", () => {
+    renderSidebar({ sessions: [session()], loaded: 12, total: 12 });
+
+    expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
+    expect(screen.queryByText(/loaded/)).not.toBeInTheDocument();
+  });
+
+  it("holds the control while the next page is on the wire", () => {
+    renderSidebar({
+      sessions: [session()],
+      loaded: 100,
+      total: 143,
+      loadingMore: true,
+    });
+
+    expect(screen.getByRole("button", { name: "loading…" })).toBeDisabled();
   });
 });

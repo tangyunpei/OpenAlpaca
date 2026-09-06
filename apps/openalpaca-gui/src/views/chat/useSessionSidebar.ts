@@ -37,8 +37,8 @@ import type { Session } from "@/lib/api/types";
 import { useProjectStore } from "@/stores/project";
 import { useSessionSelection } from "@/stores/session";
 
-/** One page is the whole sidebar; the daemon's own default is 50. */
-const SESSION_LIMIT = 100;
+/** One page of the sidebar; the daemon's own default is 50. */
+const SESSION_PAGE = 100;
 
 /** The lane the GUI talks on is `{local_user}:gui`, so the source is the filter. */
 const GUI_SOURCE = "gui";
@@ -52,6 +52,11 @@ export interface SessionSidebarState {
   busyId: string | null;
   creating: boolean;
   actionError: string | null;
+  /** Conversations fetched so far, and how many the query matches in all. */
+  loaded: number;
+  total: number;
+  loadingMore: boolean;
+  loadMore: () => void;
   /**
    * The **canonical** project root this window resolves to — `GET /v1/status`'s
    * `project_root` for the picker's path, never the picker's path itself
@@ -77,7 +82,15 @@ export function useSessionSidebar(
   laneKey: string | null,
   activeSessionId: string | null,
 ): SessionSidebarState {
-  const list = useSessions({ source: GUI_SOURCE, limit: SESSION_LIMIT });
+  /**
+   * How many pages have been asked for. The request is one widening `limit`
+   * rather than an accumulating offset: the daemon orders by `updated_at DESC`
+   * and writes move rows, so stitching independent offset pages together would
+   * drop and duplicate conversations across the seam. One page of 100 is the
+   * whole sidebar for almost everyone; a lane with more can reach the rest.
+   */
+  const [pages, setPages] = useState(1);
+  const list = useSessions({ source: GUI_SOURCE, limit: SESSION_PAGE * pages });
   const create = useCreateSession();
   const activate = useActivateSession();
   const archiveMutation = useArchiveSession();
@@ -107,6 +120,8 @@ export function useSessionSidebar(
 
   const [busyId, setBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+
+  const loadMore = useCallback(() => setPages((asked) => asked + 1), []);
 
   /**
    * R48 has to stay reachable. A pinned conversation makes every turn name it
@@ -253,6 +268,14 @@ export function useSessionSidebar(
     busyId,
     creating: create.isPending,
     actionError,
+    // Both figures are the *query's*: `total` counts every `gui`-source
+    // conversation the daemon holds, before this window's client-side lane
+    // filter. Comparing them says whether more can be fetched, which is the
+    // question the control answers.
+    loaded: list.data?.sessions.length ?? 0,
+    total: list.data?.total ?? 0,
+    loadingMore: list.isPlaceholderData,
+    loadMore,
     windowProject,
     newChat,
     select: onSelect,

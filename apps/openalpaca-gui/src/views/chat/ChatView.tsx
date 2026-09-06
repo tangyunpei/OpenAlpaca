@@ -149,6 +149,10 @@ export default function ChatView({
             actionError={sidebar.actionError}
             windowProject={sidebar.windowProject}
             width={sessionsWidth}
+            loaded={sidebar.loaded}
+            total={sidebar.total}
+            loadingMore={sidebar.loadingMore}
+            onLoadMore={sidebar.loadMore}
             onCollapse={closeSessions}
             onNewChat={sidebar.newChat}
             onSelect={sidebar.select}

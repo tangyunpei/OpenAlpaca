@@ -10,6 +10,7 @@
  */
 
 import {
+  keepPreviousData,
   useMutation,
   useQuery,
   useQueryClient,
@@ -36,12 +37,22 @@ import type {
 } from "@/lib/api/types";
 import { qk } from "@/lib/query-keys";
 
+/**
+ * `GET /v1/sessions`.
+ *
+ * A widened `limit` is a different key, so without `keepPreviousData` asking
+ * for the next page would empty the list and put it back into its loading
+ * state — the rows are already on screen and the request is for *more* of
+ * them, not for different ones. `isPlaceholderData` is then what "the next
+ * page is on the wire" means.
+ */
 export function useSessions(
   query: ListSessionsQuery = {},
 ): UseQueryResult<SessionsResponse> {
   return useQuery({
     queryKey: qk.sessions.list(query),
     queryFn: ({ signal }) => listSessions(query, signal),
+    placeholderData: keepPreviousData,
   });
 }
 
