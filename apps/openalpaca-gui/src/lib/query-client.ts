@@ -6,6 +6,19 @@ import { ApiError } from "./http";
 import type { ServerEvent } from "./events";
 import { qk } from "./query-keys";
 
+/**
+ * This run's event-log key, on top of whatever else an event's own case
+ * returns. `RUN_LOG_EVENT_TYPES` (`lib/api/run-events.ts`) names every frame
+ * whose persisted row the run-detail card renders and that can carry a
+ * `task_id` — every arm for one of those types calls this instead of
+ * hand-rolling the null guard, so the set can't drift case by case.
+ */
+function invalidateRunLog(
+  taskId: string | null,
+): readonly (readonly unknown[])[] {
+  return taskId === null ? [] : [qk.tasks.eventLog(taskId)];
+}
+
 /** Retry transport failures and 5xx; never retry a 4xx the daemon meant. */
 function shouldRetry(failureCount: number, error: unknown): boolean {
   if (error instanceof ApiError && !error.isRetryable) return false;
@@ -61,15 +74,21 @@ export function invalidationKeysFor(
     // `["artifacts"]` is a prefix of the list, versions and diff keys, so one
     // entry refreshes whichever Library surface is mounted. Not `tasks`: a
     // run's artifact list is read out of `task.outcome`, which the daemon only
-    // writes at completion — and that arrives as `task_status`.
+    // writes at completion — and that arrives as `task_status`. Also a
+    // `run-events.ts` row (RUN_LOG_EVENT_TYPES), so the run's own log key
+    // comes along too (task-33 review #1: this arm used to drop it).
     case "artifact_written":
-      return [qk.artifacts.all()];
+      return [qk.artifacts.all(), ...invalidateRunLog(event.task_id)];
 
     // A lane opened or closed: this run's timeline changed, and nothing else.
     // Not `qk.tasks.all()` — a run with eight subagents would re-list every
-    // task sixteen times over its life.
+    // task sixteen times over its life. Also a `run-events.ts` row, so the
+    // run's own log key comes along too (task-33 review #1).
     case "subagent_span":
-      return [qk.tasks.timeline(event.task_id)];
+      return [
+        qk.tasks.timeline(event.task_id),
+        ...invalidateRunLog(event.task_id),
+      ];
 
     case "chat_stream_ended":
       return [qk.chat.all(), qk.conversations.all()];
@@ -131,9 +150,7 @@ export function invalidationKeysFor(
       return [qk.agents.instances()];
 
     case "llm_call_completed":
-      return event.task_id === null
-        ? [qk.usage.all()]
-        : [qk.usage.all(), qk.tasks.eventLog(event.task_id)];
+      return [qk.usage.all(), ...invalidateRunLog(event.task_id)];
 
     // These carry `task_id` since Phase 4 (GAP-10), so a run's own log key is
     // refreshed alongside the daemon-wide one — that is what keeps the run
@@ -141,20 +158,26 @@ export function invalidationKeysFor(
     case "tool_executed":
     case "security_violation":
     case "circuit_breaker_tripped":
-      return event.task_id === null
-        ? [qk.events.all()]
-        : [qk.events.all(), qk.tasks.eventLog(event.task_id)];
+      return [qk.events.all(), ...invalidateRunLog(event.task_id)];
+
+    // Blocks the run until answered, and the confirmation itself is a
+    // `run-events.ts` row (`tool` tag) once persisted — the chat session's
+    // live subscription shows the prompt immediately, but the run-detail
+    // card only updates on a refetch, so this needs the same invalidation as
+    // the tool-execution frames above (task-33 review #1: it used to return
+    // `[]`, which is why the earlier comment on those frames sat next to it).
+    case "tool_confirmation_requested":
+      return invalidateRunLog(event.task_id);
 
     case "command_received":
     case "wake":
       return [qk.events.all()];
 
     // Purely live signals — the views that care subscribe to them directly
-    // (the chat session holds the pending confirmations; the event log reads
-    // the socket's own ring), so nothing cached depends on them.
+    // (the chat session shows these inline), and no persisted row depends on
+    // them, so nothing cached needs a refetch.
     case "heartbeat":
     case "chat_stream_started":
-    case "tool_confirmation_requested":
     case "skill_invocation_started":
     case "soul_updated":
       return [];

@@ -37,6 +37,30 @@ export interface RunEventPage {
   next_before: number | null;
 }
 
+/**
+ * `event_type` values a live `ServerEvent` can carry a `task_id` for and
+ * that are *not* already covered by the `["tasks"]` prefix group (i.e. not
+ * `task_status` / `workflow_started` / `workflow_progress` /
+ * `workflow_steered`) or dropped as a duplicate (`dag_node_status`).
+ * `tool_auto_approved` is excluded too: it renders on this card but has no
+ * `ServerEvent` variant, so nothing live ever needs to invalidate for it.
+ *
+ * `lib/query-client.ts`'s `invalidationKeysFor` must refresh
+ * `qk.tasks.eventLog(task_id)` for every one of these when the frame names a
+ * run — `query-client.test.ts` iterates this exact list, so a type added
+ * here without its own invalidation arm fails that test instead of leaving
+ * the run-detail card stale until an unrelated frame happens to land.
+ */
+export const RUN_LOG_EVENT_TYPES = [
+  "tool_executed",
+  "security_violation",
+  "circuit_breaker_tripped",
+  "llm_call_completed",
+  "subagent_span",
+  "artifact_written",
+  "tool_confirmation_requested",
+] as const;
+
 /** `event_type` → the design's five tones. */
 function tagFor(eventType: string): RunEventTag {
   switch (eventType) {
