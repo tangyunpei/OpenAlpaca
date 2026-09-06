@@ -98,6 +98,31 @@ export function useSessionSidebar(
     select(null);
   }, [projectPath, select]);
 
+  /**
+   * A pin lasts exactly as long as the daemon still calls that conversation
+   * the lane's active one.
+   *
+   * The lane holds one active conversation, and plenty of things step it down
+   * without this window doing anything: another window's "New chat", a CLI
+   * `--resume`, the follow-up autostart's `claim_next`. Left pinned, the next
+   * turn names an archived session and comes back `409 SESSION_ARCHIVED` for a
+   * user who did nothing but type. Released, the pointer falls back to the
+   * lane's active session — which is what the daemon would have chosen anyway.
+   *
+   * Only a row the refreshed list actually shows as non-active releases the
+   * pin: a row that is merely *absent* (a later page, a filter) is unknown,
+   * not archived. And neither a write in flight nor a fetch in flight can
+   * release it, because the list is then still the one from before the write.
+   */
+  useEffect(() => {
+    if (selectedId === null || busyId !== null || list.isFetching) return;
+    const pinned = (list.data?.sessions ?? []).find(
+      (row) => row.id === selectedId,
+    );
+    if (pinned === undefined || pinned.status === "active") return;
+    select(null);
+  }, [selectedId, busyId, list.data, list.isFetching, select]);
+
   const sessions = useMemo(() => {
     const rows = (list.data?.sessions ?? []).filter(
       (row) => laneKey === null || row.lane_key === laneKey,
@@ -123,18 +148,24 @@ export function useSessionSidebar(
     [busyId],
   );
 
+  /**
+   * "New chat" creates and pins **nothing**.
+   *
+   * `POST /v1/sessions` archives the incumbent and makes the new row the
+   * lane's active conversation, so an unpinned turn already lands in it —
+   * `GET /v1/chat/history` echoes it back as `session_id` and
+   * `selectedId ?? activeSessionId` highlights it. Pinning it would cost both
+   * halves of the design: every later turn would name a session, so R48 could
+   * never fire again, and an archive from another client would strand the
+   * window on a `409`.
+   */
   const newChat = useCallback(() => {
     if (create.isPending) return;
     setActionError(null);
     void create
       .mutateAsync(projectPath === null ? {} : { workspacePath: projectPath })
-      // Addressing the conversation just created keeps the window on it even
-      // if another client opens one a moment later. Its binding is this
-      // window's project, so R49 substitutes the same value the header would
-      // have carried and nothing changes scope.
-      .then((session) => select(session.id))
       .catch((error: unknown) => setActionError(sessionErrorMessage(error)));
-  }, [create, projectPath, select]);
+  }, [create, projectPath]);
 
   const onSelect = useCallback(
     (id: string) => {

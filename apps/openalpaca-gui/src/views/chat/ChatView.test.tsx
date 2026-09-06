@@ -87,10 +87,49 @@ let followupListReply: () => Response;
 let followupWriteReply: () => Response;
 /** What `POST /v1/chat` answers; swapped per test to refuse a named session. */
 let chatSendReply: () => Response;
-/** What `GET /v1/sessions` answers — the lane's conversations. */
-let sessionListReply: () => Response;
+/**
+ * The conversations this fake daemon holds, in `updated_at DESC` order.
+ *
+ * Mutable because the sidebar's rules are about *transitions*: an `activate`
+ * archives the incumbent, and a pin only survives while the daemon still calls
+ * that row active. A fixture that answered the same list before and after a
+ * write could not tell those cases apart.
+ */
+let sessionRows: Record<string, unknown>[] = [];
+/** What `GET /v1/sessions` answers — one page of `sessionRows`. */
+let sessionListReply: (url: string) => Response;
 /** What the five `/v1/sessions` write verbs answer; swapped per test to refuse. */
 let sessionWriteReply: () => Response;
+
+/** `limit`/`offset`, exactly as the route pages. */
+function pageOfSessions(url: string): Response {
+  const query = new URL(url).searchParams;
+  const limit = Number(query.get("limit") ?? 50);
+  const offset = Number(query.get("offset") ?? 0);
+  return json({
+    sessions: sessionRows.slice(offset, offset + limit),
+    total: sessionRows.length,
+  });
+}
+
+/** What a successful write does to the rows the next `GET` will answer with. */
+function applySessionWrite(url: string): void {
+  const activated = /\/v1\/sessions\/([^/?]+)\/activate/.exec(url);
+  if (activated !== null) {
+    const id = decodeURIComponent(activated[1] ?? "");
+    for (const row of sessionRows) {
+      row.status = row.id === id ? "active" : "archived";
+    }
+    return;
+  }
+  const archived = /\/v1\/sessions\/([^/?]+)\/archive/.exec(url);
+  if (archived !== null) {
+    const id = decodeURIComponent(archived[1] ?? "");
+    for (const row of sessionRows) {
+      if (row.id === id) row.status = "archived";
+    }
+  }
+}
 
 function installFetch() {
   const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
@@ -105,7 +144,11 @@ function installFetch() {
     });
 
     if (url.includes("/v1/sessions")) {
-      return method === "GET" ? sessionListReply() : sessionWriteReply();
+      if (method === "GET") return sessionListReply(url);
+      const reply = sessionWriteReply();
+      // A refused write changes nothing, here as on the daemon.
+      if (reply.ok) applySessionWrite(url);
+      return reply;
     }
     if (url.includes("/v1/chat/history")) {
       return historyReply();
@@ -168,16 +211,21 @@ function KeyLadder() {
   return null;
 }
 
-function renderChat() {
+/**
+ * Returns the query client so a test can replay what the `session_changed`
+ * frame does — invalidate, and let the view read the daemon's new answer.
+ */
+function renderChat(): QueryClient {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
-  return render(
+  render(
     <QueryProvider client={client} connectEvents={false}>
       <KeyLadder />
       <ChatView />
     </QueryProvider>,
   );
+  return client;
 }
 
 /** Send one message and hand back the stream it opened. */
@@ -218,7 +266,8 @@ beforeEach(() => {
   historyReply = () =>
     json({ messages: [], total: 0, lane_key: "user:gui", session_id: null });
   chatSendReply = () => json({ stream_id: "stream-1", lane_key: "user:gui" });
-  sessionListReply = () => json({ sessions: [], total: 0 });
+  sessionRows = [];
+  sessionListReply = pageOfSessions;
   sessionWriteReply = () => json(sessionRow());
   steerReply = () =>
     json({
@@ -948,7 +997,7 @@ describe("ChatView — the run link and artifact chips after a reload (GAP-23)",
  */
 describe("ChatView — the conversation sidebar (§5.7)", () => {
   function seedSessions(rows: Record<string, unknown>[]): void {
-    sessionListReply = () => json({ sessions: rows, total: rows.length });
+    sessionRows = rows;
   }
 
   it("lists the lane's conversations, live one first", async () => {
@@ -1036,6 +1085,99 @@ describe("ChatView — the conversation sidebar (§5.7)", () => {
       source: "gui",
       workspace_path: "/Users/dev/openalpaca",
     });
+  });
+
+  /**
+   * "New chat" must not pin. The created row *is* the lane's new active
+   * conversation, so an unpinned turn already lands in it — and only an
+   * unpinned turn lets the daemon detect a project change (R48). Pinning it
+   * also strands the window when the daemon archives that row from under it.
+   */
+  it("leaves a new conversation unpinned, so the lane's own active one governs", async () => {
+    seedSessions([sessionRow({ id: "sess-live" })]);
+    renderChat();
+    await screen.findByLabelText("Message");
+
+    fireEvent.click(screen.getByRole("button", { name: "New chat" }));
+    await waitFor(() =>
+      expect(
+        requests.some(
+          (r) => r.method === "POST" && r.url.endsWith("/v1/sessions"),
+        ),
+      ).toBe(true),
+    );
+
+    expect(useSessionSelection.getState().selectedId).toBeNull();
+
+    await sendMessage("after the new chat");
+    const send = requests.find(
+      (r) => r.method === "POST" && r.url.endsWith("/v1/chat"),
+    );
+    expect(send?.body).not.toHaveProperty("session_id");
+  });
+
+  /**
+   * A second window's "New chat", a CLI `--resume` or the follow-up autostart
+   * can archive the pinned conversation. Left pinned, the next turn names an
+   * archived session and comes back `409` for a user who did nothing but type;
+   * released, the same sequence is self-healing.
+   */
+  it("releases a pin the daemon archived elsewhere and follows the lane again", async () => {
+    historyReply = () =>
+      json({
+        messages: [],
+        total: 0,
+        lane_key: "user:gui",
+        session_id: "sess-live",
+      });
+    seedSessions([sessionRow({ id: "sess-live", title: "Connector audit" })]);
+    const client = renderChat();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Connector audit/ }),
+    );
+    await waitFor(() =>
+      expect(useSessionSelection.getState().selectedId).toBe("sess-live"),
+    );
+
+    sessionRows = [
+      sessionRow({
+        id: "sess-new",
+        title: "Docs pass",
+        updated_at: "2026-09-06 11:00:00",
+      }),
+      sessionRow({
+        id: "sess-live",
+        title: "Connector audit",
+        status: "archived",
+      }),
+    ];
+    historyReply = () =>
+      json({
+        messages: [],
+        total: 0,
+        lane_key: "user:gui",
+        session_id: "sess-new",
+      });
+    await act(async () => {
+      await client.invalidateQueries();
+    });
+
+    await waitFor(() =>
+      expect(useSessionSelection.getState().selectedId).toBeNull(),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Docs pass/ })).toHaveAttribute(
+        "aria-current",
+        "true",
+      ),
+    );
+
+    await sendMessage("still here?");
+    const send = requests.find(
+      (r) => r.method === "POST" && r.url.endsWith("/v1/chat"),
+    );
+    expect(send?.body).not.toHaveProperty("session_id");
   });
 
   it("resumes an archived conversation by activating it", async () => {
