@@ -39,18 +39,6 @@ pub struct TaskResponse {
     pub outcome: Option<ParsedOutcomeFields>,
 }
 
-/// Row shape served by `GET /v1/tasks` — a `Task`'s own fields flattened to
-/// the top level (matching `Task`'s `#[serde(skip)]`s on the internal
-/// `state_json`/`outcome_json` columns), plus the fields the handler used to
-/// post-inject via `serde_json::Value::as_object_mut()`:
-/// `assigned_agents` (always present, possibly empty) and `outcome` (present
-/// only when the task's `outcome_json` parses — see `parse_outcome`), plus
-/// `cost_usd` (GAP-08b), sourced from a single grouped
-/// `LlmUsageRepository::cost_for_tasks` query over the page's task ids and
-/// defaulted to 0.0 for a task with no logged LLM calls.
-///
-/// This is the "cheap half" of task-shape normalisation (plan §7); the full
-/// `GET /v1/tasks` vs `/{id}` unification lands in Phase 4 with P8.
 /// One swimlane of `GET /v1/tasks/{id}/timeline` — the `TimelineLane` the GUI
 /// is written against, field for field.
 ///
@@ -93,6 +81,18 @@ pub struct TaskTimelineResponse {
     pub lanes: Vec<TimelineLaneResponse>,
 }
 
+/// Row shape served by `GET /v1/tasks` — a `Task`'s own fields flattened to
+/// the top level (matching `Task`'s `#[serde(skip)]`s on the internal
+/// `state_json`/`outcome_json` columns), plus the fields the handler used to
+/// post-inject via `serde_json::Value::as_object_mut()`:
+/// `assigned_agents` (always present, possibly empty) and `outcome` (present
+/// only when the task's `outcome_json` parses — see `parse_outcome`), plus
+/// `cost_usd` (GAP-08b), sourced from a single grouped
+/// `LlmUsageRepository::cost_for_tasks` query over the page's task ids and
+/// defaulted to 0.0 for a task with no logged LLM calls.
+///
+/// This is the "cheap half" of task-shape normalisation (plan §7); the full
+/// `GET /v1/tasks` vs `/{id}` unification lands in Phase 4 with P8.
 #[derive(Debug, Serialize)]
 pub struct TaskSummaryResponse {
     #[serde(flatten)]
