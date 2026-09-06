@@ -58,6 +58,14 @@ impl ModelRegistry {
 
     /// Create a registry with well-known models pre-populated.
     pub fn with_defaults() -> Self {
+        Self {
+            models: RwLock::new(Self::default_models()),
+        }
+    }
+
+    /// The compiled default catalogue — every model this build knows how to
+    /// price and route without asking a provider's API.
+    fn default_models() -> HashMap<String, ModelInfo> {
         let mut models = HashMap::new();
 
         // Anthropic models (discovered: false — only for internal routing/pricing)
@@ -182,9 +190,7 @@ impl ModelRegistry {
             );
         }
 
-        Self {
-            models: RwLock::new(models),
-        }
+        models
     }
 
     /// Create a registry with well-known models, overridden by config models.
@@ -334,6 +340,26 @@ impl ModelRegistry {
             models.remove(id);
         }
         to_remove
+    }
+
+    /// Put back the compiled defaults for a provider that [`Self::remove_by_provider`]
+    /// stripped, returning how many entries were restored.
+    ///
+    /// Re-enabling a provider (GAP-15) has to do this before refreshing:
+    /// `refresh_models` only *marks* entries it can already see, so without a
+    /// restore a disable/enable cycle would leave the provider with no
+    /// catalogue until the daemon restarted. Existing entries win, so a
+    /// discovered model is never overwritten by its default.
+    pub fn restore_defaults_for_provider(&self, provider: &ProviderType) -> usize {
+        let mut models = self.models.write().unwrap_or_else(|p| p.into_inner());
+        let mut restored = 0;
+        for (id, info) in Self::default_models() {
+            if info.provider == *provider && !models.contains_key(&id) {
+                models.insert(id, info);
+                restored += 1;
+            }
+        }
+        restored
     }
 
     /// Register a model only if it's not already present.

@@ -44,11 +44,23 @@ pub fn read_config(path: &std::path::Path) -> Result<LlmRouterConfig, LlmError> 
         .map_err(|e| LlmError::Config(format!("Failed to parse {}: {}", path.display(), e)))
 }
 
+/// Render a config as TOML text, **deterministically**.
+///
+/// Serializing the struct directly walks its `HashMap`s, whose iteration order
+/// differs between instances, so two writes of the same content can reorder
+/// half the file. `toml::Value`'s tables are ordered, so going through one
+/// makes a rewrite that changes a single key change a single key — which is
+/// what a hand-edited file deserves (plan §1.4).
+pub fn render_config(config: &LlmRouterConfig) -> Result<String, LlmError> {
+    let value = toml::Value::try_from(config)
+        .map_err(|e| LlmError::Config(format!("Failed to serialize config: {}", e)))?;
+    toml::to_string_pretty(&value)
+        .map_err(|e| LlmError::Config(format!("Failed to serialize config: {}", e)))
+}
+
 /// Write a hierarchical LLM config to a TOML file.
 pub fn write_config(path: &std::path::Path, config: &LlmRouterConfig) -> Result<(), LlmError> {
-    let content = toml::to_string_pretty(config)
-        .map_err(|e| LlmError::Config(format!("Failed to serialize config: {}", e)))?;
-    std::fs::write(path, content)
+    std::fs::write(path, render_config(config)?)
         .map_err(|e| LlmError::Config(format!("Failed to write {}: {}", path.display(), e)))?;
     Ok(())
 }
