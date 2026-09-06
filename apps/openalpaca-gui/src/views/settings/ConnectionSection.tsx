@@ -19,10 +19,13 @@
  * Also real since Phase 8: **uptime, `Schema vNN` and `Copy log path`** —
  * GAP-14, closed. `GET /v1/status` carries `started_at`/`uptime_secs`, the open
  * database's `schema_version` (not a compile-time count of migration files) and
- * the CLI-managed `log_path`, plus §4.8's two size totals and what the boot
- * session-log sweep did. The log path is `null` for a daemon the CLI did not
- * start — the sidecar, a `cargo run` — and the Copy button is inert there,
- * because a path to a file that was never written is worse than no path.
+ * the CLI-managed `log_path`, plus §4.8's two size totals, `retention` (the
+ * limits those totals are measured against) and what the boot session-log
+ * sweep did. The log path is `null` for a daemon this run did not launch —
+ * the sidecar, a `cargo run`, or one that merely found a previous CLI
+ * daemon's leftover `daemon.log` at the usual path — and the Copy button is
+ * inert there, because a path to a file this daemon did not write is worse
+ * than no path.
  *
  * Unavailable: the spend *cap*, which nothing serves because there is no daily
  * budget by design (N4: caps are per-workflow/per-turn), so the design's
@@ -156,11 +159,20 @@ export function ConnectionSection() {
  * The session line under them is the boot sweep's own account. It is silent on
  * a daemon whose sweep found nothing to do — an eviction that never happened
  * is not news — and says so plainly when the log is *still* over its cap,
- * which is the one state the owner can act on.
+ * naming the cap itself (`retention.log_max_total_bytes`) rather than sending
+ * the owner off to raise a number the panel never showed them.
+ *
+ * Exported for its own tests: it takes a plain `DaemonStatus | undefined`, so
+ * it can be rendered without mocking the connection/usage/tasks hooks the
+ * rest of the section needs.
  */
-function StorageCard({ status }: { status: DaemonStatus | undefined }) {
+export function StorageCard({ status }: { status: DaemonStatus | undefined }) {
   const sweep = status?.sessions.last_sweep ?? null;
   const dropped = status?.sessions.dropped_records ?? 0;
+  // The denominator the two `over_cap_after` notes below need — `retention`
+  // is what closed Important #1 (T44 fix round 1): without it, "raise the
+  // cap" pointed at a number the panel never showed.
+  const totalCap = formatFileSize(status?.retention.log_max_total_bytes ?? 0);
 
   return (
     <StatCard
@@ -184,14 +196,14 @@ function StorageCard({ status }: { status: DaemonStatus | undefined }) {
           {formatFileSize(sweep.bytes_freed)} from {sweep.sessions_evicted} of{" "}
           {sweep.sessions_visited} sessions
           {sweep.over_cap_after
-            ? " — still over the total cap, with only active sessions left to evict."
+            ? ` — still over the ${totalCap} cap, with only active sessions left to evict.`
             : "."}
         </GapNote>
       )}
       {sweep !== null && sweep.files_removed === 0 && sweep.over_cap_after && (
         <GapNote>
-          Session logs are over the total cap and everything left is protected —
-          raise `log_max_total_bytes` or archive some conversations.
+          Session logs are over the {totalCap} cap and everything left is
+          protected — raise log_max_total_bytes or archive some conversations.
         </GapNote>
       )}
       {dropped > 0 && (

@@ -801,8 +801,7 @@ export interface HealthResponse {
  * `GET /v1/status` — the authenticated sibling of `/v1/health` (plan §4.7
  * item 4). It names absolute paths on the owner's disk, hence the token.
  *
- * GAP-14's remaining fields (`started_at`, `uptime_secs`, `schema_version`,
- * `log_path`) are Phase 8 and are not here yet.
+ * GAP-14, closed in Phase 8: every field below is served today.
  */
 export interface DaemonStatus {
   /** `~/.openalpaca` (or `$OPENALPACA_HOME_STORE`). */
@@ -831,7 +830,22 @@ export interface DaemonStatus {
   upload_bytes: number;
   /** Bytes agents produced. Informational; never charged against the cap. */
   produced_bytes: number;
+  /**
+   * The `orchestrator.sessions` limits this daemon is actually enforcing —
+   * the denominator `sessions.last_sweep`'s `over_cap_after` is measured
+   * against, and what the Storage card's "raise the cap" advice means.
+   */
+  retention: DaemonRetentionStatus;
   sessions: DaemonSessionsStatus;
+}
+
+export interface DaemonRetentionStatus {
+  /** Per session, counting `log.jsonl` segments plus `results/`. */
+  log_max_session_bytes: number;
+  /** Across all sessions — the total-cap denominator. */
+  log_max_total_bytes: number;
+  /** Age-based sweep of archived session logs; `0` means it is disabled. */
+  log_retention_days: number;
 }
 
 export interface DaemonSessionsStatus {

@@ -33,6 +33,11 @@ const STATUS: DaemonStatus = {
   log_path: "/Users/dev/.openalpaca/state/logs/daemon.log",
   upload_bytes: 1_024,
   produced_bytes: 2_048,
+  retention: {
+    log_max_session_bytes: 256 * 1024 * 1024,
+    log_max_total_bytes: 2 * 1024 * 1024 * 1024,
+    log_retention_days: 0,
+  },
   sessions: {
     last_sweep: {
       sessions_visited: 4,

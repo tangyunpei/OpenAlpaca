@@ -6,7 +6,8 @@
  * `started_at`/`uptime_secs`, `schema_version` (the open database's, not a
  * compile-time count of migration files), `log_path` (the CLI-managed
  * `daemon.log`, or `null` where none was written), the two size totals, the
- * boot session-log sweep — and the project below.
+ * boot session-log sweep, the `retention` limits those are measured against —
+ * and the project below.
  *
  * The project half is the one only this client can ask. The daemon holds no per-lane
  * record of a workspace (R22): a turn carries `x-workspace-path` and the daemon
