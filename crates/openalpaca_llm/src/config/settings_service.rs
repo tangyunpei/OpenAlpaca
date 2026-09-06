@@ -622,15 +622,32 @@ impl LlmSettingsService {
         Ok((model, fallback_models))
     }
 
-    /// Update orchestrator config (model + fallback_models).
-    /// Takes effect on next restart (no hot-reload of orchestrator model).
+    /// Update orchestrator config (model + fallback_models), and point the
+    /// router at the new default model.
     ///
     /// Through [`Self::persist_only`] like every other `llm.toml` write: this
     /// one used to read → mutate → write the whole document with a plain
     /// `fs::write`, so overlapping a provider toggle it wrote the pre-toggle
     /// `enabled` value back and the file and the router disagreed until
     /// restart. The two sit on the same GUI screen.
+    ///
+    /// **The hot path belongs here, not to the watcher** (R62). Taking the lock
+    /// also put this write behind the daemon's dedup ring, which swallows the
+    /// filesystem event the daemon itself raised — and the watcher tick was the
+    /// only caller of `set_default_model` in the workspace, so the picked model
+    /// reached the file and nothing else: the GUI read the new id off disk
+    /// while the router kept answering on the old one until restart. Every
+    /// `persist_only` caller applies its own effect synchronously after the
+    /// write, the way the provider toggle does; the ring is then left to matter
+    /// only for **external** edits.
+    ///
+    /// Write-first, like the toggle: a refused write returns with the router
+    /// untouched, so the file and the router cannot disagree.
+    ///
+    /// `fallback_models` is still read from the file on the next start — the
+    /// router holds no live copy of it, so there is nothing here to move.
     pub fn update_orchestrator_config(&self, req: UpdateOrchestratorRequest) -> Result<(), String> {
+        let model = req.model.clone();
         self.persist_only(|config| {
             let orch =
                 config
@@ -646,6 +663,8 @@ impl LlmSettingsService {
                 Some(req.fallback_models)
             };
         })?;
+
+        self.router.set_default_model(model);
 
         Ok(())
     }

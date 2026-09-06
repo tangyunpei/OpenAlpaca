@@ -342,7 +342,12 @@ pub async fn get_orchestrator_config(State(state): State<Arc<AppState>>) -> impl
     }
 }
 
-/// PUT /v1/orchestrator/config
+/// PUT /v1/orchestrator/config — pick the model the daemon chats with.
+///
+/// The service writes `llm.toml` under the config lock **and points the router
+/// at the new default in the same call** (R62): the write is deduped against
+/// the watcher's ring, so nothing else would. `GET` reads the file, so any gap
+/// between the two is a divergence with nothing on the wire saying so.
 pub async fn update_orchestrator_config(
     State(state): State<Arc<AppState>>,
     Json(body): Json<UpdateOrchestratorRequest>,
@@ -686,8 +691,12 @@ pub async fn update_web_search_config(
         }
     };
 
-    // Immediately update the in-memory ArcSwap so subsequent GET reads
-    // return the fresh value without waiting for the file-watcher hot-reload.
+    // The hot path, applied here rather than left to the watcher — which is
+    // load-bearing, not an optimisation (R62): the write goes through
+    // `persist_only`, whose writer records the hash, so the watcher swallows
+    // the event this write raised and step 5 of the tick never runs for it.
+    // This is the same `Arc<ArcSwap<_>>` the watcher stores into, so an
+    // external edit still lands on it.
     state
         .web_search_config
         .store(std::sync::Arc::new(updated_ws));

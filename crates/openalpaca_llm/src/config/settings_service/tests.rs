@@ -374,6 +374,55 @@ async fn an_orchestrator_write_goes_through_the_same_locked_writer_as_a_toggle()
     assert!(text.contains(SECRET), "and the encrypted key is still verbatim");
 }
 
+/// R62. Taking the lock put the orchestrator write behind the watcher's dedup
+/// ring, and step 3 of the watcher tick — `router.set_default_model` — was its
+/// only caller in the workspace. The ring then swallowed the event the write
+/// raised, so the model an owner picked in the GUI reached the file and nothing
+/// else: `GET /v1/orchestrator/config` read the new id off disk while the
+/// router kept answering on the old one until restart.
+///
+/// Every `persist_only` caller applies its own hot-path effect synchronously
+/// after the write, the way the provider toggle does, and the ring is left to
+/// matter only for **external** edits.
+#[tokio::test]
+async fn an_orchestrator_write_moves_the_routers_default_model_at_once() {
+    let h = Harness::new();
+    assert_eq!(h.router.default_model(), DEFAULT_MODEL);
+
+    h.service
+        .update_orchestrator_config(UpdateOrchestratorRequest {
+            model: "claude-sonnet-4-6".to_string(),
+            fallback_models: vec![],
+        })
+        .unwrap();
+
+    assert_eq!(
+        h.router.default_model(),
+        "claude-sonnet-4-6",
+        "the write is the hot path's trigger, not the watcher"
+    );
+}
+
+/// …and a write that never landed must not move it. The order is write-first
+/// for the same reason the toggle's is: a refused write leaves the router
+/// exactly as it was, so the file and the router cannot disagree.
+#[tokio::test]
+async fn a_failed_orchestrator_write_leaves_the_default_model_alone() {
+    let h = Harness::new();
+    *h.fail.lock().unwrap() = true;
+
+    let err = h
+        .service
+        .update_orchestrator_config(UpdateOrchestratorRequest {
+            model: "claude-sonnet-4-6".to_string(),
+            fallback_models: vec![],
+        })
+        .expect_err("the writer was told to fail");
+
+    assert!(err.contains("disk is full"), "{err}");
+    assert_eq!(h.router.default_model(), DEFAULT_MODEL);
+}
+
 /// The daemon's other `llm.toml` writer, `PUT /v1/daemon/config/providers/
 /// web-search`, had the same exposure and now takes the same lock.
 #[tokio::test]
