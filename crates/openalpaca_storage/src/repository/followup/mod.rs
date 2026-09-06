@@ -190,7 +190,41 @@ impl<'a> FollowupRepository<'a> {
         })
     }
 
-    /// Mark a follow-up item done.
+    /// Consume a still-queued follow-up item, moving it queued → done.
+    /// Returns whether the claim won.
+    ///
+    /// The third CAS on `status = 'queued'`, and it exists for the same reason
+    /// as the other two. The lazy `unprocessed_steering` injection lists a
+    /// lane's leftovers, renders them into the turn's context block, and marks
+    /// them done so they surface exactly once — and a `DELETE` on the follow-up
+    /// route can land in that gap, because every repository call takes and
+    /// releases the connection separately. Unconditional [`mark_done`] would
+    /// then overwrite a `cancelled` row with `done` *after* the client was told
+    /// the item was dropped. CAS-ing instead lets the injector claim each row
+    /// before it renders it, and skip the ones it lost.
+    ///
+    /// [`mark_done`](Self::mark_done) stays for the follow-up runner, which
+    /// closes out a row it already claimed (`running`, not `queued`).
+    pub fn mark_done_if_queued(&self, id: i64) -> Result<bool> {
+        self.db.with_connection(|conn| {
+            let changed = conn
+                .execute(
+                    "UPDATE lane_followups \
+                     SET status = 'done', updated_at = datetime('now') \
+                     WHERE id = ?1 AND status = 'queued'",
+                    rusqlite::params![id],
+                )
+                .context("Failed to claim followup")?;
+            Ok(changed > 0)
+        })
+    }
+
+    /// Mark a follow-up item done, whatever its current status.
+    ///
+    /// For a row this caller already owns — the follow-up runner closing out
+    /// the `running` row `claim_next` handed it. A caller that is racing
+    /// another transition off `queued` wants
+    /// [`mark_done_if_queued`](Self::mark_done_if_queued) instead.
     pub fn mark_done(&self, id: i64) -> Result<()> {
         self.set_status(id, "done")
     }

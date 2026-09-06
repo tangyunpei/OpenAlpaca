@@ -147,6 +147,48 @@ fn test_cancel_if_queued_is_lane_scoped() {
     assert!(!repo.cancel_if_queued(id + 999, "user:cli").unwrap());
 }
 
+/// The claim the lazy `unprocessed_steering` injection needs: a leftover row is
+/// consumed only while it is still queued. The injector lists the lane, renders
+/// a block, and marks the rows it used — and a cancel can land in between, so
+/// the mark has to be a CAS like every other transition off `queued`.
+#[test]
+fn test_mark_done_if_queued_wins_only_on_a_queued_row() {
+    let db = setup_db();
+    let repo = FollowupRepository::new(&db);
+
+    let id = queue_item(&repo, "user:cli", FOLLOWUP_KIND_UNPROCESSED_STEERING, "leftover");
+
+    assert!(repo.mark_done_if_queued(id).unwrap());
+    assert_eq!(repo.get(id).unwrap().unwrap().status, "done");
+
+    // Not idempotent, for the same reason `cancel_if_queued` is not: the row
+    // has left `queued`, so the second claim loses.
+    assert!(!repo.mark_done_if_queued(id).unwrap());
+    assert_eq!(repo.get(id).unwrap().unwrap().status, "done");
+}
+
+/// The race it exists to lose: the row was cancelled between the injector's
+/// list and its claim. The claim must not resurrect it as `done` — the
+/// cancellation has already been announced to the client.
+#[test]
+fn test_mark_done_if_queued_loses_to_a_cancel() {
+    let db = setup_db();
+    let repo = FollowupRepository::new(&db);
+
+    let id = queue_item(&repo, "user:cli", FOLLOWUP_KIND_UNPROCESSED_STEERING, "never mind");
+    assert!(repo.cancel_if_queued(id, "user:cli").unwrap());
+
+    assert!(!repo.mark_done_if_queued(id).unwrap());
+    assert_eq!(
+        repo.get(id).unwrap().unwrap().status,
+        "cancelled",
+        "a cancelled row stays cancelled — `done` would overwrite what the user was told"
+    );
+
+    // An id that names no row is the same "nothing changed".
+    assert!(!repo.mark_done_if_queued(id + 999).unwrap());
+}
+
 #[test]
 fn test_mark_done_and_cancelled() {
     let db = setup_db();
