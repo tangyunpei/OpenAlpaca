@@ -34,8 +34,25 @@
 //! **Its only record is the deletions themselves**, so a crash between two of
 //! them leaves a partially swept root and the next boot simply continues: the
 //! pass is idempotent, and a file already gone is not an error.
+//!
+//! **The one database write it does** (T42 re-review, Minor 2) sits beside
+//! that R54 rule and follows from it. Because an archived session can lose its
+//! live segment, it can lose its log *entirely* — and a session with no
+//! segments left restarts its `seq` at 1 if it is ever reopened. The
+//! `tool_execution_log` rows that indexed it hold `log_seq` and
+//! `result_ref = "log:<seq>"`, which would then name records of a different
+//! generation rather than merely missing ones. So the rows are de-indexed
+//! ([`SkillExecutionRepository::clear_session_log_index`], one statement, one
+//! transaction) **before** the file is removed — write-first, so no window
+//! exists in which a row describes a record that is not there — and an
+//! eviction whose de-indexing fails is abandoned rather than completed. The
+//! audit half of those rows survives: that a tool ran stays true when its
+//! narrative is trimmed, and `invocations_today` must not move because the
+//! disk filled up.
 
 use super::reader::{LIVE_SEGMENT, segment_range};
+use openalpaca_storage::Database;
+use openalpaca_storage::repository::SkillExecutionRepository;
 use std::collections::HashSet;
 use std::fs;
 use std::io;
@@ -60,6 +77,9 @@ pub struct SweepReport {
     /// [`SessionLogService`](super::SessionLogService) after the boot pass so
     /// T44's status route can say it, and logged at `warn` at boot.
     pub over_cap_after: bool,
+    /// `tool_execution_log` rows whose `log_seq` / `result_ref` were cleared
+    /// because the log they addressed was evicted (see [`enforce_total_cap`]).
+    pub index_rows_cleared: usize,
 }
 
 /// Bring `root` under `max_total_bytes`, evicting oldest-touched archived
@@ -74,6 +94,7 @@ pub fn enforce_total_cap(
     root: &Path,
     max_total_bytes: u64,
     active: &HashSet<String>,
+    db: Option<&Database>,
 ) -> io::Result<SweepReport> {
     let (mut sessions, foreign_bytes) = match scan(root, active) {
         Ok(scanned) => scanned,
@@ -108,6 +129,28 @@ pub fn enforce_total_cap(
             if total <= max_total_bytes {
                 break;
             }
+            // **Write-first** (T42 re-review, Minor 2). Losing the live
+            // segment loses the session's *whole* log — it is the last thing
+            // to go — and a session that is later reopened restarts its `seq`
+            // at 1, so `tool_execution_log.log_seq` and
+            // `result_ref = "log:<seq>"` would not merely dangle: they would
+            // name records of a different generation. The rows are cleared
+            // before the file is removed, so no window exists in which a row
+            // describes a record that is not there — and if the clear fails,
+            // the file stays, because a row pointing at nothing is worse than
+            // a session that is still over its cap.
+            if victim.live && let Some(db) = db {
+                match SkillExecutionRepository::new(db).clear_session_log_index(&session.id) {
+                    Ok(cleared) => report.index_rows_cleared += cleared,
+                    Err(e) => {
+                        tracing::warn!(
+                            session_id = %session.id,
+                            "Session log sweep kept a live segment it could not de-index: {e}"
+                        );
+                        continue;
+                    }
+                }
+            }
             // A file already gone is a previous pass that did not finish, not
             // a failure: the sweep's only record is the deletion itself.
             match fs::remove_file(&victim.path) {
@@ -137,9 +180,16 @@ pub fn enforce_total_cap(
 struct Victim {
     path: PathBuf,
     bytes: u64,
+    /// The session's live `log.jsonl` — the last thing in a session to go, and
+    /// the one whose removal makes the session's index rows point at nothing.
+    live: bool,
 }
 
 struct SessionDir {
+    /// The directory name, which is `session_dir_name(id)` — identical to the
+    /// id for every id this store writes (they are UUIDs), and the key the
+    /// `tool_execution_log` rows are found by.
+    id: String,
     /// Newest mtime among the session's own files: "oldest-touched" in §5.4's
     /// LRU. Taken from the files rather than the directory because a directory
     /// mtime changes for reasons that have nothing to do with the session.
@@ -172,12 +222,13 @@ fn scan(root: &Path, active: &HashSet<String>) -> io::Result<(Vec<SessionDir>, u
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        out.push(scan_session(&path, protected.contains(&name)));
+        let is_protected = protected.contains(&name);
+        out.push(scan_session(&path, name, is_protected));
     }
     Ok((out, foreign))
 }
 
-fn scan_session(dir: &Path, protected: bool) -> SessionDir {
+fn scan_session(dir: &Path, id: String, protected: bool) -> SessionDir {
     let mut bytes = 0;
     let mut touched = 0;
     let mut spills: Vec<Victim> = Vec::new();
@@ -207,10 +258,21 @@ fn scan_session(dir: &Path, protected: bool) -> SessionDir {
             // is — its writer is appending to it, and §5.4 protects it
             // outright — so it is not even collected here.
             if !protected {
-                live = Some(Victim { path, bytes: len });
+                live = Some(Victim {
+                    path,
+                    bytes: len,
+                    live: true,
+                });
             }
         } else if let Some((first, _)) = segment_range(&name) {
-            segments.push((first, Victim { path, bytes: len }));
+            segments.push((
+                first,
+                Victim {
+                    path,
+                    bytes: len,
+                    live: false,
+                },
+            ));
         }
     }
 
@@ -222,6 +284,7 @@ fn scan_session(dir: &Path, protected: bool) -> SessionDir {
     evictable.extend(live);
 
     SessionDir {
+        id,
         touched,
         bytes,
         protected,
@@ -245,7 +308,11 @@ fn walk(dir: &Path) -> (u64, u64, Vec<Victim>) {
         let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
         bytes += len;
         touched = touched.max(mtime_secs(&path));
-        files.push(Victim { path, bytes: len });
+        files.push(Victim {
+            path,
+            bytes: len,
+            live: false,
+        });
     }
     (bytes, touched, files)
 }

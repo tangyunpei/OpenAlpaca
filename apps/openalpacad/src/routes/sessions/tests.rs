@@ -89,6 +89,61 @@ async fn listing_answers_the_envelope_with_its_total() {
     assert!(body["sessions"][0].get("summary").is_none());
 }
 
+/// T39 left `interrupted_task_count` structurally 0 because nothing wrote the
+/// status. §5.6b's boot sweep does, and the grouped query counts it — so the
+/// sidebar's badge stops being decoration.
+#[tokio::test]
+async fn the_interrupted_count_counts_the_runs_the_boot_sweep_marked() {
+    let h = Harness::new();
+    let session = h
+        .repo()
+        .get_or_create_active_session(LANE, "gui", None)
+        .expect("session");
+    let other = h
+        .repo()
+        .create_session(LANE, "gui", None, Some("Untouched"))
+        .expect("session");
+
+    // Two runs the previous incarnation left in flight, plus one that really
+    // finished and one that really failed — neither is an interruption.
+    for (id, status, in_session) in [
+        ("t-1", "running", &session.id),
+        ("t-2", "queued", &session.id),
+        ("t-3", "completed", &session.id),
+        ("t-4", "failed", &session.id),
+        ("t-5", "running", &other.id),
+    ] {
+        h.db.with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO task (id, title, status, priority, created_by, source_lane, session_id)
+                 VALUES (?1, 'a run', ?2, 0, 'junpei', 'junpei:gui', ?3)",
+                (id, status, in_session.as_str()),
+            )?;
+            Ok(())
+        })
+        .expect("seed task");
+    }
+    openalpaca_storage::repository::TaskRepository::new(&h.db)
+        .interrupt_all_non_terminal("interrupted — the daemon restarted (instance i-1)")
+        .expect("sweep");
+
+    let (status, body) = split(list_sessions(&h.deps(), ListSessionsQuery::default())).await;
+    assert_eq!(status, StatusCode::OK);
+    let counts: std::collections::HashMap<&str, i64> = body["sessions"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|s| {
+            (
+                s["id"].as_str().expect("id"),
+                s["interrupted_task_count"].as_i64().expect("count"),
+            )
+        })
+        .collect();
+    assert_eq!(counts[session.id.as_str()], 2, "the running and the queued one");
+    assert_eq!(counts[other.id.as_str()], 1);
+}
+
 #[tokio::test]
 async fn listing_filters_by_status_and_refuses_an_unknown_one() {
     let h = Harness::new();

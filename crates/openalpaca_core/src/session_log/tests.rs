@@ -1435,7 +1435,7 @@ fn the_boot_sweep_evicts_the_oldest_archived_sessions_first() {
 
     let active: std::collections::HashSet<String> = std::collections::HashSet::new();
     // 4 000 to free: exactly the oldest session's four spill files.
-    let report = sweep::enforce_total_cap(root, 14_000, &active).unwrap();
+    let report = sweep::enforce_total_cap(root, 14_000, &active, None).unwrap();
 
     assert!(report.bytes_freed > 0);
     assert!(total_bytes(root) <= 14_000, "the sweep brought the root under its cap");
@@ -1481,7 +1481,7 @@ fn the_boot_sweep_converges_on_a_root_of_single_segment_sessions() {
     assert_eq!(total_bytes(root), 6_000);
 
     let active = std::collections::HashSet::new();
-    let report = sweep::enforce_total_cap(root, 2_000, &active).unwrap();
+    let report = sweep::enforce_total_cap(root, 2_000, &active, None).unwrap();
 
     assert!(total_bytes(root) <= 2_000, "the root converges under its cap");
     assert!(!report.over_cap_after, "and the report says so");
@@ -1509,7 +1509,7 @@ fn the_boot_sweep_never_touches_a_live_session() {
     age(root, "archived", 10);
 
     let active: std::collections::HashSet<String> = ["live".to_string()].into_iter().collect();
-    let report = sweep::enforce_total_cap(root, 1_000, &active).unwrap();
+    let report = sweep::enforce_total_cap(root, 1_000, &active, None).unwrap();
 
     for i in 0..6 {
         assert!(
@@ -1552,11 +1552,11 @@ fn the_boot_sweep_is_idempotent_across_a_crash_mid_eviction() {
     // exactly as a half-finished previous run would have left it.
     fs::remove_file(root.join("a").join("results/000001-t-dump.txt")).unwrap();
 
-    let first = sweep::enforce_total_cap(root, 8_000, &active).unwrap();
+    let first = sweep::enforce_total_cap(root, 8_000, &active, None).unwrap();
     assert!(first.bytes_freed > 0);
     let after_first = total_bytes(root);
 
-    let second = sweep::enforce_total_cap(root, 8_000, &active).unwrap();
+    let second = sweep::enforce_total_cap(root, 8_000, &active, None).unwrap();
     assert_eq!(second.bytes_freed, 0, "a second pass has nothing left to do");
     assert_eq!(total_bytes(root), after_first, "and changes nothing");
 }
@@ -1574,7 +1574,7 @@ fn the_boot_sweep_leaves_names_it_did_not_create_alone() {
     fs::write(root.join("a").join("snapshots/keep.png"), "reserved").unwrap();
 
     let active = std::collections::HashSet::new();
-    sweep::enforce_total_cap(root, 1, &active).unwrap();
+    sweep::enforce_total_cap(root, 1, &active, None).unwrap();
 
     assert!(root.join("NOTES.md").exists(), "an unknown name is left alone");
     assert!(
@@ -1598,7 +1598,7 @@ fn the_service_carries_the_boot_sweeps_report() {
 
     // Active, so nothing in it is a candidate and the cap cannot be met.
     let active: std::collections::HashSet<String> = ["a".to_string()].into_iter().collect();
-    let report = sweep::enforce_total_cap(root, 1, &active).unwrap();
+    let report = sweep::enforce_total_cap(root, 1, &active, None).unwrap();
     assert!(report.over_cap_after, "only protected bytes are left");
 
     let plain = service(&dir);
@@ -1759,4 +1759,147 @@ fn the_scan_pages_a_log_longer_than_one_page() {
         vec!["r-2"],
         "the drain in the last page cleared the push in the first"
     );
+}
+
+// ── The eviction's write-first de-indexing (T42 re-review, Minor 2) ──
+
+/// One `tool_execution_log` row for `session`, with both halves: the daemon's
+/// audit columns and the session writer's index pointers.
+fn seed_index_row(db: &Database, session: &str, seq: i64, tool: &str) {
+    use openalpaca_storage::models::skill_execution::ToolExecutionEntry;
+    use openalpaca_storage::repository::SkillExecutionRepository;
+    SkillExecutionRepository::new(db)
+        .attach_session_index(&ToolExecutionEntry {
+            request_id: Some(format!("toolu_{seq}")),
+            agent_id: "lead_agent".to_string(),
+            tool_name: tool.to_string(),
+            success: true,
+            duration_ms: 12,
+            session_id: Some(session.to_string()),
+            log_seq: Some(seq),
+            args_preview: Some("{}".to_string()),
+            result_preview: Some("ok".to_string()),
+            result_ref: Some(format!("log:{seq}")),
+            ..Default::default()
+        })
+        .unwrap();
+}
+
+fn index_pointers(db: &Database, session: &str) -> Vec<(Option<i64>, Option<String>)> {
+    db.with_connection(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT log_seq, result_ref FROM tool_execution_log \
+             WHERE session_id = ?1 ORDER BY id",
+        )?;
+        let rows = stmt
+            .query_map([session], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })
+    .unwrap()
+}
+
+fn open_db(dir: &TempDir) -> Database {
+    Database::open(&dir.path().join("index.db")).unwrap()
+}
+
+/// Losing an archived session's live segment loses its whole log, and a
+/// reopened session restarts its `seq` at 1 — so a surviving `log_seq` would
+/// name a *different* generation's record. The eviction clears the pointers
+/// and leaves the audit half of the row alone.
+#[test]
+fn evicting_a_live_segment_clears_that_sessions_index_pointers() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    let db = open_db(&dir);
+    seed_session(&root, "gone", 0, 1_000);
+    seed_session(&root, "kept", 0, 1_000);
+    // `gone` is the older, so the LRU takes it first.
+    age(&root, "gone", 9_000);
+    seed_index_row(&db, "gone", 7, "shell_execute");
+    seed_index_row(&db, "kept", 3, "file_read");
+
+    let active = std::collections::HashSet::new();
+    // Enough to force `gone` out entirely and leave `kept` alone.
+    let report = sweep::enforce_total_cap(&root, 2_000, &active, Some(&db)).unwrap();
+
+    assert!(!root.join("gone").join(LIVE_SEGMENT).exists());
+    assert!(root.join("kept").join(LIVE_SEGMENT).exists());
+    assert_eq!(report.index_rows_cleared, 1);
+    assert_eq!(index_pointers(&db, "gone"), vec![(None, None)]);
+    assert_eq!(
+        index_pointers(&db, "kept"),
+        vec![(Some(3), Some("log:3".to_string()))],
+        "a session that kept its live segment keeps its pointers"
+    );
+
+    // The audit half survives: that the tool ran is still true, and
+    // `invocations_today` must not move because the disk filled up.
+    let (agent, tool, preview): (String, String, Option<String>) = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT agent_id, tool_name, result_preview FROM tool_execution_log \
+                 WHERE session_id = 'gone'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(agent, "lead_agent");
+    assert_eq!(tool, "shell_execute");
+    assert_eq!(preview.as_deref(), Some("ok"));
+}
+
+/// A session that only gives up its `results/` and rotated segments keeps its
+/// live segment, so its `seq` never restarts and its pointers stay true.
+#[test]
+fn evicting_only_the_older_files_leaves_the_index_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    let db = open_db(&dir);
+    seed_session(&root, "a", 2, 1_000);
+    seed_index_row(&db, "a", 5, "web_fetch");
+
+    let active = std::collections::HashSet::new();
+    // 4 000 of the session's 5 000 bytes: the two spills and one rotated
+    // segment go; the live segment stays.
+    let report = sweep::enforce_total_cap(&root, 1_000, &active, Some(&db)).unwrap();
+    assert!(root.join("a").join(LIVE_SEGMENT).exists());
+    assert_eq!(report.index_rows_cleared, 0);
+    assert_eq!(
+        index_pointers(&db, "a"),
+        vec![(Some(5), Some("log:5".to_string()))]
+    );
+}
+
+/// **Write-first.** The de-indexing runs before the removal, and an eviction
+/// that cannot de-index is abandoned: a row pointing at a record that is not
+/// there is worse than a root that is still over its cap.
+#[test]
+fn a_live_segment_that_cannot_be_de_indexed_is_not_evicted() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("sessions");
+    fs::create_dir_all(&root).unwrap();
+    let db = open_db(&dir);
+    seed_session(&root, "a", 0, 1_000);
+    seed_index_row(&db, "a", 7, "shell_execute");
+    // The `UPDATE` can no longer run.
+    db.with_connection(|conn| {
+        conn.execute("DROP TABLE tool_execution_log", [])?;
+        Ok(())
+    })
+    .unwrap();
+
+    let active = std::collections::HashSet::new();
+    let report = sweep::enforce_total_cap(&root, 1, &active, Some(&db)).unwrap();
+
+    assert!(
+        root.join("a").join(LIVE_SEGMENT).exists(),
+        "the file the rows still describe must stay"
+    );
+    assert!(!root.join("a").join("log.1-9.jsonl").exists(), "the rotated one still goes");
+    assert_eq!(report.index_rows_cleared, 0);
+    assert!(report.over_cap_after, "and the pass says so rather than pretending");
 }

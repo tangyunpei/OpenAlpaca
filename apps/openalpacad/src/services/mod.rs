@@ -304,8 +304,13 @@ async fn sweep_session_logs(
         };
 
     let root = root.to_path_buf();
+    // The database goes with it: an eviction that takes a session's live
+    // segment de-indexes that session's `tool_execution_log` rows first
+    // (write-first, T42 re-review Minor 2), and the walk is blocking work
+    // either way.
+    let db = db.clone();
     let swept = tokio::task::spawn_blocking(move || {
-        openalpaca_core::session_log::sweep::enforce_total_cap(&root, max_total, &active)
+        openalpaca_core::session_log::sweep::enforce_total_cap(&root, max_total, &active, Some(&db))
     })
     .await;
 
@@ -346,6 +351,7 @@ async fn sweep_session_logs(
             sessions_visited = report.sessions_visited,
             sessions_evicted = report.sessions_evicted,
             files_removed = report.files_removed,
+            index_rows_cleared = report.index_rows_cleared,
             bytes_freed = report.bytes_freed,
             bytes_before = report.bytes_before,
             bytes_after = report.bytes_after,

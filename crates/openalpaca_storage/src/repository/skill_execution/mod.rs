@@ -140,6 +140,37 @@ impl<'a> SkillExecutionRepository<'a> {
         })
     }
 
+    /// Drop the session-log pointers on every `tool_execution_log` row of a
+    /// session whose log has been evicted (T42 re-review, Minor 2).
+    ///
+    /// `log_seq` and `result_ref` are *addresses* inside
+    /// `sessions/<id>/log.jsonl` and `sessions/<id>/results/`. When the boot
+    /// sweep takes an archived session's live segment (R54), those files are
+    /// gone — and if that session is ever reopened its `seq` restarts at 1, so
+    /// the surviving rows would not merely dangle, they would name records of a
+    /// *different* generation. Clearing them is the write-first half of the
+    /// eviction: the caller runs this **before** removing the file, so no
+    /// window exists in which a row describes a record that is not there.
+    ///
+    /// The audit half of the row is untouched — `agent_id`, `tool_name`,
+    /// `success`, `duration_ms`, the previews. That a tool ran is still true,
+    /// and `GET /v1/tools`' `invocations_today` must not change because a
+    /// narrative was trimmed; what stopped being true is *where to read it*.
+    ///
+    /// One statement, so one transaction. Returns the number of rows changed.
+    pub fn clear_session_log_index(&self, session_id: &str) -> Result<usize> {
+        self.db.with_connection(|conn| {
+            let rows = conn
+                .execute(
+                    "UPDATE tool_execution_log SET log_seq = NULL, result_ref = NULL \
+                     WHERE session_id = ?1 AND (log_seq IS NOT NULL OR result_ref IS NOT NULL)",
+                    rusqlite::params![session_id],
+                )
+                .context("Failed to clear a session's tool-call index pointers")?;
+            Ok(rows)
+        })
+    }
+
     /// `tool_name → COUNT(*)` over `tool_execution_log` since `since_utc`, for
     /// `GET /v1/tools`' `invocations_today` (GAP-18).
     ///

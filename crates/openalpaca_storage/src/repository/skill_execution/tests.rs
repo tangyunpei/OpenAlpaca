@@ -490,3 +490,74 @@ fn the_error_message_column_is_clamped_like_the_previews() {
         .unwrap();
     assert_eq!(stored.chars().count(), PREVIEW_CHARS);
 }
+
+/// T42 re-review, Minor 2: when the boot sweep evicts a session's log, the
+/// rows that indexed it must stop describing records that no longer exist —
+/// and must keep describing the calls that really happened.
+#[test]
+fn clearing_a_sessions_index_drops_the_pointers_and_keeps_the_audit() {
+    let db = setup_db();
+    let repo = SkillExecutionRepository::new(&db);
+    for (request, seq, session) in [("toolu_1", 4, "gone"), ("toolu_2", 9, "gone"), ("toolu_3", 2, "kept")] {
+        repo.attach_session_index(&ToolExecutionEntry {
+            request_id: Some(request.to_string()),
+            agent_id: "lead_agent".to_string(),
+            tool_name: "shell_execute".to_string(),
+            success: true,
+            duration_ms: 5,
+            session_id: Some(session.to_string()),
+            log_seq: Some(seq),
+            args_preview: Some("{}".to_string()),
+            result_preview: Some("ok".to_string()),
+            result_ref: Some(format!("log:{seq}")),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    assert_eq!(repo.clear_session_log_index("gone").unwrap(), 2);
+
+    /// What the assertions below need out of one row.
+    struct IndexedRow {
+        log_seq: Option<i64>,
+        result_ref: Option<String>,
+        tool_name: String,
+        result_preview: Option<String>,
+    }
+    let read = |session: &str| -> Vec<IndexedRow> {
+        db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT log_seq, result_ref, tool_name, result_preview \
+                 FROM tool_execution_log WHERE session_id = ?1 ORDER BY id",
+            )?;
+            let rows = stmt
+                .query_map([session], |r| {
+                    Ok(IndexedRow {
+                        log_seq: r.get(0)?,
+                        result_ref: r.get(1)?,
+                        tool_name: r.get(2)?,
+                        result_preview: r.get(3)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .unwrap()
+    };
+
+    for row in read("gone") {
+        assert_eq!(row.log_seq, None);
+        assert_eq!(row.result_ref, None);
+        // The call still happened; `invocations_today` must not move.
+        assert_eq!(row.tool_name, "shell_execute");
+        assert_eq!(row.result_preview.as_deref(), Some("ok"));
+    }
+    assert_eq!(
+        read("kept")[0].log_seq,
+        Some(2),
+        "another session is untouched"
+    );
+
+    // Idempotent: a second pass finds nothing left to clear.
+    assert_eq!(repo.clear_session_log_index("gone").unwrap(), 0);
+}

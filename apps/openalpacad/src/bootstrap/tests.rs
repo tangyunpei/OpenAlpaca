@@ -290,7 +290,7 @@ fn the_recovery_runs_before_the_byte_cap_eviction_or_the_interjection_is_gone() 
     sweep_interrupted_runs(&db, Some(&sessions), "boot-1");
     // A cap of 0 bytes: the session is archived, so R54 lets its live segment
     // go, and the log is gone.
-    sweep::enforce_total_cap(&sessions, 0, &empty).unwrap();
+    sweep::enforce_total_cap(&sessions, 0, &empty, None).unwrap();
     assert!(!sessions.join("s1").join("log.jsonl").exists());
     assert_eq!(queued_contents(&db, "user:cli"), vec!["never seen"]);
 
@@ -305,7 +305,7 @@ fn the_recovery_runs_before_the_byte_cap_eviction_or_the_interjection_is_gone() 
     seed_run(&db, "t1", "s1", "user:cli");
     seed_crashed_log(&sessions, "s1", "t1");
 
-    sweep::enforce_total_cap(&sessions, 0, &empty).unwrap();
+    sweep::enforce_total_cap(&sessions, 0, &empty, None).unwrap();
     assert!(
         !sessions.join("s1").join("log.jsonl").exists(),
         "the eviction really took the only copy"
