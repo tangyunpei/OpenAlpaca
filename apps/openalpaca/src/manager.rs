@@ -12,6 +12,18 @@ const DAEMON_BIN_ENV: &str = "OPENALPACA_DAEMON_BIN";
 const GUI_APP_ENV: &str = "OPENALPACA_GUI_APP";
 const DAEMON_CONFIG_ENV: &str = "OPENALPACA_CONFIG_DIR";
 
+/// Rotate `daemon.log` once it is past 16 MB, and keep three generations —
+/// so the log costs at most four files, however long a daemon runs.
+///
+/// The file is the daemon's stdout and stderr: nothing else bounds it, and a
+/// long-lived daemon that logs at `info` will fill a disk given months. The
+/// caps are deliberately dumb — a size check at start, no timer, no
+/// compression, no dependency — because the alternative (a real in-daemon
+/// appender, and un-discarding the GUI sidecar's stdout) is a separate piece
+/// of work and this file must not grow unbounded while it waits.
+const LOG_MAX_BYTES: u64 = 16 * 1024 * 1024;
+const LOG_KEEP: usize = 3;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DaemonLaunch {
     Binary(PathBuf),
@@ -35,9 +47,22 @@ pub fn start_daemon() -> Result<()> {
 
     let runtime_dir = ensure_runtime_dirs()?;
     let config_dir = store::ensure_runtime_config_dir()?;
-    let log_path = store::logs_dir()?.join("daemon.log");
-    let log_file = fs::File::create(&log_path)
-        .with_context(|| format!("Failed to create daemon log file: {}", log_path.display()))?;
+    store::logs_dir().context("Failed to create the daemon log directory")?;
+    let log_path = store::daemon_log_path()?;
+    // Bound it before opening it: a log that is already past its cap becomes
+    // `daemon.log.1` and this run starts a fresh one. A rotation that fails is
+    // reported and not fatal — a daemon that will not start because its log
+    // could not be renamed would be the worse bug.
+    if let Err(e) = rotate_log(&log_path, LOG_MAX_BYTES, LOG_KEEP) {
+        println!("⚠️  Could not rotate the daemon log ({e}); appending to it as it is.");
+    }
+    // Append, not truncate: the rotation is what bounds the file, so a restart
+    // no longer silently discards the previous run's output.
+    let log_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("Failed to open daemon log file: {}", log_path.display()))?;
 
     let current_exe = std::env::current_exe().context("Failed to resolve current executable")?;
     let launch = resolve_daemon_launch(&current_exe)?;
@@ -191,6 +216,39 @@ pub fn stop_gui() -> Result<()> {
         println!("⚠️  No GUI process found.");
     }
     Ok(())
+}
+
+/// Shift the log's generations down one when it is past `max_bytes`.
+///
+/// `daemon.log` → `.1` → `.2` → … → `.{keep}`, and whatever was at `.{keep}`
+/// is gone. A log that does not exist, or that is still under the cap, is left
+/// alone — the first start of a fresh install rotates nothing.
+fn rotate_log(path: &Path, max_bytes: u64, keep: usize) -> std::io::Result<()> {
+    match fs::metadata(path) {
+        Ok(meta) if meta.len() > max_bytes => {}
+        // Absent, or small enough: nothing to do. An unreadable log is not a
+        // reason to refuse to start, so it is treated the same way.
+        _ => return Ok(()),
+    }
+
+    // Oldest first, so no rename can overwrite a generation that has not moved
+    // yet. `keep` is the last one kept, which makes `.{keep}` the one dropped.
+    let _ = fs::remove_file(generation(path, keep));
+    for n in (1..keep).rev() {
+        let from = generation(path, n);
+        if from.exists() {
+            fs::rename(&from, generation(path, n + 1))?;
+        }
+    }
+    fs::rename(path, generation(path, 1))
+}
+
+/// `daemon.log` + `.n` — appended, never substituted, so the base name's own
+/// extension survives.
+fn generation(path: &Path, n: usize) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(format!(".{n}"));
+    PathBuf::from(name)
 }
 
 fn daemon_launch_command(launch: &DaemonLaunch, runtime_dir: &Path, config_dir: &Path) -> Command {
@@ -401,6 +459,84 @@ mod tests {
             perms.set_mode(0o755);
             fs::set_permissions(path, perms).expect("permissions");
         }
+    }
+
+    /// Below the threshold the log is left exactly as it is: rotating a small
+    /// file would throw away the only copy of a short run's output.
+    #[test]
+    fn a_log_under_the_cap_is_not_rotated() {
+        let root = tempfile::TempDir::new().unwrap();
+        let log = root.path().join("daemon.log");
+        fs::write(&log, b"one short run\n").unwrap();
+
+        rotate_log(&log, LOG_MAX_BYTES, LOG_KEEP).expect("rotation should succeed");
+
+        assert_eq!(fs::read(&log).unwrap(), b"one short run\n");
+        assert!(!log.with_extension("log.1").exists());
+    }
+
+    /// A missing log is the ordinary first start, not an error.
+    #[test]
+    fn a_missing_log_is_not_an_error() {
+        let root = tempfile::TempDir::new().unwrap();
+        rotate_log(&root.path().join("daemon.log"), LOG_MAX_BYTES, LOG_KEEP)
+            .expect("a first start rotates nothing");
+    }
+
+    /// The real 16 MB threshold, exercised with a sparse file so the test does
+    /// not write 16 MB: past it, `daemon.log` becomes `daemon.log.1` and the
+    /// live name is free for a fresh file.
+    #[test]
+    fn a_log_over_sixteen_megabytes_is_rotated_to_dot_one() {
+        let root = tempfile::TempDir::new().unwrap();
+        let log = root.path().join("daemon.log");
+        fs::File::create(&log)
+            .unwrap()
+            .set_len(LOG_MAX_BYTES + 1)
+            .unwrap();
+
+        rotate_log(&log, LOG_MAX_BYTES, LOG_KEEP).expect("rotation should succeed");
+
+        assert!(!log.exists(), "the live name is free after a rotation");
+        let rotated = root.path().join("daemon.log.1");
+        assert_eq!(fs::metadata(&rotated).unwrap().len(), LOG_MAX_BYTES + 1);
+    }
+
+    /// Keep three: every generation shifts down one and the fourth is dropped,
+    /// so the log costs at most four files however long the daemon runs.
+    #[test]
+    fn rotation_keeps_three_generations_and_drops_the_oldest() {
+        let root = tempfile::TempDir::new().unwrap();
+        let log = root.path().join("daemon.log");
+        for (name, body) in [
+            ("daemon.log", "live"),
+            ("daemon.log.1", "gen1"),
+            ("daemon.log.2", "gen2"),
+            ("daemon.log.3", "gen3"),
+        ] {
+            fs::write(root.path().join(name), body).unwrap();
+        }
+
+        // A tiny cap: the keep rule is what is under test, not the threshold.
+        rotate_log(&log, 2, LOG_KEEP).expect("rotation should succeed");
+
+        assert!(!log.exists());
+        let read = |name: &str| fs::read_to_string(root.path().join(name)).unwrap();
+        assert_eq!(read("daemon.log.1"), "live");
+        assert_eq!(read("daemon.log.2"), "gen1");
+        assert_eq!(read("daemon.log.3"), "gen2");
+        assert!(
+            !root.path().join("daemon.log.4").exists(),
+            "the fourth generation is dropped, never accumulated"
+        );
+
+        // And again, to prove the shift is not a one-off.
+        fs::write(&log, "live-2").unwrap();
+        rotate_log(&log, 2, LOG_KEEP).expect("rotation should succeed");
+        assert_eq!(read("daemon.log.1"), "live-2");
+        assert_eq!(read("daemon.log.2"), "live");
+        assert_eq!(read("daemon.log.3"), "gen1");
+        assert!(!root.path().join("daemon.log.4").exists());
     }
 
     #[test]

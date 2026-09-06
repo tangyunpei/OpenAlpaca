@@ -42,7 +42,12 @@ Runtime paths after installer-based startup:
 - config base dir: `~/.openalpaca/config`
 - discovery: `~/.openalpaca/state/discovery.json`
 - database: `~/.openalpaca/state/openalpaca.db`
-- daemon log (CLI-managed startup): `~/.openalpaca/state/logs/daemon.log`
+- daemon log (CLI-managed startup): `~/.openalpaca/state/logs/daemon.log` —
+  appended across restarts and rotated by `openalpaca daemon start` when it is
+  past 16 MB (`daemon.log.1` … `.3`, oldest dropped), so it costs at most four
+  files. `GET /v1/status` reports the path when this file exists; a daemon
+  started any other way (`cargo run`, the GUI sidecar) writes none and reports
+  `null`.
 
 ## Startup and Lifecycle
 
