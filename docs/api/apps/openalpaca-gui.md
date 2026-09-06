@@ -100,6 +100,18 @@
 - Exported functions: `getDispatchDecisions`, `getLatencyAggregates`, `getLatencyRecords`, `getOrchestratorConfig`, `updateOrchestratorConfig`
 - Endpoints: none
 
+### `run-events.test.ts`
+
+- Source: `apps/openalpaca-gui/src/lib/api/run-events.test.ts`
+- Exported functions: none
+- Endpoints: none
+
+### `run-events.ts`
+
+- Source: `apps/openalpaca-gui/src/lib/api/run-events.ts`
+- Exported functions: none
+- Endpoints: none
+
 ### `settings.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/settings.ts`
@@ -121,7 +133,7 @@
 ### `telemetry.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/telemetry.ts`
-- Exported functions: `getEventHistory`, `getHealth`
+- Exported functions: `getEventHistory`, `getHealth`, `getRunEventLog`
 - Endpoints: none
 
 ### `tools.ts`
