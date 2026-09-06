@@ -12,7 +12,7 @@ use crate::events::SystemEvent;
 use crate::security::policy::{Principal, Scope};
 use chrono::{DateTime, Utc};
 use openalpaca_storage::Database;
-use openalpaca_storage::repository::{FOLLOWUP_KIND_UNPROCESSED_STEERING, FollowupRepository};
+use openalpaca_storage::repository::FollowupRepository;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -143,7 +143,7 @@ pub fn push_steering(
 }
 
 /// The fallback `push_steering` takes when the session log dropped its
-/// `steering` record. Writes exactly what
+/// `steering` record. Files exactly what
 /// `FollowupRepository::recover_unprocessed_steering` would write for this
 /// same interjection after a crash — same kind, same columns — so a
 /// log-channel drop degrades to "recovered late" rather than "lost".
@@ -171,20 +171,62 @@ fn file_dropped_steering(
         );
         return;
     };
+    match file_unprocessed_steering(db, lane_key, task_id, text, principal_json, workspace_path) {
+        Ok(Some(_id)) => {}
+        Ok(None) => {
+            // The graceful-exit conversion (or a prior call here) already
+            // filed this exact interjection — R56's guard, not a bug.
+            tracing::debug!(
+                task_id = %task_id,
+                "dropped steering record already filed as a follow-up — skipping the duplicate"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task_id,
+                "failed to file the dropped steering record as a follow-up: {e}"
+            );
+        }
+    }
+}
+
+/// File a single `unprocessed_steering` follow-up row, unless a row for the
+/// same interjection has already been filed.
+///
+/// R56: the shared choke point every writer of this row goes through — the
+/// dropped-record fallback above, the graceful-exit leftover conversion
+/// (`orchestrator/dispatcher/lead_agent.rs`), and the boot-time crash
+/// recovery (`FollowupRepository::recover_unprocessed_steering`) all reach
+/// [`FollowupRepository::queue_unprocessed_steering_once`] — the single
+/// guarded `INSERT … WHERE NOT EXISTS` — so the same interjection can never
+/// be filed twice by two different call sites, even when both fire for the
+/// same message at workflow detach (the bug this function closes).
+///
+/// The row is pinned to the lane's current active session, same as
+/// [`FollowupRepository::queue`] — unlike the boot recovery, which pins to
+/// the crashed run's own session because by the time a crash is noticed the
+/// lane may be showing a different conversation.
+///
+/// Returns `Ok(Some(id))` when a new row was inserted, `Ok(None)` when a
+/// matching row already existed and nothing changed.
+pub(crate) fn file_unprocessed_steering(
+    db: &Database,
+    lane_key: &str,
+    task_id: &str,
+    text: &str,
+    principal_json: &str,
+    workspace_path: Option<&str>,
+) -> anyhow::Result<Option<i64>> {
     let repo = FollowupRepository::new(db);
-    if let Err(e) = repo.queue(
+    let session_id = repo.active_session_id(lane_key)?;
+    repo.queue_unprocessed_steering_once(
         lane_key,
-        FOLLOWUP_KIND_UNPROCESSED_STEERING,
         text,
         principal_json,
         workspace_path,
-        Some(task_id),
-    ) {
-        tracing::warn!(
-            task_id = %task_id,
-            "failed to file the dropped steering record as a follow-up: {e}"
-        );
-    }
+        task_id,
+        session_id.as_deref(),
+    )
 }
 
 /// Why a push into a [`SteeringInbox`] was rejected.
@@ -659,6 +701,59 @@ mod tests {
         assert_eq!(rows[0].content, "second");
         assert_eq!(rows[0].source_task_id.as_deref(), Some("task-1"));
         assert_eq!(rows[0].workspace_path.as_deref(), Some("/repo"));
+    }
+
+    /// The core of this round's fix (R56): the dropped-record fallback above
+    /// and the graceful-exit leftover conversion
+    /// (`orchestrator/dispatcher/lead_agent.rs:502-542`) both file an
+    /// undelivered interjection through this exact function — so calling it
+    /// twice for the same message, once for each call site, must not leave
+    /// two rows behind (a steered instruction shown to the model twice via
+    /// `<unprocessed_steering>`).
+    #[tokio::test]
+    async fn the_dropped_record_fallback_and_the_graceful_exit_conversion_agree_on_one_row() {
+        use openalpaca_storage::Database;
+        use openalpaca_storage::repository::FollowupRepository;
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        // Simulates `push_steering`'s fallback filing the interjection...
+        let first = file_unprocessed_steering(
+            &db,
+            "u:gui",
+            "task-1",
+            "focus on the tests",
+            "\"System\"",
+            Some("/repo"),
+        )
+        .unwrap();
+        assert!(first.is_some(), "the first writer must insert the row");
+
+        // ...and the graceful-exit conversion later trying to file the very
+        // same interjection at workflow detach.
+        let second = file_unprocessed_steering(
+            &db,
+            "u:gui",
+            "task-1",
+            "focus on the tests",
+            "\"System\"",
+            Some("/repo"),
+        )
+        .unwrap();
+        assert_eq!(
+            second, None,
+            "the second writer must see the row already filed"
+        );
+
+        let repo = FollowupRepository::new(&db);
+        let rows = repo.list_queued_by_lane("u:gui").unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "one steered instruction must not surface twice: {rows:?}"
+        );
+        assert_eq!(rows[0].content, "focus on the tests");
     }
 
     /// With no database at all, a dropped record has nowhere to be filed.

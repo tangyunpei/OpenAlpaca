@@ -504,8 +504,6 @@ impl TaskDispatcher {
                 ctx.remove_steering_inbox(&task_id);
                 if !leftovers.is_empty() {
                     if let Some(ref db) = db {
-                        let repo =
-                            openalpaca_storage::repository::FollowupRepository::new(db);
                         for msg in leftovers {
                             let principal_json = match serde_json::to_string(&msg.principal)
                             {
@@ -518,21 +516,35 @@ impl TaskDispatcher {
                                     continue;
                                 }
                             };
-                            match repo.queue(
+                            // R56: the same guarded insert the dropped-record
+                            // fallback (`runner/steering.rs`) and the boot
+                            // recovery use, so a message the fallback already
+                            // filed (log channel saturated for this push,
+                            // still undrained at detach) is not filed again
+                            // here — one steered instruction must not surface
+                            // twice via `<unprocessed_steering>`.
+                            match crate::runner::steering::file_unprocessed_steering(
+                                db,
                                 &lane_key,
-                                "unprocessed_steering",
+                                &task_id,
                                 &msg.text,
                                 &principal_json,
                                 msg.workspace_path.as_deref(),
-                                Some(&task_id),
                             ) {
-                                Ok(followup_id) => {
+                                Ok(Some(followup_id)) => {
                                     bus.publish(SystemEvent::FollowupQueued {
                                         lane_key: lane_key.clone(),
                                         followup_id,
                                         kind: "unprocessed_steering".to_string(),
                                         timestamp: Utc::now(),
                                     });
+                                }
+                                Ok(None) => {
+                                    tracing::debug!(
+                                        task_id = %task_id,
+                                        "steering leftover already filed as a follow-up — \
+                                         skipping the duplicate"
+                                    );
                                 }
                                 Err(e) => tracing::warn!(
                                     task_id = %task_id,

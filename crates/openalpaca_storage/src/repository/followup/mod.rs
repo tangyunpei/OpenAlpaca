@@ -122,6 +122,95 @@ impl<'a> FollowupRepository<'a> {
         })
     }
 
+    /// Resolve the lane's currently active session, if it has one. The same
+    /// lookup [`queue`](Self::queue) does internally — exposed here so a
+    /// caller that wants "pin this row to whatever the lane is showing right
+    /// now" (the dropped-record fallback and the graceful-exit conversion
+    /// both want this, same as `queue`) can resolve it before calling
+    /// [`queue_unprocessed_steering_once`](Self::queue_unprocessed_steering_once),
+    /// which — unlike `queue` — takes the session id as a plain value rather
+    /// than resolving it itself: the boot-time crash recovery wants the
+    /// crashed run's *own* session instead of whatever the lane happens to
+    /// be showing by the time the crash is noticed.
+    pub fn active_session_id(&self, lane_key: &str) -> Result<Option<String>> {
+        self.db.with_connection(|conn| {
+            conn.query_row(
+                "SELECT id FROM session WHERE lane_key = ?1 AND status = 'active'",
+                rusqlite::params![lane_key],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("Failed to resolve the lane's active session")
+        })
+    }
+
+    /// Queue a single `unprocessed_steering` row, unless a row for the same
+    /// `(source_task_id, kind, content)` triple has already been filed.
+    ///
+    /// R56: the one guarded insert every writer of an `unprocessed_steering`
+    /// row goes through — the dropped-record fallback (`runner/steering.rs`),
+    /// the graceful-exit leftover conversion
+    /// (`orchestrator/dispatcher/lead_agent.rs`), and
+    /// [`recover_unprocessed_steering`](Self::recover_unprocessed_steering)
+    /// below — so the same interjection can never be filed twice by two
+    /// different call sites, even when both fire for the same message at
+    /// workflow detach (the boot recovery previously carried its own
+    /// multiset guard while the other two writers carried none at all).
+    ///
+    /// The guard is a single `INSERT … WHERE NOT EXISTS`, run under the
+    /// process's one `Mutex<Connection>` like every other write here: there
+    /// is no window between a check and an insert for two in-process writers
+    /// to race through.
+    ///
+    /// This narrows the historical **multiset** guard
+    /// (`recover_unprocessed_steering`'s own doc comment below) to a **set**:
+    /// two calls naming the same task, kind, and literal text collapse to
+    /// one row even when they really are two distinct interjections — the
+    /// schema has no column that could tell them apart. That is an accepted
+    /// trade against the harder guarantee this exists to close: the *same*
+    /// interjection must never be filed twice by two call sites. Content
+    /// that actually differs is unaffected — still one row per distinct
+    /// message.
+    ///
+    /// Returns `Ok(Some(id))` when a new row was inserted, `Ok(None)` when a
+    /// matching row already existed and nothing changed.
+    pub fn queue_unprocessed_steering_once(
+        &self,
+        lane_key: &str,
+        content: &str,
+        principal_json: &str,
+        workspace_path: Option<&str>,
+        source_task_id: &str,
+        session_id: Option<&str>,
+    ) -> Result<Option<i64>> {
+        self.db.with_connection(|conn| {
+            let changed = conn
+                .execute(
+                    "INSERT INTO lane_followups \
+                     (lane_key, kind, content, principal_json, workspace_path, source_task_id, session_id) \
+                     SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7 \
+                     WHERE NOT EXISTS ( \
+                         SELECT 1 FROM lane_followups \
+                         WHERE source_task_id = ?6 AND kind = ?2 AND content = ?3 \
+                     )",
+                    rusqlite::params![
+                        lane_key,
+                        FOLLOWUP_KIND_UNPROCESSED_STEERING,
+                        content,
+                        principal_json,
+                        workspace_path,
+                        source_task_id,
+                        session_id,
+                    ],
+                )
+                .context("Failed to insert an unprocessed_steering follow-up")?;
+            if changed == 0 {
+                return Ok(None);
+            }
+            Ok(Some(conn.last_insert_rowid()))
+        })
+    }
+
     /// Fetch a single follow-up row by id.
     pub fn get(&self, id: i64) -> Result<Option<FollowupRecord>> {
         self.db.with_connection(|conn| {
@@ -140,26 +229,23 @@ impl<'a> FollowupRepository<'a> {
     /// File a crashed run's undelivered interjections as the rows the graceful
     /// path would have written (§5.6b). Returns the ids actually inserted.
     ///
-    /// **Idempotence marker: the follow-up's own presence.** §5.6b asks for a
-    /// `request_id` uniqueness guard, and `lane_followups` has no such column;
-    /// adding one is a migration outside the plan's §11 ledger, and appending a
-    /// `steering_recovered` record to the log instead would mean the boot pass
-    /// writing into a log the byte-cap sweep is about to shrink — which T42
-    /// declined for the same reason. So the guard is the rows: for one run, the
-    /// interjections already filed under `(source_task_id, kind, content)` are
-    /// counted, and only the *surplus* is inserted.
+    /// Built on [`queue_unprocessed_steering_once`](Self::queue_unprocessed_steering_once)
+    /// (R56): each item is its own guarded `INSERT … WHERE NOT EXISTS`
+    /// against `(source_task_id, kind, content)`, so a crash between this
+    /// pass and the status flip is still safe the same way it always was —
+    /// the run is non-terminal until the flip, the next boot scans it again,
+    /// and the guard finds nothing left to add — and a run whose leftovers
+    /// were partly filed by the graceful path before it crashed gains only
+    /// the ones still missing.
     ///
-    /// It is a **multiset** guard, not a set one, so two interjections with the
-    /// same words are two rows and not one — and so a run that crashed *after*
-    /// the graceful path had filed some of its leftovers gains only the ones
-    /// still missing.
-    ///
-    /// The count and the inserts share one `with_connection` closure, which is
-    /// atomic against every other caller because the process holds a single
-    /// `Mutex<Connection>` (the argument R51's merge rests on). That is what
-    /// makes a crash between this pass and the status flip safe: the run is
-    /// still non-terminal, the next boot scans it again, and finds nothing left
-    /// to add.
+    /// **This guard is a set, not the historical multiset.** R56 narrowed it
+    /// to close a duplicate-insert bug shared with the other two writers of
+    /// this row: two recovered interjections with identical text now
+    /// collapse to one row, even within the same call — the schema has no
+    /// column that would let the guard tell them apart. Content that
+    /// actually differs is unaffected, and a second pass over the same log
+    /// (or one that only partly landed before a crash) still adds nothing it
+    /// already filed.
     ///
     /// `session_id` is the run's own (`task.session_id`), not the lane's
     /// current active session: the promise was made in that conversation
@@ -172,51 +258,20 @@ impl<'a> FollowupRepository<'a> {
         session_id: Option<&str>,
         items: &[RecoveredSteering],
     ) -> Result<Vec<i64>> {
-        if items.is_empty() {
-            return Ok(Vec::new());
+        let mut inserted = Vec::new();
+        for item in items {
+            if let Some(id) = self.queue_unprocessed_steering_once(
+                lane_key,
+                &item.content,
+                &item.principal_json,
+                item.workspace_path.as_deref(),
+                source_task_id,
+                session_id,
+            )? {
+                inserted.push(id);
+            }
         }
-        self.db.with_connection(|conn| {
-            let mut already: std::collections::HashMap<String, i64> =
-                std::collections::HashMap::new();
-            {
-                let mut stmt = conn.prepare(
-                    "SELECT content, COUNT(*) FROM lane_followups \
-                     WHERE source_task_id = ?1 AND kind = ?2 GROUP BY content",
-                )?;
-                let mut rows =
-                    stmt.query(rusqlite::params![source_task_id, FOLLOWUP_KIND_UNPROCESSED_STEERING])?;
-                while let Some(row) = rows.next()? {
-                    already.insert(row.get(0)?, row.get(1)?);
-                }
-            }
-
-            let mut inserted = Vec::new();
-            for item in items {
-                if let Some(remaining) = already.get_mut(&item.content)
-                    && *remaining > 0
-                {
-                    *remaining -= 1;
-                    continue;
-                }
-                conn.execute(
-                    "INSERT INTO lane_followups \
-                     (lane_key, kind, content, principal_json, workspace_path, source_task_id, session_id) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    rusqlite::params![
-                        lane_key,
-                        FOLLOWUP_KIND_UNPROCESSED_STEERING,
-                        item.content,
-                        item.principal_json,
-                        item.workspace_path,
-                        source_task_id,
-                        session_id,
-                    ],
-                )
-                .context("Failed to insert a recovered steering leftover")?;
-                inserted.push(conn.last_insert_rowid());
-            }
-            Ok(inserted)
-        })
+        Ok(inserted)
     }
 
     /// List all queued items for a lane (any kind), oldest first.

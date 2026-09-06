@@ -355,10 +355,18 @@ fn a_second_recovery_pass_over_the_same_log_adds_nothing() {
     assert_eq!(repo.list_queued_by_lane("user:cli").unwrap().len(), 2);
 }
 
-/// A **multiset**, not a set: the user really did say "hurry up" twice, and
-/// collapsing them into one row would lose an interjection.
+/// R56 narrowed this guard from a multiset to a set (see
+/// `queue_unprocessed_steering_once`'s doc comment): two interjections with
+/// identical text now collapse to one row, even within the same recovery
+/// call, because the schema carries no column that would let the guard tell
+/// a repeat from a coincidence. That is a deliberate trade against the
+/// harder guarantee the narrowing exists to close elsewhere — the very same
+/// interjection must never be filed twice by two different call sites —
+/// never a *double delivery of one* interjection. Content that actually
+/// differs is still one row per message; see `the_guard_does_not_reach_across_runs`
+/// and `a_recovered_interjection_is_the_row_the_graceful_path_would_have_written`.
 #[test]
-fn two_interjections_with_the_same_words_are_two_rows() {
+fn two_interjections_with_the_same_words_collapse_to_one_row() {
     let db = setup_db();
     let repo = FollowupRepository::new(&db);
     let items = [recovered("hurry up"), recovered("hurry up")];
@@ -367,7 +375,7 @@ fn two_interjections_with_the_same_words_are_two_rows() {
         repo.recover_unprocessed_steering("user:cli", "task-1", None, &items)
             .unwrap()
             .len(),
-        2
+        1
     );
     // And a re-run of the same scan still adds nothing.
     assert!(
@@ -375,6 +383,85 @@ fn two_interjections_with_the_same_words_are_two_rows() {
             .unwrap()
             .is_empty()
     );
+    assert_eq!(repo.list_queued_by_lane("user:cli").unwrap().len(), 1);
+}
+
+// ── R56: the shared guarded insert every unprocessed_steering writer uses ──
+
+/// The core of R56's fix: the dropped-record fallback (`runner/steering.rs`)
+/// and the graceful-exit leftover conversion (`dispatcher/lead_agent.rs`)
+/// both file the same interjection through this one guarded insert. A second
+/// call naming the same `(source_task_id, kind, content)` must not produce a
+/// second row — that was the bug (one steered instruction shown to the model
+/// twice via `<unprocessed_steering>`).
+#[test]
+fn queue_unprocessed_steering_once_files_an_interjection_only_once() {
+    let db = setup_db();
+    let repo = FollowupRepository::new(&db);
+
+    let first = repo
+        .queue_unprocessed_steering_once(
+            "user:cli",
+            "focus on the tests",
+            "\"System\"",
+            Some("/repo"),
+            "task-1",
+            None,
+        )
+        .unwrap();
+    assert!(first.is_some(), "the first call must insert a row");
+
+    let second = repo
+        .queue_unprocessed_steering_once(
+            "user:cli",
+            "focus on the tests",
+            "\"System\"",
+            Some("/repo"),
+            "task-1",
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        second, None,
+        "a matching row already exists — nothing should be inserted again"
+    );
+
+    let rows = repo.list_queued_by_lane("user:cli").unwrap();
+    assert_eq!(rows.len(), 1, "exactly one row, not a duplicate: {rows:?}");
+    assert_eq!(rows[0].content, "focus on the tests");
+}
+
+/// The guard's key is `(source_task_id, kind, content)` — content that
+/// actually differs is a different interjection, and both must be filed.
+#[test]
+fn queue_unprocessed_steering_once_still_inserts_distinct_content() {
+    let db = setup_db();
+    let repo = FollowupRepository::new(&db);
+
+    let first = repo
+        .queue_unprocessed_steering_once(
+            "user:cli",
+            "first message",
+            "\"System\"",
+            None,
+            "task-1",
+            None,
+        )
+        .unwrap();
+    let second = repo
+        .queue_unprocessed_steering_once(
+            "user:cli",
+            "second message",
+            "\"System\"",
+            None,
+            "task-1",
+            None,
+        )
+        .unwrap();
+
+    assert!(first.is_some());
+    assert!(second.is_some());
+    assert_ne!(first, second);
     assert_eq!(repo.list_queued_by_lane("user:cli").unwrap().len(), 2);
 }
 
