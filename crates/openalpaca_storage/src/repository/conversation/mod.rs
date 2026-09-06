@@ -19,8 +19,8 @@ impl<'a> ConversationRepository<'a> {
     pub fn insert(&self, msg: &ConversationMessage) -> Result<i64> {
         self.db.with_connection(|conn| {
             conn.execute(
-                "INSERT INTO conversation_messages (lane_key, role, content, source, model, tokens_in, tokens_out, duration_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO conversation_messages (lane_key, role, content, source, model, tokens_in, tokens_out, duration_ms, task_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 (
                     &msg.lane_key,
                     &msg.role,
@@ -30,6 +30,7 @@ impl<'a> ConversationRepository<'a> {
                     msg.tokens_in,
                     msg.tokens_out,
                     msg.duration_ms,
+                    &msg.task_id,
                 ),
             )?;
             Ok(conn.last_insert_rowid())
@@ -45,8 +46,8 @@ impl<'a> ConversationRepository<'a> {
     ) -> Result<i64> {
         self.db.with_connection(|conn| {
             conn.execute(
-                "INSERT INTO conversation_messages (lane_key, role, content, source, model, tokens_in, tokens_out, duration_ms, content_json, display_text)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT INTO conversation_messages (lane_key, role, content, source, model, tokens_in, tokens_out, duration_ms, content_json, display_text, task_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 (
                     &msg.lane_key,
                     &msg.role,
@@ -58,6 +59,7 @@ impl<'a> ConversationRepository<'a> {
                     msg.duration_ms,
                     content_json,
                     display_text,
+                    &msg.task_id,
                 ),
             )?;
             Ok(conn.last_insert_rowid())
@@ -73,7 +75,7 @@ impl<'a> ConversationRepository<'a> {
     ) -> Result<Vec<ConversationMessage>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, lane_key, role, content, source, model, tokens_in, tokens_out, duration_ms, created_at, content_json, display_text
+                "SELECT id, lane_key, role, content, source, model, tokens_in, tokens_out, duration_ms, created_at, content_json, display_text, task_id
                  FROM conversation_messages
                  WHERE lane_key = ?1
                  ORDER BY created_at ASC, id ASC
@@ -99,7 +101,7 @@ impl<'a> ConversationRepository<'a> {
     ) -> Result<Vec<ConversationMessage>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, lane_key, role, content, source, model, tokens_in, tokens_out, duration_ms, created_at, content_json, display_text
+                "SELECT id, lane_key, role, content, source, model, tokens_in, tokens_out, duration_ms, created_at, content_json, display_text, task_id
                  FROM (
                      SELECT * FROM conversation_messages
                      WHERE lane_key = ?1
@@ -305,7 +307,7 @@ impl<'a> ConversationRepository<'a> {
     ) -> Result<Vec<ConversationMessage>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, lane_key, role, content, source, model, tokens_in, tokens_out, duration_ms, created_at
+                "SELECT id, lane_key, role, content, source, model, tokens_in, tokens_out, duration_ms, created_at, task_id
                  FROM conversation_messages
                  WHERE lane_key = ?1 AND id > ?2 AND id < ?3
                  ORDER BY id ASC
@@ -337,7 +339,7 @@ impl<'a> ConversationRepository<'a> {
         })
     }
 
-    /// The ten-column projection: `content_json` / `display_text` are not
+    /// The eleven-column projection: `content_json` / `display_text` are not
     /// selected by its callers and stay at their `Default` (`None`).
     fn row_to_message(row: &rusqlite::Row<'_>) -> Result<ConversationMessage> {
         Ok(ConversationMessage {
@@ -351,6 +353,7 @@ impl<'a> ConversationRepository<'a> {
             tokens_out: row.get(7)?,
             duration_ms: row.get(8)?,
             created_at: row.get(9)?,
+            task_id: row.get(10)?,
             ..Default::default()
         })
     }
@@ -369,6 +372,7 @@ impl<'a> ConversationRepository<'a> {
             created_at: row.get(9)?,
             content_json: row.get(10)?,
             display_text: row.get(11)?,
+            task_id: row.get(12)?,
         })
     }
 }

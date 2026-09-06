@@ -355,3 +355,81 @@ fn test_list_conversations_for_owner() {
         .unwrap();
     assert_eq!(nobody.len(), 0);
 }
+
+// ── GAP-23: the run a message started, or reported on ────────────────
+
+#[test]
+fn task_id_survives_the_round_trip_on_every_read() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+
+    let delegating = repo
+        .insert(&ConversationMessage {
+            lane_key: "user:gui".to_string(),
+            role: "assistant".to_string(),
+            content: "Starting that now.".to_string(),
+            task_id: Some("task-1".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    repo.insert(&ConversationMessage {
+        lane_key: "user:gui".to_string(),
+        role: "user".to_string(),
+        content: "thanks".to_string(),
+        ..Default::default()
+    })
+    .unwrap();
+    let report = repo
+        .insert(&ConversationMessage {
+            lane_key: "user:gui".to_string(),
+            role: "assistant".to_string(),
+            content: "Done.".to_string(),
+            task_id: Some("task-1".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let listed = repo.list_by_lane("user:gui", 50, 0).unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .map(|m| m.task_id.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("task-1"), None, Some("task-1")],
+    );
+
+    let recent = repo.list_recent_by_lane("user:gui", 50).unwrap();
+    assert_eq!(recent[0].task_id.as_deref(), Some("task-1"));
+    assert!(recent[1].task_id.is_none());
+
+    // The ten-column projection reads it too, so no path silently answers
+    // `None` for a message that started a run.
+    let ranged = repo
+        .list_by_lane_id_range("user:gui", delegating - 1, report + 1, 50)
+        .unwrap();
+    assert_eq!(ranged.len(), 3);
+    assert_eq!(ranged[2].task_id.as_deref(), Some("task-1"));
+}
+
+#[test]
+fn structured_insert_carries_the_run_too() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+
+    repo.insert_with_structured(
+        &ConversationMessage {
+            lane_key: "user:gui".to_string(),
+            role: "assistant".to_string(),
+            content: "Starting that now.".to_string(),
+            task_id: Some("task-9".to_string()),
+            ..Default::default()
+        },
+        r#"{"v":1,"parts":[]}"#,
+        "Starting that now.",
+    )
+    .unwrap();
+
+    let listed = repo.list_by_lane("user:gui", 50, 0).unwrap();
+    assert_eq!(listed[0].task_id.as_deref(), Some("task-9"));
+    assert_eq!(listed[0].display_text.as_deref(), Some("Starting that now."));
+}

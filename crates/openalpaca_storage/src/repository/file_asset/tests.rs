@@ -143,3 +143,154 @@ fn readers_tolerate_the_new_columns() {
     assert_eq!(ready.len(), 1);
     assert_eq!(ready[0].id, "produced-1");
 }
+
+// ── GAP-23: the message ⇄ artifact link ─────────────────────────────
+
+/// Stamp the run and the kind migration 036 added; `insert` leaves both unset.
+fn produced_by(db: &Database, id: &str, task_id: &str, kind: &str) {
+    db.with_connection(|conn| {
+        conn.execute(
+            "INSERT OR IGNORE INTO task (id, title, created_by, source_lane)
+             VALUES (?1, 'A run', 'tester', 'user:gui')",
+            [task_id],
+        )?;
+        let updated = conn.execute(
+            "UPDATE file_assets SET origin = 'produced', task_id = ?2, kind = ?3 WHERE id = ?1",
+            rusqlite::params![id, task_id, kind],
+        )?;
+        assert_eq!(updated, 1, "{id} should exist");
+        Ok(())
+    })
+    .unwrap();
+}
+
+fn message(db: &Database, lane_key: &str, content: &str) -> i64 {
+    db.with_connection(|conn| {
+        conn.execute(
+            "INSERT INTO conversation_messages (lane_key, role, content)
+             VALUES (?1, 'assistant', ?2)",
+            [lane_key, content],
+        )?;
+        Ok(conn.last_insert_rowid())
+    })
+    .unwrap()
+}
+
+fn role_of(db: &Database, message_id: i64, file_id: &str) -> String {
+    db.with_connection(|conn| {
+        Ok(conn.query_row(
+            "SELECT role FROM conversation_message_attachments
+              WHERE message_id = ?1 AND file_id = ?2",
+            rusqlite::params![message_id, file_id],
+            |row| row.get(0),
+        )?)
+    })
+    .unwrap()
+}
+
+#[test]
+fn link_to_message_still_writes_the_attachment_role() {
+    let db = test_db();
+    let repo = FileAssetRepository::new(&db);
+    repo.insert(&asset("upload-1", 10)).unwrap();
+    let msg = message(&db, "user:gui", "here is the file");
+
+    repo.link_to_message(msg, "upload-1", 0, Some("a caption"))
+        .unwrap();
+
+    assert_eq!(role_of(&db, msg, "upload-1"), "attachment");
+    // The upload half of the read is unchanged by the new role.
+    let attachments = repo.get_attachments_for_message(msg).unwrap();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0].0, "upload-1");
+    assert_eq!(attachments[0].2.as_deref(), Some("a caption"));
+}
+
+#[test]
+fn link_to_message_with_role_writes_the_artifact_role() {
+    let db = test_db();
+    let repo = FileAssetRepository::new(&db);
+    repo.insert(&asset("produced-1", 10)).unwrap();
+    produced_by(&db, "produced-1", "task-1", "markdown");
+    let msg = message(&db, "user:gui", "the report");
+
+    repo.link_to_message_with_role(msg, "produced-1", 0, None, ARTIFACT_ROLE)
+        .unwrap();
+
+    assert_eq!(role_of(&db, msg, "produced-1"), "artifact");
+}
+
+#[test]
+fn artifact_links_read_back_only_the_artifact_rows() {
+    let db = test_db();
+    let repo = FileAssetRepository::new(&db);
+    repo.insert(&asset("upload-1", 10)).unwrap();
+    repo.insert(&asset("produced-1", 20)).unwrap();
+    repo.insert(&asset("produced-2", 30)).unwrap();
+    produced_by(&db, "produced-1", "task-1", "markdown");
+    produced_by(&db, "produced-2", "task-1", "code");
+
+    let turn = message(&db, "user:gui", "here is the file");
+    let report = message(&db, "user:gui", "the report");
+    repo.link_to_message(turn, "upload-1", 0, None).unwrap();
+    repo.link_to_message_with_role(report, "produced-1", 0, None, ARTIFACT_ROLE)
+        .unwrap();
+    repo.link_to_message_with_role(report, "produced-2", 1, None, ARTIFACT_ROLE)
+        .unwrap();
+
+    let links = repo.artifact_links_for_messages(&[turn, report]).unwrap();
+
+    // The uploaded attachment is not an artifact chip.
+    assert!(!links.contains_key(&turn));
+    let artifacts = links.get(&report).expect("the report's artifacts");
+    assert_eq!(
+        artifacts,
+        &vec![
+            MessageArtifact {
+                id: "produced-1".to_string(),
+                name: "produced-1.md".to_string(),
+                kind: Some("markdown".to_string()),
+            },
+            MessageArtifact {
+                id: "produced-2".to_string(),
+                name: "produced-2.md".to_string(),
+                kind: Some("code".to_string()),
+            },
+        ]
+    );
+}
+
+#[test]
+fn artifact_links_for_no_messages_touches_nothing() {
+    let db = test_db();
+    let repo = FileAssetRepository::new(&db);
+    assert!(repo.artifact_links_for_messages(&[]).unwrap().is_empty());
+}
+
+#[test]
+fn produced_ids_for_task_skips_uploads_and_other_runs() {
+    let db = test_db();
+    let repo = FileAssetRepository::new(&db);
+    repo.insert(&asset("produced-1", 10)).unwrap();
+    repo.insert(&asset("produced-2", 20)).unwrap();
+    repo.insert(&asset("elsewhere", 30)).unwrap();
+    repo.insert(&asset("upload-1", 40)).unwrap();
+    produced_by(&db, "produced-1", "task-1", "markdown");
+    produced_by(&db, "produced-2", "task-1", "code");
+    produced_by(&db, "elsewhere", "task-2", "markdown");
+    // An upload the user attached *during* the run is still an upload.
+    db.with_connection(|conn| {
+        conn.execute(
+            "UPDATE file_assets SET task_id = 'task-1' WHERE id = 'upload-1'",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    assert_eq!(
+        repo.produced_ids_for_task("task-1").unwrap(),
+        vec!["produced-1".to_string(), "produced-2".to_string()]
+    );
+    assert!(repo.produced_ids_for_task("task-none").unwrap().is_empty());
+}

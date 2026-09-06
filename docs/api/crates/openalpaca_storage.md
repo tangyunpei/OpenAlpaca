@@ -31,14 +31,14 @@
 - `pub use models::{AgentMetrics, AgentTaskHistory, SubAgentConfig};`
 - `pub use models::{ArtifactKind, ArtifactOrigin};`
 - `pub use models::{OutcomeKind, Task, TaskStatus};`
-- `pub use models::{AttachmentRef, FileAsset, FileAssetStatus};`
+- `pub use models::{AttachmentRef, FileAsset, FileAssetStatus, MessageArtifact};`
 - `pub use models::{Conversation, ConversationMessage};`
 - `pub use models::{ExternalIdentity, GlobalUser, LinkToken};`
 - `pub use models::{MemoryKind, MemoryScope, MemorySource, MemoryV2};`
 - `pub use models::MessageFeedback;`
 - `pub use models::{SkillExecutionEntry, ToolExecutionEntry};`
 - `pub use models::SkillHealthMetrics;`
-- `pub use repository::{ AgentRepository, ConfigRepository, ConversationRepository, EventLogRepository, FOLLOWUP_KIND_FOLLOWUP, FOLLOWUP_KIND_UNPROCESSED_STEERING, FileAssetRepository, FollowupRecord, FollowupRepository, IdentityRepository, LlmUsageRepository, MemoryRepository, MessageFeedbackRepository, OrchestratorLatencyRepository, PreferenceRepository, SkillExecutionRepository, SubAgentRepository, SubagentSpanRepository, TaskRepository, };`
+- `pub use repository::{ ARTIFACT_ROLE, ATTACHMENT_ROLE, AgentRepository, ConfigRepository, ConversationRepository, EventLogRepository, FOLLOWUP_KIND_FOLLOWUP, FOLLOWUP_KIND_UNPROCESSED_STEERING, FileAssetRepository, FollowupRecord, FollowupRepository, IdentityRepository, LlmUsageRepository, MemoryRepository, MessageFeedbackRepository, OrchestratorLatencyRepository, PreferenceRepository, SkillExecutionRepository, SubAgentRepository, SubagentSpanRepository, TaskRepository, };`
 - `pub use repository::llm_usage::LlmUsageDaily;`
 - `pub use repository::subagent_span::{ NewSubagentSpan, SPAN_DETAIL_INTERRUPTED, SpanState, SubagentSpanRecord, TemplateRunCount, };`
 - `pub use uploads::{NewUpload, StoredUpload, UploadError, UploadStore};`

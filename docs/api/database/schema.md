@@ -6,7 +6,7 @@
 
 - DB path resolver: `openalpaca_storage::paths::database_path()`
 - Migrations entrypoint: `openalpaca_storage::migrations::MIGRATIONS`
-- Registered migrations: 37
+- Registered migrations: 38
 
 ## Tables
 
@@ -109,7 +109,7 @@ created_at TEXT NOT NULL DEFAULT (datetime('now'))
 
 ### `conversation_messages` (table)
 
-Source migration: `028_message_attachments.sql`
+Source migration: `038_message_run_links.sql`
 
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT
@@ -124,6 +124,7 @@ created_at TEXT NOT NULL DEFAULT (datetime('now'))
 source TEXT
 content_json TEXT
 display_text TEXT
+task_id TEXT
 ```
 
 ### `conversations` (table)
@@ -521,6 +522,7 @@ timestamp TEXT DEFAULT (datetime('now'))
 | `idx_conv_msg_created` | `conversation_messages` | `INDEX` | `created_at` | `009_conversation_messages.sql` |
 | `idx_conv_msg_lane` | `conversation_messages` | `INDEX` | `lane_key` | `009_conversation_messages.sql` |
 | `idx_conv_msg_lane_id` | `conversation_messages` | `INDEX` | `lane_key, id` | `014_conversation_summary.sql` |
+| `idx_conv_msg_task` | `conversation_messages` | `INDEX` | `task_id` | `038_message_run_links.sql` |
 | `idx_conversations_source` | `conversations` | `INDEX` | `source` | `011_unified_conversations.sql` |
 | `idx_conversations_updated` | `conversations` | `INDEX` | `updated_at DESC` | `011_unified_conversations.sql` |
 | `idx_discovered_models_provider` | `discovered_models` | `INDEX` | `provider` | `010_discovered_models.sql` |

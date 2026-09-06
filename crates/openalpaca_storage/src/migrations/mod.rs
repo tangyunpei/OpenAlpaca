@@ -196,4 +196,9 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "run_observability",
         sql: include_str!("037_run_observability.sql"),
     },
+    Migration {
+        version: 38,
+        name: "message_run_links",
+        sql: include_str!("038_message_run_links.sql"),
+    },
 ];

@@ -22,6 +22,11 @@ pub struct ConversationMessage {
     pub created_at: String,
     pub content_json: Option<String>,
     pub display_text: Option<String>,
+    /// The run this message belongs to (GAP-23, migration 038): the turn that
+    /// *started* a workflow, and the completion report that closed it. `None`
+    /// for ordinary chat. Not a foreign key — a pruned run leaves a dangling
+    /// id rather than taking the transcript with it.
+    pub task_id: Option<String>,
 }
 
 /// A conversation master record, tracking all conversations across sources.

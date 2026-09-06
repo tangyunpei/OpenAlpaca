@@ -17,7 +17,7 @@ pub mod task;
 pub use artifact::{ArtifactKind, ArtifactOrigin};
 pub use conversation::{Conversation, ConversationMessage};
 pub use core::{Agent, EventLog, Memory, MemoryRole};
-pub use file_asset::{AttachmentRef, FileAsset, FileAssetStatus};
+pub use file_asset::{AttachmentRef, FileAsset, FileAssetStatus, MessageArtifact};
 pub use identity::{ExternalIdentity, GlobalUser, LinkToken};
 pub use memory::{MemoryKind, MemoryScope, MemorySource, MemoryV2};
 pub use subagent::{AgentMetrics, AgentTaskHistory, SubAgentConfig};

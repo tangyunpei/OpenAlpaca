@@ -8,7 +8,7 @@ fn test_database_creation() {
 
     let db = Database::open(&db_path).unwrap();
     assert!(db_path.exists());
-    assert_eq!(db.schema_version().unwrap(), 37);
+    assert_eq!(db.schema_version().unwrap(), 38);
 }
 
 #[test]
@@ -20,14 +20,14 @@ fn test_migrations_idempotent() {
     let _db1 = Database::open(&db_path).unwrap();
     let db2 = Database::open(&db_path).unwrap();
 
-    assert_eq!(db2.schema_version().unwrap(), 37);
+    assert_eq!(db2.schema_version().unwrap(), 38);
 }
 
 #[test]
 fn test_migration_035_drops_planner_telemetry() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 37);
+    assert_eq!(db.schema_version().unwrap(), 38);
 
     db.with_connection(|conn| {
         let columns = |table: &str| -> rusqlite::Result<Vec<String>> {
@@ -183,7 +183,7 @@ fn insert_asset(
 fn test_migration_036_adds_artifact_columns() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 37);
+    assert_eq!(db.schema_version().unwrap(), 38);
 
     db.with_connection(|conn| {
         let columns = |table: &str| -> rusqlite::Result<Vec<String>> {
@@ -365,7 +365,7 @@ fn test_migration_036_artifact_versions_cascade() {
 fn test_migration_037_run_observability_schema() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 37);
+    assert_eq!(db.schema_version().unwrap(), 38);
 
     db.with_connection(|conn| {
         let columns = |table: &str| -> rusqlite::Result<Vec<String>> {
@@ -440,6 +440,64 @@ fn test_migration_037_run_observability_schema() {
         conn.execute("DELETE FROM task WHERE id = 't1'", [])?;
         let left: i64 = conn.query_row("SELECT count(*) FROM subagent_span", [], |r| r.get(0))?;
         assert_eq!(left, 0, "spans should cascade with the task");
+
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn test_migration_038_message_run_links() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    assert_eq!(db.schema_version().unwrap(), 38);
+
+    db.with_connection(|conn| {
+        let columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(conversation_messages)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert!(
+            columns.contains(&"task_id".to_string()),
+            "conversation_messages.task_id should exist: {columns:?}"
+        );
+
+        let indexes: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'conversation_messages'")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert!(
+            indexes.contains(&"idx_conv_msg_task".to_string()),
+            "idx_conv_msg_task should exist: {indexes:?}"
+        );
+
+        // The link is deliberately *not* a foreign key: a run's row can be
+        // purged while the turn that started it stays in the transcript, and
+        // the column is then a dangling id the client renders as plain text.
+        conn.execute(
+            "INSERT INTO conversation_messages (lane_key, role, content, task_id)
+             VALUES ('user:gui', 'assistant', 'started', 'no-such-run')",
+            [],
+        )?;
+        let stored: Option<String> = conn.query_row(
+            "SELECT task_id FROM conversation_messages WHERE content = 'started'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(stored.as_deref(), Some("no-such-run"));
+
+        // Every pre-038 row reads back NULL, never an empty string.
+        conn.execute(
+            "INSERT INTO conversation_messages (lane_key, role, content)
+             VALUES ('user:gui', 'user', 'chat only')",
+            [],
+        )?;
+        let bare: Option<String> = conn.query_row(
+            "SELECT task_id FROM conversation_messages WHERE content = 'chat only'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(bare.is_none());
 
         Ok(())
     })

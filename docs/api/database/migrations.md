@@ -4,7 +4,7 @@
 
 ## Overview
 
-- Total registered migrations: 37
+- Total registered migrations: 38
 - Migration SQL directory: `crates/openalpaca_storage/src/migrations`
 
 ## Files
@@ -48,3 +48,4 @@
 | 35 | `drop_planner_telemetry` | `035_drop_planner_telemetry.sql` | Migration 035: drop the planner telemetry columns. |
 | 36 | `artifact_store` | `036_artifact_store.sql` | Migration 036: project-scoped artifact store. |
 | 37 | `run_observability` | `037_run_observability.sql` | Migration 037: run observability. |
+| 38 | `message_run_links` | `038_message_run_links.sql` | Migration 038: message → run links (GAP-23). |

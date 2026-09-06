@@ -1,8 +1,17 @@
 //! FileAssetRepository — CRUD for file assets
 
 use crate::Database;
-use crate::models::file_asset::{FileAsset, FileAssetStatus};
+use crate::models::file_asset::{FileAsset, FileAssetStatus, MessageArtifact};
 use anyhow::Result;
+use std::collections::HashMap;
+
+/// `conversation_message_attachments.role` for a file a user turn carried in —
+/// the column's own default since `028:7`.
+pub const ATTACHMENT_ROLE: &str = "attachment";
+
+/// `conversation_message_attachments.role` for a file the message's *run*
+/// produced (GAP-23).
+pub const ARTIFACT_ROLE: &str = "artifact";
 
 /// The `file_assets` columns every [`FileAsset`] read selects, in the order
 /// [`row_to_file_asset`] expects.
@@ -154,7 +163,8 @@ impl<'a> FileAssetRepository<'a> {
         })
     }
 
-    /// Link a file asset to a conversation message.
+    /// Link a file asset to a conversation message as an *attachment* — a file
+    /// the turn carried in.
     pub fn link_to_message(
         &self,
         message_id: i64,
@@ -162,13 +172,92 @@ impl<'a> FileAssetRepository<'a> {
         sort_order: i32,
         caption: Option<&str>,
     ) -> Result<()> {
+        self.link_to_message_with_role(message_id, file_id, sort_order, caption, ATTACHMENT_ROLE)
+    }
+
+    /// Link a file asset to a conversation message under an explicit `role`
+    /// (`028:7`).
+    ///
+    /// [`ARTIFACT_ROLE`] is what a completion report uses for the files its run
+    /// produced (GAP-23): same table, same message, but a chip the client draws
+    /// from the Library rather than an upload the user attached.
+    pub fn link_to_message_with_role(
+        &self,
+        message_id: i64,
+        file_id: &str,
+        sort_order: i32,
+        caption: Option<&str>,
+        role: &str,
+    ) -> Result<()> {
         self.db.with_connection(|conn| {
             conn.execute(
-                "INSERT INTO conversation_message_attachments (message_id, file_id, sort_order, caption)
-                 VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![message_id, file_id, sort_order, caption],
+                "INSERT INTO conversation_message_attachments (message_id, file_id, sort_order, role, caption)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![message_id, file_id, sort_order, role, caption],
             )?;
             Ok(())
+        })
+    }
+
+    /// The [`ARTIFACT_ROLE`] links of a whole page of messages, in one query.
+    ///
+    /// Keyed by `message_id`; a message with no artifacts has no entry at all,
+    /// so the caller's default is an empty list rather than a second query.
+    /// `role='attachment'` rows are not returned — they are the upload half and
+    /// belong to [`Self::get_attachments_for_message`].
+    pub fn artifact_links_for_messages(
+        &self,
+        message_ids: &[i64],
+    ) -> Result<HashMap<i64, Vec<MessageArtifact>>> {
+        let mut links: HashMap<i64, Vec<MessageArtifact>> = HashMap::new();
+        if message_ids.is_empty() {
+            return Ok(links);
+        }
+        // rusqlite has no array binding: one `?` per id, all bound.
+        let placeholders = std::iter::repeat_n("?", message_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT a.message_id, f.id, f.filename, f.kind
+                 FROM conversation_message_attachments a
+                 JOIN file_assets f ON f.id = a.file_id
+                 WHERE a.role = '{ARTIFACT_ROLE}' AND a.message_id IN ({placeholders})
+                 ORDER BY a.message_id ASC, a.sort_order ASC, a.id ASC"
+            ))?;
+            let mut rows = stmt.query(rusqlite::params_from_iter(message_ids.iter()))?;
+            while let Some(row) = rows.next()? {
+                links
+                    .entry(row.get(0)?)
+                    .or_default()
+                    .push(MessageArtifact {
+                        id: row.get(1)?,
+                        name: row.get(2)?,
+                        kind: row.get(3)?,
+                    });
+            }
+            Ok(())
+        })?;
+        Ok(links)
+    }
+
+    /// The ids of the artifacts a run *produced*, oldest first.
+    ///
+    /// `origin != 'upload'` on purpose: a file the user attached during the run
+    /// also carries its `task_id`, and it is not the run's output.
+    pub fn produced_ids_for_task(&self, task_id: &str) -> Result<Vec<String>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM file_assets
+                 WHERE task_id = ?1 AND origin != 'upload'
+                 ORDER BY created_at ASC, rowid ASC",
+            )?;
+            let mut ids = Vec::new();
+            let mut rows = stmt.query(rusqlite::params![task_id])?;
+            while let Some(row) = rows.next()? {
+                ids.push(row.get(0)?);
+            }
+            Ok(ids)
         })
     }
 
