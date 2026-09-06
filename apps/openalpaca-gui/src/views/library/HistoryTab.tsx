@@ -1,12 +1,15 @@
 /**
  * `HistoryTab` / `VersionRow`, full size (DESIGN_SPEC §3.25).
  *
- * Versions are newest first and index 0 takes the raised treatment. Typed
- * against the proposed `ArtifactVersion` (GAP-05).
+ * Versions are newest first and index 0 takes the raised treatment. The
+ * `+3 −1` pair is the daemon's own stored count for that write, computed from
+ * the same `similar` diff the Diff tab renders — so the number on a row and the
+ * patch a reader then opens agree. It is `null` on v1 (nothing to change from)
+ * and for the kinds that are not text, and is simply omitted there.
  */
 
 import { cn } from "@/lib/cn";
-import type { ArtifactVersion } from "@/lib/api/unbacked";
+import type { ArtifactVersion } from "@/lib/api/artifacts";
 
 import { relativeTime } from "./format";
 
@@ -57,6 +60,12 @@ function VersionRow({ version, latest }: VersionRowProps) {
           </span>
         )}
       </span>
+      {version.added_lines !== null && version.removed_lines !== null && (
+        <span className="flex shrink-0 items-center gap-[6px] font-mono text-xs">
+          <span className="text-green">{`+${version.added_lines}`}</span>
+          <span className="text-red">{`−${version.removed_lines}`}</span>
+        </span>
+      )}
       <span className="shrink-0 font-mono text-xs text-muted-fg">
         {relativeTime(version.created_at)}
       </span>

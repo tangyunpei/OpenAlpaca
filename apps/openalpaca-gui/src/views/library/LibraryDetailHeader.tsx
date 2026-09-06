@@ -19,7 +19,7 @@ import {
   pinVariant,
   toFileKind,
 } from "@/components/ui";
-import type { Artifact } from "@/lib/api/unbacked";
+import type { Artifact } from "@/lib/api/artifacts";
 import type { ArtifactTab } from "@/stores/ui";
 
 import { relativeTime } from "./format";

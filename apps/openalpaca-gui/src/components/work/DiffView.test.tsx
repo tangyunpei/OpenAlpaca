@@ -1,8 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { available, unavailable } from "@/lib/unavailable";
-
 import { ArtifactDiffTab, DiffView } from "./DiffView";
 
 const PATCH = [
@@ -47,32 +45,43 @@ describe("DiffView", () => {
   });
 });
 
-describe("ArtifactDiffTab (GAP-05)", () => {
-  it("names the missing versioning route instead of drawing a fake diff", () => {
-    render(<ArtifactDiffTab diff={unavailable("GAP-05")} size="compact" />);
-    expect(
-      screen.getByText("No earlier version to compare against."),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/Artifact version history not yet available/i),
-    ).toBeInTheDocument();
-  });
-
-  it("renders the real diff once the route exists", () => {
+describe("ArtifactDiffTab", () => {
+  it("renders the daemon's patch", () => {
     render(
       <ArtifactDiffTab
         size="full"
-        diff={available({
+        diff={{
           from: 1,
           to: 2,
           added_lines: 2,
           removed_lines: 1,
           format: "unified",
           patch: PATCH,
-        })}
+        }}
       />,
     );
     expect(screen.getByText("v1 → v2")).toBeInTheDocument();
-    expect(screen.queryByText(/not yet available/i)).not.toBeInTheDocument();
+  });
+
+  /**
+   * The two 409s (`NOT_DIFFABLE`, `DIFF_TOO_LARGE`) and "there is only one
+   * version" all land here. Each says which it was: an empty diff pane would
+   * read as "nothing changed", which is a different claim entirely.
+   */
+  it("says why there is no patch instead of drawing an empty one", () => {
+    render(
+      <ArtifactDiffTab
+        diff={null}
+        note="This kind cannot be diffed — it is not text."
+        size="compact"
+      />,
+    );
+    expect(
+      screen.getByText("No earlier version to compare against."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("This kind cannot be diffed — it is not text."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("v1 → v2")).not.toBeInTheDocument();
   });
 });

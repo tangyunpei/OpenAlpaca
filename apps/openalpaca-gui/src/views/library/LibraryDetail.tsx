@@ -1,54 +1,63 @@
 /**
  * The Library's right column (DESIGN_SPEC §2.4, §3.31, §5.3).
  *
- * Head pinned, body scrolling. Every tab reads from the artifact adapters, and
- * all three of them are unavailable today: the artifact resource itself is
- * GAP-04 and its versions/diff are GAP-05. Where the design would show content,
- * this shows the design's empty voice plus the route the daemon would need —
- * never an invented file.
+ * Head pinned, body scrolling. Every tab reads a real route now: the row from
+ * `GET /v1/artifacts/{id}`, the bytes from `…/content`, the versions from
+ * `…/versions` and the patch from `…/diff`. Each failure states itself — a
+ * vanished file, a 404, a 409 the daemon named — because a blank pane would
+ * claim "nothing here", which is a different thing from "this could not be
+ * read".
  *
- * The `available` branches are written against the proposed resources so they
- * light up unchanged the day the routes land. Nothing here draws a diff or a
- * preview of its own: `ArtifactPreview` and `ArtifactDiffTab` are the same
- * components the chat file panel mounts, at `size="full"` instead of
- * `"compact"`, so the two sizes cannot drift apart.
+ * Nothing here draws a diff or a preview of its own: `ArtifactPreview` and
+ * `ArtifactDiffTab` are the same components the chat file panel mounts, at
+ * `size="full"` instead of `"compact"`, so the two sizes cannot drift apart.
  */
 
-import { SectionEmpty, toFileKind } from "@/components/ui";
+import { SectionEmpty, languageFromName } from "@/components/ui";
 import { ArtifactDiffTab } from "@/components/work";
 import { ArtifactPreview } from "@/components/work/preview";
-import { useTogglePin } from "@/hooks/useArtifacts";
-import { useDownloadFile, useOpenFile } from "@/hooks/useFiles";
 import {
   useArtifact,
   useArtifactDiff,
+  useArtifactText,
   useArtifactVersions,
-} from "@/hooks/useUnbacked";
-import type { Artifact } from "@/lib/api/unbacked";
-import { GAPS, gapDetail, gapNote, unavailable } from "@/lib/unavailable";
+  useTogglePin,
+} from "@/hooks/useArtifacts";
+import { useDownloadFile, useOpenFile } from "@/hooks/useFiles";
+import { artifactContentUrl, type Artifact } from "@/lib/api/artifacts";
+import { ApiError } from "@/lib/http";
 import { useUiStore } from "@/stores/ui";
 
 import { HistoryTab } from "./HistoryTab";
 import { LibraryDetailHeader } from "./LibraryDetailHeader";
-
-/** The artifact resource carries no bytes today, so a preview has no source. */
-const CONTENT_NOTE = `${gapNote(GAPS["GAP-04"])} — ${gapDetail(unavailable("GAP-04"))}`;
+import { diffPair, previewPlan } from "./preview";
 
 export interface LibraryDetailProps {
   artifactId: string | null;
+}
+
+/** What went wrong reading the row, in the user's terms rather than HTTP's. */
+function detailError(error: Error): string {
+  if (error instanceof ApiError && error.isNotFound) {
+    return "This file is not in the library any more.";
+  }
+  return error.message;
 }
 
 export function LibraryDetail({ artifactId }: LibraryDetailProps) {
   const tab = useUiStore((s) => s.libraryTab);
   const setTab = useUiStore((s) => s.setLibraryTab);
   const pins = useUiStore((s) => s.pins);
-  const togglePin = useTogglePin();
   const showToast = useUiStore((s) => s.showToast);
   const focusRun = useUiStore((s) => s.focusRun);
+  const togglePin = useTogglePin();
 
   const artifact = useArtifact(artifactId);
+  const model = artifact.data ?? null;
+
   const versions = useArtifactVersions(artifactId);
-  const diff = useArtifactDiff(artifactId);
+  const pair = model === null ? null : diffPair(model);
+  const diff = useArtifactDiff(artifactId, pair?.from ?? 0, pair?.to ?? 0);
 
   const download = useDownloadFile();
   const open = useOpenFile();
@@ -63,18 +72,25 @@ export function LibraryDetail({ artifactId }: LibraryDetailProps) {
     );
   }
 
-  if (!artifact.available) {
+  if (artifact.error !== null) {
     return (
       <DetailShell>
-        <SectionEmpty padded={false} note={gapDetail(artifact)}>
-          This file cannot be opened yet.
+        <SectionEmpty padded={false} note={artifact.error.message}>
+          {detailError(artifact.error)}
         </SectionEmpty>
       </DetailShell>
     );
   }
 
-  const model = artifact.data;
-  const pinned = pins[model.id] === true;
+  if (model === null) {
+    return (
+      <DetailShell>
+        <SectionEmpty padded={false}>Reading the file…</SectionEmpty>
+      </DetailShell>
+    );
+  }
+
+  const pinned = pins[model.id] ?? model.pinned;
   // Narrowed once so the jump handler does not need a cast.
   const taskId = model.task_id;
 
@@ -131,15 +147,35 @@ export function LibraryDetail({ artifactId }: LibraryDetailProps) {
     >
       {tab === "preview" && <PreviewTab artifact={model} />}
 
-      {tab === "diff" && <ArtifactDiffTab diff={diff} size="full" />}
+      {tab === "diff" && (
+        <ArtifactDiffTab
+          size="full"
+          diff={diff.data ?? null}
+          note={
+            pair === null
+              ? "Only one version of this file exists, so there is nothing to compare it with."
+              : diff.error !== null
+                ? diff.error.message
+                : diff.isLoading
+                  ? "Reading the patch…"
+                  : null
+          }
+        />
+      )}
 
       {tab === "history" &&
-        (versions.available ? (
-          <HistoryTab versions={versions.data} />
-        ) : (
-          <SectionEmpty padded={false} note={gapDetail(versions)}>
+        (versions.error !== null ? (
+          <SectionEmpty padded={false} note={versions.error.message}>
+            The version history could not be read.
+          </SectionEmpty>
+        ) : versions.data === undefined ? (
+          <SectionEmpty padded={false}>Reading the history…</SectionEmpty>
+        ) : versions.data.length === 0 ? (
+          <SectionEmpty padded={false}>
             No version history for this file.
           </SectionEmpty>
+        ) : (
+          <HistoryTab versions={versions.data} />
         ))}
     </DetailShell>
   );
@@ -166,31 +202,66 @@ function DetailShell({
 }
 
 /**
- * §3.25, full size — the shared renderer, fed with what the daemon serves.
+ * §3.25, full size — the shared renderer, fed with the artifact's own bytes.
  *
- * The proposed artifact resource carries a `summary`, never bytes; the content
- * route that would supply them is part of the same gap (GAP-04). Passing the
- * summary through as the document body is honest — it is the artifact's own
- * text — and `null` falls through to the renderer's empty card plus the note.
+ * `previewPlan` decides what may be drawn (and says why when nothing may be);
+ * this only fetches when that decision asks for characters.
  */
 function PreviewTab({ artifact }: { artifact: Artifact }) {
-  const summary =
-    artifact.summary === null || artifact.summary.trim() === ""
-      ? null
-      : artifact.summary;
+  const plan = previewPlan(artifact);
+  const content = useArtifactText(artifact.id, plan.mode === "text");
+
+  const byline =
+    artifact.version_count > 1
+      ? `v${artifact.version} of ${artifact.version_count}`
+      : null;
+
+  if (plan.mode === "image") {
+    return (
+      <ArtifactPreview
+        size="full"
+        meta={{ name: artifact.name, kind: "image", byline }}
+        content={null}
+        src={artifactContentUrl(artifact.id)}
+        note={
+          artifactContentUrl(artifact.id) === null
+            ? "Not connected to the daemon, so the image cannot be loaded."
+            : null
+        }
+      />
+    );
+  }
+
+  const body = plan.mode === "text" ? (content.data ?? null) : null;
+  const note =
+    plan.mode === "none"
+      ? plan.note
+      : content.error !== null
+        ? content.error.message
+        : content.isLoading
+          ? "Reading the file…"
+          : plan.note;
+
   return (
-    <ArtifactPreview
-      size="full"
-      meta={{
-        name: artifact.name,
-        kind: toFileKind(artifact.kind),
-        byline:
-          artifact.version_count > 1
-            ? `v${artifact.version} of ${artifact.version_count}`
-            : null,
-      }}
-      content={summary}
-      note={summary === null ? CONTENT_NOTE : null}
-    />
+    <>
+      {/* The renderer only shows a note in place of a document, so a note that
+          accompanies one (markup shown as source) is drawn above it. */}
+      {body !== null && note !== null && (
+        <p className="mt-0 mb-[10px] font-mono text-2xs-plus text-faint">
+          {note}
+        </p>
+      )}
+      <ArtifactPreview
+        size="full"
+        meta={{
+          name: artifact.name,
+          kind: plan.mode === "text" ? plan.kind : "term",
+          byline,
+          language: languageFromName(artifact.name),
+        }}
+        content={body}
+        note={note}
+      />
+    </>
   );
 }

@@ -48,6 +48,7 @@ export const qk = {
     list: (query: Record<string, unknown>) =>
       ["artifacts", "list", query] as const,
     detail: (id: string) => ["artifacts", "detail", id] as const,
+    content: (id: string) => ["artifacts", "content", id] as const,
     versions: (id: string) => ["artifacts", "versions", id] as const,
     diff: (id: string, from: number, to: number) =>
       ["artifacts", "diff", id, from, to] as const,

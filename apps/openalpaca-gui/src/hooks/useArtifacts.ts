@@ -15,17 +15,19 @@
  */
 
 import {
+  useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
   type UseMutationResult,
   type UseQueryResult,
 } from "@tanstack/react-query";
-import { useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 
 import {
   getArtifact,
   getArtifactDiff,
+  getArtifactText,
   listArtifactVersions,
   listArtifacts,
   setArtifactPinned,
@@ -72,6 +74,68 @@ export function useArtifacts(
   return result;
 }
 
+/** Enough rows to fill the pane; the rest is one `Load more` away. */
+export const ARTIFACT_PAGE_SIZE = 200;
+
+export interface ArtifactFeed {
+  /** Every row loaded so far, in server order. */
+  artifacts: Artifact[];
+  /** The unpaged count the daemon reported, or `null` before the first page. */
+  total: number | null;
+  loading: boolean;
+  error: Error | null;
+  hasMore: boolean;
+  loadingMore: boolean;
+  loadMore: () => void;
+}
+
+/**
+ * The Library's list: `GET /v1/artifacts` paged by `limit`/`offset`.
+ *
+ * Infinite rather than one big request because `total` can be any size and the
+ * route caps a page at 500 rows; an invalidation (an `artifact_written` frame)
+ * refetches the pages already loaded, so a new file appears without losing the
+ * reader's place.
+ */
+export function useArtifactFeed(
+  query: ListArtifactsQuery = {},
+  pageSize: number = ARTIFACT_PAGE_SIZE,
+): ArtifactFeed {
+  const result = useInfiniteQuery({
+    queryKey: qk.artifacts.list({ ...query, pageSize }),
+    queryFn: ({ pageParam, signal }) =>
+      listArtifacts({ ...query, limit: pageSize, offset: pageParam }, signal),
+    initialPageParam: 0,
+    getNextPageParam: (last, pages) => {
+      const loaded = pages.reduce((n, page) => n + page.artifacts.length, 0);
+      // A page that came back empty means the count and the rows disagree;
+      // stop rather than asking for the same offset forever.
+      if (last.artifacts.length === 0) return undefined;
+      return loaded < last.total ? loaded : undefined;
+    },
+  });
+
+  const pages = result.data?.pages;
+  const artifacts = useMemo(
+    () => (pages ?? []).flatMap((page) => page.artifacts),
+    [pages],
+  );
+  useSyncedPins(artifacts);
+
+  const { fetchNextPage } = result;
+  const loadMore = useCallback(() => void fetchNextPage(), [fetchNextPage]);
+
+  return {
+    artifacts,
+    total: pages === undefined ? null : (pages.at(-1)?.total ?? 0),
+    loading: result.isLoading,
+    error: result.error,
+    hasMore: result.hasNextPage,
+    loadingMore: result.isFetchingNextPage,
+    loadMore,
+  };
+}
+
 /** `GET /v1/artifacts/{id}` — the detail pane's own row. */
 export function useArtifact(id: string | null): UseQueryResult<Artifact> {
   const result = useQuery({
@@ -110,6 +174,24 @@ export function useArtifactDiff(
     queryKey: qk.artifacts.diff(id ?? "", from, to),
     queryFn: ({ signal }) => getArtifactDiff(id as string, from, to, signal),
     enabled: id !== null && from >= 1 && to > from,
+  });
+}
+
+/**
+ * An artifact's bytes as text, for the preview renderers.
+ *
+ * Guarded by the caller rather than here: images load by URL, binaries are not
+ * text at all, and a very large file is not worth pulling into the webview —
+ * `enabled` is where that policy lives (`views/library/preview.ts`).
+ */
+export function useArtifactText(
+  id: string | null,
+  enabled: boolean,
+): UseQueryResult<string> {
+  return useQuery({
+    queryKey: qk.artifacts.content(id ?? ""),
+    queryFn: ({ signal }) => getArtifactText(id as string, signal),
+    enabled: id !== null && enabled,
   });
 }
 

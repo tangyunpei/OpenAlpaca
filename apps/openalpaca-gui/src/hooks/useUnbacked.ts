@@ -20,56 +20,12 @@
 import { useMemo } from "react";
 
 import {
-  getArtifactDiff,
   getDaemonStatusDetail,
   getTaskTimeline,
-  listArtifacts,
-  listArtifactVersions,
-  type Artifact,
-  type ArtifactDiff,
-  type ArtifactListPage,
-  type ArtifactVersion,
   type DaemonStatusDetail,
-  type ListArtifactsQuery,
   type TaskTimeline,
 } from "@/lib/api/unbacked";
-import { unavailable, type Availability } from "@/lib/unavailable";
-
-/** GAP-04 — the whole Library list. */
-export function useArtifacts(
-  query: ListArtifactsQuery = {},
-): Availability<ArtifactListPage> {
-  const key = JSON.stringify(query);
-  return useMemo(
-    () => listArtifacts(JSON.parse(key) as ListArtifactsQuery),
-    [key],
-  );
-}
-
-/** GAP-04 — one artifact's metadata. There is no single-artifact route either. */
-export function useArtifact(artifactId: string | null): Availability<Artifact> {
-  void artifactId;
-  return useMemo(() => unavailable("GAP-04"), []);
-}
-
-/** GAP-05 — the History tab. */
-export function useArtifactVersions(
-  artifactId: string | null,
-): Availability<ArtifactVersion[]> {
-  return useMemo(() => listArtifactVersions(artifactId ?? ""), [artifactId]);
-}
-
-/** GAP-05 — the Diff tab. */
-export function useArtifactDiff(
-  artifactId: string | null,
-  from = 1,
-  to = 2,
-): Availability<ArtifactDiff> {
-  return useMemo(
-    () => getArtifactDiff(artifactId ?? "", from, to),
-    [artifactId, from, to],
-  );
-}
+import { type Availability } from "@/lib/unavailable";
 
 /** GAP-09 — the Parallel work swimlanes. */
 export function useTaskTimeline(

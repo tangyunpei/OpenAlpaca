@@ -14,7 +14,7 @@
  */
 
 import { getCachedConnection } from "../connection";
-import { apiFetch } from "../http";
+import { apiFetch, apiRequest } from "../http";
 
 export type ArtifactKind =
   | "markdown"
@@ -160,6 +160,25 @@ export async function getArtifactDiff(
     `/v1/artifacts/${encodeURIComponent(id)}/diff`,
     { signal, query: { from, to } },
   );
+}
+
+/**
+ * `GET /v1/artifacts/{id}/content` as text, for the preview renderers.
+ *
+ * The same route the `<img>` loads by URL; this is the header-authenticated
+ * read of it, used for the kinds that are rendered as characters rather than
+ * fetched by the browser. A 410 `ARTIFACT_GONE` arrives as an `ApiError` and
+ * the pane says the bytes are gone.
+ */
+export async function getArtifactText(
+  id: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const response = await apiRequest(
+    `/v1/artifacts/${encodeURIComponent(id)}/content`,
+    { signal },
+  );
+  return await response.text();
 }
 
 /** `PUT /v1/artifacts/{id}/pin` — the server is the authority on a pin. */

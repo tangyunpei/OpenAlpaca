@@ -1,10 +1,11 @@
 /**
  * The ⌘K command catalogue (DESIGN_SPEC §3.33, §4.4 "Palette").
  *
- * The design ships eight rows. Seven of them map onto something this client can
- * really do; the eighth — the `Find <filename>` row — depends on an artifact
- * listing that does not exist (API_MAP §2.3, GAP-04), so it is **absent** here
- * rather than faked. The palette renders the gap note in its place.
+ * The design ships eight rows. Seven of them are static and built here. The
+ * eighth — `Find <filename>` — is a *query*: the palette asks
+ * `GET /v1/artifacts?q=` for what the reader typed and appends a row per hit,
+ * so those rows depend on the typed text and cannot be part of a fixed
+ * catalogue.
  *
  * Two rows are conditional on live state and simply do not exist without it:
  *   `Steer …`    needs a run in `GET /v1/tasks?status=active`
@@ -26,7 +27,7 @@ export interface Shortcut {
   shift?: boolean;
 }
 
-export type CommandGroup = "Run" | "Steer" | "Approve" | "Go" | "View";
+export type CommandGroup = "Run" | "Steer" | "Approve" | "Go" | "View" | "Find";
 
 export interface Command {
   id: string;

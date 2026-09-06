@@ -23,95 +23,10 @@ import { sendChatMessage } from "../chat-stream";
 import { unavailable, type Availability } from "../unavailable";
 import type { ChatSendResponse } from "./types";
 
-// ── Artifacts (GAP-04 / GAP-05) ─────────────────────────────────────────────
-
-export type ArtifactKind =
-  | "markdown"
-  | "code"
-  | "terminal"
-  | "table"
-  | "plan"
-  | "image"
-  | "html"
-  | "binary";
-
-/** The proposed `Artifact` resource. */
-export interface Artifact {
-  id: string;
-  name: string;
-  kind: ArtifactKind;
-  mime_type: string;
-  size_bytes: number;
-  task_id: string | null;
-  task_title: string | null;
-  agent_id: string | null;
-  agent_template_id: string | null;
-  version: number;
-  version_count: number;
-  summary: string | null;
-  metadata: Record<string, unknown> | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface ArtifactListPage {
-  artifacts: Artifact[];
-  total: number;
-}
-
-export interface ArtifactVersion {
-  version: number;
-  note: string;
-  author_agent_id: string | null;
-  created_at: string;
-  size_bytes: number;
-  added_lines: number | null;
-  removed_lines: number | null;
-}
-
-export interface ArtifactDiff {
-  from: number;
-  to: number;
-  added_lines: number;
-  removed_lines: number;
-  format: "unified";
-  patch: string;
-}
-
-export interface ListArtifactsQuery {
-  taskId?: string;
-  kind?: ArtifactKind;
-  limit?: number;
-  offset?: number;
-}
-
-/** GAP-04 — there is no `/v1/artifacts` list route and `FileAsset` has no run attribution. */
-export function listArtifacts(
-  _query: ListArtifactsQuery = {},
-): Availability<ArtifactListPage> {
-  void _query;
-  return unavailable("GAP-04");
-}
-
-/** GAP-05 — nothing versioned exists in storage. */
-export function listArtifactVersions(
-  _artifactId: string,
-): Availability<ArtifactVersion[]> {
-  void _artifactId;
-  return unavailable("GAP-05");
-}
-
-/** GAP-05 — no diff endpoint, and no prior content to diff against. */
-export function getArtifactDiff(
-  _artifactId: string,
-  _from: number,
-  _to: number,
-): Availability<ArtifactDiff> {
-  void _artifactId;
-  void _from;
-  void _to;
-  return unavailable("GAP-05");
-}
+// The artifact resource left this file when Phase 3 landed `/v1/artifacts*`:
+// the `Artifact`, `ArtifactVersion` and `ArtifactDiff` types are now wire types
+// in `api/artifacts.ts`, fetched by real functions there. What was GAP-04 and
+// GAP-05 is served — list, row, content, versions, diff and pin.
 
 // ── Subagent timeline (GAP-09) ──────────────────────────────────────────────
 

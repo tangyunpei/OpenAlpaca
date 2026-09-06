@@ -1,13 +1,14 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import type { Artifact } from "@/lib/api/unbacked";
+import type { Artifact } from "@/lib/api/artifacts";
 
 import { LibraryRow, artifactSubtitle } from "./LibraryRow";
 
 /**
- * A shape-only fixture for the *proposed* resource (GAP-04). It exists to prove
- * the row renders the contract, not to stand in for data anywhere in the app.
+ * One row of `GET /v1/artifacts`, spelled out here so the subtitle rules can be
+ * asserted without a daemon. `LibraryView.test.tsx` proves the same component
+ * against real response bodies.
  */
 const artifact: Artifact = {
   id: "findings",
@@ -25,6 +26,12 @@ const artifact: Artifact = {
   metadata: null,
   created_at: "2026-08-31T12:00:00Z",
   updated_at: "2026-08-31T12:00:00Z",
+  origin: "produced",
+  pinned: false,
+  missing: false,
+  path: "/home/.openalpaca/artifacts/2026-08-31-run/01-connector-audit-findings.md",
+  project_root: null,
+  rel_path: "2026-08-31-run/01-connector-audit-findings.md",
 };
 
 describe("LibraryRow (§3.30)", () => {

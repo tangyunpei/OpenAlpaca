@@ -1,6 +1,7 @@
 /** Barrel for the data layer's React surface. Views import from here. */
 
 export * from "./useAgents";
+export * from "./useArtifacts";
 export * from "./useChat";
 export * from "./useConnection";
 export * from "./useConnectors";

@@ -13,15 +13,18 @@
  *     even while its data is not.
  */
 
-import { FilePanel } from "@/components/chat";
+import { FilePanel, formatClock } from "@/components/chat";
+import { toFileKind } from "@/components/ui";
 import { ArtifactPreview } from "@/components/work/preview";
-import { useTogglePin } from "@/hooks/useArtifacts";
-import { useArtifacts } from "@/hooks/useUnbacked";
+import { useArtifacts, useTogglePin } from "@/hooks/useArtifacts";
 import { useFileMetadata } from "@/hooks/useFiles";
 import { GAPS, gapNote } from "@/lib/unavailable";
 import { useUiStore } from "@/stores/ui";
 
 import { fileKind, fileLanguage } from "./artifact";
+
+/** As many rows as the design's 340px-tall dropdown can usefully show. */
+const PICKER_LIMIT = 30;
 
 export interface FilePanelSlotProps {
   artifactId: string;
@@ -29,7 +32,9 @@ export interface FilePanelSlotProps {
 
 export function FilePanelSlot({ artifactId }: FilePanelSlotProps) {
   const metadata = useFileMetadata(artifactId);
-  const library = useArtifacts();
+  // The switcher lists the Library, newest first — the same rows the Library
+  // view shows, capped to what the dropdown can hold.
+  const library = useArtifacts({ limit: PICKER_LIMIT });
 
   const panelTab = useUiStore((s) => s.panelTab);
   const setPanelTab = useUiStore((s) => s.setPanelTab);
@@ -41,10 +46,20 @@ export function FilePanelSlot({ artifactId }: FilePanelSlotProps) {
   const closePanel = useUiStore((s) => s.closePanel);
   const openInLibrary = useUiStore((s) => s.openInLibrary);
   const togglePin = useTogglePin();
-  const pinned = useUiStore((s) => s.pins[artifactId] === true);
+  const pins = useUiStore((s) => s.pins);
+  const pinned = pins[artifactId] === true;
 
   const file = metadata.data ?? null;
   const name = file?.filename ?? null;
+
+  const pickerItems = (library.data?.artifacts ?? []).map((entry) => ({
+    id: entry.id,
+    name: entry.name,
+    kind: toFileKind(entry.kind),
+    language: fileLanguage(entry.name),
+    pinned: pins[entry.id] ?? entry.pinned,
+    stamp: formatClock(entry.updated_at),
+  }));
 
   const artifact =
     file === null || name === null
@@ -78,8 +93,16 @@ export function FilePanelSlot({ artifactId }: FilePanelSlotProps) {
       pickerOpen={pickerOpen}
       onTogglePicker={togglePicker}
       onClosePicker={closePicker}
-      pickerItems={[]}
-      pickerNote={library.available ? null : library.reason}
+      pickerItems={pickerItems}
+      pickerNote={
+        library.error !== null
+          ? `The library could not be listed — ${library.error.message}`
+          : library.isLoading
+            ? "Reading the library…"
+            : pickerItems.length === 0
+              ? "Nothing in the library yet."
+              : null
+      }
       onPickArtifact={pickPanelArtifact}
       onBackToWork={backToWork}
       onClose={closePanel}

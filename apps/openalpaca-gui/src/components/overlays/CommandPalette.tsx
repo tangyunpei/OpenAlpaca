@@ -13,10 +13,10 @@
  *  * **Filtering and keyboard navigation are real.** §3.33 says the export
  *    implements neither and prescribes a substring match over `group + label`;
  *    ↑/↓/Home/End move the selection and ↵ runs it.
- *  * **The `Find <filename>` row is gone.** It needs `GET /v1/artifacts`, which
- *    does not exist (GAP-04). Inventing a filename to search for would be
- *    exactly the fabrication the brief forbids, so the row is replaced by a
- *    muted line naming the missing route.
+ *  * **The `Find <filename>` rows are a query.** `GET /v1/artifacts?q=` is
+ *    asked for whatever was typed and one row is appended per hit, opening that
+ *    artifact in the Library on the Preview tab. No text, no rows — the palette
+ *    never invents a filename to offer.
  *
  * `pendingConfirmation` defaults to the confirmation the chat lane publishes;
  * without one the `Approve` row simply does not exist.
@@ -25,7 +25,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Scrim } from "@/components/ui";
-import { useArtifacts } from "@/hooks/useUnbacked";
+import { useArtifacts } from "@/hooks/useArtifacts";
 import { cn } from "@/lib/cn";
 import { useUiStore } from "@/stores/ui";
 
@@ -50,11 +50,12 @@ export function CommandPalette({ pendingConfirmation }: CommandPaletteProps) {
   return <PaletteDialog pendingConfirmation={pendingConfirmation} />;
 }
 
+/** Enough hits to be useful without pushing the commands off the dialog. */
+const FIND_LIMIT = 5;
+
 function PaletteDialog({ pendingConfirmation }: CommandPaletteProps) {
   const setPaletteOpen = useUiStore((s) => s.setPaletteOpen);
-
-  // GAP-04: there is nothing to search, so there are no `Find` rows.
-  const artifacts = useArtifacts();
+  const openArtifact = useUiStore((s) => s.openArtifact);
 
   const commands = useCommandCatalog(pendingConfirmation);
 
@@ -62,10 +63,29 @@ function PaletteDialog({ pendingConfirmation }: CommandPaletteProps) {
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const results = useMemo(
-    () => filterCommands(commands, query),
-    [commands, query],
+  const needle = query.trim();
+  const artifacts = useArtifacts(
+    { q: needle, limit: FIND_LIMIT },
+    { enabled: needle !== "" },
   );
+
+  const results = useMemo(() => {
+    const matched = filterCommands(commands, query);
+    if (needle === "") return matched;
+    const finds: Command[] = (artifacts.data?.artifacts ?? []).map(
+      (artifact) => ({
+        id: `find.${artifact.id}`,
+        group: "Find",
+        label: artifact.name,
+        run: () => {
+          setPaletteOpen(false);
+          // Sets the view, the selection and the Preview tab in one action.
+          openArtifact(artifact.id);
+        },
+      }),
+    );
+    return [...matched, ...finds];
+  }, [commands, query, needle, artifacts.data, openArtifact, setPaletteOpen]);
 
   // A shrinking result set must never leave the cursor past the end.
   useEffect(() => {
@@ -172,14 +192,15 @@ function PaletteDialog({ pendingConfirmation }: CommandPaletteProps) {
 
           {results.length === 0 && (
             <p className="m-0 px-[10px] py-[9px] text-md text-muted-fg">
-              No commands match that.
+              {artifacts.isLoading
+                ? "Searching the library…"
+                : "No commands or files match that."}
             </p>
           )}
 
-          {!artifacts.available && (
+          {artifacts.error !== null && (
             <p className="mt-[4px] mb-0 border-t border-line-hair px-[10px] pt-[9px] font-mono text-2xs-plus text-faint">
-              Artifact search is unavailable — {artifacts.reason} (proposed{" "}
-              {artifacts.gap.proposedEndpoint})
+              The library could not be searched — {artifacts.error.message}
             </p>
           )}
         </div>

@@ -11,7 +11,7 @@
  */
 
 import { FileBadge, languageFromName, toFileKind } from "@/components/ui";
-import type { Artifact } from "@/lib/api/unbacked";
+import type { Artifact } from "@/lib/api/artifacts";
 import { cn } from "@/lib/cn";
 
 import { relativeTime } from "./format";

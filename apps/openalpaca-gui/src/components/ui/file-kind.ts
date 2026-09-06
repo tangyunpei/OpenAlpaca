@@ -9,7 +9,7 @@
  * the honest abbreviation is `SRC`, not a guessed one.
  */
 
-import type { ArtifactKind } from "@/lib/api/unbacked";
+import type { ArtifactKind } from "@/lib/api/artifacts";
 
 export type FileKind =
   "md" | "code" | "plan" | "term" | "table" | "html" | "image";

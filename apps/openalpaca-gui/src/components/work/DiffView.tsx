@@ -6,16 +6,18 @@
  * response: a counter that disagrees with the lines under it is worse than no
  * counter, and the proposed endpoint's `added_lines` is a convenience field.
  *
- * `ArtifactDiffTab` is the container: version history and diffs do not exist
- * anywhere in storage (GAP-05), so today it renders the design's empty copy and
- * names the route that would fill it.
+ * `ArtifactDiffTab` is the container. `GET …/diff` answers 200 with a real
+ * unified patch, or refuses with a 409 it names (`NOT_DIFFABLE` for an image or
+ * binary, `DIFF_TOO_LARGE` past the 8 MiB cap); a single-version artifact has
+ * no pair to ask about at all. All three arrive here as `diff = null` plus the
+ * sentence explaining which one it was — an empty diff pane would read as
+ * "nothing changed", which is a different claim.
  */
 
 import { useMemo } from "react";
 
 import { cn } from "@/lib/cn";
-import type { ArtifactDiff } from "@/lib/api/unbacked";
-import { isAvailable, type Availability } from "@/lib/unavailable";
+import type { ArtifactDiff } from "@/lib/api/artifacts";
 
 import { parseUnifiedDiff, type DiffLine } from "./diff";
 import { PreviewShell, PreviewUnavailable } from "./preview";
@@ -112,7 +114,10 @@ export function DiffView({
 }
 
 export interface ArtifactDiffTabProps {
-  diff: Availability<ArtifactDiff>;
+  /** `null` when there is no patch to draw — `note` then says why. */
+  diff: ArtifactDiff | null;
+  /** The refusal, the loading line, or the "only one version" sentence. */
+  note?: string | null;
   size: PreviewSize;
   fromTime?: string | null;
   toTime?: string | null;
@@ -121,24 +126,25 @@ export interface ArtifactDiffTabProps {
 
 export function ArtifactDiffTab({
   diff,
+  note = null,
   size,
   fromTime,
   toTime,
   className,
 }: ArtifactDiffTabProps) {
-  if (!isAvailable(diff)) {
+  if (diff === null) {
     return (
-      <PreviewUnavailable size={size} note={diff.reason} className={className}>
+      <PreviewUnavailable size={size} note={note} className={className}>
         No earlier version to compare against.
       </PreviewUnavailable>
     );
   }
   return (
     <DiffView
-      patch={diff.data.patch}
+      patch={diff.patch}
       size={size}
-      fromLabel={`v${diff.data.from}`}
-      toLabel={`v${diff.data.to}`}
+      fromLabel={`v${diff.from}`}
+      toLabel={`v${diff.to}`}
       fromTime={fromTime}
       toTime={toTime}
       className={className}

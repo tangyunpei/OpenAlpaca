@@ -2,14 +2,13 @@
  * The Library view (DESIGN_SPEC §2.4, §5.3).
  *
  * Two columns with the third resizer between them (`libListW`, 326 / 260–480,
- * drag direction +1). Everything on screen is either client state (the kind
- * filter, the selection, pins) or an honest absence: `GET /v1/artifacts` does
- * not exist (API_MAP §2.3, GAP-04), so the list renders its real chrome over
- * the adapter's unavailable state and names the route it is waiting for.
+ * drag direction +1). The list is `GET /v1/artifacts`, paged; the kind chips and
+ * the selection are client state. Nothing on screen is invented: an empty list
+ * is the daemon's own empty list, and a failed one says what failed.
  */
 
 import { Resizer } from "@/components/shell";
-import { useArtifacts } from "@/hooks/useUnbacked";
+import { useArtifactFeed } from "@/hooks/useArtifacts";
 import { useUiStore } from "@/stores/ui";
 
 import { LibraryDetail } from "./LibraryDetail";
@@ -23,7 +22,7 @@ export default function LibraryView() {
   const openArtifact = useUiStore((s) => s.openArtifact);
   const pins = useUiStore((s) => s.pins);
 
-  const artifacts = useArtifacts();
+  const feed = useArtifactFeed();
 
   return (
     <section aria-label="Library" className="flex min-w-0 flex-1 bg-main">
@@ -31,10 +30,16 @@ export default function LibraryView() {
         width={width}
         kind={kind}
         onKindChange={setKind}
-        artifacts={artifacts}
+        artifacts={feed.artifacts}
+        total={feed.total}
+        loading={feed.loading}
+        error={feed.error}
         selectedId={openArtifactId}
         onSelect={openArtifact}
         pins={pins}
+        hasMore={feed.hasMore}
+        loadingMore={feed.loadingMore}
+        onLoadMore={feed.loadMore}
       />
       <Resizer paneKey="libListW" direction={1} label="library list" />
       <LibraryDetail artifactId={openArtifactId} />
