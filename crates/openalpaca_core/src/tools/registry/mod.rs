@@ -25,9 +25,10 @@ pub use capabilities::{
 /// builtin can announce what it produced.
 #[derive(Debug, Clone, Default)]
 pub struct ToolContext {
-    /// The agent **template** id ("research_agent") — the name a capability
-    /// violation is reported against. Not the runtime instance: that is
-    /// `agent_instance_id`.
+    /// The id capability violations are reported against — the template id
+    /// ("research_agent") for subagents; the lead runner passes its instance
+    /// id instead (pre-existing, `runner/lead_agent/mod.rs`; unified in
+    /// Phase 8). `agent_instance_id` below is the instance id everywhere.
     pub agent_id: Option<String>,
     /// The runtime instance the call belongs to ("research_agent::a1b2c3d4"),
     /// which is what a `subagent_span` lane is keyed by. Threaded so a pending
