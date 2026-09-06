@@ -379,6 +379,33 @@ async fn patching_renames_and_unbinds_the_workspace() {
     assert_eq!(body["title"], "Renamed", "and leaves the title alone");
 }
 
+// ── GET /v1/sessions/{id}/events ─────────────────────────────────────
+
+/// The ninth route of §5.7's family is registered but not served: Phase 7b
+/// writes the log it reads. It answers `501` rather than letting axum answer a
+/// generic `404`, which a client could not tell from an unknown session id —
+/// and the unknown id still answers `404`, so the two cases stay distinct.
+#[tokio::test]
+async fn the_event_log_answers_501_until_phase_7b_serves_it() {
+    let h = Harness::new();
+    let session = h
+        .repo()
+        .get_or_create_active_session(LANE, "gui", None)
+        .expect("session");
+
+    let (status, body) = split(get_session_events(&h.deps(), &session.id)).await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(body["error"]["code"], "SESSION_EVENTS_NOT_SERVED");
+
+    let (status, body) = split(get_session_events(&h.deps(), "no-such-session")).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "an unknown id is answered before the not-implemented body"
+    );
+    assert_eq!(body["error"]["code"], "SESSION_NOT_FOUND");
+}
+
 // ── DELETE ───────────────────────────────────────────────────────────
 
 #[tokio::test]

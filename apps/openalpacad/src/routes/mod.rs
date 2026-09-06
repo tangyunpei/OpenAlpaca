@@ -89,8 +89,8 @@ pub use settings::{
 };
 pub use sessions::{
     activate_session_handler, archive_session_handler, create_session_handler,
-    delete_session_handler, get_session_handler, get_session_messages_handler,
-    list_sessions_handler, patch_session_handler,
+    delete_session_handler, get_session_events_handler, get_session_handler,
+    get_session_messages_handler, list_sessions_handler, patch_session_handler,
 };
 pub use skills::skill_health_handler;
 pub use status::status_handler;

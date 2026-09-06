@@ -5,15 +5,19 @@
 //! POST   /v1/sessions {source?, workspace_path?, title?}
 //! GET    /v1/sessions/{id}
 //! GET    /v1/sessions/{id}/messages?limit=&offset=&before_id=
+//! GET    /v1/sessions/{id}/events            → 501 SESSION_EVENTS_NOT_SERVED
 //! POST   /v1/sessions/{id}/activate
 //! POST   /v1/sessions/{id}/archive
 //! PATCH  /v1/sessions/{id} {title?, workspace_path?}
 //! DELETE /v1/sessions/{id}
 //! ```
 //!
-//! `GET /v1/sessions/{id}/events` is deliberately **not** here: it reads the
-//! per-session JSONL log, which Phase 7b writes. A route that answered it now
-//! could only answer with an empty list for every session, which is a mock.
+//! `GET /v1/sessions/{id}/events` is registered but deliberately **not
+//! served**: it reads the per-session JSONL log, which Phase 7b writes, and a
+//! route that answered an empty list for every session would be a mock. It is
+//! registered anyway so the answer is `501 SESSION_EVENTS_NOT_SERVED` — a
+//! client following §5.7 is told what is going on, instead of getting axum's
+//! generic `404`, which it could not tell from an unknown session id.
 //!
 //! **Owner scoping (ruling R40).** Reads are unscoped, matching the task and
 //! follow-up reads. Every *write* is scoped to lanes whose user id is the local
@@ -377,6 +381,30 @@ pub(super) fn get_session_messages(
         }
         Err(e) => db_error(e),
     }
+}
+
+// ── GET /v1/sessions/{id}/events ─────────────────────────────────────
+
+pub async fn get_session_events_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    get_session_events(&deps(&state), &id)
+}
+
+/// The path exists so the surface tells the truth about itself: §5.7 lists it,
+/// nothing serves it yet, and an unregistered path would answer axum's generic
+/// `404` — indistinguishable from an unknown session id. The `404` check runs
+/// first for that reason. Phase 7b (T42) replaces the body with the log.
+pub(super) fn get_session_events(deps: &Deps<'_>, id: &str) -> Response {
+    if let Err(response) = deps.load_for_read(id) {
+        return response;
+    }
+    api_error(
+        StatusCode::NOT_IMPLEMENTED,
+        "SESSION_EVENTS_NOT_SERVED",
+        "The per-session event log is served by Phase 7b (T42).",
+    )
 }
 
 // ── POST /v1/sessions/{id}/activate ──────────────────────────────────

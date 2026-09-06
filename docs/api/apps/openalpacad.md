@@ -5,7 +5,7 @@
 ## Overview
 
 - Router source: `apps/openalpacad/src/router.rs`.
-- Total documented method/path endpoints: 93.
+- Total documented method/path endpoints: 94.
 - Includes public, bearer-protected, WebSocket, and SSE routes.
 
 ## Auth
@@ -90,6 +90,7 @@
 | PATCH | `/v1/sessions/{id}` | `bearer` | `patch_session_handler` | `sessions::PatchSessionRequest` | - | `apps/openalpacad/src/routes/sessions.rs` |
 | POST | `/v1/sessions/{id}/activate` | `bearer` | `activate_session_handler` | - | - | `apps/openalpacad/src/routes/sessions.rs` |
 | POST | `/v1/sessions/{id}/archive` | `bearer` | `archive_session_handler` | - | - | `apps/openalpacad/src/routes/sessions.rs` |
+| GET | `/v1/sessions/{id}/events` | `bearer` | `get_session_events_handler` | - | - | `apps/openalpacad/src/routes/sessions.rs` |
 | GET | `/v1/sessions/{id}/messages` | `bearer` | `get_session_messages_handler` | - | `sessions::SessionMessagesQuery` | `apps/openalpacad/src/routes/sessions.rs` |
 | GET | `/v1/settings/llm` | `bearer` | `get_llm_settings` | - | - | `apps/openalpacad/src/routes/settings.rs` |
 | PUT | `/v1/settings/llm` | `bearer` | `upsert_key` | `AddKeyRequest` | - | `apps/openalpacad/src/routes/settings.rs` |
