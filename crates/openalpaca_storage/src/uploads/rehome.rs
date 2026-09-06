@@ -137,7 +137,7 @@ fn rehome_inner(db: &Database, stop_after: Option<Stop>) -> RehomeSummary {
     }
 
     if summary.remaining == 0 {
-        dispose_interim_assets();
+        dispose_interim_assets(db);
     }
     summary
 }
@@ -413,13 +413,87 @@ fn storage_path_is_referenced(conn: &Connection, storage_path: &str) -> Result<b
     )?)
 }
 
+/// The pre-D2 sha-sharded address a blob held before this pass moved it:
+/// `state/assets/<sha[0..2]>/<sha[2..4]>/<sha>` — precisely what
+/// `interim_asset_storage_path` computed before this task deleted it (the
+/// report's decision 1). Kept private here, the one place left with a reason
+/// to reconstruct it: naming the stray a kill between `tx.commit()` and the
+/// unlink in [`rehome_row`] leaves behind (Important 2, fix round 1).
+fn stranded_blob_path(interim_dir: &Path, sha256: &str) -> PathBuf {
+    interim_dir
+        .join(&sha256[0..2])
+        .join(&sha256[2..4])
+        .join(sha256)
+}
+
+/// Reclaims the blob of a re-home a kill interrupted between its commit and
+/// its unlink (Important 2, fix round 1).
+///
+/// That blob is not a stray the way a human's file is: the row that used to
+/// address it now carries a `rel_path`, and its `sha256` still names exactly
+/// where the old bytes would be — [`stranded_blob_path`] is the same function
+/// [`rehome_row`] would have unlinked from, had it run. Verified, not assumed:
+/// the D2 copy has to exist with the same size as the stray before the stray
+/// is removed, and [`storage_path_is_referenced`] — the same predicate
+/// [`rehome_row`] itself asks — has to say nothing still points at it (a
+/// second row sharing the same pre-D2 blob may not have moved yet).
+///
+/// Runs only while [`interim_assets_dir`] still exists, so it costs nothing
+/// once every stray is gone. A store of moved uploads with nothing to reclaim
+/// pays one filesystem miss per row, in the same bounded, boot-only spirit as
+/// the rest of this pass.
+fn reclaim_stranded_blobs(db: &Database, interim_dir: &Path) -> Result<usize> {
+    db.with_connection(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT sha256, storage_path FROM file_assets
+              WHERE origin = 'upload' AND rel_path IS NOT NULL",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut reclaimed = 0usize;
+        while let Some(row) = rows.next()? {
+            let sha256: String = row.get(0)?;
+            let storage_path: String = row.get(1)?;
+            let stray = stranded_blob_path(interim_dir, &sha256);
+
+            let Ok(stray_meta) = fs::symlink_metadata(&stray) else {
+                continue;
+            };
+            if !stray_meta.is_file() {
+                continue;
+            }
+            let Ok(d2_meta) = fs::metadata(&storage_path) else {
+                continue;
+            };
+            if d2_meta.len() != stray_meta.len() {
+                continue;
+            }
+            if storage_path_is_referenced(conn, &stray.to_string_lossy())? {
+                continue;
+            }
+
+            info!(
+                "Reclaiming {} ({} bytes): its row already moved to {}",
+                stray.display(),
+                stray_meta.len(),
+                storage_path
+            );
+            remove_best_effort(&stray);
+            reclaimed += 1;
+        }
+        Ok(reclaimed)
+    })
+}
+
 /// Removes the interim directory once nothing addresses anything inside it.
 ///
-/// Called only when no pre-D2 row is left. A file still standing there is
-/// something this pass did not account for — the old blob of a row whose unlink
-/// never ran, or something a human put there — so the directory is kept and its
-/// contents named. Deleting what we cannot explain is not this pass's call.
-fn dispose_interim_assets() {
+/// Called only when no pre-D2 row is left. First reclaims every stray this
+/// pass can account for ([`reclaim_stranded_blobs`] — the residue of a
+/// commit-then-crash, Important 2, fix round 1); a file still standing after
+/// that is something this pass did not account for — a human's file, or a
+/// blob whose row is not (or not yet) fully moved — so the directory is kept
+/// and its contents named. Deleting what we cannot explain is not this pass's
+/// call.
+fn dispose_interim_assets(db: &Database) {
     let dir = match interim_assets_dir() {
         Ok(dir) => dir,
         Err(e) => {
@@ -430,6 +504,12 @@ fn dispose_interim_assets() {
     if !dir.exists() {
         debug!("No interim asset directory at {}", dir.display());
         return;
+    }
+    if let Err(e) = reclaim_stranded_blobs(db, &dir) {
+        warn!(
+            "Failed reclaiming stranded interim blobs under {}: {e:#}",
+            dir.display()
+        );
     }
     match files_under(&dir) {
         Ok(leftovers) if leftovers.is_empty() => match fs::remove_dir_all(&dir) {

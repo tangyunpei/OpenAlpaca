@@ -312,11 +312,13 @@ fn a_kill_after_the_copy_resumes_without_stranding_a_second_file() {
 }
 
 /// Killed between the commit and the unlink: the row is already at its D2
-/// address, so the next pass skips it and never learns where its blob was. The
-/// blob is left where it is and the interim directory is kept — this pass does
-/// not delete what it cannot account for.
+/// address, so *this* pass never learns where its blob was. But the row still
+/// carries the `sha256` that named the old address, so the next boot's
+/// disposal pass can reconstruct it, confirm the D2 copy is intact, and
+/// reclaim the stray — it is this pass's own residue, not a human's file
+/// (Important 2, fix round 1).
 #[test]
-fn a_kill_after_the_commit_leaves_the_blob_and_keeps_the_directory() {
+fn a_kill_after_the_commit_strands_a_blob_the_next_boot_reclaims() {
     let fx = Fixture::new();
     let blob = fx.pre_d2("up-1", "owner-1", "notes.txt", b"legacy bytes", CREATED);
 
@@ -331,10 +333,13 @@ fn a_kill_after_the_commit_leaves_the_blob_and_keeps_the_directory() {
 
     assert_eq!(rehome_inner(&fx.db, None), RehomeSummary::default());
     assert_eq!(fx.day_entries(DAY), vec!["01-notes.txt"]);
-    assert!(blob.exists(), "an unreferenced blob is left, not deleted");
     assert!(
-        fx.assets().exists(),
-        "a directory with a file in it is kept"
+        !blob.exists(),
+        "the stray is reclaimed: its row already moved to an intact D2 copy"
+    );
+    assert!(
+        !fx.assets().exists(),
+        "nothing was left once its only stray was reclaimed"
     );
 }
 
