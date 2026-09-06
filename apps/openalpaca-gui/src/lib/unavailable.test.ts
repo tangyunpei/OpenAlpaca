@@ -34,10 +34,13 @@ describe("gap registry", () => {
   // and `{ action: "start" }` runs a queued row under its own id. Phase 6
   // closed the message → run link (GAP-23): migration 038's
   // `conversation_messages.task_id` plus the report's `role='artifact'` links,
-  // both served by the two history routes. GAP-20 is *narrowed*, not closed:
-  // its run counts are served now, its toggle is not — so the count is 9.
-  it("covers the 9 gaps still open from API_MAP §3", () => {
-    expect(listGaps()).toHaveLength(9);
+  // both served by the two history routes. Phase 7a closed conversation
+  // rename/delete (GAP-21): migration 039's `PATCH`/`DELETE /v1/sessions/{id}`
+  // and the chat view's conversation sidebar, which calls them. GAP-20 is
+  // *narrowed*, not closed: its run counts are served now, its toggle is not —
+  // so the count is 8.
+  it("covers the 8 gaps still open from API_MAP §3", () => {
+    expect(listGaps()).toHaveLength(8);
     expect(listGaps()[0]?.id).toBe("GAP-08c");
     expect(listGaps().at(-1)?.id).toBe("GAP-24");
     for (const closed of [
@@ -51,6 +54,7 @@ describe("gap registry", () => {
       "GAP-11",
       "GAP-12",
       "GAP-19",
+      "GAP-21",
       "GAP-22",
       "GAP-23",
     ]) {
@@ -81,17 +85,14 @@ describe("gap registry", () => {
 
 describe("Unavailable results", () => {
   it("carries a note that names the missing API", () => {
-    const result = unavailable("GAP-21");
+    const result = unavailable("GAP-24");
 
     expect(isAvailable(result)).toBe(false);
-    // The daemon half landed (PATCH/DELETE /v1/sessions/{id}); what is still
-    // missing is a client surface that calls them, and the note says so
-    // rather than claiming the routes do not exist.
     expect(result.reason).toBe(
-      "Renaming and deleting a conversation are served by the daemon but not wired into this list yet",
+      "Extension install / uninstall not yet available",
     );
-    expect(result.missingApi).toContain("/v1/sessions/{id}");
-    expect(result.gap.id).toBe("GAP-21");
+    expect(result.missingApi).toContain("no install or uninstall route");
+    expect(result.gap.id).toBe("GAP-24");
   });
 
   it("uses the override phrasing where the generic sentence would read wrong", () => {
@@ -107,6 +108,6 @@ describe("Unavailable results", () => {
   });
 
   it("unwraps to the fallback rather than to fabricated data", () => {
-    expect(unwrapOr(unavailable("GAP-21"), [])).toEqual([]);
+    expect(unwrapOr(unavailable("GAP-18"), [])).toEqual([]);
   });
 });

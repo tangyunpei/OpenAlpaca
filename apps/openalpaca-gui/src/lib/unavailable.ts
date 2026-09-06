@@ -23,7 +23,6 @@ export type GapId =
   | "GAP-17"
   | "GAP-18"
   | "GAP-20"
-  | "GAP-21"
   | "GAP-24";
 
 export type GapFixSize = "XS" | "S" | "S–M" | "M" | "L";
@@ -165,24 +164,13 @@ export const GAPS: Record<GapId, GapDescriptor> = {
     noteOverride:
       "Templates have no enabled flag — the per-template toggle is not served",
   },
-  // GAP-21's *daemon* half is served: migration 039 made a lane hold many
-  // sessions, and `PATCH /v1/sessions/{id}` renames while
-  // `DELETE /v1/sessions/{id}` removes one transactionally (409 while a run it
-  // started is in flight). What is still missing is the client: the session
-  // sidebar that would offer those controls is its own task, and this list has
-  // no UI for them. The id stays registered until that lands — retire it with
-  // the sidebar, not before.
-  "GAP-21": {
-    id: "GAP-21",
-    label: "Conversation rename and delete",
-    missingApi:
-      "the routes exist (PATCH/DELETE /v1/sessions/{id}); no client surface calls them yet",
-    proposedEndpoint: "PATCH /v1/sessions/{id}; DELETE /v1/sessions/{id}",
-    blocks: "Renaming or removing a stored conversation",
-    fixSize: "S",
-    noteOverride:
-      "Renaming and deleting a conversation are served by the daemon but not wired into this list yet",
-  },
+  // GAP-21 (a conversation could be neither renamed nor deleted) is closed
+  // with Phase 7a. Its daemon half landed first: migration 039 made a lane
+  // hold many sessions, `PATCH /v1/sessions/{id}` renames one and
+  // `DELETE /v1/sessions/{id}` removes it transactionally (409 while a run it
+  // started is in flight). Its client half is the chat view's conversation
+  // sidebar, which carries both verbs plus archive, activate and "New chat" —
+  // so there is no surface left that shows a conversation it cannot operate.
   // GAP-22 (the six `plugin_*` variants carrying no `ts`/`instance_id`) is
   // closed: C7 deleted those variants with `/v1/plugins*`, and the extension
   // family that replaced them carries both on every frame (ADR-030 §7.3).

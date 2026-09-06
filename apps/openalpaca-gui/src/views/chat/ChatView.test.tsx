@@ -22,6 +22,7 @@ import { resetConnection } from "@/lib/connection";
 import { QueryProvider } from "@/lib/query-provider";
 import { useConfirmationStore } from "@/stores/confirmation";
 import { useProjectStore } from "@/stores/project";
+import { useSessionSelection } from "@/stores/session";
 import { useUiStore } from "@/stores/ui";
 
 import ChatView from "./ChatView";
@@ -84,6 +85,12 @@ let steerReply: () => Response;
 let followupListReply: () => Response;
 /** What `POST` / `DELETE …/followups` answer; swapped per test to refuse. */
 let followupWriteReply: () => Response;
+/** What `POST /v1/chat` answers; swapped per test to refuse a named session. */
+let chatSendReply: () => Response;
+/** What `GET /v1/sessions` answers — the lane's conversations. */
+let sessionListReply: () => Response;
+/** What the five `/v1/sessions` write verbs answer; swapped per test to refuse. */
+let sessionWriteReply: () => Response;
 
 function installFetch() {
   const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
@@ -97,6 +104,9 @@ function installFetch() {
       headers: new Headers(init?.headers),
     });
 
+    if (url.includes("/v1/sessions")) {
+      return method === "GET" ? sessionListReply() : sessionWriteReply();
+    }
     if (url.includes("/v1/chat/history")) {
       return historyReply();
     }
@@ -104,7 +114,7 @@ function installFetch() {
       return new Response("", { status: 200 });
     }
     if (url.includes("/v1/chat")) {
-      return json({ stream_id: "stream-1", lane_key: "user:gui" });
+      return chatSendReply();
     }
     if (url.includes("/steer")) {
       return steerReply();
@@ -182,10 +192,34 @@ async function sendMessage(text: string): Promise<FakeEventSource> {
   return source;
 }
 
+/** One `SessionView`, as `/v1/sessions` serializes it. */
+function sessionRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "sess-1",
+    lane_key: "user:gui",
+    source: "gui",
+    title: "Connector audit",
+    workspace_id: null,
+    status: "active",
+    message_count: 2,
+    last_message_at: "2026-09-06 10:00:00",
+    created_at: "2026-09-06 09:00:00",
+    updated_at: "2026-09-06 10:00:00",
+    ended_at: null,
+    active_task_count: 0,
+    interrupted_task_count: 0,
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   requests = [];
   FakeEventSource.instances = [];
-  historyReply = () => json({ messages: [], total: 0, lane_key: "user:gui" });
+  historyReply = () =>
+    json({ messages: [], total: 0, lane_key: "user:gui", session_id: null });
+  chatSendReply = () => json({ stream_id: "stream-1", lane_key: "user:gui" });
+  sessionListReply = () => json({ sessions: [], total: 0 });
+  sessionWriteReply = () => json(sessionRow());
   steerReply = () =>
     json({
       task_id: "run-1",
@@ -208,6 +242,7 @@ beforeEach(() => {
   resetConnection();
   useUiStore.setState({ ...initialUi, model: null, view: "chat" });
   useProjectStore.setState({ path: null });
+  useSessionSelection.setState({ selectedId: null });
   vi.stubGlobal("EventSource", FakeEventSource);
   installFetch();
 });
@@ -409,7 +444,14 @@ describe("ChatView — the aside is one slot with two modes (§8.4)", () => {
     act(() => {
       useUiStore.getState().closeWorkPane();
     });
-    expect(screen.queryByRole("complementary")).toBeNull();
+    // Named, because the conversation sidebar is a `complementary` too and it
+    // is not part of the aside's two-mode slot.
+    expect(
+      screen.queryByRole("complementary", { name: "Work pane" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("complementary", { name: "File panel" }),
+    ).toBeNull();
   });
 
   it("uses the caller's work pane when one is supplied", async () => {
@@ -896,5 +938,292 @@ describe("ChatView — the run link and artifact chips after a reload (GAP-23)",
     const state = useUiStore.getState();
     expect(state.view).toBe("work");
     expect(state.selectedRunId).toBe("b41c8e02-9f3a-4c11-8f52-2b7d5e6a1c30");
+  });
+});
+
+/**
+ * The conversation sidebar (plan §5.7). A lane holds many conversations since
+ * migration 039 and exactly one is `active`; these are the client rules for
+ * living with that, asserted on the wire rather than on a spy.
+ */
+describe("ChatView — the conversation sidebar (§5.7)", () => {
+  function seedSessions(rows: Record<string, unknown>[]): void {
+    sessionListReply = () => json({ sessions: rows, total: rows.length });
+  }
+
+  it("lists the lane's conversations, live one first", async () => {
+    seedSessions([
+      sessionRow({
+        id: "sess-old",
+        title: "Docs pass",
+        status: "archived",
+        updated_at: "2026-09-06 12:00:00",
+      }),
+      sessionRow({ id: "sess-live", title: "Connector audit" }),
+    ]);
+    renderChat();
+
+    const rows = await screen.findAllByRole("button", {
+      name: /Connector audit|Docs pass/,
+    });
+    // The archived row is the *more recent* by `updated_at`; status wins.
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.textContent).toMatch(/^Connector audit/);
+    expect(rows[1]?.textContent).toMatch(/^Docs pass/);
+  });
+
+  /** A conversation on another lane is not this window's to show. */
+  it("drops rows belonging to another lane", async () => {
+    historyReply = () =>
+      json({
+        messages: [],
+        total: 0,
+        lane_key: "user:gui",
+        session_id: "sess-live",
+      });
+    seedSessions([
+      sessionRow({ id: "sess-live", title: "Connector audit" }),
+      sessionRow({
+        id: "sess-tg",
+        title: "Telegram thread",
+        lane_key: "user:telegram",
+      }),
+    ]);
+    renderChat();
+
+    await screen.findByRole("button", { name: /Connector audit/ });
+    expect(
+      screen.queryByRole("button", { name: /Telegram thread/ }),
+    ).toBeNull();
+  });
+
+  it("highlights the conversation the daemon says the lane is on", async () => {
+    historyReply = () =>
+      json({
+        messages: [],
+        total: 0,
+        lane_key: "user:gui",
+        session_id: "sess-live",
+      });
+    seedSessions([sessionRow({ id: "sess-live" })]);
+    renderChat();
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /Connector audit/ }),
+      ).toHaveAttribute("aria-current", "true"),
+    );
+  });
+
+  it("opens a new conversation in the window's project", async () => {
+    useProjectStore.setState({ path: "/Users/dev/openalpaca" });
+    renderChat();
+    await screen.findByLabelText("Message");
+
+    fireEvent.click(screen.getByRole("button", { name: "New chat" }));
+
+    await waitFor(() =>
+      expect(
+        requests.find(
+          (r) => r.method === "POST" && r.url.endsWith("/v1/sessions"),
+        ),
+      ).toBeDefined(),
+    );
+    const created = requests.find(
+      (r) => r.method === "POST" && r.url.endsWith("/v1/sessions"),
+    );
+    expect(created?.body).toEqual({
+      source: "gui",
+      workspace_path: "/Users/dev/openalpaca",
+    });
+  });
+
+  it("resumes an archived conversation by activating it", async () => {
+    seedSessions([
+      sessionRow({ id: "sess-old", title: "Docs pass", status: "archived" }),
+    ]);
+    renderChat();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Docs pass/ }));
+
+    await waitFor(() =>
+      expect(
+        requests.some((r) => r.url.endsWith("/v1/sessions/sess-old/activate")),
+      ).toBe(true),
+    );
+    expect(useSessionSelection.getState().selectedId).toBe("sess-old");
+  });
+
+  /**
+   * Clicking the conversation the lane is already on must not write: an
+   * `activate` there archives and re-opens the same row and announces a
+   * transition that never happened.
+   */
+  it("pins the live conversation without calling activate", async () => {
+    seedSessions([sessionRow({ id: "sess-live" })]);
+    renderChat();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Connector audit/ }),
+    );
+
+    await waitFor(() =>
+      expect(useSessionSelection.getState().selectedId).toBe("sess-live"),
+    );
+    expect(requests.some((r) => r.url.includes("/activate"))).toBe(false);
+  });
+
+  it("renames through PATCH with only the title", async () => {
+    seedSessions([sessionRow({ id: "sess-live" })]);
+    renderChat();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Rename" }));
+    const field = screen.getByLabelText("Conversation title");
+    fireEvent.change(field, { target: { value: "Connector audit v2" } });
+    fireEvent.submit(field);
+
+    await waitFor(() =>
+      expect(requests.some((r) => r.method === "PATCH")).toBe(true),
+    );
+    const patch = requests.find((r) => r.method === "PATCH");
+    expect(patch?.url).toContain("/v1/sessions/sess-live");
+    expect(patch?.body).toEqual({ title: "Connector audit v2" });
+  });
+
+  it("renders a refused delete in the daemon's own terms", async () => {
+    seedSessions([sessionRow({ id: "sess-live" })]);
+    sessionWriteReply = () =>
+      new Response(
+        JSON.stringify({
+          error: {
+            code: "SESSION_HAS_ACTIVE_WORKFLOWS",
+            message: "This conversation has a run in flight.",
+          },
+        }),
+        { status: 409 },
+      );
+    renderChat();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm delete" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /run in flight — cancel it before deleting/,
+    );
+  });
+
+  /**
+   * R49: a turn that names a conversation runs in *that* conversation's
+   * project. The composer therefore names it only when the user resumed one —
+   * a turn with nothing pinned must stay unnamed, or R48 (change project ⇒ new
+   * conversation) could never fire.
+   */
+  it("names the resumed conversation on the turn, and nothing otherwise", async () => {
+    seedSessions([sessionRow({ id: "sess-live" })]);
+    renderChat();
+    await screen.findByLabelText("Message");
+
+    await sendMessage("first, unpinned");
+    const unpinned = requests.filter(
+      (r) => r.method === "POST" && r.url.endsWith("/v1/chat"),
+    );
+    expect(unpinned[0]?.body).not.toHaveProperty("session_id");
+
+    fireEvent.click(screen.getByRole("button", { name: /Connector audit/ }));
+    await waitFor(() =>
+      expect(useSessionSelection.getState().selectedId).toBe("sess-live"),
+    );
+
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "second, resumed" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() =>
+      expect(
+        requests.filter(
+          (r) => r.method === "POST" && r.url.endsWith("/v1/chat"),
+        ),
+      ).toHaveLength(2),
+    );
+    const sends = requests.filter(
+      (r) => r.method === "POST" && r.url.endsWith("/v1/chat"),
+    );
+    expect(sends[1]?.body).toMatchObject({ session_id: "sess-live" });
+  });
+
+  /**
+   * R48 is the daemon's: it opens the new conversation on the turn whose
+   * project differs. The client's only job is to stop naming a session, so
+   * that switch can be detected at all — and to create nothing itself.
+   */
+  it("releases the pin when the window's project changes, and creates nothing", async () => {
+    seedSessions([sessionRow({ id: "sess-live" })]);
+    renderChat();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Connector audit/ }),
+    );
+    await waitFor(() =>
+      expect(useSessionSelection.getState().selectedId).toBe("sess-live"),
+    );
+
+    act(() => {
+      useProjectStore.getState().setPath("/Users/dev/other");
+    });
+
+    await waitFor(() =>
+      expect(useSessionSelection.getState().selectedId).toBeNull(),
+    );
+    expect(
+      requests.some(
+        (r) => r.method === "POST" && r.url.endsWith("/v1/sessions"),
+      ),
+    ).toBe(false);
+  });
+
+  it("reads the resumed conversation's transcript, not the lane's", async () => {
+    seedSessions([
+      sessionRow({ id: "sess-old", title: "Docs pass", status: "archived" }),
+    ]);
+    renderChat();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Docs pass/ }));
+
+    await waitFor(() =>
+      expect(requests.some((r) => r.url.includes("session_id=sess-old"))).toBe(
+        true,
+      ),
+    );
+  });
+
+  /** The refusal a second window can cause: it archived what this one pinned. */
+  it("explains a turn refused because the conversation was archived elsewhere", async () => {
+    seedSessions([sessionRow({ id: "sess-live" })]);
+    renderChat();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Connector audit/ }),
+    );
+    await waitFor(() =>
+      expect(useSessionSelection.getState().selectedId).toBe("sess-live"),
+    );
+
+    chatSendReply = () =>
+      new Response(
+        JSON.stringify({
+          error: { code: "SESSION_ARCHIVED", message: "archived" },
+        }),
+        { status: 409 },
+      );
+
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "still here?" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(
+      await screen.findByText(/This conversation was archived/),
+    ).toBeInTheDocument();
   });
 });

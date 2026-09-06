@@ -62,6 +62,32 @@ export function formatHeaderDate(value: Date = new Date()): string {
 }
 
 /**
+ * The conversation-list stamp — `6 Sep`, the same shape Settings uses for a
+ * stored conversation. An unparseable value reads `—` rather than a guess or
+ * an `Invalid Date`.
+ */
+export function formatDayMonth(iso: string | null | undefined): string {
+  if (iso === null || iso === undefined) return "—";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "—";
+  const months = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+  ];
+  return `${date.getDate()} ${months[date.getMonth()] ?? ""}`;
+}
+
+/**
  * `3800 → "3.8s"`, `372000 → "6m 12s"`. Seconds are zero-padded above a
  * minute, matching the design's `11m 04s`.
  */

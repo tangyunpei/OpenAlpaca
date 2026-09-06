@@ -348,6 +348,19 @@ export interface SendChatOptions {
   model?: string;
   /** Optional `x-workspace-path` header. */
   workspacePath?: string;
+  /**
+   * The conversation this turn belongs to (§5.7). Omitted — the default — the
+   * turn lands in the lane's active session, which is what lets the daemon
+   * open a new one when the window's project changed (R48).
+   *
+   * Sent, the turn addresses that conversation and **takes its project**,
+   * overriding the header (R49): resuming is a change of scope, not just of
+   * transcript. An archived target is `409 SESSION_ARCHIVED` unless the caller
+   * also asked to re-open it, which this client does not do implicitly —
+   * re-opening archives whatever is live on the lane, and that is the user's
+   * call, made by clicking the row.
+   */
+  sessionId?: string;
   signal?: AbortSignal;
 }
 
@@ -361,6 +374,9 @@ export async function sendChatMessage(
       content: options.content,
       attachments: options.attachments ?? [],
       ...(options.model === undefined ? {} : { model: options.model }),
+      ...(options.sessionId === undefined
+        ? {}
+        : { session_id: options.sessionId }),
     },
     headers: options.workspacePath
       ? { "x-workspace-path": options.workspacePath }

@@ -22,6 +22,7 @@ import {
   DensityToggle,
   FollowupQueue,
   RunningNowPill,
+  SessionSidebar,
   formatHeaderDate,
 } from "@/components/chat";
 import { Resizer } from "@/components/shell";
@@ -45,6 +46,7 @@ import {
 import { FilePanelSlot } from "./FilePanelSlot";
 import { Transcript } from "./Transcript";
 import { useChatSession } from "./useChatSession";
+import { useSessionSidebar } from "./useSessionSidebar";
 import { renderDefaultWorkPane, type WorkPaneRenderer } from "./WorkPaneSlot";
 
 export interface ChatViewProps {
@@ -84,6 +86,7 @@ export default function ChatView({
   const updateOrchestrator = useUpdateOrchestratorConfig();
 
   const session = useChatSession();
+  const sidebar = useSessionSidebar(session.laneKey, session.sessionId);
 
   // The app root owns the key ladder (§4.5), the rail's blocked lane bar and
   // the palette's `Approve` row; all three read this one published slot.
@@ -120,6 +123,24 @@ export default function ChatView({
 
   return (
     <>
+      {/* A lane holds many conversations since migration 039; this is the one
+          surface that says so, and the only place "New chat" exists. */}
+      <SessionSidebar
+        sessions={sidebar.sessions}
+        selectedId={sidebar.selectedId}
+        loading={sidebar.loading}
+        error={sidebar.error}
+        busyId={sidebar.busyId}
+        creating={sidebar.creating}
+        actionError={sidebar.actionError}
+        windowProject={sidebar.windowProject}
+        onNewChat={sidebar.newChat}
+        onSelect={sidebar.select}
+        onRename={sidebar.rename}
+        onArchive={sidebar.archive}
+        onDelete={sidebar.remove}
+      />
+
       <section className="flex min-w-0 flex-1 flex-col bg-main">
         <PaneHeader title="Chat" variant="chat" meta={formatHeaderDate()}>
           {workClosed && activeCount > 0 && (

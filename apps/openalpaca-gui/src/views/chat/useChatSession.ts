@@ -54,9 +54,12 @@ import {
 } from "@/hooks/useFollowups";
 import { useTasks } from "@/hooks/useTasks";
 import { followupErrorMessage, type FollowupRecord } from "@/lib/api/followups";
+import { sessionErrorMessage } from "@/lib/api/sessions";
 import { steerErrorMessage, steerTask } from "@/lib/api/tasks";
 import type { ApprovalScope } from "@/lib/api/types";
+import { ApiError } from "@/lib/http";
 import { useProjectStore, workspaceOption } from "@/stores/project";
+import { useSessionSelection } from "@/stores/session";
 import { useUiStore, type ComposerMode } from "@/stores/ui";
 
 import {
@@ -106,6 +109,12 @@ export interface ChatSession {
   historyLoading: boolean;
   historyError: Error | null;
   laneKey: string | null;
+  /**
+   * The conversation this transcript came from, as the daemon reported it —
+   * `null` on a lane that has never held a turn. Not a local memory of what
+   * was clicked: the sidebar highlights this.
+   */
+  sessionId: string | null;
 
   draft: string;
   setDraft: (value: string) => void;
@@ -150,7 +159,14 @@ function reportStatus(status: string): RunReportData["status"] {
 }
 
 export function useChatSession(): ChatSession {
-  const history = useChatHistory({ limit: HISTORY_LIMIT });
+  // The conversation the sidebar has resumed, if any. `null` — the default —
+  // asks the daemon for the lane's active session, which is the state R48
+  // needs in order to open a new conversation when the project changes.
+  const selectedSessionId = useSessionSelection((s) => s.selectedId);
+  const history = useChatHistory({
+    limit: HISTORY_LIMIT,
+    ...(selectedSessionId === null ? {} : { sessionId: selectedSessionId }),
+  });
   const stream = useChatStream();
   const activeTasks = useTasks({ status: "active" });
 
@@ -490,10 +506,21 @@ export function useChatSession(): ChatSession {
         content: text,
         ...(model === null ? {} : { model }),
         ...workspaceOption(projectPath),
+        // A resumed conversation is addressed by id, and R49 then makes its
+        // project govern this turn instead of the header above. Nothing is
+        // sent while the sidebar has nothing pinned, which is what leaves R48
+        // free to open a new conversation on a project change.
+        ...(selectedSessionId === null ? {} : { sessionId: selectedSessionId }),
       })
       .catch((error: unknown) => {
+        // A refused *session* is its own fact — archived elsewhere, or on
+        // another lane — and reads nothing like a transport failure.
         setSendError(
-          error instanceof Error ? error.message : "Could not reach the daemon",
+          error instanceof ApiError && (error.code ?? "").startsWith("SESSION")
+            ? sessionErrorMessage(error)
+            : error instanceof Error
+              ? error.message
+              : "Could not reach the daemon",
         );
         // Put the text back rather than losing it.
         setDraft(text);
@@ -511,6 +538,7 @@ export function useChatSession(): ChatSession {
     stream,
     model,
     projectPath,
+    selectedSessionId,
     laneKey,
     queueFollowup,
     clearSteerTarget,
@@ -594,6 +622,7 @@ export function useChatSession(): ChatSession {
     historyLoading: history.isLoading,
     historyError: history.error,
     laneKey,
+    sessionId: history.data?.session_id ?? null,
 
     draft,
     setDraft,

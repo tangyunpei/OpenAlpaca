@@ -19,6 +19,13 @@ export interface ChatHistoryQuery {
    * caller that wants it before sending anything.
    */
   laneKey?: string;
+  /**
+   * Which conversation on that lane (§5.7). Omitted, the daemon answers for
+   * the lane's **active** session — today's behaviour — and echoes its id back
+   * as `session_id`, which is how the sidebar knows what to highlight. Naming
+   * a session on another lane is `404`, not a cross-lane read.
+   */
+  sessionId?: string;
 }
 
 /** `GET /v1/chat/history` */
@@ -31,6 +38,7 @@ export async function getChatHistory(
       limit: query.limit,
       offset: query.offset,
       lane_key: query.laneKey,
+      session_id: query.sessionId,
     },
     signal,
   });

@@ -204,6 +204,8 @@ export interface ChatHistoryResponse {
   messages: ChatMessage[];
   total: number;
   lane_key: string;
+  /** The conversation these messages came from; `null` on a lane with none. */
+  session_id: string | null;
 }
 
 export interface ChatDeleteResponse {

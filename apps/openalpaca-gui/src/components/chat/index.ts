@@ -12,6 +12,7 @@ export * from "./ModelPicker";
 export * from "./prose";
 export * from "./ResolutionRow";
 export * from "./RunReportCard";
+export * from "./SessionSidebar";
 export * from "./StreamingIndicator";
 export * from "./ToolConfirmationBanner";
 export * from "./WrittenArtifactCard";
