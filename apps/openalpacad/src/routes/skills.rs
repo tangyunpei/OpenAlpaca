@@ -77,6 +77,41 @@ fn invocations_today(db: &openalpaca_storage::Database) -> HashMap<String, i64> 
     }
 }
 
+/// Today's counts, re-keyed from what the **log** holds onto the catalog id.
+///
+/// `skill_execution_log.skill_id` is not the catalog id. Every invocation path
+/// resolves the entry and then passes `entry.frontmatter.name` on as the id it
+/// logs: `/slash` and router selection build `Intent::SkillInvocation` from it
+/// (`intent/skill_match.rs:31,55` → `skill/invocation.rs:140`), and the model's
+/// `invoke_skill` does the same (`builtins/invoke_skill.rs:173`). Older rows,
+/// and the cron arm, can carry the id instead.
+///
+/// So a logged key is resolved the way `SkillCatalog::get` resolves one —
+/// lowercased, **id first, then frontmatter name** — and both spellings of one
+/// skill add up. A key no entry claims is counted for nobody rather than
+/// attached to a row it does not belong to.
+fn counts_by_skill_id(
+    entries: &[(String, openalpaca_core::orchestrator::skill_catalog::SkillEntry)],
+    counts: &HashMap<String, i64>,
+) -> HashMap<String, i64> {
+    let mut key_to_id: HashMap<String, &str> = HashMap::new();
+    for (id, entry) in entries {
+        key_to_id.insert(entry.frontmatter.name.to_lowercase(), id.as_str());
+    }
+    // Ids win: `get` tries the id map before it scans names.
+    for (id, _) in entries {
+        key_to_id.insert(id.to_lowercase(), id.as_str());
+    }
+
+    let mut by_id: HashMap<String, i64> = HashMap::new();
+    for (logged, count) in counts {
+        if let Some(id) = key_to_id.get(&logged.to_lowercase()) {
+            *by_id.entry((*id).to_string()).or_insert(0) += count;
+        }
+    }
+    by_id
+}
+
 /// The catalog array, sorted by id — the catalog is a `HashMap`, and a listing
 /// that reorders between two reads is unusable in a diff.
 pub(crate) fn skills_json(
@@ -84,8 +119,10 @@ pub(crate) fn skills_json(
     ledger: &ExtensionLedger,
     counts: &HashMap<String, i64>,
 ) -> Vec<serde_json::Value> {
-    let mut rows: Vec<(String, serde_json::Value)> = catalog
-        .entries_snapshot()
+    let entries = catalog.entries_snapshot();
+    let counts = counts_by_skill_id(&entries, counts);
+
+    let mut rows: Vec<(String, serde_json::Value)> = entries
         .into_iter()
         .map(|(id, entry)| {
             let front = &entry.frontmatter;

@@ -113,18 +113,37 @@ describe("ToolsSection (ADR-030 §9.3)", () => {
     expect(screen.getByText("12 today")).toBeInTheDocument();
   });
 
-  it("names a health row from the catalog and keeps the id the log keys on", () => {
+  it("names a health row from the catalog and keeps the catalog id beside it", () => {
     state.skills = [health];
     state.catalog = [catalogued];
     render(<ToolsSection />);
 
     expect(screen.getByText("Skill health")).toBeInTheDocument();
     expect(screen.getByText("Connector Audit")).toBeInTheDocument();
-    // The id is what `skill_execution_log` keys on and what `/slash` resolves,
-    // so it stays on the row rather than being replaced by the name.
+    // The catalog id is what `/slash` resolves, so it stays on the row rather
+    // than being replaced by the name.
     expect(screen.getByText(/connector_audit ·/)).toBeInTheDocument();
     // GAP-18 is closed — the note that named the missing listing is gone.
     expect(screen.queryByText(/Skill catalog not yet available/)).toBeNull();
+  });
+
+  /**
+   * `skill_execution_log.skill_id` is **not** the catalog id: every invocation
+   * path resolves the entry and logs `frontmatter.name` (`/slash` and the
+   * router through `Intent::SkillInvocation`, and the model's `invoke_skill`).
+   * The join resolves a health row the way `SkillCatalog::get` does — id first,
+   * then name, case-insensitively — or it would miss on every file skill
+   * anyone actually ran.
+   */
+  it("resolves a health row logged under the frontmatter name", () => {
+    state.skills = [{ ...health, skill_id: "Connector Audit" }];
+    state.catalog = [catalogued];
+    render(<ToolsSection />);
+
+    expect(screen.getByText("Connector Audit")).toBeInTheDocument();
+    // Named from the catalog, and the canonical id is what the second line
+    // shows — not the spelling the log happened to hold.
+    expect(screen.getByText(/^connector_audit ·/)).toBeInTheDocument();
   });
 
   /**

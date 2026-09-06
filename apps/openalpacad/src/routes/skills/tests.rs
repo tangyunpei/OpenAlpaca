@@ -278,3 +278,46 @@ fn invocations_today_is_per_id_and_defaults_to_zero() {
     assert_eq!(find(&rows, "code-review")["invocations_today"], 7);
     assert_eq!(find(&rows, "daily-digest")["invocations_today"], 0);
 }
+
+/// **The log does not key on the catalog id.** Every invocation path resolves
+/// the entry and then passes `entry.frontmatter.name` on as the `skill_id`
+/// written to `skill_execution_log` — `/slash` and router selection through
+/// `Intent::SkillInvocation` (`intent/skill_match.rs:31,55` →
+/// `skill/invocation.rs:140`), and the model's `invoke_skill` tool through
+/// `builtins/invoke_skill.rs:173`. So `invocations_today` resolves a logged key
+/// the way `SkillCatalog::get` does — lowercased, id first, then frontmatter
+/// name — or it would report 0 for every file skill anyone actually ran.
+#[test]
+fn invocations_today_counts_rows_logged_under_the_frontmatter_name() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let catalog = SkillCatalog::new();
+    scan_file_skill(&catalog, dir.path(), "code-review", REVIEW_SKILL);
+
+    // "Code Review" is the frontmatter name; "code-review" is the id. Both
+    // spellings reach the column, and both belong to this one skill.
+    let counts = HashMap::from([
+        ("Code Review".to_string(), 5i64),
+        ("code-review".to_string(), 2i64),
+    ]);
+    let rows = skills_json(&catalog, &ExtensionLedger::new(), &counts);
+    assert_eq!(
+        find(&rows, "code-review")["invocations_today"],
+        7,
+        "both spellings are the same skill and both count"
+    );
+}
+
+/// A logged key that resolves to no catalog entry is simply not counted —
+/// never attached to some other row. (The GUI still shows that health row; it
+/// is the *catalog* listing that has nothing to say about it.)
+#[test]
+fn a_logged_key_no_skill_claims_is_counted_for_nobody() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let catalog = SkillCatalog::new();
+    scan_file_skill(&catalog, dir.path(), "code-review", REVIEW_SKILL);
+
+    let counts = HashMap::from([("deleted-skill".to_string(), 9i64)]);
+    let rows = skills_json(&catalog, &ExtensionLedger::new(), &counts);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(find(&rows, "code-review")["invocations_today"], 0);
+}

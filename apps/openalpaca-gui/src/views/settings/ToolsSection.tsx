@@ -20,19 +20,40 @@
  *    accept one.
  *
  * Skill health keeps its own subsection, fed by `GET /v1/skills/health` and
- * named from `GET /v1/skills` — the two join on the skill id. A health row for
- * a skill the catalog no longer holds (a deleted directory, a disabled
- * plugin's withdrawn contribution) keeps showing its id: that is the truth the
- * log has, and it is never replaced by a placeholder name.
+ * named from `GET /v1/skills`. The join is not a plain id match:
+ * `skill_execution_log.skill_id` is **not** the catalog id — every invocation
+ * path resolves the entry and then logs `frontmatter.name` (`/slash` and
+ * router selection through `Intent::SkillInvocation`, and the model's
+ * `invoke_skill`) — so a health row is resolved the way `SkillCatalog::get`
+ * resolves one: lowercased, id first, then frontmatter name.
+ *
+ * A health row for a skill the catalog no longer holds (a deleted directory, a
+ * disabled plugin's withdrawn contribution) keeps showing the id it has: that
+ * is the truth the log has, and it is never replaced by a placeholder name.
  */
 
 import { Eyebrow, Tag } from "@/components/ui";
 import { useSkillCatalog, useSkillHealth, useTools } from "@/hooks/useSkills";
-import type { ToolCatalogEntry } from "@/lib/api/types";
+import type { SkillCatalogEntry, ToolCatalogEntry } from "@/lib/api/types";
 import { useUiStore } from "@/stores/ui";
 
 import { GapNote, ListCard, ListRow, ListState } from "./primitives";
 import { percent } from "./format";
+
+/**
+ * `SkillCatalog::get`'s rule, on the client: a logged `skill_id` resolves by id
+ * first, then by frontmatter name, both lowercased. Ids are inserted last so
+ * they win a collision, exactly as the daemon's id map is consulted before its
+ * name scan.
+ */
+export function skillsByLogKey(
+  catalog: SkillCatalogEntry[],
+): Map<string, SkillCatalogEntry> {
+  const byKey = new Map<string, SkillCatalogEntry>();
+  for (const skill of catalog) byKey.set(skill.name.toLowerCase(), skill);
+  for (const skill of catalog) byKey.set(skill.id.toLowerCase(), skill);
+  return byKey;
+}
 
 /** "via MCP `github` — enabled" (§9.3). */
 export function originLabel(entry: ToolCatalogEntry): string | null {
@@ -49,9 +70,7 @@ export function ToolsSection() {
 
   const toolRows = tools.data ?? [];
   const healthRows = health.data ?? [];
-  const namesById = new Map(
-    (catalog.data ?? []).map((skill) => [skill.id, skill.name]),
-  );
+  const skillsByKey = skillsByLogKey(catalog.data ?? []);
 
   return (
     <>
@@ -107,23 +126,22 @@ export function ToolsSection() {
           empty={healthRows.length === 0}
           emptyCopy="No skill has been invoked yet."
         >
-          {healthRows.map((skill) => {
-            const name = namesById.get(skill.skill_id);
-            const metrics = `${skill.total_invocations} invocations · ${percent(
-              skill.clean_success_rate,
-            )} clean · ${percent(skill.repair_rate)} repaired`;
+          {healthRows.map((row) => {
+            const skill = skillsByKey.get(row.skill_id.toLowerCase());
+            const metrics = `${row.total_invocations} invocations · ${percent(
+              row.clean_success_rate,
+            )} clean · ${percent(row.repair_rate)} repaired`;
             return (
               <ListRow
-                key={skill.skill_id}
-                name={name ?? skill.skill_id}
-                // The id stays visible when the name replaces it in the title:
-                // it is what the log keys on and what `/slash` resolves.
+                key={row.skill_id}
+                name={skill?.name ?? row.skill_id}
+                // The catalog id stays visible when the name takes the title:
+                // it is what `/slash` resolves and what the catalog is keyed
+                // by, whichever spelling the log happened to record.
                 description={
-                  name === undefined
-                    ? metrics
-                    : `${skill.skill_id} · ${metrics}`
+                  skill === undefined ? metrics : `${skill.id} · ${metrics}`
                 }
-                meta={`${Math.round(skill.avg_duration_ms)} ms avg`}
+                meta={`${Math.round(row.avg_duration_ms)} ms avg`}
               />
             );
           })}
