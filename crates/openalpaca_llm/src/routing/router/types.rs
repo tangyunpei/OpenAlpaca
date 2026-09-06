@@ -84,6 +84,12 @@ pub struct LlmCapacityInfo {
 }
 
 /// A provider entry with its key pool (swappable for hot-reload).
+///
+/// Both halves are `Arc`s, so cloning one is two refcount bumps — which is how
+/// a request takes what it needs out of the router's `DashMap` and lets the
+/// shard's lock go before it awaits anything (R59). A request that kept the
+/// `Ref` would block `deregister_provider` for the length of its call.
+#[derive(Clone)]
 pub struct ProviderEntry {
     pub provider: Arc<dyn LlmProvider>,
     pub key_pool: Arc<ArcSwap<KeyPool>>,

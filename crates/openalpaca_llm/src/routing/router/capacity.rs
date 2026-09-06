@@ -34,9 +34,10 @@ impl LlmRouter {
             None => return zero,
         };
 
-        let available_keys = match self.providers.get(&provider_type) {
+        // Cloned out before the await — see `LlmRouter::provider_entry` (R59).
+        let available_keys = match self.provider_entry(&provider_type) {
             Some(entry) => {
-                let pool = entry.value().key_pool.load();
+                let pool = entry.key_pool.load();
                 pool.available_api_key_count().await
             }
             None => return zero,
@@ -76,9 +77,18 @@ impl LlmRouter {
     /// Falls back to hardcoded defaults when no API-compatible key is available
     /// or when the provider returns 0 models (e.g. managed/OAuth keys only).
     pub async fn refresh_models(&self) {
-        for entry in self.providers.iter() {
-            let provider_type = entry.key().clone();
-            let prov_entry = entry.value();
+        // Snapshot first: this loop awaits a provider's `list_models` over the
+        // network, and an iterator guard held across that would block a
+        // concurrent `deregister_provider` for the whole refresh (R59). A
+        // provider unloaded mid-refresh keeps its own `Arc` here and is simply
+        // no longer in the map afterwards.
+        let entries: Vec<(ProviderType, ProviderEntry)> = self
+            .providers
+            .iter()
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect();
+
+        for (provider_type, prov_entry) in entries {
             let pool = prov_entry.key_pool.load();
 
             let key_secret = match pool.acquire_api_compatible().await {
