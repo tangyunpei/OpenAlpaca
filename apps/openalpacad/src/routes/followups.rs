@@ -518,6 +518,7 @@ mod tests {
             status: "queued".to_string(),
             created_at: "2026-09-05 10:00:00".to_string(),
             updated_at: "2026-09-05 10:00:00".to_string(),
+            session_id: Some("session-1".to_string()),
         });
         let value = serde_json::to_value(&view).unwrap();
 

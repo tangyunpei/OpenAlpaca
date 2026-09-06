@@ -234,23 +234,27 @@ impl ChatService {
         })
     }
 
-    /// Get conversation history for a lane.
+    /// Get one session's transcript (migration 039).
+    ///
+    /// Session-scoped, not lane-scoped: a lane now holds many conversations,
+    /// and reading them together would splice two transcripts into one.
     pub fn get_history(
         &self,
-        lane_key: &str,
+        session_id: &str,
         limit: i64,
         offset: i64,
     ) -> Result<(Vec<ConversationMessage>, i64)> {
         let repo = ConversationRepository::new(&self.db);
-        let messages = repo.list_by_lane(lane_key, limit, offset)?;
-        let total = repo.count_by_lane(lane_key)?;
+        let messages = repo.list_by_session(session_id, limit, offset)?;
+        let total = repo.count_by_session(session_id)?;
         Ok((messages, total))
     }
 
-    /// Clear conversation history for a lane.
-    pub fn clear_history(&self, lane_key: &str) -> Result<u64> {
+    /// Clear one session's transcript. The session row survives — this empties
+    /// a conversation, it does not delete it (`DELETE /v1/sessions/{id}` does).
+    pub fn clear_history(&self, session_id: &str) -> Result<u64> {
         let repo = ConversationRepository::new(&self.db);
-        repo.delete_by_lane(lane_key)
+        repo.delete_by_session(session_id)
     }
 
     /// Get a reference to the stream manager.

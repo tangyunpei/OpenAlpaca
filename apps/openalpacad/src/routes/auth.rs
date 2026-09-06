@@ -47,7 +47,7 @@ pub struct MeResponse {
     pub sources: Vec<String>,
 }
 
-/// Distinct `conversations.source` values across every conversation owned by
+/// Distinct `session.source` values across every conversation owned by
 /// `owner_id` (GAP-16). Reads chosen: reuse `list_conversations_for_owner`
 /// with no source filter and an unbounded limit, then dedupe in-process,
 /// rather than adding a new `SELECT DISTINCT` repository method — a desktop
@@ -90,11 +90,11 @@ mod tests {
     fn distinct_sources_for_owner_dedupes_and_sorts() {
         let (_dir, db) = test_db();
         let repo = ConversationRepository::new(&db);
-        repo.get_or_create_conversation("alice:gui", "gui").unwrap();
-        repo.get_or_create_conversation("alice:telegram", "telegram")
+        repo.get_or_create_active_session("alice:gui", "gui", None).unwrap();
+        repo.get_or_create_active_session("alice:telegram", "telegram", None)
             .unwrap();
         // A second gui conversation must not duplicate the "gui" entry.
-        repo.get_or_create_conversation("alice:gui2", "gui").unwrap();
+        repo.get_or_create_active_session("alice:gui2", "gui", None).unwrap();
 
         let sources = distinct_sources_for_owner(&db, "alice").unwrap();
         assert_eq!(sources, vec!["gui".to_string(), "telegram".to_string()]);
@@ -104,8 +104,8 @@ mod tests {
     fn distinct_sources_for_owner_excludes_other_owners() {
         let (_dir, db) = test_db();
         let repo = ConversationRepository::new(&db);
-        repo.get_or_create_conversation("alice:gui", "gui").unwrap();
-        repo.get_or_create_conversation("bob:discord", "discord")
+        repo.get_or_create_active_session("alice:gui", "gui", None).unwrap();
+        repo.get_or_create_active_session("bob:discord", "discord", None)
             .unwrap();
 
         let sources = distinct_sources_for_owner(&db, "alice").unwrap();

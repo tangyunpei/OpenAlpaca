@@ -9,6 +9,15 @@ pub struct ChatSendRequest {
     pub content: String,
     #[serde(default)]
     pub attachments: Vec<openalpaca_storage::AttachmentRef>,
+    /// The conversation this turn belongs to (§5.7). Absent means the lane's
+    /// active session, created on demand — today's behaviour exactly.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// Re-open `session_id` if it is archived. Absent, an archived target is
+    /// refused with `409 SESSION_ARCHIVED` rather than silently re-homing the
+    /// lane.
+    #[serde(default)]
+    pub activate: bool,
 }
 
 #[derive(Serialize)]
@@ -22,18 +31,8 @@ pub struct HistoryQuery {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
     pub lane_key: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub struct ConversationsQuery {
-    pub source: Option<String>,
-    pub limit: Option<i64>,
-    pub offset: Option<i64>,
-}
-
-#[derive(Serialize)]
-pub struct ConversationsResponse {
-    pub conversations: Vec<openalpaca_storage::Conversation>,
+    /// Which conversation on that lane; absent means its active one.
+    pub session_id: Option<String>,
 }
 
 /// A stored message as the two history routes answer it (GAP-23).
@@ -77,21 +76,20 @@ pub(super) fn with_artifacts(
 }
 
 #[derive(Serialize)]
-pub struct ConversationMessagesResponse {
-    pub messages: Vec<ConversationMessageView>,
-    pub total: i64,
-}
-
-#[derive(Serialize)]
 pub struct ChatHistoryResponse {
     pub messages: Vec<ConversationMessageView>,
     pub total: i64,
     pub lane_key: String,
+    /// The conversation these messages came from; `null` on a lane that has
+    /// never held a turn.
+    pub session_id: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct DeleteHistoryQuery {
     pub lane_key: Option<String>,
+    /// Which conversation on that lane; absent means its active one.
+    pub session_id: Option<String>,
 }
 
 #[derive(Serialize)]

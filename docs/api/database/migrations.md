@@ -4,7 +4,7 @@
 
 ## Overview
 
-- Total registered migrations: 38
+- Total registered migrations: 39
 - Migration SQL directory: `crates/openalpaca_storage/src/migrations`
 
 ## Files
@@ -49,3 +49,4 @@
 | 36 | `artifact_store` | `036_artifact_store.sql` | Migration 036: project-scoped artifact store. |
 | 37 | `run_observability` | `037_run_observability.sql` | Migration 037: run observability. |
 | 38 | `message_run_links` | `038_message_run_links.sql` | Migration 038: message → run links (GAP-23). |
+| 39 | `sessions` | `039_sessions.sql` | Migration 039: sessions. Rebuilds `conversations` as `session` |

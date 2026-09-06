@@ -402,6 +402,19 @@ impl EventBroadcaster {
                     });
                     repo.log("followup_queued", None, Some(&detail), None)
                 }
+                ServerEvent::SessionChanged {
+                    session_id,
+                    lane_key,
+                    status,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "session_id": session_id,
+                        "lane_key": lane_key,
+                        "status": status,
+                    });
+                    repo.log("session_changed", None, Some(&detail), None)
+                }
                 ServerEvent::FollowupCancelled {
                     lane_key,
                     followup_id,

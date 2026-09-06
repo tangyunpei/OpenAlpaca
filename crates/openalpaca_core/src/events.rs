@@ -422,6 +422,19 @@ pub enum SystemEvent {
         kind: String,
         timestamp: DateTime<Utc>,
     },
+    /// A session's lifecycle changed (migration 039, §5.7): created,
+    /// activated, archived or deleted.
+    ///
+    /// Published by the `/v1/sessions` routes and by the follow-up claim that
+    /// re-homes a lane, so a second window's sidebar does not keep showing a
+    /// conversation that is no longer the live one.
+    SessionChanged {
+        session_id: String,
+        lane_key: String,
+        /// "active" | "archived" | "deleted"
+        status: String,
+        timestamp: DateTime<Utc>,
+    },
     /// A queued follow-up item was cancelled before it ran (GAP-03).
     ///
     /// Published by `DELETE /v1/lanes/{lane_key}/followups/{id}` only when the

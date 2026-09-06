@@ -208,7 +208,17 @@ impl Gateway {
         // session (§5.1): the workspace the request carried binds the
         // session's project the first time one is seen.
         if let Some(ref p) = self.persistence {
-            let workspace_path = req.workspace_path.as_deref();
+            // The canonical project root, not the raw header: a session's
+            // `workspace_id` is the same key `task.workspace_id` and memory
+            // scoping use, and `MemoryScopeContext::for_request` is the one
+            // resolver (R22). `None` — no header, or a path under no marker —
+            // means no project, and the session stays unbound.
+            let workspace_root =
+                crate::memory::scope_context::MemoryScopeContext::for_request(
+                    req.workspace_path.as_deref(),
+                )
+                .request_workspace_root;
+            let workspace_path = workspace_root.as_deref();
             if req.attachments.is_empty() {
                 if let Err(e) =
                     p.persist_user_message(&lane_key_str, &req.content, &source_name, workspace_path)

@@ -5,7 +5,7 @@
 ## Overview
 
 - Router source: `apps/openalpacad/src/router.rs`.
-- Total documented method/path endpoints: 87.
+- Total documented method/path endpoints: 93.
 - Includes public, bearer-protected, WebSocket, and SSE routes.
 
 ## Auth
@@ -56,8 +56,6 @@
 | POST | `/v1/connectors/{id}/config` | `bearer` | `connector_config_handler` | `connectors::ConnectorConfigBody` | - | `apps/openalpacad/src/routes/connectors.rs` |
 | GET | `/v1/connectors/{id}/settings` | `bearer` | `connector_settings_handler` | - | - | `apps/openalpacad/src/routes/connectors.rs` |
 | PUT | `/v1/connectors/{id}/settings` | `bearer` | `update_connector_settings_handler` | `connectors::ConnectorSettingsBody` | - | `apps/openalpacad/src/routes/connectors.rs` |
-| GET | `/v1/conversations` | `bearer` | `list_conversations_handler` | - | `ConversationsQuery` | `apps/openalpacad/src/routes/chat.rs` |
-| GET | `/v1/conversations/{id}/messages` | `bearer` | `get_conversation_messages_handler` | - | `HistoryQuery` | `apps/openalpacad/src/routes/chat.rs` |
 | GET | `/v1/daemon/config/providers` | `bearer` | `get_daemon_providers` | - | - | `apps/openalpacad/src/routes/settings.rs` |
 | PUT | `/v1/daemon/config/providers/web-search` | `bearer` | `update_web_search_config` | `UpdateWebSearchRequest` | - | `apps/openalpacad/src/routes/settings.rs` |
 | GET | `/v1/events` | `query_token` | `events_handler` | - | `HashMap<String, String>` | `apps/openalpacad/src/routes/events.rs` |
@@ -85,6 +83,14 @@
 | GET | `/v1/orchestrator/decisions` | `bearer` | `dispatch_decisions_handler` | - | `dispatch_decisions::DecisionParams` | `apps/openalpacad/src/routes/dispatch_decisions.rs` |
 | GET | `/v1/orchestrator/latency` | `bearer` | `orchestrator_latency_handler` | - | `orchestrator_latency::LatencyParams` | `apps/openalpacad/src/routes/orchestrator_latency.rs` |
 | GET | `/v1/orchestrator/latency/aggregate` | `bearer` | `orchestrator_latency_aggregate_handler` | - | `orchestrator_latency::AggregateParams` | `apps/openalpacad/src/routes/orchestrator_latency.rs` |
+| GET | `/v1/sessions` | `bearer` | `list_sessions_handler` | - | `sessions::ListSessionsQuery` | `apps/openalpacad/src/routes/sessions.rs` |
+| POST | `/v1/sessions` | `bearer` | `create_session_handler` | `sessions::CreateSessionRequest` | - | `apps/openalpacad/src/routes/sessions.rs` |
+| GET | `/v1/sessions/{id}` | `bearer` | `get_session_handler` | - | - | `apps/openalpacad/src/routes/sessions.rs` |
+| DELETE | `/v1/sessions/{id}` | `bearer` | `delete_session_handler` | - | - | `apps/openalpacad/src/routes/sessions.rs` |
+| PATCH | `/v1/sessions/{id}` | `bearer` | `patch_session_handler` | `sessions::PatchSessionRequest` | - | `apps/openalpacad/src/routes/sessions.rs` |
+| POST | `/v1/sessions/{id}/activate` | `bearer` | `activate_session_handler` | - | - | `apps/openalpacad/src/routes/sessions.rs` |
+| POST | `/v1/sessions/{id}/archive` | `bearer` | `archive_session_handler` | - | - | `apps/openalpacad/src/routes/sessions.rs` |
+| GET | `/v1/sessions/{id}/messages` | `bearer` | `get_session_messages_handler` | - | `sessions::SessionMessagesQuery` | `apps/openalpacad/src/routes/sessions.rs` |
 | GET | `/v1/settings/llm` | `bearer` | `get_llm_settings` | - | - | `apps/openalpacad/src/routes/settings.rs` |
 | PUT | `/v1/settings/llm` | `bearer` | `upsert_key` | `AddKeyRequest` | - | `apps/openalpacad/src/routes/settings.rs` |
 | GET | `/v1/settings/llm/cli-backends` | `bearer` | `get_cli_backends` | - | - | `apps/openalpacad/src/routes/settings.rs` |
@@ -122,10 +128,6 @@
 - External or generic type; see handler source.
 
 ### `ConfirmationBody`
-
-- External or generic type; see handler source.
-
-### `ConversationsQuery`
 
 - External or generic type; see handler source.
 
@@ -374,6 +376,61 @@
 | `to` | `Option<String>` |
 | `limit` | `Option<usize>` |
 
+### `sessions::CreateSessionRequest`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/sessions.rs`
+
+| Field | Type |
+|---|---|
+| `source` | `Option<String>` |
+| `workspace_path` | `Option<String>` |
+| `title` | `Option<String>` |
+
+### `sessions::ListSessionsQuery`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/sessions.rs`
+
+| Field | Type |
+|---|---|
+| `workspace_id` | `Option<String>` |
+| `source` | `Option<String>` |
+| `status` | `Option<String>` |
+| `q` | `Option<String>` |
+| `limit` | `Option<i64>` |
+| `offset` | `Option<i64>` |
+
+### `sessions::PatchSessionRequest`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/sessions.rs`
+
+| Field | Type |
+|---|---|
+| `title` | `Option<String>` |
+| `workspace_path` | `Option<String>` |
+| `limit` | `Option<i64>` |
+| `offset` | `Option<i64>` |
+| `before_id` | `Option<i64>` |
+| `messages` | `Vec<super::chat_types::ConversationMessageView>` |
+| `total` | `i64` |
+| `db` | `&'a Database` |
+| `bus` | `&'a EventBus` |
+| `ctx` | `&'a SharedContext` |
+| `owner` | `&'a str` |
+
+### `sessions::SessionMessagesQuery`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/sessions.rs`
+
+| Field | Type |
+|---|---|
+| `limit` | `Option<i64>` |
+| `offset` | `Option<i64>` |
+| `before_id` | `Option<i64>` |
+
 ### `super::TokenParams`
 
 - External or generic type; see handler source.
@@ -409,6 +466,26 @@
 |---|---|
 | `request_id` | `String` |
 | `status` | `String` |
+
+### `sessions::SessionMessagesResponse`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/sessions.rs`
+
+| Field | Type |
+|---|---|
+| `messages` | `Vec<super::chat_types::ConversationMessageView>` |
+| `total` | `i64` |
+
+### `sessions::SessionsResponse`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/sessions.rs`
+
+| Field | Type |
+|---|---|
+| `sessions` | `Vec<SessionView>` |
+| `total` | `i64` |
 
 ## Streaming
 

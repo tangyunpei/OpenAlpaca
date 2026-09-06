@@ -720,6 +720,18 @@ impl TaskDispatcher {
                                 lane_key = %lane_key,
                                 "Auto-starting queued follow-up"
                             );
+                            // The claim re-homed the lane onto the session the
+                            // item was promised in (§5.3) — say so, or a second
+                            // window keeps showing the conversation that just
+                            // stepped down.
+                            if let Some(ref session_id) = row.session_id {
+                                bus.publish(SystemEvent::SessionChanged {
+                                    session_id: session_id.clone(),
+                                    lane_key: lane_key.clone(),
+                                    status: openalpaca_storage::SESSION_ACTIVE.to_string(),
+                                    timestamp: Utc::now(),
+                                });
+                            }
                             let scope = match row.workspace_path.clone() {
                                 Some(path) => crate::security::policy::Scope::Workspace { path },
                                 None => crate::security::policy::Scope::Global,

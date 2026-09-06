@@ -257,6 +257,20 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
+    /// A session's lifecycle changed — created, activated, archived or
+    /// deleted (migration 039, §5.7).
+    ///
+    /// The sidebar's honesty frame: a second window showing a session that
+    /// another window just archived or deleted learns about it here, rather
+    /// than on its next manual refresh.
+    SessionChanged {
+        session_id: String,
+        lane_key: String,
+        /// "active" | "archived" | "deleted"
+        status: String,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
     /// A queued follow-up item was cancelled before it ran (GAP-03).
     ///
     /// Fired only when the cancel actually *won* the CAS against the autostart

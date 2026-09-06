@@ -286,13 +286,16 @@ impl NotificationDispatcher {
 
         // Write — the half that reaches the default lane and `GET
         // /v1/chat/history`. `"gui"` is the lane's own source, passed as the
-        // `source` **column**: if the default lane has no conversation row yet,
-        // `get_or_create_conversation` creates one with whatever source it is
+        // `source` **column**: if the default lane has no session yet,
+        // `get_or_create_active_session` creates one with whatever source it is
         // handed, and a `"system"`-sourced default lane would be wrong forever.
+        // No session pin — a notice is lane chatter, so it lands in whatever
+        // conversation the lane is currently showing.
         openalpaca_core::orchestrator::dispatcher::persist_conversation(
             &self.db,
             notice_lane,
             "gui",
+            None,
             content.clone(),
             None,
             0,

@@ -193,6 +193,40 @@ impl<'a> ConversationRepository<'a> {
         })
     }
 
+    /// The page of a session's transcript that ends just before `before_id`:
+    /// the newest `limit` messages older than the cursor, chronological.
+    ///
+    /// This is what "load older" means — [`list_by_session_id_range`] returns
+    /// the *oldest* rows in a range, which walks a long transcript from the
+    /// wrong end.
+    ///
+    /// [`list_by_session_id_range`]: Self::list_by_session_id_range
+    pub fn list_by_session_before(
+        &self,
+        session_id: &str,
+        before_id: i64,
+        limit: i64,
+    ) -> Result<Vec<ConversationMessage>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {MESSAGE_COLUMNS}
+                 FROM (
+                     SELECT * FROM conversation_messages
+                     WHERE session_id = ?1 AND id < ?2
+                     ORDER BY id DESC
+                     LIMIT ?3
+                 )
+                 ORDER BY id ASC",
+            ))?;
+            let mut messages = Vec::new();
+            let mut rows = stmt.query(rusqlite::params![session_id, before_id, limit])?;
+            while let Some(row) = rows.next()? {
+                messages.push(Self::row_to_message(row)?);
+            }
+            Ok(messages)
+        })
+    }
+
     /// List the most recent N messages for a lane, in chronological order.
     pub fn list_recent_by_lane(
         &self,

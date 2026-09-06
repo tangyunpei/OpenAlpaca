@@ -24,6 +24,7 @@ pub mod files;
 mod files_types;
 pub mod followups;
 pub mod orchestrator_latency;
+pub mod sessions;
 pub mod settings;
 mod settings_types;
 pub mod skills;
@@ -58,8 +59,7 @@ pub use artifacts::{
 pub use auth::{generate_link_token_handler, get_me_handler};
 pub use chat::{
     chat_stream_handler, confirm_tool, delete_chat_history_handler, delete_feedback_handler,
-    get_chat_history_handler, get_conversation_messages_handler, get_feedback_handler,
-    list_conversations_handler, send_chat_handler, upsert_feedback_handler,
+    get_chat_history_handler, get_feedback_handler, send_chat_handler, upsert_feedback_handler,
 };
 pub use command::command_handler;
 pub use connectors::{
@@ -86,6 +86,11 @@ pub use settings::{
     get_orchestrator_config, get_provider_usage, list_models, refresh_models, reorder_keys,
     rescan_credentials, set_key_priority, update_orchestrator_config, update_web_search_config,
     upsert_key, validate_key,
+};
+pub use sessions::{
+    activate_session_handler, archive_session_handler, create_session_handler,
+    delete_session_handler, get_session_handler, get_session_messages_handler,
+    list_sessions_handler, patch_session_handler,
 };
 pub use skills::skill_health_handler;
 pub use status::status_handler;

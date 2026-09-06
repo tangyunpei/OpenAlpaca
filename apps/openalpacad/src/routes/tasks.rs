@@ -94,6 +94,10 @@ pub async fn create_task_handler(
         // Nor is it a re-run: `POST /v1/tasks/{id}/rerun` is the verb that
         // fills this, and it dispatches rather than passing through here.
         source_task_id: None,
+        // Same reason as `workspace_id`: the session a run belongs to is
+        // resolved where a run actually starts (§5.1), not on a route that
+        // only parks a row.
+        session_id: None,
     };
 
     // 1. Persist to DB
@@ -838,6 +842,7 @@ mod tests {
             artifact_count: 0,
             workspace_id: None,
             source_task_id: None,
+            session_id: None,
         }
     }
 

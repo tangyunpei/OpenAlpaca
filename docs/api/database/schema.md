@@ -6,7 +6,7 @@
 
 - DB path resolver: `openalpaca_storage::paths::database_path()`
 - Migrations entrypoint: `openalpaca_storage::migrations::MIGRATIONS`
-- Registered migrations: 38
+- Registered migrations: 39
 
 ## Tables
 
@@ -109,7 +109,7 @@ created_at TEXT NOT NULL DEFAULT (datetime('now'))
 
 ### `conversation_messages` (table)
 
-Source migration: `038_message_run_links.sql`
+Source migration: `039_sessions.sql`
 
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT
@@ -125,6 +125,7 @@ source TEXT
 content_json TEXT
 display_text TEXT
 task_id TEXT
+session_id TEXT
 ```
 
 ### `conversations` (table)
@@ -254,7 +255,7 @@ updated_at TEXT DEFAULT (datetime('now'))
 
 ### `lane_followups` (table)
 
-Source migration: `033_lane_followups.sql`
+Source migration: `039_sessions.sql`
 
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT
@@ -267,6 +268,7 @@ source_task_id TEXT
 status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','done','cancelled'))
 created_at TEXT NOT NULL DEFAULT (datetime('now'))
 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+session_id TEXT
 ```
 
 ### `link_token` (table)
@@ -393,6 +395,28 @@ Source migration: `001_init.sql`
 version INTEGER PRIMARY KEY
 ```
 
+### `session` (table)
+
+Source migration: `039_sessions.sql`
+
+```sql
+id TEXT PRIMARY KEY
+lane_key TEXT NOT NULL
+source TEXT NOT NULL
+title TEXT DEFAULT ''
+workspace_id TEXT
+status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','archived'))
+message_count INTEGER DEFAULT 0
+last_message_at TEXT
+summary TEXT NOT NULL DEFAULT ''
+summary_version INTEGER NOT NULL DEFAULT 0
+last_summarized_message_id INTEGER NOT NULL DEFAULT 0
+summary_updated_at TEXT
+ended_at TEXT
+created_at TEXT NOT NULL DEFAULT (datetime('now'))
+updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+```
+
 ### `skill_execution_log` (table)
 
 Source migration: `031_message_feedback.sql`
@@ -454,7 +478,7 @@ updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 
 ### `task` (table)
 
-Source migration: `037_run_observability.sql`
+Source migration: `039_sessions.sql`
 
 ```sql
 id TEXT PRIMARY KEY
@@ -477,6 +501,7 @@ outcome_kind TEXT
 artifact_count INTEGER NOT NULL DEFAULT 0
 workspace_id TEXT
 source_task_id TEXT
+session_id TEXT
 ```
 
 ### `task_agent_assignment` (table)
@@ -497,7 +522,7 @@ result_output TEXT
 
 ### `tool_execution_log` (table)
 
-Source migration: `030_skill_tool_execution_log.sql`
+Source migration: `039_sessions.sql`
 
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT
@@ -508,6 +533,12 @@ success INTEGER NOT NULL
 duration_ms INTEGER NOT NULL
 error_message TEXT
 timestamp TEXT DEFAULT (datetime('now'))
+session_id TEXT
+task_id TEXT
+log_seq INTEGER
+args_preview TEXT
+result_preview TEXT
+result_ref TEXT
 ```
 
 ## Indexes
@@ -522,6 +553,7 @@ timestamp TEXT DEFAULT (datetime('now'))
 | `idx_conv_msg_created` | `conversation_messages` | `INDEX` | `created_at` | `009_conversation_messages.sql` |
 | `idx_conv_msg_lane` | `conversation_messages` | `INDEX` | `lane_key` | `009_conversation_messages.sql` |
 | `idx_conv_msg_lane_id` | `conversation_messages` | `INDEX` | `lane_key, id` | `014_conversation_summary.sql` |
+| `idx_conv_msg_session` | `conversation_messages` | `INDEX` | `session_id, id` | `039_sessions.sql` |
 | `idx_conv_msg_task` | `conversation_messages` | `INDEX` | `task_id` | `038_message_run_links.sql` |
 | `idx_conversations_source` | `conversations` | `INDEX` | `source` | `011_unified_conversations.sql` |
 | `idx_conversations_updated` | `conversations` | `INDEX` | `updated_at DESC` | `011_unified_conversations.sql` |
@@ -558,6 +590,9 @@ timestamp TEXT DEFAULT (datetime('now'))
 | `idx_orch_latency_mode` | `orchestrator_latency` | `INDEX` | `mode, timestamp DESC` | `022_orchestrator_latency.sql` |
 | `idx_orch_latency_ts` | `orchestrator_latency` | `INDEX` | `timestamp DESC` | `022_orchestrator_latency.sql` |
 | `idx_preference_user` | `preference` | `INDEX` | `user_id` | `005_preference.sql` |
+| `idx_session_source` | `session` | `INDEX` | `source` | `039_sessions.sql` |
+| `idx_session_updated` | `session` | `INDEX` | `updated_at DESC` | `039_sessions.sql` |
+| `idx_session_workspace` | `session` | `INDEX` | `workspace_id, updated_at DESC` | `039_sessions.sql` |
 | `idx_sel_agent` | `skill_execution_log` | `INDEX` | `agent_id, skill_id` | `030_skill_tool_execution_log.sql` |
 | `idx_sel_request_id` | `skill_execution_log` | `UNIQUE` | `request_id` | `030_skill_tool_execution_log.sql` |
 | `idx_sel_response_msg` | `skill_execution_log` | `INDEX` | `response_message_id` | `031_message_feedback.sql` |
@@ -567,11 +602,14 @@ timestamp TEXT DEFAULT (datetime('now'))
 | `idx_subagent_span_state` | `subagent_span` | `INDEX` | `state` | `037_run_observability.sql` |
 | `idx_subagent_span_task` | `subagent_span` | `INDEX` | `task_id, started_at` | `037_run_observability.sql` |
 | `idx_task_created_by` | `task` | `INDEX` | `created_by` | `006_tasks.sql` |
+| `idx_task_session` | `task` | `INDEX` | `session_id` | `039_sessions.sql` |
 | `idx_task_source` | `task` | `INDEX` | `source_task_id` | `037_run_observability.sql` |
 | `idx_task_status` | `task` | `INDEX` | `status` | `006_tasks.sql` |
 | `idx_task_workspace` | `task` | `INDEX` | `workspace_id` | `036_artifact_store.sql` |
 | `idx_task_agent_task` | `task_agent_assignment` | `INDEX` | `task_id` | `006_tasks.sql` |
 | `idx_tel_request` | `tool_execution_log` | `INDEX` | `request_id` | `030_skill_tool_execution_log.sql` |
+| `idx_tel_session` | `tool_execution_log` | `INDEX` | `session_id, id` | `039_sessions.sql` |
+| `idx_tel_task` | `tool_execution_log` | `INDEX` | `task_id, id` | `039_sessions.sql` |
 | `idx_tel_tool_ts` | `tool_execution_log` | `INDEX` | `tool_name, timestamp DESC` | `030_skill_tool_execution_log.sql` |
 
 ## Triggers

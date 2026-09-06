@@ -3,7 +3,7 @@ use axum::{
     Router,
     extract::{DefaultBodyLimit, State},
     response::Json,
-    routing::{delete, get, post, put},
+    routing::{delete, get, patch, post, put},
 };
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
@@ -188,14 +188,30 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/chat/history",
             delete(crate::routes::delete_chat_history_handler),
         )
-        // Cross-platform conversation API (Phase 5.6)
+        // Sessions (plan §5.7) — replaces `/v1/conversations` (P19), which was
+        // deleted rather than aliased.
+        .route("/v1/sessions", get(crate::routes::list_sessions_handler))
+        .route("/v1/sessions", post(crate::routes::create_session_handler))
+        .route("/v1/sessions/{id}", get(crate::routes::get_session_handler))
         .route(
-            "/v1/conversations",
-            get(crate::routes::list_conversations_handler),
+            "/v1/sessions/{id}",
+            patch(crate::routes::patch_session_handler),
         )
         .route(
-            "/v1/conversations/{id}/messages",
-            get(crate::routes::get_conversation_messages_handler),
+            "/v1/sessions/{id}",
+            delete(crate::routes::delete_session_handler),
+        )
+        .route(
+            "/v1/sessions/{id}/messages",
+            get(crate::routes::get_session_messages_handler),
+        )
+        .route(
+            "/v1/sessions/{id}/activate",
+            post(crate::routes::activate_session_handler),
+        )
+        .route(
+            "/v1/sessions/{id}/archive",
+            post(crate::routes::archive_session_handler),
         )
         // Settings routes (Phase 5.5)
         .route("/v1/settings/llm", get(crate::routes::get_llm_settings))

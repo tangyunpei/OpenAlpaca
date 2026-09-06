@@ -151,8 +151,11 @@ accurate, the tab names are not:
 
 ### Conversations
 
-- Cross-source conversation list and message inspection
-- Endpoints: `/v1/conversations`, `/v1/conversations/{id}/messages`
+- Cross-source conversation list and message inspection. A conversation is a
+  **session**: an epoch of a lane, bound to at most one workspace, `active` or
+  `archived`; a lane holds many and at most one active one.
+- Endpoints: `/v1/sessions`, `/v1/sessions/{id}`, `/v1/sessions/{id}/messages`
+  (the `/v1/conversations` reads were deleted, not aliased)
 
 ### Event Log
 

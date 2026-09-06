@@ -502,6 +502,20 @@ impl EventBroadcaster {
         let _ = self.tx.send(event);
     }
 
+    /// Broadcast a session lifecycle change and persist it (§5.7)
+    pub fn session_changed(&self, session_id: &str, lane_key: &str, status: &str) {
+        let event = ServerEvent::SessionChanged {
+            session_id: session_id.to_string(),
+            lane_key: lane_key.to_string(),
+            status: status.to_string(),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
     /// Broadcast a follow-up cancelled event and persist it (GAP-03)
     pub fn followup_cancelled(&self, lane_key: &str, followup_id: i64) {
         let event = ServerEvent::FollowupCancelled {
