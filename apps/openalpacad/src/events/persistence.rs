@@ -402,6 +402,17 @@ impl EventBroadcaster {
                     });
                     repo.log("followup_queued", None, Some(&detail), None)
                 }
+                ServerEvent::FollowupCancelled {
+                    lane_key,
+                    followup_id,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "lane_key": lane_key,
+                        "followup_id": followup_id,
+                    });
+                    repo.log("followup_cancelled", None, Some(&detail), None)
+                }
                 // A produced artifact (plan §4.9). Persisted like `task_status`
                 // so it appears in `GET /v1/events/history` and feeds GAP-10's
                 // per-run log; the agent goes in the indexed column so

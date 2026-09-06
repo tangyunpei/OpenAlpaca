@@ -90,6 +90,63 @@ fn test_claim_next_is_lane_scoped() {
     assert!(repo.claim_next("other:telegram").unwrap().is_some());
 }
 
+/// The CAS the `DELETE` route needs: cancel wins only while the row is still
+/// queued *and* still belongs to the lane the caller addressed. Unconditional
+/// `mark_cancelled` would race the autostart claim and mark a row that is
+/// already running.
+#[test]
+fn test_cancel_if_queued_wins_only_on_a_queued_row() {
+    let db = setup_db();
+    let repo = FollowupRepository::new(&db);
+
+    let id = queue_item(&repo, "user:cli", FOLLOWUP_KIND_FOLLOWUP, "to cancel");
+
+    assert!(repo.cancel_if_queued(id, "user:cli").unwrap());
+    assert_eq!(repo.get(id).unwrap().unwrap().status, "cancelled");
+
+    // Idempotence is not a property of a CAS: the second attempt loses,
+    // because the row is no longer queued.
+    assert!(!repo.cancel_if_queued(id, "user:cli").unwrap());
+    assert_eq!(repo.get(id).unwrap().unwrap().status, "cancelled");
+}
+
+/// The race the route reports as `409`: the autostart claimed the row between
+/// the caller reading it and pressing cancel. Exactly one of the two CASes
+/// wins, and it is the claim — the turn is already running.
+#[test]
+fn test_cancel_if_queued_loses_to_the_autostart_claim() {
+    let db = setup_db();
+    let repo = FollowupRepository::new(&db);
+
+    let id = queue_item(&repo, "user:cli", FOLLOWUP_KIND_FOLLOWUP, "already claimed");
+    let claimed = repo.claim_next("user:cli").unwrap().unwrap();
+    assert_eq!(claimed.id, id);
+
+    assert!(!repo.cancel_if_queued(id, "user:cli").unwrap());
+    assert_eq!(
+        repo.get(id).unwrap().unwrap().status,
+        "running",
+        "a claimed row keeps running — cancel must not overwrite it"
+    );
+}
+
+/// Lane-scoped, like `claim_next`: naming the wrong lane cancels nothing, so
+/// the route can answer `404` for a row that is not this lane's without a
+/// second query deciding it.
+#[test]
+fn test_cancel_if_queued_is_lane_scoped() {
+    let db = setup_db();
+    let repo = FollowupRepository::new(&db);
+
+    let id = queue_item(&repo, "user:cli", FOLLOWUP_KIND_FOLLOWUP, "mine");
+
+    assert!(!repo.cancel_if_queued(id, "other:telegram").unwrap());
+    assert_eq!(repo.get(id).unwrap().unwrap().status, "queued");
+
+    // An id that does not exist at all is the same "nothing changed".
+    assert!(!repo.cancel_if_queued(id + 999, "user:cli").unwrap());
+}
+
 #[test]
 fn test_mark_done_and_cancelled() {
     let db = setup_db();

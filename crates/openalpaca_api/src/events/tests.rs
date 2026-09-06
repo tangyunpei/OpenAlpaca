@@ -150,6 +150,23 @@ fn test_followup_queued_serialization() {
     assert!(json.contains("\"kind\":\"followup\""));
 }
 
+/// GAP-03's other half. No `kind`: a cancel names the row, and the client
+/// already knows what kind it was showing.
+#[test]
+fn test_followup_cancelled_serialization() {
+    let event = ServerEvent::FollowupCancelled {
+        lane_key: "junpei:cli".into(),
+        followup_id: 42,
+        ts: Utc::now(),
+        instance_id: "inst-1".into(),
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert!(json.contains("\"type\":\"followup_cancelled\""));
+    assert!(json.contains("\"lane_key\":\"junpei:cli\""));
+    assert!(json.contains("\"followup_id\":42"));
+    assert!(json.contains("\"instance_id\":\"inst-1\""));
+}
+
 // ── ServerEvent::ArtifactWritten (plan §4.9) ──────────────────────
 
 /// The wire shape the GUI union mirrors, field for field. `kind` is the

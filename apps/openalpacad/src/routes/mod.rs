@@ -22,6 +22,7 @@ pub mod events_history;
 pub mod extensions;
 pub mod files;
 mod files_types;
+pub mod followups;
 pub mod orchestrator_latency;
 pub mod settings;
 mod settings_types;
@@ -75,6 +76,7 @@ pub use extensions::{
 pub use files::{
     get_file_content_handler, get_file_metadata_handler, open_file_handler, upload_file_handler,
 };
+pub use followups::{cancel_followup_handler, list_followups_handler, queue_followup_handler};
 pub use orchestrator_latency::{
     orchestrator_latency_aggregate_handler, orchestrator_latency_handler,
 };

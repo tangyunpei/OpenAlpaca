@@ -5,7 +5,7 @@
 ## Overview
 
 - Router source: `apps/openalpacad/src/router.rs`.
-- Total documented method/path endpoints: 83.
+- Total documented method/path endpoints: 86.
 - Includes public, bearer-protected, WebSocket, and SSE routes.
 
 ## Auth
@@ -72,6 +72,9 @@
 | GET | `/v1/files/{id}/content` | `bearer_or_query_token` | `get_file_content_handler` | - | `super::TokenParams` | `apps/openalpacad/src/routes/files.rs` |
 | POST | `/v1/files/{id}/open` | `bearer` | `open_file_handler` | - | - | `apps/openalpacad/src/routes/files.rs` |
 | GET | `/v1/health` | `none` | `health_handler` | - | - | `apps/openalpacad/src/router.rs` |
+| GET | `/v1/lanes/{lane_key}/followups` | `bearer` | `list_followups_handler` | - | - | `apps/openalpacad/src/routes/followups.rs` |
+| POST | `/v1/lanes/{lane_key}/followups` | `bearer` | `queue_followup_handler` | `followups::QueueFollowupRequest` | - | `apps/openalpacad/src/routes/followups.rs` |
+| DELETE | `/v1/lanes/{lane_key}/followups/{id}` | `bearer` | `cancel_followup_handler` | - | - | `apps/openalpacad/src/routes/followups.rs` |
 | GET | `/v1/llm/usage` | `bearer` | `get_llm_usage` | - | `LlmUsageQuery` | `apps/openalpacad/src/routes/settings.rs` |
 | GET | `/v1/llm/usage/daily` | `bearer` | `get_llm_usage_daily` | - | `LlmUsageDailyQuery` | `apps/openalpacad/src/routes/settings.rs` |
 | GET | `/v1/me` | `bearer` | `get_me_handler` | - | - | `apps/openalpacad/src/routes/auth.rs` |
@@ -336,6 +339,17 @@
 |---|---|
 | `key` | `String` |
 | `value` | `serde_json::Value` |
+
+### `followups::QueueFollowupRequest`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/followups.rs`
+
+| Field | Type |
+|---|---|
+| `content` | `String` |
+| `kind` | `Option<String>` |
+| `source_task_id` | `Option<String>` |
 
 ### `orchestrator_latency::AggregateParams`
 

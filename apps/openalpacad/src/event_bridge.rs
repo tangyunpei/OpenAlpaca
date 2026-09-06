@@ -521,6 +521,12 @@ pub fn spawn_event_bridge(
                     tracing::info!(%lane_key, followup_id, %kind, "Follow-up queued");
                     eb.followup_queued(lane_key, followup_id, kind);
                 }
+                openalpaca_core::events::SystemEvent::FollowupCancelled {
+                    ref lane_key, followup_id, ..
+                } => {
+                    tracing::info!(%lane_key, followup_id, "Follow-up cancelled");
+                    eb.followup_cancelled(lane_key, followup_id);
+                }
                 openalpaca_core::events::SystemEvent::ArtifactWritten {
                     ref artifact_id,
                     ref task_id,
@@ -1139,6 +1145,28 @@ mod tests {
                 assert_eq!(kind, "followup");
             }
             other => panic!("Expected FollowupQueued, got {other:?}"),
+        }
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_followup_cancelled_bridged_to_server_event() {
+        let (bus, mut rx, cancel) = setup_bridge();
+        bus.publish(SystemEvent::FollowupCancelled {
+            lane_key: "junpei:cli".into(),
+            followup_id: 42,
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::FollowupCancelled {
+                lane_key,
+                followup_id,
+                ..
+            } => {
+                assert_eq!(lane_key, "junpei:cli");
+                assert_eq!(followup_id, 42);
+            }
+            other => panic!("Expected FollowupCancelled, got {other:?}"),
         }
         cancel.cancel();
     }

@@ -257,6 +257,17 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
+    /// A queued follow-up item was cancelled before it ran (GAP-03).
+    ///
+    /// Fired only when the cancel actually *won* the CAS against the autostart
+    /// claim, so a client that retires a pending chip on this frame is never
+    /// retiring one that is about to run.
+    FollowupCancelled {
+        lane_key: String,
+        followup_id: i64,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
     /// An agent wrote a **produced** artifact — `artifact_write`, or the
     /// `workspace_write(entry_type = "artifact")` spill (plan §4.9).
     ///

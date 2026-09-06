@@ -422,6 +422,16 @@ pub enum SystemEvent {
         kind: String,
         timestamp: DateTime<Utc>,
     },
+    /// A queued follow-up item was cancelled before it ran (GAP-03).
+    ///
+    /// Published by `DELETE /v1/lanes/{lane_key}/followups/{id}` only when the
+    /// cancel won its CAS against the autostart claim — a losing cancel
+    /// changed no row and has nothing to announce.
+    FollowupCancelled {
+        lane_key: String,
+        followup_id: i64,
+        timestamp: DateTime<Utc>,
+    },
     /// An agent wrote a **produced** artifact — `artifact_write`, or the
     /// `workspace_write(entry_type = "artifact")` spill (plan §4.9).
     ///

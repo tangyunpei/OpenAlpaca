@@ -35,6 +35,7 @@ pub use models::{SkillExecutionEntry, ToolExecutionEntry};
 pub use models::SkillHealthMetrics;
 pub use repository::{
     AgentRepository, ConfigRepository, ConversationRepository, EventLogRepository,
+    FOLLOWUP_KIND_FOLLOWUP, FOLLOWUP_KIND_UNPROCESSED_STEERING,
     FileAssetRepository, FollowupRecord, FollowupRepository, IdentityRepository,
     LlmUsageRepository, MemoryRepository,
     MessageFeedbackRepository, OrchestratorLatencyRepository, PreferenceRepository,

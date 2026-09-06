@@ -502,6 +502,19 @@ impl EventBroadcaster {
         let _ = self.tx.send(event);
     }
 
+    /// Broadcast a follow-up cancelled event and persist it (GAP-03)
+    pub fn followup_cancelled(&self, lane_key: &str, followup_id: i64) {
+        let event = ServerEvent::FollowupCancelled {
+            lane_key: lane_key.to_string(),
+            followup_id,
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
     /// Broadcast an extension state transition and persist it (extension
     /// design ADR-030 §3.2 T5, §3.3 E5, §3.6, §3.7).
     pub fn extension_state_changed(

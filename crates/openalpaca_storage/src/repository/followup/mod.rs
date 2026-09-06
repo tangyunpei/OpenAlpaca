@@ -162,6 +162,34 @@ impl<'a> FollowupRepository<'a> {
         })
     }
 
+    /// Cancel a follow-up item, but only while it is still queued **and**
+    /// still belongs to `lane_key`. Returns whether the cancel won.
+    ///
+    /// One `UPDATE` with the whole predicate in its `WHERE`, for the same
+    /// reason [`claim_next`](Self::claim_next) has one: the autostart claim
+    /// races this. `mark_cancelled` is unconditional, so a caller that read
+    /// the row, saw `queued`, and then cancelled would overwrite a row the
+    /// claim had already moved to `running` — the turn keeps running while
+    /// the ledger says it was cancelled. With both sides CAS-ing on
+    /// `status = 'queued'`, exactly one wins and the loser is told so.
+    ///
+    /// The lane is part of the predicate rather than a separate check for the
+    /// same reason: an id belonging to another lane must not be cancellable,
+    /// and re-reading the row to decide that would reopen the window.
+    pub fn cancel_if_queued(&self, id: i64, lane_key: &str) -> Result<bool> {
+        self.db.with_connection(|conn| {
+            let changed = conn
+                .execute(
+                    "UPDATE lane_followups \
+                     SET status = 'cancelled', updated_at = datetime('now') \
+                     WHERE id = ?1 AND lane_key = ?2 AND status = 'queued'",
+                    rusqlite::params![id, lane_key],
+                )
+                .context("Failed to cancel followup")?;
+            Ok(changed > 0)
+        })
+    }
+
     /// Mark a follow-up item done.
     pub fn mark_done(&self, id: i64) -> Result<()> {
         self.set_status(id, "done")

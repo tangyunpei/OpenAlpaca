@@ -74,6 +74,21 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/tasks/{id}/steer",
             post(crate::routes::steer_task_handler),
         )
+        // The lane follow-up queue (GAP-03) — the read-back, write and
+        // race-safe cancel for the queue the model's `queue_followup` tool and
+        // the steering-leftover conversion already write to.
+        .route(
+            "/v1/lanes/{lane_key}/followups",
+            get(crate::routes::list_followups_handler),
+        )
+        .route(
+            "/v1/lanes/{lane_key}/followups",
+            post(crate::routes::queue_followup_handler),
+        )
+        .route(
+            "/v1/lanes/{lane_key}/followups/{id}",
+            delete(crate::routes::cancel_followup_handler),
+        )
 
         .route("/v1/agents", get(crate::routes::list_agents_handler))
         .route("/v1/agents", post(crate::routes::create_agent_handler))
