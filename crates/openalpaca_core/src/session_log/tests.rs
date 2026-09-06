@@ -271,6 +271,52 @@ async fn a_nested_array_of_large_strings_is_trimmed_element_wise() {
     );
 }
 
+/// P-14: `preserved_from_seq` is by definition the last seq the log already
+/// holds, so the writer — the only party that assigns a seq — stamps it,
+/// exactly as it does `log_seq`. §5.4's replay rule ("replay only rounds with
+/// `seq > preserved_from_seq`") is defined in terms of it.
+#[tokio::test]
+async fn a_compaction_record_carries_the_seq_of_the_record_before_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = service(&dir);
+    let handle = svc.handle_for("sess-compact");
+
+    handle.emit(Record::new(RecordType::Round).with_data(serde_json::json!({"round": 1})));
+    handle.emit(Record::new(RecordType::Round).with_data(serde_json::json!({"round": 2})));
+    handle.emit(Record::new(RecordType::Compaction).with_data(serde_json::json!({
+        "tier": "LlmSummary",
+        "trigger": "auto",
+        "cumulative_dropped_tokens": 900,
+        "dropped_from_seq": null,
+        "summary_msg_id": null,
+    })));
+    assert!(handle.flush().await);
+
+    let rows = lines(&log_path(dir.path(), "sess-compact"));
+    assert_eq!(rows[2]["seq"], 3);
+    assert_eq!(
+        rows[2]["data"]["preserved_from_seq"], 2,
+        "the boundary is the prior record's seq"
+    );
+    assert_eq!(rows[2]["data"]["cumulative_dropped_tokens"], 900);
+    assert!(rows[2]["data"]["dropped_from_seq"].is_null());
+    assert!(rows[2]["data"]["summary_msg_id"].is_null());
+}
+
+/// Nothing precedes the first record, so there is no boundary to name — an
+/// explicit null rather than a seq that does not exist.
+#[tokio::test]
+async fn a_compaction_record_with_no_prior_record_has_a_null_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = service(&dir);
+    let handle = svc.handle_for("sess-compact-first");
+    handle.emit(Record::new(RecordType::Compaction).with_data(serde_json::json!({"tier": "x"})));
+    assert!(handle.flush().await);
+
+    let rows = lines(&log_path(dir.path(), "sess-compact-first"));
+    assert!(rows[0]["data"]["preserved_from_seq"].is_null(), "{}", rows[0]);
+}
+
 // ── Durability ──────────────────────────────────────────────────────
 
 /// §5.4: "the writer truncates a torn tail before appending on reopen", and

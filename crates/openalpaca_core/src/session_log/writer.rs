@@ -246,7 +246,26 @@ fn write_record(
 ) {
     let kind = record.kind;
     let (data, truncated) = cap_data(record.data);
-    let record = Record { data, ..record };
+    let mut record = Record { data, ..record };
+
+    // P-14: `preserved_from_seq` is the last seq the log already holds, so it
+    // is the writer's to stamp — the same reason `log_seq` is. An emitter can
+    // only guess: records it queued may not be written yet, and a dropped one
+    // never consumes a number. Nothing precedes the first record, so there is
+    // no boundary to name and the field stays null.
+    if kind == RecordType::Compaction
+        && let Some(map) = record.data.as_object_mut()
+    {
+        let preserved = log.next_seq.saturating_sub(1);
+        map.insert(
+            "preserved_from_seq".into(),
+            if preserved == 0 {
+                Value::Null
+            } else {
+                Value::from(preserved)
+            },
+        );
+    }
     if truncated {
         // The marker T42 greps for: every site that must gain a `results/`
         // spill announces itself once, with the session and the kind.

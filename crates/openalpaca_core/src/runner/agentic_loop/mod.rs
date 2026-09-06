@@ -341,6 +341,10 @@ async fn run_agentic_loop_core(
     // them, so budget exits can re-append unsent messages to the inbox for
     // follow-up conversion.
     let mut steering_bonus_rounds: usize = 0;
+    // P-14: what this run's compactions have taken out of its context so far,
+    // in tokens. Cumulative across every compaction the loop performs, which
+    // is what makes a later `compaction` record readable on its own.
+    let mut cumulative_dropped_tokens: u64 = 0;
     let mut pending_steering: Vec<SteeringMsg> = Vec::new();
 
     // Pre-compute tool token estimate once — avoids re-serializing tool JSON
@@ -541,10 +545,18 @@ async fn run_agentic_loop_core(
                     );
                 });
 
+                cumulative_dropped_tokens += report
+                    .initial_tokens
+                    .saturating_sub(report.final_tokens)
+                    as u64;
+
                 // §5.5: the loop narrates its compaction into the session
-                // log. `dropped_from_seq`/`preserved_from_seq` (P-14) need a
-                // message→seq map that does not exist yet and are absent
-                // rather than guessed; every value below is the report's own.
+                // log. `preserved_from_seq` (P-14) is stamped by the writer,
+                // which is the only party that knows what the log already
+                // holds. `dropped_from_seq` and `summary_msg_id` need a
+                // message→log-seq map that does not exist yet (T55) and are
+                // explicit nulls rather than guesses; every other value below
+                // is the report's own.
                 log_event(
                     config,
                     task_id,
@@ -560,6 +572,9 @@ async fn run_agentic_loop_core(
                         "messages_discarded": report.messages_discarded,
                         "memories_extracted": report.memories_extracted,
                         "tiers_applied": format!("{:?}", report.tiers_applied),
+                        "cumulative_dropped_tokens": cumulative_dropped_tokens,
+                        "dropped_from_seq": Value::Null,
+                        "summary_msg_id": Value::Null,
                     }),
                 );
 

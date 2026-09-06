@@ -893,12 +893,24 @@ async fn test_compaction_triggers_during_agentic_loop() {
         ChatMessage::system("You are a helpful assistant."),
         ChatMessage::user("Search for information repeatedly."),
     ];
+    // The compaction record is narrated into a real log, so P-14's fields are
+    // asserted on what the writer actually produced.
+    let dir = tempfile::tempdir().unwrap();
+    let service = crate::session_log::SessionLogService::new(
+        dir.path().to_path_buf(),
+        None,
+        crate::session_log::SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-compaction");
+
     let config = LoopConfig {
         max_rounds: 10,
         max_cost: 10.0,
         enable_caching: false,
         thinking: None,
         context_tail_keep: 2,
+        session_log: Some(handle.clone()),
         ..Default::default()
     };
 
@@ -933,6 +945,35 @@ async fn test_compaction_triggers_during_agentic_loop() {
         result.rounds_used
     );
     assert_eq!(result.tool_calls_made, 4);
+
+    // P-14: the compaction record names the boundary §5.4's replay rule is
+    // defined in terms of, and how much this run has dropped so far. The two
+    // fields that need a message→log-seq map are explicit nulls, not guesses.
+    assert!(handle.flush().await);
+    let records = crate::session_log::read_records(&dir.path().join("sess-compaction")).unwrap();
+    let compaction = records
+        .iter()
+        .find(|r| r.kind == "compaction")
+        .expect("the loop narrates its compaction");
+    let previous = records
+        .iter()
+        .rfind(|r| r.seq < compaction.seq)
+        .expect("a compaction is never the first record here");
+    assert_eq!(
+        compaction.data["preserved_from_seq"].as_u64(),
+        Some(previous.seq),
+        "the boundary is the last seq written before the compaction"
+    );
+    assert_eq!(
+        compaction.data["cumulative_dropped_tokens"].as_u64(),
+        Some(
+            (compaction.data["pre_tokens"].as_u64().unwrap())
+                .saturating_sub(compaction.data["post_tokens"].as_u64().unwrap())
+        ),
+        "the first compaction of a run has dropped exactly its own delta"
+    );
+    assert!(compaction.data["dropped_from_seq"].is_null());
+    assert!(compaction.data["summary_msg_id"].is_null());
 }
 
 #[test]
