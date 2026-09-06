@@ -42,6 +42,6 @@ pub use repository::{
 };
 pub use repository::llm_usage::LlmUsageDaily;
 pub use repository::subagent_span::{
-    NewSubagentSpan, SPAN_DETAIL_INTERRUPTED, SpanState, SubagentSpanRecord,
+    NewSubagentSpan, SPAN_DETAIL_INTERRUPTED, SpanState, SubagentSpanRecord, TemplateRunCount,
 };
 pub use uploads::{NewUpload, StoredUpload, UploadError, UploadStore};

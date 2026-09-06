@@ -29,7 +29,7 @@ use chrono::Utc;
 use std::sync::Arc;
 
 use openalpaca_core::events::SystemEvent;
-use openalpaca_storage::{SubAgentConfig, SubAgentRepository};
+use openalpaca_storage::{SubAgentConfig, SubAgentRepository, SubagentSpanRepository};
 
 use super::agents_types::*;
 use crate::AppState;
@@ -440,9 +440,20 @@ pub async fn delete_agent_handler(
 pub async fn list_templates_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let templates = state.gateway.shared_context.agent_registry.list_templates();
 
+    // GAP-20: one grouped query for the whole page, not one per template.
+    // A read failure costs the counts, not the list — the panel then shows
+    // every template with `0 runs`, which is what an empty span table means
+    // too, so nothing renders as a fabricated number.
+    let runs = SubagentSpanRepository::new(&state.db)
+        .run_counts_by_template()
+        .unwrap_or_else(|e| {
+            tracing::warn!("Failed to read template run counts: {e}");
+            std::collections::HashMap::new()
+        });
+
     let response: Vec<TemplateResponse> = templates
         .iter()
-        .map(TemplateResponse::from_template)
+        .map(|t| TemplateResponse::from_template(t, runs.get(&t.frontmatter.id)))
         .collect();
 
     (
@@ -463,7 +474,13 @@ pub async fn get_template_handler(
         .get_template(&id)
     {
         Some(template) => {
-            let response = TemplateResponse::from_template(&template);
+            let runs = SubagentSpanRepository::new(&state.db)
+                .run_counts_by_template()
+                .unwrap_or_else(|e| {
+                    tracing::warn!("Failed to read template run counts: {e}");
+                    std::collections::HashMap::new()
+                });
+            let response = TemplateResponse::from_template(&template, runs.get(&id));
             (
                 StatusCode::OK,
                 Json(serde_json::to_value(response).unwrap()),

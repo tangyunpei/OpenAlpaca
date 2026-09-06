@@ -1,24 +1,46 @@
 /**
  * Settings → Agents (DESIGN_SPEC §5.4, API_MAP §2.4).
  *
- * Real: the template list (`GET /v1/agent-templates`) and, separately, which
- * instances are running right now (`GET /v1/agent-instances`) — the design's
- * rows are templates, so the running count is shown as meta rather than
- * conflated with them.
+ * Real: the template list (`GET /v1/agent-templates`), its per-template run
+ * count and last-run stamp (GAP-20's counts half, from `subagent_span`), and,
+ * separately, which instances are running right now
+ * (`GET /v1/agent-instances`) — the design's rows are templates, so the
+ * running count is shown as meta rather than conflated with them.
  *
- * Unavailable: `12 runs 7d` and the per-template on/off switch. `AgentMetrics`
- * is lifetime, keyed by instance, and only returned by `GET /v1/agents/{id}`;
- * there is no enabled flag at all (GAP-20).
+ * Unavailable: the per-template on/off switch. There is no enabled flag on a
+ * template and nothing would enforce one in the spawn path (GAP-20's remaining
+ * half).
  */
 
 import { Button, Tag, chipVariant } from "@/components/ui";
 import {
-  TEMPLATE_METRICS_NOTE,
+  TEMPLATE_TOGGLE_NOTE,
   useAgentInstances,
   useAgentTemplates,
 } from "@/hooks/useAgents";
+import type { AgentTemplate } from "@/lib/api/types";
 
+import { shortDate } from "./format";
 import { GapNote, ListCard, ListRow, ListState, Toggle } from "./primitives";
+
+/**
+ * `1 running · 12 runs · last 4 Sep`. A template nothing has ever spawned says
+ * so in words: `0 runs` reads like a metric that failed to load.
+ */
+function templateMeta(template: AgentTemplate, running: number): string {
+  const parts: string[] = [];
+  if (running > 0) parts.push(`${running} running`);
+  if (template.run_count === 0) {
+    parts.push("No runs yet");
+  } else {
+    const last =
+      template.last_run_at === undefined
+        ? ""
+        : ` · last ${shortDate(template.last_run_at)}`;
+    parts.push(`${template.run_count} runs${last}`);
+  }
+  return parts.join(" · ");
+}
 
 export function AgentsSection() {
   const templates = useAgentTemplates();
@@ -59,13 +81,13 @@ export function AgentsSection() {
                     </Button>
                   )
                 }
-                meta={running === 0 ? undefined : `${running} running`}
+                meta={templateMeta(template, running)}
                 control={
                   <Toggle
                     checked
                     label={`Enable ${template.name}`}
                     disabled
-                    disabledReason={TEMPLATE_METRICS_NOTE}
+                    disabledReason={TEMPLATE_TOGGLE_NOTE}
                   />
                 }
               />
@@ -74,7 +96,7 @@ export function AgentsSection() {
         </ListState>
       </ListCard>
 
-      <GapNote>{TEMPLATE_METRICS_NOTE}.</GapNote>
+      <GapNote>{TEMPLATE_TOGGLE_NOTE}.</GapNote>
     </>
   );
 }

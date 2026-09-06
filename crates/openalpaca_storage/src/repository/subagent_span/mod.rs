@@ -76,6 +76,20 @@ pub struct SubagentSpanRecord {
     pub output_preview: Option<String>,
 }
 
+/// How often one agent template has been run, and when it last started
+/// (GAP-20). Counted from `subagent_span`, so a run is counted from the moment
+/// it is spawned — `agent_task_history` only ever knew about runs that had
+/// already returned.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TemplateRunCount {
+    /// Every span this template has opened, lifetime. In-flight runs included.
+    pub run_count: i64,
+    /// The newest span's `started_at` (RFC 3339, UTC); `None` is impossible
+    /// for a template that has an entry at all, and is carried as an `Option`
+    /// only because `MAX()` is nullable in SQL.
+    pub last_run_at: Option<String>,
+}
+
 /// The fields a caller supplies when a span opens. `label`, `started_at` and
 /// `state` are the repository's to assign.
 #[derive(Debug, Clone, Copy)]
@@ -277,6 +291,37 @@ impl<'a> SubagentSpanRepository<'a> {
             let rows = stmt
                 .query_map(rusqlite::params![task_id], row_to_record)?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// Run counts for every template that has ever opened a span, keyed by
+    /// template id (GAP-20).
+    ///
+    /// One grouped query for the whole list — the Agents panel renders every
+    /// template from one call, and a per-template count would be an N+1 over a
+    /// list that grows with the config directory. A template with no span is
+    /// absent from the map; the caller reports it as `0` rather than this
+    /// query inventing rows for ids it has never seen.
+    pub fn run_counts_by_template(&self) -> Result<std::collections::HashMap<String, TemplateRunCount>>
+    {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT template_id, COUNT(*), MAX(started_at) \
+                 FROM subagent_span GROUP BY template_id",
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        TemplateRunCount {
+                            run_count: row.get(1)?,
+                            last_run_at: row.get(2)?,
+                        },
+                    ))
+                })?
+                .collect::<std::result::Result<std::collections::HashMap<_, _>, _>>()
+                .context("Failed to read subagent span run counts")?;
             Ok(rows)
         })
     }

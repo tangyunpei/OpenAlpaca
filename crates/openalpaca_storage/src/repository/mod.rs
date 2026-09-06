@@ -39,5 +39,6 @@ pub use skill_execution::SkillExecutionRepository;
 pub use subagent::SubAgentRepository;
 pub use subagent_span::{
     NewSubagentSpan, SPAN_DETAIL_INTERRUPTED, SpanState, SubagentSpanRecord, SubagentSpanRepository,
+    TemplateRunCount,
 };
 pub use task::TaskRepository;

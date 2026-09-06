@@ -469,6 +469,15 @@ export interface AgentTemplate {
   require_confirmation_for: string[];
   persona: string;
   body: string;
+  /**
+   * Lifetime runs of this template (GAP-20, counts half), counted from
+   * `subagent_span` — one row per spawned subagent, opened at spawn time, so
+   * a run still in flight is included. Always sent; `0` for a template
+   * nothing has spawned.
+   */
+  run_count: number;
+  /** When the newest of those runs started. Absent when there are none. */
+  last_run_at?: string;
 }
 
 export interface AgentInstance {

@@ -26,7 +26,8 @@ describe("gap registry", () => {
   // server-side pins (GAP-12). Phase 4 closed two: the subagent timeline
   // (GAP-09), served by `subagent_span` + `GET /v1/tasks/{id}/timeline`, and
   // the per-run event log (GAP-10), served by `event_log.task_id` +
-  // `GET /v1/events/history?task_id=`.
+  // `GET /v1/events/history?task_id=`. GAP-20 is *narrowed*, not closed: its
+  // run counts are served now, its toggle is not — so the count stays 13.
   it("covers the 13 gaps still open from API_MAP §3", () => {
     expect(listGaps()).toHaveLength(13);
     expect(listGaps()[0]?.id).toBe("GAP-02");
@@ -52,6 +53,17 @@ describe("gap registry", () => {
     expect(GAPS["GAP-18"].proposedEndpoint).toBe("GET /v1/skills");
     expect(GAPS["GAP-18"].missingApi).not.toMatch(/tool registry/);
     expect(GAPS["GAP-18"].blocks).not.toMatch(/enabled/);
+  });
+
+  // P8's counterpart: run counts are served (`run_count`/`last_run_at` off
+  // `subagent_span`), so GAP-20 keeps only the toggle. It stays in the
+  // registry because the disabled switch in Settings → Agents still needs a
+  // note that names why it cannot be operated.
+  it("keeps only the enable/disable half of GAP-20, with no claim about counts", () => {
+    expect(GAPS["GAP-20"].missingApi).not.toMatch(/run count/i);
+    expect(GAPS["GAP-20"].blocks).not.toMatch(/runs/);
+    expect(GAPS["GAP-20"].proposedEndpoint).not.toMatch(/window/);
+    expect(gapNote(GAPS["GAP-20"])).toMatch(/enabled flag/);
   });
 });
 

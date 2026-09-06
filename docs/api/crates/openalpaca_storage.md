@@ -40,7 +40,7 @@
 - `pub use models::SkillHealthMetrics;`
 - `pub use repository::{ AgentRepository, ConfigRepository, ConversationRepository, EventLogRepository, FileAssetRepository, FollowupRecord, FollowupRepository, IdentityRepository, LlmUsageRepository, MemoryRepository, MessageFeedbackRepository, OrchestratorLatencyRepository, PreferenceRepository, SkillExecutionRepository, SubAgentRepository, SubagentSpanRepository, TaskRepository, };`
 - `pub use repository::llm_usage::LlmUsageDaily;`
-- `pub use repository::subagent_span::{ NewSubagentSpan, SPAN_DETAIL_INTERRUPTED, SpanState, SubagentSpanRecord, };`
+- `pub use repository::subagent_span::{ NewSubagentSpan, SPAN_DETAIL_INTERRUPTED, SpanState, SubagentSpanRecord, TemplateRunCount, };`
 - `pub use uploads::{NewUpload, StoredUpload, UploadError, UploadStore};`
 
 ## Related Links

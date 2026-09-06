@@ -157,14 +157,23 @@ export const GAPS: Record<GapId, GapDescriptor> = {
     blocks: "Naming a skill in Settings → Tools; the health rows show ids",
     fixSize: "M",
   },
+  // The counts half of GAP-20 closed with P8's replacement data: a template
+  // row now carries `run_count` and `last_run_at`, grouped out of
+  // `subagent_span` in one query per list, so `12 runs` is the daemon's
+  // number. The window (`?window=7d`) is struck with it — the count is
+  // lifetime, and the row says `last <date>` rather than implying a period it
+  // does not compute. What is left is the toggle: a template has no `enabled`
+  // field and nothing would enforce one in the spawn path.
   "GAP-20": {
     id: "GAP-20",
-    label: "Agent template metrics",
-    missingApi: "TemplateResponse has no run counts and no enabled flag",
-    proposedEndpoint:
-      "GET /v1/agent-templates?window=7d; PUT /v1/agent-templates/{id}/enabled",
-    blocks: "`12 runs 7d` per template; the per-template toggle",
+    label: "Agent template enable/disable",
+    missingApi:
+      "TemplateResponse has no enabled flag, and nothing enforces one where subagents are spawned",
+    proposedEndpoint: "PUT /v1/agent-templates/{id}/enabled",
+    blocks: "The per-template toggle in Settings → Agents",
     fixSize: "M",
+    noteOverride:
+      "Templates have no enabled flag — the per-template toggle is not served",
   },
   "GAP-21": {
     id: "GAP-21",

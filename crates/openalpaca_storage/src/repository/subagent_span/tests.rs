@@ -243,3 +243,56 @@ fn a_span_for_an_unknown_task_is_refused() {
     });
     assert!(err.is_err(), "the FK to task(id) is enforced");
 }
+
+// ── Run counts per template (GAP-20) ──────────────────────────────
+
+/// One grouped query answers the whole template list: every span the template
+/// ever opened, and when it last started one. Counting spans rather than
+/// `agent_task_history` rows means a run in flight is counted the moment it is
+/// spawned, which is the number the Agents panel claims to show.
+#[test]
+fn run_counts_group_every_span_by_its_template() {
+    let db = setup_db();
+    make_task(&db, "t1", TaskStatus::Running);
+    make_task(&db, "t2", TaskStatus::Completed);
+    open(&db, "t1", "n1", "review_agent");
+    open(&db, "t1", "n2", "review_agent");
+    open(&db, "t2", "n3", "review_agent");
+    let writing = open(&db, "t2", "n4", "writing_agent");
+
+    // A closed span still counts — the count is "runs", not "runs in flight".
+    SubagentSpanRepository::new(&db)
+        .close("n1", SpanState::Done, None, None)
+        .unwrap();
+
+    let counts = SubagentSpanRepository::new(&db)
+        .run_counts_by_template()
+        .unwrap();
+
+    assert_eq!(counts.len(), 2, "one entry per template, not per span");
+    let review = counts.get("review_agent").expect("review_agent counted");
+    assert_eq!(review.run_count, 3);
+    let writing_count = counts.get("writing_agent").expect("writing_agent counted");
+    assert_eq!(writing_count.run_count, 1);
+    assert_eq!(
+        writing_count.last_run_at.as_deref(),
+        Some(writing.started_at.as_str()),
+        "last_run_at is the newest span's start"
+    );
+    // A template that never ran has no entry at all: the caller reports 0
+    // rather than this query inventing a row.
+    assert!(counts.get("research_agent").is_none());
+}
+
+/// An empty table is an empty map, not an error — a fresh install's Agents
+/// panel shows every template with `0 runs`.
+#[test]
+fn run_counts_on_an_empty_table_are_empty() {
+    let db = setup_db();
+    assert!(
+        SubagentSpanRepository::new(&db)
+            .run_counts_by_template()
+            .unwrap()
+            .is_empty()
+    );
+}

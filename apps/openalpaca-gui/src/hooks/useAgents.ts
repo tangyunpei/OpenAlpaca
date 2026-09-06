@@ -34,8 +34,11 @@ export function useAgentTemplates(): UseQueryResult<AgentTemplate[]> {
   });
 }
 
-/** `12 runs 7d` and the per-template toggle are not served (GAP-20). */
-export const TEMPLATE_METRICS_NOTE = gapNote(GAPS["GAP-20"]);
+/**
+ * The per-template on/off switch is not served (GAP-20's remaining half).
+ * Run counts *are* — `run_count`/`last_run_at` ride on the template row.
+ */
+export const TEMPLATE_TOGGLE_NOTE = gapNote(GAPS["GAP-20"]);
 
 export function useAgentInstances(): UseQueryResult<AgentInstance[]> {
   return useQuery({
