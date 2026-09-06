@@ -185,4 +185,106 @@ describe("runEventsFromRing", () => {
   it("returns nothing for a run with no matching frames", () => {
     expect(runEventsFromRing(RING, "unknown")).toEqual([]);
   });
+
+  // R35 — `dag_node_status` still fires alongside `subagent_span` for the
+  // same transition (the bridge keeps emitting it; P9/Phase 8 deletes the
+  // emitter), but must not also produce a row: `subagent_span` is the single
+  // source of `spawn` rows.
+  it("produces no row from `dag_node_status`", () => {
+    const [row] = runEventsFromRing(
+      [
+        {
+          type: "dag_node_status",
+          task_id: "b41",
+          node_id: "node-1",
+          node_title: "review",
+          agent_id: "review_agent",
+          status: "running",
+          duration_ms: null,
+          output_preview: null,
+          _id: 20,
+          ...base,
+        },
+      ],
+      "b41",
+    );
+    expect(row).toBeUndefined();
+  });
+
+  it("yields one spawn row per subagent open/close, not doubled by the parallel `dag_node_status` frame", () => {
+    const labels = ["review", "writing", "audit"];
+    const spanOpens: ServerEvent[] = labels.map((label, i) => ({
+      type: "subagent_span",
+      task_id: "b41",
+      span_id: `node-${i}`,
+      label: `${label}·1`,
+      template_id: `${label}_agent`,
+      agent_instance_id: `${label}_agent::a${i}`,
+      state: "running",
+      detail: null,
+      started_at: "2026-08-31T14:22:41.000Z",
+      ended_at: null,
+      duration_ms: null,
+      output_preview: null,
+      _id: 100 + i,
+      ...base,
+    }));
+    const spanCloses: ServerEvent[] = labels.map((label, i) => ({
+      type: "subagent_span",
+      task_id: "b41",
+      span_id: `node-${i}`,
+      label: `${label}·1`,
+      template_id: `${label}_agent`,
+      agent_instance_id: `${label}_agent::a${i}`,
+      state: "done",
+      detail: null,
+      started_at: "2026-08-31T14:22:41.000Z",
+      ended_at: "2026-08-31T14:27:41.000Z",
+      duration_ms: 300000,
+      output_preview: "ok",
+      _id: 200 + i,
+      ...base,
+    }));
+    const dagMirrors: ServerEvent[] = labels.flatMap((label, i) => [
+      {
+        type: "dag_node_status",
+        task_id: "b41",
+        node_id: `node-${i}`,
+        node_title: label,
+        agent_id: `${label}_agent`,
+        status: "running",
+        duration_ms: null,
+        output_preview: null,
+        _id: 300 + i,
+        ...base,
+      },
+      {
+        type: "dag_node_status",
+        task_id: "b41",
+        node_id: `node-${i}`,
+        node_title: label,
+        agent_id: `${label}_agent`,
+        status: "done",
+        duration_ms: 300000,
+        output_preview: "ok",
+        _id: 400 + i,
+        ...base,
+      },
+    ]);
+
+    const events = runEventsFromRing(
+      [...spanOpens, ...spanCloses, ...dagMirrors],
+      "b41",
+      20,
+    );
+
+    const spawns = events.filter((event) => event.tag === "spawn");
+    expect(spawns).toHaveLength(6);
+    expect(
+      spawns.filter((event) => event.text.endsWith("· running")),
+    ).toHaveLength(3);
+    expect(
+      spawns.filter((event) => event.text.endsWith("· done")),
+    ).toHaveLength(3);
+  });
 });

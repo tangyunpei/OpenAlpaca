@@ -63,15 +63,13 @@ function toRunEvent(event: ServerEvent, taskId: string): RunEvent | null {
         at: event.ts,
       };
     }
+    // `dag_node_status` fires for the same moment as `subagent_span` (P9 /
+    // Phase 8 deletes the emitter) but is not rendered here: `subagent_span`
+    // is the single source of `spawn` rows, so a run with a handful of
+    // subagents does not fill the six-row cap with duplicates of the same
+    // transition.
     case "dag_node_status":
-      if (event.task_id !== taskId) return null;
-      return {
-        id: event._id,
-        task_id: taskId,
-        tag: "spawn",
-        text: `${event.node_title} · ${event.status}`,
-        at: event.ts,
-      };
+      return null;
     // The first frame that carries both a run and a deliverable, so the
     // `artifact` tag finally has a producer (T28). A loose artifact — a chat
     // turn with no workflow — has a null `task_id` and belongs to no run.
@@ -84,9 +82,8 @@ function toRunEvent(event: ServerEvent, taskId: string): RunEvent | null {
         text: `${event.name} · v${event.version}`,
         at: event.ts,
       };
-    // A subagent lane opening or closing (GAP-09). `dag_node_status` says the
-    // same thing for the same moment, but names the objective; this names the
-    // lane, which is what the Timeline card above it is keyed by.
+    // A subagent lane opening or closing (GAP-09) — the single source of
+    // `spawn` rows; see the `dag_node_status` case above.
     case "subagent_span":
       if (event.task_id !== taskId) return null;
       return {
