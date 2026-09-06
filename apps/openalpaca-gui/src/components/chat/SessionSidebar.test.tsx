@@ -109,9 +109,9 @@ describe("SessionSidebar — the rows", () => {
   });
 
   /**
-   * `interrupted_task_count` is structurally 0 until Phase 7b's boot sweep
-   * writes the status; the badge is here so it starts telling the truth the
-   * moment it does, with no client change.
+   * `interrupted_task_count` is real as of §5.6b: the boot sweep writes
+   * `interrupted` on every run the previous daemon left in flight, and the
+   * grouped query behind `SessionView` counts them.
    */
   it("badges a conversation whose runs were interrupted", () => {
     renderSidebar({ sessions: [session({ interrupted_task_count: 2 })] });

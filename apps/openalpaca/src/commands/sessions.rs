@@ -49,8 +49,8 @@ pub struct SessionsArgs {
 /// One row of `GET /v1/sessions` — the daemon's `SessionView`.
 ///
 /// The counts and the summary columns it also carries are left off: a list is
-/// for finding a conversation, and `interrupted_task_count` is structurally 0
-/// until Phase 7b's boot sweep writes that status.
+/// for finding a conversation. (`interrupted_task_count` is real as of §5.6b's
+/// boot sweep — `openalpaca tasks --status interrupted` is where to read it.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionItem {
     pub id: String,
