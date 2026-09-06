@@ -628,47 +628,182 @@ fn test_migration_039_partial_index_allows_one_active_session_per_lane() {
     .unwrap();
 }
 
-#[test]
-fn test_migration_039_backfills_one_active_session_per_existing_lane() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("test.db");
-
-    // Build a pre-039 database, stop at 38, then seed it the way 011..038 left it.
+/// Apply every migration up to and including `through` to a raw connection.
+///
+/// `Database::open` always runs *all* of them, so a test that wants the
+/// database as version 38 left it — with rows in `conversations`, which 039
+/// then copies and drops — cannot use it. The pragmas mirror `open`'s so the
+/// migrations run under the same foreign-key posture they do in production.
+fn open_at_version(path: &std::path::Path, through: i32) -> Connection {
+    ensure_vec_extension();
+    let conn = Connection::open(path).expect("open the database");
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA foreign_keys = ON;
+         PRAGMA temp_store = MEMORY;",
+    )
+    .expect("apply pragmas");
+    for migration in migrations::MIGRATIONS
+        .iter()
+        .filter(|m| m.version <= through)
     {
-        let db = Database::open(&path).unwrap();
-        db.with_connection(|conn| {
-            conn.execute("DELETE FROM session", [])?;
-            conn.execute(
-                "INSERT INTO session (id, lane_key, source, title, message_count, summary)
-                 VALUES ('legacy-1', 'alice:gui', 'gui', 'Old chat', 2, 'a summary')",
-                [],
-            )?;
-            conn.execute(
-                "INSERT INTO conversation_messages (lane_key, role, content, session_id)
-                 VALUES ('alice:gui', 'user', 'hello', 'legacy-1')",
-                [],
-            )?;
-            Ok(())
+        conn.execute_batch(migration.sql).unwrap_or_else(|e| {
+            panic!(
+                "migration {} ({}) failed: {e}",
+                migration.version, migration.name
+            )
+        });
+    }
+    conn
+}
+
+fn apply_migration(conn: &Connection, version: i32) {
+    let migration = migrations::MIGRATIONS
+        .iter()
+        .find(|m| m.version == version)
+        .unwrap_or_else(|| panic!("migration {version} is not registered"));
+    conn.execute_batch(migration.sql)
+        .unwrap_or_else(|e| panic!("migration {version} failed: {e}"));
+}
+
+/// The riskiest statement in 039 is its data copy: `INSERT INTO session …
+/// SELECT … FROM conversations`, followed by `DROP TABLE conversations` — after
+/// which nothing can be recovered — and the `UPDATE conversation_messages SET
+/// session_id = (SELECT …)` that re-keys the transcript onto it.
+///
+/// Opening a fresh database exercises neither: 039 runs against an empty
+/// `conversations`. So build the database the way an upgrading user's is built
+/// — apply 001..038 directly, seed the old tables, then apply 039 alone — and
+/// read every carried column back off `session`.
+#[test]
+fn test_migration_039_copies_conversations_into_session_and_rekeys_messages() {
+    let dir = tempdir().unwrap();
+    let conn = open_at_version(&dir.path().join("test.db"), 38);
+
+    let version: i32 = conn
+        .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+            row.get(0)
         })
+        .unwrap();
+    assert_eq!(version, 38, "the seed must happen on a pre-039 schema");
+
+    // Two lanes as 011..038 left them: one conversation row each, distinct
+    // values in every column 039 carries, and messages on both.
+    conn.execute(
+        "INSERT INTO conversations (id, lane_key, source, title, message_count, last_message_at,
+                                    summary, summary_version, last_summarized_message_id,
+                                    summary_updated_at, created_at, updated_at)
+         VALUES ('conv-a', 'alice:gui', 'gui', 'Old chat', 3, '2026-01-02 03:04:05',
+                 'a summary', 7, 42, '2026-01-02 03:04:06',
+                 '2025-12-01 00:00:00', '2026-01-02 03:04:07')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO conversations (id, lane_key, source, title, message_count, created_at, updated_at)
+         VALUES ('conv-b', 'bob:telegram', 'telegram', '', 1,
+                 '2025-11-01 00:00:00', '2025-11-02 00:00:00')",
+        [],
+    )
+    .unwrap();
+    for (lane, content) in [
+        ("alice:gui", "hello"),
+        ("alice:gui", "hi back"),
+        ("bob:telegram", "ping"),
+        // A lane with messages but no `conversations` master row: 039's
+        // scalar subquery finds nothing, so it stays unattached.
+        ("carol:cli", "orphan"),
+    ] {
+        conn.execute(
+            "INSERT INTO conversation_messages (lane_key, role, content) VALUES (?1, 'user', ?2)",
+            rusqlite::params![lane, content],
+        )
         .unwrap();
     }
 
-    let db = Database::open(&path).unwrap();
-    db.with_connection(|conn| {
-        let (status, workspace): (String, Option<String>) = conn.query_row(
-            "SELECT status, workspace_id FROM session WHERE id = 'legacy-1'",
+    apply_migration(&conn, 39);
+
+    // Every column the SELECT lists arrived, positionally intact — a swapped
+    // pair in a 14-column positional copy is exactly the defect this catches.
+    let column = |name: &str| -> Option<String> {
+        conn.query_row(
+            &format!("SELECT CAST({name} AS TEXT) FROM session WHERE id = 'conv-a'"),
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        assert_eq!(status, "active", "a carried-over lane keeps today's semantics");
-        assert!(workspace.is_none(), "no workspace is known for a legacy row");
-        let linked: String = conn.query_row(
-            "SELECT session_id FROM conversation_messages WHERE content = 'hello'",
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .unwrap_or_else(|e| panic!("read session.{name}: {e}"))
+    };
+    for (name, expected) in [
+        ("lane_key", "alice:gui"),
+        ("source", "gui"),
+        ("title", "Old chat"),
+        ("message_count", "3"),
+        ("last_message_at", "2026-01-02 03:04:05"),
+        ("summary", "a summary"),
+        ("summary_version", "7"),
+        ("last_summarized_message_id", "42"),
+        ("summary_updated_at", "2026-01-02 03:04:06"),
+        ("created_at", "2025-12-01 00:00:00"),
+        ("updated_at", "2026-01-02 03:04:07"),
+    ] {
+        assert_eq!(
+            column(name).as_deref(),
+            Some(expected),
+            "session.{name} did not survive the copy"
+        );
+    }
+
+    // Both rows made it, and the lifecycle columns the copy *sets* rather than
+    // carries hold the values §5.2 gives a carried-over conversation.
+    let carried: Vec<(String, String, Option<String>, Option<String>)> = conn
+        .prepare("SELECT id, status, workspace_id, ended_at FROM session ORDER BY id")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(carried.len(), 2, "every conversation became a session");
+    for (id, status, workspace, ended_at) in &carried {
+        assert_eq!(status, "active", "{id} keeps today's semantics");
+        assert!(workspace.is_none(), "{id}: no workspace is known pre-039");
+        assert!(ended_at.is_none(), "{id} has not ended");
+    }
+    assert_eq!(carried[0].0, "conv-a");
+    assert_eq!(carried[1].0, "conv-b");
+
+    // The transcript re-keyed onto the session its lane became.
+    let rekeyed: Vec<(String, Option<String>)> = conn
+        .prepare("SELECT content, session_id FROM conversation_messages ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        rekeyed,
+        vec![
+            ("hello".to_string(), Some("conv-a".to_string())),
+            ("hi back".to_string(), Some("conv-a".to_string())),
+            ("ping".to_string(), Some("conv-b".to_string())),
+            ("orphan".to_string(), None),
+        ]
+    );
+
+    // And the table the copy read from is gone, at version 39.
+    let leftover: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'conversations'",
             [],
             |row| row.get(0),
-        )?;
-        assert_eq!(linked, "legacy-1");
-        Ok(())
-    })
-    .unwrap();
+        )
+        .unwrap();
+    assert_eq!(leftover, 0);
+    let version: i32 = conn
+        .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(version, 39);
 }
