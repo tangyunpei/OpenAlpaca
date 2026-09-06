@@ -1,7 +1,7 @@
 //! Service initialization for daemon startup.
 
 mod agents;
-mod llm;
+pub(crate) mod llm;
 mod mcp;
 mod tools;
 

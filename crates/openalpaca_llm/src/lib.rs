@@ -21,7 +21,8 @@ pub use config::llm_config::{
     reverse_migrate_llm_secrets, write_config,
 };
 pub use config::settings_service::{
-    LlmSettingsService, OrchestratorConfigResponse, UpdateOrchestratorRequest,
+    ConfigWriter, LlmSettingsService, OrchestratorConfigResponse, ProviderEnabledOutcome,
+    SetProviderEnabledError, UpdateOrchestratorRequest,
 };
 pub use embedder::{EmbedError, Embedder, build_embedder, build_embedder_with_runtime};
 pub use error::LlmError;

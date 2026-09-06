@@ -5,7 +5,7 @@
 ## Overview
 
 - Router source: `apps/openalpacad/src/router.rs`.
-- Total documented method/path endpoints: 95.
+- Total documented method/path endpoints: 96.
 - Includes public, bearer-protected, WebSocket, and SSE routes.
 
 ## Auth
@@ -101,6 +101,7 @@
 | PUT | `/v1/settings/llm/keys/reorder` | `bearer` | `reorder_keys` | `ReorderKeysRequest` | - | `apps/openalpacad/src/routes/settings.rs` |
 | DELETE | `/v1/settings/llm/keys/{provider}/{key_id}` | `bearer` | `delete_key` | - | - | `apps/openalpacad/src/routes/settings.rs` |
 | GET | `/v1/settings/llm/providers/usage` | `bearer` | `get_provider_usage` | - | - | `apps/openalpacad/src/routes/settings.rs` |
+| PUT | `/v1/settings/llm/providers/{provider}/enabled` | `bearer` | `set_provider_enabled` | `SetProviderEnabledRequest` | - | `apps/openalpacad/src/routes/settings.rs` |
 | GET | `/v1/settings/llm/status` | `bearer` | `get_key_status` | - | - | `apps/openalpacad/src/routes/settings.rs` |
 | POST | `/v1/settings/llm/validate` | `bearer` | `validate_key` | `ValidateKeyRequest` | - | `apps/openalpacad/src/routes/settings.rs` |
 | GET | `/v1/skills` | `bearer` | `list_skills_handler` | - | - | `apps/openalpacad/src/routes/skills.rs` |
@@ -186,6 +187,10 @@
 - External or generic type; see handler source.
 
 ### `SetKeyPriorityRequest`
+
+- External or generic type; see handler source.
+
+### `SetProviderEnabledRequest`
 
 - External or generic type; see handler source.
 

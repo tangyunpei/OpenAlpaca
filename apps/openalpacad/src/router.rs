@@ -269,6 +269,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/settings/llm/providers/usage",
             get(crate::routes::get_provider_usage),
         )
+        // GAP-15: the ENABLE bit for one provider. `usage` above is a literal
+        // segment, so the two never collide.
+        .route(
+            "/v1/settings/llm/providers/{provider}/enabled",
+            put(crate::routes::set_provider_enabled),
+        )
         // Orchestrator config routes (Phase 5.7)
         .route(
             "/v1/orchestrator/config",

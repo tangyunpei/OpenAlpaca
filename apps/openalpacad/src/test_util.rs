@@ -17,7 +17,15 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub(crate) struct HomeStoreGuard {
     _lock: MutexGuard<'static, ()>,
     prev: Option<OsString>,
+    /// The master key this guard set, if any — restored the same way.
+    prev_master_key: Option<Option<OsString>>,
 }
+
+/// A fixed 32-byte key. `KeyEncryptor::from_env` is what a
+/// `LlmSettingsService` is built through, and a test must never reach for the
+/// owner's real one.
+const TEST_MASTER_KEY: &str =
+    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
 impl HomeStoreGuard {
     pub(crate) fn set(path: &Path) -> Self {
@@ -25,13 +33,33 @@ impl HomeStoreGuard {
         let prev = std::env::var_os(openalpaca_storage::store::HOME_STORE_ENV);
         // SAFETY: serialized by ENV_LOCK — the binary's only writer.
         unsafe { std::env::set_var(openalpaca_storage::store::HOME_STORE_ENV, path) };
-        Self { _lock: lock, prev }
+        Self {
+            _lock: lock,
+            prev,
+            prev_master_key: None,
+        }
+    }
+
+    /// As [`Self::set`], plus a throwaway `OPENALPACA_MASTER_KEY` for the tests
+    /// that build an `LlmSettingsService`.
+    pub(crate) fn set_with_master_key(path: &Path) -> Self {
+        let mut guard = Self::set(path);
+        guard.prev_master_key = Some(std::env::var_os("OPENALPACA_MASTER_KEY"));
+        // SAFETY: as above — still holding ENV_LOCK.
+        unsafe { std::env::set_var("OPENALPACA_MASTER_KEY", TEST_MASTER_KEY) };
+        guard
     }
 }
 
 impl Drop for HomeStoreGuard {
     fn drop(&mut self) {
         // SAFETY: as above — still holding ENV_LOCK.
+        if let Some(prev) = self.prev_master_key.take() {
+            match prev {
+                Some(v) => unsafe { std::env::set_var("OPENALPACA_MASTER_KEY", v) },
+                None => unsafe { std::env::remove_var("OPENALPACA_MASTER_KEY") },
+            }
+        }
         match self.prev.take() {
             Some(v) => unsafe { std::env::set_var(openalpaca_storage::store::HOME_STORE_ENV, v) },
             None => unsafe { std::env::remove_var(openalpaca_storage::store::HOME_STORE_ENV) },

@@ -84,8 +84,8 @@ pub use settings::{
     delete_key, get_cli_backends, get_daemon_providers, get_discovered_credentials,
     get_key_status, get_llm_settings, get_llm_usage, get_llm_usage_daily,
     get_orchestrator_config, get_provider_usage, list_models, refresh_models, reorder_keys,
-    rescan_credentials, set_key_priority, update_orchestrator_config, update_web_search_config,
-    upsert_key, validate_key,
+    rescan_credentials, set_key_priority, set_provider_enabled, update_orchestrator_config,
+    update_web_search_config, upsert_key, validate_key,
 };
 pub use sessions::{
     activate_session_handler, archive_session_handler, create_session_handler,

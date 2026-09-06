@@ -3,16 +3,18 @@ use axum::http::StatusCode;
 use axum::{
     Json,
     extract::{Path, Query, State},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use chrono::Utc;
 use openalpaca_core::events::SystemEvent;
+use openalpaca_llm::SetProviderEnabledError;
 use openalpaca_llm::config::settings_service::{
     AddKeyRequest, OrchestratorConfigResponse, ReorderKeysRequest, SetKeyPriorityRequest,
     UpdateOrchestratorRequest, ValidateKeyRequest,
 };
 use std::sync::Arc;
 
+use super::api_error;
 use super::settings_types::*;
 
 /// GET /v1/settings/llm — returns masked config
@@ -536,6 +538,67 @@ pub async fn get_provider_usage(State(state): State<Arc<AppState>>) -> impl Into
         .into_response()
 }
 
+// ── Provider enable/disable (GAP-15) ────────────────────────────────
+
+/// PUT /v1/settings/llm/providers/{provider}/enabled — turn one provider on
+/// or off.
+///
+/// The bit lives in `llm.toml`, so the write lands first and the router is
+/// only touched once it has: a disable unloads the provider (in-flight calls
+/// finish, new ones fall through to the fallback chain), an enable
+/// re-registers it and refreshes its models. Disabling the provider that
+/// serves the default model is refused — `409 PROVIDER_IS_DEFAULT` — because
+/// nothing would be left to answer with.
+pub async fn set_provider_enabled(
+    State(state): State<Arc<AppState>>,
+    Path(provider): Path<String>,
+    Json(body): Json<SetProviderEnabledRequest>,
+) -> impl IntoResponse {
+    let Some(service) = &state.llm_settings_service else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "LLM_NOT_CONFIGURED",
+            "LLM router is not configured",
+        );
+    };
+    provider_enabled_response(service, &provider, body.enabled).await
+}
+
+/// The route's whole decision table, minus the `AppState` lookup above — so
+/// every status code it can answer with is reachable from a test.
+pub(crate) async fn provider_enabled_response(
+    service: &openalpaca_llm::LlmSettingsService,
+    provider: &str,
+    enabled: bool,
+) -> Response {
+    match service.set_provider_enabled(provider, enabled).await {
+        Ok(outcome) => {
+            if let Some(warning) = &outcome.warning {
+                tracing::warn!(provider = %outcome.id, warning = %warning, "provider toggled but not loaded");
+            }
+            (
+                StatusCode::OK,
+                Json(ProviderEnabledResponse {
+                    id: outcome.id,
+                    enabled: outcome.enabled,
+                }),
+            )
+                .into_response()
+        }
+        Err(e @ SetProviderEnabledError::UnknownProvider(_)) => {
+            api_error(StatusCode::NOT_FOUND, "PROVIDER_NOT_FOUND", e.to_string())
+        }
+        Err(e @ SetProviderEnabledError::IsDefaultProvider { .. }) => {
+            api_error(StatusCode::CONFLICT, "PROVIDER_IS_DEFAULT", e.to_string())
+        }
+        Err(e @ SetProviderEnabledError::Persist(_)) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DISK_WRITE_FAILED",
+            e.to_string(),
+        ),
+    }
+}
+
 // ── Daemon config (providers) endpoints ─────────────────────────────
 
 /// GET /v1/daemon/config/providers — read web search provider configuration (from llm.toml)
@@ -619,6 +682,9 @@ pub async fn update_web_search_config(
 
     (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
 }
+
+#[cfg(test)]
+mod provider_enabled_tests;
 
 #[cfg(test)]
 mod tests {

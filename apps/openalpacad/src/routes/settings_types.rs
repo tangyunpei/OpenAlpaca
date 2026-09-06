@@ -16,6 +16,19 @@ pub(super) fn settings_error(status: StatusCode, code: &str, message: &str) -> i
     )
 }
 
+/// Body of `PUT /v1/settings/llm/providers/{provider}/enabled` (GAP-15).
+#[derive(Debug, Deserialize)]
+pub struct SetProviderEnabledRequest {
+    pub enabled: bool,
+}
+
+/// Its answer: the row as it now stands.
+#[derive(Debug, Serialize)]
+pub(super) struct ProviderEnabledResponse {
+    pub id: String,
+    pub enabled: bool,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct LlmUsageQuery {
     /// GAP-08b: checked first in `get_llm_usage` — a task-scoped query wins

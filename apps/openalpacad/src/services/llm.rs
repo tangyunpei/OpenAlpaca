@@ -107,6 +107,22 @@ pub(super) fn build_llm_router(
     }
 }
 
+/// `llm.toml`'s hook into the one atomic writer for hand-edited config
+/// (plan §1.4, P-11).
+///
+/// It lives in `openalpaca_core`, which sits above `openalpaca_llm`, so the
+/// settings service takes it by injection rather than naming it. Everything
+/// `mcp.toml` and `.permissions.toml` get — tmp → fsync → rotate → rename, five
+/// versions kept under `state/backups/` — `llm.toml` now gets too. The lock is
+/// the caller's: `persist_only` holds `llm.toml.lock` across the whole
+/// read-modify-write.
+pub(crate) fn atomic_config_writer() -> openalpaca_llm::ConfigWriter {
+    Arc::new(|path: &Path, contents: &str| {
+        openalpaca_core::config_io::atomic_write_with_backup(path, contents)
+            .map_err(|e| e.to_string())
+    })
+}
+
 pub(super) async fn build_llm_settings_service(
     llm_router: &Option<Arc<openalpaca_llm::LlmRouter>>,
     llm_config_path: &Path,
@@ -120,7 +136,7 @@ pub(super) async fn build_llm_settings_service(
         ) {
             Ok(service) => {
                 info!("LLM settings service initialized");
-                Some(Arc::new(service))
+                Some(Arc::new(service.with_config_writer(atomic_config_writer())))
             }
             Err(e) => {
                 warn!("Failed to init LLM settings service: {e}");
