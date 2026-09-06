@@ -191,7 +191,8 @@ impl Database {
             // 0. Conversation history (children first: feedback -> messages -> conversations)
             tx.execute("DELETE FROM message_feedback", [])?;
             tx.execute("DELETE FROM conversation_messages", [])?;
-            tx.execute("DELETE FROM conversations", [])?;
+            // Migration 039 rebuilt `conversations` as `session`.
+            tx.execute("DELETE FROM session", [])?;
 
             // 0. LLM Usage (no FKs, safe to delete first)
             tx.execute("DELETE FROM llm_call_log", [])?;
@@ -210,6 +211,9 @@ impl Database {
 
             // 1. Task System
             tx.execute("DELETE FROM task_agent_assignment", [])?;
+            // 037: spans reference task (ON DELETE CASCADE) — explicit so the
+            // reset does not depend on foreign_keys being enabled.
+            tx.execute("DELETE FROM subagent_span", [])?;
             tx.execute("DELETE FROM task", [])?;
 
             // 1. Identity, Config & Preference System

@@ -807,3 +807,27 @@ fn test_migration_039_copies_conversations_into_session_and_rekeys_messages() {
         .unwrap();
     assert_eq!(version, 39);
 }
+
+/// `factory_reset` must run against the schema every migration produces —
+/// migration 039 dropped `conversations`, which the reset used to name.
+#[test]
+fn factory_reset_runs_on_a_fully_migrated_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("reset.db")).unwrap();
+    db.with_connection(|conn| {
+        conn.execute(
+            "INSERT INTO session (id, lane_key, source, status, created_at, updated_at) \
+             VALUES ('s1', 'u:gui', 'gui', 'active', datetime('now'), datetime('now'))",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    db.factory_reset().expect("factory_reset must succeed on the current schema");
+    let n: i64 = db
+        .with_connection(|conn| {
+            Ok(conn.query_row("SELECT COUNT(*) FROM session", [], |r| r.get(0))?)
+        })
+        .unwrap();
+    assert_eq!(n, 0, "the reset empties the session table");
+}
