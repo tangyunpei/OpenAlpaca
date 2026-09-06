@@ -17,7 +17,7 @@
 import { FileBadge, type FileKind } from "@/components/ui";
 import { cn } from "@/lib/cn";
 
-export type RunReportStatus = "done" | "failed" | "cancelled";
+export type RunReportStatus = "done" | "failed" | "cancelled" | "interrupted";
 
 export interface ArtifactChip {
   id: string;
@@ -45,18 +45,23 @@ const EYEBROW: Record<RunReportStatus, string> = {
   done: "Run finished",
   failed: "Run failed",
   cancelled: "Run cancelled",
+  // Daemon plan §5.6b. Not "failed": nothing about the run went wrong, the
+  // daemon it was running in went away.
+  interrupted: "Run interrupted",
 };
 
 const DOT: Record<RunReportStatus, string> = {
   done: "bg-green",
   failed: "bg-red",
   cancelled: "bg-muted-fg",
+  interrupted: "bg-gold",
 };
 
 const EYEBROW_COLOR: Record<RunReportStatus, string> = {
   done: "text-green",
   failed: "text-red",
   cancelled: "text-muted-fg",
+  interrupted: "text-gold",
 };
 
 export function RunReportCard({

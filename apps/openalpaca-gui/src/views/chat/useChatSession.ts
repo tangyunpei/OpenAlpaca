@@ -146,15 +146,21 @@ export interface ChatSession {
 
 function isTerminal(
   status: string,
-): status is "completed" | "failed" | "cancelled" {
+): status is "completed" | "failed" | "cancelled" | "interrupted" {
   return (
-    status === "completed" || status === "failed" || status === "cancelled"
+    status === "completed" ||
+    status === "failed" ||
+    status === "cancelled" ||
+    // The daemon went away mid-run (§5.6b). Terminal, so the report card is
+    // drawn — and it must not say "failed".
+    status === "interrupted"
   );
 }
 
 function reportStatus(status: string): RunReportData["status"] {
   if (status === "completed") return "done";
   if (status === "cancelled") return "cancelled";
+  if (status === "interrupted") return "interrupted";
   return "failed";
 }
 

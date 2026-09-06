@@ -2,18 +2,30 @@
  * Run-status vocabulary shared by `StatusDot`, `StatusLabel` and the rail
  * (DESIGN_SPEC §3.20, §4.3).
  *
- * The design models five states. The daemon's `TaskStatus` has six: it also
- * emits `failed`, and `completed` is the wire spelling of `done`
- * (`lib/api/types.ts#toRunStatus`). Painting a failed run as `DONE` would state
- * something untrue about the run, so `failed` is carried as a sixth status
- * styled from the palette's error tokens — the single documented addition to
- * §3.20's table.
+ * The design models five states. The daemon's `TaskStatus` has seven: it also
+ * emits `failed` and `interrupted`, and `completed` is the wire spelling of
+ * `done` (`lib/api/types.ts#toRunStatus`). Painting a failed run as `DONE`
+ * would state something untrue about the run, so `failed` is carried as a
+ * sixth status styled from the palette's error tokens — the first documented
+ * addition to §3.20's table.
+ *
+ * `interrupted` is the second (daemon plan §5.6b): the daemon went away while
+ * the run was in flight. It is terminal, so it does not sit in the rail or the
+ * active count, but it is **not** an error — nothing about the work went
+ * wrong — so it is styled from the warning tokens rather than the error ones,
+ * and the terminal action bar's `Re-run` is what restarts it.
  */
 
 import type { RunStatus, TaskStatusValue } from "@/lib/api/types";
 
 export type UiStatus =
-  "running" | "queued" | "paused" | "done" | "cancelled" | "failed";
+  | "running"
+  | "queued"
+  | "paused"
+  | "done"
+  | "cancelled"
+  | "failed"
+  | "interrupted";
 
 /** `completed` → `done`; every other value is already a `UiStatus`. */
 export function toUiStatus(status: TaskStatusValue | RunStatus): UiStatus {
@@ -28,6 +40,7 @@ export const STATUS_TEXT: Record<UiStatus, string> = {
   done: "DONE",
   cancelled: "CANCELLED",
   failed: "FAILED",
+  interrupted: "INTERRUPTED",
 };
 
 /** Sentence-case, for `aria-label` on the dot. */
@@ -42,7 +55,12 @@ export function statusPulses(status: UiStatus): boolean {
 
 /** `railRuns` — everything that is not finished (§4.2). */
 export function isLive(status: UiStatus): boolean {
-  return status !== "done" && status !== "cancelled" && status !== "failed";
+  return (
+    status !== "done" &&
+    status !== "cancelled" &&
+    status !== "failed" &&
+    status !== "interrupted"
+  );
 }
 
 /** `activeCount` — drives the Work nav badge and the "N running" pill (§4.2). */

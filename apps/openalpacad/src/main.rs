@@ -185,7 +185,7 @@ async fn async_main(
     // before any ingress starts (WakeManager::start in Step 8,
     // ConnectorManager::start_all in Step 12), so it can never sweep tasks
     // created by this run.
-    bootstrap::sweep_orphaned_tasks(&db);
+    bootstrap::sweep_orphaned_tasks(&db, &instance_id);
     // …and the lanes those tasks were running (GAP-09). Must follow the
     // task sweep — that is what makes the previous generation's tasks
     // terminal, which is the condition this one matches on.

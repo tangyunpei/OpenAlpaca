@@ -118,7 +118,7 @@ export function UnavailableActionsNote({
 export interface TerminalRunRowProps {
   /** The run's own note, or `null`. */
   note: string | null;
-  status: "done" | "cancelled" | "failed";
+  status: "done" | "cancelled" | "failed" | "interrupted";
   onAction: (id: RunActionId) => void;
   rerun: RunActionDescriptor;
   /**
@@ -168,16 +168,18 @@ export function TerminalRunRow({
  * status and nothing more, so it cannot be mistaken for a report.
  */
 export const DEFAULT_TERMINAL_NOTE: Record<
-  "done" | "cancelled" | "failed",
+  "done" | "cancelled" | "failed" | "interrupted",
   string
 > = {
   done: "finished",
   cancelled: "cancelled by you",
   failed: "failed",
+  // Daemon plan §5.6b — the run never finished, and nothing about it failed.
+  interrupted: "interrupted by a daemon restart",
 };
 
 export interface TerminalBannerProps {
-  status: "done" | "cancelled" | "failed";
+  status: "done" | "cancelled" | "failed" | "interrupted";
   note: string | null;
   actions: readonly RunActionDescriptor[];
   onAction: (id: RunActionId) => void;
@@ -199,7 +201,10 @@ export function TerminalBanner({
       ? `Finished${note === null ? "" : ` · ${note}`}`
       : status === "cancelled"
         ? "Cancelled by you · no further steps will run"
-        : `Failed${note === null ? "" : ` · ${note}`}`;
+        : status === "interrupted"
+          ? // §5.6b — terminal, but not an error the run made.
+            `Interrupted by a daemon restart${note === null ? "" : ` · ${note}`}`
+          : `Failed${note === null ? "" : ` · ${note}`}`;
 
   return (
     <div

@@ -191,6 +191,17 @@ describe("gapTooltip", () => {
 });
 
 describe("actionToast", () => {
+  /**
+   * §5.6b — an interrupted run is finished, so it gets the terminal bar, and
+   * that bar's `Re-run` is exactly the restart the daemon allows: `start`
+   * refuses a terminal row (R43); `rerun` copies the goal onto a new id.
+   */
+  it("gives an interrupted run the terminal bar, whose verb is Re-run", () => {
+    const ids = runActions("interrupted").map((a) => a.id);
+    expect(ids).toEqual(["jump", "rerun"]);
+    expect(runActions("interrupted").every((a) => a.enabled)).toBe(true);
+  });
+
   it("uses §4.4's copy for the three real verbs", () => {
     expect(actionToast("pause", "Connector audit")).toBe(
       "Connector audit paused",

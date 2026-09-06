@@ -92,7 +92,21 @@ fn the_boot_sweeps_report_abandoned_lanes_as_interrupted() {
     assert_eq!(spans[0].state, "running");
 
     // The real boot order: tasks first, then their lanes.
-    sweep_orphaned_tasks(&db);
+    sweep_orphaned_tasks(&db, "instance-under-test");
+    // §5.6b — the run is `interrupted`, not `failed`, and the detail names the
+    // incarnation that found it.
+    let task = openalpaca_storage::repository::TaskRepository::new(&db)
+        .get("t1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(task.status, openalpaca_storage::TaskStatus::Interrupted);
+    assert!(
+        task.result_summary
+            .as_deref()
+            .is_some_and(|s| s.contains("instance-under-test")),
+        "{:?}",
+        task.result_summary
+    );
     close_orphaned_spans(&db);
     let spans = SubagentSpanRepository::new(&db)
         .list_for_task("t1")

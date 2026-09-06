@@ -29,6 +29,9 @@ const dot = tv({
       done: "border-disabled bg-disabled",
       cancelled: "border-muted-fg bg-transparent",
       failed: "border-red bg-transparent",
+      // Outlined like the other two terminal-but-not-done states, in the
+      // warning colour: a crash is not an error the run made (§5.6b).
+      interrupted: "border-gold bg-transparent",
     },
     size: {
       6: "h-[6px] w-[6px] border-[1px]",

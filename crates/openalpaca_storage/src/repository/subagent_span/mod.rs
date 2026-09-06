@@ -369,6 +369,12 @@ impl<'a> SubagentSpanRepository<'a> {
     /// tokio task that would have closed it is gone. Report it as `cancelled`
     /// / `"interrupted"` rather than leaving a lane running forever.
     ///
+    /// "Terminal" includes `interrupted` (§5.6b): that is the status the boot
+    /// sweep now writes for a run the previous incarnation left in flight, and
+    /// it is precisely the run whose spans this pass exists to close. It used
+    /// to be `failed`, so leaving it out of the list here would have made this
+    /// sweep match nothing on exactly the boot it matters.
+    ///
     /// Idempotent: it matches nothing on the next boot. Returns the number of
     /// spans closed.
     pub fn close_orphans(&self) -> Result<usize> {
@@ -380,7 +386,7 @@ impl<'a> SubagentSpanRepository<'a> {
                 "SELECT s.id, s.started_at FROM subagent_span s \
                  JOIN task t ON t.id = s.task_id \
                  WHERE s.state = 'running' \
-                   AND t.status IN ('completed', 'failed', 'cancelled')",
+                   AND t.status IN ('completed', 'failed', 'cancelled', 'interrupted')",
             )?;
             let stale: Vec<(String, String)> = stmt
                 .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?

@@ -13,13 +13,31 @@
 
 // ── Tasks ───────────────────────────────────────────────────────────────────
 
-/** `TaskStatus` on the wire (`apps/openalpacad/src/routes/tasks_types.rs`). */
+/**
+ * `TaskStatus` on the wire (`apps/openalpacad/src/routes/tasks_types.rs`).
+ *
+ * `interrupted` is the boot sweep's (daemon plan §5.6b): a run the daemon was
+ * driving when it went away. It is terminal — a new daemon cannot re-enter the
+ * loop — but it is not a failure, and the restart affordance is `Re-run`.
+ */
 export type TaskStatusValue =
-  "queued" | "running" | "paused" | "completed" | "failed" | "cancelled";
+  | "queued"
+  | "running"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
 
 /** The design's five-state run model. `completed` maps to `done`. */
 export type RunStatus =
-  "running" | "queued" | "paused" | "done" | "cancelled" | "failed";
+  | "running"
+  | "queued"
+  | "paused"
+  | "done"
+  | "cancelled"
+  | "failed"
+  | "interrupted";
 
 /** Free-form artifact reference parsed out of `task.outcome_json`. Schema-less by design; `/v1/artifacts?task_id=` is the typed answer. */
 export interface ParsedOutcome {

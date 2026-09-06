@@ -34,6 +34,7 @@ fn entry_status_from_db(status: TaskStatus) -> TaskEntryStatus {
         TaskStatus::Failed => TaskEntryStatus::Failed,
         TaskStatus::Cancelled => TaskEntryStatus::Cancelled,
         TaskStatus::Paused => TaskEntryStatus::Paused,
+        TaskStatus::Interrupted => TaskEntryStatus::Interrupted,
     }
 }
 
@@ -45,6 +46,7 @@ fn db_status_from_entry(status: TaskEntryStatus) -> TaskStatus {
         TaskEntryStatus::Failed => TaskStatus::Failed,
         TaskEntryStatus::Cancelled => TaskStatus::Cancelled,
         TaskEntryStatus::Paused => TaskStatus::Paused,
+        TaskEntryStatus::Interrupted => TaskStatus::Interrupted,
     }
 }
 
@@ -147,6 +149,7 @@ pub fn apply_task_action(
             TaskEntryStatus::Failed => TaskLaneStatus::Failed,
             TaskEntryStatus::Cancelled => TaskLaneStatus::Cancelled,
             TaskEntryStatus::Paused => TaskLaneStatus::Paused,
+            TaskEntryStatus::Interrupted => TaskLaneStatus::Interrupted,
         };
         lane.set_status(lane_status);
     }

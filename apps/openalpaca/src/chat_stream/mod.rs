@@ -442,6 +442,21 @@ pub async fn poll_task_completion(client: &DaemonClient, task_id: &str) -> Resul
                 }
                 return Ok(());
             }
+            // Terminal, but not a failure: the daemon went away mid-run
+            // (§5.6b). Polling must stop — the run will never move again — and
+            // the restart verb is `rerun`, not `start` (R43).
+            "interrupted" => {
+                let summary = task["result_summary"].as_str().unwrap_or("");
+                println!("{}", "[Task interrupted — the daemon restarted]".yellow());
+                if !summary.is_empty() {
+                    println!("{} {}", "Detail:".yellow(), summary);
+                }
+                println!(
+                    "{}",
+                    "Nothing was lost — re-run it to start the same goal again.".dimmed()
+                );
+                return Ok(());
+            }
             _ => {
                 // Still running — continue polling
             }

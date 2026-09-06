@@ -4,11 +4,18 @@ use openalpaca_storage::repository::{SubagentSpanRepository, TaskRepository};
 use openalpaca_storage::{ConfigRepository, Database, IdentityRepository};
 use std::path::Path;
 
-/// Startup orphan sweep (Routing V2 Phase 3): mark every non-terminal task
-/// (queued / running / paused) as failed. In-flight execution never survives
-/// a daemon restart — the tokio tasks driving them are gone — so any task
-/// left non-terminal in the DB is an orphan that would otherwise look alive
-/// forever in /status output and lane workflow context.
+/// Startup orphan sweep (§5.6b): mark every non-terminal task
+/// (queued / running / paused) **`interrupted`**. In-flight execution never
+/// survives a daemon restart — the tokio tasks driving them are gone — so any
+/// task left non-terminal in the DB belongs to a dead incarnation and would
+/// otherwise look alive forever in /status output and lane workflow context.
+///
+/// It used to write `failed` with a fabricated reason. Nothing failed: the
+/// daemon went away. `interrupted` says that, is terminal (a new incarnation
+/// cannot re-enter the loop), and carries the restart affordance the GUI
+/// offers — Phase 5's `rerun`, which dispatches a new id linked back by
+/// `source_task_id`. `start` refuses it exactly as it refuses any other
+/// finished row (R43).
 ///
 /// CALL-ORDER GUARANTEE: this must run right after the database opens and
 /// BEFORE any ingress can create or resume work — i.e. before
@@ -18,10 +25,13 @@ use std::path::Path;
 /// touched.
 ///
 /// Non-fatal: failure is logged but doesn't prevent daemon startup.
-pub fn sweep_orphaned_tasks(db: &Database) {
-    match TaskRepository::new(db).fail_all_non_terminal("daemon restarted — task orphaned") {
+pub fn sweep_orphaned_tasks(db: &Database, instance_id: &str) {
+    let detail = format!("interrupted — the daemon restarted (instance {instance_id})");
+    match TaskRepository::new(db).interrupt_all_non_terminal(&detail) {
         Ok(0) => {}
-        Ok(count) => tracing::info!("Startup orphan sweep: failed {count} orphaned task(s)"),
+        Ok(count) => {
+            tracing::info!("Startup orphan sweep: interrupted {count} orphaned task(s)")
+        }
         Err(e) => tracing::warn!("Startup orphan sweep failed (non-fatal): {e}"),
     }
 }

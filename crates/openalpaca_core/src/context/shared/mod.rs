@@ -16,6 +16,12 @@ pub enum TaskEntryStatus {
     Failed,
     Cancelled,
     Paused,
+    /// A run a previous incarnation left in flight (§5.6b). The registry is
+    /// empty at boot, so nothing ever *enters* this state in memory — the
+    /// variant exists because [`TaskEntryStatus`] is the total projection of
+    /// `TaskStatus`, and a resurrected DB row must not be reported as
+    /// something it is not.
+    Interrupted,
 }
 
 impl TaskEntryStatus {
@@ -27,11 +33,15 @@ impl TaskEntryStatus {
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
             Self::Paused => "paused",
+            Self::Interrupted => "interrupted",
         }
     }
 
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Interrupted
+        )
     }
 }
 

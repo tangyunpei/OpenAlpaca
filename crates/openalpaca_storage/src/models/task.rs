@@ -13,6 +13,21 @@ pub enum TaskStatus {
     Failed,
     Cancelled,
     Paused,
+    /// The daemon went away while this run was in flight (§5.6b).
+    ///
+    /// Written **only** by the boot sweep, for a row the previous incarnation
+    /// left `queued` / `running` / `paused`. It is not a failure — nothing
+    /// about the work went wrong — and saying `failed` with a fabricated
+    /// message is what §5.6b calls the sweep lying.
+    ///
+    /// **Terminal.** A new incarnation cannot re-enter the loop that was
+    /// running: its tokio task, its steering inbox and its in-memory history
+    /// are gone. So the row is finished, and the restart affordance is Phase
+    /// 5's `rerun` (a new id carrying `source_task_id` back to this one).
+    /// `start` refuses an interrupted row exactly as it refuses any other
+    /// terminal one (R43): it re-launches in place and would spend whatever
+    /// partial result the run left behind.
+    Interrupted,
 }
 
 impl TaskStatus {
@@ -24,12 +39,16 @@ impl TaskStatus {
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
             Self::Paused => "paused",
+            Self::Interrupted => "interrupted",
         }
     }
 
     /// Whether this status represents a terminal (final) state.
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Interrupted
+        )
     }
 }
 
@@ -44,6 +63,7 @@ impl std::str::FromStr for TaskStatus {
             "failed" => Ok(Self::Failed),
             "cancelled" => Ok(Self::Cancelled),
             "paused" => Ok(Self::Paused),
+            "interrupted" => Ok(Self::Interrupted),
             _ => anyhow::bail!("Invalid task status: {}", s),
         }
     }
@@ -63,6 +83,11 @@ pub enum OutcomeKind {
     ArtifactOnly,
     Mixed,
     Failed,
+    /// The run produced no outcome because the daemon went away (§5.6b).
+    /// Written by the boot sweep beside [`TaskStatus::Interrupted`], so a
+    /// client reading `outcome_kind` alone is told the same truth the status
+    /// tells and never sees `failed` for a crash.
+    Interrupted,
 }
 
 impl OutcomeKind {
@@ -72,6 +97,7 @@ impl OutcomeKind {
             Self::ArtifactOnly => "artifact_only",
             Self::Mixed => "mixed",
             Self::Failed => "failed",
+            Self::Interrupted => "interrupted",
         }
     }
 }
@@ -85,6 +111,7 @@ impl std::str::FromStr for OutcomeKind {
             "artifact_only" => Ok(Self::ArtifactOnly),
             "mixed" => Ok(Self::Mixed),
             "failed" => Ok(Self::Failed),
+            "interrupted" => Ok(Self::Interrupted),
             _ => anyhow::bail!("Invalid outcome kind: {}", s),
         }
     }

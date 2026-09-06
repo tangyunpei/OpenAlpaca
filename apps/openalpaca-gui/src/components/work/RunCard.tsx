@@ -189,7 +189,9 @@ export function RunCard({
               ? "done"
               : run.status === "failed"
                 ? "failed"
-                : "cancelled"
+                : run.status === "interrupted"
+                  ? "interrupted"
+                  : "cancelled"
           }
           rerun={rerun}
           busy={busy}

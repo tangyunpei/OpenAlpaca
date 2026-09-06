@@ -43,4 +43,4 @@ pub use subagent_span::{
     NewSubagentSpan, SPAN_DETAIL_INTERRUPTED, SpanState, SubagentSpanRecord, SubagentSpanRepository,
     TemplateRunCount,
 };
-pub use task::TaskRepository;
+pub use task::{NonTerminalRun, TaskRepository};

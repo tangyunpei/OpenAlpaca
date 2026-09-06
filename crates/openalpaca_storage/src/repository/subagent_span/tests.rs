@@ -213,6 +213,22 @@ fn close_orphans_cancels_running_spans_on_terminal_tasks_only() {
     assert_eq!(repo.close_orphans().unwrap(), 0);
 }
 
+/// §5.6b changed what the task sweep writes — `interrupted`, not `failed` —
+/// and this pass runs immediately after it. An `interrupted` run is exactly
+/// the crash case whose spans are stranded, so it must be in the terminal set.
+#[test]
+fn close_orphans_treats_an_interrupted_run_as_terminal() {
+    let db = setup_db();
+    make_task(&db, "crashed", TaskStatus::Interrupted);
+    open(&db, "crashed", "n-crashed", "review_agent");
+
+    let repo = SubagentSpanRepository::new(&db);
+    assert_eq!(repo.close_orphans().unwrap(), 1);
+    let span = &repo.list_for_task("crashed").unwrap()[0];
+    assert_eq!(span.state, "cancelled");
+    assert_eq!(span.detail.as_deref(), Some("interrupted"));
+}
+
 #[test]
 fn deleting_a_task_cascades_to_its_spans() {
     let db = setup_db();

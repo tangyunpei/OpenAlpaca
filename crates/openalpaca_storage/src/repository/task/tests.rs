@@ -308,8 +308,11 @@ fn test_set_outcome_updates_existing() {
     );
 }
 
+/// §5.6b — the boot sweep stops lying. A run the previous incarnation left
+/// non-terminal becomes `interrupted`, not `failed` with a fabricated message:
+/// nothing failed, the daemon went away.
 #[test]
-fn test_fail_all_non_terminal_sweeps_only_live_rows() {
+fn interrupt_all_non_terminal_sweeps_only_live_rows() {
     let db = setup_db();
     let repo = TaskRepository::new(&db);
 
@@ -330,27 +333,44 @@ fn test_fail_all_non_terminal_sweeps_only_live_rows() {
     let mut with_summary = make_task("running-with-summary", "has summary");
     with_summary.status = TaskStatus::Running;
     with_summary.result_summary = Some("partial progress".to_string());
+    with_summary.session_id = Some("sess-1".to_string());
     repo.create(&with_summary).unwrap();
 
-    let swept = repo
-        .fail_all_non_terminal("daemon restarted — task orphaned")
+    // The recovery pass needs the rows *before* they are flipped: it reads
+    // each one's session log for undrained steering.
+    let live = repo.list_non_terminal().unwrap();
+    let mut ids: Vec<&str> = live.iter().map(|r| r.id.as_str()).collect();
+    ids.sort();
+    assert_eq!(ids, ["paused", "queued", "running", "running-with-summary"]);
+    let carried = live
+        .iter()
+        .find(|r| r.id == "running-with-summary")
         .unwrap();
+    assert_eq!(carried.session_id.as_deref(), Some("sess-1"));
+    assert_eq!(carried.lane_key, "cli");
+
+    let swept = repo.interrupt_all_non_terminal("interrupted by instance i-7").unwrap();
     assert_eq!(swept, 4, "queued + running + paused + running-with-summary");
 
-    // Non-terminal rows flipped to Failed with the reason + completed_at.
+    // Non-terminal rows flipped to Interrupted with the detail + completed_at.
     for id in ["queued", "running", "paused"] {
         let task = repo.get(id).unwrap().unwrap();
-        assert_eq!(task.status, TaskStatus::Failed, "task {id}");
+        assert_eq!(task.status, TaskStatus::Interrupted, "task {id}");
         assert_eq!(
             task.result_summary.as_deref(),
-            Some("daemon restarted — task orphaned"),
+            Some("interrupted by instance i-7"),
+            "task {id}"
+        );
+        assert_eq!(
+            task.outcome_kind,
+            Some(OutcomeKind::Interrupted),
             "task {id}"
         );
         assert!(task.completed_at.is_some(), "task {id}");
     }
     // Existing summary preserved.
     let task = repo.get("running-with-summary").unwrap().unwrap();
-    assert_eq!(task.status, TaskStatus::Failed);
+    assert_eq!(task.status, TaskStatus::Interrupted);
     assert_eq!(task.result_summary.as_deref(), Some("partial progress"));
 
     // Terminal rows untouched.
@@ -364,8 +384,32 @@ fn test_fail_all_non_terminal_sweeps_only_live_rows() {
         assert!(task.result_summary.is_none(), "terminal task {id}");
     }
 
-    // Idempotent: a second sweep finds nothing.
-    assert_eq!(repo.fail_all_non_terminal("again").unwrap(), 0);
+    // Idempotent: a second sweep finds nothing, and neither does the listing
+    // the recovery pass drives off — `interrupted` is terminal.
+    assert_eq!(repo.interrupt_all_non_terminal("again").unwrap(), 0);
+    assert!(repo.list_non_terminal().unwrap().is_empty());
+}
+
+/// `interrupted` is terminal: a new incarnation cannot re-enter the loop that
+/// was running, so the row is finished. That is what makes `rerun` the restart
+/// verb and `start` refuse (R43).
+#[test]
+fn interrupted_is_terminal_and_round_trips_as_a_status() {
+    assert!(TaskStatus::Interrupted.is_terminal());
+    assert_eq!(TaskStatus::Interrupted.as_str(), "interrupted");
+    assert_eq!(
+        "interrupted".parse::<TaskStatus>().unwrap(),
+        TaskStatus::Interrupted
+    );
+    assert_eq!(
+        serde_json::to_string(&TaskStatus::Interrupted).unwrap(),
+        "\"interrupted\""
+    );
+    assert_eq!(OutcomeKind::Interrupted.as_str(), "interrupted");
+    assert_eq!(
+        "interrupted".parse::<OutcomeKind>().unwrap(),
+        OutcomeKind::Interrupted
+    );
 }
 
 /// Migration 036's `task.workspace_id` — the project a run belonged to, so a

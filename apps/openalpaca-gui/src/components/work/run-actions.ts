@@ -158,7 +158,13 @@ export function runActions(
   status: UiStatus,
   steerReason: string | null = null,
 ): RunActionDescriptor[] {
-  return status === "done" || status === "cancelled" || status === "failed"
+  // `interrupted` (§5.6b) is terminal, so it gets the terminal bar — and that
+  // bar's `Re-run` is exactly the restart the daemon allows: `start` refuses a
+  // finished row (R43), `rerun` copies the goal onto a new id.
+  return status === "done" ||
+    status === "cancelled" ||
+    status === "failed" ||
+    status === "interrupted"
     ? terminalRunActions()
     : liveRunActions(status, steerReason);
 }

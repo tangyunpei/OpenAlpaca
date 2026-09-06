@@ -8,6 +8,26 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{OptionalExtension, Row};
 
+/// One row the boot sweep is about to call `interrupted` (§5.6b).
+///
+/// Read before the flip, because the recovery pass needs the run's session to
+/// find its undrained steering, and after the flip the rows are no longer
+/// distinguishable from any other terminal run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NonTerminalRun {
+    pub id: String,
+    /// The conversation the run was started from (migration 039). `None` for a
+    /// run dispatched on a lane with no session row, and for pre-039 rows —
+    /// such a run has no log to recover steering from.
+    pub session_id: Option<String>,
+    /// The `task.source_lane` column: the lane a recovered follow-up belongs
+    /// to.
+    pub lane_key: String,
+    /// The status the row carried when the daemon died — `queued`, `running`
+    /// or `paused`. Kept as the raw string so the boot log can name it.
+    pub status: String,
+}
+
 /// How many ids [`TaskRepository::titles_for`] puts in one `IN (…)`. Well under
 /// SQLite's default variable limit (999), and one statement covers a full
 /// artifact page, whose own limit is smaller than this.
@@ -287,24 +307,57 @@ impl<'a> TaskRepository<'a> {
         })
     }
 
-    /// Mark every non-terminal task (queued / running / paused) as failed
-    /// with the given reason, preserving any result summary already present.
+    /// The rows the boot sweep is about to call `interrupted` — read *before*
+    /// the flip, because the steering recovery pass (§5.6b) needs each run's
+    /// session before the status that identifies it is gone.
+    ///
+    /// Empty on every boot but the one after a crash, which is what makes the
+    /// recovery pass free in the ordinary case.
+    pub fn list_non_terminal(&self) -> Result<Vec<NonTerminalRun>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, session_id, source_lane, status FROM task \
+                 WHERE status IN ('queued', 'running', 'paused') ORDER BY id",
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(NonTerminalRun {
+                        id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        lane_key: row.get(2)?,
+                        status: row.get::<_, String>(3)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .context("Failed to list non-terminal tasks")?;
+            Ok(rows)
+        })
+    }
+
+    /// Mark every non-terminal task (queued / running / paused) `interrupted`
+    /// with the given detail, preserving any result summary already present.
     /// Returns the number of tasks swept.
     ///
-    /// Used by the daemon's startup orphan sweep (Routing V2 Phase 3):
-    /// in-flight execution does not survive a restart, so any task left
-    /// non-terminal in the DB is an orphan.
-    pub fn fail_all_non_terminal(&self, reason: &str) -> Result<usize> {
+    /// The daemon's startup sweep (§5.6b): in-flight execution does not
+    /// survive a restart — the tokio tasks driving it are gone — so any task
+    /// left non-terminal belongs to a dead incarnation. It is **not** a
+    /// failure, and this used to write one; `interrupted` says what actually
+    /// happened and carries a restart affordance (`rerun`, GAP-06).
+    ///
+    /// Idempotent: `interrupted` is terminal, so the next boot matches none of
+    /// the rows this one wrote.
+    pub fn interrupt_all_non_terminal(&self, detail: &str) -> Result<usize> {
         self.db.with_connection(|conn| {
             let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
             let rows = conn
                 .execute(
-                    "UPDATE task SET status = 'failed',
+                    "UPDATE task SET status = 'interrupted',
                             result_summary = COALESCE(result_summary, ?1),
+                            outcome_kind = COALESCE(outcome_kind, 'interrupted'),
                             updated_at = ?2,
                             completed_at = COALESCE(completed_at, ?2)
                      WHERE status IN ('queued', 'running', 'paused')",
-                    rusqlite::params![reason, now],
+                    rusqlite::params![detail, now],
                 )
                 .context("Failed to sweep non-terminal tasks")?;
             Ok(rows)

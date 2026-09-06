@@ -20,6 +20,7 @@ const label = tv({
       done: "text-tertiary",
       cancelled: "text-muted-fg",
       failed: "text-red",
+      interrupted: "text-gold",
     },
     size: {
       card: "text-xs",
