@@ -68,7 +68,26 @@ pub fn push_steering(
         .steering_inbox(task_id)
         .ok_or(SteeringPushError::Closed)?;
     let request_id = msg.request_id;
+    let text = msg.text.clone();
+    let received_at = msg.received_at;
     let depth = inbox.push(msg)?;
+    // §5.5: one line in the workflow's transcript, written on the *accepted*
+    // push. That is what makes crash recovery of an interjection possible —
+    // a `steering` record with no later `steering_drained` naming its request
+    // id is an interjection the workflow never delivered.
+    if let Some(log) = shared_context.task_session_log(task_id) {
+        log.emit(
+            crate::session_log::Record::new(crate::session_log::RecordType::Steering)
+                .task(Some(task_id))
+                .with_data(serde_json::json!({
+                    "request_id": request_id.to_string(),
+                    "lane_key": lane_key,
+                    "text": text,
+                    "received_at": received_at.to_rfc3339(),
+                    "queue_depth": depth,
+                })),
+        );
+    }
     bus.publish(SystemEvent::WorkflowSteered {
         task_id: task_id.to_string(),
         lane_key: lane_key.to_string(),
@@ -337,6 +356,70 @@ mod tests {
         assert!(rendered.starts_with("<user_interjection ts=\""));
         assert!(rendered.starts_with(USER_INTERJECTION_PREFIX));
         assert!(rendered.ends_with(">focus on the tests</user_interjection>"));
+    }
+
+    /// §5.5: an accepted push is one line in the workflow's transcript. That
+    /// is what makes an undrained interjection findable after a crash — a
+    /// `steering` record whose request id no `steering_drained` ever names.
+    #[tokio::test]
+    async fn push_steering_narrates_into_the_runs_session_log() {
+        use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+
+        let ctx = SharedContext::new();
+        let bus = EventBus::default();
+        let dir = tempfile::tempdir().unwrap();
+        let service = SessionLogService::new(
+            dir.path().to_path_buf(),
+            None,
+            SessionLogLimits::default(),
+            "test".to_string(),
+        );
+        let handle = service.handle_for("sess-1");
+        ctx.register_steering_inbox("task-1", Arc::new(SteeringInbox::default()));
+        ctx.register_task_session_log("task-1", handle.clone());
+
+        let m = msg("focus on the tests");
+        let request_id = m.request_id;
+        assert_eq!(push_steering(&ctx, &bus, "task-1", "u:gui", m), Ok(1));
+        assert!(handle.flush().await);
+
+        let records = read_records(&dir.path().join("sess-1")).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, "steering");
+        assert_eq!(records[0].task_id.as_deref(), Some("task-1"));
+        assert_eq!(records[0].data["request_id"], request_id.to_string());
+        assert_eq!(records[0].data["text"], "focus on the tests");
+        assert_eq!(records[0].data["lane_key"], "u:gui");
+        assert_eq!(records[0].data["queue_depth"], 1);
+    }
+
+    /// A rejected push writes nothing: the log narrates what happened, not
+    /// what was attempted.
+    #[tokio::test]
+    async fn a_rejected_push_writes_no_record() {
+        use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+
+        let ctx = SharedContext::new();
+        let bus = EventBus::default();
+        let dir = tempfile::tempdir().unwrap();
+        let service = SessionLogService::new(
+            dir.path().to_path_buf(),
+            None,
+            SessionLogLimits::default(),
+            "test".to_string(),
+        );
+        let handle = service.handle_for("sess-2");
+        let inbox = Arc::new(SteeringInbox::new(1));
+        inbox.push(msg("first")).unwrap();
+        ctx.register_steering_inbox("task-2", inbox);
+        ctx.register_task_session_log("task-2", handle.clone());
+
+        assert_eq!(
+            push_steering(&ctx, &bus, "task-2", "u:gui", msg("second")),
+            Err(SteeringPushError::Full)
+        );
+        assert!(handle.flush().await);
+        assert!(read_records(&dir.path().join("sess-2")).unwrap().is_empty());
     }
 
     #[test]

@@ -65,6 +65,35 @@ pub async fn initialize_services(
 ) -> Result<InitializedServices> {
     let shared_context = Arc::new(SharedContext::new());
 
+    // The session event log (§5.5). Parked on `SharedContext` the way the
+    // event bus is, so the gateway, the dispatcher, the runner and the
+    // steering rail all reach it without a global. It lives under the **home**
+    // store's `sessions/`, never a project directory — a transcript carries
+    // persona and cross-project content and must not be git-committable. A
+    // store that cannot be resolved is a warning, not a boot failure: the
+    // daemon runs without a log rather than not at all.
+    match openalpaca_core::session_log::default_root() {
+        Ok(root) => {
+            let limits = openalpaca_core::session_log::SessionLogLimits {
+                max_session_bytes: daemon_config
+                    .load()
+                    .orchestrator
+                    .sessions
+                    .log_max_session_bytes,
+                ..Default::default()
+            };
+            shared_context.set_session_log(Arc::new(
+                openalpaca_core::session_log::SessionLogService::new(
+                    root,
+                    Some(db.clone()),
+                    limits,
+                    env!("CARGO_PKG_VERSION").to_string(),
+                ),
+            ));
+        }
+        Err(e) => tracing::warn!("Session event log disabled — no sessions directory: {e}"),
+    }
+
     // Initialize secret store
     let llm_config_path = config_base_dir.join("llm.toml");
     let (secret_store, keyring_available) = llm::initialize_secret_store(&llm_config_path);

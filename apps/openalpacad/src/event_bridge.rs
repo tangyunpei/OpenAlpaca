@@ -118,6 +118,7 @@ pub fn spawn_event_bridge(
                     success,
                     duration_ms,
                     task_id,
+                    session_id,
                     ..
                 } => {
                     tracing::debug!(
@@ -129,6 +130,7 @@ pub fn spawn_event_bridge(
                         success,
                         duration_ms,
                         task_id.as_deref(),
+                        session_id.as_deref(),
                     );
                 }
                 openalpaca_core::events::SystemEvent::LlmCallCompleted {
@@ -994,6 +996,7 @@ mod tests {
             success: true,
             duration_ms: 12,
             task_id: Some("t-1".into()),
+            session_id: None,
             timestamp: chrono::Utc::now(),
         });
         match recv_event(&mut rx).await {
@@ -1079,6 +1082,7 @@ mod tests {
             success: true,
             duration_ms: 12,
             task_id: None,
+            session_id: None,
             timestamp: chrono::Utc::now(),
         });
         match recv_event(&mut rx).await {

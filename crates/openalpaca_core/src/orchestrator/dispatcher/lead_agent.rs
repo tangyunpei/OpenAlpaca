@@ -392,7 +392,7 @@ impl TaskDispatcher {
             // task alone. Opened after the status flip, so a reader that sees
             // a running task always sees a lane for it.
             let lead_span_id = format!("lead::{task_id}");
-            crate::runner::span::open_span(
+            let lead_label = crate::runner::span::open_span(
                 db.as_ref(),
                 &bus,
                 &task_id,
@@ -401,6 +401,34 @@ impl TaskDispatcher {
                 &lead_agent.id,
                 &description,
             );
+
+            // §5.5: the run's session log. Opened from the session the
+            // dispatch pinned, registered against the task id so
+            // `push_steering` can narrate into it, and handed to the lead's
+            // loop and to every subagent it spawns — one log per session,
+            // `span_id` the dimension that tells the lanes apart (P-20).
+            let session_log = session_id.as_ref().and_then(|id| {
+                ctx.session_log()
+                    .map(|svc| svc.open(id, Some(&lane_key), Some(&source), None))
+            });
+            if let Some(ref log) = session_log {
+                ctx.register_task_session_log(&task_id, log.clone());
+                log.emit(
+                    crate::session_log::Record::new(
+                        crate::session_log::RecordType::SubagentOpen,
+                    )
+                    .task(Some(&task_id))
+                    .span(Some(&lead_span_id))
+                    .agent(Some(&lead_agent.id))
+                    .with_data(serde_json::json!({
+                        "span_id": lead_span_id,
+                        "template": lead_agent.template_id,
+                        "label": lead_label,
+                        "role": "lead",
+                        "objective": description.chars().take(500).collect::<String>(),
+                    })),
+                );
+            }
 
             // Mark step 0 as running now (before the agentic loop) so started_at is accurate
             if let Some(ref db) = db
@@ -435,6 +463,8 @@ impl TaskDispatcher {
                 workspace.clone(),
                 Some(cancel_token),
                 steering_inbox.clone(),
+                session_log.clone(),
+                &lead_span_id,
                 &connector_block,
                 broker,
                 skill_catalog,
@@ -679,14 +709,42 @@ impl TaskDispatcher {
             // timeline reports a span still running on a terminal task as
             // `cancelled`/`"interrupted"`, and closing after the flip would
             // leave a window where a reader saw the lead as interrupted.
+            let lead_state =
+                crate::runner::span::span_state_for(&result.loop_result.finish_reason);
+            let lead_detail =
+                crate::runner::span::span_detail_for(&result.loop_result.finish_reason);
             crate::runner::span::close_span(
                 db.as_ref(),
                 &bus,
                 &lead_span_id,
-                crate::runner::span::span_state_for(&result.loop_result.finish_reason),
-                crate::runner::span::span_detail_for(&result.loop_result.finish_reason).as_deref(),
+                lead_state,
+                lead_detail.as_deref(),
                 Some(result.final_content.as_str()),
             );
+            if let Some(ref log) = session_log {
+                log.emit(
+                    crate::session_log::Record::new(
+                        crate::session_log::RecordType::SubagentClose,
+                    )
+                    .task(Some(&task_id))
+                    .span(Some(&lead_span_id))
+                    .agent(Some(&lead_agent.id))
+                    .with_data(serde_json::json!({
+                        "span_id": lead_span_id,
+                        "role": "lead",
+                        "state": lead_state.as_str(),
+                        "detail": lead_detail,
+                        "output_preview": result
+                            .final_content
+                            .chars()
+                            .take(200)
+                            .collect::<String>(),
+                    })),
+                );
+            }
+            // The run's transcript link is per-run state, like the steering
+            // inbox: released once nothing else will narrate into it.
+            ctx.remove_task_session_log(&task_id);
 
             finalize_task_with_outcome(
                 &ctx,

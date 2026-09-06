@@ -753,3 +753,114 @@ async fn test_changing_project_opens_a_new_session() {
         .collect::<Vec<_>>();
     assert_eq!(announced, vec![(second.id.clone(), "active".to_string())]);
 }
+
+// ── Session event log (§5.5) ────────────────────────────────────────
+
+/// The gateway's three emit points, on one delegating turn: the boot-boundary
+/// `session_start`, the `user_msg`, and the `assistant_msg` with the
+/// `delegation` beside it. Content stays in `conversation_messages` — the
+/// records carry the message id and a preview only (§5.3).
+#[tokio::test]
+async fn a_turn_writes_its_two_halves_and_its_delegation_to_the_session_log() {
+    use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+
+    let dir = tempfile::tempdir().unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let ctx = Arc::new(SharedContext::new());
+    let service = Arc::new(SessionLogService::new(
+        logs.path().to_path_buf(),
+        Some(db.clone()),
+        SessionLogLimits::default(),
+        "test".to_string(),
+    ));
+    ctx.set_session_log(service.clone());
+
+    let gw = Gateway::new(
+        ctx,
+        Arc::new(LaneManager::new()),
+        Arc::new(DelegatingHandler),
+        EventBus::default(),
+        Some(db.clone()),
+    );
+    gw.handle_event(GatewayRequest {
+        source: EventSource::Gui {
+            connection_id: "user1".to_string(),
+        },
+        content: "do a big task".to_string(),
+        principal: Principal::System,
+        scope: Scope::Global,
+        attachments: Vec::new(),
+        workspace_path: None,
+        stream_id: None,
+        lane_override: None,
+    })
+    .await;
+
+    let session_id = openalpaca_storage::ConversationRepository::new(&db)
+        .active_session_id("user1:gui")
+        .unwrap()
+        .expect("the turn opened a session");
+    let handle = service.handle_for(&session_id);
+    assert!(handle.flush().await);
+
+    let records = read_records(&logs.path().join(&session_id)).unwrap();
+    let kinds: Vec<&str> = records.iter().map(|r| r.kind.as_str()).collect();
+    assert_eq!(
+        kinds,
+        vec!["session_start", "user_msg", "assistant_msg", "delegation"],
+        "{kinds:?}"
+    );
+
+    assert_eq!(records[0].data["lane_key"], "user1:gui");
+    assert_eq!(records[0].data["source"], "gui");
+    assert_eq!(records[0].data["boot_id"], service.boot_id());
+
+    let messages = openalpaca_storage::ConversationRepository::new(&db)
+        .list_by_lane("user1:gui", 50, 0)
+        .unwrap();
+    assert_eq!(records[1].data["msg_id"], messages[0].id);
+    assert_eq!(records[1].data["preview"], "do a big task");
+    assert!(records[1].task_id.is_none(), "a user turn starts no run");
+
+    assert_eq!(records[2].data["msg_id"], messages[1].id);
+    assert_eq!(records[2].data["preview"], "ack");
+
+    assert_eq!(records[3].data["task_id"], "task-42");
+    assert_eq!(records[3].data["title"], "Research Rust");
+    assert_eq!(records[3].task_id.as_deref(), Some("task-42"));
+}
+
+/// A gateway with no session log service behaves exactly as before — the log
+/// is an addition beside the transcript, never a precondition for it.
+#[tokio::test]
+async fn a_gateway_without_a_session_log_still_persists_its_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let gw = Gateway::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        Arc::new(StubHandler),
+        EventBus::default(),
+        Some(db.clone()),
+    );
+    let resp = gw
+        .handle_event(GatewayRequest {
+            source: EventSource::Gui {
+                connection_id: "user1".to_string(),
+            },
+            content: "hello".to_string(),
+            principal: Principal::System,
+            scope: Scope::Global,
+            attachments: Vec::new(),
+            workspace_path: None,
+            stream_id: None,
+            lane_override: None,
+        })
+        .await;
+    assert!(!resp.is_error);
+    let messages = openalpaca_storage::ConversationRepository::new(&db)
+        .list_by_lane("user1:gui", 50, 0)
+        .unwrap();
+    assert_eq!(messages.len(), 2);
+}

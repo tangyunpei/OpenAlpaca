@@ -679,7 +679,7 @@ mod tests {
         let eb = EventBroadcaster::new(16, "inst-1".to_string(), Some(db.clone()));
 
         eb.task_status("t-1", "A run", "running", None, None, None, None, None, None);
-        eb.tool_executed("research_agent::a1", "web_search", true, 12, Some("t-1"));
+        eb.tool_executed("research_agent::a1", "web_search", true, 12, Some("t-1"), None);
         eb.security_violation("research_agent::a1", "shell", "denied", Some("t-1"));
         eb.circuit_breaker_tripped("research_agent::a1", "web_search", 3, 300, Some("t-1"));
         eb.llm_call_completed("research_agent::a1", "m", 1, 2, 0.1, Some("t-1"));
@@ -753,13 +753,46 @@ mod tests {
         }
     }
 
+    /// §5.4's one-source-of-truth rule for a tool call's index row: when a
+    /// session log is carrying the call, its writer holds the `log_seq` and
+    /// the payloads and writes the full row — so this audit insert stands
+    /// down. It still broadcasts and still writes `event_log`; only the
+    /// second, poorer `tool_execution_log` row is not written, which is what
+    /// keeps `invocations_today` from double-counting every logged call.
+    #[test]
+    fn a_session_logged_call_leaves_its_index_row_to_the_session_writer() {
+        let (_dir, db) = test_db();
+        let eb = EventBroadcaster::new(16, "inst-1".to_string(), Some(db.clone()));
+
+        eb.tool_executed("orchestrator", "web_search", true, 5, None, Some("sess-1"));
+
+        let tool_rows: i64 = db
+            .with_connection(|conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM tool_execution_log", [], |r| r.get(0))?)
+            })
+            .unwrap();
+        assert_eq!(tool_rows, 0, "the session writer owns this row");
+        // The audit trail is unaffected.
+        let rows = EventLogRepository::new(&db).recent(10).unwrap();
+        assert!(rows.iter().any(|r| r.event_type == "tool_executed"));
+
+        // Without a session, this is still the only writer.
+        eb.tool_executed("orchestrator", "web_search", true, 5, None, None);
+        let tool_rows: i64 = db
+            .with_connection(|conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM tool_execution_log", [], |r| r.get(0))?)
+            })
+            .unwrap();
+        assert_eq!(tool_rows, 1);
+    }
+
     /// An event with no run leaves the column NULL rather than borrowing one.
     #[test]
     fn a_task_less_event_leaves_the_column_null() {
         let (_dir, db) = test_db();
         let eb = EventBroadcaster::new(16, "inst-1".to_string(), Some(db.clone()));
 
-        eb.tool_executed("orchestrator", "web_search", true, 5, None);
+        eb.tool_executed("orchestrator", "web_search", true, 5, None, None);
         eb.connector_status("telegram", "connected");
 
         let rows = EventLogRepository::new(&db).recent(10).unwrap();

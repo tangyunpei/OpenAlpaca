@@ -2293,3 +2293,277 @@ async fn test_steering_cancel_during_llm_call_reappends_undelivered() {
     assert_eq!(leftover.len(), 1);
     assert_eq!(leftover[0].text, "mid-flight fix");
 }
+
+// ── Session event log (§5.5) ────────────────────────────────────────
+
+/// The loop's four emit points, on one run: a `round` per LLM response
+/// carrying the `tool_use` blocks verbatim, a `tool_call` before dispatch and
+/// a `tool_result` after it, and a `workflow_done` at the exit. Every record
+/// is stamped with the run's `task_id` and the loop's `span_id` (P-20), and
+/// the seq is gap-free across all of them.
+#[tokio::test]
+async fn the_loop_narrates_rounds_tools_and_its_exit_into_the_session_log() {
+    use crate::bus::EventBus;
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+    use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+    use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+    use crate::tools::ToolRegistry;
+
+    struct EchoTool;
+    #[async_trait]
+    impl BuiltInTool for EchoTool {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+            Ok("the search result".to_string())
+        }
+    }
+
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "search".to_string(),
+                description: "Search".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(Arc::new(EchoTool)),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+    let policy = SandboxPolicy {
+        agent_id: "research_agent::a1".to_string(),
+        allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
+        denied_capabilities: vec![],
+        require_confirmation_for: vec![],
+        max_tool_calls: None,
+        max_tool_runtime_secs: 60,
+        stream_id: None,
+        lane_key: None,
+        confirmation_timeout_secs: None,
+        auto_approve: false,
+    };
+
+    let provider = Arc::new(MockRouterProvider::new(vec![
+        Ok(ChatResponse {
+            content: "Searching.".to_string(),
+            tool_calls: vec![openalpaca_llm::ToolCall {
+                id: "tc_1".to_string(),
+                name: "search".to_string(),
+                arguments: serde_json::json!({"query": "kettle"}),
+            }],
+            model: "claude-sonnet-4-20250514".to_string(),
+            usage: Usage {
+                input_tokens: 20,
+                output_tokens: 15,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::ToolUse,
+            thinking: None,
+            parts: None,
+        }),
+        Ok(ChatResponse {
+            content: "All done.".to_string(),
+            tool_calls: vec![],
+            model: "claude-sonnet-4-20250514".to_string(),
+            usage: Usage {
+                input_tokens: 30,
+                output_tokens: 10,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        }),
+    ]));
+    let router = LlmRouter::single_provider(
+        provider,
+        ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&db_dir.path().join("t.db")).unwrap();
+    let service = SessionLogService::new(
+        dir.path().to_path_buf(),
+        Some(db.clone()),
+        SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-loop");
+
+    let config = LoopConfig {
+        model: Some("claude-sonnet-4-20250514".to_string()),
+        enable_caching: false,
+        session_log: Some(handle.clone()),
+        span_id: Some("lead::task-9".to_string()),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop_routed(
+        &router,
+        vec![ChatMessage::user("find the kettle")],
+        vec![],
+        &config,
+        Some(&sandbox),
+        "research_agent::a1",
+        Some(&policy),
+        Some("task-9"),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+    assert!(handle.flush().await);
+
+    let records = read_records(&dir.path().join("sess-loop")).unwrap();
+    let kinds: Vec<&str> = records.iter().map(|r| r.kind.as_str()).collect();
+    assert_eq!(
+        kinds,
+        vec!["round", "tool_call", "tool_result", "round", "workflow_done"],
+        "the loop narrates in dispatch order: {kinds:?}"
+    );
+    for (i, record) in records.iter().enumerate() {
+        assert_eq!(record.seq, (i + 1) as u64, "gap-free");
+        assert_eq!(record.task_id.as_deref(), Some("task-9"));
+        assert_eq!(record.span_id.as_deref(), Some("lead::task-9"));
+        assert_eq!(record.agent.as_deref(), Some("research_agent::a1"));
+    }
+
+    // The `tool_use` blocks are verbatim — id, name and the full input JSON —
+    // which is what makes replay-resume reconstructible (§5.4).
+    let round = &records[0];
+    assert_eq!(round.data["round"], 1);
+    assert_eq!(round.data["model"], "claude-sonnet-4-20250514");
+    assert_eq!(round.data["input_tokens"], 20);
+    assert_eq!(round.data["text"], "Searching.");
+    assert_eq!(round.data["tool_use"][0]["id"], "tc_1");
+    assert_eq!(round.data["tool_use"][0]["name"], "search");
+    assert_eq!(round.data["tool_use"][0]["input"]["query"], "kettle");
+
+    assert_eq!(records[1].data["tool_use_id"], "tc_1");
+    assert_eq!(records[1].data["input"]["query"], "kettle");
+    // A builtin belongs to no extension — `ext` is null, never invented.
+    assert!(records[1].data["ext"].is_null());
+    assert_eq!(records[2].data["tool_use_id"], "tc_1");
+    assert_eq!(records[2].data["ok"], true);
+    assert_eq!(records[2].data["result"], "the search result");
+
+    let done = records.last().unwrap();
+    assert_eq!(done.data["finish_reason"], "complete");
+    assert_eq!(done.data["rounds_used"], 2);
+    assert_eq!(done.data["tool_calls_made"], 1);
+
+    // The index row is the writer's, and points back at both records.
+    let (session_id, task, log_seq, result_ref): (String, String, i64, String) = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT session_id, task_id, log_seq, result_ref FROM tool_execution_log",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(session_id, "sess-loop");
+    assert_eq!(task, "task-9");
+    assert_eq!(log_seq, 2, "log_seq points at the tool_call record");
+    assert_eq!(result_ref, "log:3");
+}
+
+/// A loop with no session log writes nothing and behaves identically — the
+/// `None` default every non-session caller relies on.
+#[tokio::test]
+async fn a_loop_without_a_session_log_is_unchanged() {
+    let provider = MockProvider::new(vec![Ok(MockProvider::simple_response("Hi."))]);
+    let config = LoopConfig::default();
+    assert!(config.session_log.is_none());
+    let result = run_agentic_loop(
+        &provider,
+        vec![ChatMessage::user("hello")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+}
+
+/// A drain is one line naming the request ids it delivered — the other half
+/// of `push_steering`'s `steering` record, and what tells a reader an
+/// interjection actually reached the model.
+#[tokio::test]
+async fn a_steering_drain_is_narrated_with_its_request_ids() {
+    use crate::runner::steering::{SteeringInbox, SteeringMsg};
+    use crate::security::policy::{Principal, Scope};
+    use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+
+    let inbox = Arc::new(SteeringInbox::default());
+    let request_id = uuid::Uuid::new_v4();
+    inbox
+        .push(SteeringMsg {
+            text: "focus on the tests".to_string(),
+            request_id,
+            principal: Principal::System,
+            scope: Scope::Global,
+            workspace_path: None,
+            received_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let service = SessionLogService::new(
+        dir.path().to_path_buf(),
+        None,
+        SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-steer");
+    let config = LoopConfig {
+        enable_caching: false,
+        steering: Some(Arc::clone(&inbox)),
+        session_log: Some(handle.clone()),
+        ..Default::default()
+    };
+
+    let provider = MockProvider::new(vec![Ok(MockProvider::simple_response("Understood."))]);
+    let result = run_agentic_loop(
+        &provider,
+        vec![ChatMessage::user("start")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+    assert!(handle.flush().await);
+
+    let records = read_records(&dir.path().join("sess-steer")).unwrap();
+    let drained = records
+        .iter()
+        .find(|r| r.kind == "steering_drained")
+        .expect("the drain is narrated");
+    assert_eq!(drained.data["at"], "round_boundary");
+    assert_eq!(drained.data["count"], 1);
+    assert_eq!(drained.data["request_ids"][0], request_id.to_string());
+    // A main-loop turn carries no task_id — that absence is the signal.
+    assert!(drained.task_id.is_none());
+}

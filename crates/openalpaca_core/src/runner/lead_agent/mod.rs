@@ -89,6 +89,12 @@ pub async fn run_lead_agent(
     workspace: MemoryScopeContext,
     cancel_token: Option<CancellationToken>,
     steering_inbox: Option<Arc<crate::runner::steering::SteeringInbox>>,
+    // The run's session event log (§5.5), handed to the lead's own loop and
+    // to every subagent it spawns — one log per session, `span_id` telling
+    // the lanes apart — plus the lead's own 037 span id, stamped on every
+    // record its loop writes.
+    session_log: Option<crate::session_log::SessionLogHandle>,
+    lead_span_id: &str,
     connector_guidance: &str,
     confirmation_broker: Option<Arc<crate::security::confirmation::ConfirmationBroker>>,
     skill_catalog: Arc<crate::orchestrator::skill_catalog::SkillCatalog>,
@@ -238,6 +244,7 @@ pub async fn run_lead_agent(
         scope: None,
         workspace_path: None,
         // Filled in by the sandbox at dispatch (T28), which owns the bus.
+        session_id: None,
         event_bus: None,
     };
 
@@ -462,6 +469,10 @@ pub async fn run_lead_agent(
         daemon_config.load().experimental.ephemeral_pressure_layer;
     // Routing V2: the loop drains this inbox at its round boundary.
     loop_config.steering = steering_inbox;
+    // §5.5: the lead's rounds, tool calls, drains and exit are narrated into
+    // the run's session log, under the lead's own span.
+    loop_config.session_log = session_log.clone();
+    loop_config.span_id = Some(lead_span_id.to_string());
 
     // Instantiate ContextBudgetManager for budget-aware compaction
     let context_budget = {

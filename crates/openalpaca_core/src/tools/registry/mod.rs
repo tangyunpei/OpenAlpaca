@@ -75,6 +75,18 @@ pub struct ToolContext {
     /// when one was provided. Persisted with steering/follow-up items so
     /// re-entry turns can restore the workspace scope (Routing V2).
     pub workspace_path: Option<String>,
+    /// The session whose event log carries this call's `tool_call` /
+    /// `tool_result` records — and therefore its `tool_execution_log` index
+    /// row, written by the session writer with the `log_seq` only it knows
+    /// (§5.4). Set by the agentic loop from its own `session_log` handle, so
+    /// `Some` means exactly "the session writer indexes this call" and the
+    /// event-driven audit row stands down. `None` on every path with no
+    /// session log, where that bare row is still the only record.
+    ///
+    /// It is also how a spilled result is resolved back to the session that
+    /// produced it (`read_result`, T42) — a `results/` reference is scoped to
+    /// this id and nothing wider.
+    pub session_id: Option<String>,
     /// The bus a tool announces its own side effects on — `artifact_write`'s
     /// `SystemEvent::ArtifactWritten` today (plan §4.9).
     ///

@@ -95,14 +95,16 @@ fn record_tool_writes_the_session_index_columns() {
         })
         .unwrap();
 
-    let row: (
+    /// The six 039 columns, in the order the query below selects them.
+    type IndexRow = (
         Option<String>,
         Option<String>,
         Option<i64>,
         Option<String>,
         Option<String>,
         Option<String>,
-    ) = db
+    );
+    let row: IndexRow = db
         .with_connection(|conn| {
             Ok(conn.query_row(
                 "SELECT session_id, task_id, log_seq, args_preview, result_preview, result_ref

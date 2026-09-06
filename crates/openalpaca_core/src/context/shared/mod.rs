@@ -1,9 +1,10 @@
 use crate::agent::registry::AgentRegistry;
 use crate::runner::steering::SteeringInbox;
+use crate::session_log::{SessionLogHandle, SessionLogService};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio_util::sync::CancellationToken;
 
 /// Status of a task entry in the in-memory registry.
@@ -140,6 +141,15 @@ pub struct SharedContext {
     steering_inboxes: DashMap<String, Arc<SteeringInbox>>,
     /// Active workflow task_ids per lane, keyed by lane_key.
     active_workflows_by_lane: DashMap<String, Vec<String>>,
+    /// The session event log service, parked here at boot the way the event
+    /// bus is (R28) so the runner can reach it without a global. `None` in
+    /// every context that has no home store — most tests.
+    session_log: OnceLock<Arc<SessionLogService>>,
+    /// The session log handle of each running workflow, keyed by task_id —
+    /// the exact analogue of `steering_inboxes` above, and for the same
+    /// reason: a producer that only knows the task id (`push_steering`) must
+    /// be able to narrate into the run's transcript.
+    task_session_logs: DashMap<String, SessionLogHandle>,
 }
 
 impl SharedContext {
@@ -150,7 +160,39 @@ impl SharedContext {
             cancellation_tokens: Mutex::new(HashMap::new()),
             steering_inboxes: DashMap::new(),
             active_workflows_by_lane: DashMap::new(),
+            session_log: OnceLock::new(),
+            task_session_logs: DashMap::new(),
         }
+    }
+
+    /// Attach the session event log service. Called once, at daemon boot;
+    /// a second call is ignored (the first service keeps its writers).
+    pub fn set_session_log(&self, service: Arc<SessionLogService>) {
+        if self.session_log.set(service).is_err() {
+            tracing::warn!("Session log service already attached — keeping the first");
+        }
+    }
+
+    /// The session event log service, if this daemon has one.
+    pub fn session_log(&self) -> Option<&Arc<SessionLogService>> {
+        self.session_log.get()
+    }
+
+    /// Remember a running workflow's session log handle, so a producer that
+    /// only knows the task id can narrate into the right transcript.
+    pub fn register_task_session_log(&self, task_id: &str, handle: SessionLogHandle) {
+        self.task_session_logs.insert(task_id.to_string(), handle);
+    }
+
+    /// The session log of a running workflow, if one was registered.
+    pub fn task_session_log(&self, task_id: &str) -> Option<SessionLogHandle> {
+        self.task_session_logs.get(task_id).map(|e| e.value().clone())
+    }
+
+    /// Forget a workflow's session log (cleanup at detach, beside the
+    /// steering inbox's).
+    pub fn remove_task_session_log(&self, task_id: &str) {
+        self.task_session_logs.remove(task_id);
     }
 
     /// Register a cancellation token for a task.

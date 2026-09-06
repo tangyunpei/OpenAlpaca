@@ -142,6 +142,7 @@ impl Orchestrator {
             // No agent instance: this path is not a subagent lane.
             agent_instance_id: None,
             // Filled in by the sandbox at dispatch (T28), which owns the bus.
+            session_id: None,
             event_bus: None,
         };
 
@@ -213,6 +214,23 @@ impl Orchestrator {
             tool_names
         };
 
+        // §5.5: a main-loop turn narrates into the lane's active session, with
+        // `task_id` absent — that absence is what tells a reader a record came
+        // from chat rather than from a run. The gateway resolved (and, on a
+        // project switch, created) this session moments ago for the same turn;
+        // this reads the answer back rather than re-deriving it, and a lane
+        // with no session simply has no log.
+        let session_log = match (self.shared_context.session_log(), self.db.as_ref()) {
+            (Some(service), Some(db)) => openalpaca_storage::ConversationRepository::new(db)
+                .active_session_id(lane_key)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(lane_key, "Failed to resolve the lane's session log: {e}");
+                    None
+                })
+                .map(|id| service.open(&id, Some(lane_key), Some(source), None)),
+            _ => None,
+        };
+
         let (tools_for_loop, policy_opt, config_for_loop);
         if !tool_defs.is_empty() {
             tracing::info!(
@@ -257,13 +275,17 @@ impl Orchestrator {
                 // on the simple-query loop.
                 enable_caching: true,
                 thinking: None,
+                session_log: session_log.clone(),
                 ..self.loop_config.clone()
             };
             tools_for_loop = tool_defs;
         } else {
             tools_for_loop = vec![];
             policy_opt = None;
-            config_for_loop = self.loop_config.clone();
+            config_for_loop = LoopConfig {
+                session_log: session_log.clone(),
+                ..self.loop_config.clone()
+            };
         }
 
         // ── Resolve model context window (drives Layer 5 trimming + budget) ──

@@ -27,6 +27,7 @@
 - `orchestrator` (crates/openalpaca_core/src/orchestrator/mod.rs)
 - `runner` (crates/openalpaca_core/src/runner/mod.rs)
 - `security` (crates/openalpaca_core/src/security/mod.rs)
+- `session_log` (crates/openalpaca_core/src/session_log/mod.rs)
 - `tools` (crates/openalpaca_core/src/tools/mod.rs)
 - `types` (crates/openalpaca_core/src/types.rs)
 - `utils` (crates/openalpaca_core/src/utils/mod.rs)

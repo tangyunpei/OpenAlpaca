@@ -114,6 +114,13 @@ pub enum SystemEvent {
         duration_ms: u64,
         /// The run this happened inside (GAP-10), or `None` outside one.
         task_id: Option<String>,
+        /// The session whose event log is indexing this call (§5.4). When
+        /// `Some`, the session writer owns the `tool_execution_log` row — it
+        /// is the only party that knows the `log_seq` — and the daemon's
+        /// audit insert stands down rather than writing a second, poorer row
+        /// for the same call. Not carried on the wire: `ServerEvent` is
+        /// unchanged, because a WS subscriber has no use for it.
+        session_id: Option<String>,
         timestamp: DateTime<Utc>,
     },
     /// An LLM call completed

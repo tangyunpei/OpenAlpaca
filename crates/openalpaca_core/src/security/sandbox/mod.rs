@@ -123,6 +123,15 @@ impl SandboxManager {
         self.confirmation_broker = Some(broker);
     }
 
+    /// The registry this sandbox dispatches through.
+    ///
+    /// Exposed so the agentic loop can stamp `ext {kind, id, generation}` on
+    /// its `tool_call`/`tool_result` records (§5.4, P-17) — the extension
+    /// identity is derived from the registered tool and lives nowhere else.
+    pub fn registry(&self) -> &ToolRegistry {
+        &self.registry
+    }
+
     /// Execute a tool call within the sandbox.
     ///
     /// Flow:
@@ -143,6 +152,9 @@ impl SandboxManager {
         // The run every event below is attributed to (GAP-10); `None` for a
         // call made outside a workflow.
         let task_id = ctx.task_id.as_deref();
+        // Set only where the agentic loop is writing this call's records, so
+        // it is exactly the signal "the session writer owns the index row".
+        let session_id = ctx.session_id.as_deref();
 
         // 1. Capability check
         if let Err(violation) = CapabilityManager::check_agent_capability(
@@ -299,7 +311,7 @@ impl SandboxManager {
 
         // 4. Circuit breaker check
         if let Err(reason) = self.circuit_breaker.check(agent_id, &tool_call.name) {
-            self.emit_tool_executed(agent_id, &tool_call.name, false, 0, task_id);
+            self.emit_tool_executed(agent_id, &tool_call.name, false, 0, task_id, session_id);
             return Err(reason);
         }
 
@@ -345,13 +357,13 @@ impl SandboxManager {
 
         match result {
             Ok(Ok(output)) => {
-                self.emit_tool_executed(agent_id, &tool_call.name, true, duration_ms, task_id);
+                self.emit_tool_executed(agent_id, &tool_call.name, true, duration_ms, task_id, session_id);
                 self.circuit_breaker
                     .record_success(agent_id, &tool_call.name);
                 Ok(output)
             }
             Ok(Err(err)) => {
-                self.emit_tool_executed(agent_id, &tool_call.name, false, duration_ms, task_id);
+                self.emit_tool_executed(agent_id, &tool_call.name, false, duration_ms, task_id, session_id);
                 if is_transient_tool_error(&err) {
                     self.circuit_breaker
                         .record_failure_for_task(agent_id, &tool_call.name, task_id);
@@ -410,6 +422,10 @@ impl SandboxManager {
         }
     }
 
+    /// `session_id` is the turn's session when the agentic loop is logging
+    /// this call (§5.4): the session writer holds the `log_seq` and writes
+    /// the `tool_execution_log` row, so the daemon's audit insert stands down
+    /// instead of duplicating it.
     fn emit_tool_executed(
         &self,
         agent_id: &str,
@@ -417,6 +433,7 @@ impl SandboxManager {
         success: bool,
         duration_ms: u64,
         task_id: Option<&str>,
+        session_id: Option<&str>,
     ) {
         self.bus.publish(SystemEvent::ToolExecuted {
             agent_id: agent_id.to_string(),
@@ -424,6 +441,7 @@ impl SandboxManager {
             success,
             duration_ms,
             task_id: task_id.map(|t| t.to_string()),
+            session_id: session_id.map(|s| s.to_string()),
             timestamp: Utc::now(),
         });
     }

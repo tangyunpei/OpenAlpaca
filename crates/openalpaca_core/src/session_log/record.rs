@@ -111,7 +111,11 @@ impl RecordType {
 
     /// Parse a catalog name. `None` for a type this build does not know —
     /// which is a readable log, not a corrupt one.
-    pub fn from_str(s: &str) -> Option<RecordType> {
+    ///
+    /// Not `FromStr`: an unknown type is an expected, non-error outcome for a
+    /// reader, and `Option` says that where `Result<_, Infallible-ish>` would
+    /// not.
+    pub fn parse(s: &str) -> Option<RecordType> {
         RecordType::ALL.into_iter().find(|t| t.as_str() == s)
     }
 

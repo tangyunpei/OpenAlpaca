@@ -33,6 +33,38 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+/// Narrate a lane's close into the run's session log, beside the 037 span
+/// write (§5.5).
+///
+/// One helper rather than three copies, because a subagent lane closes at
+/// three different places — cancelled before it started, a plugin loop's
+/// outcome, and an LLM loop's finish reason — and all three must say the same
+/// words the span row says.
+fn emit_subagent_close(
+    log: Option<&crate::session_log::SessionLogHandle>,
+    task_id: &str,
+    span_id: &str,
+    instance_id: &str,
+    state: openalpaca_storage::SpanState,
+    detail: Option<&str>,
+    output: Option<&str>,
+) {
+    let Some(log) = log else { return };
+    log.emit(
+        crate::session_log::Record::new(crate::session_log::RecordType::SubagentClose)
+            .task(Some(task_id))
+            .span(Some(span_id))
+            .agent(Some(instance_id))
+            .with_data(serde_json::json!({
+                "span_id": span_id,
+                "role": "subagent",
+                "state": state.as_str(),
+                "detail": detail,
+                "output_preview": output.map(|o| o.chars().take(200).collect::<String>()),
+            })),
+    );
+}
+
 /// Maximum nesting depth for subagent spawning.
 /// Prevents indirect recursion (e.g., A spawns B spawns C spawns A...).
 /// Depth 0 = top-level lead agent, depth 1 = its direct subagents, etc.
@@ -90,6 +122,16 @@ pub struct SpawnSubagentTool {
 }
 
 impl SpawnSubagentTool {
+    /// The run's session event log, if one is open (§5.5).
+    ///
+    /// Read off `SharedContext` by task id rather than threaded through the
+    /// constructor: the dispatcher registers the handle there for exactly
+    /// this reason, the same way it registers the steering inbox, and the
+    /// spawn tool already holds both the context and the task id.
+    fn session_log(&self) -> Option<crate::session_log::SessionLogHandle> {
+        self.shared_context.task_session_log(&self.task_id)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         router: Arc<LlmRouter>,
@@ -265,7 +307,7 @@ impl BuiltInTool for SpawnSubagentTool {
         // the same thing. Unlike `record_agent_history`, which writes nothing
         // until the run returns, this row exists from the moment the lane
         // starts — that is the whole point: an in-flight lane must be visible.
-        crate::runner::span::open_span(
+        let span_label = crate::runner::span::open_span(
             self.db.as_ref(),
             &self.bus,
             &self.task_id,
@@ -274,6 +316,36 @@ impl BuiltInTool for SpawnSubagentTool {
             &instance_id,
             objective,
         );
+
+        // §5.5: the lane's open, narrated beside the 037 span write. The
+        // record's `span_id` *is* the span id, so `?span_id=` on the reader
+        // is a pure filter over one globally ordered log (P-20).
+        let session_log = self.session_log();
+        if let Some(ref log) = session_log {
+            log.emit(
+                crate::session_log::Record::new(crate::session_log::RecordType::SubagentOpen)
+                    .task(Some(&self.task_id))
+                    .span(Some(&node_id))
+                    .agent(Some(&instance_id))
+                    .with_data(serde_json::json!({
+                        "span_id": node_id,
+                        "template": agent_id,
+                        "label": span_label,
+                        "role": "subagent",
+                        "objective": objective.chars().take(500).collect::<String>(),
+                        // P-17: a plugin-backed template says so, so a reader
+                        // never has to guess which extension ran the lane.
+                        "plugin_id": self
+                            .shared_context
+                            .agent_registry
+                            .get_template(agent_id)
+                            .and_then(|t| match t.source {
+                                AgentSource::Plugin { plugin_id, .. } => Some(plugin_id),
+                                AgentSource::Internal => None,
+                            }),
+                    })),
+            );
+        }
 
         self.spawn_count.fetch_add(1, Ordering::SeqCst);
         let agent_start = std::time::Instant::now();
@@ -297,6 +369,7 @@ impl BuiltInTool for SpawnSubagentTool {
             scope: None,
             workspace_path: None,
             // Filled in by the sandbox at dispatch (T28), which owns the bus.
+            session_id: None,
             event_bus: None,
         };
         let mut sandbox = SandboxManager::new(
@@ -325,6 +398,11 @@ impl BuiltInTool for SpawnSubagentTool {
             .load()
             .experimental
             .ephemeral_pressure_layer;
+        // §5.4: one log per session, subagents as a *dimension* — the lane's
+        // rounds and tool calls land in the run's transcript stamped with
+        // this span id, never in a file of their own.
+        loop_config.session_log = session_log.clone();
+        loop_config.span_id = Some(node_id.clone());
 
         // 8. Build messages with context distillation via PromptBuilder
         let default_model = self.router.default_model();
@@ -523,6 +601,7 @@ impl BuiltInTool for SpawnSubagentTool {
         let db = self.db.clone();
         let agent_id_owned = agent_id.to_string();
         let objective_preview: String = objective.chars().take(50).collect();
+        let span_log = session_log.clone();
         tokio::task::spawn(async move {
             // Hold the concurrency permit for the lifetime of this subagent.
             // It is automatically released when this async block completes.
@@ -543,6 +622,15 @@ impl BuiltInTool for SpawnSubagentTool {
                     db.as_ref(),
                     &bus,
                     &node_id,
+                    openalpaca_storage::SpanState::Cancelled,
+                    Some("cancelled before starting"),
+                    None,
+                );
+                emit_subagent_close(
+                    span_log.as_ref(),
+                    &task_id,
+                    &node_id,
+                    &instance_id,
                     openalpaca_storage::SpanState::Cancelled,
                     Some("cancelled before starting"),
                     None,
@@ -648,16 +736,26 @@ impl BuiltInTool for SpawnSubagentTool {
                     _ if cancelled => Some("cancelled".to_string()),
                     PluginLoopOutcome::Failed { error, .. } => Some(error.clone()),
                 };
+                let plugin_output = match &outcome {
+                    PluginLoopOutcome::Completed { content, .. } => Some(content.as_str()),
+                    _ => None,
+                };
                 crate::runner::span::close_span(
                     db.as_ref(),
                     &bus,
                     &node_id,
                     span_state,
                     span_detail.as_deref(),
-                    match &outcome {
-                        PluginLoopOutcome::Completed { content, .. } => Some(content.as_str()),
-                        _ => None,
-                    },
+                    plugin_output,
+                );
+                emit_subagent_close(
+                    span_log.as_ref(),
+                    &task_id,
+                    &node_id,
+                    &instance_id,
+                    span_state,
+                    span_detail.as_deref(),
+                    plugin_output,
                 );
 
                 // No LLM usage to record — the plugin runs its own model
@@ -748,12 +846,23 @@ impl BuiltInTool for SpawnSubagentTool {
             // into `false` because the lead agent needs a boolean; the span
             // maps `Cancelled` explicitly, because "cancelled" and "failed"
             // read differently and the UI has separate copy for each.
+            let span_state = crate::runner::span::span_state_for(&result.finish_reason);
+            let span_detail = crate::runner::span::span_detail_for(&result.finish_reason);
             crate::runner::span::close_span(
                 db.as_ref(),
                 &bus,
                 &node_id,
-                crate::runner::span::span_state_for(&result.finish_reason),
-                crate::runner::span::span_detail_for(&result.finish_reason).as_deref(),
+                span_state,
+                span_detail.as_deref(),
+                Some(result.final_content.as_str()),
+            );
+            emit_subagent_close(
+                span_log.as_ref(),
+                &task_id,
+                &node_id,
+                &instance_id,
+                span_state,
+                span_detail.as_deref(),
                 Some(result.final_content.as_str()),
             );
 

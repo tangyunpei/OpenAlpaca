@@ -1297,6 +1297,8 @@ async fn run_lead_for_test(
         MemoryScopeContext::global_only(),
         None,
         None,
+        None,
+        "lead::task-1",
         "",
         None,
         skill_catalog,
@@ -1506,4 +1508,128 @@ async fn test_invoke_skill_through_lead_path_runs_fixture_skill() {
         }
     }
     assert!(completed, "missing SkillCompleted event for the nested skill");
+}
+
+// ── Session event log (§5.5) ────────────────────────────────────────
+
+/// A subagent lane opens and closes in the run's transcript, beside the 037
+/// span writes. The records carry the span id as `span_id`, so `?span_id=` on
+/// the reader is a pure filter over one globally ordered log (P-20) — never a
+/// per-agent file.
+#[tokio::test]
+async fn a_subagent_lane_is_narrated_into_the_runs_session_log() {
+    use crate::agent::template::{AgentSource, AgentTemplateFrontmatter};
+    use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+
+    let executor = Arc::new(CompletingPluginExecutor {
+        instructions: std::sync::Mutex::new(None),
+    });
+    let template = AgentTemplate {
+        frontmatter: AgentTemplateFrontmatter {
+            id: "plugin_researcher".to_string(),
+            name: "Plugin Researcher".to_string(),
+            description: "Plugin-backed research agent".to_string(),
+            icon: None,
+            singleton: false,
+            capabilities: vec![],
+            denied_capabilities: vec![],
+            temperature: 0.5,
+            verbosity: "normal".to_string(),
+            model: None,
+            fallback_models: vec![],
+            max_tool_calls: None,
+            timeout_seconds: None,
+            max_cost_per_task: None,
+            max_rounds: None,
+            require_confirmation_for: vec![],
+        },
+        body: String::new(),
+        sections: HashMap::new(),
+        source: AgentSource::Plugin {
+            plugin_id: "test_plugin".to_string(),
+            executor: executor.clone(),
+        },
+    };
+
+    let shared_context = Arc::new(SharedContext::new());
+    assert!(shared_context.agent_registry.register_template(template));
+
+    let dir = tempfile::tempdir().unwrap();
+    let service = SessionLogService::new(
+        dir.path().to_path_buf(),
+        None,
+        SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-lead");
+    // The dispatcher registers the run's handle here; the spawn tool reads it
+    // back by task id, exactly as it reads the steering inbox.
+    shared_context.register_task_session_log("task-1", handle.clone());
+
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn_tool = SpawnSubagentTool::new(
+        Arc::new(openalpaca_llm::LlmRouter::new(
+            std::collections::HashMap::new(),
+            openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
+            std::collections::HashMap::new(),
+            Arc::new(openalpaca_llm::CostTracker::new(
+                openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
+            )),
+            "test-model".to_string(),
+        )),
+        Arc::new(ToolRegistry::default()),
+        shared_context,
+        EventBus::default(),
+        None,
+        "task-1".to_string(),
+        "user-1".to_string(),
+        "test-lead".to_string(),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        None,
+        tracker.clone(),
+        0,
+        DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+        MemoryScopeContext::global_only(),
+        None,
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+    );
+
+    spawn_tool
+        .execute(&serde_json::json!({
+            "agent_id": "plugin_researcher",
+            "objective": "Summarize the design doc"
+        }))
+        .await
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !tracker.all_done() {
+        assert!(tokio::time::Instant::now() < deadline, "subagent never finished");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(handle.flush().await);
+
+    let records = read_records(&dir.path().join("sess-lead")).unwrap();
+    let kinds: Vec<&str> = records.iter().map(|r| r.kind.as_str()).collect();
+    assert_eq!(kinds, vec!["subagent_open", "subagent_close"], "{kinds:?}");
+
+    let open = &records[0];
+    assert_eq!(open.task_id.as_deref(), Some("task-1"));
+    assert_eq!(open.data["template"], "plugin_researcher");
+    assert_eq!(open.data["role"], "subagent");
+    assert!(open.data["objective"]
+        .as_str()
+        .unwrap()
+        .contains("Summarize the design doc"));
+    // P-17: a plugin-backed lane names the extension that ran it.
+    assert_eq!(open.data["plugin_id"], "test_plugin");
+
+    let close = &records[1];
+    assert_eq!(close.data["state"], "done");
+    assert_eq!(close.data["output_preview"], "plugin result");
+    // Both halves name the same 037 span, which is the whole filter.
+    assert_eq!(open.span_id, close.span_id);
+    assert_eq!(open.span_id.as_deref(), open.data["span_id"].as_str());
 }

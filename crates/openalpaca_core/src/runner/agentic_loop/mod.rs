@@ -20,7 +20,9 @@ use chrono::Utc;
 use crate::runner::steering::SteeringMsg;
 use crate::security::capabilities::CapabilityManager;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+use crate::session_log::{Record, RecordType};
 use crate::tools::registry::ToolContext;
+use serde_json::{Value, json};
 use openalpaca_llm::{
     ChatMessage, FinishReason, LlmProvider, LlmRouter, LlmRouterError, RequestContext,
     ToolDefinition,
@@ -134,6 +136,7 @@ pub async fn run_agentic_loop(
         cancel_token,
         tool_context,
         None,
+        None,
     )
     .await
 }
@@ -170,8 +173,45 @@ pub async fn run_agentic_loop_routed(
         cancel_token,
         tool_context,
         cost_accumulator,
+        task_id,
     )
     .await
+}
+
+/// Narrate one event into the turn's session log (§5.5).
+///
+/// A no-op when the loop has no log — every non-session caller, and every
+/// test that does not care. `emit` itself is a non-blocking `try_send`, so
+/// this never stalls a round.
+fn log_event(
+    config: &LoopConfig,
+    task_id: Option<&str>,
+    agent_id: &str,
+    kind: RecordType,
+    data: Value,
+) {
+    if let Some(ref log) = config.session_log {
+        log.emit(
+            Record::new(kind)
+                .task(task_id)
+                .span(config.span_id.as_deref())
+                .agent(Some(agent_id))
+                .with_data(data),
+        );
+    }
+}
+
+/// `ext {kind, id, generation}` for a tool that belongs to an extension
+/// (§5.4, P-17) — what makes the S4 refusal auditable per session. `None`
+/// for builtins, which are never on the ENABLE axis.
+fn tool_extension(sandbox: Option<&SandboxManager>, tool_name: &str) -> Option<Value> {
+    let tool = sandbox?.registry().get(tool_name)?;
+    let id = tool.extension_id()?;
+    Some(json!({
+        "kind": id.kind.as_str(),
+        "id": id.name,
+        "generation": tool.incarnation(),
+    }))
 }
 
 /// Return drained-but-unsent steering messages to the inbox on a loop exit
@@ -185,7 +225,10 @@ fn return_pending_steering(config: &LoopConfig, pending: &mut Vec<SteeringMsg>) 
     }
 }
 
-/// Core agentic loop implementation shared by both Direct and Router backends.
+/// Run the loop and narrate its exit (§5.5: "at every exit").
+///
+/// The exit record lives here rather than at the nine `return`s inside the
+/// core so no future exit can be added without one.
 #[allow(clippy::too_many_arguments)]
 async fn run_agentic_loop_inner(
     backend: LlmBackend<'_>,
@@ -199,6 +242,81 @@ async fn run_agentic_loop_inner(
     cancel_token: Option<CancellationToken>,
     tool_context: Option<&ToolContext>,
     cost_accumulator: Option<LoopCostAccumulator>,
+    task_id: Option<&str>,
+) -> LoopResult {
+    let result = run_agentic_loop_core(
+        backend,
+        initial_messages,
+        tools,
+        config,
+        sandbox,
+        agent_id,
+        sandbox_policy,
+        context_budget,
+        cancel_token,
+        tool_context,
+        cost_accumulator,
+        task_id,
+    )
+    .await;
+
+    if config.session_log.is_some() {
+        if let LoopFinishReason::Error(ref message) = result.finish_reason {
+            log_event(
+                config,
+                task_id,
+                agent_id,
+                RecordType::Error,
+                json!({ "where": "agentic_loop", "message": message }),
+            );
+        }
+        log_event(
+            config,
+            task_id,
+            agent_id,
+            RecordType::WorkflowDone,
+            json!({
+                "finish_reason": finish_reason_str(&result.finish_reason),
+                "rounds_used": result.rounds_used,
+                "tool_calls_made": result.tool_calls_made,
+                "input_tokens": result.total_input_tokens,
+                "output_tokens": result.total_output_tokens,
+                "estimated_cost_usd": result.estimated_cost,
+                "elapsed_ms": result.elapsed.as_millis() as u64,
+                "model": result.model_used,
+            }),
+        );
+    }
+    result
+}
+
+/// The exit word a reader sees, stable across refactors of the enum's Debug.
+fn finish_reason_str(reason: &LoopFinishReason) -> &'static str {
+    match reason {
+        LoopFinishReason::Complete => "complete",
+        LoopFinishReason::MaxRounds => "max_rounds",
+        LoopFinishReason::CostExceeded => "cost_exceeded",
+        LoopFinishReason::Truncated => "truncated",
+        LoopFinishReason::Cancelled => "cancelled",
+        LoopFinishReason::Error(_) => "error",
+    }
+}
+
+/// Core agentic loop implementation shared by both Direct and Router backends.
+#[allow(clippy::too_many_arguments)]
+async fn run_agentic_loop_core(
+    backend: LlmBackend<'_>,
+    initial_messages: Vec<ChatMessage>,
+    tools: Vec<ToolDefinition>,
+    config: &LoopConfig,
+    sandbox: Option<&SandboxManager>,
+    agent_id: &str,
+    sandbox_policy: Option<&SandboxPolicy>,
+    context_budget: Option<&crate::context_budget::ContextBudgetManager>,
+    cancel_token: Option<CancellationToken>,
+    tool_context: Option<&ToolContext>,
+    cost_accumulator: Option<LoopCostAccumulator>,
+    task_id: Option<&str>,
 ) -> LoopResult {
     let mut state = LoopState::new();
     // Baseline the agent-scoped cumulative cost BEFORE round 0's LLM call.
@@ -423,6 +541,28 @@ async fn run_agentic_loop_inner(
                     );
                 });
 
+                // §5.5: the loop narrates its compaction into the session
+                // log. `dropped_from_seq`/`preserved_from_seq` (P-14) need a
+                // message→seq map that does not exist yet and are absent
+                // rather than guessed; every value below is the report's own.
+                log_event(
+                    config,
+                    task_id,
+                    agent_id,
+                    RecordType::Compaction,
+                    json!({
+                        "tier": format!("{tier:?}"),
+                        "trigger": "auto",
+                        "pre_tokens": report.initial_tokens,
+                        "post_tokens": report.final_tokens,
+                        "messages_before": report.messages_before,
+                        "messages_after": report.messages_after,
+                        "messages_discarded": report.messages_discarded,
+                        "memories_extracted": report.memories_extracted,
+                        "tiers_applied": format!("{:?}", report.tiers_applied),
+                    }),
+                );
+
                 // Emit CompactionTriggered telemetry
                 if let Some(ref bus) = config.event_bus {
                     bus.publish(crate::events::SystemEvent::CompactionTriggered {
@@ -455,6 +595,21 @@ async fn run_agentic_loop_inner(
                     round = state.rounds,
                     interjections = drained.len(),
                     "Steering drain: injecting user interjections"
+                );
+                log_event(
+                    config,
+                    task_id,
+                    agent_id,
+                    RecordType::SteeringDrained,
+                    json!({
+                        "at": "round_boundary",
+                        "round": state.rounds,
+                        "count": drained.len(),
+                        "request_ids": drained
+                            .iter()
+                            .map(|m| m.request_id.to_string())
+                            .collect::<Vec<_>>(),
+                    }),
                 );
                 for msg in &drained {
                     Arc::make_mut(&mut messages)
@@ -648,6 +803,52 @@ async fn run_agentic_loop_inner(
                     }
                 }
 
+                // §5.5: one `round` record per LLM response. It carries the
+                // `tool_use` blocks **verbatim** — id, name, full input — so
+                // both halves of the assistant(tool_use)/user(tool_result)
+                // alternation are reconstructible bit-for-bit, which is what
+                // makes replay-resume possible (§5.4). The `context` block is
+                // `ContextBudgetManager::section_breakdown()`, so a per-turn
+                // `/context` bar needs no new endpoint (P-19).
+                if config.session_log.is_some() {
+                    let context = context_budget.map(|budget| {
+                        let sections: std::collections::HashMap<&str, usize> =
+                            budget.section_breakdown().into_iter().collect();
+                        json!({
+                            "window": budget.model_context_window(),
+                            "system_prompt": sections.get("system_prompt").copied().unwrap_or(0),
+                            "tools": sections.get("tools").copied().unwrap_or(0),
+                            "messages": msg_tokens_estimate,
+                            "free": budget.free_zone_capacity(),
+                        })
+                    });
+                    log_event(
+                        config,
+                        task_id,
+                        agent_id,
+                        RecordType::Round,
+                        json!({
+                            "round": state.rounds,
+                            "model": response.model,
+                            "input_tokens": response.usage.input_tokens,
+                            "output_tokens": response.usage.output_tokens,
+                            "cache_read_input_tokens": response.usage.cache_read_input_tokens,
+                            "stop_reason": format!("{:?}", response.finish_reason),
+                            "text": response.content,
+                            "tool_use": response
+                                .tool_calls
+                                .iter()
+                                .map(|tc| json!({
+                                    "id": tc.id,
+                                    "name": tc.name,
+                                    "input": tc.arguments,
+                                }))
+                                .collect::<Vec<_>>(),
+                            "context": context,
+                        }),
+                    );
+                }
+
                 // ── 10. Persist or execute tools ──────────────────
                 let persist_span = tracing::info_span!(
                     "loop.step.persist_or_tools",
@@ -704,10 +905,40 @@ async fn run_agentic_loop_inner(
                         );
                     });
 
-                    let effective_ctx = tool_context.cloned().unwrap_or_else(|| ToolContext {
+                    let mut effective_ctx = tool_context.cloned().unwrap_or_else(|| ToolContext {
                         agent_id: Some(agent_id.to_string()),
                         ..Default::default()
                     });
+                    // The session whose log carries this call's records — and
+                    // therefore its `tool_execution_log` index row. Set from
+                    // the loop's own handle so the two can never disagree:
+                    // where this is `Some`, the sandbox leaves the row to the
+                    // session writer instead of writing a bare one.
+                    effective_ctx.session_id = config
+                        .session_log
+                        .as_ref()
+                        .map(|log| log.session_id().to_string());
+
+                    // §5.5: the call is announced before dispatch, so a
+                    // `tool_call` with no matching `tool_result` is exactly
+                    // what a crash or a cancellation looks like in the log.
+                    for tc in &executable {
+                        log_event(
+                            config,
+                            task_id,
+                            agent_id,
+                            RecordType::ToolCall,
+                            json!({
+                                "tool_use_id": tc.id,
+                                "name": tc.name,
+                                "input": tc.arguments,
+                                "ext": tool_extension(sandbox, &tc.name),
+                            }),
+                        );
+                    }
+                    let tool_started = Instant::now();
+
+                    let effective_ctx = effective_ctx;
                     let tool_futures = executable.iter().map(|&tc| {
                         let ctx_ref = &effective_ctx;
                         async move {
@@ -751,9 +982,32 @@ async fn run_agentic_loop_inner(
                             .await
                     };
 
+                    // The batch shares one wall-clock: `join_all` runs them
+                    // together, so per-call durations would be fiction.
+                    let batch_duration_ms = tool_started.elapsed().as_millis() as i64;
+
                     // Collect results in order (join_all preserves input order)
                     for (tc, result_text) in executable.iter().zip(results.iter()) {
                         state.tool_calls_made += 1;
+                        let ok = !result_text.starts_with("[tool_error]");
+                        log_event(
+                            config,
+                            task_id,
+                            agent_id,
+                            RecordType::ToolResult,
+                            json!({
+                                "tool_use_id": tc.id,
+                                "name": tc.name,
+                                "ok": ok,
+                                "duration_ms": batch_duration_ms,
+                                // On a refusal this is the S4 string the gate
+                                // answered with, which is what makes a
+                                // withheld capability auditable per session.
+                                "error": (!ok).then(|| result_text.clone()),
+                                "result": result_text,
+                                "ext": tool_extension(sandbox, &tc.name),
+                            }),
+                        );
                         persist_span.in_scope(|| {
                             tracing::debug!(
                                 agent_id = agent_id,
@@ -837,6 +1091,21 @@ async fn run_agentic_loop_inner(
                                 "Steering completion guard: continuing loop for late interjections"
                             );
                         });
+                        log_event(
+                            config,
+                            task_id,
+                            agent_id,
+                            RecordType::SteeringDrained,
+                            json!({
+                                "at": "completion_guard",
+                                "round": state.rounds,
+                                "count": drained.len(),
+                                "request_ids": drained
+                                    .iter()
+                                    .map(|m| m.request_id.to_string())
+                                    .collect::<Vec<_>>(),
+                            }),
+                        );
                         Arc::make_mut(&mut messages)
                             .push(ChatMessage::assistant(&response.content));
                         for msg in &drained {

@@ -36,7 +36,7 @@
 - `pub use models::{ExternalIdentity, GlobalUser, LinkToken};`
 - `pub use models::{MemoryKind, MemoryScope, MemorySource, MemoryV2};`
 - `pub use models::MessageFeedback;`
-- `pub use models::{SkillExecutionEntry, ToolExecutionEntry};`
+- `pub use models::{PREVIEW_CHARS, SkillExecutionEntry, ToolExecutionEntry};`
 - `pub use models::SkillHealthMetrics;`
 - `pub use repository::{ ARTIFACT_ROLE, ATTACHMENT_ROLE, AgentRepository, ConfigRepository, ConversationRepository, EventLogRepository, FOLLOWUP_KIND_FOLLOWUP, FOLLOWUP_KIND_UNPROCESSED_STEERING, FileAssetRepository, FollowupRecord, FollowupRepository, IdentityRepository, LlmUsageRepository, MemoryRepository, MessageFeedbackRepository, OrchestratorLatencyRepository, PreferenceRepository, SESSION_ACTIVE, SESSION_ARCHIVED, SessionFilter, SkillExecutionRepository, SubAgentRepository, SubagentSpanRepository, TaskRepository, };`
 - `pub use repository::llm_usage::LlmUsageDaily;`

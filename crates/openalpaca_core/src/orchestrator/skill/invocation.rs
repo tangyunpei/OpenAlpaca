@@ -629,6 +629,7 @@ impl Orchestrator {
                 // No agent instance: this path is not a subagent lane.
                 agent_instance_id: None,
                 // Filled in by the sandbox at dispatch (T28), which owns the bus.
+                session_id: None,
                 event_bus: None,
             };
             let needs_clone = !skill_doc.frontmatter.scripts.is_empty()
@@ -1070,6 +1071,7 @@ impl Orchestrator {
             // No agent instance: this path is not a subagent lane.
             agent_instance_id: None,
             // Filled in by the sandbox at dispatch (T28), which owns the bus.
+            session_id: None,
             event_bus: None,
         };
 

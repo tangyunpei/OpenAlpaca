@@ -211,6 +211,15 @@ impl Gateway {
         // and the assistant half must land in the conversation the question was
         // asked in, not wherever a mid-turn "New chat" left the lane pointing.
         let mut turn_session: Option<String> = None;
+        let mut turn_log: Option<crate::session_log::SessionLogHandle> = None;
+        // The user half's own content and attachment ids, kept for the log
+        // record below — `req.content` moves into the handler.
+        let content_for_log = req.content.clone();
+        let attachment_ids: Vec<String> = req
+            .attachments
+            .iter()
+            .map(|a| a.file_id.clone())
+            .collect();
         if let Some(ref p) = self.persistence {
             // The canonical project root, not the raw header: a session's
             // `workspace_id` is the same key `task.workspace_id` and memory
@@ -248,6 +257,32 @@ impl Gateway {
                             status: "active".to_string(),
                             timestamp: chrono::Utc::now(),
                         });
+                    }
+                    // §5.5: the gateway opens the turn's session log and
+                    // writes the user half. Content stays in the DB — the
+                    // record carries the message id and a preview (§5.3's
+                    // one-source-of-truth table), never a second copy of the
+                    // conversation.
+                    if let Some(service) = self.shared_context.session_log() {
+                        let log = service.open(
+                            &turn.session_id,
+                            Some(&lane_key_str),
+                            Some(&source_name),
+                            workspace_path,
+                        );
+                        log.emit(
+                            crate::session_log::Record::new(
+                                crate::session_log::RecordType::UserMsg,
+                            )
+                            .with_data(serde_json::json!({
+                                "msg_id": turn.message_id,
+                                "preview": preview(&content_for_log),
+                                "source": source_name,
+                                "attachments": attachment_ids,
+                                "project_switched": turn.project_switched,
+                            })),
+                        );
+                        turn_log = Some(log);
                     }
                     turn_session = Some(turn.session_id);
                 }
@@ -290,6 +325,7 @@ impl Gateway {
         match handler_result {
             Ok(result) => {
                 let duration_ms = start.elapsed().as_millis() as i64;
+                let mut assistant_msg_id: i64 = 0;
                 // Persist assistant message and link to skill execution log
                 if let Some(ref p) = self.persistence {
                     match p.persist_assistant_message(
@@ -310,9 +346,42 @@ impl Gateway {
                             {
                                 tracing::debug!("No skill execution to link for request {request_id}: {e}");
                             }
+                            assistant_msg_id = message_id;
                         }
                         Err(e) => tracing::warn!("Failed to persist assistant message: {e}"),
                         _ => {}
+                    }
+                }
+
+                // §5.5: the assistant half, and — beside where
+                // `result.delegation` is read — the `delegation` record. Both
+                // land in the session the turn *started* in, which is the
+                // whole point of pinning it above.
+                if let Some(ref log) = turn_log {
+                    log.emit(
+                        crate::session_log::Record::new(
+                            crate::session_log::RecordType::AssistantMsg,
+                        )
+                        .with_data(serde_json::json!({
+                            "msg_id": assistant_msg_id,
+                            "preview": preview(&result.content),
+                            "model": result.model,
+                            "tokens_in": result.tokens_in,
+                            "tokens_out": result.tokens_out,
+                            "duration_ms": duration_ms,
+                        })),
+                    );
+                    if let Some(ref delegation) = result.delegation {
+                        log.emit(
+                            crate::session_log::Record::new(
+                                crate::session_log::RecordType::Delegation,
+                            )
+                            .task(Some(&delegation.task_id))
+                            .with_data(serde_json::json!({
+                                "task_id": delegation.task_id,
+                                "title": delegation.title,
+                            })),
+                        );
                     }
                 }
                 GatewayResponse {
@@ -343,6 +412,12 @@ impl Gateway {
     pub fn is_healthy(&self) -> bool {
         true
     }
+}
+
+/// §5.4: a chat record carries "msg_id, ≤512 preview" — the content itself
+/// lives in `conversation_messages` and is never copied into the log.
+fn preview(content: &str) -> String {
+    content.chars().take(512).collect()
 }
 
 /// Derive user_id and source_name from EventSource.

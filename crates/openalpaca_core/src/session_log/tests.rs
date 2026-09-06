@@ -83,7 +83,7 @@ fn record_type_strings_match_their_serialised_names() {
     for kind in RecordType::ALL {
         let json = serde_json::to_string(&kind).unwrap();
         assert_eq!(json, format!("\"{}\"", kind.as_str()), "{kind:?}");
-        assert_eq!(RecordType::from_str(kind.as_str()), Some(kind));
+        assert_eq!(RecordType::parse(kind.as_str()), Some(kind));
     }
 }
 
