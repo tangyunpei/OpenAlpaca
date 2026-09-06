@@ -22,11 +22,21 @@ pub struct SetProviderEnabledRequest {
     pub enabled: bool,
 }
 
-/// Its answer: the row as it now stands.
+/// Its answer: the row as it now stands, and whether the router actually holds
+/// the provider.
+///
+/// `enabled` is the disposition in `llm.toml`; `loaded` is what the daemon did
+/// with it. They differ when an enable cannot register — no usable key, or the
+/// provider is not compiled in — and `warning` is then the daemon's own
+/// sentence about why. A disable is `loaded: false` with no warning: that is
+/// what it asked for. Silent degradation is the one outcome the settled rules
+/// reject, so this travels on the wire rather than only in the log (R60).
 #[derive(Debug, Serialize)]
 pub(super) struct ProviderEnabledResponse {
     pub id: String,
     pub enabled: bool,
+    pub loaded: bool,
+    pub warning: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -375,10 +375,20 @@ export interface LlmSettingsResponse {
   providers: Record<string, ProviderInfo>;
 }
 
-/** `PUT /v1/settings/llm/providers/{provider}/enabled` — the row as it stands. */
+/**
+ * `PUT /v1/settings/llm/providers/{provider}/enabled` — the row as it stands.
+ *
+ * `enabled` is the disposition now in `llm.toml`; `loaded` is whether the
+ * daemon's router actually holds the provider. They differ when an enable
+ * could not register — no usable key, or the provider is not compiled in — and
+ * `warning` is then the daemon's own sentence about why. A disable is
+ * `loaded: false` with no warning: that is what it asked for.
+ */
 export interface ProviderEnabledResponse {
   id: string;
   enabled: boolean;
+  loaded: boolean;
+  warning: string | null;
 }
 
 export interface KeyStatusEntry {

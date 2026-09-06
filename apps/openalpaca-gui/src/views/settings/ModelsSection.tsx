@@ -14,7 +14,15 @@
  * `llm.toml` and unloads or reloads the provider live. It moves optimistically
  * and is put back if the daemon refuses — the refusal an owner will meet is
  * the `409` on the provider that serves the chat model.
+ *
+ * A `200` is not always a load: turning on a provider with no usable key
+ * writes the bit and leaves the router with nothing (`loaded: false`). The
+ * switch still moves — the file says on — so the row carries the daemon's
+ * `warning` beneath it, because a switch that says on beside a provider that
+ * cannot answer is the silent degradation the rules reject.
  */
+
+import { useState } from "react";
 
 import { Button, Tag, chipVariant } from "@/components/ui";
 import {
@@ -43,6 +51,11 @@ export function ModelsSection() {
   const setProviderEnabled = useSetProviderEnabled();
   const setModel = useUiStore((s) => s.setModel);
   const showToast = useUiStore((s) => s.showToast);
+  // Per provider, the daemon's reason for a write that did not load. It comes
+  // back on the toggle's own response and on nothing else — `GET
+  // /v1/settings/llm` reports the file, which by then says `enabled = true` —
+  // so it is kept here until the next toggle of that row answers.
+  const [notLoaded, setNotLoaded] = useState<Record<string, string>>({});
 
   const providers = Object.entries(llm.data?.providers ?? {});
   const activeModel = orchestrator.data?.model ?? llm.data?.orchestrator.model;
@@ -51,8 +64,19 @@ export function ModelsSection() {
     setProviderEnabled.mutate(
       { provider, enabled: next },
       {
-        onSuccess: (row) =>
-          showToast(`${row.id} ${row.enabled ? "on" : "off"}`),
+        onSuccess: (row) => {
+          setNotLoaded((current) => {
+            const { [row.id]: _dropped, ...rest } = current;
+            return row.loaded || row.warning === null
+              ? rest
+              : { ...rest, [row.id]: row.warning };
+          });
+          showToast(
+            row.loaded || !row.enabled
+              ? `${row.id} ${row.enabled ? "on" : "off"}`
+              : `${row.id} on, but the daemon could not load it`,
+          );
+        },
         onError: (error) => showToast(providerToggleErrorCopy(provider, error)),
       },
     );
@@ -102,9 +126,18 @@ export function ModelsSection() {
                 key={provider}
                 name={provider}
                 tags={<Tag value={info.enabled ? "active" : "off"} />}
-                description={`${info.keys.length} ${
-                  info.keys.length === 1 ? "key" : "keys"
-                } · ${info.key_selection_strategy}`}
+                description={
+                  <>
+                    {`${info.keys.length} ${
+                      info.keys.length === 1 ? "key" : "keys"
+                    } · ${info.key_selection_strategy}`}
+                    {notLoaded[provider] !== undefined && (
+                      <span className="mt-[3px] block text-red-ink">
+                        On, but not loaded — {notLoaded[provider]}
+                      </span>
+                    )}
+                  </>
+                }
                 chips={
                   providerModels.length === 0
                     ? undefined

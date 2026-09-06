@@ -116,7 +116,15 @@ async fn turning_a_keyless_provider_on_answers_the_row_and_loads_it() {
     let (status, body) = h.put("ollama", true).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, serde_json::json!({ "id": "ollama", "enabled": true }));
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "id": "ollama",
+            "enabled": true,
+            "loaded": true,
+            "warning": null,
+        })
+    );
     assert!(
         h.service
             .router()
@@ -152,7 +160,16 @@ async fn a_disable_strips_the_models_and_a_second_enable_puts_them_back() {
     let (status, body) = h.put("ollama", false).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, serde_json::json!({ "id": "ollama", "enabled": false }));
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "id": "ollama",
+            "enabled": false,
+            "loaded": false,
+            "warning": null,
+        }),
+        "a disable is not loaded — that is the point of it"
+    );
     assert!(
         !h.service
             .router()
@@ -220,5 +237,35 @@ async fn enabling_the_default_models_provider_is_never_refused() {
     let (status, body) = h.put("anthropic", true).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, serde_json::json!({ "id": "anthropic", "enabled": true }));
+    assert_eq!(body["id"], "anthropic");
+    assert_eq!(body["enabled"], true);
+}
+
+/// R60. The fixture's Anthropic row carries no key, so the file can be written
+/// and the router still cannot load the provider. That used to answer
+/// `200 {id, enabled: true}` with the failure only in the daemon log: nothing
+/// on the wire, and nothing in `GET /v1/settings/llm`, told "on and serving"
+/// apart from "on and inert". A 500 would be worse — the write did happen and
+/// a restart reaches the same state — so the disposition is reported instead.
+#[tokio::test]
+async fn an_enable_the_router_cannot_load_says_so_on_the_wire() {
+    let h = Harness::new();
+
+    let (status, body) = h.put("anthropic", true).await;
+
+    assert_eq!(status, StatusCode::OK, "the write happened; this is not a failure");
+    assert_eq!(body["id"], "anthropic");
+    assert_eq!(body["enabled"], true, "the file says what the owner asked for");
+    assert_eq!(body["loaded"], false, "and the body says it did not load: {body}");
+    let warning = body["warning"].as_str().unwrap_or_default();
+    assert!(
+        warning.contains("No keys"),
+        "the reason travels with it: {body}"
+    );
+    assert!(
+        !h.service
+            .router()
+            .configured_providers()
+            .contains(&ProviderType::Anthropic)
+    );
 }

@@ -549,6 +549,13 @@ pub async fn get_provider_usage(State(state): State<Arc<AppState>>) -> impl Into
 /// re-registers it and refreshes its models. Disabling the provider that
 /// serves the default model is refused — `409 PROVIDER_IS_DEFAULT` — because
 /// nothing would be left to answer with.
+///
+/// The 200 body is `{id, enabled, loaded, warning}`. `enabled` is the
+/// disposition now on disk; `loaded` is whether the router holds the provider.
+/// An enable that could not register — no usable key, or the provider is not
+/// compiled in — is still a 200, because the write happened and a restart
+/// reaches the same state, but it answers `loaded: false` and carries the
+/// daemon's reason in `warning` rather than leaving it in the log.
 pub async fn set_provider_enabled(
     State(state): State<Arc<AppState>>,
     Path(provider): Path<String>,
@@ -581,6 +588,8 @@ pub(crate) async fn provider_enabled_response(
                 Json(ProviderEnabledResponse {
                     id: outcome.id,
                     enabled: outcome.enabled,
+                    loaded: outcome.loaded,
+                    warning: outcome.warning,
                 }),
             )
                 .into_response()

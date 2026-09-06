@@ -18,6 +18,13 @@ const state = vi.hoisted(() => ({
   providers: {} as Record<string, unknown>,
   calls: [] as Array<{ provider: string; enabled: boolean }>,
   fail: null as Error | null,
+  /** What the daemon answers with; null means "loaded, no warning". */
+  result: null as {
+    id: string;
+    enabled: boolean;
+    loaded: boolean;
+    warning: string | null;
+  } | null,
 }));
 
 vi.mock("@/hooks/useSettings", async (importOriginal) => ({
@@ -37,13 +44,26 @@ vi.mock("@/hooks/useSettings", async (importOriginal) => ({
     mutate: (
       input: { provider: string; enabled: boolean },
       options?: {
-        onSuccess?: (row: { id: string; enabled: boolean }) => void;
+        onSuccess?: (row: {
+          id: string;
+          enabled: boolean;
+          loaded: boolean;
+          warning: string | null;
+        }) => void;
         onError?: (error: Error) => void;
       },
     ) => {
       state.calls.push(input);
       if (state.fail !== null) options?.onError?.(state.fail);
-      else options?.onSuccess?.({ id: input.provider, enabled: input.enabled });
+      else
+        options?.onSuccess?.(
+          state.result ?? {
+            id: input.provider,
+            enabled: input.enabled,
+            loaded: input.enabled,
+            warning: null,
+          },
+        );
     },
   }),
 }));
@@ -68,6 +88,7 @@ beforeEach(() => {
   state.providers = { anthropic: provider(true), ollama: provider(false) };
   state.calls = [];
   state.fail = null;
+  state.result = null;
   useUiStore.setState({ toast: null });
 });
 
@@ -111,6 +132,38 @@ describe("the provider switch", () => {
     expect(useUiStore.getState().toast).toMatch(
       /serves the model you chat with — pick a different model first/,
     );
+  });
+
+  it("says inline when the bit was written but the provider did not load", async () => {
+    // R60: `200 {enabled: true, loaded: false}` — the write happened, the
+    // router has nothing. The switch stays on because the file says so, and
+    // the row has to say the rest out loud rather than leave it in the log.
+    state.result = {
+      id: "anthropic",
+      enabled: true,
+      loaded: false,
+      warning: "No keys for Anthropic, cannot register provider",
+    };
+    state.providers = { anthropic: provider(false) };
+    render(<ModelsSection />);
+
+    await userEvent.click(
+      screen.getByRole("switch", { name: "Enable anthropic" }),
+    );
+
+    expect(screen.getByText(/on, but not loaded/i).textContent).toMatch(
+      /No keys for Anthropic/,
+    );
+  });
+
+  it("carries no such note when the provider did load", async () => {
+    render(<ModelsSection />);
+
+    await userEvent.click(
+      screen.getByRole("switch", { name: "Enable ollama" }),
+    );
+
+    expect(screen.queryByText(/on, but not loaded/i)).toBeNull();
   });
 
   it("no longer carries the gap note that said the switch was dead", () => {

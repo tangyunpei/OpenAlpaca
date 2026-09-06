@@ -58,6 +58,11 @@ pub struct LlmSettingsService {
 pub struct ProviderEnabledOutcome {
     pub id: String,
     pub enabled: bool,
+    /// Whether the router holds the provider now — asked of the router after
+    /// the hot path, not derived from `enabled`. A disable is never loaded;
+    /// an enable is loaded unless registration failed, which is the case
+    /// `warning` explains (R60).
+    pub loaded: bool,
     /// Model ids `deregister_provider` stripped from the registry. Empty on an
     /// enable.
     pub removed_models: Vec<String>,
@@ -788,6 +793,7 @@ impl LlmSettingsService {
         let mut outcome = ProviderEnabledOutcome {
             id: provider.to_string(),
             enabled,
+            loaded: false,
             removed_models: Vec::new(),
             restored_models: 0,
             warning: None,
@@ -808,7 +814,8 @@ impl LlmSettingsService {
                     .model_registry()
                     .reload_from_config(models, &disabled);
             }
-            if let Err(e) = self.register_provider_from_config(&config, provider_type) {
+            if let Err(e) = self.register_provider_from_config(&config, provider_type.clone())
+            {
                 tracing::warn!(provider = %provider, error = %e, "provider enabled in config but not loaded");
                 outcome.warning = Some(e);
             } else {
@@ -822,6 +829,10 @@ impl LlmSettingsService {
                 "provider disabled and unloaded"
             );
         }
+
+        // Asked of the router rather than inferred: this is the one field that
+        // distinguishes "on and serving" from "on and inert".
+        outcome.loaded = self.router.has_provider(&provider_type);
 
         Ok(outcome)
     }
