@@ -20,7 +20,6 @@ export type GapId =
   | "GAP-03"
   | "GAP-06"
   | "GAP-08c"
-  | "GAP-09"
   | "GAP-10"
   | "GAP-13"
   | "GAP-14"
@@ -97,14 +96,11 @@ export const GAPS: Record<GapId, GapDescriptor> = {
     noteOverride:
       "Spend is not capped daily by design — caps are per workflow, so the progress bar has no denominator to draw against",
   },
-  "GAP-09": {
-    id: "GAP-09",
-    label: "Subagent timeline",
-    missingApi: "agent_task_history has no started_at, label, or detail",
-    proposedEndpoint: "GET /v1/tasks/{id}/timeline + a SubagentSpan event",
-    blocks: "The Parallel work swimlanes",
-    fixSize: "L",
-  },
+  // GAP-09 (no subagent timeline) closed with Phase 4: `subagent_span` records
+  // each lane from its spawn — start time, label, template, instance and
+  // detail — `GET /v1/tasks/{id}/timeline` serves them, and the `subagent_span`
+  // event moves the swimlanes live. `blocked` and the interrupted-lane rule
+  // are derived at read time rather than stored, so neither can go stale.
   "GAP-10": {
     id: "GAP-10",
     label: "Per-run event log",

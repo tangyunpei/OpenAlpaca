@@ -2,8 +2,7 @@ import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { laneColor, showsPending } from "@/components/ui";
-import type { TaskTimeline, TimelineLane } from "@/lib/api/unbacked";
-import { available, unavailable } from "@/lib/unavailable";
+import type { TaskTimeline, TimelineLane } from "@/lib/api/tasks";
 
 import {
   axisLabels,
@@ -106,32 +105,39 @@ describe("axisLabels", () => {
 });
 
 describe("ParallelWorkBlock", () => {
-  it("names the missing route instead of drawing empty lanes (GAP-09)", () => {
-    render(<ParallelWorkBlock timeline={unavailable("GAP-09")} />);
-    expect(screen.getByText("Parallel work")).toBeInTheDocument();
-    expect(
-      screen.getByText(/Subagent timeline not yet available/i),
-    ).toBeInTheDocument();
-  });
-
-  it("renders one labelled lane per span when the route exists", () => {
+  it("renders one labelled lane per span", () => {
     render(
       <ParallelWorkBlock
-        timeline={available(
-          timeline([
-            lane(),
-            lane({ lane_id: "l2", label: "review·3", state: "blocked" }),
-          ]),
-        )}
+        timeline={timeline([
+          lane(),
+          lane({ lane_id: "l2", label: "review·3", state: "blocked" }),
+        ])}
       />,
     );
+    expect(screen.getByText("Parallel work")).toBeInTheDocument();
     expect(screen.getByText("explore·1")).toBeInTheDocument();
     expect(screen.getByText("review·3")).toBeInTheDocument();
     expect(screen.queryByText(/not yet available/i)).not.toBeInTheDocument();
   });
 
   it("says so plainly when the run has no spans at all", () => {
-    render(<ParallelWorkBlock timeline={available(timeline([]))} />);
+    render(<ParallelWorkBlock timeline={timeline([])} />);
     expect(screen.getByText("No subagent spans yet.")).toBeInTheDocument();
+  });
+
+  it("shows the same empty line while the timeline is still loading", () => {
+    // `null` is "not here yet", never an invented lane.
+    render(<ParallelWorkBlock timeline={null} />);
+    expect(screen.getByText("Parallel work")).toBeInTheDocument();
+    expect(screen.getByText("No subagent spans yet.")).toBeInTheDocument();
+  });
+
+  it("draws an in-flight lane, which is what the route added", () => {
+    render(
+      <ParallelWorkBlock
+        timeline={timeline([lane({ ended_at: null, state: "running" })])}
+      />,
+    );
+    expect(screen.getByText("explore·1")).toBeInTheDocument();
   });
 });

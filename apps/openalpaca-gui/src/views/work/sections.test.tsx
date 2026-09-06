@@ -7,78 +7,66 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import type { TaskAgentAssignment } from "@/lib/api/types";
 import type { OutcomeArtifact } from "@/components/work/run-model";
+import type { TaskTimeline } from "@/lib/api/tasks";
 import type { RunEvent } from "@/lib/api/unbacked";
-import { available, unavailable } from "@/lib/unavailable";
 
 import { EventLogSection, EVENT_LOG_EMPTY } from "./EventLogSection";
 import { OutputSection, OUTPUT_EMPTY } from "./OutputSection";
 import { TimelineSection, TIMELINE_EMPTY } from "./TimelineSection";
 
-const assignment = (
-  patch: Partial<TaskAgentAssignment> = {},
-): TaskAgentAssignment => ({
-  id: "h1",
+const timeline = (lanes: TaskTimeline["lanes"]): TaskTimeline => ({
   task_id: "b41",
-  agent_id: "explore_agent_1",
-  role: "explore",
-  status: "completed",
-  runtime_seconds: 42,
-  completed_at: "2026-08-31T14:27:41Z",
-  ...patch,
+  started_at: "2026-08-31T14:22:41Z",
+  now: "2026-08-31T14:32:41Z",
+  completed_at: null,
+  lanes,
 });
 
-describe("TimelineSection (GAP-09)", () => {
-  it("shows the design's empty copy and names the proposed route", () => {
-    render(
-      <TimelineSection timeline={unavailable("GAP-09")} assignments={[]} />,
-    );
+describe("TimelineSection", () => {
+  it("shows the design's empty copy while the timeline is loading", () => {
+    render(<TimelineSection timeline={null} />);
     expect(screen.getByText("Timeline")).toBeInTheDocument();
     expect(screen.getByText(TIMELINE_EMPTY)).toBeInTheDocument();
-    expect(
-      screen.getByText(/\/v1\/tasks\/\{id\}\/timeline/),
-    ).toBeInTheDocument();
   });
 
-  it("falls back to the agent runs the daemon does serve, clearly labelled", () => {
-    render(
-      <TimelineSection
-        timeline={unavailable("GAP-09")}
-        assignments={[assignment()]}
-      />,
-    );
-    expect(screen.getByText("explore")).toBeInTheDocument();
-    expect(screen.getByText("explore_agent_1")).toBeInTheDocument();
-    expect(screen.getByText(/42s · completed/)).toBeInTheDocument();
-    expect(screen.getByText(/Agent runs, not a timeline/)).toBeInTheDocument();
+  it("shows the same copy for a run that spawned nothing", () => {
+    render(<TimelineSection timeline={timeline([])} />);
+    expect(screen.getByText(TIMELINE_EMPTY)).toBeInTheDocument();
   });
 
-  it("draws the real swimlanes once a timeline exists", () => {
+  it("draws the real swimlanes, in-flight lane included", () => {
     render(
       <TimelineSection
-        timeline={available({
-          task_id: "b41",
-          started_at: "2026-08-31T14:22:41Z",
-          now: "2026-08-31T14:32:41Z",
-          completed_at: null,
-          lanes: [
-            {
-              lane_id: "l1",
-              label: "lead",
-              template_id: "lead_agent",
-              agent_instance_id: "a1",
-              started_at: "2026-08-31T14:22:41Z",
-              ended_at: null,
-              state: "running",
-              detail: null,
-            },
-          ],
-        })}
-        assignments={[]}
+        timeline={timeline([
+          {
+            lane_id: "l1",
+            label: "lead·1",
+            template_id: "lead_agent",
+            agent_instance_id: "a1",
+            started_at: "2026-08-31T14:22:41Z",
+            ended_at: null,
+            state: "running",
+            detail: null,
+          },
+          {
+            lane_id: "l2",
+            label: "review·1",
+            template_id: "review_agent",
+            agent_instance_id: "a2",
+            started_at: "2026-08-31T14:24:00Z",
+            ended_at: null,
+            state: "blocked",
+            detail: "waiting on shell_execute",
+          },
+        ])}
+        blocked
       />,
     );
-    expect(screen.getByText("lead")).toBeInTheDocument();
+    expect(screen.getByText("lead·1")).toBeInTheDocument();
+    expect(screen.getByText("review·1")).toBeInTheDocument();
+    expect(screen.getByText("waiting on shell_execute")).toBeInTheDocument();
+    expect(screen.queryByText(TIMELINE_EMPTY)).not.toBeInTheDocument();
     expect(screen.queryByText(/not yet available/)).not.toBeInTheDocument();
   });
 });

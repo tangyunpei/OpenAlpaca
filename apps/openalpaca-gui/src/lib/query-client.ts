@@ -65,6 +65,12 @@ export function invalidationKeysFor(
     case "artifact_written":
       return [qk.artifacts.all()];
 
+    // A lane opened or closed: this run's timeline changed, and nothing else.
+    // Not `qk.tasks.all()` — a run with eight subagents would re-list every
+    // task sixteen times over its life.
+    case "subagent_span":
+      return [qk.tasks.timeline(event.task_id)];
+
     case "chat_stream_ended":
       return [qk.chat.all(), qk.conversations.all()];
 

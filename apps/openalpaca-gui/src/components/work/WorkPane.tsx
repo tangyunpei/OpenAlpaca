@@ -29,7 +29,7 @@ import { useMemo } from "react";
 
 import { PaneHeader } from "@/components/ui";
 import { useTasks } from "@/hooks/useTasks";
-import { useTaskTimeline } from "@/hooks/useUnbacked";
+import { useTaskTimeline } from "@/hooks/useTasks";
 import { Button } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import { useUiStore } from "@/stores/ui";
@@ -166,9 +166,9 @@ interface RunCardSlotProps {
 }
 
 /**
- * One card, so the per-run timeline hook has a component to live in. It is
- * `unavailable` for every run today (GAP-09), but as a hook it becomes a real
- * per-run query the moment the route exists — no restructuring.
+ * One card, so the per-run timeline hook has a component to live in: each card
+ * runs its own `GET /v1/tasks/{id}/timeline` query, which the run's own
+ * `subagent_span` frames invalidate.
  */
 function RunCardSlot({
   run,
@@ -185,7 +185,7 @@ function RunCardSlot({
   return (
     <RunCard
       run={run}
-      timeline={timeline}
+      timeline={timeline.data ?? null}
       dense={dense}
       blocked={blocked}
       busy={controller.busyFor(run.id)}

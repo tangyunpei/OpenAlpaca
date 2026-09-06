@@ -22,8 +22,7 @@ import {
   StatusLabel,
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
-import type { TaskTimeline } from "@/lib/api/unbacked";
-import type { Availability } from "@/lib/unavailable";
+import type { TaskTimeline } from "@/lib/api/tasks";
 
 import { ParallelWorkBlock } from "./ParallelWork";
 import { RunActionBar, TerminalRunRow } from "./RunActionBar";
@@ -44,8 +43,8 @@ const MAX_FILE_ROWS = 4;
 
 export interface RunCardProps {
   run: Run;
-  /** GAP-09 today; the `available` branch is drawn all the same. */
-  timeline: Availability<TaskTimeline>;
+  /** `null` while the run's timeline is loading, or if the read failed. */
+  timeline: TaskTimeline | null;
   /** This run holds the pending tool confirmation. */
   blocked?: boolean;
   dense?: boolean;

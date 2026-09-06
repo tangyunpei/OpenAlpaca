@@ -37,8 +37,7 @@ import {
 import { toFileKind } from "@/components/ui";
 import { useArtifacts } from "@/hooks/useArtifacts";
 import { useEventRing } from "@/hooks/useDaemonEvents";
-import { useTask } from "@/hooks/useTasks";
-import { useTaskTimeline } from "@/hooks/useUnbacked";
+import { useTask, useTaskTimeline } from "@/hooks/useTasks";
 import { isLive } from "@/components/ui";
 import { useUiStore } from "@/stores/ui";
 
@@ -46,7 +45,7 @@ import { formatClock } from "@/components/work/run-model";
 
 import { EventLogSection } from "./EventLogSection";
 import { OutputSection } from "./OutputSection";
-import { TimelineSection, type RunAssignment } from "./TimelineSection";
+import { TimelineSection } from "./TimelineSection";
 
 export interface RunDetailProps {
   runId: string | null;
@@ -83,11 +82,6 @@ export function RunDetail({
       .join(" · ");
     return { ...detailRun, costUsd, meta };
   }, [task, fallbackRun]);
-
-  const assignments = useMemo<RunAssignment[]>(
-    () => detail.data?.assignments ?? [],
-    [detail.data],
-  );
 
   const events = useMemo(
     () => (runId === null ? [] : runEventsFromRing(ring, runId)),
@@ -176,11 +170,7 @@ export function RunDetail({
         </>
       )}
 
-      <TimelineSection
-        timeline={timeline}
-        assignments={assignments}
-        blocked={blocked}
-      />
+      <TimelineSection timeline={timeline.data ?? null} blocked={blocked} />
       <OutputSection
         artifacts={outputs ?? run.artifacts}
         count={run.artifactCount}

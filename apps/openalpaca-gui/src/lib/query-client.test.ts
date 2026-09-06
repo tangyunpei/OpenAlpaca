@@ -136,6 +136,17 @@ describe("invalidationKeysFor", () => {
     ).toEqual([qk.artifacts.all()]);
   });
 
+  // Phase 4: a lane transition changes this run's timeline and nothing else.
+  // A run with eight subagents fires sixteen of these over its life, so
+  // invalidating `tasks.all()` here would re-list every run sixteen times.
+  it("refreshes only the timeline of the run whose lane moved", () => {
+    expect(
+      invalidationKeysFor(
+        event("subagent_span", { task_id: "run-1", span_id: "node-1" }),
+      ),
+    ).toEqual([qk.tasks.timeline("run-1")]);
+  });
+
   it("invalidates nothing for a frame this build does not know", () => {
     expect(
       invalidationKeysFor({

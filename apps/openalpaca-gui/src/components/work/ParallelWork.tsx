@@ -3,13 +3,10 @@
  * compact block inside a run card and the wide block inside the work detail's
  * Timeline card.
  *
- * Nothing serves this today. `agent_task_history` records an agent, a role, a
- * status and a runtime — but no `started_at` — so not even a finished span can
- * be placed on an axis, and there is no per-subagent progress event (GAP-09).
- * Both sizes therefore render the real component against the adapter and, when
- * it says unavailable, show the design's copy plus the proposed route. The
- * `available` branch is written out in full so the day the route lands the
- * views do not change.
+ * `GET /v1/tasks/{id}/timeline` serves this (Phase 4): one `subagent_span` per
+ * lane, opened at the spawn rather than written at completion, so a lane that
+ * is still working has a start and no end instead of no row at all. A run with
+ * no lanes yet renders the design's own empty sentence — never invented bars.
  *
  * The red→green coupling of §4.4 lives in `LaneBar` and is driven from here by
  * one `blocked` flag: a `block` lane is red with an amber pending hatch only
@@ -24,8 +21,7 @@
 
 import { Eyebrow, LaneAxis, LaneBar, type Lane } from "@/components/ui";
 import { cn } from "@/lib/cn";
-import type { TaskTimeline, TimelineLane } from "@/lib/api/unbacked";
-import { isAvailable, type Availability } from "@/lib/unavailable";
+import type { TaskTimeline, TimelineLane } from "@/lib/api/tasks";
 
 import { formatClock, parseTimestamp } from "./run-model";
 
@@ -104,7 +100,8 @@ export function axisLabels(
 // ── Compact: the run card's Parallel work block (§3.19) ─────────────────────
 
 export interface ParallelWorkBlockProps {
-  timeline: Availability<TaskTimeline>;
+  /** `null` while the run's timeline is loading, or if the read failed. */
+  timeline: TaskTimeline | null;
   /** This run holds the pending tool confirmation. */
   blocked?: boolean;
   className?: string;
@@ -115,7 +112,7 @@ export function ParallelWorkBlock({
   blocked = false,
   className,
 }: ParallelWorkBlockProps) {
-  const lanes = isAvailable(timeline) ? lanesFromTimeline(timeline.data) : [];
+  const lanes = timeline === null ? [] : lanesFromTimeline(timeline);
 
   return (
     <div
@@ -126,7 +123,7 @@ export function ParallelWorkBlock({
         <Eyebrow tone="faint">now →</Eyebrow>
       </div>
 
-      {isAvailable(timeline) && lanes.length > 0 ? (
+      {lanes.length > 0 ? (
         <div className="flex flex-col gap-[6px]">
           {lanes.map((lane) => (
             <LaneBar
@@ -139,7 +136,7 @@ export function ParallelWorkBlock({
         </div>
       ) : (
         <p className="m-0 font-mono text-2xs-plus leading-[1.5] text-faint">
-          {isAvailable(timeline) ? "No subagent spans yet." : timeline.reason}
+          No subagent spans yet.
         </p>
       )}
     </div>

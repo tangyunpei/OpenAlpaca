@@ -195,6 +195,90 @@ describe("DaemonEventsClient", () => {
     client.disconnect();
   });
 
+  // Phase 4. Narrowing on `type` proves the union member exists with the right
+  // field types; `bun run check` fails if any of these reads is wrong.
+  it("carries a subagent_span open through with its own fields", async () => {
+    const client = makeClient();
+    const seen: ServerEvent[] = [];
+    client.onEvent((event) => seen.push(event));
+    await client.connect();
+
+    const socket = latest();
+    socket.onopen?.({});
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "subagent_span",
+        task_id: "b41",
+        span_id: "node-1",
+        label: "review\u00b71",
+        template_id: "review_agent",
+        agent_instance_id: "review_agent::a1b2",
+        state: "running",
+        detail: null,
+        started_at: "2026-09-05T10:00:00.000Z",
+        ended_at: null,
+        duration_ms: null,
+        output_preview: null,
+        ts: "2026-09-05T10:00:00Z",
+        instance_id: "7f3a",
+      }),
+    });
+
+    const event = seen[0];
+    if (event?.type !== "subagent_span") {
+      throw new Error(`expected subagent_span, got ${event?.type}`);
+    }
+    expect(event.task_id).toBe("b41");
+    expect(event.span_id).toBe("node-1");
+    expect(event.label).toBe("review\u00b71");
+    expect(event.template_id).toBe("review_agent");
+    expect(event.agent_instance_id).toBe("review_agent::a1b2");
+    expect(event.state).toBe("running");
+    expect(event.started_at).toBe("2026-09-05T10:00:00.000Z");
+    expect(event.ended_at).toBeNull();
+    expect(event.duration_ms).toBeNull();
+    client.disconnect();
+  });
+
+  it("carries a subagent_span close, cancellation and all", async () => {
+    const client = makeClient();
+    const seen: ServerEvent[] = [];
+    client.onEvent((event) => seen.push(event));
+    await client.connect();
+
+    const socket = latest();
+    socket.onopen?.({});
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "subagent_span",
+        task_id: "b41",
+        span_id: "node-1",
+        label: "review\u00b71",
+        template_id: "review_agent",
+        agent_instance_id: "review_agent::a1b2",
+        state: "cancelled",
+        detail: "cancelled before starting",
+        started_at: "2026-09-05T10:00:00.000Z",
+        ended_at: "2026-09-05T10:00:04.500Z",
+        duration_ms: 4500,
+        output_preview: "partial",
+        ts: "2026-09-05T10:00:04Z",
+        instance_id: "7f3a",
+      }),
+    });
+
+    const event = seen[0];
+    if (event?.type !== "subagent_span") {
+      throw new Error(`expected subagent_span, got ${event?.type}`);
+    }
+    expect(event.state).toBe("cancelled");
+    expect(event.detail).toBe("cancelled before starting");
+    expect(event.ended_at).toBe("2026-09-05T10:00:04.500Z");
+    expect(event.duration_ms).toBe(4500);
+    expect(event.output_preview).toBe("partial");
+    client.disconnect();
+  });
+
   it("drops frames that are not tagged ServerEvents", async () => {
     const client = makeClient();
     await client.connect();

@@ -60,6 +60,11 @@ export type ServerEvent =
   // `path` its absolute location; `task_id`/`agent_id` are null for a loose
   // artifact — a chat turn that ran no workflow. Never fired for uploads.
   | { type: "artifact_written"; artifact_id: string; task_id: string | null; agent_id: string | null; name: string; kind: string; version: number; path: string; ts: string; instance_id: string; _id: number }
+  // One subagent lane of a run opening or closing (GAP-09). The payload is the
+  // `subagent_span` row, so `started_at`/`ended_at` are the same strings
+  // `GET /v1/tasks/{id}/timeline` serves. `state` is never `"blocked"` here —
+  // that one is derived at read time from the pending confirmations.
+  | { type: "subagent_span"; task_id: string; span_id: string; label: string; template_id: string; agent_instance_id: string; state: string; detail: string | null; started_at: string; ended_at: string | null; duration_ms: number | null; output_preview: string | null; ts: string; instance_id: string; _id: number }
   // The extension family (ADR-030) — the only lifecycle events there are since
   // C7 deleted the six `plugin_*` variants with `/v1/plugins*`. Every one of
   // these carries `ts` and `instance_id`, which is what the deleted six lacked

@@ -2,12 +2,18 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { unavailable } from "@/lib/unavailable";
+import type { TaskTimeline } from "@/lib/api/tasks";
 
 import { RunCard } from "./RunCard";
 import type { Run } from "./run-model";
 
-const TIMELINE = unavailable("GAP-09");
+const TIMELINE: TaskTimeline = {
+  task_id: "b41c8e02",
+  started_at: "2026-08-31T14:22:41Z",
+  now: "2026-08-31T14:32:41Z",
+  completed_at: null,
+  lanes: [],
+};
 
 const run = (patch: Partial<Run> = {}): Run => ({
   id: "b41c8e02",

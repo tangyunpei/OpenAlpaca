@@ -80,6 +80,15 @@ beforeEach(() => {
       const url = String(input);
       requested.push(url);
       if (url.includes("/v1/artifacts")) return artifactsReply();
+      if (url.includes("/timeline")) {
+        return json({
+          task_id: "task-1",
+          started_at: "2026-08-31T14:22:41Z",
+          now: "2026-08-31T14:32:41Z",
+          completed_at: null,
+          lanes: [],
+        });
+      }
       if (url.includes("/v1/tasks/")) return json({ task, assignments: [] });
       return json({ error: "not found" }, 404);
     }),

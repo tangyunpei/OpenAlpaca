@@ -28,41 +28,13 @@ import type { ChatSendResponse } from "./types";
 // in `api/artifacts.ts`, fetched by real functions there. What was GAP-04 and
 // GAP-05 is served — list, row, content, versions, diff and pin.
 
-// ── Subagent timeline (GAP-09) ──────────────────────────────────────────────
-
-export type TimelineLaneState =
-  "running" | "done" | "failed" | "blocked" | "cancelled";
-
-export interface TimelineLane {
-  lane_id: string;
-  label: string;
-  template_id: string;
-  agent_instance_id: string;
-  started_at: string;
-  ended_at: string | null;
-  state: TimelineLaneState;
-  detail: string | null;
-  steps_current?: number;
-  steps_total?: number;
-}
-
-export interface TaskTimeline {
-  task_id: string;
-  started_at: string;
-  now: string;
-  completed_at: string | null;
-  lanes: TimelineLane[];
-}
-
-/**
- * GAP-09 — the Parallel work swimlanes. `agent_task_history` has no
- * `started_at`, so even finished spans cannot be placed on an axis, and
- * `dag_node_status` is dead under the lead-agent topology.
- */
-export function getTaskTimeline(_taskId: string): Availability<TaskTimeline> {
-  void _taskId;
-  return unavailable("GAP-09");
-}
+// The subagent timeline left this file when Phase 4 landed
+// `GET /v1/tasks/{id}/timeline`: `TimelineLane`, `TimelineLaneState` and
+// `TaskTimeline` are now wire types in `api/tasks.ts`, fetched by a real
+// function there. What was GAP-09 is served — `subagent_span` records each
+// lane from its spawn, so an *in-flight* lane is visible, which is what
+// `agent_task_history` (written only at completion, with no start time) could
+// never do.
 
 // ── Per-run event log (GAP-10) ──────────────────────────────────────────────
 

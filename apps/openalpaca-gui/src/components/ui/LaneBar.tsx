@@ -8,9 +8,10 @@
  * consequences — so `blocked` is a prop of the lane row, never baked into the
  * lane data.
  *
- * `start`/`end` are percentages of the run's wall clock. They are clamped here
- * because they come from a timeline the daemon does not serve yet (GAP-09) and
- * an out-of-range value must not paint outside the track.
+ * `start`/`end` are percentages of the run's wall clock, computed from the
+ * daemon's span times. They are clamped here because a lane that started
+ * before the run's own `created_at`, or one still running past `now`, must not
+ * paint outside the track.
  */
 
 import { cn } from "@/lib/cn";

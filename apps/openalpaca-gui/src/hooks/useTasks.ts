@@ -10,9 +10,11 @@ import {
 
 import {
   getTask,
+  getTaskTimeline,
   listTasks,
   performTaskAction,
   type ListTasksQuery,
+  type TaskTimeline,
 } from "@/lib/api/tasks";
 import type {
   Task,
@@ -37,6 +39,28 @@ export function useTask(id: string | null): UseQueryResult<TaskDetailResponse> {
     queryKey: qk.tasks.detail(id ?? ""),
     queryFn: ({ signal }) => getTask(id as string, signal),
     enabled: id !== null,
+  });
+}
+
+/**
+ * `GET /v1/tasks/{id}/timeline` — the Parallel work swimlanes.
+ *
+ * A live run's lanes move on every spawn and every completion, which arrive as
+ * `subagent_span` frames; those invalidate `qk.tasks.timeline(id)`
+ * (`lib/query-client.ts`), so this needs no polling. `blocked` is derived
+ * server-side from what is pending *right now*, so a stale cache would show a
+ * lane waiting on a prompt that was already answered — hence the short
+ * `staleTime`, which is the floor for the refetch a `tool_confirmation`
+ * resolution triggers by other means.
+ */
+export function useTaskTimeline(
+  id: string | null,
+): UseQueryResult<TaskTimeline> {
+  return useQuery({
+    queryKey: qk.tasks.timeline(id ?? ""),
+    queryFn: ({ signal }) => getTaskTimeline(id as string, signal),
+    enabled: id !== null && id !== "",
+    staleTime: 5_000,
   });
 }
 

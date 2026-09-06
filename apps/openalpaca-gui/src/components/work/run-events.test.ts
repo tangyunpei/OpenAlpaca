@@ -77,13 +77,45 @@ const RING: ServerEvent[] = [
     _id: 9,
     ...base,
   },
+  {
+    type: "subagent_span",
+    task_id: "b41",
+    span_id: "node-1",
+    label: "review·1",
+    template_id: "review_agent",
+    agent_instance_id: "review_agent::a1b2",
+    state: "done",
+    detail: null,
+    started_at: "2026-08-31T14:22:41.000Z",
+    ended_at: "2026-08-31T14:27:41.000Z",
+    duration_ms: 300000,
+    output_preview: "all clear",
+    _id: 10,
+    ...base,
+  },
+  {
+    type: "subagent_span",
+    task_id: "other-run",
+    span_id: "node-2",
+    label: "review·1",
+    template_id: "review_agent",
+    agent_instance_id: "review_agent::c3d4",
+    state: "running",
+    detail: null,
+    started_at: "2026-08-31T14:22:41.000Z",
+    ended_at: null,
+    duration_ms: null,
+    output_preview: null,
+    _id: 11,
+    ...base,
+  },
 ];
 
 describe("runEventsFromRing", () => {
   const events = runEventsFromRing(RING, "b41", 10);
 
   it("keeps only the events that carry this task id", () => {
-    expect(events.map((event) => event.id)).toEqual([8, 4, 3, 2, 1]);
+    expect(events.map((event) => event.id)).toEqual([10, 8, 4, 3, 2, 1]);
   });
 
   // T28 — the first `ServerEvent` that carries both a run and a deliverable,
@@ -96,6 +128,18 @@ describe("runEventsFromRing", () => {
 
   it("drops a loose artifact, which belongs to no run", () => {
     expect(events.some((event) => event.id === 9)).toBe(false);
+  });
+
+  // Phase 4 — a lane transition names the lane, not the objective, so it lines
+  // up with the Timeline card directly above the log.
+  it("tags a lane transition as `spawn` and names it by label and state", () => {
+    const span = events.find((event) => event.id === 10);
+    expect(span?.tag).toBe("spawn");
+    expect(span?.text).toBe("review·1 · done");
+  });
+
+  it("drops another run's lane, even though the label repeats per run", () => {
+    expect(events.some((event) => event.id === 11)).toBe(false);
   });
 
   it("drops tool events, which carry an agent id and no task id (GAP-10)", () => {

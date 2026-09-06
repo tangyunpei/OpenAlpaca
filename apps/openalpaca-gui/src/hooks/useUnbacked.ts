@@ -7,7 +7,9 @@
  * substitute invented rows.
  *
  * When a route lands, the hook body swaps to a `useQuery` and the view keeps
- * its `available` branch unchanged.
+ * its `available` branch unchanged — which is exactly what happened to the
+ * subagent timeline in Phase 4: `useTaskTimeline` is a real query in
+ * `useTasks` now that `GET /v1/tasks/{id}/timeline` exists.
  *
  * Only the gaps a view actually renders through get a hook. Three others —
  * steering (GAP-02), follow-ups (GAP-03) and re-run/start (GAP-06) — are
@@ -21,18 +23,9 @@ import { useMemo } from "react";
 
 import {
   getDaemonStatusDetail,
-  getTaskTimeline,
   type DaemonStatusDetail,
-  type TaskTimeline,
 } from "@/lib/api/unbacked";
 import { type Availability } from "@/lib/unavailable";
-
-/** GAP-09 — the Parallel work swimlanes. */
-export function useTaskTimeline(
-  taskId: string | null,
-): Availability<TaskTimeline> {
-  return useMemo(() => getTaskTimeline(taskId ?? ""), [taskId]);
-}
 
 /** GAP-14 — uptime, `Schema vNN`, `Copy log path`. */
 export function useDaemonStatusDetail(): Availability<DaemonStatusDetail> {
