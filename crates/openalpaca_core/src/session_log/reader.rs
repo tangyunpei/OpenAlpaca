@@ -166,10 +166,12 @@ pub fn read_records_after(
 ///   carries their range, so `log.<first>-<last>.jsonl` with `last <=
 ///   after_seq` is skipped whole. Without it, draining a log costs
 ///   O(records so far) per page — O(n²) overall.
-/// * **A line's seq is found with a byte search before it is parsed.** The
-///   envelope puts `seq` second, so the first `"seq":` in the line is the
-///   record's own; a line the cursor has already seen costs a scan, not a
-///   `serde_json` parse of a 64 KB envelope.
+/// * **A line's seq is found by a byte scan before it is parsed.** A line the
+///   cursor has already seen costs one pass over its bytes, not a
+///   `serde_json` parse of a 64 KB envelope. The scan is depth-aware
+///   ([`scan_seq`]) — it returns the *top-level* `seq` and never a payload's,
+///   whatever order the keys are in — and any doubt falls through to the
+///   parse, which is the authority either way.
 ///
 /// `max_bytes` bounds the page by the raw bytes of the records it returns —
 /// 500 records of 64 KB envelopes is a ~32 MB response, which a record count
@@ -241,22 +243,87 @@ fn skip_segment(path: &Path, after_seq: Option<u64>) -> bool {
 
 /// The envelope's `seq`, found by scanning the raw line.
 ///
-/// The writer emits `{"v":…,"seq":…,` so the first `"seq":` is the record's
-/// own — every other seq-ish key in the log (`from_seq`, `to_seq`, `log_seq`,
-/// `preserved_from_seq`) has a `_` where this needle has its opening quote.
-/// `None` means "cannot tell cheaply", and the caller parses.
-fn scan_seq(line: &[u8]) -> Option<u64> {
-    const NEEDLE: &[u8] = b"\"seq\":";
-    let at = line
-        .windows(NEEDLE.len())
-        .position(|window| window == NEEDLE)?
-        + NEEDLE.len();
-    let digits: &[u8] = &line[at..];
-    let end = digits.iter().position(|b| !b.is_ascii_digit())?;
-    if end == 0 {
+/// It cannot simply take the first `"seq":`: a `tool_call`'s `data.input` is
+/// the model's own JSON for an arbitrary tool schema, so a payload `seq` (a
+/// cursor, a page, a message id) is both reachable and partly model-chosen —
+/// and lines written before [`Envelope`](super::record) became a struct put
+/// `data` *before* the envelope's `seq`, lexicographically. Taking the wrong
+/// one drops the record from the page and from every later page.
+///
+/// So the scan is depth-aware: it walks the line once, tracking string state
+/// (an escaped quote is text, not a delimiter) and brace/bracket depth, and
+/// returns the value of a `seq` key at **depth 1** only — the top-level
+/// object's own. Everything deeper is payload and is ignored, whatever order
+/// the keys are in.
+///
+/// `None` means "cannot tell cheaply" — a truncated line, a non-numeric or
+/// absent top-level `seq`, unbalanced delimiters — and the caller falls back
+/// to the authoritative `serde_json` parse.
+pub(super) fn scan_seq(line: &[u8]) -> Option<u64> {
+    let mut depth = 0usize;
+    let mut at = 0usize;
+    while at < line.len() {
+        match line[at] {
+            b'{' | b'[' => {
+                depth += 1;
+                at += 1;
+            }
+            b'}' | b']' => {
+                // More closers than openers: the line is not what we think.
+                depth = depth.checked_sub(1)?;
+                at += 1;
+            }
+            b'"' => {
+                let (token, after) = scan_string(line, at)?;
+                at = after;
+                // A string is a key only when a `:` follows it.
+                let colon = skip_ws(line, at);
+                if line.get(colon) != Some(&b':') {
+                    continue;
+                }
+                at = colon + 1;
+                if depth == 1 && token == b"seq" {
+                    return scan_u64(line, skip_ws(line, at));
+                }
+            }
+            _ => at += 1,
+        }
+    }
+    None
+}
+
+/// The contents of the JSON string starting at `open` (which must be its
+/// quote), and the index just past its closing quote. `None` if it never
+/// closes — a torn final line, which is end-of-log, not a seq.
+fn scan_string(line: &[u8], open: usize) -> Option<(&[u8], usize)> {
+    let start = open + 1;
+    let mut at = start;
+    loop {
+        match *line.get(at)? {
+            // `\"` is a quote in the text, and `\\` is a backslash: either
+            // way the next byte cannot close the string.
+            b'\\' => at += 2,
+            b'"' => return Some((&line[start..at], at + 1)),
+            _ => at += 1,
+        }
+    }
+}
+
+fn skip_ws(line: &[u8], mut at: usize) -> usize {
+    while line.get(at).is_some_and(u8::is_ascii_whitespace) {
+        at += 1;
+    }
+    at
+}
+
+/// The unsigned integer at `at`, or `None` if there isn't one (`null`, a
+/// float, a negative, an overflow).
+fn scan_u64(line: &[u8], at: usize) -> Option<u64> {
+    let end = at + line[at..].iter().position(|b| !b.is_ascii_digit())?;
+    if end == at {
         return None;
     }
-    std::str::from_utf8(&digits[..end]).ok()?.parse().ok()
+    std::str::from_utf8(&line[at..end]).ok()?.parse().ok()
 }
 
 fn parse_record(line: &str) -> Result<LoggedRecord, serde_json::Error> {

@@ -643,6 +643,71 @@ async fn the_event_log_page_stops_at_its_byte_budget() {
     assert_eq!(body["events"][0]["seq"], events.len() as u64 + 1);
 }
 
+/// R55: paging never skips a record whose *payload* carries a `seq`.
+///
+/// A `tool_call`'s `data.input` is the model's own JSON for whatever tool it
+/// called, so `{"seq": 3}` is an ordinary argument (a cursor, a page, a
+/// message id) — and the cursor's cheap pre-scan used to take the first
+/// `"seq":` in the line. Records at seq > 3 then vanished from their page and
+/// from every later page: a silent, permanent hole in the stream a GUI polls.
+/// Both line shapes are exercised — the writer's order and the lexicographic
+/// order the log already holds from before the envelope became a struct.
+#[tokio::test]
+async fn the_event_log_pages_past_a_payload_seq_without_skipping_a_record() {
+    let h = Harness::new();
+    let session = h
+        .repo()
+        .get_or_create_active_session(LANE, "gui", None)
+        .expect("session");
+
+    let payload = serde_json::json!({"tool_use_id": "toolu_01", "input": {"seq": 3}});
+    let lines: Vec<String> = (1..=25)
+        .map(|seq| {
+            if seq % 2 == 1 {
+                // The writer's order: `v`, `seq`, then the rest.
+                format!(
+                    r#"{{"v":1,"seq":{seq},"ts":"2026-09-05T10:22:03.114Z","type":"tool_call","data":{payload}}}"#
+                )
+            } else {
+                // The lexicographic order a `serde_json::Map` produced, where
+                // `data` precedes the envelope's own `seq`.
+                serde_json::to_string(&serde_json::json!({
+                    "v": 1,
+                    "seq": seq,
+                    "ts": "2026-09-05T10:22:03.114Z",
+                    "type": "tool_call",
+                    "data": payload,
+                }))
+                .expect("an object of owned values cannot fail to serialise")
+            }
+        })
+        .collect();
+    write_log(&h, &session.id, &lines.iter().map(String::as_str).collect::<Vec<_>>());
+
+    let mut seen: Vec<u64> = Vec::new();
+    let mut cursor: Option<u64> = None;
+    for _ in 0..10 {
+        let (status, body) = split(get_session_events(
+            &h.deps(),
+            &session.id,
+            SessionEventsQuery { after_seq: cursor, limit: Some(6), ..Default::default() },
+        ))
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let events = body["events"].as_array().expect("events").clone();
+        if events.is_empty() {
+            break;
+        }
+        seen.extend(events.iter().map(|e| e["seq"].as_u64().expect("seq")));
+        cursor = body["next_after_seq"].as_u64();
+    }
+    assert_eq!(
+        seen,
+        (1..=25).collect::<Vec<u64>>(),
+        "every record must appear exactly once, in order"
+    );
+}
+
 /// A session that has never written a record has no directory (P-22) — an
 /// empty page, not a 404 and not an error.
 #[tokio::test]

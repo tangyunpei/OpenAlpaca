@@ -1127,6 +1127,247 @@ fn a_page_stops_at_its_byte_budget_and_still_answers_a_cursor() {
     assert_eq!(read_records_page(&session, None, 500, usize::MAX).unwrap().len(), 40);
 }
 
+// ── The cursor's cheap seq (R55) ────────────────────────────────────
+
+/// A record whose payload carries a `seq` of its own — the shape the model
+/// produces whenever it calls a tool with a `seq` argument (a cursor, a page,
+/// a message id), which no schema forbids.
+fn tool_call_with_a_payload_seq(payload_seq: u64) -> Record {
+    Record::new(RecordType::ToolCall)
+        .task(Some("task-1"))
+        .span(Some("span-1"))
+        .agent(Some("lead_agent::a1b2c3d4"))
+        .with_data(serde_json::json!({
+            "tool_use_id": "toolu_01",
+            "name": "list_messages",
+            "input": {"seq": payload_seq, "limit": 20},
+        }))
+}
+
+/// The same envelope, serialised the way a `serde_json::Map` used to serialise
+/// it — lexicographically, `agent` … `data` … `seq` — which is what every line
+/// already on disk looks like.
+fn legacy_ordered_line(seq: u64, data: serde_json::Value) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "v": 1,
+        "seq": seq,
+        "ts": "2026-09-05T10:22:03.114Z",
+        "type": "tool_call",
+        "task_id": "task-1",
+        "span_id": "span-1",
+        "agent": "lead_agent::a1b2c3d4",
+        "data": data,
+    }))
+    .expect("an object of owned values cannot fail to serialise")
+}
+
+/// R55(a): the envelope's field order is the writer's, not the key names'.
+///
+/// It was a `serde_json::Map` — a `BTreeMap` without `preserve_order` — so the
+/// line came out `{"agent":…,"data":…,"seq":…}` and `data` preceded the
+/// record's own `seq`. A `#[derive(Serialize)]` struct keeps the declared
+/// order, so `seq` is always the second key.
+#[test]
+fn the_envelope_puts_seq_second_whatever_the_key_names_sort_to() {
+    let line = tool_call_with_a_payload_seq(7).to_line(42);
+    assert!(
+        line.starts_with(r#"{"v":1,"seq":42,"ts":"#),
+        "the envelope must open with v then seq: {line}"
+    );
+    // And the shape is unchanged otherwise — same keys, same values.
+    let parsed: LoggedRecord = serde_json::from_str(&line).expect("one JSON object");
+    assert_eq!(parsed.seq, 42);
+    assert_eq!(parsed.kind, "tool_call");
+    assert_eq!(parsed.task_id.as_deref(), Some("task-1"));
+    assert_eq!(parsed.span_id.as_deref(), Some("span-1"));
+    assert_eq!(parsed.agent.as_deref(), Some("lead_agent::a1b2c3d4"));
+    assert_eq!(parsed.data["input"]["seq"], 7);
+    assert_eq!(parsed.v, 1);
+}
+
+/// R55(b): the scan is depth-aware, so a `seq` in the payload is never read as
+/// the envelope's — under the writer's order *and* under the lexicographic
+/// order the log already holds.
+#[test]
+fn a_seq_inside_the_payload_is_never_read_as_the_envelopes() {
+    let record = tool_call_with_a_payload_seq(7);
+
+    let written = record.to_line(42);
+    assert_eq!(reader::scan_seq(written.as_bytes()), Some(42), "{written}");
+
+    let legacy = legacy_ordered_line(42, record.data.clone());
+    assert!(
+        legacy.starts_with(r#"{"agent":"#) && legacy.find(r#""data""#) < legacy.find(r#","seq":"#),
+        "the fixture must be the old lexicographic shape: {legacy}"
+    );
+    assert_eq!(reader::scan_seq(legacy.as_bytes()), Some(42), "{legacy}");
+
+    // A payload seq nested deeper, and one in an array, are equally ignored.
+    let deep = legacy_ordered_line(
+        99,
+        serde_json::json!({"input": {"page": [{"seq": 1}, {"seq": 2}], "cursor": {"a": {"seq": 3}}}}),
+    );
+    assert_eq!(reader::scan_seq(deep.as_bytes()), Some(99), "{deep}");
+}
+
+/// A `"seq":` that lives inside a JSON *string* — escaped quotes and all — is
+/// text, not a key. So is a brace or bracket in prose, which must not move the
+/// scanner's depth.
+#[test]
+fn an_escaped_quote_in_a_string_does_not_fool_the_seq_scan() {
+    let prose = serde_json::json!({
+        "input": {"text": r#"the log said "seq": 7 next to a } and a ] and a trailing \"#},
+    });
+    let legacy = legacy_ordered_line(42, prose.clone());
+    assert!(legacy.contains(r#"\"seq\":"#), "the fixture must escape its quotes: {legacy}");
+    assert_eq!(reader::scan_seq(legacy.as_bytes()), Some(42), "{legacy}");
+
+    let written = Record::new(RecordType::ToolCall).with_data(prose).to_line(42);
+    assert_eq!(reader::scan_seq(written.as_bytes()), Some(42), "{written}");
+}
+
+/// A tiny deterministic PRNG: a property test must fail the same way twice and
+/// must not cost the workspace a dependency.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+
+    fn pick<'a, T>(&mut self, from: &'a [T]) -> &'a T {
+        &from[self.below(from.len() as u64) as usize]
+    }
+}
+
+/// Payload values built out of exactly the things that can fool a byte scan:
+/// `seq` keys at every depth, brace/bracket characters inside strings, escaped
+/// quotes, a lone trailing backslash, and non-ASCII.
+fn any_payload(rng: &mut Rng, depth: u32) -> serde_json::Value {
+    const KEYS: &[&str] =
+        &["seq", "data", "input", "log_seq", "from_seq", "name", "v", "type", "\"seq\":", "{"];
+    const STRINGS: &[&str] = &[
+        "",
+        "plain",
+        r#"{"seq": 9}"#,
+        r#"he said "seq": 9"#,
+        r"back\slash",
+        r"trailing\",
+        "brace } and bracket ]",
+        "unicode ✓ ünï",
+    ];
+    match rng.below(if depth >= 3 { 4 } else { 6 }) {
+        0 => serde_json::Value::from(rng.below(10_000)),
+        1 => serde_json::Value::Bool(rng.below(2) == 0),
+        2 => serde_json::Value::Null,
+        3 => serde_json::Value::from(*rng.pick(STRINGS)),
+        4 => {
+            let n = rng.below(4);
+            serde_json::Value::Array((0..n).map(|_| any_payload(rng, depth + 1)).collect())
+        }
+        _ => {
+            let n = rng.below(5);
+            let mut map = serde_json::Map::new();
+            for _ in 0..n {
+                map.insert(rng.pick(KEYS).to_string(), any_payload(rng, depth + 1));
+            }
+            serde_json::Value::Object(map)
+        }
+    }
+}
+
+/// R55's property: for every line the writer itself produces, the cheap scan
+/// and the authoritative parse agree on the seq. If they ever disagree the
+/// cursor drops records, silently and permanently.
+#[test]
+fn the_seq_scan_agrees_with_the_parser_on_every_line_the_writer_writes() {
+    let mut rng = Rng(0x5EED_5EED_5EED_5EED);
+    for i in 0..1_000u64 {
+        let seq = rng.below(u64::from(u32::MAX)) + 1;
+        let mut data = serde_json::Map::new();
+        let n = rng.below(5);
+        for _ in 0..n {
+            data.insert(
+                rng.pick(&["seq", "input", "tool_use_id", "name", "result", "ext"]).to_string(),
+                any_payload(&mut rng, 1),
+            );
+        }
+        let optional = ["task-1", r#"a "seq": 3 in an id"#, "{}"];
+        let record = Record::new(*rng.pick(&RecordType::ALL))
+            .with_data(serde_json::Value::Object(data))
+            .task((rng.below(2) == 0).then(|| *rng.pick(&optional)))
+            .span((rng.below(2) == 0).then(|| *rng.pick(&optional)))
+            .agent((rng.below(2) == 0).then(|| *rng.pick(&optional)));
+
+        let line = record.to_line(seq);
+        let parsed: LoggedRecord =
+            serde_json::from_str(&line).unwrap_or_else(|e| panic!("case {i}: {e}: {line}"));
+        assert_eq!(parsed.seq, seq, "case {i}: {line}");
+        assert_eq!(
+            reader::scan_seq(line.as_bytes()),
+            Some(parsed.seq),
+            "case {i}: the scan disagreed with the parse: {line}"
+        );
+    }
+}
+
+/// The consequence the scan exists to avoid: paging a real, writer-written log
+/// must return every record exactly once. A payload `seq` below the cursor
+/// used to make the record vanish from the page it belonged to and from every
+/// later page — a permanent, silent hole in the events stream.
+#[test]
+fn paging_a_writer_written_log_never_drops_a_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = dir.path().join("sess-payload-seq");
+    fs::create_dir_all(&session).unwrap();
+
+    let body: String =
+        (1..=30).map(|seq| tool_call_with_a_payload_seq(3).to_line(seq)).collect();
+    fs::write(session.join(LIVE_SEGMENT), body).unwrap();
+
+    let mut seen = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = read_records_page(&session, cursor, 7, usize::MAX).unwrap();
+        if page.is_empty() {
+            break;
+        }
+        cursor = Some(page.last().unwrap().seq);
+        seen.extend(page.iter().map(|r| r.seq));
+    }
+    assert_eq!(seen, (1..=30).collect::<Vec<_>>(), "records went missing from the stream");
+}
+
+/// The same, for the lines written before the field order was fixed: they are
+/// on disk already and the depth-aware scan is what keeps them readable.
+#[test]
+fn paging_a_log_written_before_the_order_was_fixed_never_drops_a_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = dir.path().join("sess-legacy-order");
+    fs::create_dir_all(&session).unwrap();
+
+    let body: String = (1..=30)
+        .map(|seq| legacy_ordered_line(seq, serde_json::json!({"input": {"seq": 3}})) + "\n")
+        .collect();
+    fs::write(session.join(LIVE_SEGMENT), body).unwrap();
+
+    let page = read_records_page(&session, Some(10), 100, usize::MAX).unwrap();
+    assert_eq!(
+        page.iter().map(|r| r.seq).collect::<Vec<_>>(),
+        (11..=30).collect::<Vec<_>>(),
+        "a legacy-ordered line must page by its envelope seq, not its payload's"
+    );
+}
+
 // ── The boot sweep (the global cap) ─────────────────────────────────
 
 /// Give a session's files a known age so "oldest-touched" is testable.

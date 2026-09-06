@@ -244,31 +244,51 @@ impl Record {
     ///
     /// `data` is assumed already capped — [`cap_data`] runs in the writer,
     /// which is also the only place that knows the assigned `seq`.
+    ///
+    /// The order of the keys is [`Envelope`]'s declared order, not the key
+    /// names' — see that struct for why the reader depends on it.
     pub(crate) fn to_line(&self, seq: u64) -> String {
-        let mut env = Map::new();
-        env.insert("v".into(), Value::from(ENVELOPE_VERSION));
-        env.insert("seq".into(), Value::from(seq));
-        env.insert(
-            "ts".into(),
-            Value::from(self.ts.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()),
-        );
-        env.insert("type".into(), Value::from(self.kind.as_str()));
-        if let Some(ref t) = self.task_id {
-            env.insert("task_id".into(), Value::from(t.as_str()));
-        }
-        if let Some(ref s) = self.span_id {
-            env.insert("span_id".into(), Value::from(s.as_str()));
-        }
-        if let Some(ref a) = self.agent {
-            env.insert("agent".into(), Value::from(a.as_str()));
-        }
-        env.insert("data".into(), self.data.clone());
-        // A `Map<String, Value>` cannot fail to serialise.
-        let mut line = serde_json::to_string(&Value::Object(env))
+        let env = Envelope {
+            v: ENVELOPE_VERSION,
+            seq,
+            ts: self.ts.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
+            kind: self.kind.as_str(),
+            task_id: self.task_id.as_deref(),
+            span_id: self.span_id.as_deref(),
+            agent: self.agent.as_deref(),
+            data: &self.data,
+        };
+        // A struct of `Value`s and strings cannot fail to serialise.
+        let mut line = serde_json::to_string(&env)
             .unwrap_or_else(|_| String::from(r#"{"v":1,"type":"error","data":{}}"#));
         line.push('\n');
         line
     }
+}
+
+/// The on-disk envelope, in the order it is written.
+///
+/// It is a struct rather than a `serde_json::Map` for one reason: `serde_json`
+/// is built here **without** `preserve_order`, so a `Map` is a `BTreeMap` and
+/// serialises its keys lexicographically — `agent, data, seq, …`, putting the
+/// payload *before* the record's own `seq`. A derived `Serialize` keeps the
+/// declared order, which is what lets the reader's cheap cursor scan find the
+/// envelope's `seq` near the head of the line (`reader::scan_seq`). Absent
+/// optional fields stay absent, exactly as the `Map` form left them out.
+#[derive(Serialize)]
+struct Envelope<'a> {
+    v: u8,
+    seq: u64,
+    ts: String,
+    #[serde(rename = "type")]
+    kind: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    task_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    span_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent: Option<&'a str>,
+    data: &'a Value,
 }
 
 /// The keys that carry a record's **identity** rather than its payload, at the
