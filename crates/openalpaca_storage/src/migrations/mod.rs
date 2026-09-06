@@ -191,4 +191,9 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "artifact_store",
         sql: include_str!("036_artifact_store.sql"),
     },
+    Migration {
+        version: 37,
+        name: "run_observability",
+        sql: include_str!("037_run_observability.sql"),
+    },
 ];

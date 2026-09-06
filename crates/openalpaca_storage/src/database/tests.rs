@@ -8,7 +8,7 @@ fn test_database_creation() {
 
     let db = Database::open(&db_path).unwrap();
     assert!(db_path.exists());
-    assert_eq!(db.schema_version().unwrap(), 36);
+    assert_eq!(db.schema_version().unwrap(), 37);
 }
 
 #[test]
@@ -20,14 +20,14 @@ fn test_migrations_idempotent() {
     let _db1 = Database::open(&db_path).unwrap();
     let db2 = Database::open(&db_path).unwrap();
 
-    assert_eq!(db2.schema_version().unwrap(), 36);
+    assert_eq!(db2.schema_version().unwrap(), 37);
 }
 
 #[test]
 fn test_migration_035_drops_planner_telemetry() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 36);
+    assert_eq!(db.schema_version().unwrap(), 37);
 
     db.with_connection(|conn| {
         let columns = |table: &str| -> rusqlite::Result<Vec<String>> {
@@ -183,7 +183,7 @@ fn insert_asset(
 fn test_migration_036_adds_artifact_columns() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 36);
+    assert_eq!(db.schema_version().unwrap(), 37);
 
     db.with_connection(|conn| {
         let columns = |table: &str| -> rusqlite::Result<Vec<String>> {
@@ -355,6 +355,91 @@ fn test_migration_036_artifact_versions_cascade() {
         let left: i64 =
             conn.query_row("SELECT count(*) FROM artifact_versions", [], |r| r.get(0))?;
         assert_eq!(left, 0, "versions should cascade with the artifact");
+
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn test_migration_037_run_observability_schema() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    assert_eq!(db.schema_version().unwrap(), 37);
+
+    db.with_connection(|conn| {
+        let columns = |table: &str| -> rusqlite::Result<Vec<String>> {
+            let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+            let names = stmt
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(names)
+        };
+
+        let span = columns("subagent_span")?;
+        for expected in [
+            "id",
+            "task_id",
+            "template_id",
+            "agent_instance_id",
+            "label",
+            "objective",
+            "state",
+            "detail",
+            "started_at",
+            "ended_at",
+            "duration_ms",
+            "output_preview",
+        ] {
+            assert!(
+                span.contains(&expected.to_string()),
+                "subagent_span.{expected} should exist: {span:?}"
+            );
+        }
+
+        // GAP-10's run-scoped log column and GAP-06's re-run provenance link.
+        assert!(columns("event_log")?.contains(&"task_id".to_string()));
+        assert!(columns("task")?.contains(&"source_task_id".to_string()));
+
+        conn.execute(
+            "INSERT INTO task (id, title, status, priority, created_by, source_lane)
+             VALUES ('t1', 'run', 'running', 0, 'tester', 'user:cli')",
+            [],
+        )?;
+
+        // The state word is constrained.
+        let bad = conn.execute(
+            "INSERT INTO subagent_span (id, task_id, template_id, agent_instance_id, label, state, started_at)
+             VALUES ('s-bad', 't1', 'a', 'a::1', 'a·1', 'wandering', '2026-09-05T10:00:00.000Z')",
+            [],
+        );
+        assert!(bad.is_err(), "state should be CHECK-constrained");
+
+        conn.execute(
+            "INSERT INTO subagent_span (id, task_id, template_id, agent_instance_id, label, state, started_at)
+             VALUES ('s1', 't1', 'review_agent', 'review_agent::1', 'review·1', 'running', '2026-09-05T10:00:00.000Z')",
+            [],
+        )?;
+
+        // Labels are unique per task, not globally.
+        let dup = conn.execute(
+            "INSERT INTO subagent_span (id, task_id, template_id, agent_instance_id, label, state, started_at)
+             VALUES ('s2', 't1', 'review_agent', 'review_agent::2', 'review·1', 'running', '2026-09-05T10:00:01.000Z')",
+            [],
+        );
+        assert!(dup.is_err(), "(task_id, label) should be unique");
+
+        // An orphan span is impossible, and spans cascade with their run.
+        let orphan = conn.execute(
+            "INSERT INTO subagent_span (id, task_id, template_id, agent_instance_id, label, state, started_at)
+             VALUES ('s3', 'ghost', 'a', 'a::1', 'a·1', 'running', '2026-09-05T10:00:00.000Z')",
+            [],
+        );
+        assert!(orphan.is_err(), "task_id should be a live FK");
+
+        conn.execute("DELETE FROM task WHERE id = 't1'", [])?;
+        let left: i64 = conn.query_row("SELECT count(*) FROM subagent_span", [], |r| r.get(0))?;
+        assert_eq!(left, 0, "spans should cascade with the task");
 
         Ok(())
     })

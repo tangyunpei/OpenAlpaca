@@ -17,6 +17,7 @@ pub mod orchestrator_latency;
 pub mod preference;
 pub mod skill_execution;
 pub mod subagent;
+pub mod subagent_span;
 pub mod task;
 
 pub use agent::AgentRepository;
@@ -36,4 +37,7 @@ pub use orchestrator_latency::OrchestratorLatencyRepository;
 pub use preference::PreferenceRepository;
 pub use skill_execution::SkillExecutionRepository;
 pub use subagent::SubAgentRepository;
+pub use subagent_span::{
+    NewSubagentSpan, SPAN_DETAIL_INTERRUPTED, SpanState, SubagentSpanRecord, SubagentSpanRepository,
+};
 pub use task::TaskRepository;

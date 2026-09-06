@@ -38,7 +38,10 @@ pub use repository::{
     FileAssetRepository, FollowupRecord, FollowupRepository, IdentityRepository,
     LlmUsageRepository, MemoryRepository,
     MessageFeedbackRepository, OrchestratorLatencyRepository, PreferenceRepository,
-    SkillExecutionRepository, SubAgentRepository, TaskRepository,
+    SkillExecutionRepository, SubAgentRepository, SubagentSpanRepository, TaskRepository,
 };
 pub use repository::llm_usage::LlmUsageDaily;
+pub use repository::subagent_span::{
+    NewSubagentSpan, SPAN_DETAIL_INTERRUPTED, SpanState, SubagentSpanRecord,
+};
 pub use uploads::{NewUpload, StoredUpload, UploadError, UploadStore};
