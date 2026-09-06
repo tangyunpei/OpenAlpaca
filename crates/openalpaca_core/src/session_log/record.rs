@@ -220,15 +220,61 @@ impl Record {
     }
 }
 
+/// The keys that carry a record's **identity** rather than its payload.
+///
+/// A cut never touches one of these, at any depth. The reason is concrete:
+/// `tool_use_id` is what pairs a `tool_call` with its `tool_result` and what
+/// the writer's index row keys `log_seq` on, and the per-element `id`/`name`
+/// are what make `round`'s verbatim `tool_use` block replayable (§5.4). A
+/// truncated record that lost them is not a smaller record, it is an
+/// anonymous one.
+const IDENTITY_KEYS: &[&str] = &[
+    "tool_use_id",
+    "id",
+    "name",
+    "type",
+    "kind",
+    "log_seq",
+    "seq",
+    "task_id",
+    "span_id",
+    "request_id",
+    "msg_id",
+    "agent",
+    "model",
+    "ext",
+];
+
+/// How far past [`PREVIEW_CHARS`] a string must be before cutting it buys
+/// more than the marker it gains.
+const CUT_WORTH_IT: usize = 128;
+
+fn is_identity(key: &str) -> bool {
+    IDENTITY_KEYS.contains(&key)
+}
+
+/// One step of a path to a cuttable string: `input.content`,
+/// `tool_use[0].input.cmd`.
+#[derive(Clone, Debug)]
+enum Seg {
+    Key(String),
+    Idx(usize),
+}
+
 /// Clamp `data` to the 64 KB envelope bound.
 ///
-/// Truncates the oversized top-level **string** fields, largest first, so the
-/// record keeps its shape — the tool name, the tool_use_id and the timings
-/// survive, only the payload is cut. Each cut is marked in place and the
-/// record carries `_truncated.spilled_pending`, which is the marker T42's
-/// `results/` spill replaces with a real stub. An object that is still over
-/// the bound with every string cut (a huge *structure* rather than a huge
-/// value) collapses to the stub wholesale.
+/// Truncates the oversized strings **at any depth**, largest first, so the
+/// record keeps its shape: the payload that made it big is cut, and the tool
+/// name, the `tool_use_id`, the per-element ids and the timings survive.
+/// `tool_call`'s `input` is an object and `round`'s `tool_use` an array, so a
+/// cut that could only reach top-level strings would collapse exactly the
+/// records that matter most.
+///
+/// Each cut is marked in place and the record carries
+/// `_truncated.spilled_pending`, which is the marker T42's `results/` spill
+/// replaces with a real stub. A payload no cut can shrink (a huge *structure*
+/// rather than a huge value) falls back to that marker plus a preview — with
+/// the identity fields still beside them, never an anonymous stub.
 ///
 /// Returns the capped value and whether anything was cut.
 pub(crate) fn cap_data(data: Value) -> (Value, bool) {
@@ -236,65 +282,187 @@ pub(crate) fn cap_data(data: Value) -> (Value, bool) {
         Ok(s) if s.len() <= ENVELOPE_DATA_CAP_BYTES => return (data, false),
         Ok(s) => s.len(),
         // Unserialisable payloads cannot reach here (they are built from
-        // `serde_json::json!`), but a stub is the honest answer if one does.
-        Err(_) => return (stub(&Value::Null, 0), true),
+        // `serde_json::json!`), but a marker is the honest answer if one does.
+        Err(_) => return (fallback(&Value::Null, 0, &Map::new()), true),
     };
 
     let Value::Object(mut map) = data else {
-        return (stub(&data, original_bytes), true);
+        return (fallback(&data, original_bytes, &Map::new()), true);
     };
 
-    // Largest string values first — cutting the biggest one usually suffices.
-    let mut victims: Vec<(String, usize)> = map
+    // Kept aside before anything is cut: whatever the cut cannot save, these
+    // survive it.
+    let identity: Map<String, Value> = map
         .iter()
-        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.len())))
-        .filter(|(_, len)| *len > PREVIEW_CHARS)
+        .filter(|(k, _)| is_identity(k))
+        .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
+
+    // Every cuttable string, anywhere in the payload, largest first. A cut
+    // only ever shortens a string in place, so no path is invalidated by an
+    // earlier one and the list is collected once.
+    let mut victims: Vec<(Vec<Seg>, usize)> = Vec::new();
+    let mut path: Vec<Seg> = Vec::new();
+    for (key, value) in map.iter() {
+        if is_identity(key) {
+            continue;
+        }
+        path.push(Seg::Key(key.clone()));
+        collect_cuttable(value, &mut path, &mut victims);
+        path.pop();
+    }
     victims.sort_by(|a, b| b.1.cmp(&a.1));
 
     let mut cut: Vec<String> = Vec::new();
-    for (key, len) in victims {
-        if serialized_len(&map) <= ENVELOPE_DATA_CAP_BYTES {
+    for (path, len) in victims {
+        // The marker is part of what has to fit: reserving it here keeps a
+        // nearly-fitting record from being pushed back over the bound by its
+        // own truncation notice.
+        if serialized_len(&map) + marker_len(&cut, original_bytes) <= ENVELOPE_DATA_CAP_BYTES {
             break;
         }
-        if let Some(slot) = map.get_mut(&key) {
-            let preview: String = slot.as_str().unwrap_or_default().chars().take(PREVIEW_CHARS).collect();
-            *slot = Value::from(format!(
-                "{preview}… [truncated: {len} bytes; spill pending]"
-            ));
-            cut.push(key);
-        }
+        let Some(slot) = slot_mut(&mut map, &path) else {
+            continue;
+        };
+        let preview: String = slot
+            .as_str()
+            .unwrap_or_default()
+            .chars()
+            .take(PREVIEW_CHARS)
+            .collect();
+        *slot = Value::from(format!("{preview}… [truncated: {len} bytes; spill pending]"));
+        cut.push(render_path(&path));
     }
 
-    let marker = serde_json::json!({
+    map.insert("_truncated".into(), marker(&cut, original_bytes));
+
+    if serialized_len(&map) > ENVELOPE_DATA_CAP_BYTES {
+        return (fallback(&Value::Object(map), original_bytes, &identity), true);
+    }
+    (Value::Object(map), true)
+}
+
+/// Collect the strings worth cutting under `value`, skipping every identity
+/// key on the way down.
+fn collect_cuttable(value: &Value, path: &mut Vec<Seg>, out: &mut Vec<(Vec<Seg>, usize)>) {
+    match value {
+        Value::String(s) if s.len() > PREVIEW_CHARS + CUT_WORTH_IT => {
+            out.push((path.clone(), s.len()));
+        }
+        Value::Array(items) => {
+            for (i, item) in items.iter().enumerate() {
+                path.push(Seg::Idx(i));
+                collect_cuttable(item, path, out);
+                path.pop();
+            }
+        }
+        Value::Object(fields) => {
+            for (key, field) in fields {
+                if is_identity(key) {
+                    continue;
+                }
+                path.push(Seg::Key(key.clone()));
+                collect_cuttable(field, path, out);
+                path.pop();
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Resolve a collected path back to the slot it names.
+fn slot_mut<'a>(map: &'a mut Map<String, Value>, path: &[Seg]) -> Option<&'a mut Value> {
+    let (first, rest) = path.split_first()?;
+    let Seg::Key(key) = first else { return None };
+    let mut cursor = map.get_mut(key)?;
+    for seg in rest {
+        cursor = match (seg, cursor) {
+            (Seg::Key(k), Value::Object(fields)) => fields.get_mut(k)?,
+            (Seg::Idx(i), Value::Array(items)) => items.get_mut(*i)?,
+            _ => return None,
+        };
+    }
+    Some(cursor)
+}
+
+/// `input.content`, `tool_use[0].input.cmd` — what `_truncated.fields` names.
+fn render_path(path: &[Seg]) -> String {
+    let mut out = String::new();
+    for seg in path {
+        match seg {
+            Seg::Key(k) => {
+                if !out.is_empty() {
+                    out.push('.');
+                }
+                out.push_str(k);
+            }
+            Seg::Idx(i) => out.push_str(&format!("[{i}]")),
+        }
+    }
+    out
+}
+
+fn marker(cut: &[String], original_bytes: usize) -> Value {
+    serde_json::json!({
         "fields": cut,
         "original_bytes": original_bytes,
         "spilled_pending": true,
-    });
-    map.insert("_truncated".into(), marker);
+    })
+}
 
-    if serialized_len(&map) > ENVELOPE_DATA_CAP_BYTES {
-        return (stub(&Value::Object(map), original_bytes), true);
-    }
-    (Value::Object(map), true)
+/// What inserting the marker will cost — its key, the separator, and room for
+/// the path name the next cut will add to it.
+fn marker_len(cut: &[String], original_bytes: usize) -> usize {
+    serde_json::to_string(&marker(cut, original_bytes))
+        .map(|s| s.len())
+        .unwrap_or(0)
+        + r#","_truncated":"#.len()
+        + 64
 }
 
 fn serialized_len(map: &Map<String, Value>) -> usize {
     serde_json::to_string(map).map(|s| s.len()).unwrap_or(usize::MAX)
 }
 
-/// The whole-payload replacement: a preview plus the same
-/// `spilled_pending` marker, so a structurally oversized record is still a
-/// findable spill site.
-fn stub(original: &Value, original_bytes: usize) -> Value {
+/// The last resort: the identity fields, the same `spilled_pending` marker,
+/// and a preview of what could not be kept.
+///
+/// It is deliberately *not* an anonymous stub — a record that cannot say
+/// which call it belongs to takes its index row and its replay key with it
+/// (Critical 1).
+fn fallback(original: &Value, original_bytes: usize, identity: &Map<String, Value>) -> Value {
     let rendered = serde_json::to_string(original).unwrap_or_default();
-    let preview: String = rendered.chars().take(PREVIEW_CHARS).collect();
-    serde_json::json!({
-        "_truncated": {
+    let bytes = if original_bytes > 0 {
+        original_bytes
+    } else {
+        rendered.len()
+    };
+    let mut out: Map<String, Value> = identity.clone();
+    out.insert(
+        "_truncated".into(),
+        serde_json::json!({
             "fields": ["*"],
-            "original_bytes": if original_bytes > 0 { original_bytes } else { rendered.len() },
+            "original_bytes": bytes,
             "spilled_pending": true,
-        },
-        "preview": preview,
-    })
+        }),
+    );
+    let preview: String = rendered.chars().take(PREVIEW_CHARS).collect();
+    out.insert("preview".into(), Value::from(preview));
+
+    // An identity field can itself be pathological. The marker is the one
+    // entry that may not be dropped to make room.
+    while serialized_len(&out) > ENVELOPE_DATA_CAP_BYTES {
+        let worst = out
+            .iter()
+            .filter(|(k, _)| k.as_str() != "_truncated")
+            .max_by_key(|(_, v)| serde_json::to_string(v).map(|s| s.len()).unwrap_or(0))
+            .map(|(k, _)| k.clone());
+        match worst {
+            Some(key) => {
+                out.remove(&key);
+            }
+            None => break,
+        }
+    }
+    Value::Object(out)
 }

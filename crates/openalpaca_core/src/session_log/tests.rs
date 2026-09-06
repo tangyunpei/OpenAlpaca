@@ -124,18 +124,22 @@ async fn the_envelope_caps_data_and_flags_the_pending_spill() {
     assert!(data["result"].as_str().unwrap().contains("spill pending"));
 }
 
-/// A payload with no oversized string field of its own still cannot exceed
-/// the bound: the whole object is replaced by the stub.
+/// A payload no cut can shrink (a huge *structure* rather than a huge value)
+/// falls back to a marker plus a preview — but the identity fields come with
+/// it. An anonymous stub would take the record's `tool_use_id` with it and
+/// leave the index row and §5.4's replay without a key.
 #[tokio::test]
-async fn an_over_cap_payload_with_no_single_big_field_becomes_a_stub() {
+async fn an_over_cap_payload_with_no_single_big_field_keeps_its_identity() {
     let dir = tempfile::tempdir().unwrap();
     let svc = service(&dir);
     let handle = svc.handle_for("sess-stub");
 
     let many: Vec<String> = (0..40_000).map(|i| format!("row-{i}")).collect();
-    handle.emit(
-        Record::new(RecordType::Round).with_data(serde_json::json!({ "tool_use": many })),
-    );
+    handle.emit(Record::new(RecordType::Round).with_data(serde_json::json!({
+        "tool_use_id": "tu-structural",
+        "name": "shell_execute",
+        "tool_use": many,
+    })));
     assert!(handle.flush().await);
 
     let rows = lines(&log_path(dir.path(), "sess-stub"));
@@ -143,6 +147,128 @@ async fn an_over_cap_payload_with_no_single_big_field_becomes_a_stub() {
     assert!(serde_json::to_string(data).unwrap().len() <= ENVELOPE_DATA_CAP_BYTES);
     assert_eq!(data["_truncated"]["spilled_pending"], true);
     assert!(data["preview"].as_str().unwrap().chars().count() <= PREVIEW_CHARS);
+    assert_eq!(data["tool_use_id"], "tu-structural");
+    assert_eq!(data["name"], "shell_execute");
+}
+
+/// Critical 1: a record is over the bound because of a **nested** value far
+/// more often than a top-level string — `tool_call`'s `input` is an object and
+/// `round`'s `tool_use` an array. The cut must reach inside them, and it must
+/// never touch the fields that identify the call: without `tool_use_id` the
+/// writer's `PendingCalls` never sees the call and the index row loses both
+/// `log_seq` and `args_preview`.
+#[tokio::test]
+async fn an_oversized_nested_input_keeps_its_identity_and_its_index_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&db_dir.path().join("t.db")).unwrap();
+    let svc = service_with(&dir, Some(db.clone()), SessionLogLimits::default());
+    let handle = svc.handle_for("sess-nested");
+
+    let huge = "c".repeat(200 * 1024);
+    handle.emit(
+        Record::new(RecordType::ToolCall)
+            .task(Some("task-1"))
+            .agent(Some("lead_agent::a1"))
+            .with_data(serde_json::json!({
+                "tool_use_id": "tu-42",
+                "name": "artifact_write",
+                "input": {"path": "report.md", "content": huge},
+            })),
+    );
+    handle.emit(
+        Record::new(RecordType::ToolResult)
+            .task(Some("task-1"))
+            .agent(Some("lead_agent::a1"))
+            .with_data(serde_json::json!({
+                "tool_use_id": "tu-42",
+                "name": "artifact_write",
+                "ok": true,
+                "duration_ms": 3,
+                "result": "written",
+            })),
+    );
+    assert!(handle.flush().await);
+
+    let rows = lines(&log_path(dir.path(), "sess-nested"));
+    let call = &rows[0]["data"];
+    assert!(serde_json::to_string(call).unwrap().len() <= ENVELOPE_DATA_CAP_BYTES);
+    assert_eq!(call["tool_use_id"], "tu-42", "the identity survives the cut");
+    assert_eq!(call["name"], "artifact_write");
+    assert_eq!(call["input"]["path"], "report.md", "only the oversized leaf is cut");
+    assert!(
+        call["input"]["content"].as_str().unwrap().contains("spill pending"),
+        "{call}"
+    );
+    assert_eq!(call["_truncated"]["fields"][0], "input.content");
+    assert!(
+        call.get("preview").is_none(),
+        "the record kept its shape rather than collapsing: {call}"
+    );
+
+    let (log_seq, args): (i64, String) = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT log_seq, args_preview FROM tool_execution_log",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .expect("a truncated call still indexes");
+    assert_eq!(log_seq, 1, "log_seq points at the tool_call record");
+    assert!(
+        args.starts_with(r#"{"content":"#),
+        "args_preview is the capped input, not NULL: {args}"
+    );
+    assert!(args.chars().count() <= openalpaca_storage::PREVIEW_CHARS);
+}
+
+/// The cut walks arrays as well as objects: three oversized elements are
+/// trimmed one at a time until the envelope fits, and each element keeps its
+/// own `id`/`name`.
+#[tokio::test]
+async fn a_nested_array_of_large_strings_is_trimmed_element_wise() {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = service(&dir);
+    let handle = svc.handle_for("sess-arr");
+
+    let big = "y".repeat(30 * 1024);
+    handle.emit(Record::new(RecordType::Round).with_data(serde_json::json!({
+        "round": 2,
+        "tool_use": [
+            {"id": "tu-a", "name": "shell_execute", "input": {"cmd": big.clone()}},
+            {"id": "tu-b", "name": "shell_execute", "input": {"cmd": big.clone()}},
+            {"id": "tu-c", "name": "shell_execute", "input": {"cmd": big}},
+        ],
+    })));
+    assert!(handle.flush().await);
+
+    let rows = lines(&log_path(dir.path(), "sess-arr"));
+    let data = &rows[0]["data"];
+    assert!(serde_json::to_string(data).unwrap().len() <= ENVELOPE_DATA_CAP_BYTES);
+    assert_eq!(data["round"], 2);
+    let uses = data["tool_use"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the array survives element-wise trimming: {data}"));
+    assert_eq!(uses.len(), 3);
+    for (i, id) in ["tu-a", "tu-b", "tu-c"].iter().enumerate() {
+        assert_eq!(uses[i]["id"], *id, "every element keeps its identity");
+        assert_eq!(uses[i]["name"], "shell_execute");
+    }
+    assert!(
+        uses.iter()
+            .any(|u| u["input"]["cmd"].as_str().unwrap().contains("spill pending")),
+        "at least one element was trimmed: {data}"
+    );
+    let fields = data["_truncated"]["fields"].as_array().unwrap();
+    assert!(!fields.is_empty());
+    assert!(
+        fields
+            .iter()
+            .all(|f| f.as_str().unwrap().starts_with("tool_use[")
+                && f.as_str().unwrap().ends_with("].input.cmd")),
+        "the cut names the element it trimmed: {fields:?}"
+    );
 }
 
 // ── Durability ──────────────────────────────────────────────────────
