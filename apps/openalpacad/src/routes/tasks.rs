@@ -3,11 +3,13 @@
 //! POST /v1/tasks           -> create a new task
 //! GET  /v1/tasks           -> list tasks (query: created_by, status, limit)
 //! GET  /v1/tasks/{id}      -> get a single task + agent runs
+//! GET  /v1/tasks/{id}/timeline -> the run's swimlanes (GAP-09)
 //! POST /v1/tasks/{id}/action -> perform action (cancel, pause, resume)
 //!
-//! The `assigned_agents` / `assignments` arrays are sourced from
-//! `agent_task_history` (written by the dispatcher's `record_agent_history`),
-//! not the dead-post-V2 `task_agent_assignment` table.
+//! Neither task shape carries agent runs any more: the legacy
+//! `assigned_agents` / `assignments` payload (read from `agent_task_history`)
+//! was deleted with Phase 4's P8, and the timeline route serves the same runs
+//! from `subagent_span` — in flight as well as finished.
 
 use axum::{
     Json,
@@ -23,33 +25,12 @@ use openalpaca_core::events::SystemEvent;
 use openalpaca_core::orchestrator::{TaskActionError, apply_task_action, parse_outcome};
 use openalpaca_core::security::confirmation::ConfirmationBroker;
 use openalpaca_storage::{
-    Database, LlmUsageRepository, SPAN_DETAIL_INTERRUPTED, SubAgentRepository,
-    SubagentSpanRepository, Task, TaskRepository, TaskStatus,
+    Database, LlmUsageRepository, SPAN_DETAIL_INTERRUPTED, SubagentSpanRepository, Task,
+    TaskRepository, TaskStatus,
 };
 
 use super::tasks_types::*;
 use crate::AppState;
-
-// ── Helpers ───────────────────────────────────────────────────────
-
-/// Summarize the agent runs recorded for a task (from `agent_task_history`)
-/// as the `assigned_agents` JSON array served by `GET /v1/tasks`.
-fn agent_runs_summary(db: &Database, task_id: &str) -> Vec<serde_json::Value> {
-    SubAgentRepository::new(db)
-        .get_history_for_task(task_id)
-        .unwrap_or_default()
-        .iter()
-        .map(|run| {
-            serde_json::json!({
-                "agent_id": run.agent_id,
-                "role": run.role,
-                "status": run.status,
-                "runtime_seconds": run.runtime_seconds,
-                "completed_at": run.completed_at,
-            })
-        })
-        .collect()
-}
 
 // ── Handlers ──────────────────────────────────────────────────────
 
@@ -180,12 +161,10 @@ pub async fn list_tasks_handler(
             let summaries: Vec<TaskSummaryResponse> = tasks
                 .into_iter()
                 .map(|t| {
-                    let assigned_agents = agent_runs_summary(&state.db, &t.id);
                     let outcome = parse_outcome(&t);
                     let cost_usd = costs.get(&t.id).copied().unwrap_or(0.0);
                     TaskSummaryResponse {
                         task: t,
-                        assigned_agents,
                         outcome,
                         cost_usd,
                     }
@@ -212,18 +191,11 @@ pub async fn get_task_handler(
 
     match repo.get(&id) {
         Ok(Some(task)) => {
-            let agents = SubAgentRepository::new(&state.db)
-                .get_history_for_task(&id)
-                .unwrap_or_default();
             let outcome = parse_outcome(&task);
             (
                 StatusCode::OK,
                 Json(
-                    serde_json::to_value(TaskResponse {
-                        task,
-                        agents: Some(agents),
-                        outcome,
-                    })
+                    serde_json::to_value(TaskResponse { task, outcome })
                     .unwrap_or_else(|_| serde_json::json!({"error": "serialization_failed"})),
                 ),
             )
@@ -566,101 +538,40 @@ mod tests {
         assert!(outcome.artifacts.is_empty());
     }
 
-    fn make_agent_config(id: &str) -> openalpaca_storage::SubAgentConfig {
-        openalpaca_storage::SubAgentConfig {
-            id: id.to_string(),
-            template_id: id.to_string(),
-            name: id.to_string(),
-            description: None,
-            icon: None,
-            status: "idle".to_string(),
-            current_task_id: None,
-            skills_json: "[]".to_string(),
-            preset_json: "{}".to_string(),
-            constraints_json: None,
-            llm_config_json: None,
-            persona: None,
-            created_at: Utc::now(),
-            updated_at: None,
-        }
-    }
-
+    /// P8 — the legacy agent-run payload is gone from both task shapes.
+    /// `subagent_span` + `GET /v1/tasks/{id}/timeline` carry the run's lanes
+    /// now, including the in-flight ones `agent_task_history` never had a row
+    /// for. Nothing else about either shape changes, so the fields the clients
+    /// actually read are asserted present alongside.
     #[test]
-    fn test_agent_runs_summary_from_seeded_history() {
-        use openalpaca_storage::{AgentTaskHistory, Database};
-
-        let dir = tempfile::tempdir().unwrap();
-        let db = Database::open(&dir.path().join("test.db")).unwrap();
-        let task_repo = TaskRepository::new(&db);
-        let mut task = make_test_task();
-        task.id = "task-hist".to_string();
-        task_repo.create(&task).unwrap();
-
-        // No runs yet: the array is empty, not an error.
-        assert!(agent_runs_summary(&db, "task-hist").is_empty());
-
-        // Seed two agent runs (the shape record_agent_history writes).
-        let sub_repo = SubAgentRepository::new(&db);
-        sub_repo.upsert(&make_agent_config("researcher")).unwrap();
-        sub_repo.upsert(&make_agent_config("writer")).unwrap();
-        let base = Utc::now();
-        sub_repo
-            .add_history(&AgentTaskHistory {
-                id: "h1".to_string(),
-                agent_id: "researcher".to_string(),
-                task_id: "task-hist".to_string(),
-                role: "researcher".to_string(),
-                status: "completed".to_string(),
-                runtime_seconds: Some(12),
-                completed_at: base,
-            })
-            .unwrap();
-        sub_repo
-            .add_history(&AgentTaskHistory {
-                id: "h2".to_string(),
-                agent_id: "writer".to_string(),
-                task_id: "task-hist".to_string(),
-                role: "writer".to_string(),
-                status: "failed".to_string(),
-                runtime_seconds: None,
-                completed_at: base + chrono::Duration::seconds(30),
-            })
-            .unwrap();
-
-        let agents = agent_runs_summary(&db, "task-hist");
-        assert_eq!(agents.len(), 2);
-        assert_eq!(agents[0]["agent_id"], "researcher");
-        assert_eq!(agents[0]["status"], "completed");
-        assert_eq!(agents[0]["runtime_seconds"], 12);
-        assert_eq!(agents[1]["agent_id"], "writer");
-        assert_eq!(agents[1]["status"], "failed");
-        assert!(agents[1]["runtime_seconds"].is_null());
-    }
-
-    #[test]
-    fn test_task_response_serializes_agent_runs_under_assignments_key() {
-        use openalpaca_storage::AgentTaskHistory;
-
-        let resp = TaskResponse {
+    fn neither_task_shape_carries_the_legacy_agent_run_payload() {
+        let detail = serde_json::to_value(TaskResponse {
             task: make_test_task(),
-            agents: Some(vec![AgentTaskHistory {
-                id: "h1".to_string(),
-                agent_id: "researcher".to_string(),
-                task_id: "task-1".to_string(),
-                role: "researcher".to_string(),
-                status: "completed".to_string(),
-                runtime_seconds: Some(7),
-                completed_at: Utc::now(),
-            }]),
             outcome: None,
-        };
-        let v = serde_json::to_value(&resp).unwrap();
-        // Legacy key kept for client compatibility (CLI/GUI parse "assignments").
-        let runs = v["assignments"].as_array().expect("assignments array");
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0]["agent_id"], "researcher");
-        assert_eq!(runs[0]["status"], "completed");
-        assert_eq!(runs[0]["runtime_seconds"], 7);
+        })
+        .unwrap();
+        for key in ["assignments", "assigned_agents", "agents"] {
+            assert!(
+                detail.get(key).is_none(),
+                "GET /v1/tasks/{{id}} still serves `{key}`"
+            );
+        }
+        assert!(detail.get("task").is_some());
+
+        let summary = serde_json::to_value(TaskSummaryResponse {
+            task: make_test_task(),
+            outcome: None,
+            cost_usd: 0.0,
+        })
+        .unwrap();
+        for key in ["assignments", "assigned_agents", "agents"] {
+            assert!(
+                summary.get(key).is_none(),
+                "GET /v1/tasks still serves `{key}`"
+            );
+        }
+        assert!(summary.get("id").is_some());
+        assert!(summary.get("cost_usd").is_some());
     }
 
     #[test]
@@ -700,11 +611,7 @@ mod tests {
         );
 
         let outcome = parse_outcome(&task);
-        let resp = TaskResponse {
-            task,
-            agents: None,
-            outcome,
-        };
+        let resp = TaskResponse { task, outcome };
 
         let v = serde_json::to_value(&resp).unwrap();
         // The task sub-object should not contain raw JSON fields
@@ -716,19 +623,16 @@ mod tests {
     }
 
     /// Reproduces `list_tasks_handler`'s pre-refactor shape: `serde_json::to_value(&task)`
-    /// with `assigned_agents` (always) and `outcome` (only when it parses) inserted onto
-    /// the object — the exact algorithm `TaskSummaryResponse` replaces — plus `cost_usd`
-    /// (GAP-08b), which never existed pre-refactor but is always present on the typed
-    /// struct today. Used below to pin that the typed struct serializes to byte-for-byte
-    /// this shape.
-    fn pre_refactor_shape(
-        task: &Task,
-        agents: Vec<serde_json::Value>,
-        cost_usd: f64,
-    ) -> serde_json::Value {
+    /// with `outcome` (only when it parses) inserted onto the object — the exact algorithm
+    /// `TaskSummaryResponse` replaces — plus `cost_usd` (GAP-08b), which never existed
+    /// pre-refactor but is always present on the typed struct today. Used below to pin
+    /// that the typed struct serializes to byte-for-byte this shape.
+    ///
+    /// The `assigned_agents` key the old algorithm also injected is deliberately absent:
+    /// P8 deleted it, and the test above pins that.
+    fn pre_refactor_shape(task: &Task, cost_usd: f64) -> serde_json::Value {
         let mut v = serde_json::to_value(task).unwrap();
         if let Some(obj) = v.as_object_mut() {
-            obj.insert("assigned_agents".to_string(), serde_json::json!(agents));
             let outcome_val =
                 parse_outcome(task).and_then(|parsed| serde_json::to_value(parsed).ok());
             if let Some(outcome_val) = outcome_val {
@@ -971,28 +875,18 @@ mod tests {
             })
             .to_string(),
         );
-        let agents = vec![serde_json::json!({
-            "agent_id": "researcher",
-            "role": "researcher",
-            "status": "completed",
-            "runtime_seconds": 12,
-            "completed_at": task.completed_at,
-        })];
-
-        let expected = pre_refactor_shape(&task, agents.clone(), 1.25);
+        let expected = pre_refactor_shape(&task, 1.25);
         let outcome = parse_outcome(&task);
         let summary = TaskSummaryResponse {
             task,
-            assigned_agents: agents,
             outcome,
             cost_usd: 1.25,
         };
         let actual = serde_json::to_value(&summary).unwrap();
 
         assert_eq!(actual, expected);
-        // Sanity: the fields the old post-injection added are actually present,
-        // so this test would fail if either one silently dropped out.
-        assert!(actual.get("assigned_agents").is_some());
+        // Sanity: the field the old post-injection added is actually present,
+        // so this test would fail if it silently dropped out.
         assert!(actual.get("outcome").is_some());
         assert_eq!(actual["outcome"]["outcome_kind"], "text_only");
         assert_eq!(actual["cost_usd"], 1.25);
@@ -1003,14 +897,12 @@ mod tests {
         // No outcome_kind/outcome_json set: parse_outcome returns None, and the
         // old code never inserted an "outcome" key in that case.
         let task = make_test_task();
-        let agents: Vec<serde_json::Value> = Vec::new();
 
-        let expected = pre_refactor_shape(&task, agents.clone(), 0.0);
+        let expected = pre_refactor_shape(&task, 0.0);
         let outcome = parse_outcome(&task);
         assert!(outcome.is_none());
         let summary = TaskSummaryResponse {
             task,
-            assigned_agents: agents,
             outcome,
             cost_usd: 0.0,
         };
@@ -1021,8 +913,6 @@ mod tests {
         // omitted field.
         assert_eq!(actual["cost_usd"], 0.0);
         assert!(actual.get("outcome").is_none());
-        // assigned_agents is still present, just empty — not omitted.
-        assert_eq!(actual["assigned_agents"], serde_json::json!([]));
     }
 
     /// §4.7 item 3 — the row shape both task routes serve carries the project
@@ -1037,7 +927,6 @@ mod tests {
         // GET /v1/tasks — the flattened summary row.
         let summary = TaskSummaryResponse {
             task: task.clone(),
-            assigned_agents: Vec::new(),
             outcome: None,
             cost_usd: 0.0,
         };
@@ -1047,7 +936,6 @@ mod tests {
         // GET /v1/tasks/{id} — the nested `task` object.
         let single = TaskResponse {
             task,
-            agents: None,
             outcome: None,
         };
         let v = serde_json::to_value(&single).unwrap();

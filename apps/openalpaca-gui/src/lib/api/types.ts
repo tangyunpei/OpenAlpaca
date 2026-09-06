@@ -21,15 +21,6 @@ export type TaskStatusValue =
 export type RunStatus =
   "running" | "queued" | "paused" | "done" | "cancelled" | "failed";
 
-/** Summary row injected into `GET /v1/tasks` list items only. */
-export interface TaskAssignedAgent {
-  agent_id: string;
-  role: string;
-  status: string;
-  runtime_seconds: number | null;
-  completed_at: string | null;
-}
-
 /** Free-form artifact reference parsed out of `task.outcome_json`. Schema-less by design; `/v1/artifacts?task_id=` is the typed answer. */
 export interface ParsedOutcome {
   outcome_summary: string | null;
@@ -57,8 +48,6 @@ export interface Task {
   state_version: number;
   outcome_kind?: string;
   artifact_count?: number;
-  /** List route only — the detail route returns `assignments` instead. */
-  assigned_agents?: TaskAssignedAgent[];
   outcome?: ParsedOutcome;
   /**
    * List route only (GAP-08b) — one grouped `cost_for_tasks` query per page,
@@ -68,27 +57,17 @@ export interface Task {
   cost_usd?: number;
 }
 
-export type AssignmentStatusValue =
-  "pending" | "running" | "completed" | "failed";
-
-/** One agent run on a task; served under the legacy `assignments` key. */
-export interface TaskAgentAssignment {
-  id: string;
-  task_id: string;
-  agent_id: string;
-  role: string;
-  status: AssignmentStatusValue;
-  runtime_seconds: number | null;
-  completed_at: string;
-}
-
 /**
- * `GET /v1/tasks/{id}`. Deliberately a different shape from a list row —
- * API_MAP §5 warns the two disagree; do not conflate them.
+ * `GET /v1/tasks/{id}`. Still a different shape from a list row (nested under
+ * `task`, no `cost_usd`) — API_MAP §5 warns the two disagree; do not conflate
+ * them.
+ *
+ * The legacy `assignments` array is gone (P8): a run's agents are lanes on
+ * `GET /v1/tasks/{id}/timeline`, which — unlike `agent_task_history` — has a
+ * row for a subagent that is still working.
  */
 export interface TaskDetailResponse {
   task: Task;
-  assignments: TaskAgentAssignment[] | null;
   outcome?: ParsedOutcome;
 }
 

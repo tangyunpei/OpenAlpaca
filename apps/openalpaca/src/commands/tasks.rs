@@ -78,23 +78,12 @@ struct TaskItem {
     status: String,
     #[serde(default)]
     priority: i32,
-    #[serde(default)]
-    assigned_agents: Vec<AssignedAgent>,
     created_at: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct AssignedAgent {
-    agent_id: String,
-    role: String,
-    status: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct TaskDetail {
     task: TaskInner,
-    #[serde(default)]
-    assignments: Option<Vec<AssignmentDetail>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -119,17 +108,37 @@ struct TaskInner {
     completed_at: Option<String>,
 }
 
-/// One agent run on the task (the daemon serves `agent_task_history` rows
-/// under the legacy `assignments` key).
+/// One lane of `GET /v1/tasks/{id}/timeline` — one spawned subagent.
+///
+/// This replaces the task routes' deleted `assignments` array (P8): a span is
+/// opened when the subagent is spawned, so a lane still working has a row here
+/// where `agent_task_history` had none at all.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct AssignmentDetail {
-    agent_id: String,
-    role: String,
-    status: String,
+struct TimelineLane {
+    label: String,
+    template_id: String,
+    /// `running` / `done` / `failed` / `blocked` / `cancelled`.
+    state: String,
+    /// Why, when the state needs one: `interrupted`, `waiting on <tool>`, …
     #[serde(default)]
-    runtime_seconds: Option<i64>,
+    detail: Option<String>,
+    started_at: String,
     #[serde(default)]
-    completed_at: Option<String>,
+    ended_at: Option<String>,
+}
+
+/// `GET /v1/tasks/{id}/timeline` (GAP-09).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TaskTimeline {
+    lanes: Vec<TimelineLane>,
+}
+
+/// `openalpaca tasks status --format json` — the task plus its lanes, so the
+/// JSON path shows the runs the table path does.
+#[derive(Debug, Serialize)]
+struct TaskStatusJson<'a> {
+    task: &'a TaskInner,
+    lanes: &'a [TimelineLane],
 }
 
 /// One row of `GET /v1/events/history`.
@@ -161,14 +170,11 @@ struct EventHistoryPage {
 }
 
 impl TableRow for TaskItem {
+    /// No AGENTS column: the list route no longer carries `assigned_agents`
+    /// (P8), and a per-row timeline call would be one request per row.
+    /// `openalpaca tasks status <id>` shows a run's lanes.
     fn headers() -> Vec<(&'static str, usize)> {
-        vec![
-            ("ID", 10),
-            ("TITLE", 30),
-            ("STATUS", 12),
-            ("AGENTS", 15),
-            ("CREATED", 20),
-        ]
+        vec![("ID", 10), ("TITLE", 30), ("STATUS", 12), ("CREATED", 20)]
     }
 
     fn table_row(&self) -> String {
@@ -176,15 +182,6 @@ impl TableRow for TaskItem {
             &self.id[..8]
         } else {
             &self.id
-        };
-        let agents = if self.assigned_agents.is_empty() {
-            "-".to_string()
-        } else {
-            self.assigned_agents
-                .iter()
-                .map(|a| a.agent_id.clone())
-                .collect::<Vec<_>>()
-                .join(", ")
         };
         let created = self
             .created_at
@@ -195,11 +192,10 @@ impl TableRow for TaskItem {
             .collect::<String>();
 
         format!(
-            "{:<10} {:<30} {:<12} {:<15} {:<20}",
+            "{:<10} {:<30} {:<12} {:<20}",
             short_id,
             truncate(&self.title, 28),
             status_color(&self.status),
-            truncate(&agents, 13),
             created,
         )
     }
@@ -248,12 +244,21 @@ async fn list_tasks(status: Option<String>, limit: usize, format: OutputFormat) 
 async fn task_status(task_id: &str, format: OutputFormat) -> Result<()> {
     let client = DaemonClient::connect()?;
     let detail: TaskDetail = client.get(&format!("/v1/tasks/{}", task_id)).await?;
+    // The agent runs come from the timeline now — the task routes stopped
+    // carrying them with P8.
+    let timeline: TaskTimeline = client
+        .get(&format!("/v1/tasks/{}/timeline", task_id))
+        .await?;
 
     match format {
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&detail).unwrap_or_default()
+                serde_json::to_string_pretty(&TaskStatusJson {
+                    task: &detail.task,
+                    lanes: &timeline.lanes,
+                })
+                .unwrap_or_default()
             );
         }
         OutputFormat::Table => {
@@ -289,29 +294,32 @@ async fn task_status(task_id: &str, format: OutputFormat) -> Result<()> {
                 println!("{} {}", "Completed:".dimmed(), completed);
             }
 
-            if let Some(ref assignments) = detail.assignments
-                && !assignments.is_empty()
-            {
+            if !timeline.lanes.is_empty() {
                 println!();
-                println!("{}", "Agent Runs:".dimmed());
-                // Served in chronological order by the daemon.
-                for a in assignments {
-                    let runtime_label = a
-                        .runtime_seconds
-                        .map(|s| format!(" {}s", s))
-                        .unwrap_or_default();
-                    let completed_label = a
-                        .completed_at
+                println!("{}", "Lanes:".dimmed());
+                // Served oldest-first by the daemon.
+                for lane in &timeline.lanes {
+                    let started = lane.started_at.chars().take(19).collect::<String>();
+                    let window = match lane.ended_at.as_deref() {
+                        Some(ended) => format!(
+                            " {} → {}",
+                            started,
+                            ended.chars().take(19).collect::<String>()
+                        ),
+                        None => format!(" {} → …", started),
+                    };
+                    let detail_label = lane
+                        .detail
                         .as_deref()
-                        .map(|t| format!(" @ {}", t.chars().take(19).collect::<String>()))
+                        .map(|d| format!(" — {}", d))
                         .unwrap_or_default();
                     println!(
                         "  {} {} ({}){}{}",
-                        status_color(&a.status),
-                        a.agent_id,
-                        a.role,
-                        runtime_label.dimmed(),
-                        completed_label.dimmed()
+                        status_color(&lane.state),
+                        lane.label,
+                        lane.template_id,
+                        window.dimmed(),
+                        detail_label.dimmed()
                     );
                 }
             }

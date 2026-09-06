@@ -110,7 +110,7 @@ beforeEach(() => {
           lanes: [],
         });
       }
-      if (url.includes("/v1/tasks/")) return json({ task, assignments: [] });
+      if (url.includes("/v1/tasks/")) return json({ task });
       return json({ error: "not found" }, 404);
     }),
   );
@@ -164,7 +164,7 @@ describe("RunDetail — Timeline", () => {
             500,
           );
         }
-        if (url.includes("/v1/tasks/")) return json({ task, assignments: [] });
+        if (url.includes("/v1/tasks/")) return json({ task });
         return json({ error: "not found" }, 404);
       }),
     );

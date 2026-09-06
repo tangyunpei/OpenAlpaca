@@ -349,7 +349,7 @@ pub async fn poll_task_completion(client: &DaemonClient, task_id: &str) -> Resul
             }
         };
 
-        // GET /v1/tasks/{id} returns { "task": {...}, "assignments": [...] }
+        // GET /v1/tasks/{id} returns { "task": {...}, "outcome": {...}? }
         let task = &resp["task"];
         let status = task["status"].as_str().unwrap_or("");
 

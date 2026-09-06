@@ -137,7 +137,7 @@ Route table source of truth: `apps/openalpacad/src/router.rs` (see also the [API
 Major groups:
 
 - Core: health, `/v1/command`, `/v1/events/history`
-- Tasks: list/create/status/action — the `assigned_agents` (list) / `assignments` (detail) arrays report agent runs from `agent_task_history` (agent id, role, status, runtime, completion time)
+- Tasks: list/create/status/action, plus `GET /v1/tasks/{id}/timeline` — one lane per spawned subagent (label, template, state, start/end), which is where a run's agents are reported; the legacy `assigned_agents` (list) / `assignments` (detail) arrays were deleted
 - Agents: CRUD/action/config plus template CRUD (`/v1/agent-templates`) and a read-only instance list (`GET /v1/agent-instances`)
 - Chat: send/history/conversations/stream, message feedback (`PUT|GET|DELETE /v1/chat/messages/{message_id}/feedback`), tool confirmations (`POST /v1/chat/confirmations/{request_id}`)
 - Files: `POST /v1/files/upload` (body limit 100 MiB), `GET /v1/files/{id}`, `GET /v1/files/{id}/content`, `POST /v1/files/{id}/open`

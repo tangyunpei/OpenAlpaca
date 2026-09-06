@@ -27,14 +27,15 @@ pub struct TaskActionRequest {
     pub action: String, // "cancel", "pause", "resume"
 }
 
+/// `GET /v1/tasks/{id}`.
+///
+/// The legacy `assignments` array (`agent_task_history` rows under a serde
+/// rename) was deleted with Phase 4's P8: it could only describe a subagent
+/// that had already returned, while `GET /v1/tasks/{id}/timeline` serves every
+/// lane of the run — in flight, blocked or finished — from `subagent_span`.
 #[derive(Debug, Serialize)]
 pub struct TaskResponse {
     pub task: Task,
-    /// Agent runs recorded for this task (from `agent_task_history`, written
-    /// by the dispatcher's `record_agent_history`). Serialized under the
-    /// legacy `assignments` key for client compatibility.
-    #[serde(rename = "assignments", skip_serializing_if = "Option::is_none")]
-    pub agents: Option<Vec<openalpaca_storage::AgentTaskHistory>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<ParsedOutcomeFields>,
 }
@@ -83,22 +84,19 @@ pub struct TaskTimelineResponse {
 
 /// Row shape served by `GET /v1/tasks` — a `Task`'s own fields flattened to
 /// the top level (matching `Task`'s `#[serde(skip)]`s on the internal
-/// `state_json`/`outcome_json` columns), plus the fields the handler used to
-/// post-inject via `serde_json::Value::as_object_mut()`:
-/// `assigned_agents` (always present, possibly empty) and `outcome` (present
-/// only when the task's `outcome_json` parses — see `parse_outcome`), plus
-/// `cost_usd` (GAP-08b), sourced from a single grouped
-/// `LlmUsageRepository::cost_for_tasks` query over the page's task ids and
-/// defaulted to 0.0 for a task with no logged LLM calls.
+/// `state_json`/`outcome_json` columns), plus `outcome` (present only when the
+/// task's `outcome_json` parses — see `parse_outcome`) and `cost_usd`
+/// (GAP-08b), sourced from a single grouped `LlmUsageRepository::cost_for_tasks`
+/// query over the page's task ids and defaulted to 0.0 for a task with no
+/// logged LLM calls.
 ///
-/// This is the "cheap half" of task-shape normalisation (plan §7); the full
-/// `GET /v1/tasks` vs `/{id}` unification lands in Phase 4 with P8.
+/// The `assigned_agents` summary array went with P8: a run's agents are the
+/// timeline's business (`GET /v1/tasks/{id}/timeline`), and building it here
+/// cost one `agent_task_history` query per row of every page.
 #[derive(Debug, Serialize)]
 pub struct TaskSummaryResponse {
     #[serde(flatten)]
     pub task: Task,
-    /// Sourced from `agent_task_history`; see `agent_runs_summary` in `tasks.rs`.
-    pub assigned_agents: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<ParsedOutcomeFields>,
     pub cost_usd: f64,

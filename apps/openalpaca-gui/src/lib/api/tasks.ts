@@ -17,7 +17,7 @@ export interface ListTasksQuery {
   limit?: number;
 }
 
-/** `GET /v1/tasks` — a bare array, with `assigned_agents` and `outcome` injected. */
+/** `GET /v1/tasks` — a bare array of `Task` rows carrying `outcome` and `cost_usd`. */
 export async function listTasks(
   query: ListTasksQuery = {},
   signal?: AbortSignal,
