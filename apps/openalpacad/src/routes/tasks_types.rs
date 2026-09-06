@@ -65,6 +65,15 @@ pub struct TaskResponse {
     pub task: Task,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<ParsedOutcomeFields>,
+    /// Whether `POST /v1/tasks/{id}/steer` would take a message for this run
+    /// right now (R40) — see [`steerable`](crate::routes::tasks) for the three
+    /// predicates. A property of *now*, like the timeline's derived lane
+    /// states: it is computed at read time and never stored.
+    ///
+    /// It sits beside `task` rather than inside it because it is not a column:
+    /// the run's row says nothing about who is asking or whether a workflow is
+    /// still attached to it.
+    pub steerable: bool,
 }
 
 /// One swimlane of `GET /v1/tasks/{id}/timeline` — the `TimelineLane` the GUI
@@ -133,4 +142,10 @@ pub struct TaskSummaryResponse {
     pub outcome: Option<ParsedOutcomeFields>,
     pub cost_usd: f64,
     pub subagent_count: i64,
+    /// Whether `POST /v1/tasks/{id}/steer` would take a message for this run
+    /// right now (R40) — the same flag, from the same predicates, that
+    /// [`TaskResponse::steerable`] carries. A list row serves it so the run
+    /// cards can disable `Steer` with a stated reason instead of letting the
+    /// user discover the answer by sending one.
+    pub steerable: bool,
 }

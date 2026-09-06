@@ -180,11 +180,16 @@ pub async fn list_tasks_handler(
                     let outcome = parse_outcome(&t);
                     let cost_usd = costs.get(&t.id).copied().unwrap_or(0.0);
                     let subagent_count = subagent_counts.get(&t.id).copied().unwrap_or(0);
+                    // R40 — an in-memory lookup per row (the registered inbox),
+                    // no query: the list stays one page, three queries.
+                    let steerable =
+                        is_steerable(&t, &state.gateway.shared_context, &state.local_user_id);
                     TaskSummaryResponse {
                         task: t,
                         outcome,
                         cost_usd,
                         subagent_count,
+                        steerable,
                     }
                 })
                 .collect();
@@ -210,10 +215,16 @@ pub async fn get_task_handler(
     match repo.get(&id) {
         Ok(Some(task)) => {
             let outcome = parse_outcome(&task);
+            let steerable =
+                is_steerable(&task, &state.gateway.shared_context, &state.local_user_id);
             (
                 StatusCode::OK,
                 Json(
-                    serde_json::to_value(TaskResponse { task, outcome })
+                    serde_json::to_value(TaskResponse {
+                        task,
+                        outcome,
+                        steerable,
+                    })
                     .unwrap_or_else(|_| serde_json::json!({"error": "serialization_failed"})),
                 ),
             )
@@ -411,6 +422,61 @@ pub async fn task_action_handler(
     }
 }
 
+// ── Steerability, in one place (R40) ──────────────────────────────
+//
+// Every task row carries a `steerable` flag and the steer route enforces the
+// same three predicates. They are written once, here, because a hint the route
+// would not honour is worse than no hint at all: the client would disable a
+// control that works, or offer one that answers 404 forever.
+//
+// Only the steer route is owner-scoped — reading a run and cancelling it are
+// not, deliberately (that asymmetry is a task-surface decision left to the
+// owner). What this flag does is make the asymmetry legible on the row.
+
+/// Why a run cannot take a steering message right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SteerRefusal {
+    /// Started somewhere else — a connector run carries
+    /// `created_by = "<provider>:<id>"`, never this daemon's local user. A
+    /// steer injects text into somebody else's running agent, so the route
+    /// answers the same `404` it gives for a run that does not exist.
+    NotOwned,
+    /// The row has reached a terminal status. Its inbox is usually closed
+    /// already; this closes the window between `cancel` marking the row and
+    /// the workflow closing the inbox on its way out.
+    Terminal,
+    /// No live inbox: the workflow never registered one (queued, steering
+    /// disabled, or a daemon generation that is gone) or it has closed.
+    NoInbox,
+}
+
+/// The three predicates, evaluated in the order the route reports them.
+fn steer_refusal(
+    task: &Task,
+    shared_context: &SharedContext,
+    owner_id: &str,
+) -> Option<SteerRefusal> {
+    if task.created_by != owner_id {
+        return Some(SteerRefusal::NotOwned);
+    }
+    if task.status.is_terminal() {
+        return Some(SteerRefusal::Terminal);
+    }
+    match shared_context.steering_inbox(&task.id) {
+        Some(inbox) if !inbox.is_closed() => None,
+        _ => Some(SteerRefusal::NoInbox),
+    }
+}
+
+/// The `steerable` flag both task shapes serve.
+///
+/// The rail's `steering_enabled` switch is not a fourth predicate: with the
+/// rail off no workflow registers an inbox at all (`dispatch_lead_agent`), so
+/// such a run already reports `false` through `NoInbox`.
+fn is_steerable(task: &Task, shared_context: &SharedContext, owner_id: &str) -> bool {
+    steer_refusal(task, shared_context, owner_id).is_none()
+}
+
 // ── POST /v1/tasks/{id}/steer (GAP-02) ────────────────────────────
 //
 // Pure reuse. The steering rail is `runner/steering.rs`, it is already
@@ -455,16 +521,33 @@ fn steer_task(
         );
     }
 
-    // A run this caller cannot see is a run that does not exist — the same
-    // `404` `routes/files.rs` and `routes/artifacts.rs` already answer with,
-    // rather than a `403` that would confirm the id belongs to someone.
     let task = match TaskRepository::new(db).get(id) {
-        Ok(Some(task)) if task.created_by == owner_id => task,
-        Ok(_) => return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Task not found"),
+        Ok(Some(task)) => task,
+        Ok(None) => return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Task not found"),
         Err(e) => {
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string());
         }
     };
+
+    // The same predicates the row's `steerable` flag is computed from.
+    match steer_refusal(&task, shared_context, owner_id) {
+        // A run this caller cannot see is a run that does not exist — the same
+        // `404` `routes/files.rs` and `routes/artifacts.rs` already answer
+        // with, byte for byte, rather than a `403` that would confirm the id
+        // belongs to someone.
+        Some(SteerRefusal::NotOwned) => {
+            return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Task not found");
+        }
+        Some(SteerRefusal::Terminal | SteerRefusal::NoInbox) => {
+            return api_error(
+                StatusCode::CONFLICT,
+                "TASK_NOT_STEERABLE",
+                "This run is not accepting steering messages — it is not running, or it has \
+                 already finished.",
+            );
+        }
+        None => {}
+    }
 
     let msg = SteeringMsg {
         text: message.to_string(),
@@ -496,10 +579,10 @@ fn steer_task(
                 routing.steering_inbox_cap,
             ),
         ),
-        // One code for both ways a run is unsteerable — it never registered an
-        // inbox (queued, or dispatched by a daemon generation that is gone) and
-        // it closed the one it had (finished or cancelled). Neither is
-        // something the caller can retry into.
+        // The `NoInbox` pre-check above answers this in the ordinary case;
+        // what is left here is the race — a workflow closing its inbox between
+        // that check and this push — and it gets the same code, because it is
+        // the same fact about the run.
         Err(SteeringPushError::Closed) => api_error(
             StatusCode::CONFLICT,
             "TASK_NOT_STEERABLE",
@@ -686,6 +769,7 @@ mod tests {
         let detail = serde_json::to_value(TaskResponse {
             task: make_test_task(),
             outcome: None,
+            steerable: false,
         })
         .unwrap();
         for key in ["assignments", "assigned_agents", "agents"] {
@@ -701,6 +785,7 @@ mod tests {
             outcome: None,
             cost_usd: 0.0,
             subagent_count: 0,
+            steerable: false,
         })
         .unwrap();
         for key in ["assignments", "assigned_agents", "agents"] {
@@ -750,7 +835,11 @@ mod tests {
         );
 
         let outcome = parse_outcome(&task);
-        let resp = TaskResponse { task, outcome };
+        let resp = TaskResponse {
+            task,
+            outcome,
+            steerable: false,
+        };
 
         let v = serde_json::to_value(&resp).unwrap();
         // The task sub-object should not contain raw JSON fields
@@ -782,6 +871,8 @@ mod tests {
                 "subagent_count".to_string(),
                 serde_json::json!(subagent_count),
             );
+            // R40's read-time hint, present on every row.
+            obj.insert("steerable".to_string(), serde_json::json!(false));
         }
         v
     }
@@ -1025,6 +1116,7 @@ mod tests {
             outcome,
             cost_usd: 1.25,
             subagent_count: 2,
+            steerable: false,
         };
         let actual = serde_json::to_value(&summary).unwrap();
 
@@ -1050,6 +1142,7 @@ mod tests {
             outcome,
             cost_usd: 0.0,
             subagent_count: 0,
+            steerable: false,
         };
         let actual = serde_json::to_value(&summary).unwrap();
 
@@ -1073,6 +1166,7 @@ mod tests {
             outcome: None,
             cost_usd: 0.0,
             subagent_count: 3,
+            steerable: false,
         })
         .unwrap();
         assert_eq!(v["subagent_count"], 3);
@@ -1086,6 +1180,7 @@ mod tests {
             outcome: None,
             cost_usd: 0.0,
             subagent_count: counts.get("task-1").copied().unwrap_or(0),
+            steerable: false,
         })
         .unwrap();
         assert!(
@@ -1099,6 +1194,7 @@ mod tests {
         let detail = serde_json::to_value(TaskResponse {
             task: make_test_task(),
             outcome: None,
+            steerable: false,
         })
         .unwrap();
         assert!(detail["task"].get("subagent_count").is_none());
@@ -1119,6 +1215,7 @@ mod tests {
             outcome: None,
             cost_usd: 0.0,
             subagent_count: 0,
+            steerable: false,
         };
         let v = serde_json::to_value(&summary).unwrap();
         assert_eq!(v["workspace_id"], "/Users/dev/openalpaca");
@@ -1127,6 +1224,7 @@ mod tests {
         let single = TaskResponse {
             task,
             outcome: None,
+            steerable: false,
         };
         let v = serde_json::to_value(&single).unwrap();
         assert_eq!(v["task"]["workspace_id"], "/Users/dev/openalpaca");
@@ -1437,5 +1535,135 @@ mod tests {
             assert_eq!(body["error"]["code"], "EMPTY_MESSAGE");
         }
         assert!(inbox.is_empty());
+    }
+
+    // ── `steerable` on a task row (R40) ───────────────────────────
+
+    /// A run this owner started, still running, with a live inbox.
+    fn live_run() -> Task {
+        let mut task = make_test_task();
+        task.status = TaskStatus::Running;
+        task.completed_at = None;
+        task
+    }
+
+    /// The hint every task row carries, so a client can disable `Steer`
+    /// instead of discovering the answer by sending. All three predicates:
+    /// the run is this owner's, it is not terminal, and it has a live inbox.
+    #[test]
+    fn a_task_row_says_whether_the_run_can_be_steered() {
+        let (shared, _bus, inbox) = steerable(16);
+
+        // All three hold → steerable.
+        assert!(is_steerable(&live_run(), &shared, STEER_OWNER));
+
+        // Another channel's run: `created_by` is `"<provider>:<id>"`, never
+        // this daemon's local user.
+        let mut foreign = live_run();
+        foreign.created_by = "telegram:4242".to_string();
+        assert!(!is_steerable(&foreign, &shared, STEER_OWNER));
+
+        // Terminal in the DB, even while the inbox has not been closed yet.
+        let mut finished = live_run();
+        finished.status = TaskStatus::Completed;
+        assert!(!is_steerable(&finished, &shared, STEER_OWNER));
+
+        // No inbox at all (queued, or a daemon generation that is gone).
+        let bare = Arc::new(SharedContext::new());
+        assert!(!is_steerable(&live_run(), &bare, STEER_OWNER));
+
+        // The inbox it had, closed on the way out.
+        inbox.close_and_drain();
+        assert!(!is_steerable(&live_run(), &shared, STEER_OWNER));
+    }
+
+    /// The hint is served by both task shapes — flattened on a list row,
+    /// beside `task` on the detail — and is always present, so `false` is
+    /// distinguishable from an older daemon that does not know the field.
+    #[test]
+    fn both_task_shapes_serve_the_steerable_hint() {
+        let summary = serde_json::to_value(TaskSummaryResponse {
+            task: live_run(),
+            outcome: None,
+            cost_usd: 0.0,
+            subagent_count: 0,
+            steerable: true,
+        })
+        .unwrap();
+        assert_eq!(summary["steerable"], true);
+
+        let detail = serde_json::to_value(TaskResponse {
+            task: live_run(),
+            outcome: None,
+            steerable: false,
+        })
+        .unwrap();
+        assert_eq!(detail["steerable"], false);
+    }
+
+    /// The anti-drift assertion: a row that says `steerable: false` is a row
+    /// the steer route refuses, and one that says `true` is a row it accepts —
+    /// both sides read the same predicates.
+    #[tokio::test]
+    async fn the_steerable_hint_matches_what_the_steer_route_does() {
+        // Owned, running, live inbox → the hint says yes and the route agrees.
+        let (_dir, db) = steer_db(None);
+        let (shared, bus, inbox) = steerable(16);
+        let task = TaskRepository::new(&db)
+            .get("task-1")
+            .unwrap()
+            .expect("the run exists");
+        assert!(is_steerable(&task, &shared, STEER_OWNER));
+        let (status, _) = split(steer_task(
+            &db,
+            &shared,
+            &bus,
+            &RoutingConfig::default(),
+            STEER_OWNER,
+            "task-1",
+            steer_request("go"),
+        ))
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Another owner: the hint says no, and the route answers 404 — the
+        // same answer it gives for a run that does not exist.
+        assert!(!is_steerable(&task, &shared, "someone-else"));
+        let (status, _) = split(steer_task(
+            &db,
+            &shared,
+            &bus,
+            &RoutingConfig::default(),
+            "someone-else",
+            "task-1",
+            steer_request("go"),
+        ))
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Terminal row, inbox still open (the window between `cancel` marking
+        // the row and the workflow closing its inbox): the hint says no, and
+        // the route refuses rather than queueing into a run that is over.
+        let mut cancelled = task.clone();
+        cancelled.status = TaskStatus::Cancelled;
+        cancelled.completed_at = Some(Utc::now());
+        TaskRepository::new(&db)
+            .update_status(&cancelled.id, TaskStatus::Cancelled)
+            .expect("mark the run cancelled");
+        assert!(!is_steerable(&cancelled, &shared, STEER_OWNER));
+        let (status, body) = split(steer_task(
+            &db,
+            &shared,
+            &bus,
+            &RoutingConfig::default(),
+            STEER_OWNER,
+            "task-1",
+            steer_request("too late"),
+        ))
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "TASK_NOT_STEERABLE");
+        // Nothing was queued past the refusal — only the accepted push above.
+        assert_eq!(inbox.drain_all().len(), 1);
     }
 }
