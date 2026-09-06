@@ -22,6 +22,6 @@ pub use identity::{ExternalIdentity, GlobalUser, LinkToken};
 pub use memory::{MemoryKind, MemoryScope, MemorySource, MemoryV2};
 pub use subagent::{AgentMetrics, AgentTaskHistory, SubAgentConfig};
 pub use feedback::MessageFeedback;
-pub use skill_execution::{SkillExecutionEntry, ToolExecutionEntry};
+pub use skill_execution::{PREVIEW_CHARS, SkillExecutionEntry, ToolExecutionEntry};
 pub use skill_health::SkillHealthMetrics;
 pub use task::{OutcomeKind, Task, TaskStatus};

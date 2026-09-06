@@ -60,17 +60,99 @@ fn test_record_tool() {
     let repo = SkillExecutionRepository::new(&db);
 
     let entry = ToolExecutionEntry {
-        id: None,
         request_id: Some("req-1".to_string()),
         agent_id: "orchestrator".to_string(),
         tool_name: "web_fetch".to_string(),
         success: true,
         duration_ms: 250,
-        error_message: None,
-        timestamp: None,
+        ..Default::default()
     };
     let id = repo.record_tool(&entry).unwrap();
     assert!(id > 0);
+}
+
+/// 039's six columns are the session event log's tool-call index (§5.4): the
+/// payloads live in the JSONL, the row holds previews and the `log_seq`
+/// pointer back to the record that carries them.
+#[test]
+fn record_tool_writes_the_session_index_columns() {
+    let db = setup_db();
+    let repo = SkillExecutionRepository::new(&db);
+
+    let id = repo
+        .record_tool(&ToolExecutionEntry {
+            agent_id: "research_agent::a1b2c3d4".to_string(),
+            tool_name: "web_fetch".to_string(),
+            success: true,
+            duration_ms: 250,
+            session_id: Some("sess-1".to_string()),
+            task_id: Some("task-1".to_string()),
+            log_seq: Some(184),
+            args_preview: Some("{\"url\":\"https://example.com\"}".to_string()),
+            result_preview: Some("hello".to_string()),
+            result_ref: Some("log:185".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let row: (
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT session_id, task_id, log_seq, args_preview, result_preview, result_ref
+                   FROM tool_execution_log WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )?)
+        })
+        .unwrap();
+
+    assert_eq!(row.0.as_deref(), Some("sess-1"));
+    assert_eq!(row.1.as_deref(), Some("task-1"));
+    assert_eq!(row.2, Some(184));
+    assert_eq!(row.3.as_deref(), Some("{\"url\":\"https://example.com\"}"));
+    assert_eq!(row.4.as_deref(), Some("hello"));
+    assert_eq!(row.5.as_deref(), Some("log:185"));
+}
+
+/// The migration documents both preview columns as "≤ 2048 chars". The bound
+/// is enforced where the column is written, so no caller can widen it — the
+/// full payload is the JSONL's job, not the index row's.
+#[test]
+fn tool_previews_are_capped_at_the_column_bound() {
+    let db = setup_db();
+    let repo = SkillExecutionRepository::new(&db);
+
+    // Multi-byte, so a byte-wise cut would panic or split a character.
+    let long: String = "é".repeat(PREVIEW_CHARS + 500);
+    let id = repo
+        .record_tool(&ToolExecutionEntry {
+            agent_id: "orchestrator".to_string(),
+            tool_name: "shell_execute".to_string(),
+            args_preview: Some(long.clone()),
+            result_preview: Some(long),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let (args, result): (String, String) = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT args_preview, result_preview FROM tool_execution_log WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+
+    assert_eq!(args.chars().count(), PREVIEW_CHARS);
+    assert_eq!(result.chars().count(), PREVIEW_CHARS);
 }
 
 #[test]
@@ -83,14 +165,12 @@ fn test_cleanup_old() {
     repo.record(&entry).unwrap();
 
     let tool_entry = ToolExecutionEntry {
-        id: None,
         request_id: Some("req-cleanup".to_string()),
         agent_id: "orchestrator".to_string(),
         tool_name: "shell".to_string(),
         success: true,
         duration_ms: 100,
-        error_message: None,
-        timestamp: None,
+        ..Default::default()
     };
     repo.record_tool(&tool_entry).unwrap();
 

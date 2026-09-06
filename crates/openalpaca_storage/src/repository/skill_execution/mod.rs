@@ -1,6 +1,6 @@
 //! Repository for skill and tool execution telemetry
 
-use crate::models::skill_execution::{SkillExecutionEntry, ToolExecutionEntry};
+use crate::models::skill_execution::{PREVIEW_CHARS, SkillExecutionEntry, ToolExecutionEntry};
 use crate::models::skill_health::SkillHealthMetrics;
 use crate::Database;
 use anyhow::{Context, Result};
@@ -57,12 +57,19 @@ impl<'a> SkillExecutionRepository<'a> {
     }
 
     /// Record a tool execution entry. Returns the row id.
+    ///
+    /// Both preview columns are clamped to [`PREVIEW_CHARS`] here rather than
+    /// at the call sites: the bound belongs to the column, and the payload it
+    /// previews is already stored in full in the session event log.
     pub fn record_tool(&self, entry: &ToolExecutionEntry) -> Result<i64> {
+        let args_preview = entry.args_preview.as_deref().map(clamp_preview);
+        let result_preview = entry.result_preview.as_deref().map(clamp_preview);
         self.db.with_connection(|conn| {
             conn.execute(
                 "INSERT INTO tool_execution_log (
-                    request_id, agent_id, tool_name, success, duration_ms, error_message
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    request_id, agent_id, tool_name, success, duration_ms, error_message,
+                    session_id, task_id, log_seq, args_preview, result_preview, result_ref
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 rusqlite::params![
                     entry.request_id,
                     entry.agent_id,
@@ -70,6 +77,12 @@ impl<'a> SkillExecutionRepository<'a> {
                     entry.success as i32,
                     entry.duration_ms,
                     entry.error_message,
+                    entry.session_id,
+                    entry.task_id,
+                    entry.log_seq,
+                    args_preview,
+                    result_preview,
+                    entry.result_ref,
                 ],
             )
             .context("Failed to insert tool execution log")?;
@@ -203,6 +216,11 @@ impl<'a> SkillExecutionRepository<'a> {
             Ok((skill_deleted, tool_deleted))
         })
     }
+}
+
+/// Clamp a preview to the column's documented bound, on a character boundary.
+fn clamp_preview(s: &str) -> String {
+    s.chars().take(PREVIEW_CHARS).collect()
 }
 
 fn parse_datetime(s: &str) -> Option<DateTime<Utc>> {

@@ -31,7 +31,7 @@ pub use models::{Conversation, ConversationMessage};
 pub use models::{ExternalIdentity, GlobalUser, LinkToken};
 pub use models::{MemoryKind, MemoryScope, MemorySource, MemoryV2};
 pub use models::MessageFeedback;
-pub use models::{SkillExecutionEntry, ToolExecutionEntry};
+pub use models::{PREVIEW_CHARS, SkillExecutionEntry, ToolExecutionEntry};
 pub use models::SkillHealthMetrics;
 pub use repository::{
     ARTIFACT_ROLE, ATTACHMENT_ROLE, AgentRepository, ConfigRepository, ConversationRepository,

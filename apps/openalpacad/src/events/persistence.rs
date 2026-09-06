@@ -581,14 +581,11 @@ impl EventBroadcaster {
     ) {
         if let Some(ref db) = self.db {
             let entry = ToolExecutionEntry {
-                id: None,
-                request_id: None,
                 agent_id: agent_id.to_string(),
                 tool_name: tool_name.to_string(),
                 success,
                 duration_ms: duration_ms as i64,
-                error_message: None,
-                timestamp: None,
+                ..Default::default()
             };
             if let Err(e) = SkillExecutionRepository::new(db).record_tool(&entry) {
                 tracing::warn!("Failed to persist tool execution log: {e}");
