@@ -525,6 +525,38 @@ pub fn spawn_event_bridge(
                         path,
                     );
                 }
+                openalpaca_core::events::SystemEvent::SubagentSpan {
+                    ref task_id,
+                    ref span_id,
+                    ref label,
+                    ref template_id,
+                    ref agent_instance_id,
+                    ref state,
+                    ref detail,
+                    ref started_at,
+                    ref ended_at,
+                    duration_ms,
+                    ref output_preview,
+                    ..
+                } => {
+                    tracing::debug!(
+                        %task_id, %span_id, %label, %state,
+                        "Subagent span"
+                    );
+                    eb.subagent_span(
+                        task_id,
+                        span_id,
+                        label,
+                        template_id,
+                        agent_instance_id,
+                        state,
+                        detail.as_deref(),
+                        started_at,
+                        ended_at.as_deref(),
+                        duration_ms,
+                        output_preview.as_deref(),
+                    );
+                }
                 openalpaca_core::events::SystemEvent::ExtensionStateChanged {
                     ref extension, ref state, generation, tools_changed, ..
                 } => {
@@ -817,6 +849,100 @@ mod tests {
                 assert_eq!(agent_id, None);
             }
             other => panic!("Expected ArtifactWritten, got {other:?}"),
+        }
+        cancel.cancel();
+    }
+
+    /// GAP-09 — a lane's open crosses the bridge with the bridge's own
+    /// `ts`/`instance_id`, and the row's own `started_at` string untouched.
+    #[tokio::test]
+    async fn test_subagent_span_open_bridged_with_ts_and_instance_id() {
+        let (bus, mut rx, cancel) = setup_bridge();
+        let before = chrono::Utc::now();
+        bus.publish(SystemEvent::SubagentSpan {
+            task_id: "t-1".into(),
+            span_id: "node-1".into(),
+            label: "review·1".into(),
+            template_id: "review_agent".into(),
+            agent_instance_id: "review_agent::a1b2".into(),
+            state: "running".into(),
+            detail: None,
+            started_at: "2026-09-05T10:00:00.000Z".into(),
+            ended_at: None,
+            duration_ms: None,
+            output_preview: None,
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::SubagentSpan {
+                task_id,
+                span_id,
+                label,
+                template_id,
+                agent_instance_id,
+                state,
+                detail,
+                started_at,
+                ended_at,
+                duration_ms,
+                output_preview,
+                ts,
+                instance_id,
+            } => {
+                assert_eq!(task_id, "t-1");
+                assert_eq!(span_id, "node-1");
+                assert_eq!(label, "review·1");
+                assert_eq!(template_id, "review_agent");
+                assert_eq!(agent_instance_id, "review_agent::a1b2");
+                assert_eq!(state, "running");
+                assert_eq!(detail, None);
+                assert_eq!(started_at, "2026-09-05T10:00:00.000Z");
+                assert_eq!(ended_at, None);
+                assert_eq!(duration_ms, None);
+                assert_eq!(output_preview, None);
+                assert!(ts >= before);
+                assert_eq!(instance_id, "test-instance");
+            }
+            other => panic!("Expected SubagentSpan, got {other:?}"),
+        }
+        cancel.cancel();
+    }
+
+    /// A close carries every closing field across unchanged — a cancellation
+    /// stays a cancellation rather than becoming "not successful".
+    #[tokio::test]
+    async fn test_subagent_span_close_bridges_its_terminal_fields() {
+        let (bus, mut rx, cancel) = setup_bridge();
+        bus.publish(SystemEvent::SubagentSpan {
+            task_id: "t-1".into(),
+            span_id: "node-1".into(),
+            label: "review·1".into(),
+            template_id: "review_agent".into(),
+            agent_instance_id: "review_agent::a1b2".into(),
+            state: "cancelled".into(),
+            detail: Some("cancelled before starting".into()),
+            started_at: "2026-09-05T10:00:00.000Z".into(),
+            ended_at: Some("2026-09-05T10:00:04.500Z".into()),
+            duration_ms: Some(4_500),
+            output_preview: Some("partial".into()),
+            timestamp: chrono::Utc::now(),
+        });
+        match recv_event(&mut rx).await {
+            ServerEvent::SubagentSpan {
+                state,
+                detail,
+                ended_at,
+                duration_ms,
+                output_preview,
+                ..
+            } => {
+                assert_eq!(state, "cancelled");
+                assert_eq!(detail.as_deref(), Some("cancelled before starting"));
+                assert_eq!(ended_at.as_deref(), Some("2026-09-05T10:00:04.500Z"));
+                assert_eq!(duration_ms, Some(4_500));
+                assert_eq!(output_preview.as_deref(), Some("partial"));
+            }
+            other => panic!("Expected SubagentSpan, got {other:?}"),
         }
         cancel.cancel();
     }

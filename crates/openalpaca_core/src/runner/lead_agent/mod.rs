@@ -223,6 +223,8 @@ pub async fn run_lead_agent(
 
     let tool_ctx = ToolContext {
         agent_id: Some(lead_agent.id.clone()),
+        // The lead's own lane (GAP-09's derived `blocked`).
+        agent_instance_id: Some(lead_agent.id.clone()),
         task_id: Some(task_id.to_string()),
         owner_id: Some(created_by.to_string()),
         workspace_id: workspace.workspace_id.clone(),

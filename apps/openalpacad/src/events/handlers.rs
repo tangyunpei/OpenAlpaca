@@ -69,6 +69,46 @@ impl EventBroadcaster {
         let _ = self.tx.send(event);
     }
 
+    /// Broadcast one subagent-lane transition and persist it (GAP-09).
+    ///
+    /// `started_at` / `ended_at` are passed through as the row's own strings;
+    /// only `ts` (the moment of the announcement) and `instance_id` are
+    /// stamped here, exactly as `task_status` stamps them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn subagent_span(
+        &self,
+        task_id: &str,
+        span_id: &str,
+        label: &str,
+        template_id: &str,
+        agent_instance_id: &str,
+        state: &str,
+        detail: Option<&str>,
+        started_at: &str,
+        ended_at: Option<&str>,
+        duration_ms: Option<i64>,
+        output_preview: Option<&str>,
+    ) {
+        let event = ServerEvent::SubagentSpan {
+            task_id: task_id.to_string(),
+            span_id: span_id.to_string(),
+            label: label.to_string(),
+            template_id: template_id.to_string(),
+            agent_instance_id: agent_instance_id.to_string(),
+            state: state.to_string(),
+            detail: detail.map(str::to_string),
+            started_at: started_at.to_string(),
+            ended_at: ended_at.map(str::to_string),
+            duration_ms,
+            output_preview: output_preview.map(str::to_string),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
     /// Broadcast an agent status event and persist it
     pub fn agent_status(
         &self,

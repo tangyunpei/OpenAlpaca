@@ -255,6 +255,22 @@ impl TaskDispatcher {
                 let _ = repo.update_status(&task_id, openalpaca_storage::TaskStatus::Running);
             }
 
+            // The lead's own lane (plan Phase 4, GAP-09). Its span id is
+            // derived from the task rather than a fresh UUID: there is exactly
+            // one lead lane per run, so the id stays reconstructible from the
+            // task alone. Opened after the status flip, so a reader that sees
+            // a running task always sees a lane for it.
+            let lead_span_id = format!("lead::{task_id}");
+            crate::runner::span::open_span(
+                db.as_ref(),
+                &bus,
+                &task_id,
+                &lead_span_id,
+                &lead_agent.template_id,
+                &lead_agent.id,
+                &description,
+            );
+
             // Mark step 0 as running now (before the agentic loop) so started_at is accurate
             if let Some(ref db) = db
                 && !update_state_with_retry(
@@ -513,6 +529,19 @@ impl TaskDispatcher {
                     "Task status: running → failed"
                 );
             }
+            // Close the lead's lane *before* the task goes terminal: the
+            // timeline reports a span still running on a terminal task as
+            // `cancelled`/`"interrupted"`, and closing after the flip would
+            // leave a window where a reader saw the lead as interrupted.
+            crate::runner::span::close_span(
+                db.as_ref(),
+                &bus,
+                &lead_span_id,
+                crate::runner::span::span_state_for(&result.loop_result.finish_reason),
+                crate::runner::span::span_detail_for(&result.loop_result.finish_reason).as_deref(),
+                Some(result.final_content.as_str()),
+            );
+
             finalize_task_with_outcome(
                 &ctx,
                 &bus,

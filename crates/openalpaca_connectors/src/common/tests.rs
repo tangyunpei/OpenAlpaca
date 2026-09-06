@@ -73,6 +73,8 @@ mod confirmation {
             tool_arguments: serde_json::json!({"cmd": "ls"}),
             stream_id: None,
             lane_key: Some("global1:discord".to_string()),
+            task_id: None,
+            agent_instance_id: None,
             timestamp: chrono::Utc::now(),
         }
     }

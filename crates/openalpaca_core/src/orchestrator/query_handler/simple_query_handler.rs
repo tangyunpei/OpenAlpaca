@@ -139,6 +139,8 @@ impl Orchestrator {
                 Some(super::LoopOverrides::MainLoop { workspace_path }) => workspace_path.clone(),
                 _ => None,
             },
+            // No agent instance: this path is not a subagent lane.
+            agent_instance_id: None,
             // Filled in by the sandbox at dispatch (T28), which owns the bus.
             event_bus: None,
         };

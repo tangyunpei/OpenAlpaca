@@ -433,6 +433,35 @@ pub enum SystemEvent {
         path: String,
         timestamp: DateTime<Utc>,
     },
+    /// One subagent lane of a run opened or closed (plan Phase 4, GAP-09).
+    ///
+    /// Fired twice per span at minimum: once on `open` with `state = running`,
+    /// and once on every close. The payload is the `subagent_span` row itself,
+    /// so a client can render a lane from the frame without a refetch — and
+    /// `started_at`/`ended_at` are the row's own RFC 3339 strings rather than
+    /// re-formatted times, so the socket and `GET /v1/tasks/{id}/timeline`
+    /// can never disagree by a millisecond.
+    ///
+    /// `state` is never `"blocked"`: that one is derived at read time from the
+    /// confirmation broker's pending requests, which is live process state and
+    /// has no transition to announce.
+    SubagentSpan {
+        task_id: String,
+        /// The span id — the spawn's `node_id`.
+        span_id: String,
+        /// The lane label, unique within the run (`review·3`).
+        label: String,
+        template_id: String,
+        agent_instance_id: String,
+        /// `"running"` | `"done"` | `"failed"` | `"cancelled"`.
+        state: String,
+        detail: Option<String>,
+        started_at: String,
+        ended_at: Option<String>,
+        duration_ms: Option<i64>,
+        output_preview: Option<String>,
+        timestamp: DateTime<Utc>,
+    },
     /// An extension's observed state changed — T5, E5, `mark_failed`, T5-deny,
     /// T5-gone and §3.7's tool-list refresh (extension design ADR-030).
     ///

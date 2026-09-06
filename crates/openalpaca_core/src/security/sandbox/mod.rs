@@ -215,6 +215,11 @@ impl SandboxManager {
                     tool_arguments: tool_call.arguments.clone(),
                     stream_id: policy.stream_id.clone(),
                     lane_key: policy.lane_key.clone(),
+                    // Attribution for the run timeline's derived `blocked`
+                    // lane (GAP-09): which run, and which of its lanes, is
+                    // actually waiting on this prompt.
+                    task_id: ctx.task_id.clone(),
+                    agent_instance_id: ctx.agent_instance_id.clone(),
                     timestamp: Utc::now(),
                 };
 

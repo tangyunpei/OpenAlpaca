@@ -1,6 +1,7 @@
 mod agentic_loop;
 pub mod lead_agent;
 pub mod plugin_agent;
+pub mod span;
 pub mod steering;
 
 pub use agentic_loop::{
@@ -9,4 +10,5 @@ pub use agentic_loop::{
 };
 pub(crate) use agentic_loop::{compress_context, estimate_messages_tokens, estimate_tools_tokens};
 pub use lead_agent::{LeadAgentResult, run_lead_agent};
+pub use span::{close_span, open_span, span_detail_for, span_state_for};
 pub use steering::{SteeringInbox, SteeringMsg, SteeringPushError};

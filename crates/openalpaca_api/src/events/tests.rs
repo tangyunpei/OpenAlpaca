@@ -223,6 +223,85 @@ fn test_artifact_written_keeps_task_and_agent_nullable() {
     }
 }
 
+// ── ServerEvent::SubagentSpan (plan Phase 4, GAP-09) ──────────────
+
+/// The open frame: a lane that has started and has not ended. The three
+/// closing fields are `null`, not absent, so the client's union is one shape
+/// for both halves of a span's life.
+#[test]
+fn test_subagent_span_open_wire_shape() {
+    let event = ServerEvent::SubagentSpan {
+        task_id: "t-1".into(),
+        span_id: "node-1".into(),
+        label: "review·3".into(),
+        template_id: "review_agent".into(),
+        agent_instance_id: "review_agent::a1b2c3d4".into(),
+        state: "running".into(),
+        detail: None,
+        started_at: "2026-09-05T10:00:00.000Z".into(),
+        ended_at: None,
+        duration_ms: None,
+        output_preview: None,
+        ts: Utc::now(),
+        instance_id: "inst-1".into(),
+    };
+    let value = serde_json::to_value(&event).unwrap();
+    assert_eq!(value["type"], "subagent_span");
+    assert_eq!(value["task_id"], "t-1");
+    assert_eq!(value["span_id"], "node-1");
+    assert_eq!(value["label"], "review·3");
+    assert_eq!(value["template_id"], "review_agent");
+    assert_eq!(value["agent_instance_id"], "review_agent::a1b2c3d4");
+    assert_eq!(value["state"], "running");
+    assert!(value["detail"].is_null());
+    assert_eq!(value["started_at"], "2026-09-05T10:00:00.000Z");
+    assert!(value["ended_at"].is_null());
+    assert!(value["duration_ms"].is_null());
+    assert!(value["output_preview"].is_null());
+    assert!(value["ts"].is_string());
+    assert_eq!(value["instance_id"], "inst-1");
+}
+
+/// The close frame round-trips, cancellation included — the state word the
+/// timeline draws is carried verbatim, not folded into a success boolean.
+#[test]
+fn test_subagent_span_close_round_trips_a_cancellation() {
+    let event = ServerEvent::SubagentSpan {
+        task_id: "t-1".into(),
+        span_id: "node-1".into(),
+        label: "review·1".into(),
+        template_id: "review_agent".into(),
+        agent_instance_id: "review_agent::a1b2c3d4".into(),
+        state: "cancelled".into(),
+        detail: Some("cancelled before starting".into()),
+        started_at: "2026-09-05T10:00:00.000Z".into(),
+        ended_at: Some("2026-09-05T10:00:04.500Z".into()),
+        duration_ms: Some(4_500),
+        output_preview: None,
+        ts: Utc::now(),
+        instance_id: "inst-1".into(),
+    };
+    let round_tripped: ServerEvent =
+        serde_json::from_str(&serde_json::to_string(&event).unwrap()).unwrap();
+    match round_tripped {
+        ServerEvent::SubagentSpan {
+            span_id,
+            state,
+            detail,
+            ended_at,
+            duration_ms,
+            ..
+        } => {
+            assert_eq!(span_id, "node-1");
+            assert_eq!(state, "cancelled");
+            assert_eq!(detail.as_deref(), Some("cancelled before starting"));
+            assert_eq!(ended_at.as_deref(), Some("2026-09-05T10:00:04.500Z"));
+            assert_eq!(duration_ms, Some(4_500));
+        }
+        other => panic!("Expected SubagentSpan, got {other:?}"),
+    }
+}
+
 // ── Existing tests ────────────────────────────────────────────────
 
 #[test]

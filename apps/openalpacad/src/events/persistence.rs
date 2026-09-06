@@ -385,6 +385,44 @@ impl EventBroadcaster {
                         None,
                     )
                 }
+                // One subagent lane opening or closing (GAP-09). Persisted
+                // like the rest so the run's history survives a restart; the
+                // agent *instance* goes in the indexed `agent_id` column,
+                // because that is what identifies the lane.
+                ServerEvent::SubagentSpan {
+                    task_id,
+                    span_id,
+                    label,
+                    template_id,
+                    agent_instance_id,
+                    state,
+                    detail,
+                    started_at,
+                    ended_at,
+                    duration_ms,
+                    output_preview,
+                    ..
+                } => {
+                    let payload = serde_json::json!({
+                        "task_id": task_id,
+                        "span_id": span_id,
+                        "label": label,
+                        "template_id": template_id,
+                        "agent_instance_id": agent_instance_id,
+                        "state": state,
+                        "detail": detail,
+                        "started_at": started_at,
+                        "ended_at": ended_at,
+                        "duration_ms": duration_ms,
+                        "output_preview": output_preview,
+                    });
+                    repo.log(
+                        "subagent_span",
+                        Some(agent_instance_id.as_str()),
+                        Some(&payload),
+                        None,
+                    )
+                }
                 // Extension (MCP server / plugin) state transitions
                 ServerEvent::ExtensionStateChanged {
                     kind,
@@ -559,5 +597,72 @@ mod tests {
         let detail = row.detail.as_ref().expect("the row carries a detail blob");
         assert!(detail["task_id"].is_null());
         assert!(detail["agent_id"].is_null());
+    }
+
+    /// A lane's open and its close are two rows, both carrying the whole span
+    /// payload, with the agent *instance* in the indexed column.
+    #[test]
+    fn a_subagent_span_logs_its_open_and_its_close() {
+        let (_dir, db) = test_db();
+        let eb = EventBroadcaster::new(16, "inst-1".to_string(), Some(db.clone()));
+
+        eb.subagent_span(
+            "t-1",
+            "node-1",
+            "review\u{b7}1",
+            "review_agent",
+            "review_agent::a1b2",
+            "running",
+            None,
+            "2026-09-05T10:00:00.000Z",
+            None,
+            None,
+            None,
+        );
+        eb.subagent_span(
+            "t-1",
+            "node-1",
+            "review\u{b7}1",
+            "review_agent",
+            "review_agent::a1b2",
+            "cancelled",
+            Some("cancelled before starting"),
+            "2026-09-05T10:00:00.000Z",
+            Some("2026-09-05T10:00:04.500Z"),
+            Some(4_500),
+            None,
+        );
+
+        let rows = EventLogRepository::new(&db).recent(10).unwrap();
+        let spans: Vec<_> = rows
+            .iter()
+            .filter(|r| r.event_type == "subagent_span")
+            .collect();
+        assert_eq!(spans.len(), 2, "the open and the close are both logged");
+        assert!(
+            spans
+                .iter()
+                .all(|r| r.agent_id.as_deref() == Some("review_agent::a1b2"))
+        );
+
+        let close = spans
+            .iter()
+            .find(|r| {
+                r.detail
+                    .as_ref()
+                    .is_some_and(|d| d["state"] == "cancelled")
+            })
+            .expect("the close row exists");
+        let detail = close.detail.as_ref().unwrap();
+        assert_eq!(detail["task_id"], "t-1");
+        assert_eq!(detail["span_id"], "node-1");
+        assert_eq!(detail["label"], "review\u{b7}1");
+        assert_eq!(detail["template_id"], "review_agent");
+        assert_eq!(detail["agent_instance_id"], "review_agent::a1b2");
+        assert_eq!(detail["detail"], "cancelled before starting");
+        assert_eq!(detail["started_at"], "2026-09-05T10:00:00.000Z");
+        assert_eq!(detail["ended_at"], "2026-09-05T10:00:04.500Z");
+        assert_eq!(detail["duration_ms"], 4_500);
+        assert!(detail["output_preview"].is_null());
     }
 }

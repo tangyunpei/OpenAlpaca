@@ -25,7 +25,16 @@ pub use capabilities::{
 /// builtin can announce what it produced.
 #[derive(Debug, Clone, Default)]
 pub struct ToolContext {
+    /// The agent **template** id ("research_agent") — the name a capability
+    /// violation is reported against. Not the runtime instance: that is
+    /// `agent_instance_id`.
     pub agent_id: Option<String>,
+    /// The runtime instance the call belongs to ("research_agent::a1b2c3d4"),
+    /// which is what a `subagent_span` lane is keyed by. Threaded so a pending
+    /// confirmation can be attributed to the lane that is waiting on it
+    /// (plan Phase 4, GAP-09's derived `blocked`); `None` on paths that have
+    /// no agent instance, such as a main-loop turn or a skill invocation.
+    pub agent_instance_id: Option<String>,
     pub task_id: Option<String>,
     pub owner_id: Option<String>,
     /// Workspace root for **memory scoping**. Derived from the daemon's current

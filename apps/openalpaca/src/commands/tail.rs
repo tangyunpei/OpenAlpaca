@@ -41,6 +41,30 @@ enum ServerEvent {
         #[allow(dead_code)]
         instance_id: String,
     },
+    /// One subagent lane of a run opening or closing (GAP-09).
+    SubagentSpan {
+        #[allow(dead_code)]
+        task_id: String,
+        #[allow(dead_code)]
+        span_id: String,
+        label: String,
+        #[allow(dead_code)]
+        template_id: String,
+        #[allow(dead_code)]
+        agent_instance_id: String,
+        state: String,
+        detail: Option<String>,
+        #[allow(dead_code)]
+        started_at: String,
+        #[allow(dead_code)]
+        ended_at: Option<String>,
+        duration_ms: Option<i64>,
+        #[allow(dead_code)]
+        output_preview: Option<String>,
+        ts: DateTime<Utc>,
+        #[allow(dead_code)]
+        instance_id: String,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -166,6 +190,32 @@ fn print_event(event: &ServerEvent) {
                 path.dimmed()
             );
         }
+        ServerEvent::SubagentSpan {
+            label,
+            state,
+            detail,
+            duration_ms,
+            ts,
+            ..
+        } => {
+            let time = ts.format("%H:%M:%S").to_string();
+            let took = match duration_ms {
+                Some(ms) => format!(" {}", format_args!("{:.1}s", *ms as f64 / 1000.0)),
+                None => String::new(),
+            };
+            let why = match detail {
+                Some(d) if !d.is_empty() => format!(" — {d}"),
+                _ => String::new(),
+            };
+            println!(
+                "{} 🧵 {} {} {}{}",
+                time.dimmed(),
+                "lane".blue(),
+                label.bold(),
+                format!("[{state}{took}]").cyan(),
+                why.dimmed()
+            );
+        }
         ServerEvent::Unknown => {
             println!("{} unknown event", "?".dimmed());
         }
@@ -236,6 +286,80 @@ mod tests {
             }
         ));
         // The print arm must survive both halves being absent.
+        print_event(&event);
+    }
+
+    /// GAP-09 — a lane transition has its own arm, so `openalpaca tail` shows
+    /// the swimlane changing instead of "unknown event".
+    #[test]
+    fn subagent_span_deserializes_into_its_own_variant() {
+        let frame = r#"{
+            "type": "subagent_span",
+            "task_id": "t-1",
+            "span_id": "node-1",
+            "label": "review\u00b71",
+            "template_id": "review_agent",
+            "agent_instance_id": "review_agent::a1b2",
+            "state": "cancelled",
+            "detail": "cancelled before starting",
+            "started_at": "2026-09-05T10:00:00.000Z",
+            "ended_at": "2026-09-05T10:00:04.500Z",
+            "duration_ms": 4500,
+            "output_preview": null,
+            "ts": "2026-09-05T10:00:04Z",
+            "instance_id": "inst-1"
+        }"#;
+        let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
+        match &event {
+            ServerEvent::SubagentSpan {
+                span_id,
+                label,
+                state,
+                detail,
+                duration_ms,
+                ..
+            } => {
+                assert_eq!(span_id, "node-1");
+                assert_eq!(label, "review\u{b7}1");
+                assert_eq!(state, "cancelled");
+                assert_eq!(detail.as_deref(), Some("cancelled before starting"));
+                assert_eq!(*duration_ms, Some(4_500));
+            }
+            other => panic!("Expected SubagentSpan, got {other:?}"),
+        }
+        print_event(&event);
+    }
+
+    /// The open frame: no end, no duration, no detail. The print arm must not
+    /// invent any of them.
+    #[test]
+    fn subagent_span_tolerates_an_open_lane() {
+        let frame = r#"{
+            "type": "subagent_span",
+            "task_id": "t-1",
+            "span_id": "node-1",
+            "label": "review\u00b71",
+            "template_id": "review_agent",
+            "agent_instance_id": "review_agent::a1b2",
+            "state": "running",
+            "detail": null,
+            "started_at": "2026-09-05T10:00:00.000Z",
+            "ended_at": null,
+            "duration_ms": null,
+            "output_preview": null,
+            "ts": "2026-09-05T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#;
+        let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
+        assert!(matches!(
+            event,
+            ServerEvent::SubagentSpan {
+                ended_at: None,
+                duration_ms: None,
+                detail: None,
+                ..
+            }
+        ));
         print_event(&event);
     }
 }

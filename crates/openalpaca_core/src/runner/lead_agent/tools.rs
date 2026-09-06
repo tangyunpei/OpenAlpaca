@@ -260,12 +260,29 @@ impl BuiltInTool for SpawnSubagentTool {
             timestamp: Utc::now(),
         });
 
+        // …and open this lane's span beside it (plan Phase 4, GAP-09). The
+        // span id *is* the node id, so the swimlane and the DAG events name
+        // the same thing. Unlike `record_agent_history`, which writes nothing
+        // until the run returns, this row exists from the moment the lane
+        // starts — that is the whole point: an in-flight lane must be visible.
+        crate::runner::span::open_span(
+            self.db.as_ref(),
+            &self.bus,
+            &self.task_id,
+            &node_id,
+            agent_id,
+            &instance_id,
+            objective,
+        );
+
         self.spawn_count.fetch_add(1, Ordering::SeqCst);
         let agent_start = std::time::Instant::now();
 
         // 5. Build SandboxManager for subagent
         let subagent_tool_ctx = ToolContext {
             agent_id: Some(agent_id.to_string()),
+            // The lane this call belongs to (GAP-09's derived `blocked`).
+            agent_instance_id: Some(instance_id.clone()),
             task_id: Some(self.task_id.clone()),
             owner_id: Some(self.created_by.clone()),
             workspace_id: self.workspace.workspace_id.clone(),
@@ -519,6 +536,17 @@ impl BuiltInTool for SpawnSubagentTool {
                     &run_id_clone,
                     "Cancelled before starting (parent task was cancelled)".to_string(),
                 );
+                // The lane opened when the spawn was announced, so it has to
+                // close here too — otherwise a cancelled batch leaves lanes
+                // running until the next daemon boot sweeps them.
+                crate::runner::span::close_span(
+                    db.as_ref(),
+                    &bus,
+                    &node_id,
+                    openalpaca_storage::SpanState::Cancelled,
+                    Some("cancelled before starting"),
+                    None,
+                );
                 busy_guard.restore();
                 return;
             }
@@ -604,6 +632,30 @@ impl BuiltInTool for SpawnSubagentTool {
                     timestamp: Utc::now(),
                 });
 
+                // Close the lane (GAP-09). A plugin loop has no
+                // `LoopFinishReason` of its own: it either completed or
+                // failed, and a cancellation surfaces as the latter with the
+                // cancel message in `error`.
+                let (span_state, span_detail) = match &outcome {
+                    PluginLoopOutcome::Completed { .. } => {
+                        (openalpaca_storage::SpanState::Done, None)
+                    }
+                    PluginLoopOutcome::Failed { error, .. } => {
+                        (openalpaca_storage::SpanState::Failed, Some(error.clone()))
+                    }
+                };
+                crate::runner::span::close_span(
+                    db.as_ref(),
+                    &bus,
+                    &node_id,
+                    span_state,
+                    span_detail.as_deref(),
+                    match &outcome {
+                        PluginLoopOutcome::Completed { content, .. } => Some(content.as_str()),
+                        _ => None,
+                    },
+                );
+
                 // No LLM usage to record — the plugin runs its own model
                 // calls out-of-process. Agent history still counts the run.
                 if let Some(ref db) = db {
@@ -687,6 +739,19 @@ impl BuiltInTool for SpawnSubagentTool {
                 },
                 timestamp: now,
             });
+
+            // Close the lane (GAP-09). `agent_success` folds a cancellation
+            // into `false` because the lead agent needs a boolean; the span
+            // maps `Cancelled` explicitly, because "cancelled" and "failed"
+            // read differently and the UI has separate copy for each.
+            crate::runner::span::close_span(
+                db.as_ref(),
+                &bus,
+                &node_id,
+                crate::runner::span::span_state_for(&result.finish_reason),
+                crate::runner::span::span_detail_for(&result.finish_reason).as_deref(),
+                Some(result.final_content.as_str()),
+            );
 
             // Record LLM usage + agent history
             crate::orchestrator::dispatcher::usage::record_llm_usage(
