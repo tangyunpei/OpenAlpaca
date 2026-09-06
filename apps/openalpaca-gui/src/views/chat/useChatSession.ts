@@ -50,6 +50,7 @@ import {
   type ResolutionEntry,
   type RunReportData,
   type TranscriptItem,
+  type WrittenArtifact,
 } from "./transcript-model";
 
 /** Constant identities: `useServerEvent` keys its subscription off the list. */
@@ -57,6 +58,7 @@ const RUN_EVENTS = ["workflow_started", "task_status"] as const;
 const AGENT_EVENTS = ["agent_status"] as const;
 const CONFIRM_EVENTS = ["tool_confirmation_requested"] as const;
 const TOOL_EVENTS = ["tool_executed"] as const;
+const ARTIFACT_EVENTS = ["artifact_written"] as const;
 
 const HISTORY_LIMIT = 100;
 
@@ -141,6 +143,7 @@ export function useChatSession(): ChatSession {
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [reports, setReports] = useState<RunReportData[]>([]);
+  const [artifacts, setArtifacts] = useState<WrittenArtifact[]>([]);
   const [resolutions, setResolutions] = useState<ResolutionEntry[]>([]);
   const [confirmationMeta, setConfirmationMeta] = useState<
     Record<string, ConfirmationMeta>
@@ -190,6 +193,36 @@ export function useChatSession(): ChatSession {
               endedAt: event.ts,
               summary: event.outcome_summary ?? event.result_summary,
               artifactCount: event.artifact_count ?? 0,
+            },
+          ],
+    );
+  });
+
+  /**
+   * A file an agent wrote, shown inline. Two frames belong to this lane: a
+   * loose artifact (no run — the main loop wrote it for this conversation) and
+   * one from a workflow this lane started. A foreign run's file belongs to that
+   * run's lane, and lands in the Library either way.
+   */
+  useServerEvent(ARTIFACT_EVENTS, (event) => {
+    if (event.type !== "artifact_written") return;
+    if (event.task_id !== null && !started.current.has(event.task_id)) return;
+    setArtifacts((current) =>
+      current.some(
+        (entry) =>
+          entry.artifactId === event.artifact_id &&
+          entry.version === event.version,
+      )
+        ? current
+        : [
+            ...current,
+            {
+              artifactId: event.artifact_id,
+              name: event.name,
+              kind: event.kind,
+              version: event.version,
+              taskId: event.task_id,
+              at: event.ts,
             },
           ],
     );
@@ -283,6 +316,7 @@ export function useChatSession(): ChatSession {
       buildTranscript({
         history: history.data?.messages ?? [],
         reports,
+        artifacts,
         confirmations,
         resolutions,
         stream: stream.state,
@@ -292,6 +326,7 @@ export function useChatSession(): ChatSession {
     [
       history.data,
       reports,
+      artifacts,
       confirmations,
       resolutions,
       stream.state,

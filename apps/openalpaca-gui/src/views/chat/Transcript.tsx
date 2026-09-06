@@ -13,11 +13,15 @@ import {
   RunReportCard,
   ToolConfirmationBanner,
   UserMessage,
+  WrittenArtifactCard,
   formatClock,
   formatElapsed,
   shortRunId,
 } from "@/components/chat";
+import { languageFromName, toFileKind } from "@/components/ui";
+import type { ArtifactKind } from "@/lib/api/artifacts";
 import { GAPS, gapNote } from "@/lib/unavailable";
+import { useUiStore } from "@/stores/ui";
 
 import { TranscriptArtifact } from "./TranscriptArtifact";
 import type { TranscriptItem } from "./transcript-model";
@@ -28,6 +32,7 @@ export interface TranscriptProps {
 }
 
 export function Transcript({ items, dense }: TranscriptProps) {
+  const openArtifact = useUiStore((s) => s.openArtifact);
   return (
     <>
       {items.map((item) => {
@@ -79,6 +84,19 @@ export function Transcript({ items, dense }: TranscriptProps) {
                     ? `${item.report.artifactCount} file${item.report.artifactCount === 1 ? "" : "s"} produced · ${gapNote(GAPS["GAP-04"])}`
                     : null
                 }
+              />
+            );
+
+          case "artifact":
+            return (
+              <WrittenArtifactCard
+                key={item.key}
+                name={item.entry.name}
+                kind={toFileKind(item.entry.kind as ArtifactKind)}
+                language={languageFromName(item.entry.name)}
+                version={item.entry.version}
+                time={formatClock(item.entry.at)}
+                onOpen={() => openArtifact(item.entry.artifactId)}
               />
             );
 

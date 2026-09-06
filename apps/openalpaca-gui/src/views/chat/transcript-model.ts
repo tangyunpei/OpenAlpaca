@@ -50,6 +50,26 @@ export interface RunReportData {
   artifactCount: number;
 }
 
+/**
+ * One `artifact_written` frame, as the transcript shows it.
+ *
+ * Session-local like the run reports, and for the same reason (GAP-23): a
+ * stored message carries no artifact link, so a card is drawn from the frame
+ * this client saw and does not survive a reload. The Library is where the file
+ * is permanent.
+ */
+export interface WrittenArtifact {
+  artifactId: string;
+  /** The head file's own name, as the daemon wrote it. */
+  name: string;
+  /** The daemon's snake_case `ArtifactKind` spelling. */
+  kind: string;
+  version: number;
+  /** `null` for a loose artifact — a chat turn that ran no workflow. */
+  taskId: string | null;
+  at: string;
+}
+
 export interface ConfirmationEntry {
   requestId: string;
   toolName: string;
@@ -102,6 +122,7 @@ export type TranscriptItem =
       attachments: AttachmentInfo[];
     }
   | { kind: "report"; key: string; report: RunReportData }
+  | { kind: "artifact"; key: string; entry: WrittenArtifact }
   | { kind: "confirmation"; key: string; entry: ConfirmationEntry }
   | { kind: "resolution"; key: string; entry: ResolutionEntry }
   | { kind: "error"; key: string; message: string };
@@ -109,6 +130,8 @@ export type TranscriptItem =
 export interface TranscriptInput {
   history: readonly ChatMessage[];
   reports: readonly RunReportData[];
+  /** Files this session watched an agent write, newest last. */
+  artifacts: readonly WrittenArtifact[];
   confirmations: readonly ConfirmationEntry[];
   resolutions: readonly ResolutionEntry[];
   stream: ChatStreamState;
@@ -191,6 +214,7 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
   const {
     history,
     reports,
+    artifacts,
     confirmations,
     resolutions,
     stream,
@@ -236,6 +260,16 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
       kind: "report",
       key: `r${report.taskId}`,
       report,
+    });
+  }
+
+  for (const entry of artifacts) {
+    // The version is part of the key: superseding a file is a second event and
+    // deserves its own card, not a silently mutated one.
+    push(timestamp(entry.at), {
+      kind: "artifact",
+      key: `a-${entry.artifactId}-${entry.version}`,
+      entry,
     });
   }
 

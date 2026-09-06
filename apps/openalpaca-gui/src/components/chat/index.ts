@@ -13,3 +13,4 @@ export * from "./ResolutionRow";
 export * from "./RunReportCard";
 export * from "./StreamingIndicator";
 export * from "./ToolConfirmationBanner";
+export * from "./WrittenArtifactCard";

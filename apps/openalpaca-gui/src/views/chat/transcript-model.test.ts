@@ -45,6 +45,7 @@ function input(overrides: Partial<TranscriptInput> = {}): TranscriptInput {
   return {
     history: [],
     reports: [],
+    artifacts: [],
     confirmations: [],
     resolutions: [],
     stream: initialChatStreamState,
@@ -148,6 +149,48 @@ describe("parseUserContent (GAP-02)", () => {
       text: "hello",
       steered: false,
     });
+  });
+});
+
+describe("buildTranscript — written artifacts", () => {
+  const written = {
+    artifactId: "art-1",
+    name: "findings.md",
+    kind: "markdown",
+    version: 2,
+    taskId: "task-1",
+    at: "2026-08-31T14:22:30Z",
+  };
+
+  it("places the card at the moment the file was written", () => {
+    const items = buildTranscript(
+      input({
+        history: [
+          message({
+            id: 1,
+            role: "user",
+            content: "audit it",
+            created_at: "2026-08-31T14:22:00Z",
+          }),
+          message({
+            id: 2,
+            role: "assistant",
+            content: "done",
+            created_at: "2026-08-31T14:23:00Z",
+          }),
+        ],
+        artifacts: [written],
+      }),
+    );
+    expect(items.map((item) => item.key)).toEqual(["m1", "a-art-1-2", "m2"]);
+    expect(items[1]).toMatchObject({ kind: "artifact", entry: written });
+  });
+
+  it("keys a new version separately, so a supersede is its own card", () => {
+    const items = buildTranscript(
+      input({ artifacts: [written, { ...written, version: 3 }] }),
+    );
+    expect(items.map((item) => item.key)).toEqual(["a-art-1-2", "a-art-1-3"]);
   });
 });
 
