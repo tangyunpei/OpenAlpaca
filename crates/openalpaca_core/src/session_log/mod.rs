@@ -77,6 +77,13 @@ pub struct SessionLogService {
     /// the log is still over its cap is readable — T44's `GET /v1/status` —
     /// rather than living only in a boot log line.
     last_sweep: Option<sweep::SweepReport>,
+    /// Records dropped by writers that have since retired — folded in by
+    /// [`handle_for`](Self::handle_for) at the moment an idled-out slot is
+    /// overwritten, before the live handle's own counter (which starts back
+    /// at zero) would otherwise erase them from `dropped_total()` (T44 fix
+    /// round 1, Important #4: the wire field is a per-boot total and must
+    /// never go down).
+    retired_dropped: AtomicU64,
 }
 
 impl SessionLogService {
@@ -98,6 +105,7 @@ impl SessionLogService {
             handles: DashMap::new(),
             started: DashMap::new(),
             last_sweep: None,
+            retired_dropped: AtomicU64::new(0),
         }
     }
 
@@ -176,6 +184,11 @@ impl SessionLogService {
                 }
                 // The previous writer idled out; start a fresh one under the
                 // same id and keep the numbering (it resumes from the file).
+                // Fold its drop count into the process-level total first — the
+                // fresh handle's own counter starts at zero, and without this
+                // the retiring one's drops would simply vanish.
+                self.retired_dropped
+                    .fetch_add(slot.get().dropped(), Ordering::Relaxed);
                 let handle = self.spawn(session_id);
                 slot.insert(handle.clone());
                 handle
@@ -219,9 +232,18 @@ impl SessionLogService {
             .unwrap_or(0)
     }
 
-    /// Records dropped across every session this boot has written.
+    /// Records dropped across every session this boot has written — a
+    /// process-lifetime total that only grows: a retired writer's count is
+    /// folded into the service's own counter at respawn before its live
+    /// counter resets to zero, so an idle-close never makes this number go
+    /// down.
     pub fn dropped_total(&self) -> u64 {
-        self.handles.iter().map(|h| h.value().dropped()).sum()
+        self.retired_dropped.load(Ordering::Relaxed)
+            + self
+                .handles
+                .iter()
+                .map(|h| h.value().dropped())
+                .sum::<u64>()
     }
 
     fn spawn(&self, session_id: &str) -> SessionLogHandle {

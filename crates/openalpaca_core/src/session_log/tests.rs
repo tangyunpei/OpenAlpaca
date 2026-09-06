@@ -944,6 +944,59 @@ async fn an_idle_writer_closes_and_the_next_emit_respawns_it() {
     assert_eq!(rows[1]["seq"], 2);
 }
 
+/// Retired writers' drops must not vanish from the total: `GET /v1/status`
+/// documents `dropped_records` as a per-boot count, so an idle respawn that
+/// resets a live handle's own counter to zero must not let the reported
+/// number go down (Important #4, T44 fix round 1).
+#[tokio::test(flavor = "multi_thread")]
+async fn dropped_total_survives_an_idle_writer_being_respawned() {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = service_with(
+        &dir,
+        None,
+        SessionLogLimits {
+            channel_capacity: 2,
+            idle_close: Duration::from_millis(50),
+            ..SessionLogLimits::default()
+        },
+    );
+
+    let handle = svc.handle_for("sess-retire");
+    for _ in 0..64 {
+        handle.emit(Record::new(RecordType::Round).with_data(serde_json::json!({})));
+    }
+    let first_round_drops = handle.dropped();
+    assert!(first_round_drops > 0, "an over-full channel drops");
+    assert!(handle.flush().await);
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(handle.is_closed(), "the idle writer exited");
+
+    // Asking for a handle on the same session respawns the writer — and must
+    // fold the retiring handle's count in before its slot is overwritten.
+    let fresh = svc.handle_for("sess-retire");
+    assert_eq!(
+        svc.dropped_total(),
+        first_round_drops,
+        "the retired writer's drops must not disappear when it is replaced"
+    );
+
+    for _ in 0..64 {
+        fresh.emit(Record::new(RecordType::Round).with_data(serde_json::json!({})));
+    }
+    let second_round_drops = fresh.dropped();
+    assert!(
+        second_round_drops > 0,
+        "the fresh writer's own channel also overflows"
+    );
+
+    assert_eq!(
+        svc.dropped_total(),
+        first_round_drops + second_round_drops,
+        "the total accumulates across a respawn instead of resetting"
+    );
+}
+
 /// R52: the writer must never block a runtime thread. Its file appends, its
 /// `sync_data` and its SQLite update all run inside `spawn_blocking`, so a
 /// slow disk — or, as here, the daemon's single connection mutex held by
