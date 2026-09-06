@@ -9,6 +9,15 @@
 //! a **session**: the lane's active one unless the request names another. The
 //! `/v1/conversations` reads that used to live here are gone (P19) — deleted,
 //! not aliased; `/v1/sessions` replaces them.
+//!
+//! **A `POST /v1/chat` that names a `session_id` addresses that session, full
+//! stop (R49).** The `x-workspace-path` header is the window's *current*
+//! project; the named conversation's binding is the one that governs the turn,
+//! so the project switch §5.1 applies to an unnamed turn (R48) is skipped and
+//! the turn's workspace root is the session's `workspace_id` when it has one
+//! (the header when it does not, which binds it). Without that, resuming a
+//! conversation from one project while the window shows another would archive
+//! the session the same request just re-opened and file the turn in a third.
 
 use axum::{
     Json,
@@ -31,8 +40,9 @@ use crate::AppState;
 
 // ── Session targeting ───────────────────────────────────────────────
 
-/// Resolve `POST /v1/chat`'s optional `session_id` into the conversation this
-/// turn will land in, activating it when the caller asked for that.
+/// Resolve `POST /v1/chat`'s `session_id` into the conversation this turn will
+/// land in, activating it when the caller asked for that. `Ok` carries that
+/// session's project binding, which R49 makes the turn's workspace root.
 ///
 /// The refusals, and why each one is what it is:
 /// - **404** for an id that does not exist, *and* for one belonging to another
@@ -51,7 +61,7 @@ fn target_session(
     owner: &str,
     session_id: &str,
     activate: bool,
-) -> Result<(), Response> {
+) -> Result<Option<String>, Response> {
     let repo = openalpaca_storage::ConversationRepository::new(db);
     let session = match repo.get_session(session_id) {
         Ok(Some(session)) => session,
@@ -89,7 +99,7 @@ fn target_session(
     }
 
     if session.status == openalpaca_storage::SESSION_ACTIVE {
-        return Ok(());
+        return Ok(session.workspace_id);
     }
     if !activate {
         return Err(error_response(
@@ -108,7 +118,7 @@ fn target_session(
                 status: openalpaca_storage::SESSION_ACTIVE.to_string(),
                 timestamp: Utc::now(),
             });
-            Ok(())
+            Ok(session.workspace_id)
         }
         Ok(false) => Err(error_response(
             StatusCode::NOT_FOUND,
@@ -121,6 +131,41 @@ fn target_session(
                 .into_response(),
         ),
     }
+}
+
+/// The conversation one `POST /v1/chat` turn addresses, and the workspace root
+/// it runs in (R49). Returns that root; the refusals come from
+/// [`target_session`].
+///
+/// **Naming a `session_id` addresses that session, full stop.** The
+/// `x-workspace-path` header is the *window's* current project, which need not
+/// be the project of the conversation the client just asked to resume. Taking
+/// the header there would hand §5.1's project switch a mismatch it answers by
+/// archiving the session this very request re-activated and opening a third
+/// one — the turn would land somewhere the client never asked for, and the
+/// conversation it explicitly re-opened would close again milliseconds later.
+/// So a named session's own binding is the turn's workspace root: the message,
+/// the resolved workspace and any run the turn starts all name one project,
+/// which is the "one workspace per session" rule read forwards.
+///
+/// A named session that is not bound yet takes the header and is bound by it
+/// downstream — a first binding, not a re-point. A request that names no
+/// session keeps R48 exactly: the header is the turn's project, and a project
+/// that differs from the lane's active session opens a new conversation.
+#[allow(clippy::result_large_err)]
+fn resolve_turn_target(
+    db: &openalpaca_storage::Database,
+    bus: &openalpaca_core::bus::EventBus,
+    owner: &str,
+    session_id: Option<&str>,
+    activate: bool,
+    header_workspace: Option<String>,
+) -> Result<Option<String>, Response> {
+    let Some(session_id) = session_id else {
+        return Ok(header_workspace);
+    };
+    let bound = target_session(db, bus, owner, session_id, activate)?;
+    Ok(bound.or(header_workspace))
 }
 
 /// Which session the two history routes act on: the one the query names, else
@@ -203,30 +248,27 @@ pub async fn send_chat_handler(
 
     let principal = &state.local_user_id;
 
-    // Which conversation this turn belongs to. Naming one is optional and the
-    // default is exactly today's behaviour — the lane's active session, created
-    // on demand by the persistence path below. Naming one is how a client
-    // resumes: because a lane has at most one active session, an *active* id
-    // is already the one this turn would land in, so the only case that has to
-    // do anything is an archived one, and re-opening a closed conversation is
-    // a decision the client states with `activate` rather than one this route
-    // takes on its behalf.
-    if let Some(ref session_id) = body.session_id
-        && let Err(response) = target_session(
-            &state.db,
-            &state.gateway.bus,
-            principal,
-            session_id,
-            body.activate,
-        )
-    {
-        return response;
-    }
-
+    // Which conversation this turn belongs to, and which project it runs in.
+    // Naming a session is optional and the default is exactly today's
+    // behaviour — the lane's active session, created on demand by the
+    // persistence path below, in the project this header names. Naming one is
+    // how a client resumes, and R49 makes that resumed conversation's own
+    // project the turn's: see `resolve_turn_target`.
     let workspace_path = headers
         .get("x-workspace-path")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
+    let workspace_path = match resolve_turn_target(
+        &state.db,
+        &state.gateway.bus,
+        principal,
+        body.session_id.as_deref(),
+        body.activate,
+        workspace_path,
+    ) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
 
     match chat_service.send_message(body.content, body.attachments, principal, workspace_path) {
         Ok(resp) => {
@@ -684,7 +726,20 @@ mod tests {
             .get_or_create_active_session("user1:gui", "gui", None)
             .expect("session");
 
-        assert!(target_session(&db, &bus, "user1", &session.id, false).is_ok());
+        assert_eq!(
+            target_session(&db, &bus, "user1", &session.id, false).expect("accepted"),
+            None,
+            "an unbound session brings no project of its own"
+        );
+
+        // And a bound one hands its project back, for R49 to run the turn in.
+        let bound = openalpaca_storage::ConversationRepository::new(&db)
+            .create_session("user1:gui", "gui", Some("/repo/one"), None)
+            .expect("session");
+        assert_eq!(
+            target_session(&db, &bus, "user1", &bound.id, false).expect("accepted"),
+            Some("/repo/one".to_string())
+        );
     }
 
     #[tokio::test]
@@ -752,6 +807,191 @@ mod tests {
             Ok(openalpaca_core::events::SystemEvent::SessionChanged { ref session_id, .. })
                 if session_id == &archived.id
         ));
+    }
+
+    // ── R49: a named session brings its own workspace ───────────────
+
+    fn project_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join(".git")).expect(".git marker");
+        dir
+    }
+
+    fn project_path(dir: &tempfile::TempDir) -> String {
+        dir.path().to_string_lossy().to_string()
+    }
+
+    /// The canonical project root a turn carrying `path` runs in — the one
+    /// resolver (R22), and the value a run this turn starts records as
+    /// `task.workspace_id`.
+    fn root(path: Option<&str>) -> Option<String> {
+        openalpaca_core::memory::scope_context::MemoryScopeContext::for_request(path)
+            .request_workspace_root
+    }
+
+    /// What the gateway does with the workspace the route resolved: the turn's
+    /// user half, persisted exactly as `Gateway::handle_event` persists it.
+    fn persist_turn(
+        db: &openalpaca_storage::Database,
+        workspace: Option<&str>,
+    ) -> openalpaca_core::gateway::persistence::PersistedUserMessage {
+        openalpaca_core::gateway::persistence::GatewayPersistence::new(db.clone())
+            .persist_user_message("user1:gui", "carry on", "gui", root(workspace).as_deref())
+            .expect("persist the user message")
+    }
+
+    fn session_count(db: &openalpaca_storage::Database) -> i64 {
+        db.with_connection(|conn| {
+            Ok(conn.query_row("SELECT COUNT(*) FROM session", [], |r| r.get(0))?)
+        })
+        .expect("count sessions")
+    }
+
+    /// R49: naming a session addresses *that* session. The window's header
+    /// still says the project it is currently showing, and taking it would
+    /// archive the conversation this same request re-opened (§5.1's project
+    /// switch) and file the turn in a third one.
+    #[tokio::test]
+    async fn resuming_a_named_session_keeps_its_workspace_and_does_not_switch() {
+        let (_dir, db) = sessions_db();
+        let bus = openalpaca_core::bus::EventBus::default();
+        let mut rx = bus.subscribe();
+        let repo = openalpaca_storage::ConversationRepository::new(&db);
+
+        let one = project_dir();
+        let two = project_dir();
+        let resumed = repo
+            .create_session(
+                "user1:gui",
+                "gui",
+                root(Some(&project_path(&one))).as_deref(),
+                None,
+            )
+            .expect("session");
+        // "New chat" on project two archived it; the window is showing two.
+        repo.create_session(
+            "user1:gui",
+            "gui",
+            root(Some(&project_path(&two))).as_deref(),
+            None,
+        )
+        .expect("session");
+
+        let workspace = resolve_turn_target(
+            &db,
+            &bus,
+            "user1",
+            Some(&resumed.id),
+            true,
+            Some(project_path(&two)),
+        )
+        .expect("the resume is accepted");
+
+        assert_eq!(
+            workspace, resumed.workspace_id,
+            "the named session's binding is the turn's workspace, not the header"
+        );
+        assert_eq!(
+            root(workspace.as_deref()),
+            resumed.workspace_id,
+            "so a run this turn starts records the session's project"
+        );
+
+        let turn = persist_turn(&db, workspace.as_deref());
+        assert_eq!(
+            turn.session_id, resumed.id,
+            "the turn lands in the conversation it named"
+        );
+        assert!(
+            !turn.project_switched,
+            "naming a session skips the project switch"
+        );
+        assert_eq!(
+            repo.get_session(&resumed.id)
+                .unwrap()
+                .expect("session")
+                .status,
+            openalpaca_storage::SESSION_ACTIVE,
+            "the conversation it re-opened stays open"
+        );
+        assert_eq!(session_count(&db), 2, "no third conversation was opened");
+
+        let announced = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|e| match e {
+                openalpaca_core::events::SystemEvent::SessionChanged {
+                    session_id,
+                    status,
+                    ..
+                } => Some((session_id, status)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            announced,
+            vec![(resumed.id.clone(), "active".to_string())],
+            "one announcement, and it is the resume"
+        );
+    }
+
+    /// A session with no project yet takes the header and is bound by it —
+    /// a first binding, not a re-point.
+    #[tokio::test]
+    async fn a_named_session_with_no_project_takes_the_header() {
+        let (_dir, db) = sessions_db();
+        let bus = openalpaca_core::bus::EventBus::default();
+        let unbound = openalpaca_storage::ConversationRepository::new(&db)
+            .get_or_create_active_session("user1:gui", "gui", None)
+            .expect("session");
+
+        let two = project_dir();
+        let workspace = resolve_turn_target(
+            &db,
+            &bus,
+            "user1",
+            Some(&unbound.id),
+            false,
+            Some(project_path(&two)),
+        )
+        .expect("accepted");
+        assert_eq!(workspace, Some(project_path(&two)));
+
+        let turn = persist_turn(&db, workspace.as_deref());
+        assert_eq!(turn.session_id, unbound.id);
+        assert!(!turn.project_switched);
+    }
+
+    /// The other half of R49: a request that names nothing keeps R48 — the
+    /// header is the turn's project, and a different one opens a new session.
+    #[tokio::test]
+    async fn a_turn_naming_no_session_still_switches_project() {
+        let (_dir, db) = sessions_db();
+        let bus = openalpaca_core::bus::EventBus::default();
+        let repo = openalpaca_storage::ConversationRepository::new(&db);
+
+        let one = project_dir();
+        let two = project_dir();
+        let live = repo
+            .create_session(
+                "user1:gui",
+                "gui",
+                root(Some(&project_path(&one))).as_deref(),
+                None,
+            )
+            .expect("session");
+
+        let workspace =
+            resolve_turn_target(&db, &bus, "user1", None, false, Some(project_path(&two)))
+                .expect("accepted");
+        assert_eq!(
+            workspace,
+            Some(project_path(&two)),
+            "with nothing named, the header is the turn's project"
+        );
+
+        let turn = persist_turn(&db, workspace.as_deref());
+        assert!(turn.project_switched, "R48 still fires");
+        assert_ne!(turn.session_id, live.id);
+        assert_eq!(session_count(&db), 2);
     }
 
     // ── The history routes retarget to a session ────────────────────
