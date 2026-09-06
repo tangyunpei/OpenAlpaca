@@ -212,12 +212,22 @@ impl RegisteredTool {
     /// which has 79 construction sites and no `Default` (design §3.1).
     ///
     /// `None` for `BuiltIn` / `Http` / `Command` — those are never on the
-    /// ENABLE axis. Both identity producers are single-site and already exist:
-    /// `bridge.rs` (`"mcp:{server}"`) and `manager.rs` (`"plugin:{name}"`).
+    /// ENABLE axis. **The backend is the identity**, on both arms: the MCP arm
+    /// carries the `server_name` the bridge registered, and the plugin arm asks
+    /// the executor for its `plugin_id()` — the plugin **directory** name,
+    /// which is what the ledger is keyed on (design §2.2, X-3).
+    ///
+    /// Never `author`. That field is a provenance string for audit and display
+    /// (`"mcp:<server>"`, `"plugin:<id>"` by convention, `"built-in"`), with no
+    /// producer enforcing its shape; deriving the ledger key from it made a
+    /// second construction site with any other convention resolve to `None` —
+    /// and `None` is unconditionally available (§6.2a) — so the gate would open
+    /// for a plugin the owner had switched off. It fails **closed** now: the
+    /// extension is always identified, and the ledger decides.
     pub fn extension_id(&self) -> Option<ExtensionId> {
         match &self.backend {
             ToolBackend::Mcp { server_name, .. } => Some(ExtensionId::mcp(server_name)),
-            ToolBackend::Plugin(_) => self.author.strip_prefix("plugin:").map(ExtensionId::plugin),
+            ToolBackend::Plugin(executor) => Some(ExtensionId::plugin(executor.plugin_id())),
             _ => None,
         }
     }

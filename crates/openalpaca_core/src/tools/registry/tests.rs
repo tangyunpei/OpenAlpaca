@@ -1904,8 +1904,12 @@ impl openalpaca_api::plugin_traits::PluginToolExecutor for GenPluginExec {
         }
     }
 
+    /// The executor is the identity producer (design §2.2): it answers with the
+    /// plugin **directory** name, which is exactly what `ExtensionId::plugin`
+    /// keys the ledger on. The double must not hard-code one name, or a test
+    /// could never tell the executor's answer apart from the `author` string's.
     fn plugin_id(&self) -> &str {
-        "plug"
+        &self.ext.name
     }
 
     fn generation(&self) -> u64 {
@@ -2609,4 +2613,120 @@ fn the_refusal_is_rendered_from_the_same_table_as_the_row() {
     assert!(model.contains("MCP server 'github' is disabled by the owner"));
     assert!(human.contains("MCP server 'github' is disabled by the owner"));
     assert!(human.contains("config/mcp.toml"));
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// WHERE AN EXTENSION TOOL'S IDENTITY COMES FROM (design §2.2, §3.1, §6.2)
+// ═════════════════════════════════════════════════════════════════════════
+//
+// `author` is a provenance *string* — an audit and display field with no
+// producer that guarantees its shape. The ledger key is derived from the
+// backend instead: the plugin executor answers `plugin_id()` (the directory
+// name) and the MCP arm carries the `server_name` the bridge registered. The
+// two must never be read from `author`, because a tool whose author does not
+// happen to spell `plugin:<dir>` would resolve to no extension at all — and an
+// extension-less tool is *available* (§6.2a fail-open), so the gate would open
+// for a plugin the owner has switched off.
+
+/// The identity is the executor's answer, not the author string's suffix.
+#[test]
+fn a_plugin_tools_identity_comes_from_its_executor_not_its_author() {
+    let ext = ExtensionId::plugin("notion");
+    let tool = plugin_tool(
+        "notion::write",
+        // A second construction site with any other author convention.
+        "Notion, Inc. <support@example.com>",
+        Arc::new(GenPluginExec {
+            generation: 1,
+            ledger: None,
+            ext: ext.clone(),
+        }),
+    );
+    assert_eq!(tool.extension_id(), Some(ext));
+}
+
+/// The MCP arm reads the server name the bridge registered — same rule, same
+/// reason. Pinned so a "make both arms consistent" refactor cannot make them
+/// consistently wrong.
+#[test]
+fn an_mcp_tools_identity_comes_from_the_registered_server_name() {
+    let mut tool = mcp_tool("github__create_issue", "github", 1);
+    tool.author = "mcp:something-else".to_string();
+    assert_eq!(tool.extension_id(), Some(ExtensionId::mcp("github")));
+}
+
+/// The backend variant is the origin marker (§3.1). A builtin whose author
+/// merely *reads* like a plugin's is on no ENABLE axis, so `/v1/tools` keeps
+/// rendering it `origin: null` and the gate keeps letting it through.
+#[test]
+fn a_builtin_whose_author_says_plugin_is_still_on_no_extension_axis() {
+    let registry = ToolRegistry::default();
+    let mut tool = make_tool("file_edit", "ok");
+    tool.author = "plugin:notion".to_string();
+    assert_eq!(tool.extension_id(), None);
+    assert!(registry.extension_is_available(&tool));
+}
+
+/// **Fails closed.** With the identity taken from the author string, a plugin
+/// tool registered under any other convention resolved to `None` — and `None`
+/// is unconditionally available — so a disabled plugin's tool stayed callable
+/// for the life of the process. Derived from the executor, the disabled
+/// plugin's ledger entry is found and the tool is withheld.
+#[test]
+fn extension_is_available_fails_closed_when_the_author_disagrees_with_the_executor() {
+    let registry = ToolRegistry::default();
+    let ext = ExtensionId::plugin("notion");
+    enabled_record(registry.extensions(), &ext, &["notion::write"]);
+    let tool = plugin_tool(
+        "notion::write",
+        "unrelated",
+        Arc::new(GenPluginExec {
+            generation: 1,
+            ledger: None,
+            ext: ext.clone(),
+        }),
+    );
+    assert!(
+        registry.extension_is_available(&tool),
+        "an enabled plugin's tool is available"
+    );
+
+    ledger_disable(registry.extensions(), &ext);
+    assert!(
+        !registry.extension_is_available(&tool),
+        "a disabled plugin's tool must be withheld however its author is spelled"
+    );
+}
+
+/// And the gate refuses the call itself, in S4's wording — the predicate above
+/// is only hygiene; this is the enforcement point.
+#[tokio::test]
+async fn the_gate_refuses_a_disabled_plugins_tool_whatever_its_author_says() {
+    let registry = Arc::new(ToolRegistry::default());
+    let ext = ExtensionId::plugin("notion");
+    enabled_record(registry.extensions(), &ext, &["notion::write"]);
+    registry
+        .register(plugin_tool(
+            "notion::write",
+            "unrelated",
+            Arc::new(GenPluginExec {
+                generation: 1,
+                ledger: None,
+                ext: ext.clone(),
+            }),
+        ))
+        .unwrap();
+
+    ledger_disable(registry.extensions(), &ext);
+
+    let err = registry
+        .execute_with_context("notion::write", &serde_json::json!({}), &ToolContext::default())
+        .await
+        .expect_err("a disabled plugin's tool must be refused");
+    assert!(
+        err.starts_with("tool 'notion::write' is unavailable: "),
+        "{err}"
+    );
+    assert!(err.contains("plugin 'notion' is disabled by the owner"), "{err}");
+    assert!(!err.contains("not found"), "{err}");
 }
