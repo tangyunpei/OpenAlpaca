@@ -71,6 +71,10 @@ pub struct SessionLogService {
     /// is a boot boundary (P-13), so an idle-close and respawn must not write
     /// a second one.
     started: DashMap<String, ()>,
+    /// What the boot sweep did, when one ran (R54). Kept here so the fact that
+    /// the log is still over its cap is readable — T44's `GET /v1/status` —
+    /// rather than living only in a boot log line.
+    last_sweep: Option<sweep::SweepReport>,
 }
 
 impl SessionLogService {
@@ -91,7 +95,22 @@ impl SessionLogService {
             boot_id: uuid::Uuid::new_v4().to_string(),
             handles: DashMap::new(),
             started: DashMap::new(),
+            last_sweep: None,
         }
+    }
+
+    /// Record what the boot sweep did, so the service can answer for it.
+    pub fn with_last_sweep(mut self, report: sweep::SweepReport) -> Self {
+        self.last_sweep = Some(report);
+        self
+    }
+
+    /// The boot sweep's report — `None` when no pass ran (the active set was
+    /// unreadable, or no store resolved). `over_cap_after` on it is the one
+    /// thing a caller usually wants: the sessions root is still over
+    /// `log_max_total_bytes` and only protected bytes are left.
+    pub fn last_sweep(&self) -> Option<&sweep::SweepReport> {
+        self.last_sweep.as_ref()
     }
 
     /// This daemon run's id, stamped on every `session_start`.

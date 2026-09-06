@@ -86,15 +86,19 @@ pub async fn initialize_services(
             // here — after the store movers, before any writer is handed out,
             // so nothing it examines is being appended to underneath it. The
             // per-session cap is the writer's and needs no boot pass.
-            sweep_session_logs(&root, db, daemon_config).await;
-            shared_context.set_session_log(Arc::new(
-                openalpaca_core::session_log::SessionLogService::new(
-                    root,
-                    Some(db.clone()),
-                    limits,
-                    env!("CARGO_PKG_VERSION").to_string(),
-                ),
-            ));
+            let swept = sweep_session_logs(&root, db, daemon_config).await;
+            let mut service = openalpaca_core::session_log::SessionLogService::new(
+                root,
+                Some(db.clone()),
+                limits,
+                env!("CARGO_PKG_VERSION").to_string(),
+            );
+            // The pass's account outlives it: T44's status route reads
+            // `over_cap_after` from here rather than from the boot log.
+            if let Some(report) = swept {
+                service = service.with_last_sweep(report);
+            }
+            shared_context.set_session_log(Arc::new(service));
         }
         Err(e) => tracing::warn!("Session event log disabled — no sessions directory: {e}"),
     }
@@ -271,15 +275,21 @@ pub async fn initialize_services(
 /// > evicted.
 ///
 /// The active set comes from the database, so "archived" means what the
-/// session rows say it means. The walk is filesystem work on a directory that
-/// may hold thousands of files, so it goes to a blocking thread rather than
-/// stalling the boot runtime; a failure is a warning, never a boot failure —
-/// the daemon runs with a log that is over its cap rather than not at all.
+/// session rows say it means, and an archived session gives up its whole log —
+/// `results/`, rotated segments, then the live segment (R54). The walk is
+/// filesystem work on a directory that may hold thousands of files, so it goes
+/// to a blocking thread rather than stalling the boot runtime; a failure is a
+/// warning, never a boot failure — the daemon runs with a log that is over its
+/// cap rather than not at all.
+///
+/// Returns the report so the [`SessionLogService`] can carry it: a root that is
+/// **still** over its cap after a full pass is a fact a status route must be
+/// able to state, not one that lives only in this function's log line.
 async fn sweep_session_logs(
     root: &Path,
     db: &Database,
     daemon_config: &Arc<ArcSwap<openalpaca_core::daemon_config::DaemonConfig>>,
-) {
+) -> Option<openalpaca_core::session_log::sweep::SweepReport> {
     let max_total = daemon_config.load().orchestrator.sessions.log_max_total_bytes;
     let active: std::collections::HashSet<String> =
         match openalpaca_storage::ConversationRepository::new(db).active_session_ids() {
@@ -289,7 +299,7 @@ async fn sweep_session_logs(
                 // session's log, which §5.4 forbids outright. Skipping is the
                 // only safe answer.
                 tracing::warn!("Session log sweep skipped — active sessions unreadable: {e}");
-                return;
+                return None;
             }
         };
 
@@ -299,27 +309,49 @@ async fn sweep_session_logs(
     })
     .await;
 
-    match swept {
-        Ok(Ok(report)) if report.files_removed == 0 => {
-            tracing::debug!(
-                sessions = report.sessions_visited,
-                bytes = report.bytes_before,
-                max_total,
-                "Session logs are within their total cap"
-            );
+    let report = match swept {
+        Ok(Ok(report)) => report,
+        Ok(Err(e)) => {
+            tracing::warn!("Session log sweep failed: {e}");
+            return None;
         }
-        Ok(Ok(report)) => tracing::info!(
+        Err(e) => {
+            tracing::warn!("Session log sweep task failed: {e}");
+            return None;
+        }
+    };
+
+    if report.files_removed == 0 && !report.over_cap_after {
+        tracing::debug!(
+            sessions = report.sessions_visited,
+            bytes = report.bytes_before,
+            max_total,
+            "Session logs are within their total cap"
+        );
+    } else if report.over_cap_after {
+        // Everything left over the cap is protected — an active session,
+        // `snapshots/`, or a name this store did not create. Nothing further
+        // can be done at boot, so it is said once, loudly.
+        tracing::warn!(
+            sessions_visited = report.sessions_visited,
+            sessions_evicted = report.sessions_evicted,
+            files_removed = report.files_removed,
+            bytes_freed = report.bytes_freed,
+            bytes_after = report.bytes_after,
+            max_total,
+            "Session logs are still over their total cap — only protected bytes remain"
+        );
+    } else {
+        tracing::info!(
             sessions_visited = report.sessions_visited,
             sessions_evicted = report.sessions_evicted,
             files_removed = report.files_removed,
             bytes_freed = report.bytes_freed,
             bytes_before = report.bytes_before,
             bytes_after = report.bytes_after,
-            still_over_cap = report.over_cap_after,
             max_total,
             "Session log sweep completed"
-        ),
-        Ok(Err(e)) => tracing::warn!("Session log sweep failed: {e}"),
-        Err(e) => tracing::warn!("Session log sweep task failed: {e}"),
+        );
     }
+    Some(report)
 }

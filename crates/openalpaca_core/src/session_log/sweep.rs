@@ -11,19 +11,25 @@
 //!
 //! and §5.4 says where it runs: "once at boot for the global cap".
 //!
-//! **What it removes, and in what order.** Within one archived session,
-//! least-destructive first: the `results/` spill files, then the rotated
-//! `log.<first>-<last>.jsonl` segments. It never removes a **live** segment —
-//! the per-session trim is explicit that whole oldest segments go "never the
-//! live segment", and a global pass has no better claim on one. So a swept
-//! session keeps its narrative and loses the payloads and the head, which is
-//! exactly the trade §5.3's source-of-truth split makes safe: chat content is
-//! in SQLite, and replay resume only ever reads the tail.
+//! **What it removes, and in what order** (R54). Within one **archived**
+//! session, least-destructive first: the `results/` spill files, then the
+//! rotated `log.<first>-<last>.jsonl` segments, and last of all the live
+//! `log.jsonl`. Evicting an archived session's live segment is what makes the
+//! cap enforceable at all: §5.4 says most sessions never rotate, so most
+//! sessions have exactly one segment — the live one — and nothing under
+//! `results/`, and a rule that spared every live segment left a root of
+//! thousands of such sessions with an empty candidate list. §5.3's
+//! source-of-truth split is what makes it safe: the chat content is in SQLite
+//! and the JSONL is loop detail.
 //!
-//! **What it never touches**: an active session, anything under `snapshots/`
-//! (reserved for Phase 8), and any name at the sessions root that this store
-//! did not create — §1.3 rule 3. Unknown names are *counted* (they are taking
-//! the disk the cap is about) but never removed.
+//! **What it never touches**: an **active** session — that is where the line
+//! is drawn, not between a live segment and a rotated one — anything under
+//! `snapshots/` (reserved for Phase 8), and any name at the sessions root that
+//! this store did not create. A stray *file* at the root is counted (it is
+//! taking the disk the cap is about) and left alone; a *directory* is read as
+//! a session, and only the names this store writes inside one — `log.jsonl`,
+//! `log.<first>-<last>.jsonl`, `results/*` — are ever candidates, so an
+//! unrelated directory loses nothing.
 //!
 //! **Its only record is the deletions themselves**, so a crash between two of
 //! them leaves a partially swept root and the next boot simply continues: the
@@ -48,8 +54,11 @@ pub struct SweepReport {
     pub bytes_before: u64,
     pub bytes_after: u64,
     /// True when the cap could not be met because everything still over it is
-    /// protected — an active session, or a live segment. Reported rather than
-    /// hidden: the alternative is deleting something §5.4 says must stay.
+    /// protected — an active session, or `snapshots/`, or a name this store
+    /// did not create. Reported rather than hidden: the alternative is
+    /// deleting something §5.4 says must stay. Carried on
+    /// [`SessionLogService`](super::SessionLogService) after the boot pass so
+    /// T44's status route can say it, and logged at `warn` at boot.
     pub over_cap_after: bool,
 }
 
@@ -59,6 +68,8 @@ pub struct SweepReport {
 /// `active` is the set of session ids that must not be touched — the sessions
 /// the database still calls active. Ids are matched against the **directory
 /// name**, which is `session_dir_name(id)`, so the caller passes raw ids.
+/// Everything else is archived, and an archived session gives up its
+/// `results/` files, then its rotated segments, then its live segment (R54).
 pub fn enforce_total_cap(
     root: &Path,
     max_total_bytes: u64,
@@ -136,8 +147,8 @@ struct SessionDir {
     bytes: u64,
     /// An active session — counted towards the total, never evicted from.
     protected: bool,
-    /// Least destructive first: `results/` spills, then rotated segments. The
-    /// live segment is never a candidate.
+    /// Least destructive first: `results/` spills, then rotated segments, then
+    /// the live segment (R54). Empty for an active session.
     evictable: Vec<Victim>,
 }
 
@@ -171,6 +182,7 @@ fn scan_session(dir: &Path, protected: bool) -> SessionDir {
     let mut touched = 0;
     let mut spills: Vec<Victim> = Vec::new();
     let mut segments: Vec<(u64, Victim)> = Vec::new();
+    let mut live: Option<Victim> = None;
 
     for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
         let path = entry.path();
@@ -189,10 +201,15 @@ fn scan_session(dir: &Path, protected: bool) -> SessionDir {
         let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
         bytes += len;
         touched = touched.max(mtime_secs(&path));
-        // §5.4 drops "whole oldest segments … never the live segment", and a
-        // global pass has no better claim on a live one than the writer does.
-        if name != LIVE_SEGMENT && segment_range(&name).is_some() {
-            let first = segment_range(&name).map(|(first, _)| first).unwrap_or(0);
+        if name == LIVE_SEGMENT {
+            // R54: an archived session's live segment is evictable, and it is
+            // the last thing in that session to go. An active session's never
+            // is — its writer is appending to it, and §5.4 protects it
+            // outright — so it is not even collected here.
+            if !protected {
+                live = Some(Victim { path, bytes: len });
+            }
+        } else if let Some((first, _)) = segment_range(&name) {
             segments.push((first, Victim { path, bytes: len }));
         }
     }
@@ -202,6 +219,7 @@ fn scan_session(dir: &Path, protected: bool) -> SessionDir {
     segments.sort_by_key(|(first, _)| *first);
     let mut evictable = spills;
     evictable.extend(segments.into_iter().map(|(_, victim)| victim));
+    evictable.extend(live);
 
     SessionDir {
         touched,

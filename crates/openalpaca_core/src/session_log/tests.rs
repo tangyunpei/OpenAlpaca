@@ -1102,6 +1102,9 @@ fn total_bytes(root: &Path) -> u64 {
 /// §5.4's `log_max_total_bytes`: "Across all sessions. Evict oldest-touched
 /// **archived** sessions' logs first, LRU; an active session's log is never
 /// evicted."
+///
+/// Inside one archived session the order is least-destructive first:
+/// `results/` before segments, and the live segment last of all.
 #[test]
 fn the_boot_sweep_evicts_the_oldest_archived_sessions_first() {
     let dir = tempfile::tempdir().unwrap();
@@ -1115,30 +1118,71 @@ fn the_boot_sweep_evicts_the_oldest_archived_sessions_first() {
     assert_eq!(before, 18_000);
 
     let active: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let report = sweep::enforce_total_cap(root, 12_000, &active).unwrap();
+    // 4 000 to free: exactly the oldest session's four spill files.
+    let report = sweep::enforce_total_cap(root, 14_000, &active).unwrap();
 
     assert!(report.bytes_freed > 0);
-    assert!(total_bytes(root) <= 12_000, "the sweep brought the root under its cap");
-    // The oldest gave up its spill first; the newest was not touched at all.
+    assert!(total_bytes(root) <= 14_000, "the sweep brought the root under its cap");
+    assert!(!report.over_cap_after);
+    for i in 0..4 {
+        assert!(
+            !root.join("oldest").join(format!("results/00000{i}-t-dump.txt")).exists(),
+            "the oldest session's spills went first"
+        );
+    }
+    // Least destructive first: the payloads went, the narrative stayed.
     assert!(
-        !root.join("oldest").join("results/000000-t-dump.txt").exists(),
-        "the oldest session's spill went first"
+        root.join("oldest").join("log.1-9.jsonl").exists(),
+        "segments are only reached once results/ is exhausted"
+    );
+    assert!(
+        root.join("oldest").join(LIVE_SEGMENT).exists(),
+        "and the live segment is the very last thing in a session to go"
     );
     assert!(
         root.join("newest").join("results/000000-t-dump.txt").exists(),
         "the newest session was not reached"
     );
-    // The live segment of every session survives — §5.4 never drops one.
-    for session in ["oldest", "middle", "newest"] {
-        assert!(
-            root.join(session).join(LIVE_SEGMENT).exists(),
-            "{session}'s live segment must survive"
-        );
+}
+
+/// R54: an **archived** session gives up everything, its live segment
+/// included — §5.3's source-of-truth split keeps the chat content in SQLite,
+/// so the JSONL is loop detail. Without this the cap is unenforceable in the
+/// common shape: §5.4 says most sessions never rotate, so most sessions have
+/// exactly one segment — the live one — and nothing under `results/`.
+#[test]
+fn the_boot_sweep_converges_on_a_root_of_single_segment_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // What a real root looks like: sessions that never rotated and never
+    // spilled. Under the old rule this list of candidates was empty.
+    for (i, session) in ["s1", "s2", "s3", "s4", "s5", "s6"].iter().enumerate() {
+        let session_dir = root.join(session);
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(session_dir.join(LIVE_SEGMENT), "x".repeat(1_000)).unwrap();
+        age(root, session, (6 - i as u64) * 1_000);
+    }
+    assert_eq!(total_bytes(root), 6_000);
+
+    let active = std::collections::HashSet::new();
+    let report = sweep::enforce_total_cap(root, 2_000, &active).unwrap();
+
+    assert!(total_bytes(root) <= 2_000, "the root converges under its cap");
+    assert!(!report.over_cap_after, "and the report says so");
+    assert_eq!(report.files_removed, 4);
+    // LRU: the four oldest gave up their logs, the two newest kept theirs.
+    for gone in ["s1", "s2", "s3", "s4"] {
+        assert!(!root.join(gone).join(LIVE_SEGMENT).exists(), "{gone} was evicted");
+    }
+    for kept in ["s5", "s6"] {
+        assert!(root.join(kept).join(LIVE_SEGMENT).exists(), "{kept} was not reached");
     }
 }
 
 /// "An active session's log is never evicted" — even when it is the oldest
-/// thing on disk and the cap cannot be met without it.
+/// thing on disk and the cap cannot be met without it. The line R54 draws is
+/// between an **active** session and an archived one, not between a live
+/// segment and a rotated one.
 #[test]
 fn the_boot_sweep_never_touches_a_live_session() {
     let dir = tempfile::tempdir().unwrap();
@@ -1158,12 +1202,20 @@ fn the_boot_sweep_never_touches_a_live_session() {
         );
     }
     assert!(root.join("live").join("log.1-9.jsonl").exists());
+    assert!(
+        root.join("live").join(LIVE_SEGMENT).exists(),
+        "and least of all an active session's live segment"
+    );
     // The cap could not be met, and the sweep says so rather than pretending.
     assert!(report.bytes_after > 1_000);
     assert!(report.over_cap_after, "the report admits the cap was not met");
     assert!(
         !root.join("archived").join("results/000000-t-dump.txt").exists(),
         "everything evictable went"
+    );
+    assert!(
+        !root.join("archived").join(LIVE_SEGMENT).exists(),
+        "an archived session's live segment is evictable — that is R54"
     );
 }
 
@@ -1213,5 +1265,29 @@ fn the_boot_sweep_leaves_names_it_did_not_create_alone() {
         root.join("a").join("snapshots/keep.png").exists(),
         "snapshots/ is reserved for Phase 8, not the sweep's to empty"
     );
-    assert!(root.join("a").join(LIVE_SEGMENT).exists());
+    // Only the names this store writes are ever removed — and `a` is
+    // archived, so under R54 that now includes its live segment.
+    assert!(!root.join("a").join(LIVE_SEGMENT).exists());
+}
+
+/// The pass's report outlives it on the service, so T44's `GET /v1/status`
+/// can say the log is over its cap instead of that fact living only in a boot
+/// log line.
+#[test]
+fn the_service_carries_the_boot_sweeps_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_session(root, "a", 4, 1_000);
+    age(root, "a", 9_000);
+
+    // Active, so nothing in it is a candidate and the cap cannot be met.
+    let active: std::collections::HashSet<String> = ["a".to_string()].into_iter().collect();
+    let report = sweep::enforce_total_cap(root, 1, &active).unwrap();
+    assert!(report.over_cap_after, "only protected bytes are left");
+
+    let plain = service(&dir);
+    assert!(plain.last_sweep().is_none(), "a service that swept nothing says nothing");
+    let swept = service(&dir).with_last_sweep(report.clone());
+    assert_eq!(swept.last_sweep(), Some(&report));
+    assert!(swept.last_sweep().is_some_and(|r| r.over_cap_after));
 }
