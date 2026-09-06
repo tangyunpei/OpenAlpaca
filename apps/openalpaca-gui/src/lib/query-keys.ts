@@ -6,7 +6,7 @@
  */
 
 import type { ChatHistoryQuery } from "./api/chat";
-import type { ListConversationsQuery } from "./api/conversations";
+import type { ListSessionsQuery } from "./api/sessions";
 import type { EventHistoryQuery } from "./api/telemetry";
 import type { ListTasksQuery } from "./api/tasks";
 import type { LlmUsageQuery } from "./api/usage";
@@ -21,12 +21,13 @@ export const qk = {
     feedback: (messageId: number) => ["chat", "feedback", messageId] as const,
   },
 
-  conversations: {
-    all: () => ["conversations"] as const,
-    list: (query: ListConversationsQuery) =>
-      ["conversations", "list", query] as const,
-    messages: (id: string, query: { limit?: number; offset?: number }) =>
-      ["conversations", "messages", id, query] as const,
+  sessions: {
+    all: () => ["sessions"] as const,
+    list: (query: ListSessionsQuery) => ["sessions", "list", query] as const,
+    messages: (
+      id: string,
+      query: { limit?: number; offset?: number; before_id?: number },
+    ) => ["sessions", "messages", id, query] as const,
   },
 
   tasks: {

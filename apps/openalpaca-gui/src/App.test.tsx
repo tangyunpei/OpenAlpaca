@@ -57,8 +57,8 @@ function installFetch() {
         });
       }
       if (url.includes("/v1/settings/llm")) return json({ providers: {} });
-      if (url.includes("/v1/conversations")) {
-        return json({ conversations: [], total: 0 });
+      if (url.includes("/v1/sessions")) {
+        return json({ sessions: [], total: 0 });
       }
       // tasks, models, connectors, plugins, skills, templates, usage — all lists
       return json([]);

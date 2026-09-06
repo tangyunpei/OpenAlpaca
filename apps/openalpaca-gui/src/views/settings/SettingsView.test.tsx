@@ -213,24 +213,27 @@ vi.mock("@/hooks/useAgents", async (importOriginal) => ({
   useAgentInstances: () => query([]),
 }));
 
-vi.mock("@/hooks/useConversations", () => ({
-  useConversations: () =>
+vi.mock("@/hooks/useSessions", () => ({
+  useSessions: () =>
     query({
-      conversations: [
+      sessions: [
         {
           id: "c1",
           lane_key: "local:gui",
           source: "gui",
           title: "Connector audit",
+          workspace_id: null,
+          status: "archived",
           message_count: 142,
           last_message_at: "2026-08-29T10:00:00Z",
           created_at: "2026-08-01T10:00:00Z",
           updated_at: "2026-08-29T10:00:00Z",
-          summary: "",
-          summary_version: 1,
-          last_summarized_message_id: 100,
+          ended_at: "2026-08-29T10:05:00Z",
+          active_task_count: 0,
+          interrupted_task_count: 0,
         },
       ],
+      total: 1,
     }),
 }));
 
@@ -329,11 +332,11 @@ describe("SettingsView (§2.5, §5.4)", () => {
     ).toHaveTextContent("GET /v1/skills");
   });
 
-  it("renders conversations with their compaction state", async () => {
+  it("renders stored conversations with their lifecycle state", async () => {
     render(<SettingsView />);
     await open("Conversations");
     expect(screen.getByText("142 messages · 29 Aug")).toBeInTheDocument();
-    expect(screen.getByText("compacted")).toBeInTheDocument();
+    expect(screen.getByText("archived")).toBeInTheDocument();
   });
 
   it("categorises real event types onto the design's log tags", async () => {

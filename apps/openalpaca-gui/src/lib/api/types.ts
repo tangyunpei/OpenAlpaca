@@ -231,28 +231,41 @@ export interface FeedbackResponse {
   comment: string | null;
 }
 
-// ── Conversations ───────────────────────────────────────────────────────────
+// ── Sessions ────────────────────────────────────────────────────────────────
+//
+// A session is one conversation transcript: an epoch of a lane, bound to at
+// most one workspace, with an `active` → `archived` lifecycle. A lane holds
+// many of them and at most one active one. `/v1/sessions` replaced the two
+// `/v1/conversations` reads (daemon plan §5.7, P19); the compaction columns
+// (`summary`, `summary_version`, …) are the daemon's own bookkeeping and are
+// deliberately not on the wire.
 
-export interface Conversation {
+export type SessionStatus = "active" | "archived";
+
+export interface Session {
   id: string;
   lane_key: string;
   source: string;
   title: string;
+  workspace_id: string | null;
+  status: SessionStatus;
   message_count: number;
   last_message_at: string | null;
   created_at: string;
   updated_at: string;
-  summary: string;
-  summary_version: number;
-  last_summarized_message_id: number;
-  summary_updated_at?: string | null;
+  ended_at: string | null;
+  /** Runs this session's lane has in flight right now. */
+  active_task_count: number;
+  /** Runs started from this session that were left interrupted. */
+  interrupted_task_count: number;
 }
 
-export interface ConversationsResponse {
-  conversations: Conversation[];
+export interface SessionsResponse {
+  sessions: Session[];
+  total: number;
 }
 
-export interface ConversationMessagesResponse {
+export interface SessionMessagesResponse {
   messages: ChatMessage[];
   total: number;
 }

@@ -32,7 +32,7 @@
 
 - WebSocket client source: `apps/openalpaca-gui/src/lib/events.ts`.
 - Parsed `ServerEvent` discriminators:
-- `agent_config_changed`, `agent_status`, `artifact_written`, `chat_stream_ended`, `chat_stream_started`, `circuit_breaker_tripped`, `command_received`, `connector_status`, `daemon_config_changed`, `dag_node_status`, `extension_capability_withdrawn`, `extension_capability_withheld`, `extension_state_changed`, `followup_cancelled`, `followup_queued`, `heartbeat`, `key_status_changed`, `llm_call_completed`, `orchestrator_config_changed`, `security_violation`, `skill_catalog_updated`, `skill_completed`, `skill_failed`, `skill_invocation_started`, `soul_updated`, `subagent_span`, `task_status`, `tool_confirmation_requested`, `tool_executed`, `wake`, `workflow_progress`, `workflow_started`, `workflow_steered`
+- `agent_config_changed`, `agent_status`, `artifact_written`, `chat_stream_ended`, `chat_stream_started`, `circuit_breaker_tripped`, `command_received`, `connector_status`, `daemon_config_changed`, `dag_node_status`, `extension_capability_withdrawn`, `extension_capability_withheld`, `extension_state_changed`, `followup_cancelled`, `followup_queued`, `heartbeat`, `key_status_changed`, `llm_call_completed`, `orchestrator_config_changed`, `security_violation`, `session_changed`, `skill_catalog_updated`, `skill_completed`, `skill_failed`, `skill_invocation_started`, `soul_updated`, `subagent_span`, `task_status`, `tool_confirmation_requested`, `tool_executed`, `wake`, `workflow_progress`, `workflow_started`, `workflow_steered`
 
 ## Related Links
 
@@ -76,12 +76,6 @@
 - Exported functions: `configureConnector`, `getConnectorSettings`, `listConnectors`, `performConnectorAction`, `updateConnectorSettings`
 - Endpoints: none
 
-### `conversations.ts`
-
-- Source: `apps/openalpaca-gui/src/lib/api/conversations.ts`
-- Exported functions: `getConversationMessages`, `listConversations`
-- Endpoints: none
-
 ### `extensions.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/extensions.ts`
@@ -122,6 +116,12 @@
 
 - Source: `apps/openalpaca-gui/src/lib/api/run-events.ts`
 - Exported functions: none
+- Endpoints: none
+
+### `sessions.ts`
+
+- Source: `apps/openalpaca-gui/src/lib/api/sessions.ts`
+- Exported functions: `getSessionMessages`, `listSessions`
 - Endpoints: none
 
 ### `settings.ts`

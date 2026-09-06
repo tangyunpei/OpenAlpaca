@@ -72,7 +72,7 @@ export function useClearChatHistory(): UseMutationResult<
     mutationFn: (laneKey?: string) => clearChatHistory(laneKey),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: qk.chat.all() });
-      void client.invalidateQueries({ queryKey: qk.conversations.all() });
+      void client.invalidateQueries({ queryKey: qk.sessions.all() });
     },
   });
 }

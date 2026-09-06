@@ -84,10 +84,13 @@ describe("Unavailable results", () => {
     const result = unavailable("GAP-21");
 
     expect(isAvailable(result)).toBe(false);
+    // The daemon half landed (PATCH/DELETE /v1/sessions/{id}); what is still
+    // missing is a client surface that calls them, and the note says so
+    // rather than claiming the routes do not exist.
     expect(result.reason).toBe(
-      "Conversation rename and delete not yet available",
+      "Renaming and deleting a conversation are served by the daemon but not wired into this list yet",
     );
-    expect(result.missingApi).toContain("conversation routes");
+    expect(result.missingApi).toContain("/v1/sessions/{id}");
     expect(result.gap.id).toBe("GAP-21");
   });
 

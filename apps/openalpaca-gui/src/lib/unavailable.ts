@@ -165,14 +165,23 @@ export const GAPS: Record<GapId, GapDescriptor> = {
     noteOverride:
       "Templates have no enabled flag — the per-template toggle is not served",
   },
+  // GAP-21's *daemon* half is served: migration 039 made a lane hold many
+  // sessions, and `PATCH /v1/sessions/{id}` renames while
+  // `DELETE /v1/sessions/{id}` removes one transactionally (409 while a run it
+  // started is in flight). What is still missing is the client: the session
+  // sidebar that would offer those controls is its own task, and this list has
+  // no UI for them. The id stays registered until that lands — retire it with
+  // the sidebar, not before.
   "GAP-21": {
     id: "GAP-21",
     label: "Conversation rename and delete",
-    missingApi: "only two conversation routes exist, both GET",
-    proposedEndpoint:
-      "PATCH /v1/conversations/{id}; DELETE /v1/conversations/{id}",
-    blocks: "Renaming or removing a stored lane",
+    missingApi:
+      "the routes exist (PATCH/DELETE /v1/sessions/{id}); no client surface calls them yet",
+    proposedEndpoint: "PATCH /v1/sessions/{id}; DELETE /v1/sessions/{id}",
+    blocks: "Renaming or removing a stored conversation",
     fixSize: "S",
+    noteOverride:
+      "Renaming and deleting a conversation are served by the daemon but not wired into this list yet",
   },
   // GAP-22 (the six `plugin_*` variants carrying no `ts`/`instance_id`) is
   // closed: C7 deleted those variants with `/v1/plugins*`, and the extension

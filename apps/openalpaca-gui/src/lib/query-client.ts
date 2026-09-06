@@ -77,6 +77,12 @@ export function invalidationKeysFor(
     case "followup_cancelled":
       return [qk.followups.all()];
 
+    // A conversation opened, moved or went away: the list is stale, and so is
+    // the transcript, because the lane's active session may have changed under
+    // a window that is showing the old one.
+    case "session_changed":
+      return [qk.sessions.all(), qk.chat.all()];
+
     // `["artifacts"]` is a prefix of the list, versions and diff keys, so one
     // entry refreshes whichever Library surface is mounted. Not `tasks`: a
     // run's artifact list is read out of `task.outcome`, which the daemon only
@@ -97,7 +103,7 @@ export function invalidationKeysFor(
       ];
 
     case "chat_stream_ended":
-      return [qk.chat.all(), qk.conversations.all()];
+      return [qk.chat.all(), qk.sessions.all()];
 
     // ADR-030 §9.5. Skills and agents because a plugin's contributions come and
     // go with it; connectors because a plugin may declare one. A frame carrying

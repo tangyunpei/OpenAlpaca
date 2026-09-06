@@ -5,7 +5,7 @@ export * from "./useArtifacts";
 export * from "./useChat";
 export * from "./useConnection";
 export * from "./useConnectors";
-export * from "./useConversations";
+export * from "./useSessions";
 export * from "./useDaemonEvents";
 export * from "./useEventHistory";
 export * from "./useExtensions";

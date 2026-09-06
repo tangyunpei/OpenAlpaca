@@ -11,7 +11,7 @@
 
 import { useAgentTemplates } from "@/hooks/useAgents";
 import { useConnectors } from "@/hooks/useConnectors";
-import { useConversations } from "@/hooks/useConversations";
+import { useSessions } from "@/hooks/useSessions";
 import { useExtensions } from "@/hooks/useExtensions";
 import { useLlmSettings } from "@/hooks/useSettings";
 import { useTools } from "@/hooks/useSkills";
@@ -61,7 +61,7 @@ function useSectionCounts(): Partial<Record<SettingsSectionId, number>> {
   const tools = useTools();
   const extensions = useExtensions();
   const templates = useAgentTemplates();
-  const conversations = useConversations({ limit: 50 });
+  const sessions = useSessions({ limit: 50 });
 
   return {
     models:
@@ -72,7 +72,7 @@ function useSectionCounts(): Partial<Record<SettingsSectionId, number>> {
     tools: tools.data?.length,
     extensions: extensions.data?.length,
     agents: templates.data?.length,
-    conversations: conversations.data?.conversations.length,
+    conversations: sessions.data?.sessions.length,
   };
 }
 
