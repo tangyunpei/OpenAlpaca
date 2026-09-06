@@ -167,7 +167,9 @@ export function RunDetail({
                 ? "done"
                 : run.status === "failed"
                   ? "failed"
-                  : "cancelled"
+                  : run.status === "interrupted"
+                    ? "interrupted"
+                    : "cancelled"
             }
             note={run.note}
             actions={actions}

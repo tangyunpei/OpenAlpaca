@@ -289,3 +289,48 @@ describe("RunDetail — Re-run in flight", () => {
     ).toBeDisabled();
   });
 });
+
+/**
+ * The terminal banner's status prop is computed from `run.status` at the
+ * call site (RunDetail.tsx), independently of `TerminalBanner`'s own
+ * `interrupted` text branch — a caller that never passes "interrupted"
+ * through leaves that branch dead. §5.6b: an interrupted run is terminal,
+ * not an error, and gets its own wording, not the cancelled copy.
+ */
+describe("RunDetail — interrupted banner", () => {
+  it("shows the interrupted wording, not the cancelled copy, and no live action bar", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        requested.push(url);
+        if (url.includes("/v1/events/history")) return eventsReply();
+        if (url.includes("/v1/artifacts")) return artifactsReply();
+        if (url.includes("/timeline")) {
+          return json({
+            task_id: "task-1",
+            started_at: "2026-08-31T14:22:41Z",
+            now: "2026-08-31T14:32:41Z",
+            completed_at: null,
+            lanes: [],
+          });
+        }
+        if (url.includes("/v1/tasks/")) {
+          return json({ task: { ...task, status: "interrupted" } });
+        }
+        return json({ error: "not found" }, 404);
+      }),
+    );
+    renderDetail();
+
+    expect(
+      await screen.findByText(/Interrupted by a daemon restart/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Cancelled by you/)).not.toBeInTheDocument();
+    // Terminal, not live: no "Cancel run" control, only the banner's Re-run.
+    expect(
+      screen.queryByRole("button", { name: "Cancel run" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Re-run" })).toBeInTheDocument();
+  });
+});
