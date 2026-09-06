@@ -70,6 +70,16 @@ pub fn push_steering(
     let request_id = msg.request_id;
     let text = msg.text.clone();
     let received_at = msg.received_at;
+    // §5.6b's recovery re-queues an undelivered interjection as the *exact*
+    // `lane_followups` row the graceful path writes
+    // (`dispatcher/lead_agent.rs`), and that row's `principal_json` is NOT
+    // NULL. The graceful path holds the whole `SteeringMsg`; the boot pass
+    // holds only this record — so the record carries the two fields the row
+    // needs, or the interjection is unrecoverable. `null` is written
+    // explicitly when the turn had no project, so "absent" always means "an
+    // older build wrote this line".
+    let principal = serde_json::to_value(&msg.principal).unwrap_or(serde_json::Value::Null);
+    let workspace_path = msg.workspace_path.clone();
     let depth = inbox.push(msg)?;
     // §5.5: one line in the workflow's transcript, written on the *accepted*
     // push. That is what makes crash recovery of an interjection possible —
@@ -85,6 +95,8 @@ pub fn push_steering(
                     "text": text,
                     "received_at": received_at.to_rfc3339(),
                     "queue_depth": depth,
+                    "principal": principal,
+                    "workspace_path": workspace_path,
                 })),
         );
     }
@@ -391,6 +403,84 @@ mod tests {
         assert_eq!(records[0].data["text"], "focus on the tests");
         assert_eq!(records[0].data["lane_key"], "u:gui");
         assert_eq!(records[0].data["queue_depth"], 1);
+    }
+
+    /// §5.6b's recovery writes "the exact rows the graceful path already
+    /// writes", and `lane_followups.principal_json` is NOT NULL. The graceful
+    /// path has the `SteeringMsg` in hand; the recovery pass has only the
+    /// record — so the record carries what the row needs, or the interjection
+    /// is unrecoverable.
+    #[tokio::test]
+    async fn a_steering_record_carries_what_a_recovered_followup_needs() {
+        use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+
+        let ctx = SharedContext::new();
+        let bus = EventBus::default();
+        let dir = tempfile::tempdir().unwrap();
+        let service = SessionLogService::new(
+            dir.path().to_path_buf(),
+            None,
+            SessionLogLimits::default(),
+            "test".to_string(),
+        );
+        let handle = service.handle_for("sess-1");
+        ctx.register_steering_inbox("task-1", Arc::new(SteeringInbox::default()));
+        ctx.register_task_session_log("task-1", handle.clone());
+
+        let mut m = msg("focus on the tests");
+        m.principal = Principal::User {
+            global_id: "u-42".to_string(),
+        };
+        m.workspace_path = Some("/repo".to_string());
+        assert_eq!(push_steering(&ctx, &bus, "task-1", "u:gui", m), Ok(1));
+        assert!(handle.flush().await);
+
+        let records = read_records(&dir.path().join("sess-1")).unwrap();
+        // The principal round-trips as the same JSON `FollowupRepository::queue`
+        // is handed by `dispatcher/lead_agent.rs`.
+        let principal: Principal =
+            serde_json::from_value(records[0].data["principal"].clone()).unwrap();
+        assert_eq!(
+            principal,
+            Principal::User {
+                global_id: "u-42".to_string()
+            }
+        );
+        assert_eq!(records[0].data["workspace_path"], "/repo");
+    }
+
+    /// A turn with no project writes an explicit null, not a missing key: the
+    /// recovered row's `workspace_path` is nullable and "absent" must not be
+    /// mistaken for "this build did not write it".
+    #[tokio::test]
+    async fn a_steering_record_with_no_project_says_so() {
+        use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+
+        let ctx = SharedContext::new();
+        let bus = EventBus::default();
+        let dir = tempfile::tempdir().unwrap();
+        let service = SessionLogService::new(
+            dir.path().to_path_buf(),
+            None,
+            SessionLogLimits::default(),
+            "test".to_string(),
+        );
+        let handle = service.handle_for("sess-1");
+        ctx.register_steering_inbox("task-1", Arc::new(SteeringInbox::default()));
+        ctx.register_task_session_log("task-1", handle.clone());
+        assert_eq!(
+            push_steering(&ctx, &bus, "task-1", "u:gui", msg("no project")),
+            Ok(1)
+        );
+        assert!(handle.flush().await);
+
+        let records = read_records(&dir.path().join("sess-1")).unwrap();
+        // `get`, not `[]`: indexing answers `Null` for an absent key too, and
+        // the point of this test is that the key is written.
+        assert_eq!(
+            records[0].data.get("workspace_path"),
+            Some(&serde_json::Value::Null)
+        );
     }
 
     /// A rejected push writes nothing: the log narrates what happened, not
