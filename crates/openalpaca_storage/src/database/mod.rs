@@ -193,6 +193,10 @@ impl Database {
             tx.execute("DELETE FROM conversation_messages", [])?;
             // Migration 039 rebuilt `conversations` as `session`.
             tx.execute("DELETE FROM session", [])?;
+            // 033: queued follow-ups reference no table, so nothing cascades
+            // them away. Left behind, `GatewayFollowupRunner` would fire them
+            // as turns against the database the user just wiped.
+            tx.execute("DELETE FROM lane_followups", [])?;
 
             // 0. LLM Usage (no FKs, safe to delete first)
             tx.execute("DELETE FROM llm_call_log", [])?;

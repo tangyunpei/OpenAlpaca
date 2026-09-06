@@ -809,7 +809,11 @@ fn test_migration_039_copies_conversations_into_session_and_rekeys_messages() {
 }
 
 /// `factory_reset` must run against the schema every migration produces —
-/// migration 039 dropped `conversations`, which the reset used to name.
+/// migration 039 dropped `conversations`, which the reset used to name — and
+/// it must empty every table holding user content, including the ones no
+/// foreign key reaches. `lane_followups` (033) is free-standing: a queued
+/// follow-up that survives the wipe is fired by `GatewayFollowupRunner` as a
+/// turn against the emptied database.
 #[test]
 fn factory_reset_runs_on_a_fully_migrated_database() {
     let dir = tempfile::tempdir().unwrap();
@@ -820,14 +824,26 @@ fn factory_reset_runs_on_a_fully_migrated_database() {
              VALUES ('s1', 'u:gui', 'gui', 'active', datetime('now'), datetime('now'))",
             [],
         )?;
+        conn.execute(
+            "INSERT INTO lane_followups (lane_key, kind, content, principal_json, status) \
+             VALUES ('u:gui', 'followup', 'and then check the logs', '{}', 'queued')",
+            [],
+        )?;
         Ok(())
     })
     .unwrap();
     db.factory_reset().expect("factory_reset must succeed on the current schema");
-    let n: i64 = db
+    let (sessions, followups): (i64, i64) = db
         .with_connection(|conn| {
-            Ok(conn.query_row("SELECT COUNT(*) FROM session", [], |r| r.get(0))?)
+            Ok((
+                conn.query_row("SELECT COUNT(*) FROM session", [], |r| r.get(0))?,
+                conn.query_row("SELECT COUNT(*) FROM lane_followups", [], |r| r.get(0))?,
+            ))
         })
         .unwrap();
-    assert_eq!(n, 0, "the reset empties the session table");
+    assert_eq!(sessions, 0, "the reset empties the session table");
+    assert_eq!(
+        followups, 0,
+        "a queued follow-up must not outlive a factory reset"
+    );
 }
