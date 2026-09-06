@@ -7,7 +7,7 @@
  *   `short`  — there is no short title on the wire, so the full `title` is
  *              rendered and truncated by CSS (same call `RunningNowSection`
  *              made).
- *   `meta`   — `11m 04s · 5/8 steps · $0.41`. Duration and steps are real
+ *   `meta`   — `11m 04s · 5/8 steps · 3 agents · $0.41`. Duration and steps are real
  *              (`created_at`→`completed_at`, `progress_current/total`); the
  *              cost segment is included only when `task.cost_usd` is present
  *              (GAP-08b, closed — `GET /v1/tasks` list rows carry it, the
@@ -198,7 +198,7 @@ export interface Run {
   id: string;
   title: string;
   status: UiStatus;
-  /** `11m 04s · 5/8 steps · $0.41` — the cost segment only when known. */
+  /** `11m 04s · 5/8 steps · 3 agents · $0.41` — the cost segment only when known. */
   meta: string;
   /** `14:22:41`, or `null` if `created_at` is unreadable. */
   started: string | null;
