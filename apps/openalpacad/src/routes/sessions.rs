@@ -60,6 +60,14 @@ const DEFAULT_EVENTS_LIMIT: i64 = 100;
 /// tool payloads, so an unbounded page is an unbounded response.
 pub(super) const MAX_EVENTS_LIMIT: i64 = 500;
 
+/// The largest page `GET …/events` will answer **in bytes**.
+///
+/// A record count is not a response size: the envelope cap is 64 KB, so 500
+/// records is a ~32 MB response. The reader stops accumulating past this and
+/// still answers `next_after_seq`, so a client polling a fat log gets more,
+/// smaller pages rather than one enormous one.
+const MAX_EVENTS_BYTES: usize = 4 * 1024 * 1024;
+
 // ── Wire shapes ──────────────────────────────────────────────────────
 
 /// One session, as a client sees it (§5.7).
@@ -464,6 +472,9 @@ pub async fn get_session_events_handler(
 ///   global order kept"), so `next_after_seq` is the last seq **read**. A
 ///   filter that matches nothing would otherwise stall a poller on the same
 ///   page forever.
+/// * A page is bounded by `limit` **and** by [`MAX_EVENTS_BYTES`], because a
+///   record count does not bound a response whose records carry whole tool
+///   payloads. A page cut short by the budget still answers a cursor.
 pub(super) fn get_session_events(
     deps: &Deps<'_>,
     id: &str,
@@ -487,10 +498,11 @@ pub(super) fn get_session_events(
 
     let dir = root.join(openalpaca_core::session_log::session_dir_name(id));
     let limit = query.limit.unwrap_or(DEFAULT_EVENTS_LIMIT).clamp(1, MAX_EVENTS_LIMIT) as usize;
-    let scanned = match openalpaca_core::session_log::read_records_after(
+    let scanned = match openalpaca_core::session_log::read_records_page(
         &dir,
         query.after_seq,
         limit,
+        MAX_EVENTS_BYTES,
     ) {
         Ok(records) => records,
         Err(e) => {

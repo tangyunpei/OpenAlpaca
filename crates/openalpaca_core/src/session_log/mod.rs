@@ -38,7 +38,8 @@ mod writer;
 mod tests;
 
 pub use reader::{
-    LIVE_SEGMENT, LoggedRecord, read_records, read_records_after, segments, spill_failure,
+    LIVE_SEGMENT, LoggedRecord, read_records, read_records_after, read_records_page, segments,
+    spill_failure,
 };
 pub use record::{
     ENVELOPE_DATA_CAP_BYTES, ENVELOPE_VERSION, PREVIEW_CHARS, RESULTS_DIR, Record, RecordType,

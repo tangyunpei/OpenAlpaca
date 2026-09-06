@@ -1052,6 +1052,81 @@ fn a_session_id_can_never_escape_the_sessions_root() {
     }
 }
 
+// ── Reading back (the cursor) ───────────────────────────────────────
+
+/// A cursor past a rotated segment must not pay for that segment.
+///
+/// The reader deserialised **every** line from seq 1 and only then discarded
+/// what the cursor had already seen — O(records so far) per page, i.e. O(n²)
+/// to drain a log, with a full `serde_json` parse per skipped line. Now an
+/// archived segment whose range ends at or before the cursor is skipped
+/// whole, and inside the segment it does read, each line's seq is found with a
+/// byte search before anything is parsed.
+#[test]
+fn paging_past_rotated_segments_parses_none_of_their_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = dir.path().join("sess-page");
+    fs::create_dir_all(&session).unwrap();
+
+    let line = |seq: u64| {
+        format!(
+            r#"{{"v":1,"seq":{seq},"ts":"2026-09-05T10:22:03.114Z","type":"round","data":{{"n":{seq}}}}}"#
+        )
+    };
+    let segment = |first: u64, last: u64| -> String {
+        (first..=last).map(|s| format!("{}\n", line(s))).collect()
+    };
+    fs::write(session.join("log.1-100.jsonl"), segment(1, 100)).unwrap();
+    fs::write(session.join("log.101-200.jsonl"), segment(101, 200)).unwrap();
+    fs::write(session.join(LIVE_SEGMENT), segment(201, 210)).unwrap();
+
+    reader::reset_parse_count();
+    let page = read_records_after(&session, Some(205), 10).unwrap();
+
+    assert_eq!(page.len(), 5, "the cursor's tail: {page:?}");
+    assert_eq!(page[0].seq, 206);
+    assert_eq!(
+        reader::parses_on_this_thread(),
+        5,
+        "only the five records the page returns are parsed — the 200 records \
+         of the rotated segments and the five skipped live lines are not"
+    );
+}
+
+/// The page also carries a byte budget, so a client asking for 500 records of
+/// 64 KB envelopes is not handed a ~32 MB response — it gets a smaller page
+/// and a cursor to come back with.
+#[test]
+fn a_page_stops_at_its_byte_budget_and_still_answers_a_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = dir.path().join("sess-fat");
+    fs::create_dir_all(&session).unwrap();
+    let fat: String = (1..=40)
+        .map(|seq| {
+            format!(
+                r#"{{"v":1,"seq":{seq},"ts":"2026-09-05T10:22:03.114Z","type":"round","data":{{"text":"{}"}}}}"#,
+                "x".repeat(10_000)
+            ) + "\n"
+        })
+        .collect();
+    fs::write(session.join(LIVE_SEGMENT), fat).unwrap();
+
+    let page = read_records_page(&session, None, 500, 100_000).unwrap();
+    assert!(
+        (1..40).contains(&page.len()),
+        "the budget stopped the page short of the 40 records asked for: {}",
+        page.len()
+    );
+    assert_eq!(page[0].seq, 1);
+    // And the cursor is usable: the next page continues where this stopped.
+    let cursor = page.last().unwrap().seq;
+    let next = read_records_page(&session, Some(cursor), 500, 100_000).unwrap();
+    assert_eq!(next[0].seq, cursor + 1);
+
+    // No budget, no truncation.
+    assert_eq!(read_records_page(&session, None, 500, usize::MAX).unwrap().len(), 40);
+}
+
 // ── The boot sweep (the global cap) ─────────────────────────────────
 
 /// Give a session's files a known age so "oldest-touched" is testable.

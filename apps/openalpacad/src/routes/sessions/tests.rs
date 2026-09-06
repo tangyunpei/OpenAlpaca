@@ -49,8 +49,15 @@ impl Harness {
 
 /// Split a `Response` into its status and its JSON body.
 async fn split(response: Response) -> (StatusCode, serde_json::Value) {
+    split_within(response, 1 << 20).await
+}
+
+/// The same, for a response deliberately bigger than `split`'s 1 MiB guard —
+/// the event log's byte budget is 4 MiB, and the test that pins it has to be
+/// able to read a page that reaches it.
+async fn split_within(response: Response, cap: usize) -> (StatusCode, serde_json::Value) {
     let status = response.status();
-    let bytes = to_bytes(response.into_body(), 1 << 20)
+    let bytes = to_bytes(response.into_body(), cap)
         .await
         .expect("read the response body");
     (
@@ -580,6 +587,60 @@ async fn a_torn_final_line_ends_the_log_instead_of_failing_the_route() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["events"].as_array().expect("events").len(), 2);
     assert_eq!(body["next_after_seq"], 2);
+}
+
+/// A record count is not a response size: 500 records of 64 KB envelopes is a
+/// ~32 MB response. The page carries a byte budget too, and answers a cursor
+/// so the client comes back for the rest.
+#[tokio::test]
+async fn the_event_log_page_stops_at_its_byte_budget() {
+    let h = Harness::new();
+    let session = h
+        .repo()
+        .get_or_create_active_session(LANE, "gui", None)
+        .expect("session");
+    // 120 envelopes at ~64 KB — 7.5 MB, comfortably over the 4 MiB budget.
+    let fat: Vec<String> = (1..=120)
+        .map(|seq| {
+            format!(
+                r#"{{"v":1,"seq":{seq},"ts":"2026-09-05T10:22:03.114Z","type":"round","data":{{"text":"{}"}}}}"#,
+                "x".repeat(64 * 1024)
+            )
+        })
+        .collect();
+    write_log(&h, &session.id, &fat.iter().map(String::as_str).collect::<Vec<_>>());
+
+    let (status, body) = split_within(get_session_events(
+        &h.deps(),
+        &session.id,
+        SessionEventsQuery { limit: Some(500), ..Default::default() },
+    ), 16 << 20)
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let events = body["events"].as_array().expect("events");
+    assert!(
+        (1..120).contains(&events.len()),
+        "the byte budget stopped the page short of the 120 records asked for: {}",
+        events.len()
+    );
+    assert_eq!(
+        body["next_after_seq"],
+        events.len() as u64,
+        "and the cursor is the last record actually returned"
+    );
+
+    // The client comes back with it and continues.
+    let (_, body) = split_within(get_session_events(
+        &h.deps(),
+        &session.id,
+        SessionEventsQuery {
+            after_seq: body["next_after_seq"].as_u64(),
+            limit: Some(500),
+            ..Default::default()
+        },
+    ), 16 << 20)
+    .await;
+    assert_eq!(body["events"][0]["seq"], events.len() as u64 + 1);
 }
 
 /// A session that has never written a record has no directory (P-22) — an

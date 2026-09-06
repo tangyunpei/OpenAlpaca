@@ -154,10 +154,41 @@ pub fn read_records_after(
     after_seq: Option<u64>,
     limit: usize,
 ) -> io::Result<Vec<LoggedRecord>> {
+    read_records_page(dir, after_seq, limit, usize::MAX)
+}
+
+/// The cursor form with a byte budget as well as a record count.
+///
+/// Two things keep a page cheap, both of which matter now that a GUI polls
+/// `GET /v1/sessions/{id}/events`:
+///
+/// * **Rotated segments the cursor is past are never opened.** Their name
+///   carries their range, so `log.<first>-<last>.jsonl` with `last <=
+///   after_seq` is skipped whole. Without it, draining a log costs
+///   O(records so far) per page — O(n²) overall.
+/// * **A line's seq is found with a byte search before it is parsed.** The
+///   envelope puts `seq` second, so the first `"seq":` in the line is the
+///   record's own; a line the cursor has already seen costs a scan, not a
+///   `serde_json` parse of a 64 KB envelope.
+///
+/// `max_bytes` bounds the page by the raw bytes of the records it returns —
+/// 500 records of 64 KB envelopes is a ~32 MB response, which a record count
+/// alone cannot prevent. At least one record is always returned when one
+/// matches, so an oversized record can never stall the cursor.
+pub fn read_records_page(
+    dir: &Path,
+    after_seq: Option<u64>,
+    limit: usize,
+    max_bytes: usize,
+) -> io::Result<Vec<LoggedRecord>> {
     let mut out = Vec::new();
+    let mut bytes = 0usize;
     for path in segments(dir)? {
-        if out.len() >= limit {
+        if out.len() >= limit || bytes >= max_bytes {
             break;
+        }
+        if skip_segment(&path, after_seq) {
+            continue;
         }
         let file = match File::open(&path) {
             Ok(f) => f,
@@ -170,7 +201,15 @@ pub fn read_records_after(
             if line.trim().is_empty() {
                 continue;
             }
-            let Ok(record) = serde_json::from_str::<LoggedRecord>(&line) else {
+            // The cheap half of the cursor: a seq the caller already has needs
+            // no parse. A line whose seq cannot be scanned falls through to
+            // the parse, which is what decides whether it is end-of-log.
+            if let Some(cursor) = after_seq
+                && scan_seq(line.as_bytes()).is_some_and(|seq| seq <= cursor)
+            {
+                continue;
+            }
+            let Ok(record) = parse_record(&line) else {
                 // §5.4: an unparseable line is end-of-log for this segment.
                 break;
             };
@@ -178,10 +217,68 @@ pub fn read_records_after(
                 continue;
             }
             out.push(record);
-            if out.len() >= limit {
+            bytes = bytes.saturating_add(line.len());
+            if out.len() >= limit || bytes >= max_bytes {
                 break;
             }
         }
     }
     Ok(out)
+}
+
+/// True when an archived segment's whole range is at or before the cursor.
+///
+/// The live segment has no range in its name and is never skipped.
+fn skip_segment(path: &Path, after_seq: Option<u64>) -> bool {
+    let Some(cursor) = after_seq else {
+        return false;
+    };
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .and_then(segment_range)
+        .is_some_and(|(_, last)| last <= cursor)
+}
+
+/// The envelope's `seq`, found by scanning the raw line.
+///
+/// The writer emits `{"v":…,"seq":…,` so the first `"seq":` is the record's
+/// own — every other seq-ish key in the log (`from_seq`, `to_seq`, `log_seq`,
+/// `preserved_from_seq`) has a `_` where this needle has its opening quote.
+/// `None` means "cannot tell cheaply", and the caller parses.
+fn scan_seq(line: &[u8]) -> Option<u64> {
+    const NEEDLE: &[u8] = b"\"seq\":";
+    let at = line
+        .windows(NEEDLE.len())
+        .position(|window| window == NEEDLE)?
+        + NEEDLE.len();
+    let digits: &[u8] = &line[at..];
+    let end = digits.iter().position(|b| !b.is_ascii_digit())?;
+    if end == 0 {
+        return None;
+    }
+    std::str::from_utf8(&digits[..end]).ok()?.parse().ok()
+}
+
+fn parse_record(line: &str) -> Result<LoggedRecord, serde_json::Error> {
+    #[cfg(test)]
+    PARSED.with(|count| count.set(count.get() + 1));
+    serde_json::from_str::<LoggedRecord>(line)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Full `serde_json` parses on this thread — the hook
+    /// `paging_past_rotated_segments_parses_none_of_their_lines` counts with.
+    /// Thread-local so a test is never confused by another running beside it.
+    static PARSED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_parse_count() {
+    PARSED.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn parses_on_this_thread() -> usize {
+    PARSED.with(|count| count.get())
 }
