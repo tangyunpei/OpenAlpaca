@@ -19,15 +19,16 @@
  *    (S1). There is no per-tool toggle anywhere, and no route that would
  *    accept one.
  *
- * Skill health keeps its own subsection, fed by `GET /v1/skills/health`. Those
- * rows read as ids because no skill *listing* exists yet (GAP-18's remaining
- * half).
+ * Skill health keeps its own subsection, fed by `GET /v1/skills/health` and
+ * named from `GET /v1/skills` — the two join on the skill id. A health row for
+ * a skill the catalog no longer holds (a deleted directory, a disabled
+ * plugin's withdrawn contribution) keeps showing its id: that is the truth the
+ * log has, and it is never replaced by a placeholder name.
  */
 
 import { Eyebrow, Tag } from "@/components/ui";
-import { useSkillHealth, useTools } from "@/hooks/useSkills";
+import { useSkillCatalog, useSkillHealth, useTools } from "@/hooks/useSkills";
 import type { ToolCatalogEntry } from "@/lib/api/types";
-import { gapDetail, unavailable } from "@/lib/unavailable";
 import { useUiStore } from "@/stores/ui";
 
 import { GapNote, ListCard, ListRow, ListState } from "./primitives";
@@ -43,10 +44,14 @@ export function originLabel(entry: ToolCatalogEntry): string | null {
 export function ToolsSection() {
   const tools = useTools();
   const health = useSkillHealth();
+  const catalog = useSkillCatalog();
   const setSection = useUiStore((s) => s.setSettingsSection);
 
   const toolRows = tools.data ?? [];
   const healthRows = health.data ?? [];
+  const namesById = new Map(
+    (catalog.data ?? []).map((skill) => [skill.id, skill.name]),
+  );
 
   return (
     <>
@@ -102,23 +107,32 @@ export function ToolsSection() {
           empty={healthRows.length === 0}
           emptyCopy="No skill has been invoked yet."
         >
-          {healthRows.map((skill) => (
-            <ListRow
-              key={skill.skill_id}
-              name={skill.skill_id}
-              description={`${skill.total_invocations} invocations · ${percent(
-                skill.clean_success_rate,
-              )} clean · ${percent(skill.repair_rate)} repaired`}
-              meta={`${Math.round(skill.avg_duration_ms)} ms avg`}
-            />
-          ))}
+          {healthRows.map((skill) => {
+            const name = namesById.get(skill.skill_id);
+            const metrics = `${skill.total_invocations} invocations · ${percent(
+              skill.clean_success_rate,
+            )} clean · ${percent(skill.repair_rate)} repaired`;
+            return (
+              <ListRow
+                key={skill.skill_id}
+                name={name ?? skill.skill_id}
+                // The id stays visible when the name replaces it in the title:
+                // it is what the log keys on and what `/slash` resolves.
+                description={
+                  name === undefined
+                    ? metrics
+                    : `${skill.skill_id} · ${metrics}`
+                }
+                meta={`${Math.round(skill.avg_duration_ms)} ms avg`}
+              />
+            );
+          })}
         </ListState>
       </ListCard>
 
-      <GapNote>{gapDetail(unavailable("GAP-18"))}.</GapNote>
       <GapNote>
-        Skill invocation counts are lifetime totals; the daemon serves no daily
-        breakdown.
+        Skill health metrics are lifetime totals; the daemon serves no per-day
+        breakdown of them.
       </GapNote>
     </>
   );

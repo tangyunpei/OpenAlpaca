@@ -39,10 +39,12 @@ describe("gap registry", () => {
   // and the chat view's conversation sidebar, which calls them. Phase 8 closed
   // the daemon status detail (GAP-14): `GET /v1/status` carries `started_at`,
   // `uptime_secs`, `schema_version` and `log_path`, so uptime, `Schema vNN` and
-  // `Copy log path` are all served. GAP-20 is *narrowed*, not closed: its run
-  // counts are served now, its toggle is not — so the count is 7.
-  it("covers the 7 gaps still open from API_MAP §3", () => {
-    expect(listGaps()).toHaveLength(7);
+  // `Copy log path` are all served — and the catalog (GAP-18), whose tool half
+  // was `GET /v1/tools` and whose skill half is now `GET /v1/skills`: the
+  // health rows are named from it. GAP-20 is *narrowed*, not closed: its run
+  // counts are served now, its toggle is not — so the count is 6.
+  it("covers the 6 gaps still open from API_MAP §3", () => {
+    expect(listGaps()).toHaveLength(6);
     expect(listGaps()[0]?.id).toBe("GAP-08c");
     expect(listGaps().at(-1)?.id).toBe("GAP-24");
     for (const closed of [
@@ -56,6 +58,7 @@ describe("gap registry", () => {
       "GAP-11",
       "GAP-12",
       "GAP-14",
+      "GAP-18",
       "GAP-19",
       "GAP-21",
       "GAP-22",
@@ -63,15 +66,6 @@ describe("gap registry", () => {
     ]) {
       expect(listGaps().map((gap) => gap.id)).not.toContain(closed);
     }
-  });
-
-  // §9.1: the tool half is served by `GET /v1/tools`; the `enabled` half of
-  // the claim is struck, because that field is derived from the extension row
-  // and does not exist per tool.
-  it("keeps only the skill half of GAP-18, with no claim about `enabled`", () => {
-    expect(GAPS["GAP-18"].proposedEndpoint).toBe("GET /v1/skills");
-    expect(GAPS["GAP-18"].missingApi).not.toMatch(/tool registry/);
-    expect(GAPS["GAP-18"].blocks).not.toMatch(/enabled/);
   });
 
   // P8's counterpart: run counts are served (`run_count`/`last_run_at` off
@@ -111,6 +105,6 @@ describe("Unavailable results", () => {
   });
 
   it("unwraps to the fallback rather than to fabricated data", () => {
-    expect(unwrapOr(unavailable("GAP-18"), [])).toEqual([]);
+    expect(unwrapOr(unavailable("GAP-17"), [])).toEqual([]);
   });
 });

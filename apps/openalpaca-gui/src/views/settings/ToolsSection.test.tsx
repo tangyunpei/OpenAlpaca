@@ -9,11 +9,17 @@ import { ToolsSection } from "./ToolsSection";
 const state = vi.hoisted(() => ({
   tools: [] as unknown[],
   skills: [] as unknown[],
+  catalog: [] as unknown[],
 }));
 
 vi.mock("@/hooks/useSkills", () => ({
   useTools: () => ({ data: state.tools, isPending: false, error: null }),
   useSkillHealth: () => ({ data: state.skills, isPending: false, error: null }),
+  useSkillCatalog: () => ({
+    data: state.catalog,
+    isPending: false,
+    error: null,
+  }),
 }));
 
 const builtin = {
@@ -40,9 +46,32 @@ const fromMcp = {
   author: "mcp:github",
 };
 
+const health = {
+  skill_id: "connector_audit",
+  total_invocations: 9,
+  clean_success_rate: 0.9,
+  repair_rate: 0.1,
+  avg_duration_ms: 1400,
+};
+
+const catalogued = {
+  id: "connector_audit",
+  name: "Connector Audit",
+  description: "Check every connector's credentials",
+  source: "file",
+  origin: null,
+  requires_capabilities: [],
+  triggers: { slash: "audit", keywords: [] },
+  schedule: null,
+  invocations_today: 2,
+  version: "0.2.0",
+  author: "file:project",
+};
+
 beforeEach(() => {
   state.tools = [builtin, fromMcp];
   state.skills = [];
+  state.catalog = [];
   useUiStore.setState({ settingsSectionId: "tools", toast: null });
 });
 
@@ -84,22 +113,32 @@ describe("ToolsSection (ADR-030 §9.3)", () => {
     expect(screen.getByText("12 today")).toBeInTheDocument();
   });
 
-  it("keeps skill health in its own subsection and names the listing still missing", () => {
-    state.skills = [
-      {
-        skill_id: "connector_audit",
-        total_invocations: 9,
-        clean_success_rate: 0.9,
-        repair_rate: 0.1,
-        avg_duration_ms: 1400,
-      },
-    ];
+  it("names a health row from the catalog and keeps the id the log keys on", () => {
+    state.skills = [health];
+    state.catalog = [catalogued];
     render(<ToolsSection />);
 
     expect(screen.getByText("Skill health")).toBeInTheDocument();
+    expect(screen.getByText("Connector Audit")).toBeInTheDocument();
+    // The id is what `skill_execution_log` keys on and what `/slash` resolves,
+    // so it stays on the row rather than being replaced by the name.
+    expect(screen.getByText(/connector_audit ·/)).toBeInTheDocument();
+    // GAP-18 is closed — the note that named the missing listing is gone.
+    expect(screen.queryByText(/Skill catalog not yet available/)).toBeNull();
+  });
+
+  /**
+   * `skill_execution_log` outlives the catalog: a skill directory can be
+   * deleted, and a plugin's skill is withdrawn from the catalog the moment the
+   * plugin is disabled. The row then shows the id it has — never a placeholder
+   * name, and never nothing.
+   */
+  it("falls back to the id for a health row the catalog no longer holds", () => {
+    state.skills = [health];
+    state.catalog = [];
+    render(<ToolsSection />);
+
     expect(screen.getByText("connector_audit")).toBeInTheDocument();
-    expect(
-      screen.getByText(/Skill catalog not yet available/),
-    ).toBeInTheDocument();
+    expect(screen.queryByText("Connector Audit")).toBeNull();
   });
 });

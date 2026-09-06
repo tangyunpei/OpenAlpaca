@@ -728,7 +728,7 @@ export interface ToolOrigin {
   state: ExtensionStateWord;
 }
 
-/** One row of `GET /v1/tools` (ADR-030 §8, GAP-18's tool half). */
+/** One row of `GET /v1/tools` (ADR-030 §8). */
 export interface ToolCatalogEntry {
   name: string;
   description: string;
@@ -752,8 +752,36 @@ export interface Connector {
 export type ConnectorAction = "enable" | "disable" | "delete";
 
 /**
- * Health only — metrics keyed by `skill_id`, with no name and no description:
- * `GET /v1/skills/health` is still the only skill route (GAP-18's skill half).
+ * One row of `GET /v1/skills` — the skill catalog.
+ *
+ * `origin` is the `ToolOrigin` rule one axis over: the extension row read at
+ * render time for a plugin skill, and `null` for a file skill, which is on no
+ * ENABLE axis at all and so carries no enable field of any kind. There is no
+ * per-skill toggle — a skill runs when the agent's capabilities cover
+ * `requires_capabilities` and the plugin serving it is enabled (S1).
+ */
+export interface SkillCatalogEntry {
+  /** Directory name, lowercased — what `skill_execution_log` keys on. */
+  id: string;
+  name: string;
+  description: string;
+  source: "file" | "plugin";
+  origin: ToolOrigin | null;
+  requires_capabilities: string[];
+  /** `slash` without its leading "/"; `null` when the skill declares none. */
+  triggers: { slash: string | null; keywords: string[] };
+  /** `invoke.cron`, or `null` for a skill the wake scheduler does not drive. */
+  schedule: string | null;
+  invocations_today: number;
+  /** `null` when the frontmatter omits it — never an invented number. */
+  version: string | null;
+  /** `plugin:<id>`, `file:project` or `file:user`. */
+  author: string;
+}
+
+/**
+ * Health metrics keyed by `skill_id` — lifetime totals, with no name and no
+ * description of their own. `GET /v1/skills` supplies those.
  */
 export interface SkillHealthMetrics {
   skill_id: string;

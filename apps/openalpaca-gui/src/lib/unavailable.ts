@@ -16,7 +16,7 @@
  */
 
 export type GapId =
-  "GAP-08c" | "GAP-13" | "GAP-15" | "GAP-17" | "GAP-18" | "GAP-20" | "GAP-24";
+  "GAP-08c" | "GAP-13" | "GAP-15" | "GAP-17" | "GAP-20" | "GAP-24";
 
 export type GapFixSize = "XS" | "S" | "S–M" | "M" | "L";
 
@@ -126,19 +126,15 @@ export const GAPS: Record<GapId, GapDescriptor> = {
     blocks: "Call counts, the `unwired` badge, Connect service",
     fixSize: "M",
   },
-  // The tool half closed with `GET /v1/tools` (ADR-030 §8): the Settings →
-  // Tools rows are real, and `enabled` is struck from the claim entirely —
-  // that field is derived from the extension row and does not exist per tool.
-  // The skill half is still open, which is why the health rows read as ids.
-  "GAP-18": {
-    id: "GAP-18",
-    label: "Skill catalog",
-    missingApi:
-      "GET /v1/skills/health is the only skill route — no listing carries a skill's name, description or triggers",
-    proposedEndpoint: "GET /v1/skills",
-    blocks: "Naming a skill in Settings → Tools; the health rows show ids",
-    fixSize: "M",
-  },
+  // GAP-18 (the catalog) closed in two halves. The tool half was
+  // `GET /v1/tools` (ADR-030 §8): the Settings → Tools rows are real, and
+  // `enabled` was struck from the claim entirely — that field is derived from
+  // the extension row and does not exist per tool. The skill half is
+  // `GET /v1/skills`: id, name, description, `requires_capabilities`,
+  // triggers, schedule, today's count and provenance, with the same `origin`
+  // rule (null for a file skill, which is on no ENABLE axis). The health rows
+  // are named from it and keep showing their id when the catalog no longer
+  // holds one.
   // The counts half of GAP-20 closed with P8's replacement data: a template
   // row now carries `run_count` and `last_run_at`, grouped out of
   // `subagent_span` in one query per list, so `12 runs` is the daemon's

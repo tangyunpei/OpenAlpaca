@@ -177,6 +177,22 @@ vi.mock("@/hooks/useSkills", async (importOriginal) => ({
         feedback_coverage: 0,
       },
     ]),
+  useSkillCatalog: () =>
+    query([
+      {
+        id: "connector_audit",
+        name: "Connector Audit",
+        description: "Check every connector's credentials",
+        source: "file",
+        origin: null,
+        requires_capabilities: [],
+        triggers: { slash: "audit", keywords: [] },
+        schedule: null,
+        invocations_today: 2,
+        version: "0.2.0",
+        author: "file:project",
+      },
+    ]),
 }));
 
 vi.mock("@/hooks/useExtensions", async (importOriginal) => ({
@@ -376,14 +392,13 @@ describe("SettingsView (§2.5, §5.4)", () => {
     expect(screen.getByRole("button", { name: "Deny" })).toBeInTheDocument();
   });
 
-  it("shows the tool catalog, the skill health, and the skill listing still missing", async () => {
+  it("shows the tool catalog and names the skill health rows from the skill catalog", async () => {
     render(<SettingsView />);
     await open("Tools");
     expect(screen.getByText("shell_execute")).toBeInTheDocument();
-    expect(screen.getByText("connector_audit")).toBeInTheDocument();
-    expect(
-      screen.getByText(/Skill catalog not yet available/),
-    ).toHaveTextContent("GET /v1/skills");
+    expect(screen.getByText("Connector Audit")).toBeInTheDocument();
+    expect(screen.getByText(/connector_audit ·/)).toBeInTheDocument();
+    expect(screen.queryByText(/Skill catalog not yet available/)).toBeNull();
   });
 
   it("renders stored conversations with their lifecycle state", async () => {

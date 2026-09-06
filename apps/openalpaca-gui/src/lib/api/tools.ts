@@ -1,5 +1,5 @@
 /**
- * `GET /v1/tools` — the tool catalog (GAP-18's tool half, ADR-030 §8).
+ * `GET /v1/tools` — the tool catalog (ADR-030 §8).
  *
  * Read-only by construction: there is no `PUT` and no per-tool toggle (S1).
  * Availability is *derived* — (the agent's capabilities) ∩ (its extension being
