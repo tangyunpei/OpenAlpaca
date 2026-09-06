@@ -5,14 +5,17 @@
  * `ImagePreview` keeps the dashed box as the loading/missing state and swaps in
  * the real bytes when a `src` exists. That `src` is the daemon's own content
  * route with its `?token=` (`artifactContentUrl`), which the webview's CSP
- * allows for the loopback origins; an object URL works just as well.
+ * allows for the loopback origins; an object URL works just as well. A `src`
+ * the browser cannot load (410 gone, a rejected token, a CSP the webview
+ * doesn't admit) falls back to that same dashed box via `onError` — a broken
+ * `<img>` never renders on its own.
  *
  * `HtmlPreview` sanitizes before rendering, for the same reason
  * `DocumentPreview` does: artifact bytes are agent output.
  */
 
 import DOMPurify from "dompurify";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
 import { cn } from "@/lib/cn";
 
@@ -24,7 +27,12 @@ import type { ChartBar, PreviewSize } from "./types";
 export interface ImagePreviewProps {
   filename: string;
   size: PreviewSize;
-  /** Object URL for the fetched bytes; `null` keeps the dashed placeholder. */
+  /**
+   * The daemon's content route (`artifactContentUrl`), carrying its own
+   * `?token=`; `null`/`undefined` keeps the dashed placeholder. A src that
+   * fails to load (410 gone, a rejected token, a CSP the webview doesn't
+   * admit) falls back to the same placeholder — see `onError` below.
+   */
   src?: string | null;
   width?: number | null;
   height?: number | null;
@@ -43,6 +51,13 @@ export function ImagePreview({
   className,
 }: ImagePreviewProps) {
   const full = size === "full";
+  // Tracks the specific `src` that failed so a later, different `src` (a new
+  // artifact, or the same one after `missing` catches up and the caller
+  // passes a fresh URL) gets its own attempt rather than staying broken.
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const loadFailed = src !== null && src !== undefined && src === failedSrc;
+  const hasSrc = src !== null && src !== undefined && !loadFailed;
+
   const dimensions =
     width !== null &&
     width !== undefined &&
@@ -51,13 +66,26 @@ export function ImagePreview({
       ? `${width} × ${height}`
       : null;
 
+  // A load failure is the one thing this component learns for itself — the
+  // browser rejected a URL the caller believed was good (gone, an expired
+  // token, a CSP the webview doesn't admit) — so it overrides whatever note
+  // the caller passed for the "no src at all" case.
+  const placeholderNote = loadFailed
+    ? "The image could not be loaded — Export or Reveal opens it in its own app."
+    : note;
+
   return (
     <PreviewShell
       size={size}
       className={cn(full ? "max-w-[700px] p-[14px]" : "p-[11px]", className)}
     >
-      {src !== null && src !== undefined ? (
-        <img src={src} alt={filename} className="block max-w-full rounded-md" />
+      {hasSrc ? (
+        <img
+          src={src}
+          alt={filename}
+          className="block max-w-full rounded-md"
+          onError={() => setFailedSrc(src)}
+        />
       ) : (
         <div
           className={cn(
@@ -83,9 +111,9 @@ export function ImagePreview({
               {dimensions}
             </span>
           )}
-          {note !== null && note !== undefined && (
+          {placeholderNote !== null && placeholderNote !== undefined && (
             <span className="px-[16px] text-center font-mono text-2xs-plus text-faint">
-              {note}
+              {placeholderNote}
             </span>
           )}
         </div>
