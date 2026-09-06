@@ -561,3 +561,48 @@ fn clearing_a_sessions_index_drops_the_pointers_and_keeps_the_audit() {
     // Idempotent: a second pass finds nothing left to clear.
     assert_eq!(repo.clear_session_log_index("gone").unwrap(), 0);
 }
+
+/// The skill half of the same instant-based count (`GET /v1/skills`'
+/// `invocations_today`). `skill_execution_log.timestamp` is the same
+/// `datetime('now')` UTC text as the tool log's, so the predicate is the same
+/// plain text comparison and the grouping is per `skill_id`.
+#[test]
+fn test_skill_invocations_since_counts_from_the_instant() {
+    let db = setup_db();
+    let repo = SkillExecutionRepository::new(&db);
+
+    let rows = [
+        ("daily-digest", "2026-09-04 21:59:59"), // one second before — excluded
+        ("daily-digest", "2026-09-04 22:00:00"), // exactly on it — counted
+        ("daily-digest", "2026-09-05 03:14:00"),
+        ("code-review", "2026-09-04 12:00:00"), // yesterday — excluded
+        ("code-review", "2026-09-05 01:00:00"),
+    ];
+    db.with_connection(|conn| {
+        for (i, (skill, ts)) in rows.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO skill_execution_log
+                   (request_id, skill_id, status, duration_ms, timestamp)
+                 VALUES (?1, ?2, 'success', 10, ?3)",
+                rusqlite::params![format!("req-{i}"), skill, ts],
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+
+    let counts = repo.skill_invocations_since("2026-09-04 22:00:00").unwrap();
+    assert_eq!(
+        counts.get("daily-digest"),
+        Some(&2),
+        "the row one second before the instant must not be counted: {counts:?}"
+    );
+    assert_eq!(
+        counts.get("code-review"),
+        Some(&1),
+        "counts are per skill id: {counts:?}"
+    );
+
+    let none = repo.skill_invocations_since("2026-09-06 00:00:00").unwrap();
+    assert!(none.is_empty(), "{none:?}");
+}

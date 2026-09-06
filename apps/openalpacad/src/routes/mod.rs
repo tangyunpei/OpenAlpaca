@@ -92,7 +92,7 @@ pub use sessions::{
     delete_session_handler, get_session_events_handler, get_session_handler,
     get_session_messages_handler, list_sessions_handler, patch_session_handler,
 };
-pub use skills::skill_health_handler;
+pub use skills::{list_skills_handler, skill_health_handler};
 pub use status::status_handler;
 pub use tasks::{
     create_task_handler, get_task_handler, get_task_timeline_handler, list_tasks_handler,

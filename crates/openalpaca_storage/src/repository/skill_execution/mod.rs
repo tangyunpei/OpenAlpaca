@@ -200,6 +200,35 @@ impl<'a> SkillExecutionRepository<'a> {
         })
     }
 
+    /// `skill_id → COUNT(*)` over `skill_execution_log` since `since_utc`, for
+    /// `GET /v1/skills`' `invocations_today`.
+    ///
+    /// The tool-log sibling above, one table over: `skill_execution_log`
+    /// carries the same `datetime('now')` UTC text `timestamp` (migration 030),
+    /// so the caller converts local midnight to UTC exactly the same way and
+    /// the predicate is the same plain text comparison. `idx_sel_skill_ts
+    /// (skill_id, timestamp DESC)` serves it as a covering scan.
+    ///
+    /// Deliberately **not** the `all_skill_health` query: that one is lifetime
+    /// totals per skill, and the catalog wants today's.
+    pub fn skill_invocations_since(&self, since_utc: &str) -> Result<HashMap<String, i64>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT skill_id, COUNT(*) FROM skill_execution_log
+                 WHERE timestamp >= ?1 GROUP BY skill_id",
+            )?;
+            let rows = stmt.query_map([since_utc], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            let mut counts = HashMap::new();
+            for row in rows {
+                let (id, count) = row?;
+                counts.insert(id, count);
+            }
+            Ok(counts)
+        })
+    }
+
     /// Get health metrics for all skills, enriched with user feedback data.
     pub fn all_skill_health(&self) -> Result<Vec<SkillHealthMetrics>> {
         self.db.with_connection(|conn| {

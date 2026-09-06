@@ -294,6 +294,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 .get(crate::routes::get_feedback_handler)
                 .delete(crate::routes::delete_feedback_handler),
         )
+        // Skill catalog (GAP-18's second half) — read-only, like `/v1/tools`;
+        // there is no per-skill enable state to write.
+        .route("/v1/skills", get(crate::routes::list_skills_handler))
         // Skill health routes (Phase 4a)
         .route(
             "/v1/skills/health",
