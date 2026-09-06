@@ -4,7 +4,7 @@
 
 ## Overview
 
-- Total registered migrations: 36
+- Total registered migrations: 37
 - Migration SQL directory: `crates/openalpaca_storage/src/migrations`
 
 ## Files
@@ -47,3 +47,4 @@
 | 34 | `drop_context_compaction_log` | `034_drop_context_compaction_log.sql` | Drop context_compaction_log: the table was added in migration 032 but no |
 | 35 | `drop_planner_telemetry` | `035_drop_planner_telemetry.sql` | Migration 035: drop the planner telemetry columns. |
 | 36 | `artifact_store` | `036_artifact_store.sql` | Migration 036: project-scoped artifact store. |
+| 37 | `run_observability` | `037_run_observability.sql` | Migration 037: run observability. |

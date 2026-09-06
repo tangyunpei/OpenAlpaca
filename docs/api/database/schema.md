@@ -6,7 +6,7 @@
 
 - DB path resolver: `openalpaca_storage::paths::database_path()`
 - Migrations entrypoint: `openalpaca_storage::migrations::MIGRATIONS`
-- Registered migrations: 36
+- Registered migrations: 37
 
 ## Tables
 
@@ -179,7 +179,7 @@ error_message TEXT
 
 ### `event_log` (table)
 
-Source migration: `001_init.sql`
+Source migration: `037_run_observability.sql`
 
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT
@@ -188,6 +188,7 @@ agent_id TEXT
 event_type TEXT NOT NULL
 detail TEXT
 result TEXT
+task_id TEXT
 ```
 
 ### `external_identity` (table)
@@ -420,6 +421,25 @@ timestamp TEXT DEFAULT (datetime('now'))
 response_message_id INTEGER
 ```
 
+### `subagent_span` (table)
+
+Source migration: `037_run_observability.sql`
+
+```sql
+id TEXT PRIMARY KEY
+task_id TEXT NOT NULL REFERENCES task(id) ON DELETE CASCADE
+template_id TEXT NOT NULL
+agent_instance_id TEXT NOT NULL
+label TEXT NOT NULL
+objective TEXT
+state TEXT NOT NULL DEFAULT 'running' CHECK (state IN ('running', 'done', 'failed', 'blocked', 'cancelled'))
+detail TEXT
+started_at TEXT NOT NULL
+ended_at TEXT
+duration_ms INTEGER
+output_preview TEXT
+```
+
 ### `system_config` (table)
 
 Source migration: `004_config.sql`
@@ -433,7 +453,7 @@ updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 
 ### `task` (table)
 
-Source migration: `036_artifact_store.sql`
+Source migration: `037_run_observability.sql`
 
 ```sql
 id TEXT PRIMARY KEY
@@ -455,6 +475,7 @@ outcome_json TEXT
 outcome_kind TEXT
 artifact_count INTEGER NOT NULL DEFAULT 0
 workspace_id TEXT
+source_task_id TEXT
 ```
 
 ### `task_agent_assignment` (table)
@@ -507,6 +528,7 @@ timestamp TEXT DEFAULT (datetime('now'))
 | `idx_dd_request` | `dispatch_decisions` | `INDEX` | `request_id` | `024_dispatch_decision_request_id.sql` |
 | `idx_dd_ts` | `dispatch_decisions` | `INDEX` | `timestamp DESC` | `024_dispatch_decision_request_id.sql` |
 | `idx_event_log_agent` | `event_log` | `INDEX` | `agent_id` | `001_init.sql` |
+| `idx_event_log_task` | `event_log` | `INDEX` | `task_id` | `037_run_observability.sql` |
 | `idx_event_log_timestamp` | `event_log` | `INDEX` | `timestamp` | `001_init.sql` |
 | `idx_event_log_type` | `event_log` | `INDEX` | `event_type` | `001_init.sql` |
 | `idx_external_identity_global_user` | `external_identity` | `INDEX` | `global_user_id` | `003_identity.sql` |
@@ -539,7 +561,11 @@ timestamp TEXT DEFAULT (datetime('now'))
 | `idx_sel_response_msg` | `skill_execution_log` | `INDEX` | `response_message_id` | `031_message_feedback.sql` |
 | `idx_sel_skill_ts` | `skill_execution_log` | `INDEX` | `skill_id, timestamp DESC` | `030_skill_tool_execution_log.sql` |
 | `idx_sel_status` | `skill_execution_log` | `INDEX` | `skill_id, status` | `030_skill_tool_execution_log.sql` |
+| `idx_subagent_span_label` | `subagent_span` | `UNIQUE` | `task_id, label` | `037_run_observability.sql` |
+| `idx_subagent_span_state` | `subagent_span` | `INDEX` | `state` | `037_run_observability.sql` |
+| `idx_subagent_span_task` | `subagent_span` | `INDEX` | `task_id, started_at` | `037_run_observability.sql` |
 | `idx_task_created_by` | `task` | `INDEX` | `created_by` | `006_tasks.sql` |
+| `idx_task_source` | `task` | `INDEX` | `source_task_id` | `037_run_observability.sql` |
 | `idx_task_status` | `task` | `INDEX` | `status` | `006_tasks.sql` |
 | `idx_task_workspace` | `task` | `INDEX` | `workspace_id` | `036_artifact_store.sql` |
 | `idx_task_agent_task` | `task_agent_assignment` | `INDEX` | `task_id` | `006_tasks.sql` |

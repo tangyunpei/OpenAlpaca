@@ -51,6 +51,48 @@ pub struct TaskResponse {
 ///
 /// This is the "cheap half" of task-shape normalisation (plan §7); the full
 /// `GET /v1/tasks` vs `/{id}` unification lands in Phase 4 with P8.
+/// One swimlane of `GET /v1/tasks/{id}/timeline` — the `TimelineLane` the GUI
+/// is written against, field for field.
+///
+/// `state` is the *reported* state, not always the stored one: a span left
+/// `running` on a terminal task reports `cancelled`/`"interrupted"`, and a
+/// span whose agent instance is waiting on a confirmation reports `blocked`.
+/// Neither is ever written to the row — both are properties of *now*.
+///
+/// `steps_current`/`steps_total` are omitted rather than guessed: nothing
+/// counts steps inside a subagent's loop today, and a `0/0` would read as a
+/// lane that did nothing.
+#[derive(Debug, Clone, Serialize)]
+pub struct TimelineLaneResponse {
+    /// The span id — the spawn's `node_id`.
+    pub lane_id: String,
+    pub label: String,
+    pub template_id: String,
+    pub agent_instance_id: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub state: String,
+    pub detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub steps_current: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub steps_total: Option<i32>,
+}
+
+/// `GET /v1/tasks/{id}/timeline` (GAP-09).
+///
+/// `now` is the server's clock at the moment of the read: the axis needs a
+/// right-hand edge for a run still in flight, and taking it from the client
+/// would drift against the lane times, which are the daemon's.
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskTimelineResponse {
+    pub task_id: String,
+    pub started_at: String,
+    pub now: String,
+    pub completed_at: Option<String>,
+    pub lanes: Vec<TimelineLaneResponse>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct TaskSummaryResponse {
     #[serde(flatten)]

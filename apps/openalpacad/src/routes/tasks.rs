@@ -21,8 +21,10 @@ use uuid::Uuid;
 
 use openalpaca_core::events::SystemEvent;
 use openalpaca_core::orchestrator::{TaskActionError, apply_task_action, parse_outcome};
+use openalpaca_core::security::confirmation::ConfirmationBroker;
 use openalpaca_storage::{
-    Database, LlmUsageRepository, SubAgentRepository, Task, TaskRepository, TaskStatus,
+    Database, LlmUsageRepository, SPAN_DETAIL_INTERRUPTED, SubAgentRepository,
+    SubagentSpanRepository, Task, TaskRepository, TaskStatus,
 };
 
 use super::tasks_types::*;
@@ -235,6 +237,129 @@ pub async fn get_task_handler(
             Json(serde_json::json!({ "error": e.to_string() })),
         ),
     }
+}
+
+/// The lane a pending confirmation is blocking, and the tool it is waiting on.
+///
+/// Keyed by agent *instance*, because that is what a span is: the template id
+/// would blur two lanes of the same kind into one.
+fn blocked_lanes(
+    broker: Option<&ConfirmationBroker>,
+    task_id: &str,
+) -> std::collections::HashMap<String, String> {
+    let Some(broker) = broker else {
+        return std::collections::HashMap::new();
+    };
+    let mut blocked = std::collections::HashMap::new();
+    for request in broker.pending_requests() {
+        if request.task_id.as_deref() != Some(task_id) {
+            continue;
+        }
+        if let Some(instance) = request.agent_instance_id {
+            // First pending request wins: a lane can only be waiting on one
+            // prompt at a time, and the extra ones are queued behind it.
+            blocked.entry(instance).or_insert(request.tool_name);
+        }
+    }
+    blocked
+}
+
+fn stamp(at: chrono::DateTime<Utc>) -> String {
+    at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// Assemble one run's timeline from its stored spans plus what is pending
+/// *right now*. Split out from the handler so every derivation rule is
+/// testable without a router.
+fn build_timeline(
+    task: &Task,
+    spans: Vec<openalpaca_storage::SubagentSpanRecord>,
+    blocked: &std::collections::HashMap<String, String>,
+    now: chrono::DateTime<Utc>,
+) -> TaskTimelineResponse {
+    let terminal = task.status.is_terminal();
+    let lanes = spans
+        .into_iter()
+        .map(|span| {
+            let running = span.state == "running";
+            let (state, detail) = if running && terminal {
+                // The daemon that would have closed this lane is gone (or the
+                // task finalized without it): report the truth, which is that
+                // the lane never finished, not that it is still working.
+                (
+                    "cancelled".to_string(),
+                    Some(SPAN_DETAIL_INTERRUPTED.to_string()),
+                )
+            } else if running && let Some(tool) = blocked.get(&span.agent_instance_id) {
+                ("blocked".to_string(), Some(format!("waiting on {tool}")))
+            } else {
+                (span.state, span.detail)
+            };
+            TimelineLaneResponse {
+                lane_id: span.id,
+                label: span.label,
+                template_id: span.template_id,
+                agent_instance_id: span.agent_instance_id,
+                started_at: span.started_at,
+                ended_at: span.ended_at,
+                state,
+                detail,
+                steps_current: None,
+                steps_total: None,
+            }
+        })
+        .collect();
+
+    TaskTimelineResponse {
+        task_id: task.id.clone(),
+        started_at: stamp(task.created_at),
+        now: stamp(now),
+        completed_at: task.completed_at.map(stamp),
+        lanes,
+    }
+}
+
+/// `GET /v1/tasks/{id}/timeline` — the run's swimlanes (GAP-09).
+fn task_timeline(
+    db: &Database,
+    broker: Option<&ConfirmationBroker>,
+    id: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match TaskRepository::new(db).get(id) {
+        Ok(Some(task)) => {
+            let spans = SubagentSpanRepository::new(db)
+                .list_for_task(id)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(task_id = id, "Failed to read subagent spans: {e}");
+                    Vec::new()
+                });
+            let blocked = blocked_lanes(broker, id);
+            let timeline = build_timeline(&task, spans, &blocked, Utc::now());
+            (
+                StatusCode::OK,
+                Json(
+                    serde_json::to_value(timeline)
+                        .unwrap_or_else(|_| serde_json::json!({"error": "serialization_failed"})),
+                ),
+            )
+        }
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "Task not found" })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+/// GET /v1/tasks/{id}/timeline
+pub async fn get_task_timeline_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    task_timeline(&state.db, state.confirmation_broker.as_deref(), &id)
 }
 
 /// POST /v1/tasks/{id}/action
@@ -612,6 +737,224 @@ mod tests {
             obj.insert("cost_usd".to_string(), serde_json::json!(cost_usd));
         }
         v
+    }
+
+    // ── GET /v1/tasks/{id}/timeline (GAP-09) ──────────────────────
+
+    /// A temp database with one task row, so spans have a live FK to hang on.
+    fn timeline_db(status: TaskStatus) -> (tempfile::TempDir, Database) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::open(&dir.path().join("test.db")).expect("open db");
+        let mut task = make_test_task();
+        task.status = status;
+        task.completed_at = status.is_terminal().then(Utc::now);
+        TaskRepository::new(&db).create(&task).expect("create task");
+        if status.is_terminal() {
+            TaskRepository::new(&db)
+                .update_status(&task.id, status)
+                .expect("terminal status");
+        }
+        (dir, db)
+    }
+
+    fn open_span(db: &Database, span_id: &str, template: &str, instance: &str) {
+        SubagentSpanRepository::new(db)
+            .open(openalpaca_storage::NewSubagentSpan {
+                id: span_id,
+                task_id: "task-1",
+                template_id: template,
+                agent_instance_id: instance,
+                objective: Some("do the thing"),
+            })
+            .expect("open span");
+    }
+
+    fn body(response: (StatusCode, Json<serde_json::Value>)) -> serde_json::Value {
+        response.1.0
+    }
+
+    /// The envelope: the run's own start, a server `now` for the axis's right
+    /// edge, and one lane per span in start order.
+    #[test]
+    fn the_timeline_carries_the_run_window_and_a_lane_per_span() {
+        let (_dir, db) = timeline_db(TaskStatus::Running);
+        open_span(&db, "n1", "review_agent", "review_agent::a");
+        open_span(&db, "n2", "writing_agent", "writing_agent::b");
+
+        let (status, Json(value)) = task_timeline(&db, None, "task-1");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["task_id"], "task-1");
+        assert!(value["started_at"].is_string());
+        assert!(value["now"].is_string());
+        assert!(value["completed_at"].is_null(), "a live run has no end yet");
+
+        let lanes = value["lanes"].as_array().expect("lanes array");
+        assert_eq!(lanes.len(), 2);
+        assert_eq!(lanes[0]["lane_id"], "n1");
+        assert_eq!(lanes[0]["label"], "review\u{b7}1");
+        assert_eq!(lanes[0]["template_id"], "review_agent");
+        assert_eq!(lanes[0]["agent_instance_id"], "review_agent::a");
+        assert_eq!(lanes[1]["label"], "writing\u{b7}1");
+        // Nothing counts steps inside a subagent loop, so the two optional
+        // fields are absent rather than a fabricated 0/0.
+        assert!(lanes[0].get("steps_current").is_none());
+        assert!(lanes[0].get("steps_total").is_none());
+    }
+
+    /// The correction that motivated the whole table: a lane that has not
+    /// finished is *visible*, with a start and no end. `agent_task_history`
+    /// has no row at all until the run returns.
+    #[test]
+    fn an_in_flight_lane_is_visible_with_no_end() {
+        let (_dir, db) = timeline_db(TaskStatus::Running);
+        open_span(&db, "n1", "review_agent", "review_agent::a");
+
+        let value = body(task_timeline(&db, None, "task-1"));
+        let lane = &value["lanes"][0];
+        assert_eq!(lane["state"], "running");
+        assert!(lane["started_at"].is_string());
+        assert!(lane["ended_at"].is_null());
+        assert!(lane["detail"].is_null());
+    }
+
+    /// A subagent cancelled before it started reports `cancelled`, not
+    /// `failed` — the distinction the write site keeps deliberately.
+    #[test]
+    fn a_cancelled_lane_reports_cancelled_with_its_reason() {
+        let (_dir, db) = timeline_db(TaskStatus::Running);
+        open_span(&db, "n1", "review_agent", "review_agent::a");
+        SubagentSpanRepository::new(&db)
+            .close(
+                "n1",
+                openalpaca_storage::SpanState::Cancelled,
+                Some("cancelled before starting"),
+                None,
+            )
+            .expect("close");
+
+        let value = body(task_timeline(&db, None, "task-1"));
+        assert_eq!(value["lanes"][0]["state"], "cancelled");
+        assert_eq!(value["lanes"][0]["detail"], "cancelled before starting");
+        assert!(value["lanes"][0]["ended_at"].is_string());
+    }
+
+    /// A pending confirmation flips exactly the lane whose agent instance is
+    /// waiting — not its sibling, and not a lane of another run.
+    #[test]
+    fn a_pending_confirmation_blocks_exactly_one_lane() {
+        let (_dir, db) = timeline_db(TaskStatus::Running);
+        open_span(&db, "n1", "review_agent", "review_agent::a");
+        open_span(&db, "n2", "review_agent", "review_agent::b");
+
+        let broker = ConfirmationBroker::new();
+        let _rx = broker.request(
+            &openalpaca_core::security::confirmation::ConfirmationRequest {
+                request_id: "req-1".to_string(),
+                agent_id: "review_agent".to_string(),
+                tool_name: "shell_execute".to_string(),
+                tool_arguments: serde_json::json!({"cmd": "ls"}),
+                stream_id: None,
+                lane_key: None,
+                task_id: Some("task-1".to_string()),
+                agent_instance_id: Some("review_agent::b".to_string()),
+                timestamp: Utc::now(),
+            },
+        );
+        // Another run's prompt must not colour this run's lanes.
+        let _rx2 = broker.request(
+            &openalpaca_core::security::confirmation::ConfirmationRequest {
+                request_id: "req-2".to_string(),
+                agent_id: "review_agent".to_string(),
+                tool_name: "shell_execute".to_string(),
+                tool_arguments: serde_json::json!({}),
+                stream_id: None,
+                lane_key: None,
+                task_id: Some("other-task".to_string()),
+                agent_instance_id: Some("review_agent::a".to_string()),
+                timestamp: Utc::now(),
+            },
+        );
+
+        let value = body(task_timeline(&db, Some(&broker), "task-1"));
+        let lanes = value["lanes"].as_array().unwrap();
+        assert_eq!(lanes[0]["state"], "running", "the sibling keeps running");
+        assert_eq!(lanes[1]["state"], "blocked");
+        assert_eq!(lanes[1]["detail"], "waiting on shell_execute");
+
+        // Answering it puts the lane back: `blocked` is never stored.
+        broker
+            .respond(
+                "req-1",
+                openalpaca_core::security::confirmation::ConfirmationResponse {
+                    approved: true,
+                    approval_scope: None,
+                },
+            )
+            .unwrap();
+        let value = body(task_timeline(&db, Some(&broker), "task-1"));
+        assert_eq!(value["lanes"][1]["state"], "running");
+    }
+
+    /// A lane still `running` on a task that has already finished belongs to a
+    /// dead daemon generation: it reports `cancelled` / `"interrupted"` even
+    /// before the next boot's `close_orphans` writes that down.
+    #[test]
+    fn a_stale_lane_on_a_terminal_run_reports_interrupted() {
+        let (_dir, db) = timeline_db(TaskStatus::Completed);
+        open_span(&db, "n1", "review_agent", "review_agent::a");
+
+        let value = body(task_timeline(&db, None, "task-1"));
+        assert_eq!(value["lanes"][0]["state"], "cancelled");
+        assert_eq!(value["lanes"][0]["detail"], "interrupted");
+        assert!(value["completed_at"].is_string());
+
+        // The row itself is untouched — the derivation is a read-time rule.
+        let stored = SubagentSpanRepository::new(&db)
+            .list_for_task("task-1")
+            .unwrap();
+        assert_eq!(stored[0].state, "running");
+    }
+
+    /// …and a confirmation cannot resurrect a lane on a finished run: the
+    /// terminal rule wins.
+    #[test]
+    fn a_terminal_run_is_never_blocked() {
+        let (_dir, db) = timeline_db(TaskStatus::Failed);
+        open_span(&db, "n1", "review_agent", "review_agent::a");
+
+        let broker = ConfirmationBroker::new();
+        let _rx = broker.request(
+            &openalpaca_core::security::confirmation::ConfirmationRequest {
+                request_id: "req-1".to_string(),
+                agent_id: "review_agent".to_string(),
+                tool_name: "shell_execute".to_string(),
+                tool_arguments: serde_json::json!({}),
+                stream_id: None,
+                lane_key: None,
+                task_id: Some("task-1".to_string()),
+                agent_instance_id: Some("review_agent::a".to_string()),
+                timestamp: Utc::now(),
+            },
+        );
+
+        let value = body(task_timeline(&db, Some(&broker), "task-1"));
+        assert_eq!(value["lanes"][0]["state"], "cancelled");
+        assert_eq!(value["lanes"][0]["detail"], "interrupted");
+    }
+
+    /// A run with no subagents is an empty lane list, not an error — and an
+    /// unknown run is a 404, not an empty timeline.
+    #[test]
+    fn a_run_without_spans_is_empty_and_an_unknown_run_is_a_404() {
+        let (_dir, db) = timeline_db(TaskStatus::Running);
+
+        let (status, Json(value)) = task_timeline(&db, None, "task-1");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["lanes"], serde_json::json!([]));
+
+        let (status, Json(value)) = task_timeline(&db, None, "no-such-task");
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(value["error"], "Task not found");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Utility functions and data migration helpers.
 
-use openalpaca_storage::repository::TaskRepository;
+use openalpaca_storage::repository::{SubagentSpanRepository, TaskRepository};
 use openalpaca_storage::{ConfigRepository, Database, IdentityRepository};
 use std::path::Path;
 
@@ -23,6 +23,24 @@ pub fn sweep_orphaned_tasks(db: &Database) {
         Ok(0) => {}
         Ok(count) => tracing::info!("Startup orphan sweep: failed {count} orphaned task(s)"),
         Err(e) => tracing::warn!("Startup orphan sweep failed (non-fatal): {e}"),
+    }
+}
+
+/// Startup span sweep (plan Phase 4, GAP-09): close every `subagent_span`
+/// left `running` on a task that is already terminal, as
+/// `cancelled` / `"interrupted"`.
+///
+/// CALL-ORDER GUARANTEE: this must run immediately after
+/// [`sweep_orphaned_tasks`], which is what makes the previous generation's
+/// tasks terminal in the first place, and before the router serves — a span
+/// opened by *this* daemon must never be swept.
+///
+/// Idempotent: the second boot after a crash matches nothing. Non-fatal.
+pub fn close_orphaned_spans(db: &Database) {
+    match SubagentSpanRepository::new(db).close_orphans() {
+        Ok(0) => {}
+        Ok(count) => tracing::info!("Startup span sweep: interrupted {count} orphaned span(s)"),
+        Err(e) => tracing::warn!("Startup span sweep failed (non-fatal): {e}"),
     }
 }
 

@@ -61,6 +61,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/tasks", get(crate::routes::list_tasks_handler))
         .route("/v1/tasks/{id}", get(crate::routes::get_task_handler))
         .route(
+            "/v1/tasks/{id}/timeline",
+            get(crate::routes::get_task_timeline_handler),
+        )
+        .route(
             "/v1/tasks/{id}/action",
             post(crate::routes::task_action_handler),
         )

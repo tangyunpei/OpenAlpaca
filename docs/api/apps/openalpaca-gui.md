@@ -52,6 +52,18 @@
 - Exported functions: `createAgentTemplate`, `deleteAgentTemplate`, `getAgent`, `getAgentConfig`, `getAgentTemplate`, `listAgentInstances`, `listAgentTemplates`, `performAgentAction`, `updateAgentConfig`, `updateAgentTemplate`
 - Endpoints: none
 
+### `artifacts.test.ts`
+
+- Source: `apps/openalpaca-gui/src/lib/api/artifacts.test.ts`
+- Exported functions: none
+- Endpoints: none
+
+### `artifacts.ts`
+
+- Source: `apps/openalpaca-gui/src/lib/api/artifacts.ts`
+- Exported functions: `getArtifact`, `getArtifactDiff`, `getArtifactText`, `listArtifactVersions`, `listArtifacts`, `setArtifactPinned`
+- Endpoints: none
+
 ### `chat.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/chat.ts`

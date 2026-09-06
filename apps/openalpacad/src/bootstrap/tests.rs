@@ -53,3 +53,62 @@ fn test_is_same_file_path_matches_identical_files() {
 
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// GAP-09 — a daemon killed mid-run leaves a task `running` and its lanes
+/// open. The boot sequence sweeps the task first, which is what makes the
+/// span sweep's condition true; running them in that order reports every
+/// abandoned lane as `cancelled` / `"interrupted"`, and a second boot
+/// (the idempotence the sweep promises) changes nothing.
+#[test]
+fn the_boot_sweeps_report_abandoned_lanes_as_interrupted() {
+    use openalpaca_storage::{Database, NewSubagentSpan, SubagentSpanRepository};
+
+    let dir = make_temp_dir("openalpaca-span-sweep");
+    let db = Database::open(&dir.join("test.db")).expect("open db");
+    db.with_connection(|conn| {
+        conn.execute(
+            "INSERT INTO task (id, title, status, priority, created_by, source_lane)
+             VALUES ('t1', 'a run', 'running', 0, 'tester', 'user:cli')",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    SubagentSpanRepository::new(&db)
+        .open(NewSubagentSpan {
+            id: "n1",
+            task_id: "t1",
+            template_id: "review_agent",
+            agent_instance_id: "review_agent::a",
+            objective: None,
+        })
+        .expect("open span");
+
+    // The span sweep alone must not touch a lane whose task is still running.
+    close_orphaned_spans(&db);
+    let spans = SubagentSpanRepository::new(&db)
+        .list_for_task("t1")
+        .unwrap();
+    assert_eq!(spans[0].state, "running");
+
+    // The real boot order: tasks first, then their lanes.
+    sweep_orphaned_tasks(&db);
+    close_orphaned_spans(&db);
+    let spans = SubagentSpanRepository::new(&db)
+        .list_for_task("t1")
+        .unwrap();
+    assert_eq!(spans[0].state, "cancelled");
+    assert_eq!(spans[0].detail.as_deref(), Some("interrupted"));
+    assert!(spans[0].ended_at.is_some());
+
+    // Idempotent: the next boot leaves the row exactly as it is.
+    let ended_at = spans[0].ended_at.clone();
+    close_orphaned_spans(&db);
+    let spans = SubagentSpanRepository::new(&db)
+        .list_for_task("t1")
+        .unwrap();
+    assert_eq!(spans[0].ended_at, ended_at);
+
+    drop(db);
+    let _ = std::fs::remove_dir_all(dir);
+}

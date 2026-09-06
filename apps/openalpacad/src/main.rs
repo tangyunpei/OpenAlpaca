@@ -186,6 +186,10 @@ async fn async_main(
     // ConnectorManager::start_all in Step 12), so it can never sweep tasks
     // created by this run.
     bootstrap::sweep_orphaned_tasks(&db);
+    // …and the lanes those tasks were running (GAP-09). Must follow the
+    // task sweep — that is what makes the previous generation's tasks
+    // terminal, which is the condition this one matches on.
+    bootstrap::close_orphaned_spans(&db);
 
     // Step 4: Resolve stable local user ID
     let local_user_id = bootstrap::resolve_local_user_id(&db);
