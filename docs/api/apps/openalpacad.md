@@ -307,8 +307,11 @@
 
 | Field | Type |
 |---|---|
-| `limit` | `Option<usize>` |
+| `task_id` | `Option<String>` |
 | `agent_id` | `Option<String>` |
+| `event_type` | `Option<String>` |
+| `before` | `Option<i64>` |
+| `limit` | `Option<usize>` |
 
 ### `extensions::ListQuery`
 

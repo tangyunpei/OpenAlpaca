@@ -132,6 +132,7 @@ struct AssignmentDetail {
     completed_at: Option<String>,
 }
 
+/// One row of `GET /v1/events/history`.
 #[derive(Debug, Serialize, Deserialize)]
 struct EventLogEntry {
     id: Option<i64>,
@@ -139,9 +140,24 @@ struct EventLogEntry {
     event_type: String,
     #[serde(default)]
     agent_id: Option<String>,
+    /// The run the row belongs to — the indexed column, filled since
+    /// migration 037 (GAP-10). NULL on rows written before it, and on events
+    /// that belong to no run.
     #[serde(default)]
     task_id: Option<String>,
-    payload: serde_json::Value,
+    /// The event's payload. Named `detail` on the wire; older rows keep the
+    /// run id in here as well as in the column.
+    #[serde(default)]
+    detail: Option<serde_json::Value>,
+}
+
+/// `GET /v1/events/history` — always this envelope, never a bare array (P20).
+#[derive(Debug, Serialize, Deserialize)]
+struct EventHistoryPage {
+    events: Vec<EventLogEntry>,
+    /// Pass back as `?before=` to walk to the older page; `null` at the end.
+    #[serde(default)]
+    next_before: Option<i64>,
 }
 
 impl TableRow for TaskItem {
@@ -306,35 +322,24 @@ async fn task_status(task_id: &str, format: OutputFormat) -> Result<()> {
 
 async fn task_log(task_id: &str, limit: usize) -> Result<()> {
     let client = DaemonClient::connect()?;
-    let events: Vec<EventLogEntry> = client
-        .get(&format!("/v1/events/history?limit={}", limit))
+    // The server filters by run now (GAP-10) — the whole page is this task's,
+    // so `--limit` is a limit on *its* rows rather than on a global window
+    // that a busy daemon would fill with other runs' events.
+    let page: EventHistoryPage = client
+        .get(&format!(
+            "/v1/events/history?task_id={}&limit={}",
+            urlencoding::encode(task_id),
+            limit
+        ))
         .await?;
 
-    // Filter to task-related events
-    let task_events: Vec<&EventLogEntry> = events
-        .iter()
-        .filter(|e| {
-            // Match by task_id in event or in payload
-            if let Some(ref tid) = e.task_id
-                && tid == task_id
-            {
-                return true;
-            }
-            if let Some(tid) = e.payload.get("task_id").and_then(|v| v.as_str())
-                && tid == task_id
-            {
-                return true;
-            }
-            false
-        })
-        .collect();
-
-    if task_events.is_empty() {
+    if page.events.is_empty() {
         println!("{}", "No log entries found for this task.".dimmed());
         return Ok(());
     }
 
-    for event in task_events {
+    // Newest first from the server; read the run forwards.
+    for event in page.events.iter().rev() {
         let ts = &event.timestamp[..19.min(event.timestamp.len())];
         let agent = event.agent_id.as_deref().unwrap_or("-");
         println!(
@@ -342,7 +347,14 @@ async fn task_log(task_id: &str, limit: usize) -> Result<()> {
             ts.dimmed(),
             status_color(&event.event_type),
             agent,
-            format_event_payload(&event.payload),
+            format_event_payload(event.detail.as_ref().unwrap_or(&serde_json::Value::Null)),
+        );
+    }
+
+    if page.next_before.is_some() {
+        println!(
+            "{}",
+            format!("… more entries; raise --limit above {limit} to see them").dimmed()
         );
     }
 
