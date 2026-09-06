@@ -31,6 +31,7 @@ pub use feedback::MessageFeedbackRepository;
 pub use file_asset::{ARTIFACT_ROLE, ATTACHMENT_ROLE, FileAssetRepository};
 pub use followup::{
     FOLLOWUP_KIND_FOLLOWUP, FOLLOWUP_KIND_UNPROCESSED_STEERING, FollowupRecord, FollowupRepository,
+    RecoveredSteering,
 };
 pub use identity::IdentityRepository;
 pub use llm_usage::LlmUsageRepository;

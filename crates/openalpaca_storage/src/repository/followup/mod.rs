@@ -58,6 +58,19 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<FollowupRecord> {
     })
 }
 
+/// One interjection the boot sweep recovered out of a crashed run's session
+/// log (§5.6b) — everything [`FollowupRepository::recover_unprocessed_steering`]
+/// needs to write the row the graceful path would have written.
+///
+/// Deliberately not a `SteeringMsg`: this crate cannot see one, and the row's
+/// columns are the whole contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveredSteering {
+    pub content: String,
+    pub principal_json: String,
+    pub workspace_path: Option<String>,
+}
+
 /// Repository for lane follow-up operations.
 pub struct FollowupRepository<'a> {
     db: &'a Database,
@@ -121,6 +134,88 @@ impl<'a> FollowupRepository<'a> {
                 .optional()
                 .context("Failed to fetch followup")?;
             Ok(record)
+        })
+    }
+
+    /// File a crashed run's undelivered interjections as the rows the graceful
+    /// path would have written (§5.6b). Returns the ids actually inserted.
+    ///
+    /// **Idempotence marker: the follow-up's own presence.** §5.6b asks for a
+    /// `request_id` uniqueness guard, and `lane_followups` has no such column;
+    /// adding one is a migration outside the plan's §11 ledger, and appending a
+    /// `steering_recovered` record to the log instead would mean the boot pass
+    /// writing into a log the byte-cap sweep is about to shrink — which T42
+    /// declined for the same reason. So the guard is the rows: for one run, the
+    /// interjections already filed under `(source_task_id, kind, content)` are
+    /// counted, and only the *surplus* is inserted.
+    ///
+    /// It is a **multiset** guard, not a set one, so two interjections with the
+    /// same words are two rows and not one — and so a run that crashed *after*
+    /// the graceful path had filed some of its leftovers gains only the ones
+    /// still missing.
+    ///
+    /// The count and the inserts share one `with_connection` closure, which is
+    /// atomic against every other caller because the process holds a single
+    /// `Mutex<Connection>` (the argument R51's merge rests on). That is what
+    /// makes a crash between this pass and the status flip safe: the run is
+    /// still non-terminal, the next boot scans it again, and finds nothing left
+    /// to add.
+    ///
+    /// `session_id` is the run's own (`task.session_id`), not the lane's
+    /// current active session: the promise was made in that conversation
+    /// (§5.3), and by the time a crash is noticed the lane may be showing
+    /// another.
+    pub fn recover_unprocessed_steering(
+        &self,
+        lane_key: &str,
+        source_task_id: &str,
+        session_id: Option<&str>,
+        items: &[RecoveredSteering],
+    ) -> Result<Vec<i64>> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.db.with_connection(|conn| {
+            let mut already: std::collections::HashMap<String, i64> =
+                std::collections::HashMap::new();
+            {
+                let mut stmt = conn.prepare(
+                    "SELECT content, COUNT(*) FROM lane_followups \
+                     WHERE source_task_id = ?1 AND kind = ?2 GROUP BY content",
+                )?;
+                let mut rows =
+                    stmt.query(rusqlite::params![source_task_id, FOLLOWUP_KIND_UNPROCESSED_STEERING])?;
+                while let Some(row) = rows.next()? {
+                    already.insert(row.get(0)?, row.get(1)?);
+                }
+            }
+
+            let mut inserted = Vec::new();
+            for item in items {
+                if let Some(remaining) = already.get_mut(&item.content)
+                    && *remaining > 0
+                {
+                    *remaining -= 1;
+                    continue;
+                }
+                conn.execute(
+                    "INSERT INTO lane_followups \
+                     (lane_key, kind, content, principal_json, workspace_path, source_task_id, session_id) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    rusqlite::params![
+                        lane_key,
+                        FOLLOWUP_KIND_UNPROCESSED_STEERING,
+                        item.content,
+                        item.principal_json,
+                        item.workspace_path,
+                        source_task_id,
+                        session_id,
+                    ],
+                )
+                .context("Failed to insert a recovered steering leftover")?;
+                inserted.push(conn.last_insert_rowid());
+            }
+            Ok(inserted)
         })
     }
 

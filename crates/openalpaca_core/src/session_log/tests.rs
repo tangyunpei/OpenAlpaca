@@ -1607,3 +1607,156 @@ fn the_service_carries_the_boot_sweeps_report() {
     assert_eq!(swept.last_sweep(), Some(&report));
     assert!(swept.last_sweep().is_some_and(|r| r.over_cap_after));
 }
+
+// ── §5.6b: reading a crashed run's undelivered interjections ─────────
+
+/// Write `records` (`(kind, task_id, data)`) as a live segment for `session`,
+/// numbering them from 1 the way the writer does.
+fn seed_records(root: &Path, session: &str, records: &[(&str, &str, serde_json::Value)]) {
+    let dir = root.join(session);
+    fs::create_dir_all(&dir).unwrap();
+    let mut out = String::new();
+    for (seq, (kind, task_id, data)) in records.iter().enumerate() {
+        let line = serde_json::json!({
+            "v": 1,
+            "seq": seq as u64 + 1,
+            "ts": "2026-09-06T10:00:00.000Z",
+            "type": kind,
+            "task_id": task_id,
+            "data": data,
+        });
+        out.push_str(&serde_json::to_string(&line).unwrap());
+        out.push('\n');
+    }
+    fs::write(dir.join(LIVE_SEGMENT), out).unwrap();
+}
+
+fn steering(request_id: &str, text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "request_id": request_id,
+        "lane_key": "u:gui",
+        "text": text,
+        "received_at": "2026-09-06T10:00:00+00:00",
+        "queue_depth": 1,
+        "principal": {"User": {"global_id": "u-42"}},
+        "workspace_path": "/repo",
+    })
+}
+
+fn drained(ids: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "at": "round_boundary",
+        "round": 2,
+        "count": ids.len(),
+        "request_ids": ids,
+    })
+}
+
+/// §5.6b's rule, literally: a `steering` record with no later
+/// `steering_drained` naming its request id is an interjection the workflow
+/// never delivered. One that *is* named was seen by the model and must never
+/// be re-queued — the user would be answered twice.
+#[test]
+fn an_undrained_steering_record_is_found_and_a_drained_one_is_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_records(
+        root,
+        "s1",
+        &[
+            ("steering", "t1", steering("r-1", "delivered")),
+            ("steering", "t1", steering("r-2", "never seen")),
+            ("steering_drained", "t1", drained(&["r-1"])),
+        ],
+    );
+
+    let scan = recovery::undrained_steering(&root.join("s1"), "t1").unwrap();
+    assert_eq!(scan.unrecoverable, 0);
+    assert_eq!(scan.undrained.len(), 1);
+    assert_eq!(scan.undrained[0].request_id, "r-2");
+    assert_eq!(scan.undrained[0].text, "never seen");
+    assert_eq!(scan.undrained[0].workspace_path.as_deref(), Some("/repo"));
+    // The principal round-trips as the JSON `lane_followups.principal_json`
+    // holds — the same string the graceful path writes.
+    let principal: serde_json::Value =
+        serde_json::from_str(&scan.undrained[0].principal_json).unwrap();
+    assert_eq!(principal["User"]["global_id"], "u-42");
+}
+
+/// A session holds every run started from that conversation (§5.1), so the
+/// scan must not hand one crash the interjections of the run beside it.
+#[test]
+fn the_scan_is_scoped_to_one_run_inside_a_shared_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_records(
+        root,
+        "s1",
+        &[
+            ("steering", "t1", steering("r-1", "for t1")),
+            ("steering", "t2", steering("r-2", "for t2")),
+            // A drain on the *other* run must not clear t1's push.
+            ("steering_drained", "t2", drained(&["r-1", "r-2"])),
+        ],
+    );
+
+    let t1 = recovery::undrained_steering(&root.join("s1"), "t1").unwrap();
+    assert_eq!(
+        t1.undrained.iter().map(|u| u.text.as_str()).collect::<Vec<_>>(),
+        vec!["for t1"]
+    );
+    let t2 = recovery::undrained_steering(&root.join("s1"), "t2").unwrap();
+    assert!(t2.undrained.is_empty(), "t2's own drain named it");
+}
+
+/// A record written before the principal was carried cannot be filed:
+/// `lane_followups.principal_json` is NOT NULL and an identity nobody
+/// asserted must not be invented. It is counted, not dropped in silence.
+#[test]
+fn a_record_without_a_principal_is_counted_as_unrecoverable() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let mut old = steering("r-1", "from an older build");
+    old.as_object_mut().unwrap().remove("principal");
+    seed_records(root, "s1", &[("steering", "t1", old)]);
+
+    let scan = recovery::undrained_steering(&root.join("s1"), "t1").unwrap();
+    assert!(scan.undrained.is_empty());
+    assert_eq!(scan.unrecoverable, 1);
+}
+
+/// P-22: the session directory is the writer's to create. A run that emitted
+/// nothing has no directory, and asking about it is not an error.
+#[test]
+fn a_session_with_no_log_recovers_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let scan = recovery::undrained_steering(&dir.path().join("never-written"), "t1").unwrap();
+    assert_eq!(scan, recovery::SteeringScan::default());
+}
+
+/// The scan pages the log rather than reading it whole — a session may hold
+/// 256 MB and this runs at boot. The page size is 512, so a log longer than
+/// one page must still find a push in its first page and a drain in its last.
+#[test]
+fn the_scan_pages_a_log_longer_than_one_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let mut records: Vec<(&str, &str, serde_json::Value)> =
+        vec![("steering", "t1", steering("r-1", "early push"))];
+    let filler: Vec<serde_json::Value> = (0..1200)
+        .map(|i| serde_json::json!({ "round": i }))
+        .collect();
+    for value in &filler {
+        records.push(("round", "t1", value.clone()));
+    }
+    records.push(("steering", "t1", steering("r-2", "late push")));
+    records.push(("steering_drained", "t1", drained(&["r-1"])));
+    seed_records(root, "s1", &records);
+
+    let scan = recovery::undrained_steering(&root.join("s1"), "t1").unwrap();
+    assert_eq!(
+        scan.undrained.iter().map(|u| u.request_id.as_str()).collect::<Vec<_>>(),
+        vec!["r-2"],
+        "the drain in the last page cleared the push in the first"
+    );
+}

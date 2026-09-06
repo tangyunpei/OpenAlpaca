@@ -1,49 +1,18 @@
 //! Utility functions and data migration helpers.
 
-use openalpaca_storage::repository::{SubagentSpanRepository, TaskRepository};
+use openalpaca_storage::repository::SubagentSpanRepository;
 use openalpaca_storage::{ConfigRepository, Database, IdentityRepository};
 use std::path::Path;
-
-/// Startup orphan sweep (§5.6b): mark every non-terminal task
-/// (queued / running / paused) **`interrupted`**. In-flight execution never
-/// survives a daemon restart — the tokio tasks driving them are gone — so any
-/// task left non-terminal in the DB belongs to a dead incarnation and would
-/// otherwise look alive forever in /status output and lane workflow context.
-///
-/// It used to write `failed` with a fabricated reason. Nothing failed: the
-/// daemon went away. `interrupted` says that, is terminal (a new incarnation
-/// cannot re-enter the loop), and carries the restart affordance the GUI
-/// offers — Phase 5's `rerun`, which dispatches a new id linked back by
-/// `source_task_id`. `start` refuses it exactly as it refuses any other
-/// finished row (R43).
-///
-/// CALL-ORDER GUARANTEE: this must run right after the database opens and
-/// BEFORE any ingress can create or resume work — i.e. before
-/// `WakeManager::start()` (scheduler/watcher events) and before
-/// `ConnectorManager::start_all()` (chat ingress) in `async_main`. Tasks
-/// created after the sweep belong to this daemon generation and must not be
-/// touched.
-///
-/// Non-fatal: failure is logged but doesn't prevent daemon startup.
-pub fn sweep_orphaned_tasks(db: &Database, instance_id: &str) {
-    let detail = format!("interrupted — the daemon restarted (instance {instance_id})");
-    match TaskRepository::new(db).interrupt_all_non_terminal(&detail) {
-        Ok(0) => {}
-        Ok(count) => {
-            tracing::info!("Startup orphan sweep: interrupted {count} orphaned task(s)")
-        }
-        Err(e) => tracing::warn!("Startup orphan sweep failed (non-fatal): {e}"),
-    }
-}
 
 /// Startup span sweep (plan Phase 4, GAP-09): close every `subagent_span`
 /// left `running` on a task that is already terminal, as
 /// `cancelled` / `"interrupted"`.
 ///
 /// CALL-ORDER GUARANTEE: this must run immediately after
-/// [`sweep_orphaned_tasks`], which is what makes the previous generation's
-/// tasks terminal in the first place, and before the router serves — a span
-/// opened by *this* daemon must never be swept.
+/// [`sweep_interrupted_runs`](super::sweep_interrupted_runs), which is what
+/// makes the previous generation's tasks terminal in the first place, and
+/// before the router serves — a span opened by *this* daemon must never be
+/// swept.
 ///
 /// Idempotent: the second boot after a crash matches nothing. Non-fatal.
 pub fn close_orphaned_spans(db: &Database) {

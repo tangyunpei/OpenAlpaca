@@ -31,6 +31,7 @@
 
 mod reader;
 mod record;
+pub mod recovery;
 pub mod sweep;
 mod writer;
 

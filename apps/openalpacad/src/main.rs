@@ -180,12 +180,16 @@ async fn async_main(
     // Repairs the absolute file_asset paths the root move broke. Idempotent:
     // matches zero rows on every boot after the first.
     store::migrate::rebase_asset_paths(&db);
-    // Routing V2 Phase 3: fail all orphaned (non-terminal) tasks from the
-    // previous daemon generation. MUST stay here — after the DB opens and
-    // before any ingress starts (WakeManager::start in Step 8,
-    // ConnectorManager::start_all in Step 12), so it can never sweep tasks
-    // created by this run.
-    bootstrap::sweep_orphaned_tasks(&db, &instance_id);
+    // §5.6b: recover the undelivered interjections of every run the previous
+    // generation left in flight, then mark those runs `interrupted`. MUST stay
+    // here — after the DB opens and before any ingress starts
+    // (WakeManager::start in Step 8, ConnectorManager::start_all in Step 12),
+    // so it can never sweep tasks created by this run — and **before** Step 9's
+    // `initialize_services`, whose byte-cap sweep may evict the very log the
+    // recovery reads (R54).
+    let sessions_root = openalpaca_core::session_log::default_root().ok();
+    let interrupted_runs =
+        bootstrap::sweep_interrupted_runs(&db, sessions_root.as_deref(), &instance_id);
     // …and the lanes those tasks were running (GAP-09). Must follow the
     // task sweep — that is what makes the previous generation's tasks
     // terminal, which is the condition this one matches on.
@@ -245,6 +249,11 @@ async fn async_main(
         Some(chat_stream_manager.clone()),
         cancel_token.clone(),
     );
+
+    // §5.6b: what step 3's sweep found, said out loud now that there is a
+    // bridge to say it to. `spawn_event_bridge` subscribes before it spawns, so
+    // this publish cannot race the subscription.
+    bootstrap::announce_interrupted(&bus, &interrupted_runs);
 
     // Step 8: Initialize WakeManager
     let (wake_tx, wake_rx) = mpsc::channel(daemon_config.load().server.wake_channel_capacity);

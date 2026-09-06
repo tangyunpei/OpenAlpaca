@@ -289,3 +289,164 @@ fn a_pre_039_followup_row_falls_back_to_the_lanes_active_session() {
         "nothing to re-home; the lane's active session is untouched"
     );
 }
+
+// ── §5.6b: recovering a crashed run's interjections ──────────────────
+
+fn recovered(content: &str) -> RecoveredSteering {
+    RecoveredSteering {
+        content: content.to_string(),
+        principal_json: "{\"User\":{\"global_id\":\"u-42\"}}".to_string(),
+        workspace_path: Some("/repo".to_string()),
+    }
+}
+
+/// The recovered row is the row the graceful path writes: same kind, same
+/// content, same principal, same lane — plus the run's own session, which is
+/// the conversation the interjection was made in (§5.3).
+#[test]
+fn a_recovered_interjection_is_the_row_the_graceful_path_would_have_written() {
+    let db = setup_db();
+    let repo = FollowupRepository::new(&db);
+
+    let ids = repo
+        .recover_unprocessed_steering(
+            "user:cli",
+            "task-1",
+            Some("sess-1"),
+            &[recovered("check the migration first")],
+        )
+        .unwrap();
+    assert_eq!(ids.len(), 1);
+
+    let row = repo.get(ids[0]).unwrap().unwrap();
+    assert_eq!(row.kind, FOLLOWUP_KIND_UNPROCESSED_STEERING);
+    assert_eq!(row.content, "check the migration first");
+    assert_eq!(row.principal_json, "{\"User\":{\"global_id\":\"u-42\"}}");
+    assert_eq!(row.workspace_path.as_deref(), Some("/repo"));
+    assert_eq!(row.source_task_id.as_deref(), Some("task-1"));
+    assert_eq!(row.session_id.as_deref(), Some("sess-1"));
+    assert_eq!(row.status, "queued");
+    // It surfaces on the lane's next turn like any other leftover, and is
+    // never auto-claimed.
+    assert_eq!(repo.list_queued_by_lane("user:cli").unwrap().len(), 1);
+    assert!(repo.claim_next("user:cli").unwrap().is_none());
+}
+
+/// The idempotence marker is the row's own presence: a second pass over the
+/// same log — a crash between the recovery and the status flip, or simply a
+/// second boot — adds nothing.
+#[test]
+fn a_second_recovery_pass_over_the_same_log_adds_nothing() {
+    let db = setup_db();
+    let repo = FollowupRepository::new(&db);
+    let items = [recovered("one"), recovered("two")];
+
+    assert_eq!(
+        repo.recover_unprocessed_steering("user:cli", "task-1", None, &items)
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        repo.recover_unprocessed_steering("user:cli", "task-1", None, &items)
+            .unwrap(),
+        Vec::<i64>::new()
+    );
+    assert_eq!(repo.list_queued_by_lane("user:cli").unwrap().len(), 2);
+}
+
+/// A **multiset**, not a set: the user really did say "hurry up" twice, and
+/// collapsing them into one row would lose an interjection.
+#[test]
+fn two_interjections_with_the_same_words_are_two_rows() {
+    let db = setup_db();
+    let repo = FollowupRepository::new(&db);
+    let items = [recovered("hurry up"), recovered("hurry up")];
+
+    assert_eq!(
+        repo.recover_unprocessed_steering("user:cli", "task-1", None, &items)
+            .unwrap()
+            .len(),
+        2
+    );
+    // And a re-run of the same scan still adds nothing.
+    assert!(
+        repo.recover_unprocessed_steering("user:cli", "task-1", None, &items)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(repo.list_queued_by_lane("user:cli").unwrap().len(), 2);
+}
+
+/// A crash *after* the graceful path filed some of the leftovers: the ones it
+/// wrote are not written twice, and the ones it never reached are.
+#[test]
+fn the_guard_counts_rows_the_graceful_path_already_wrote() {
+    let db = setup_db();
+    let repo = FollowupRepository::new(&db);
+    repo.queue(
+        "user:cli",
+        FOLLOWUP_KIND_UNPROCESSED_STEERING,
+        "already filed",
+        "\"System\"",
+        None,
+        Some("task-1"),
+    )
+    .unwrap();
+
+    let ids = repo
+        .recover_unprocessed_steering(
+            "user:cli",
+            "task-1",
+            None,
+            &[recovered("already filed"), recovered("never filed")],
+        )
+        .unwrap();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(repo.get(ids[0]).unwrap().unwrap().content, "never filed");
+}
+
+/// The guard is scoped to the run. Another run's identical interjection is
+/// another run's, and must not suppress this one.
+#[test]
+fn the_guard_does_not_reach_across_runs() {
+    let db = setup_db();
+    let repo = FollowupRepository::new(&db);
+    repo.recover_unprocessed_steering("user:cli", "task-1", None, &[recovered("same words")])
+        .unwrap();
+    let ids = repo
+        .recover_unprocessed_steering("user:cli", "task-2", None, &[recovered("same words")])
+        .unwrap();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(repo.list_queued_by_lane("user:cli").unwrap().len(), 2);
+}
+
+/// A row the user cancelled, or one already surfaced (`done`), still counts:
+/// the guard is "was this interjection ever filed", not "is it still queued".
+/// Re-queueing a cancelled message would put back what the user retired.
+#[test]
+fn a_cancelled_or_surfaced_row_is_not_recovered_again() {
+    let db = setup_db();
+    let repo = FollowupRepository::new(&db);
+    let ids = repo
+        .recover_unprocessed_steering(
+            "user:cli",
+            "task-1",
+            None,
+            &[recovered("cancelled one"), recovered("surfaced one")],
+        )
+        .unwrap();
+    repo.mark_cancelled(ids[0]).unwrap();
+    repo.mark_done(ids[1]).unwrap();
+
+    assert!(
+        repo.recover_unprocessed_steering(
+            "user:cli",
+            "task-1",
+            None,
+            &[recovered("cancelled one"), recovered("surfaced one")],
+        )
+        .unwrap()
+        .is_empty()
+    );
+}
