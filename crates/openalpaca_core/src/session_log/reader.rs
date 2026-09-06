@@ -14,7 +14,7 @@
 //! cursor §5.4 names.
 
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
@@ -27,7 +27,11 @@ pub const LIVE_SEGMENT: &str = "log.jsonl";
 ///
 /// `kind` is the raw string, not a [`RecordType`](super::RecordType): a
 /// reader must tolerate a type it does not know.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// `Serialize` round-trips the envelope exactly — the absent fields stay
+/// absent — so `GET /v1/sessions/{id}/events` hands a client the same object
+/// the writer wrote, not a re-shaped one.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LoggedRecord {
     #[serde(default)]
     pub v: u8,
@@ -35,11 +39,11 @@ pub struct LoggedRecord {
     pub ts: DateTime<Utc>,
     #[serde(rename = "type")]
     pub kind: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub span_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     #[serde(default)]
     pub data: Value,

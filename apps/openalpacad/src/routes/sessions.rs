@@ -5,19 +5,17 @@
 //! POST   /v1/sessions {source?, workspace_path?, title?}
 //! GET    /v1/sessions/{id}
 //! GET    /v1/sessions/{id}/messages?limit=&offset=&before_id=
-//! GET    /v1/sessions/{id}/events            → 501 SESSION_EVENTS_NOT_SERVED
+//! GET    /v1/sessions/{id}/events?after_seq=&types=&limit=&agent=&span_id=
 //! POST   /v1/sessions/{id}/activate
 //! POST   /v1/sessions/{id}/archive
 //! PATCH  /v1/sessions/{id} {title?, workspace_path?}   (409 if already bound)
 //! DELETE /v1/sessions/{id}
 //! ```
 //!
-//! `GET /v1/sessions/{id}/events` is registered but deliberately **not
-//! served**: it reads the per-session JSONL log, which Phase 7b writes, and a
-//! route that answered an empty list for every session would be a mock. It is
-//! registered anyway so the answer is `501 SESSION_EVENTS_NOT_SERVED` — a
-//! client following §5.7 is told what is going on, instead of getting axum's
-//! generic `404`, which it could not tell from an unknown session id.
+//! `GET /v1/sessions/{id}/events` serves the per-session JSONL event log
+//! (§5.4) through its reader: `after_seq` is the resume cursor, `types`,
+//! `agent` and `span_id` are pure filters over one log, and an unparseable
+//! final line is end-of-log rather than an error.
 //!
 //! **Owner scoping (ruling R40).** Reads are unscoped, matching the task and
 //! follow-up reads. Every *write* is scoped to lanes whose user id is the local
@@ -54,6 +52,13 @@ const TASK_STATUS_INTERRUPTED: &str = "interrupted";
 
 /// The default page size for both list routes.
 const DEFAULT_LIMIT: i64 = 50;
+
+/// The default page of the event log.
+const DEFAULT_EVENTS_LIMIT: i64 = 100;
+
+/// The largest page `GET …/events` will answer. §5.4's records carry whole
+/// tool payloads, so an unbounded page is an unbounded response.
+pub(super) const MAX_EVENTS_LIMIT: i64 = 500;
 
 // ── Wire shapes ──────────────────────────────────────────────────────
 
@@ -113,6 +118,30 @@ pub struct CreateSessionRequest {
     pub title: Option<String>,
 }
 
+/// `?after_seq=&types=&limit=&agent=&span_id=` (§5.4/§5.7).
+///
+/// `types` takes a comma-separated list; `type` is accepted as the singular
+/// spelling of the same key. `agent` and `span_id` are the two dimensions
+/// §5.4 keeps *one* log for — "a pure filter … subagents as a dimension".
+#[derive(Debug, Default, Deserialize)]
+pub struct SessionEventsQuery {
+    pub after_seq: Option<u64>,
+    pub limit: Option<i64>,
+    pub types: Option<String>,
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    pub agent: Option<String>,
+    pub span_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionEventsResponse {
+    pub events: Vec<openalpaca_core::session_log::LoggedRecord>,
+    /// The cursor a client passes back as `after_seq`: the last seq **read**,
+    /// not the last one that matched a filter.
+    pub next_after_seq: u64,
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct PatchSessionRequest {
     #[serde(default)]
@@ -153,6 +182,11 @@ pub(super) struct Deps<'a> {
     pub ctx: &'a SharedContext,
     /// The local user — the owner every write is scoped to (R40).
     pub owner: &'a str,
+    /// The home store's `sessions/` — where `GET …/events` reads the JSONL
+    /// from. `None` when the store could not be resolved at boot, which the
+    /// daemon already warned about; the route then answers an empty page
+    /// rather than inventing one.
+    pub sessions_root: Option<std::path::PathBuf>,
 }
 
 impl Deps<'_> {
@@ -253,6 +287,14 @@ fn deps(state: &AppState) -> Deps<'_> {
         bus: &state.gateway.bus,
         ctx: &state.gateway.shared_context,
         owner: &state.local_user_id,
+        // The same root the writers use, taken from the service the daemon
+        // built at boot so the route and the writer can never disagree about
+        // where a session's log lives.
+        sessions_root: state
+            .gateway
+            .shared_context
+            .session_log()
+            .map(|service| service.root().to_path_buf()),
     }
 }
 
@@ -400,23 +442,99 @@ pub(super) fn get_session_messages(
 pub async fn get_session_events_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(query): Query<SessionEventsQuery>,
 ) -> impl IntoResponse {
-    get_session_events(&deps(&state), &id)
+    get_session_events(&deps(&state), &id, query)
 }
 
-/// The path exists so the surface tells the truth about itself: §5.7 lists it,
-/// nothing serves it yet, and an unregistered path would answer axum's generic
-/// `404` — indistinguishable from an unknown session id. The `404` check runs
-/// first for that reason. Phase 7b (T42) replaces the body with the log.
-pub(super) fn get_session_events(deps: &Deps<'_>, id: &str) -> Response {
+/// The per-session JSONL event log (§5.4), paged by the `seq` cursor §5.4
+/// names — "the resume cursor for `/events`".
+///
+/// Three things this route deliberately does **not** do:
+///
+/// * It never fails on a torn tail. §5.4 makes an unparseable final line
+///   end-of-log, because a `kill -9` mid-write leaves one and the transcript
+///   before it is still worth reading. That rule lives in the reader.
+/// * It never 404s a session with no log. `sessions/<id>/` is created by the
+///   writer's first record (P-22), so "no directory" means "nothing narrated
+///   yet", not "no session" — the row is what answers that, and it is checked
+///   first.
+/// * It never advances the cursor by what *matched*. `types`/`agent`/`span_id`
+///   are filters over one page of the scan (§5.4: "a pure filter — one log,
+///   global order kept"), so `next_after_seq` is the last seq **read**. A
+///   filter that matches nothing would otherwise stall a poller on the same
+///   page forever.
+pub(super) fn get_session_events(
+    deps: &Deps<'_>,
+    id: &str,
+    query: SessionEventsQuery,
+) -> Response {
+    // R40: reads are unscoped, like the task and follow-up reads. The row
+    // check is still first, so an unknown id is a `404` rather than an empty
+    // page that a client could not tell from a quiet session.
     if let Err(response) = deps.load_for_read(id) {
         return response;
     }
-    api_error(
-        StatusCode::NOT_IMPLEMENTED,
-        "SESSION_EVENTS_NOT_SERVED",
-        "The per-session event log is served by Phase 7b (T42).",
-    )
+    let Some(root) = deps.sessions_root.clone() else {
+        // No session store resolved at boot: the log was never written, so an
+        // empty page is the truth. (The daemon logs the resolution failure.)
+        return Json(SessionEventsResponse {
+            events: Vec::new(),
+            next_after_seq: query.after_seq.unwrap_or(0),
+        })
+        .into_response();
+    };
+
+    let dir = root.join(openalpaca_core::session_log::session_dir_name(id));
+    let limit = query.limit.unwrap_or(DEFAULT_EVENTS_LIMIT).clamp(1, MAX_EVENTS_LIMIT) as usize;
+    let scanned = match openalpaca_core::session_log::read_records_after(
+        &dir,
+        query.after_seq,
+        limit,
+    ) {
+        Ok(records) => records,
+        Err(e) => {
+            tracing::warn!(session_id = id, "Failed to read the session log: {e}");
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "SESSION_LOG_UNREADABLE",
+                format!("Failed to read the session log: {e}"),
+            );
+        }
+    };
+
+    let next_after_seq = scanned
+        .last()
+        .map(|r| r.seq)
+        .unwrap_or_else(|| query.after_seq.unwrap_or(0));
+    let wanted: Option<Vec<String>> = query
+        .types
+        .as_deref()
+        .or(query.kind.as_deref())
+        .map(|raw| {
+            raw.split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect()
+        });
+
+    let events = scanned
+        .into_iter()
+        .filter(|r| wanted.as_ref().is_none_or(|kinds| kinds.contains(&r.kind)))
+        .filter(|r| query.agent.as_deref().is_none_or(|a| r.agent.as_deref() == Some(a)))
+        .filter(|r| {
+            query
+                .span_id
+                .as_deref()
+                .is_none_or(|s| r.span_id.as_deref() == Some(s))
+        })
+        .collect();
+
+    Json(SessionEventsResponse {
+        events,
+        next_after_seq,
+    })
+    .into_response()
 }
 
 // ── POST /v1/sessions/{id}/activate ──────────────────────────────────

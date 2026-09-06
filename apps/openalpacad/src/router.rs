@@ -205,9 +205,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/sessions/{id}/messages",
             get(crate::routes::get_session_messages_handler),
         )
-        // Registered, not served: answers 501 SESSION_EVENTS_NOT_SERVED until
-        // Phase 7b writes the log it reads (T42). Unregistered, a client
-        // following §5.7 could not tell the gap from an unknown session id.
+        // §5.4's per-session JSONL, paged by its `seq` cursor.
         .route(
             "/v1/sessions/{id}/events",
             get(crate::routes::get_session_events_handler),

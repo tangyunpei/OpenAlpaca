@@ -13,17 +13,22 @@ struct Harness {
     db: Database,
     bus: EventBus,
     ctx: SharedContext,
+    /// Where `GET …/events` reads the JSONL from — the home store's
+    /// `sessions/` in production, a tempdir here.
+    sessions_root: std::path::PathBuf,
 }
 
 impl Harness {
     fn new() -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = Database::open(&dir.path().join("test.db")).expect("open db");
+        let sessions_root = dir.path().join("sessions");
         Self {
             _dir: dir,
             db,
             bus: EventBus::default(),
             ctx: SharedContext::new(),
+            sessions_root,
         }
     }
 
@@ -33,6 +38,7 @@ impl Harness {
             bus: &self.bus,
             ctx: &self.ctx,
             owner: OWNER,
+            sessions_root: Some(self.sessions_root.clone()),
         }
     }
 
@@ -433,29 +439,206 @@ async fn patching_the_workspace_of_a_bound_session_is_409() {
 
 // ── GET /v1/sessions/{id}/events ─────────────────────────────────────
 
-/// The ninth route of §5.7's family is registered but not served: Phase 7b
-/// writes the log it reads. It answers `501` rather than letting axum answer a
-/// generic `404`, which a client could not tell from an unknown session id —
-/// and the unknown id still answers `404`, so the two cases stay distinct.
+/// Write `lines` verbatim into a session's live segment, the way the writer
+/// would have. The route reads files, not a service, so this is the whole
+/// fixture it needs.
+fn write_log(h: &Harness, session_id: &str, lines: &[&str]) {
+    let dir = h
+        .sessions_root
+        .join(openalpaca_core::session_log::session_dir_name(session_id));
+    std::fs::create_dir_all(&dir).expect("session dir");
+    let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    std::fs::write(dir.join(openalpaca_core::session_log::LIVE_SEGMENT), body).expect("write log");
+}
+
+fn record(seq: u64, kind: &str, extra: &str) -> String {
+    format!(
+        r#"{{"v":1,"seq":{seq},"ts":"2026-09-05T10:22:03.114Z","type":"{kind}"{extra},"data":{{"n":{seq}}}}}"#
+    )
+}
+
+/// §5.7: `GET /v1/sessions/{id}/events?after_seq=&types=&limit=` answers
+/// `{events, next_after_seq}` — the cursor form §5.4 names, over the JSONL.
 #[tokio::test]
-async fn the_event_log_answers_501_until_phase_7b_serves_it() {
+async fn the_event_log_pages_by_seq_and_answers_a_cursor() {
+    let h = Harness::new();
+    let session = h
+        .repo()
+        .get_or_create_active_session(LANE, "gui", None)
+        .expect("session");
+    let lines: Vec<String> = (1..=10).map(|i| record(i, "round", "")).collect();
+    write_log(&h, &session.id, &lines.iter().map(String::as_str).collect::<Vec<_>>());
+
+    let (status, body) = split(get_session_events(
+        &h.deps(),
+        &session.id,
+        SessionEventsQuery { limit: Some(4), ..Default::default() },
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let events = body["events"].as_array().expect("events");
+    assert_eq!(events.len(), 4);
+    assert_eq!(events[0]["seq"], 1);
+    assert_eq!(events[0]["type"], "round");
+    assert_eq!(events[0]["data"]["n"], 1);
+    assert_eq!(body["next_after_seq"], 4, "the cursor is the last seq returned");
+
+    let (_, body) = split(get_session_events(
+        &h.deps(),
+        &session.id,
+        SessionEventsQuery { after_seq: Some(4), limit: Some(4), ..Default::default() },
+    ))
+    .await;
+    assert_eq!(body["events"][0]["seq"], 5);
+    assert_eq!(body["next_after_seq"], 8);
+
+    // Drained: the cursor holds where it was, so a poller does not rewind.
+    let (_, body) = split(get_session_events(
+        &h.deps(),
+        &session.id,
+        SessionEventsQuery { after_seq: Some(10), ..Default::default() },
+    ))
+    .await;
+    assert!(body["events"].as_array().expect("events").is_empty());
+    assert_eq!(body["next_after_seq"], 10);
+}
+
+/// `types` is a pure filter over the same paged scan — so is `agent`. The
+/// cursor advances by what was **scanned**, never by what matched, or a filter
+/// that matches nothing would stall a poller forever.
+#[tokio::test]
+async fn the_event_log_filters_without_stalling_the_cursor() {
+    let h = Harness::new();
+    let session = h
+        .repo()
+        .get_or_create_active_session(LANE, "gui", None)
+        .expect("session");
+    let lines = [
+        record(1, "round", r#","agent":"lead_agent::a1""#),
+        record(2, "tool_call", r#","agent":"lead_agent::a1""#),
+        record(3, "tool_result", r#","agent":"research_agent::b2""#),
+        record(4, "round", r#","agent":"research_agent::b2""#),
+    ];
+    write_log(&h, &session.id, &lines.iter().map(String::as_str).collect::<Vec<_>>());
+
+    let (_, body) = split(get_session_events(
+        &h.deps(),
+        &session.id,
+        SessionEventsQuery { types: Some("tool_call,tool_result".into()), ..Default::default() },
+    ))
+    .await;
+    let events = body["events"].as_array().expect("events");
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["type"], "tool_call");
+    assert_eq!(events[1]["type"], "tool_result");
+    assert_eq!(body["next_after_seq"], 4, "the cursor is what was scanned");
+
+    let (_, body) = split(get_session_events(
+        &h.deps(),
+        &session.id,
+        SessionEventsQuery { agent: Some("research_agent::b2".into()), ..Default::default() },
+    ))
+    .await;
+    assert_eq!(body["events"].as_array().expect("events").len(), 2);
+
+    // A filter that matches nothing still moves the cursor past what it read.
+    let (_, body) = split(get_session_events(
+        &h.deps(),
+        &session.id,
+        SessionEventsQuery { types: Some("compaction".into()), ..Default::default() },
+    ))
+    .await;
+    assert!(body["events"].as_array().expect("events").is_empty());
+    assert_eq!(body["next_after_seq"], 4);
+}
+
+/// §5.4: "readers treat an unparseable final line as end-of-log". A `kill -9`
+/// mid-write must not make the route fail — it answers what parsed.
+#[tokio::test]
+async fn a_torn_final_line_ends_the_log_instead_of_failing_the_route() {
+    let h = Harness::new();
+    let session = h
+        .repo()
+        .get_or_create_active_session(LANE, "gui", None)
+        .expect("session");
+    write_log(
+        &h,
+        &session.id,
+        &[
+            &record(1, "round", ""),
+            &record(2, "round", ""),
+            r#"{"v":1,"seq":3,"ts":"2026-09-05T10:22:03.11"#,
+        ],
+    );
+
+    let (status, body) = split(get_session_events(
+        &h.deps(),
+        &session.id,
+        SessionEventsQuery::default(),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["events"].as_array().expect("events").len(), 2);
+    assert_eq!(body["next_after_seq"], 2);
+}
+
+/// A session that has never written a record has no directory (P-22) — an
+/// empty page, not a 404 and not an error.
+#[tokio::test]
+async fn a_session_with_no_log_answers_an_empty_page() {
     let h = Harness::new();
     let session = h
         .repo()
         .get_or_create_active_session(LANE, "gui", None)
         .expect("session");
 
-    let (status, body) = split(get_session_events(&h.deps(), &session.id)).await;
-    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
-    assert_eq!(body["error"]["code"], "SESSION_EVENTS_NOT_SERVED");
+    let (status, body) = split(get_session_events(
+        &h.deps(),
+        &session.id,
+        SessionEventsQuery::default(),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["events"].as_array().expect("events").is_empty());
+    assert_eq!(body["next_after_seq"], 0);
+}
 
-    let (status, body) = split(get_session_events(&h.deps(), "no-such-session")).await;
-    assert_eq!(
-        status,
-        StatusCode::NOT_FOUND,
-        "an unknown id is answered before the not-implemented body"
-    );
+/// An unknown id answers `404 SESSION_NOT_FOUND` — the reason the route was
+/// registered before it could be served, and still true now that it is.
+#[tokio::test]
+async fn an_unknown_session_still_answers_404() {
+    let h = Harness::new();
+    let (status, body) = split(get_session_events(
+        &h.deps(),
+        "no-such-session",
+        SessionEventsQuery::default(),
+    ))
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"]["code"], "SESSION_NOT_FOUND");
+}
+
+/// `limit` is clamped: a client asking for the whole log gets a page.
+#[tokio::test]
+async fn the_event_log_clamps_its_page_size() {
+    let h = Harness::new();
+    let session = h
+        .repo()
+        .get_or_create_active_session(LANE, "gui", None)
+        .expect("session");
+    let lines: Vec<String> = (1..=600).map(|i| record(i, "round", "")).collect();
+    write_log(&h, &session.id, &lines.iter().map(String::as_str).collect::<Vec<_>>());
+
+    let (_, body) = split(get_session_events(
+        &h.deps(),
+        &session.id,
+        SessionEventsQuery { limit: Some(10_000), ..Default::default() },
+    ))
+    .await;
+    assert_eq!(
+        body["events"].as_array().expect("events").len(),
+        MAX_EVENTS_LIMIT as usize
+    );
 }
 
 // ── DELETE ───────────────────────────────────────────────────────────

@@ -96,6 +96,15 @@ impl SessionLogService {
         &self.boot_id
     }
 
+    /// The sessions root every writer of this service works under.
+    ///
+    /// Exposed so `GET /v1/sessions/{id}/events` reads from the same place the
+    /// writers write to, rather than re-resolving the store and risking a
+    /// disagreement.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// Where a session's log lives. The id is sanitised into a single path
     /// segment: nothing a caller passes can address a directory outside the
     /// sessions root.

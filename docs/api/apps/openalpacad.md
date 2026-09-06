@@ -90,7 +90,7 @@
 | PATCH | `/v1/sessions/{id}` | `bearer` | `patch_session_handler` | `sessions::PatchSessionRequest` | - | `apps/openalpacad/src/routes/sessions.rs` |
 | POST | `/v1/sessions/{id}/activate` | `bearer` | `activate_session_handler` | - | - | `apps/openalpacad/src/routes/sessions.rs` |
 | POST | `/v1/sessions/{id}/archive` | `bearer` | `archive_session_handler` | - | - | `apps/openalpacad/src/routes/sessions.rs` |
-| GET | `/v1/sessions/{id}/events` | `bearer` | `get_session_events_handler` | - | - | `apps/openalpacad/src/routes/sessions.rs` |
+| GET | `/v1/sessions/{id}/events` | `bearer` | `get_session_events_handler` | - | `sessions::SessionEventsQuery` | `apps/openalpacad/src/routes/sessions.rs` |
 | GET | `/v1/sessions/{id}/messages` | `bearer` | `get_session_messages_handler` | - | `sessions::SessionMessagesQuery` | `apps/openalpacad/src/routes/sessions.rs` |
 | GET | `/v1/settings/llm` | `bearer` | `get_llm_settings` | - | - | `apps/openalpacad/src/routes/settings.rs` |
 | PUT | `/v1/settings/llm` | `bearer` | `upsert_key` | `AddKeyRequest` | - | `apps/openalpacad/src/routes/settings.rs` |
@@ -420,6 +420,21 @@
 | `bus` | `&'a EventBus` |
 | `ctx` | `&'a SharedContext` |
 | `owner` | `&'a str` |
+| `sessions_root` | `Option<std::path::PathBuf>` |
+
+### `sessions::SessionEventsQuery`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/sessions.rs`
+
+| Field | Type |
+|---|---|
+| `after_seq` | `Option<u64>` |
+| `limit` | `Option<i64>` |
+| `types` | `Option<String>` |
+| `kind` | `Option<String>` |
+| `agent` | `Option<String>` |
+| `span_id` | `Option<String>` |
 
 ### `sessions::SessionMessagesQuery`
 
@@ -467,6 +482,16 @@
 |---|---|
 | `request_id` | `String` |
 | `status` | `String` |
+
+### `sessions::SessionEventsResponse`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/sessions.rs`
+
+| Field | Type |
+|---|---|
+| `events` | `Vec<openalpaca_core::session_log::LoggedRecord>` |
+| `next_after_seq` | `u64` |
 
 ### `sessions::SessionMessagesResponse`
 
