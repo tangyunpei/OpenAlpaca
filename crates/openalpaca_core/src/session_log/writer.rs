@@ -214,9 +214,15 @@ impl PendingCalls {
     }
 }
 
-/// `tool_execution_log` is the index over the log (§5.4): the row is written
-/// by the same writer that assigned the seq, so `log_seq` and `result_ref`
-/// can never point at a record that does not exist.
+/// `tool_execution_log` is the index over the log (§5.4): the `log_seq` half
+/// of the row is written by the same writer that assigned the seq, so it can
+/// never point at a record that does not exist.
+///
+/// It is an **update**, not an insert (R51): the daemon's audit path already
+/// wrote this call's row unconditionally, keyed by the same `tool_use_id`, and
+/// this adds the half only the writer knows. When the audit row is not there —
+/// the event was lost, or the call never reached the sandbox — the update
+/// inserts instead, so the index is never silently empty.
 ///
 /// The previews are taken from the **capped** payload — the bytes that
 /// actually landed inline — so the row and the record agree even when the
@@ -254,6 +260,8 @@ fn index_tool_call(
             let Some(db) = db.as_ref() else { return };
             let call = pending.take(id);
             let entry = ToolExecutionEntry {
+                // The key the daemon's audit row carries for this call.
+                request_id: Some(id.to_string()),
                 agent_id: record.agent.clone().unwrap_or_else(|| "unknown".to_string()),
                 tool_name: call
                     .as_ref()
@@ -288,7 +296,7 @@ fn index_tool_call(
                 result_ref: Some(format!("log:{seq}")),
                 ..Default::default()
             };
-            if let Err(e) = SkillExecutionRepository::new(db).record_tool(&entry) {
+            if let Err(e) = SkillExecutionRepository::new(db).attach_session_index(&entry) {
                 tracing::warn!(session_id, "Failed to index a tool call: {e}");
             }
         }

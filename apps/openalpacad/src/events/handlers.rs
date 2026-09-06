@@ -304,12 +304,13 @@ impl EventBroadcaster {
     /// `task_id` is the run the call belonged to (GAP-10); `None` for a call
     /// made outside a workflow.
     ///
-    /// `session_id` is **not** broadcast — `ServerEvent::ToolExecuted` is
-    /// unchanged and a WS subscriber has no use for it. It decides one thing:
-    /// whether this call's `tool_execution_log` row is ours to write. When a
-    /// session log is carrying the call, its writer holds the `log_seq` and
-    /// the payloads and writes the full index row (§5.4); a second insert
-    /// here would double every session-logged call in `invocations_today`.
+    /// `session_id` and `tool_use_id` are **not** broadcast —
+    /// `ServerEvent::ToolExecuted` is unchanged and a WS subscriber has no use
+    /// for them. They go on the row: together they are the key the session
+    /// writer matches to merge its `log_seq` and previews onto it (R51). The
+    /// insert itself is unconditional — the writer's copy is best-effort (a
+    /// full channel drops it, a cancelled round loses it) and an audit row
+    /// `invocations_today` counts is not.
     #[allow(clippy::too_many_arguments)]
     pub fn tool_executed(
         &self,
@@ -319,6 +320,7 @@ impl EventBroadcaster {
         duration_ms: u64,
         task_id: Option<&str>,
         session_id: Option<&str>,
+        tool_use_id: Option<&str>,
     ) {
         let event = ServerEvent::ToolExecuted {
             agent_id: agent_id.to_string(),
@@ -331,9 +333,15 @@ impl EventBroadcaster {
         };
 
         self.persist(&event);
-        if session_id.is_none() {
-            self.persist_tool_execution(agent_id, tool_name, success, duration_ms);
-        }
+        self.persist_tool_execution(
+            agent_id,
+            tool_name,
+            success,
+            duration_ms,
+            task_id,
+            session_id,
+            tool_use_id,
+        );
         let _ = self.tx.send(event);
     }
 

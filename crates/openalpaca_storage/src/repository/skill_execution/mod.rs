@@ -56,37 +56,87 @@ impl<'a> SkillExecutionRepository<'a> {
         })
     }
 
-    /// Record a tool execution entry. Returns the row id.
+    /// Record a tool execution entry — the **audit half** of the row, written
+    /// unconditionally by the daemon for every executed call (R51). Returns
+    /// the row id.
     ///
-    /// Both preview columns are clamped to [`PREVIEW_CHARS`] here rather than
-    /// at the call sites: the bound belongs to the column, and the payload it
-    /// previews is already stored in full in the session event log.
+    /// The row is never best-effort: `GET /v1/tools`' `invocations_today`
+    /// counts these, and the session writer's copy can be dropped by a full
+    /// channel or lost with a cancelled round. What the writer adds is the
+    /// *index* half — `log_seq`, the previews, `result_ref` — merged onto this
+    /// same row by [`attach_session_index`](Self::attach_session_index).
+    ///
+    /// Whichever half arrives second merges rather than inserting, so the two
+    /// can race without producing two rows or losing a `log_seq` that already
+    /// landed. Both previews and `error_message` are clamped to
+    /// [`PREVIEW_CHARS`] here rather than at the call sites: the bound belongs
+    /// to the column, and the payload it previews is stored in full in the
+    /// session event log.
     pub fn record_tool(&self, entry: &ToolExecutionEntry) -> Result<i64> {
-        let args_preview = entry.args_preview.as_deref().map(clamp_preview);
-        let result_preview = entry.result_preview.as_deref().map(clamp_preview);
         self.db.with_connection(|conn| {
-            conn.execute(
-                "INSERT INTO tool_execution_log (
-                    request_id, agent_id, tool_name, success, duration_ms, error_message,
-                    session_id, task_id, log_seq, args_preview, result_preview, result_ref
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                rusqlite::params![
-                    entry.request_id,
-                    entry.agent_id,
-                    entry.tool_name,
-                    entry.success as i32,
-                    entry.duration_ms,
-                    entry.error_message,
-                    entry.session_id,
-                    entry.task_id,
-                    entry.log_seq,
-                    args_preview,
-                    result_preview,
-                    entry.result_ref,
-                ],
-            )
-            .context("Failed to insert tool execution log")?;
-            Ok(conn.last_insert_rowid())
+            // The session writer may have created this call's row first — its
+            // record can beat the daemon's event to the table. Merging the
+            // audit half onto it keeps the row count honest and leaves the
+            // writer's `log_seq` and previews alone.
+            if let Some(id) = counterpart(conn, entry, Counterpart::WriterRow)? {
+                conn.execute(
+                    "UPDATE tool_execution_log
+                        SET agent_id = ?1, tool_name = ?2, success = ?3, duration_ms = ?4,
+                            error_message = COALESCE(?5, error_message),
+                            task_id = COALESCE(task_id, ?6)
+                      WHERE id = ?7",
+                    rusqlite::params![
+                        entry.agent_id,
+                        entry.tool_name,
+                        entry.success as i32,
+                        entry.duration_ms,
+                        entry.error_message.as_deref().map(clamp_preview),
+                        entry.task_id,
+                        id,
+                    ],
+                )
+                .context("Failed to merge a tool execution audit row")?;
+                return Ok(id);
+            }
+            insert_tool_row(conn, entry)
+        })
+    }
+
+    /// Attach the session log's **index half** to a call's row (§5.4, R51):
+    /// `log_seq`, the two previews and `result_ref`, which only the session
+    /// writer knows because it is the only party that assigns a `seq`.
+    ///
+    /// Merges onto the daemon's audit row for the same call — matched by the
+    /// call's tool-use id within the session — and inserts a whole row only
+    /// when there is none to merge onto (the audit event was lost, or the
+    /// call never reached the sandbox). Never touches the audit columns of a
+    /// row it did not create: that half is the daemon's.
+    pub fn attach_session_index(&self, entry: &ToolExecutionEntry) -> Result<i64> {
+        self.db.with_connection(|conn| {
+            if let Some(id) = counterpart(conn, entry, Counterpart::AuditRow)? {
+                conn.execute(
+                    "UPDATE tool_execution_log
+                        SET session_id = ?1,
+                            task_id = COALESCE(?2, task_id),
+                            log_seq = ?3, args_preview = ?4, result_preview = ?5,
+                            result_ref = ?6,
+                            error_message = COALESCE(error_message, ?7)
+                      WHERE id = ?8",
+                    rusqlite::params![
+                        entry.session_id,
+                        entry.task_id,
+                        entry.log_seq,
+                        entry.args_preview.as_deref().map(clamp_preview),
+                        entry.result_preview.as_deref().map(clamp_preview),
+                        entry.result_ref,
+                        entry.error_message.as_deref().map(clamp_preview),
+                        id,
+                    ],
+                )
+                .context("Failed to attach a session index to a tool execution row")?;
+                return Ok(id);
+            }
+            insert_tool_row(conn, entry)
         })
     }
 
@@ -216,6 +266,81 @@ impl<'a> SkillExecutionRepository<'a> {
             Ok((skill_deleted, tool_deleted))
         })
     }
+}
+
+/// Which half of a call's row we are looking for: the one the *other* writer
+/// would have made (R51).
+#[derive(Clone, Copy)]
+enum Counterpart {
+    /// A row the session writer created — it carries a `log_seq`.
+    WriterRow,
+    /// A row the daemon's audit path created — it has no `log_seq` yet.
+    AuditRow,
+}
+
+/// The other half's row for this call, if there is one to merge onto.
+///
+/// Matched by the call's tool-use id **within its session**: both are needed,
+/// because `request_id` is the provider's id for the call and only unique
+/// beside the session it was made in. Without both — a call outside any
+/// session log, or a provider that emitted no id — there is nothing safe to
+/// match on and the caller inserts a fresh row.
+fn counterpart(
+    conn: &rusqlite::Connection,
+    entry: &ToolExecutionEntry,
+    want: Counterpart,
+) -> Result<Option<i64>> {
+    let (Some(session_id), Some(request_id)) =
+        (entry.session_id.as_deref(), entry.request_id.as_deref())
+    else {
+        return Ok(None);
+    };
+    if request_id.is_empty() {
+        return Ok(None);
+    }
+    let sql = match want {
+        Counterpart::WriterRow => {
+            "SELECT id FROM tool_execution_log
+              WHERE request_id = ?1 AND session_id = ?2 AND log_seq IS NOT NULL
+              ORDER BY id DESC LIMIT 1"
+        }
+        Counterpart::AuditRow => {
+            "SELECT id FROM tool_execution_log
+              WHERE request_id = ?1 AND session_id = ?2 AND log_seq IS NULL
+              ORDER BY id DESC LIMIT 1"
+        }
+    };
+    use rusqlite::OptionalExtension;
+    Ok(conn
+        .query_row(sql, rusqlite::params![request_id, session_id], |r| r.get(0))
+        .optional()
+        .context("Failed to look up a tool execution row")?)
+}
+
+/// The one INSERT both halves fall back to when there is nothing to merge.
+fn insert_tool_row(conn: &rusqlite::Connection, entry: &ToolExecutionEntry) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO tool_execution_log (
+            request_id, agent_id, tool_name, success, duration_ms, error_message,
+            session_id, task_id, log_seq, args_preview, result_preview, result_ref
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        rusqlite::params![
+            entry.request_id,
+            entry.agent_id,
+            entry.tool_name,
+            entry.success as i32,
+            entry.duration_ms,
+            entry.error_message.as_deref().map(clamp_preview),
+            entry.session_id,
+            entry.task_id,
+            entry.log_seq,
+            entry.args_preview.as_deref().map(clamp_preview),
+            entry.result_preview.as_deref().map(clamp_preview),
+            entry.result_ref,
+        ],
+    )
+    .context("Failed to insert tool execution log")?;
+    Ok(conn.last_insert_rowid())
 }
 
 /// Clamp a preview to the column's documented bound, on a character boundary.

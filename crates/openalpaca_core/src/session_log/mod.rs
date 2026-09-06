@@ -152,6 +152,24 @@ impl SessionLogService {
         }
     }
 
+    /// How many records this boot has dropped for `session_id` — a full
+    /// channel, or a writer that could not open its directory (§5.5 chose
+    /// drops over stalls; this is how a reader learns the log has a hole).
+    ///
+    /// Surfaced here rather than only on the handle so T44's status route can
+    /// report it from the service it already holds.
+    pub fn dropped_for(&self, session_id: &str) -> u64 {
+        self.handles
+            .get(session_id)
+            .map(|h| h.value().dropped())
+            .unwrap_or(0)
+    }
+
+    /// Records dropped across every session this boot has written.
+    pub fn dropped_total(&self) -> u64 {
+        self.handles.iter().map(|h| h.value().dropped()).sum()
+    }
+
     fn spawn(&self, session_id: &str) -> SessionLogHandle {
         let (tx, rx) = mpsc::channel(self.limits.channel_capacity.max(1));
         let handle = SessionLogHandle {
@@ -204,7 +222,14 @@ impl SessionLogHandle {
                 }
                 false
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => false,
+            // The writer is gone — it could not open its directory, or the
+            // service was dropped. Counted like a full channel: a record that
+            // never reaches disk is a hole in the log either way, and the
+            // "writer died" case being invisible was how it stayed unnoticed.
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                false
+            }
         }
     }
 

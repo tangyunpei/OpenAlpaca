@@ -326,3 +326,167 @@ fn test_tool_invocations_since_counts_from_the_instant() {
     let none = repo.tool_invocations_since("2026-09-06 00:00:00").unwrap();
     assert!(none.is_empty(), "{none:?}");
 }
+
+// ── R51: one row, two halves ────────────────────────────────────────
+
+fn audit_half(request_id: &str, session_id: &str) -> ToolExecutionEntry {
+    ToolExecutionEntry {
+        request_id: Some(request_id.to_string()),
+        agent_id: "research_agent::a1".to_string(),
+        tool_name: "web_fetch".to_string(),
+        success: true,
+        duration_ms: 250,
+        session_id: Some(session_id.to_string()),
+        ..Default::default()
+    }
+}
+
+fn index_half(request_id: &str, session_id: &str, log_seq: i64) -> ToolExecutionEntry {
+    ToolExecutionEntry {
+        request_id: Some(request_id.to_string()),
+        agent_id: "research_agent::a1".to_string(),
+        tool_name: "web_fetch".to_string(),
+        success: true,
+        duration_ms: 250,
+        session_id: Some(session_id.to_string()),
+        task_id: Some("task-1".to_string()),
+        log_seq: Some(log_seq),
+        args_preview: Some(r#"{"url":"https://example.com"}"#.to_string()),
+        result_preview: Some("the page body".to_string()),
+        result_ref: Some(format!("log:{}", log_seq + 1)),
+        ..Default::default()
+    }
+}
+
+fn rows(db: &Database) -> i64 {
+    db.with_connection(|conn| {
+        Ok(conn.query_row("SELECT COUNT(*) FROM tool_execution_log", [], |r| r.get(0))?)
+    })
+    .unwrap()
+}
+
+/// R51: the daemon's audit insert and the session writer's index update are
+/// two halves of **one** row. The writer merges onto the row the daemon
+/// already wrote, matched by the call's tool-use id, and adds only its own
+/// columns.
+#[test]
+fn the_index_update_lands_log_seq_on_the_daemons_audit_row() {
+    let db = setup_db();
+    let repo = SkillExecutionRepository::new(&db);
+
+    repo.record_tool(&audit_half("toolu_1", "sess-1")).unwrap();
+    repo.attach_session_index(&index_half("toolu_1", "sess-1", 184))
+        .unwrap();
+
+    assert_eq!(rows(&db), 1, "one row, not two");
+    let (log_seq, task, result_ref, duration, agent): (i64, String, String, i64, String) = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT log_seq, task_id, result_ref, duration_ms, agent_id
+                   FROM tool_execution_log",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(log_seq, 184, "the update lands log_seq on the audit row");
+    assert_eq!(task, "task-1");
+    assert_eq!(result_ref, "log:185");
+    assert_eq!(duration, 250, "the audit half is left alone");
+    assert_eq!(agent, "research_agent::a1");
+}
+
+/// The reverse order — the writer's record beats the daemon's event to the
+/// table — must not produce a second row and must not clobber the `log_seq`
+/// that is already there.
+#[test]
+fn an_audit_insert_after_the_index_row_merges_instead_of_clobbering() {
+    let db = setup_db();
+    let repo = SkillExecutionRepository::new(&db);
+
+    repo.attach_session_index(&index_half("toolu_2", "sess-1", 12))
+        .unwrap();
+    let mut late = audit_half("toolu_2", "sess-1");
+    late.success = false;
+    late.duration_ms = 999;
+    repo.record_tool(&late).unwrap();
+
+    assert_eq!(rows(&db), 1, "the late audit insert merges, it does not add");
+    let (log_seq, success, duration): (i64, i64, i64) = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT log_seq, success, duration_ms FROM tool_execution_log",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(log_seq, 12, "the writer's log_seq survives the audit insert");
+    assert_eq!(success, 0, "the audit half is authoritative for the outcome");
+    assert_eq!(duration, 999);
+}
+
+/// The merge is keyed on the call, not on the session: two calls are two
+/// rows, so `invocations_today` still counts what happened.
+#[test]
+fn two_calls_in_one_session_stay_two_rows() {
+    let db = setup_db();
+    let repo = SkillExecutionRepository::new(&db);
+
+    for (id, seq) in [("toolu_a", 3), ("toolu_b", 5)] {
+        repo.record_tool(&audit_half(id, "sess-1")).unwrap();
+        repo.attach_session_index(&index_half(id, "sess-1", seq))
+            .unwrap();
+    }
+    assert_eq!(rows(&db), 2);
+}
+
+/// A call the daemon never reported (its event was lost, or it never
+/// executed) still gets the writer's row: the index is not silently empty.
+#[test]
+fn an_index_row_with_no_audit_row_is_inserted_whole() {
+    let db = setup_db();
+    let repo = SkillExecutionRepository::new(&db);
+
+    repo.attach_session_index(&index_half("toolu_lonely", "sess-1", 7))
+        .unwrap();
+    assert_eq!(rows(&db), 1);
+    let (tool, log_seq): (String, i64) = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT tool_name, log_seq FROM tool_execution_log",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(tool, "web_fetch");
+    assert_eq!(log_seq, 7);
+}
+
+/// `error_message` is clamped where the column is written, like both
+/// previews: the loop now hands the writer the untruncated error text.
+#[test]
+fn the_error_message_column_is_clamped_like_the_previews() {
+    let db = setup_db();
+    let repo = SkillExecutionRepository::new(&db);
+
+    repo.record_tool(&ToolExecutionEntry {
+        agent_id: "a".to_string(),
+        tool_name: "shell_execute".to_string(),
+        success: false,
+        duration_ms: 1,
+        error_message: Some("e".repeat(40 * 1024)),
+        ..Default::default()
+    })
+    .unwrap();
+
+    let stored: String = db
+        .with_connection(|conn| {
+            Ok(conn.query_row("SELECT error_message FROM tool_execution_log", [], |r| {
+                r.get(0)
+            })?)
+        })
+        .unwrap();
+    assert_eq!(stored.chars().count(), PREVIEW_CHARS);
+}

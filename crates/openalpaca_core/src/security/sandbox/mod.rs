@@ -152,8 +152,9 @@ impl SandboxManager {
         // The run every event below is attributed to (GAP-10); `None` for a
         // call made outside a workflow.
         let task_id = ctx.task_id.as_deref();
-        // Set only where the agentic loop is writing this call's records, so
-        // it is exactly the signal "the session writer owns the index row".
+        // Set only where the agentic loop is writing this call's records: it
+        // is what lets the session writer find this call's audit row and add
+        // the `log_seq` half to it (R51).
         let session_id = ctx.session_id.as_deref();
 
         // 1. Capability check
@@ -311,7 +312,7 @@ impl SandboxManager {
 
         // 4. Circuit breaker check
         if let Err(reason) = self.circuit_breaker.check(agent_id, &tool_call.name) {
-            self.emit_tool_executed(agent_id, &tool_call.name, false, 0, task_id, session_id);
+            self.emit_tool_executed(agent_id, tool_call, false, 0, task_id, session_id);
             return Err(reason);
         }
 
@@ -357,13 +358,13 @@ impl SandboxManager {
 
         match result {
             Ok(Ok(output)) => {
-                self.emit_tool_executed(agent_id, &tool_call.name, true, duration_ms, task_id, session_id);
+                self.emit_tool_executed(agent_id, tool_call, true, duration_ms, task_id, session_id);
                 self.circuit_breaker
                     .record_success(agent_id, &tool_call.name);
                 Ok(output)
             }
             Ok(Err(err)) => {
-                self.emit_tool_executed(agent_id, &tool_call.name, false, duration_ms, task_id, session_id);
+                self.emit_tool_executed(agent_id, tool_call, false, duration_ms, task_id, session_id);
                 if is_transient_tool_error(&err) {
                     self.circuit_breaker
                         .record_failure_for_task(agent_id, &tool_call.name, task_id);
@@ -423,13 +424,15 @@ impl SandboxManager {
     }
 
     /// `session_id` is the turn's session when the agentic loop is logging
-    /// this call (§5.4): the session writer holds the `log_seq` and writes
-    /// the `tool_execution_log` row, so the daemon's audit insert stands down
-    /// instead of duplicating it.
+    /// this call (§5.4). With the call's `tool_use_id` it is how the session
+    /// writer finds the audit row this event writes and merges its `log_seq`
+    /// and previews onto it (R51) — the daemon's insert itself is
+    /// unconditional, because the writer's copy is best-effort and an audit
+    /// row is not.
     fn emit_tool_executed(
         &self,
         agent_id: &str,
-        tool_name: &str,
+        tool_call: &ToolCall,
         success: bool,
         duration_ms: u64,
         task_id: Option<&str>,
@@ -437,11 +440,12 @@ impl SandboxManager {
     ) {
         self.bus.publish(SystemEvent::ToolExecuted {
             agent_id: agent_id.to_string(),
-            tool_name: tool_name.to_string(),
+            tool_name: tool_call.name.clone(),
             success,
             duration_ms,
             task_id: task_id.map(|t| t.to_string()),
             session_id: session_id.map(|s| s.to_string()),
+            tool_use_id: Some(tool_call.id.clone()).filter(|id| !id.is_empty()),
             timestamp: Utc::now(),
         });
     }
