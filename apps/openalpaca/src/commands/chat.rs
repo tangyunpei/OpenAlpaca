@@ -122,38 +122,87 @@ async fn resume(client: &DaemonClient, session_id: &str) -> Result<SessionItem> 
     Ok(session)
 }
 
+#[derive(serde::Deserialize)]
+struct TranscriptMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(serde::Deserialize)]
+struct TranscriptPage {
+    messages: Vec<TranscriptMessage>,
+    /// Every message the conversation holds, not just this page's — the count
+    /// the tail's offset is derived from. Defaulted so a daemon that predates
+    /// the field still renders (the tail is then the first page, as before).
+    #[serde(default)]
+    total: i64,
+}
+
+/// Where a conversation's last `limit` messages begin.
+///
+/// `GET /v1/sessions/{id}/messages` is oldest-first
+/// (`ORDER BY created_at ASC, id ASC LIMIT ?2 OFFSET ?3`), so a page asked for
+/// without an offset is the conversation's **opening** — the exact opposite of
+/// a tail. `total` is on the envelope for this.
+fn tail_offset(total: i64, limit: usize) -> usize {
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    usize::try_from((total - limit).max(0)).unwrap_or(0)
+}
+
+/// One page of a conversation's messages.
+fn transcript_page_path(session_id: &str, limit: usize, offset: usize) -> String {
+    format!(
+        "/v1/sessions/{}/messages?limit={limit}&offset={offset}",
+        urlencoding::encode(session_id)
+    )
+}
+
+/// The last `limit` of what a page returned, in the order they were said.
+///
+/// The offset already narrows the request; this is what makes the *printing*
+/// a tail rather than trusting the page to be one.
+fn tail_of(messages: &[TranscriptMessage], limit: usize) -> &[TranscriptMessage] {
+    &messages[messages.len().saturating_sub(limit)..]
+}
+
+/// The block printed above the prompt, one line per turn.
+fn render_tail(messages: &[TranscriptMessage]) -> String {
+    let mut out = String::new();
+    for message in messages {
+        let who = match message.role.as_str() {
+            "user" => "You:".bold(),
+            "assistant" => "Alpaca:".cyan().bold(),
+            other => other.dimmed(),
+        };
+        out.push_str(&format!("{} {}\n", who, message.content.trim()));
+    }
+    out
+}
+
 /// The last few turns of the resumed conversation, so the prompt does not open
 /// on an empty screen with no idea what was being discussed.
+///
+/// Two requests at most: the first answers *how long* the conversation is, and
+/// only a conversation longer than the tail needs a second one aimed at its
+/// end.
 async fn print_transcript_tail(client: &DaemonClient, session_id: &str) -> Result<()> {
-    #[derive(serde::Deserialize)]
-    struct Message {
-        role: String,
-        content: String,
-    }
-    #[derive(serde::Deserialize)]
-    struct Page {
-        messages: Vec<Message>,
+    let mut page: TranscriptPage = client
+        .get(&transcript_page_path(session_id, TAIL_MESSAGES, 0))
+        .await?;
+    let offset = tail_offset(page.total, TAIL_MESSAGES);
+    if offset > 0 {
+        page = client
+            .get(&transcript_page_path(session_id, TAIL_MESSAGES, offset))
+            .await?;
     }
 
-    let path = format!(
-        "/v1/sessions/{}/messages?limit={TAIL_MESSAGES}",
-        urlencoding::encode(session_id)
-    );
-    let page: Page = client.get(&path).await?;
     if page.messages.is_empty() {
         eprintln!("{}", "(no messages yet)".dimmed());
         return Ok(());
     }
 
     println!();
-    for message in &page.messages {
-        let who = match message.role.as_str() {
-            "user" => "You:".bold(),
-            "assistant" => "Alpaca:".cyan().bold(),
-            other => other.dimmed(),
-        };
-        println!("{} {}", who, message.content.trim());
-    }
+    print!("{}", render_tail(tail_of(&page.messages, TAIL_MESSAGES)));
     println!("{}", "─".repeat(40).dimmed());
     Ok(())
 }
@@ -276,5 +325,74 @@ mod tests {
             .args;
         assert_eq!(args.session.as_deref(), Some("sess-1"));
         assert_eq!(args.message.as_deref(), Some("hi"));
+    }
+
+    /// `turn 1` … `turn n`, alternating who said it, oldest first — the order
+    /// `GET /v1/sessions/{id}/messages` returns.
+    fn transcript(count: usize) -> Vec<TranscriptMessage> {
+        (1..=count)
+            .map(|n| TranscriptMessage {
+                role: if n % 2 == 1 { "user" } else { "assistant" }.to_string(),
+                content: format!("turn {n}"),
+            })
+            .collect()
+    }
+
+    /// The route orders oldest-first, so the tail of a fifty-message
+    /// conversation starts at 42 — not at 0, which is where it starts.
+    #[test]
+    fn the_tail_of_a_long_conversation_starts_where_its_last_eight_begin() {
+        assert_eq!(tail_offset(50, TAIL_MESSAGES), 42);
+        assert_eq!(tail_offset(9, TAIL_MESSAGES), 1);
+        // Nothing to skip: the whole conversation *is* the tail.
+        assert_eq!(tail_offset(8, TAIL_MESSAGES), 0);
+        assert_eq!(tail_offset(3, TAIL_MESSAGES), 0);
+        assert_eq!(tail_offset(0, TAIL_MESSAGES), 0);
+        // A daemon that sends no `total` deserializes as 0 and must not
+        // produce a negative offset.
+        assert_eq!(tail_offset(-1, TAIL_MESSAGES), 0);
+    }
+
+    #[test]
+    fn a_long_conversation_is_re_requested_from_where_its_tail_begins() {
+        assert_eq!(
+            transcript_page_path("sess-1", TAIL_MESSAGES, 0),
+            "/v1/sessions/sess-1/messages?limit=8&offset=0"
+        );
+        assert_eq!(
+            transcript_page_path("sess-1", TAIL_MESSAGES, tail_offset(50, TAIL_MESSAGES)),
+            "/v1/sessions/sess-1/messages?limit=8&offset=42"
+        );
+        // An id is a path segment, never a second path.
+        assert!(transcript_page_path("a/b", TAIL_MESSAGES, 0).contains("a%2Fb"));
+    }
+
+    /// The bug this replaced: a fifty-message conversation printed `turn 1` …
+    /// `turn 8` and called it the tail.
+    #[test]
+    fn a_resumed_conversation_prints_its_last_eight_turns_in_order() {
+        colored::control::set_override(false);
+
+        let all = transcript(50);
+        let printed = render_tail(tail_of(&all, TAIL_MESSAGES));
+        let lines: Vec<&str> = printed.lines().collect();
+
+        assert_eq!(lines.len(), TAIL_MESSAGES, "{printed}");
+        assert_eq!(lines[0], "You: turn 43", "{printed}");
+        assert_eq!(lines[7], "Alpaca: turn 50", "{printed}");
+        assert!(
+            !printed.contains("turn 1\n") && !lines.iter().any(|line| line.ends_with("turn 8")),
+            "the opening of the conversation is not its tail: {printed}"
+        );
+    }
+
+    /// A conversation shorter than the tail prints whole, still in order.
+    #[test]
+    fn a_short_conversation_prints_whole() {
+        colored::control::set_override(false);
+
+        let printed = render_tail(tail_of(&transcript(3), TAIL_MESSAGES));
+        let lines: Vec<&str> = printed.lines().collect();
+        assert_eq!(lines, vec!["You: turn 1", "Alpaca: turn 2", "You: turn 3"]);
     }
 }
