@@ -521,12 +521,23 @@ impl EventBroadcaster {
         let _ = self.tx.send(event);
     }
 
-    /// Broadcast a session lifecycle change and persist it (§5.7)
-    pub fn session_changed(&self, session_id: &str, lane_key: &str, status: &str) {
+    /// Broadcast a session lifecycle change and persist it (§5.7).
+    ///
+    /// `task_id` is set only by §5.6b's `interrupted` frame, which is about
+    /// one run of the session rather than the session's own lifecycle; it is
+    /// what lets the persisted row hang off the task (`log_for_task`).
+    pub fn session_changed(
+        &self,
+        session_id: &str,
+        lane_key: &str,
+        status: &str,
+        task_id: Option<&str>,
+    ) {
         let event = ServerEvent::SessionChanged {
             session_id: session_id.to_string(),
             lane_key: lane_key.to_string(),
             status: status.to_string(),
+            task_id: task_id.map(str::to_string),
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };

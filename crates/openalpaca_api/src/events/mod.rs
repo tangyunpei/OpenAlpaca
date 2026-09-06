@@ -258,16 +258,26 @@ pub enum ServerEvent {
         instance_id: String,
     },
     /// A session's lifecycle changed — created, activated, archived or
-    /// deleted (migration 039, §5.7).
+    /// deleted (migration 039, §5.7) — or one of its runs was found
+    /// interrupted at boot (§5.6b).
     ///
     /// The sidebar's honesty frame: a second window showing a session that
     /// another window just archived or deleted learns about it here, rather
-    /// than on its next manual refresh.
+    /// than on its next manual refresh; and a window open across a daemon
+    /// restart learns that a run it was watching will never finish.
     SessionChanged {
         session_id: String,
         lane_key: String,
-        /// "active" | "archived" | "deleted"
+        /// "active" | "archived" | "deleted" | "interrupted"
+        ///
+        /// `interrupted` is not a session state — the row is still `active` or
+        /// `archived` — it is a fact about one of the session's runs, named by
+        /// `task_id`. A client seeing it should re-read the session's
+        /// `interrupted_task_count` and the run itself.
         status: String,
+        /// The run the change is about: `null` for every lifecycle
+        /// transition, set for `interrupted`.
+        task_id: Option<String>,
         ts: DateTime<Utc>,
         instance_id: String,
     },

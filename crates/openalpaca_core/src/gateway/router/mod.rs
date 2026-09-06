@@ -255,6 +255,7 @@ impl Gateway {
                             session_id: turn.session_id.clone(),
                             lane_key: lane_key_str.clone(),
                             status: "active".to_string(),
+                            task_id: None,
                             timestamp: chrono::Utc::now(),
                         });
                     }

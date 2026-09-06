@@ -526,10 +526,10 @@ pub fn spawn_event_bridge(
                     eb.followup_queued(lane_key, followup_id, kind);
                 }
                 openalpaca_core::events::SystemEvent::SessionChanged {
-                    ref session_id, ref lane_key, ref status, ..
+                    ref session_id, ref lane_key, ref status, ref task_id, ..
                 } => {
                     tracing::info!(%session_id, %lane_key, %status, "Session changed");
-                    eb.session_changed(session_id, lane_key, status);
+                    eb.session_changed(session_id, lane_key, status, task_id.as_deref());
                 }
                 openalpaca_core::events::SystemEvent::FollowupCancelled {
                     ref lane_key, followup_id, ..

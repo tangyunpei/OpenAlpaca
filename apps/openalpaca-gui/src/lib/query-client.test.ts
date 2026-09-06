@@ -80,6 +80,24 @@ describe("invalidationKeysFor", () => {
     ]);
   });
 
+  /**
+   * §5.6b — the boot sweep's frame is about a run, not the conversation's
+   * lifecycle, so it also stales the run list: the card a window was watching
+   * has finished, and the sidebar's "N interrupted" badge has just moved.
+   */
+  it("adds the run list to a session frame that reports an interruption", () => {
+    expect(
+      invalidationKeysFor(
+        event("session_changed", { status: "interrupted", task_id: "run-1" }),
+      ),
+    ).toEqual([qk.sessions.all(), qk.chat.all(), qk.tasks.all()]);
+    expect(
+      invalidationKeysFor(
+        event("session_changed", { status: "archived", task_id: null }),
+      ),
+    ).toEqual([qk.sessions.all(), qk.chat.all()]);
+  });
+
   it("scopes a subagent node to its own run", () => {
     expect(
       invalidationKeysFor(event("dag_node_status", { task_id: "run-1" })),

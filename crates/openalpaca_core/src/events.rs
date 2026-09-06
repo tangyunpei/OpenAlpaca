@@ -435,16 +435,27 @@ pub enum SystemEvent {
         timestamp: DateTime<Utc>,
     },
     /// A session's lifecycle changed (migration 039, §5.7): created,
-    /// activated, archived or deleted.
+    /// activated, archived or deleted — or one of its runs was found
+    /// interrupted at boot (§5.6b).
     ///
-    /// Published by the `/v1/sessions` routes and by the follow-up claim that
-    /// re-homes a lane, so a second window's sidebar does not keep showing a
-    /// conversation that is no longer the live one.
+    /// Published by the `/v1/sessions` routes, by the follow-up claim that
+    /// re-homes a lane, and by the boot sweep, so a second window's sidebar
+    /// does not keep showing a conversation that is no longer the live one —
+    /// or an "N interrupted" badge that has just become true.
     SessionChanged {
         session_id: String,
         lane_key: String,
-        /// "active" | "archived" | "deleted"
+        /// "active" | "archived" | "deleted" | "interrupted"
+        ///
+        /// The first three are the session row's own lifecycle. `interrupted`
+        /// is **not** a session state — the `session` table's CHECK allows
+        /// only `active`/`archived` — it is a session-visible fact about one
+        /// of its runs, named by `task_id`, which is why it rides this variant
+        /// rather than a second one.
         status: String,
+        /// The run the change is about. `Some` only for `interrupted`; every
+        /// lifecycle transition is about the session itself.
+        task_id: Option<String>,
         timestamp: DateTime<Utc>,
     },
     /// A queued follow-up item was cancelled before it ran (GAP-03).

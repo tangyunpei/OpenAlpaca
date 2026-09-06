@@ -57,10 +57,14 @@ export type ServerEvent =
   | { type: "workflow_progress"; task_id: string; lane_key: string; message: string; ts: string; instance_id: string; _id: number }
   | { type: "followup_queued"; lane_key: string; followup_id: number; kind: string; ts: string; instance_id: string; _id: number }
   // A conversation was created, activated, archived or deleted (daemon plan
-  // §5.7). `status` is "active" | "archived" | "deleted" — the last is not a
-  // stored state, it is the row going away. Keeps a second window from showing
-  // a conversation that is no longer the live one.
-  | { type: "session_changed"; session_id: string; lane_key: string; status: string; ts: string; instance_id: string; _id: number }
+  // §5.7), or one of its runs was found interrupted at boot (§5.6b).
+  // `status` is "active" | "archived" | "deleted" | "interrupted" — `deleted`
+  // is not a stored state, it is the row going away, and `interrupted` is not
+  // a session state at all: the row stays active or archived, and `task_id`
+  // names the run that will never finish. Keeps a second window from showing a
+  // conversation that is no longer the live one, or a run that is no longer
+  // going anywhere.
+  | { type: "session_changed"; session_id: string; lane_key: string; status: string; task_id: string | null; ts: string; instance_id: string; _id: number }
   // GAP-03's other half. Fired only when the cancel actually won its CAS
   // against the autostart claim, so a pending chip retired on this frame is
   // never one that is about to run. No `kind`: the row is named by id.

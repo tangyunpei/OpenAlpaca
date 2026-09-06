@@ -80,8 +80,16 @@ export function invalidationKeysFor(
     // A conversation opened, moved or went away: the list is stale, and so is
     // the transcript, because the lane's active session may have changed under
     // a window that is showing the old one.
+    //
+    // §5.6b's `interrupted` frame is about a *run*, not the conversation's
+    // lifecycle: the session list is stale because its
+    // `interrupted_task_count` badge just moved, and so is the run itself —
+    // the card a window was watching is finished and its action bar is now the
+    // terminal one. `qk.tasks.all()` is what says that.
     case "session_changed":
-      return [qk.sessions.all(), qk.chat.all()];
+      return event.status === "interrupted"
+        ? [qk.sessions.all(), qk.chat.all(), qk.tasks.all()]
+        : [qk.sessions.all(), qk.chat.all()];
 
     // `["artifacts"]` is a prefix of the list, versions and diff keys, so one
     // entry refreshes whichever Library surface is mounted. Not `tasks`: a

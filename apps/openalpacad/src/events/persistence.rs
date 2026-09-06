@@ -406,14 +406,26 @@ impl EventBroadcaster {
                     session_id,
                     lane_key,
                     status,
+                    task_id,
                     ..
                 } => {
                     let detail = serde_json::json!({
                         "session_id": session_id,
                         "lane_key": lane_key,
                         "status": status,
+                        "task_id": task_id,
                     });
-                    repo.log("session_changed", None, Some(&detail), None)
+                    // §5.6b's `interrupted` frame names a run, so the row
+                    // hangs off it (T33's `log_for_task`) and shows up in that
+                    // run's own log; a lifecycle transition names no task and
+                    // writes the same row it always did.
+                    repo.log_for_task(
+                        "session_changed",
+                        None,
+                        task_id.as_deref(),
+                        Some(&detail),
+                        None,
+                    )
                 }
                 ServerEvent::FollowupCancelled {
                     lane_key,

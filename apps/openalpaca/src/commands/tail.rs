@@ -65,6 +65,19 @@ enum ServerEvent {
         #[allow(dead_code)]
         instance_id: String,
     },
+    /// A conversation was created, activated, archived or deleted (§5.7) — or
+    /// one of its runs was found interrupted at boot (§5.6b), in which case
+    /// `task_id` names the run.
+    SessionChanged {
+        #[allow(dead_code)]
+        session_id: String,
+        lane_key: String,
+        status: String,
+        task_id: Option<String>,
+        ts: DateTime<Utc>,
+        #[allow(dead_code)]
+        instance_id: String,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -216,6 +229,33 @@ fn print_event(event: &ServerEvent) {
                 why.dimmed()
             );
         }
+        ServerEvent::SessionChanged {
+            lane_key,
+            status,
+            task_id,
+            ts,
+            ..
+        } => {
+            let time = ts.format("%H:%M:%S").to_string();
+            // §5.6b — the one status that is about a *run* rather than the
+            // conversation's own lifecycle, so it names the run.
+            let what = match task_id {
+                Some(id) => format!("[{status} {id}]"),
+                None => format!("[{status}]"),
+            };
+            let tint = if status == "interrupted" {
+                what.yellow()
+            } else {
+                what.cyan()
+            };
+            println!(
+                "{} 💬 {} {} {}",
+                time.dimmed(),
+                "session".magenta(),
+                lane_key.bold(),
+                tint
+            );
+        }
         ServerEvent::Unknown => {
             println!("{} unknown event", "?".dimmed());
         }
@@ -359,6 +399,56 @@ mod tests {
                 detail: None,
                 ..
             }
+        ));
+        print_event(&event);
+    }
+
+    /// §5.6b — the boot sweep's frame names the run it interrupted, and
+    /// `openalpaca tail` prints it instead of "unknown event".
+    #[test]
+    fn an_interrupted_session_frame_names_its_run() {
+        let frame = r#"{
+            "type": "session_changed",
+            "session_id": "s-1",
+            "lane_key": "user1:gui",
+            "status": "interrupted",
+            "task_id": "t-9",
+            "ts": "2026-09-05T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#;
+        let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
+        match event {
+            ServerEvent::SessionChanged {
+                ref session_id,
+                ref status,
+                ref task_id,
+                ..
+            } => {
+                assert_eq!(session_id, "s-1");
+                assert_eq!(status, "interrupted");
+                assert_eq!(task_id.as_deref(), Some("t-9"));
+            }
+            other => panic!("Expected SessionChanged, got {other:?}"),
+        }
+        print_event(&event);
+    }
+
+    /// A lifecycle transition carries no run; the arm must survive that.
+    #[test]
+    fn a_lifecycle_session_frame_carries_no_run() {
+        let frame = r#"{
+            "type": "session_changed",
+            "session_id": "s-1",
+            "lane_key": "user1:gui",
+            "status": "archived",
+            "task_id": null,
+            "ts": "2026-09-05T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#;
+        let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
+        assert!(matches!(
+            event,
+            ServerEvent::SessionChanged { task_id: None, .. }
         ));
         print_event(&event);
     }

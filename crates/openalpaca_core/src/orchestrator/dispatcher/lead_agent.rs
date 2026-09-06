@@ -787,6 +787,7 @@ impl TaskDispatcher {
                                     session_id: session_id.clone(),
                                     lane_key: lane_key.clone(),
                                     status: openalpaca_storage::SESSION_ACTIVE.to_string(),
+                                    task_id: None,
                                     timestamp: Utc::now(),
                                 });
                             }

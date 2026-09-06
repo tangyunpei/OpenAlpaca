@@ -262,6 +262,7 @@ impl Deps<'_> {
             session_id: session_id.to_string(),
             lane_key: lane_key.to_string(),
             status: status.to_string(),
+            task_id: None,
             timestamp: Utc::now(),
         });
     }

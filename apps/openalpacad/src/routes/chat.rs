@@ -116,6 +116,7 @@ fn target_session(
                 session_id: session_id.to_string(),
                 lane_key: session.lane_key.clone(),
                 status: openalpaca_storage::SESSION_ACTIVE.to_string(),
+                task_id: None,
                 timestamp: Utc::now(),
             });
             Ok(session.workspace_id)
