@@ -1,0 +1,200 @@
+//! The two ways a *stored* task row becomes a live run (GAP-06).
+//!
+//! Both start from a row in `task` rather than from a message, and both are
+//! deliberately asymmetric:
+//!
+//! * [`Orchestrator::rerun_task`] copies a finished run's goal onto a **new
+//!   id** and dispatches that (`201`). The original row is untouched — it is
+//!   the thing the user is re-running *against* — and the copy records where it
+//!   came from in `task.source_task_id`.
+//! * [`Orchestrator::start_task`] runs a row **under its own id** (`200`). This
+//!   is settled decision D5: a client that queued a task through
+//!   `POST /v1/tasks` is already holding that id, and handing it a different
+//!   one back would mean every reference it stored is now to the wrong row.
+//!
+//! Neither verb is a chat turn: the caller addresses a run, so nothing here
+//! goes through the gateway, the lane's history, or the model.
+
+use super::Orchestrator;
+use crate::lane::LaneKey;
+use crate::memory::scope_context::MemoryScopeContext;
+use openalpaca_storage::repository::TaskRepository;
+use openalpaca_storage::{Task, TaskStatus};
+
+/// Why a re-run or a start could not happen. Each caller formats its own
+/// response — the daemon route maps these one-to-one onto status codes.
+#[derive(Debug, PartialEq, Eq)]
+pub enum TaskLaunchError {
+    /// No such row — or (the route's own check) not this caller's run.
+    NotFound,
+    /// `rerun` on a run that has not finished. Re-running work that is still
+    /// in flight would put two agents on the same goal; steer or cancel it.
+    NotTerminal { current: &'static str },
+    /// The row carries no description, so there is no goal to dispatch. A
+    /// `POST /v1/tasks` row may legitimately be title-only.
+    NoDescription,
+    /// `start` on an id that already has a live run.
+    AlreadyRunning,
+    /// Database read failure.
+    Db(String),
+    /// The dispatcher refused — no agent template was free to lead the run.
+    Dispatch(String),
+}
+
+/// What a re-run produced: a different run, and the one it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RerunOutcome {
+    /// The **new** run's id.
+    pub task_id: String,
+    /// The run it was copied from.
+    pub source_task_id: String,
+    pub title: String,
+}
+
+/// What a `start` produced: the same id, now dispatched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartOutcome {
+    pub task_id: String,
+    pub title: String,
+    /// The run's status as the registry holds it the instant the dispatch
+    /// returned — `queued`, or already `running` if the background task got
+    /// there first. Both are true answers to "what happened?"; neither is a
+    /// promise about the round after this one.
+    pub status: String,
+}
+
+/// The goal, the lane and the project a stored row is re-launched with.
+struct RunPlan {
+    description: String,
+    title: String,
+    created_by: String,
+    lane_key: String,
+    source: String,
+    workspace: MemoryScopeContext,
+}
+
+impl RunPlan {
+    /// Reconstruct a dispatch from the row that recorded one.
+    ///
+    /// `source` comes out of the lane key (`"{user_id}:{source}"`) rather than
+    /// being invented: a run re-launched from the GUI still belongs to the lane
+    /// it was started on, and its completion report is posted there.
+    fn from_row(task: &Task) -> Result<Self, TaskLaunchError> {
+        let description = task
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .ok_or(TaskLaunchError::NoDescription)?
+            .to_string();
+        let source = LaneKey::from_str(&task.source_lane)
+            .map(|key| key.source)
+            .unwrap_or_else(|| "internal".to_string());
+        Ok(Self {
+            description,
+            title: task.title.clone(),
+            created_by: task.created_by.clone(),
+            lane_key: task.source_lane.clone(),
+            source,
+            // The row's `workspace_id` is the workspace the *request* supplied
+            // (R22), which is exactly what `for_request` takes — so a re-launch
+            // resolves its project the same way the original turn did, home
+            // fold included, and a row with no project falls back to memory
+            // scoping alone just as that turn did.
+            workspace: MemoryScopeContext::for_request(task.workspace_id.as_deref()),
+        })
+    }
+}
+
+impl Orchestrator {
+    /// Read a row, or say why it cannot be read.
+    fn launchable_row(&self, task_id: &str) -> Result<Task, TaskLaunchError> {
+        let db = self.db.as_ref().ok_or(TaskLaunchError::NotFound)?;
+        TaskRepository::new(db)
+            .get(task_id)
+            .map_err(|e| TaskLaunchError::Db(e.to_string()))?
+            .ok_or(TaskLaunchError::NotFound)
+    }
+
+    /// GAP-06's `rerun` — dispatch a **new** run from a finished one's goal.
+    ///
+    /// Refuses a run that has not finished (`NotTerminal`) and one with nothing
+    /// to re-dispatch (`NoDescription`). On success the new row carries
+    /// `source_task_id = task_id`, so the link survives a restart the way the
+    /// runs themselves do.
+    pub fn rerun_task(&self, task_id: &str) -> Result<RerunOutcome, TaskLaunchError> {
+        let row = self.launchable_row(task_id)?;
+        if !row.status.is_terminal() {
+            return Err(TaskLaunchError::NotTerminal {
+                current: row.status.as_str(),
+            });
+        }
+        let plan = RunPlan::from_row(&row)?;
+
+        let outcome = self
+            .task_dispatcher
+            .dispatch_lead_agent_rerun(
+                &plan.description,
+                plan.title,
+                &plan.created_by,
+                &plan.lane_key,
+                &plan.source,
+                plan.workspace,
+                &row.id,
+            )
+            .map_err(TaskLaunchError::Dispatch)?;
+
+        Ok(RerunOutcome {
+            task_id: outcome.task_id,
+            source_task_id: row.id,
+            title: outcome.title,
+        })
+    }
+
+    /// D5's `start` — dispatch a stored row under its own id.
+    ///
+    /// The run slot is claimed before anything else happens, so two
+    /// simultaneous starts cannot both dispatch; a claim that fails is the
+    /// `AlreadyRunning` answer, and a dispatch that fails releases it.
+    pub fn start_task(&self, task_id: &str) -> Result<StartOutcome, TaskLaunchError> {
+        let row = self.launchable_row(task_id)?;
+        let plan = RunPlan::from_row(&row)?;
+
+        if !self.shared_context.claim_run_slot(&row.id) {
+            return Err(TaskLaunchError::AlreadyRunning);
+        }
+
+        let outcome = match self.task_dispatcher.dispatch_lead_agent_with_id(
+            &row.id,
+            &plan.description,
+            plan.title,
+            &plan.created_by,
+            &plan.lane_key,
+            &plan.source,
+            plan.workspace,
+        ) {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                // Nothing is running under this id after all.
+                self.shared_context.remove_cancellation_token(&row.id);
+                return Err(TaskLaunchError::Dispatch(e));
+            }
+        };
+
+        let status = self
+            .shared_context
+            .task_registry
+            .get(&outcome.task_id)
+            .map(|entry| entry.status.as_str().to_string())
+            .unwrap_or_else(|| TaskStatus::Queued.as_str().to_string());
+
+        Ok(StartOutcome {
+            task_id: outcome.task_id,
+            title: outcome.title,
+            status,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests;

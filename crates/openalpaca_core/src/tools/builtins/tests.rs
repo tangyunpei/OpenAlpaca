@@ -319,6 +319,7 @@ mod workspace_artifact_spill {
                     outcome_kind: None,
                     artifact_count: 0,
                     workspace_id: None,
+                    source_task_id: None,
                 })
                 .unwrap();
             Self {

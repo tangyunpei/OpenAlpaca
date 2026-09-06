@@ -1298,6 +1298,7 @@ fn make_test_task() -> openalpaca_storage::Task {
         outcome_kind: None,
         artifact_count: 0,
         workspace_id: None,
+        source_task_id: None,
     }
 }
 

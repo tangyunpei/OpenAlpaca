@@ -88,6 +88,9 @@ pub async fn create_task_handler(
         // (`dispatch_lead_agent`, §4.7 item 3). `None` says "no project", which
         // is true of a row created here.
         workspace_id: None,
+        // Nor is it a re-run: `POST /v1/tasks/{id}/rerun` is the verb that
+        // fills this, and it dispatches rather than passing through here.
+        source_task_id: None,
     };
 
     // 1. Persist to DB
@@ -640,6 +643,7 @@ mod tests {
             outcome_kind: None,
             artifact_count: 0,
             workspace_id: None,
+            source_task_id: None,
         }
     }
 

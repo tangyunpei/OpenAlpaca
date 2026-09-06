@@ -17,6 +17,21 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+/// How a dispatch's persist step writes the run's row.
+///
+/// Every dispatch but one mints a fresh id, so the row cannot exist yet. The
+/// exception is D5's `start`, which re-launches a row the client already holds
+/// an id for — see [`TaskRepository::upsert_queued`].
+///
+/// [`TaskRepository::upsert_queued`]: openalpaca_storage::repository::TaskRepository::upsert_queued
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RowWrite {
+    /// A fresh id: `INSERT`.
+    Create,
+    /// D5's `start`: create-or-update on the caller's id.
+    Relaunch,
+}
+
 impl TaskDispatcher {
     /// Dispatch a task using the Lead Agent orchestration pattern.
     /// Spawns a lead agent instance from the "lead_agent" template (singleton),
@@ -30,7 +45,93 @@ impl TaskDispatcher {
         source: &str,
         workspace: MemoryScopeContext,
     ) -> Result<DispatchOutcome, String> {
-        let task_id = Uuid::new_v4().to_string();
+        self.dispatch_lead_agent_inner(
+            Uuid::new_v4().to_string(),
+            description,
+            title,
+            created_by,
+            lane_key,
+            source,
+            workspace,
+            None,
+            RowWrite::Create,
+        )
+    }
+
+    /// GAP-06's `rerun`: a **new** run carrying an old one's goal, with the
+    /// provenance link back to it (`task.source_task_id`).
+    ///
+    /// The asymmetry with [`Self::dispatch_lead_agent_with_id`] is deliberate.
+    /// A re-run is a second run of the same work, and both rows have to survive
+    /// — the original's result is the thing the user is comparing against — so
+    /// it gets a new id and answers `201`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn dispatch_lead_agent_rerun(
+        &self,
+        description: &str,
+        title: String,
+        created_by: &str,
+        lane_key: &str,
+        source: &str,
+        workspace: MemoryScopeContext,
+        source_task_id: &str,
+    ) -> Result<DispatchOutcome, String> {
+        self.dispatch_lead_agent_inner(
+            Uuid::new_v4().to_string(),
+            description,
+            title,
+            created_by,
+            lane_key,
+            source,
+            workspace,
+            Some(source_task_id.to_string()),
+            RowWrite::Create,
+        )
+    }
+
+    /// D5's `start`: run a stored row **under its own id**.
+    ///
+    /// The caller must already hold the id's run slot
+    /// ([`SharedContext::claim_run_slot`](crate::context::SharedContext::claim_run_slot))
+    /// and must release it if this returns `Err` — the claim is what stops two
+    /// simultaneous `start`s from putting two lead agents on one task id.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn dispatch_lead_agent_with_id(
+        &self,
+        task_id: &str,
+        description: &str,
+        title: String,
+        created_by: &str,
+        lane_key: &str,
+        source: &str,
+        workspace: MemoryScopeContext,
+    ) -> Result<DispatchOutcome, String> {
+        self.dispatch_lead_agent_inner(
+            task_id.to_string(),
+            description,
+            title,
+            created_by,
+            lane_key,
+            source,
+            workspace,
+            None,
+            RowWrite::Relaunch,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_lead_agent_inner(
+        &self,
+        task_id: String,
+        description: &str,
+        title: String,
+        created_by: &str,
+        lane_key: &str,
+        source: &str,
+        workspace: MemoryScopeContext,
+        source_task_id: Option<String>,
+        row_write: RowWrite,
+    ) -> Result<DispatchOutcome, String> {
         let now = Utc::now();
 
         // Spawn a lead agent instance from the singleton template.
@@ -124,8 +225,17 @@ impl TaskDispatcher {
                 // recording *that* would claim a Telegram run belonged to
                 // whatever repository the daemon started in (R22).
                 workspace_id: workspace.request_workspace_root.clone(),
+                // Set only by `rerun`, which is the only dispatch that copies
+                // another run's goal onto a new id (GAP-06).
+                source_task_id: source_task_id.clone(),
             };
-            if let Err(e) = repo.create(&task) {
+            let persisted = match row_write {
+                RowWrite::Create => repo.create(&task),
+                // D5 — the row is already there under this id, and the run
+                // about to start replaces whatever the last one left on it.
+                RowWrite::Relaunch => repo.upsert_queued(&task),
+            };
+            if let Err(e) = persisted {
                 tracing::warn!("Failed to persist lead agent task to DB: {e}");
             }
 
@@ -189,6 +299,11 @@ impl TaskDispatcher {
         workspace: MemoryScopeContext,
     ) {
         let Some(router) = self.require_router(&task_id) else {
+            // Nothing will run, so nothing will clean up after it: release the
+            // run slot D5's `start` claimed before dispatching, or that id
+            // answers "already running" until the daemon restarts. A no-op for
+            // every other dispatch — those register their token below.
+            self.shared_context.remove_cancellation_token(&task_id);
             return;
         };
 

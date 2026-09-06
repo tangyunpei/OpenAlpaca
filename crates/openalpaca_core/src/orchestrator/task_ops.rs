@@ -460,6 +460,7 @@ mod tests {
             outcome_kind: None,
             artifact_count: 0,
             workspace_id: None,
+            source_task_id: None,
         }
     }
 

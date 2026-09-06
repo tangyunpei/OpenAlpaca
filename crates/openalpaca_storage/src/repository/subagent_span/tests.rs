@@ -30,6 +30,7 @@ fn make_task(db: &Database, id: &str, status: TaskStatus) {
         outcome_kind: None,
         artifact_count: 0,
         workspace_id: None,
+        source_task_id: None,
     };
     TaskRepository::new(db).create(&task).unwrap();
     if status.is_terminal() {

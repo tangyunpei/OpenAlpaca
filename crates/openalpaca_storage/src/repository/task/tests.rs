@@ -28,6 +28,7 @@ fn make_task(id: &str, title: &str) -> Task {
         outcome_kind: None,
         artifact_count: 0,
         workspace_id: None,
+        source_task_id: None,
     }
 }
 
@@ -399,6 +400,125 @@ fn workspace_id_round_trips_and_defaults_to_none() {
         recent.iter().find(|t| t.id == "t-loose").unwrap().workspace_id,
         None
     );
+}
+
+/// Migration 037's `task.source_task_id` — the provenance link a re-run writes
+/// from the new row back to the one it copied (GAP-06). `NULL` on every row
+/// that was not born of a re-run, which is nearly all of them.
+#[test]
+fn source_task_id_round_trips_and_defaults_to_none() {
+    let db = setup_db();
+    let repo = TaskRepository::new(&db);
+
+    repo.create(&make_task("t-original", "Ship the release"))
+        .unwrap();
+    let mut copy = make_task("t-copy", "Ship the release");
+    copy.source_task_id = Some("t-original".to_string());
+    repo.create(&copy).unwrap();
+
+    assert_eq!(repo.get("t-original").unwrap().unwrap().source_task_id, None);
+    assert_eq!(
+        repo.get("t-copy")
+            .unwrap()
+            .unwrap()
+            .source_task_id
+            .as_deref(),
+        Some("t-original")
+    );
+
+    // Every list path reads the same column, so a client that lists runs can
+    // see which one a row came from without a second request.
+    let listed = repo.list_recent(10).unwrap();
+    let copy = listed.iter().find(|t| t.id == "t-copy").unwrap();
+    assert_eq!(copy.source_task_id.as_deref(), Some("t-original"));
+}
+
+// ============================================================================
+// upsert_queued — D5's `start` keeps the task id
+// ============================================================================
+
+/// The plan's acknowledged "least clean" code, isolated here so it has exactly
+/// one caller and one test: `start` re-launches a stored row **under its own
+/// id**, so the dispatcher's persist step cannot be a plain `INSERT`.
+#[test]
+fn upsert_queued_creates_a_row_that_does_not_exist_yet() {
+    let db = setup_db();
+    let repo = TaskRepository::new(&db);
+
+    let mut task = make_task("t1", "Ship the release");
+    task.description = Some("do the thing".to_string());
+    repo.upsert_queued(&task).unwrap();
+
+    let stored = repo.get("t1").unwrap().unwrap();
+    assert_eq!(stored.title, "Ship the release");
+    assert_eq!(stored.description.as_deref(), Some("do the thing"));
+    assert_eq!(stored.status, TaskStatus::Queued);
+}
+
+/// Re-launching an existing row resets it to a fresh queued run: the previous
+/// attempt's outcome, summary, progress and state are cleared, because leaving
+/// them would describe a run that is no longer the one this row names. The
+/// row's identity — its id, its creation time and its priority — survives.
+#[test]
+fn upsert_queued_relaunches_an_existing_row_in_place() {
+    let db = setup_db();
+    let repo = TaskRepository::new(&db);
+
+    let mut original = make_task("t1", "Ship the release");
+    original.priority = 7;
+    original.description = Some("first attempt".to_string());
+    repo.create(&original).unwrap();
+    repo.update_state("t1", r#"{"objective":"old"}"#, 0).unwrap();
+    repo.set_result("t1", "cancelled halfway").unwrap();
+    repo.set_outcome("t1", r#"{"summary":"partial"}"#, OutcomeKind::Mixed, 2)
+        .unwrap();
+    repo.update_status("t1", TaskStatus::Cancelled).unwrap();
+    let created_at = repo.get("t1").unwrap().unwrap().created_at;
+
+    let mut relaunch = make_task("t1", "Ship the release");
+    relaunch.description = Some("second attempt".to_string());
+    relaunch.workspace_id = Some("/Users/dev/openalpaca".to_string());
+    repo.upsert_queued(&relaunch).unwrap();
+
+    let stored = repo.get("t1").unwrap().unwrap();
+    assert_eq!(stored.status, TaskStatus::Queued);
+    assert_eq!(stored.description.as_deref(), Some("second attempt"));
+    assert_eq!(
+        stored.workspace_id.as_deref(),
+        Some("/Users/dev/openalpaca")
+    );
+    assert!(stored.result_summary.is_none(), "the old summary is gone");
+    assert!(stored.outcome_json.is_none(), "the old outcome is gone");
+    assert!(stored.outcome_kind.is_none());
+    assert_eq!(stored.artifact_count, 0);
+    assert!(stored.completed_at.is_none(), "it has not finished again");
+    assert!(stored.state_json.is_none());
+    assert_eq!(
+        stored.state_version, 0,
+        "the dispatcher's state init writes against version 0"
+    );
+
+    // Identity is not re-minted: same row, same age, same priority.
+    assert_eq!(stored.created_at, created_at);
+    assert_eq!(stored.priority, 7);
+
+    // And exactly one row still answers to the id.
+    assert_eq!(repo.list_recent(10).unwrap().len(), 1);
+}
+
+/// Idempotent in the sense the dispatcher needs: calling it twice leaves one
+/// queued row, not two rows or an error.
+#[test]
+fn upsert_queued_is_idempotent() {
+    let db = setup_db();
+    let repo = TaskRepository::new(&db);
+
+    let task = make_task("t1", "Ship the release");
+    repo.upsert_queued(&task).unwrap();
+    repo.upsert_queued(&task).unwrap();
+
+    assert_eq!(repo.list_recent(10).unwrap().len(), 1);
+    assert_eq!(repo.get("t1").unwrap().unwrap().status, TaskStatus::Queued);
 }
 
 // ============================================================================

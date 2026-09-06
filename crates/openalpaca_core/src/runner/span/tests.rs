@@ -26,6 +26,7 @@ fn setup_db() -> (tempfile::TempDir, Database) {
             outcome_kind: None,
             artifact_count: 0,
             workspace_id: None,
+            source_task_id: None,
         })
         .unwrap();
     (dir, db)

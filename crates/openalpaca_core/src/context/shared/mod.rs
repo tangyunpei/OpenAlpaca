@@ -162,6 +162,37 @@ impl SharedContext {
         tokens.insert(task_id.to_string(), token);
     }
 
+    /// Claim the run slot for `task_id`: register a token iff none is
+    /// registered, and say whether the claim succeeded.
+    ///
+    /// The compare-and-set behind D5's `start` (`POST /v1/tasks/{id}/action
+    /// {"action":"start"}`), which re-launches a stored row **under its own
+    /// id**. A registered token is what "this id is already running" means
+    /// everywhere else in the daemon, so it is also the lock: reading the map
+    /// and then dispatching would let two simultaneous `start`s both pass, and
+    /// two lead agents on one task id fight over its `state_version` and its
+    /// run log.
+    ///
+    /// The token registered here is a placeholder that nothing holds yet — the
+    /// dispatch replaces it with the run's real one a few lines later. A caller
+    /// that claims and then fails to dispatch must
+    /// [`remove_cancellation_token`](Self::remove_cancellation_token), or the
+    /// id stays claimed until the daemon restarts.
+    pub fn claim_run_slot(&self, task_id: &str) -> bool {
+        use std::collections::hash_map::Entry;
+        let mut tokens = self
+            .cancellation_tokens
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        match tokens.entry(task_id.to_string()) {
+            Entry::Occupied(_) => false,
+            Entry::Vacant(slot) => {
+                slot.insert(CancellationToken::new());
+                true
+            }
+        }
+    }
+
     /// Trigger cancellation for a task. Returns `true` if the token was found.
     pub fn cancel_task(&self, task_id: &str) -> bool {
         let tokens = self

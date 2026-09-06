@@ -505,6 +505,7 @@ fn test_build_task_outcome_with_db_and_state_json() {
         outcome_kind: None,
         artifact_count: 0,
         workspace_id: None,
+        source_task_id: None,
     };
     repo.create(&task).unwrap();
 
@@ -599,6 +600,7 @@ fn test_finalize_task_with_outcome_persists_and_reads_back() {
         outcome_kind: None,
         artifact_count: 0,
         workspace_id: None,
+        source_task_id: None,
     };
     repo.create(&task).unwrap();
 

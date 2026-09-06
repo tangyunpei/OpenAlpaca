@@ -129,5 +129,12 @@ pub struct Task {
     /// here would claim a run belonged to whatever repository the daemon
     /// happened to start in. Column added by migration 036.
     pub workspace_id: Option<String>,
+    /// The run this one was copied from — set only by `rerun` (GAP-06), which
+    /// dispatches a **new** id carrying the old row's goal.
+    ///
+    /// `None` for every other row, including one that `start` re-launched: that
+    /// verb keeps the id (D5), so there are not two runs to link. Column and
+    /// index added by migration 037.
+    pub source_task_id: Option<String>,
 }
 
