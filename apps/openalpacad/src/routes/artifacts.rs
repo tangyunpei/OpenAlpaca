@@ -115,12 +115,15 @@ fn artifact_error_status(error: &ArtifactError) -> StatusCode {
             StatusCode::NOT_FOUND
         }
         ArtifactError::Gone { .. } => StatusCode::GONE,
-        // Both are a well-formed request the store refuses on the state of the
-        // address: an image is not diffable, and a name held by a file no row
-        // describes is not writable. `NameTaken` reaches no route today — the
-        // artifact surface is read-only, and `artifact_write` is a tool — but
-        // the mapping belongs here rather than at whichever route first writes.
-        ArtifactError::NotDiffable { .. } | ArtifactError::NameTaken { .. } => StatusCode::CONFLICT,
+        // All three are a well-formed request the store refuses on the state of
+        // the address: an image is not diffable, a version above the diff cap
+        // will not be read, and a name held by a file no row describes is not
+        // writable. `NameTaken` reaches no route today — the artifact surface
+        // is read-only, and `artifact_write` is a tool — but the mapping
+        // belongs here rather than at whichever route first writes.
+        ArtifactError::NotDiffable { .. }
+        | ArtifactError::DiffTooLarge { .. }
+        | ArtifactError::NameTaken { .. } => StatusCode::CONFLICT,
     }
 }
 
@@ -392,13 +395,38 @@ pub(crate) fn list_artifact_versions(db: &Database, owner_id: &str, id: &str) ->
 /// versions, with the `+`/`-` totals the store counted from the same diff.
 ///
 /// An image or a binary answers `409` `NOT_DIFFABLE`, and that answer is
-/// final; a version whose bytes are gone is `410`, as reading it is.
-pub(crate) fn artifact_diff(db: &Database, owner_id: &str, id: &str, from: u32, to: u32) -> Response {
+/// final; a version above `MAX_DIFF_BYTES` (8 MiB) is `409` `DIFF_TOO_LARGE`
+/// and the version list's stored counts are its summary; a version whose bytes
+/// are gone is `410`, as reading it is — and, exactly as reading it does, that
+/// resolution stamps `missing_since` when the *head* is what is missing.
+///
+/// R32: only the path resolution touches the database. The two reads and the
+/// diff run on a blocking thread, because they are unbounded in the artifact's
+/// size and `Database::with_connection` holds the daemon's one connection for
+/// its whole closure — the same reason `artifact_content` reads its bytes
+/// outside `resolve_content`. The patch is decoded lossily, so an invalid byte
+/// in a nominally-text artifact reaches the UI as U+FFFD.
+pub(crate) async fn artifact_diff(
+    db: &Database,
+    owner_id: &str,
+    id: &str,
+    from: u32,
+    to: u32,
+) -> Response {
     if let Err(response) = visible(db, owner_id, id) {
         return response;
     }
-    match ArtifactStore::new(db).diff(id, from, to) {
-        Ok(diff) => Json(serde_json::json!({
+    let (from_path, to_path) = match ArtifactStore::new(db).diff_paths(id, from, to) {
+        Ok(paths) => paths,
+        Err(e) => return store_error(&e),
+    };
+    let owned_id = id.to_string();
+    let rendered = tokio::task::spawn_blocking(move || {
+        ArtifactStore::diff_files(&owned_id, from, &from_path, to, &to_path)
+    })
+    .await;
+    match rendered {
+        Ok(Ok(diff)) => Json(serde_json::json!({
             "from": diff.from,
             "to": diff.to,
             "added_lines": diff.added_lines,
@@ -407,7 +435,14 @@ pub(crate) fn artifact_diff(db: &Database, owner_id: &str, id: &str, from: u32, 
             "patch": diff.patch,
         }))
         .into_response(),
-        Err(e) => store_error(&e),
+        Ok(Err(e)) => store_error(&e),
+        // The blocking task panicked or was cancelled: neither is a store
+        // failure, so it does not go through `store_error`'s `DB_ERROR`.
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DIFF_FAILED",
+            format!("the diff task did not finish: {e}"),
+        ),
     }
 }
 
@@ -493,6 +528,7 @@ pub async fn get_artifact_diff_handler(
         params.from,
         params.to,
     )
+    .await
 }
 
 pub async fn pin_artifact_handler(

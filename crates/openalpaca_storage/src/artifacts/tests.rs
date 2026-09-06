@@ -1303,6 +1303,50 @@ fn diff_reports_a_deleted_version_as_gone() {
     );
 }
 
+/// R32. The patch is bounded by size before a byte is read: a version above
+/// `MAX_DIFF_BYTES` is `DIFF_TOO_LARGE`, not 8 MiB in memory and a Myers run
+/// over a million lines. The version rows' stored `added_lines`/`removed_lines`
+/// remain the answer for a file that big.
+///
+/// The 8 MiB is written straight to disk on purpose: `put` would have to carry
+/// the whole thing through memory to set up the same state, and the number is
+/// spelled here rather than read from the constant so that raising the cap
+/// cannot silently pass.
+#[test]
+fn a_version_over_the_diff_cap_is_diff_too_large() {
+    let f = Fixture::new();
+    let id = versions_of(&f, ArtifactKind::Markdown, &["one\n", "two\n"]);
+    let head = f.store().get(&id, OWNER).unwrap().unwrap().storage_path;
+    fs::write(&head, vec![b'x'; 8 * 1024 * 1024 + 1]).unwrap();
+
+    let err = f.store().diff(&id, 1, 2).unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<ArtifactError>()
+            .unwrap_or_else(|| panic!("not an ArtifactError: {err}"))
+            .code(),
+        "DIFF_TOO_LARGE"
+    );
+    assert!(
+        err.to_string().contains("version 2"),
+        "the refusal names the version that is too big: {err}"
+    );
+}
+
+/// One byte under the cap is an ordinary diff — the bound refuses what it says
+/// it refuses and nothing else.
+#[test]
+fn a_version_at_the_diff_cap_still_diffs() {
+    let f = Fixture::new();
+    let id = versions_of(&f, ArtifactKind::Markdown, &["one\n", "two\n"]);
+    let head = f.store().get(&id, OWNER).unwrap().unwrap().storage_path;
+    let mut body = vec![b'x'; 8 * 1024 * 1024 - 1];
+    body.push(b'\n');
+    fs::write(&head, &body).unwrap();
+
+    let diff = f.store().diff(&id, 1, 2).unwrap();
+    assert_eq!((diff.added_lines, diff.removed_lines), (1, 1));
+}
+
 // ============================================================================
 // line counting (the write-time added/removed pair)
 // ============================================================================

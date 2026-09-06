@@ -82,7 +82,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
-use similar::{ChangeTag, TextDiff};
+use similar::{ChangeTag, TextDiff, TextDiffConfig};
 
 use crate::Database;
 use crate::content_io::{fsync_dir, remove_best_effort, sha256_hex};
@@ -105,6 +105,23 @@ pub const DEFAULT_LIST_LIMIT: i64 = 50;
 /// patch — the unified-diff default, and what every diff viewer expects.
 const DIFF_CONTEXT_RADIUS: usize = 3;
 
+/// R32: the largest version, **per side**, that [`ArtifactStore::diff_files`]
+/// will read and diff.
+///
+/// Nothing caps an artifact's size on the way in (`max_artifact_bytes` defaults
+/// to 10 MiB and validation allows 100 MiB), so without this a single diff
+/// request could read 200 MiB and run Myers over millions of line tokens. Above
+/// the cap the answer is [`ArtifactError::DiffTooLarge`] and the version rows'
+/// own `added_lines`/`removed_lines` — written at *write* time, against the
+/// same pair — remain the summary.
+pub const MAX_DIFF_BYTES: u64 = 8 * 1024 * 1024;
+
+/// R32: how long [`line_counts`] may spend diffing before `similar` gives up
+/// and approximates. The read path is bounded by size; the write path cannot
+/// be (the bytes are already committed to disk by then), so it is bounded by
+/// time instead.
+const LINE_COUNT_DEADLINE: std::time::Duration = std::time::Duration::from_millis(500);
+
 // ============================================================================
 // Errors
 // ============================================================================
@@ -122,6 +139,14 @@ pub enum ArtifactError {
     VersionNotFound { id: String, version: u32 },
     /// §4.9: `kind ∈ {image, binary}` → **409** `NOT_DIFFABLE`.
     NotDiffable { id: String, kind: &'static str },
+    /// R32: one side of the diff is above [`MAX_DIFF_BYTES`] → **409**
+    /// `DIFF_TOO_LARGE`. Refused before the bytes are read, not after.
+    DiffTooLarge {
+        id: String,
+        version: u32,
+        size_bytes: u64,
+        limit: u64,
+    },
     /// R24: the head name is already held by a file no artifact row describes
     /// — a crash orphan, or something dropped into the directory by hand.
     ///
@@ -140,6 +165,7 @@ impl ArtifactError {
             Self::Gone { .. } => "ARTIFACT_GONE",
             Self::VersionNotFound { .. } => "ARTIFACT_VERSION_NOT_FOUND",
             Self::NotDiffable { .. } => "NOT_DIFFABLE",
+            Self::DiffTooLarge { .. } => "DIFF_TOO_LARGE",
             Self::NameTaken { .. } => "ARTIFACT_NAME_TAKEN",
         }
     }
@@ -158,6 +184,16 @@ impl fmt::Display for ArtifactError {
             Self::NotDiffable { id, kind } => {
                 write!(f, "artifact {id} of kind {kind} is not diffable")
             }
+            Self::DiffTooLarge {
+                id,
+                version,
+                size_bytes,
+                limit,
+            } => write!(
+                f,
+                "artifact {id} version {version} is {size_bytes} bytes, above the \
+                 {limit}-byte diff limit; its stored line counts are the summary"
+            ),
             Self::NameTaken { path } => write!(
                 f,
                 "{path} is already held by a file no artifact describes; \
@@ -799,7 +835,25 @@ impl<'a> ArtifactStore<'a> {
     /// patch is rendered from, so the pair and the patch's own `+`/`-` totals
     /// cannot disagree. Identical versions are an **empty** patch and `(0, 0)`,
     /// not an error.
+    ///
+    /// R32: this is both halves in one call, for a caller that is not holding
+    /// up anything else. An **async** caller wants [`Self::diff_paths`] and
+    /// [`Self::diff_files`] instead, with the second half on a blocking thread
+    /// — see the note on `diff_files`.
     pub fn diff(&self, id: &str, from: u32, to: u32) -> Result<ArtifactDiff> {
+        let (from_path, to_path) = self.diff_paths(id, from, to)?;
+        Self::diff_files(id, from, &from_path, to, &to_path)
+    }
+
+    /// R32, the half of [`Self::diff`] that needs the database: the kind gate
+    /// and the absolute path of each version's bytes, resolved in **one**
+    /// `with_connection` (the connection mutex is not reentrant).
+    ///
+    /// `kind ∈ {image, binary}` is [`ArtifactError::NotDiffable`]; a version
+    /// that never existed is [`ArtifactError::VersionNotFound`] and one whose
+    /// bytes are gone is [`ArtifactError::Gone`] — and, as when reading it,
+    /// an absent *head* stamps `missing_since` on the row before saying so.
+    pub fn diff_paths(&self, id: &str, from: u32, to: u32) -> Result<(PathBuf, PathBuf)> {
         self.db.with_connection(|conn| {
             let record = load_by_id(conn, id)?.ok_or_else(|| not_found(id))?;
             if let Some(kind) = record.kind
@@ -811,24 +865,49 @@ impl<'a> ArtifactStore<'a> {
                 }));
             }
 
-            let old = read_version_text(conn, &record, from)?;
-            let new = read_version_text(conn, &record, to)?;
-            let diff = TextDiff::from_lines(old.as_str(), new.as_str());
-            let (added_lines, removed_lines) = change_counts(&diff);
-            let patch = diff
-                .unified_diff()
-                .context_radius(DIFF_CONTEXT_RADIUS)
-                .header(&format!("v{from}"), &format!("v{to}"))
-                .to_string();
+            let from_path = resolve_version_path(conn, &record, Some(from))?;
+            let to_path = resolve_version_path(conn, &record, Some(to))?;
+            Ok((from_path, to_path))
+        })
+    }
 
-            Ok(ArtifactDiff {
-                from,
-                to,
-                added_lines,
-                removed_lines,
-                format: "unified",
-                patch,
-            })
+    /// R32, the half that needs no database: two reads, one [`TextDiff`], one
+    /// rendered patch. Takes no `self` precisely because it must run *outside*
+    /// [`Self::diff_paths`]'s `with_connection` — the reads and the Myers diff
+    /// are unbounded in the artifact's size, and `Database::with_connection`
+    /// holds the daemon's single connection mutex for the whole closure, so
+    /// doing this inside it stalls every other database caller.
+    ///
+    /// Bounded by [`MAX_DIFF_BYTES`] per side: a bigger version is
+    /// [`ArtifactError::DiffTooLarge`], refused off its metadata before a byte
+    /// is read.
+    ///
+    /// The bytes are decoded lossily ([`read_version_text`]), so an invalid
+    /// byte in a nominally-text artifact reaches the served patch as U+FFFD.
+    pub fn diff_files(
+        id: &str,
+        from: u32,
+        from_path: &Path,
+        to: u32,
+        to_path: &Path,
+    ) -> Result<ArtifactDiff> {
+        let old = read_version_text(id, from, from_path)?;
+        let new = read_version_text(id, to, to_path)?;
+        let diff = TextDiff::from_lines(old.as_str(), new.as_str());
+        let (added_lines, removed_lines) = change_counts(&diff);
+        let patch = diff
+            .unified_diff()
+            .context_radius(DIFF_CONTEXT_RADIUS)
+            .header(&format!("v{from}"), &format!("v{to}"))
+            .to_string();
+
+        Ok(ArtifactDiff {
+            from,
+            to,
+            added_lines,
+            removed_lines,
+            format: "unified",
+            patch,
         })
     }
 
@@ -1042,12 +1121,25 @@ fn resolve_version_path(
     Ok(path)
 }
 
-/// One version's bytes as text. Lossy on purpose: the kind is already known to
-/// be text, and a stray invalid byte is worth a replacement character in the
-/// patch rather than a failed diff.
-fn read_version_text(conn: &Connection, record: &ArtifactRecord, version: u32) -> Result<String> {
-    let path = resolve_version_path(conn, record, Some(version))?;
-    let bytes = fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+/// One version's bytes as text, refused above [`MAX_DIFF_BYTES`] off its
+/// metadata — the size is answered without reading anything.
+///
+/// Lossy on purpose: the kind is already known to be text, and a stray invalid
+/// byte is worth a replacement character in the patch rather than a failed
+/// diff.
+fn read_version_text(id: &str, version: u32, path: &Path) -> Result<String> {
+    let size = fs::metadata(path)
+        .with_context(|| format!("failed to stat {}", path.display()))?
+        .len();
+    if size > MAX_DIFF_BYTES {
+        return Err(anyhow::Error::new(ArtifactError::DiffTooLarge {
+            id: id.to_string(),
+            version,
+            size_bytes: size,
+            limit: MAX_DIFF_BYTES,
+        }));
+    }
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
@@ -1375,10 +1467,20 @@ where
 /// pair are one computation. The multiset tally this replaced was cheaper but
 /// answered a different question — under it a *moved* line was neither added
 /// nor removed, while the patch it was supposed to summarise showed both.
+///
+/// **Bounded by time** ([`LINE_COUNT_DEADLINE`]), because this runs at write
+/// time inside [`ArtifactStore::put`]'s transaction, with the connection mutex
+/// held — the size bound the read path uses is not available here, since the
+/// bytes are the ones this call is committing. On the deadline `similar`
+/// returns a valid but possibly non-minimal diff rather than failing, so the
+/// stored pair stays self-consistent with the patch that call rendered; only
+/// its minimality, not its meaning, degrades on a pathological pair.
 fn line_counts(old: &[u8], new: &[u8]) -> (i64, i64) {
     let old = String::from_utf8_lossy(old);
     let new = String::from_utf8_lossy(new);
-    change_counts(&TextDiff::from_lines(old.as_ref(), new.as_ref()))
+    let mut config = TextDiffConfig::new();
+    config.timeout(LINE_COUNT_DEADLINE);
+    change_counts(&config.diff_lines(old.as_ref(), new.as_ref()))
 }
 
 #[cfg(test)]

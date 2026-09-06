@@ -383,7 +383,7 @@ async fn another_owners_artifact_is_a_404_on_every_route() {
     let (status, _) = split(list_artifact_versions(&f.db, OWNER, &row.id)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
-    let (status, _) = split(artifact_diff(&f.db, OWNER, &row.id, 1, 2)).await;
+    let (status, _) = split(artifact_diff(&f.db, OWNER, &row.id, 1, 2).await).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
     let (status, _) = split(pin_artifact(&f.db, OWNER, &row.id, true)).await;
@@ -812,7 +812,7 @@ async fn a_text_diff_is_a_200_unified_patch() {
     let row = f.put(OWNER, "Notes", "one\n", None);
     f.put_again(OWNER, "Notes", "one\ntwo\n", None);
 
-    let (status, body) = split(artifact_diff(&f.db, OWNER, &row.id, 1, 2)).await;
+    let (status, body) = split(artifact_diff(&f.db, OWNER, &row.id, 1, 2).await).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["from"], 1);
     assert_eq!(body["to"], 2);
@@ -832,7 +832,7 @@ async fn a_diff_of_another_owners_artifact_is_a_404() {
     let row = f.put(OWNER, "Notes", "one\n", None);
     f.put_again(OWNER, "Notes", "one\ntwo\n", None);
 
-    let (status, body) = split(artifact_diff(&f.db, OTHER, &row.id, 1, 2)).await;
+    let (status, body) = split(artifact_diff(&f.db, OTHER, &row.id, 1, 2).await).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(error_code(&body), "ARTIFACT_NOT_FOUND");
 }
@@ -842,7 +842,7 @@ async fn a_diff_of_an_unknown_version_is_a_404() {
     let f = Fixture::new();
     let row = f.put(OWNER, "Notes", "one\n", None);
 
-    let (status, body) = split(artifact_diff(&f.db, OWNER, &row.id, 1, 9)).await;
+    let (status, body) = split(artifact_diff(&f.db, OWNER, &row.id, 1, 9).await).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(error_code(&body), "ARTIFACT_VERSION_NOT_FOUND");
 }
@@ -860,9 +860,90 @@ async fn a_binary_diff_is_a_409_not_diffable() {
     );
     let row = ArtifactStore::new(&f.db).put(new).expect("put").0;
 
-    let (status, body) = split(artifact_diff(&f.db, OWNER, &row.id, 1, 1)).await;
+    let (status, body) = split(artifact_diff(&f.db, OWNER, &row.id, 1, 1).await).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(error_code(&body), "NOT_DIFFABLE");
+}
+
+/// ~3.5 MiB of text: 100 000 lines, every fourth of them stamped with `salt`,
+/// so the two versions differ all the way down and the diff is real work
+/// (a few hundred milliseconds) rather than something that finishes before a
+/// second caller could ever notice it.
+fn multi_mib_text(salt: u32) -> String {
+    let filler = "-".repeat(20);
+    let mut out = String::with_capacity(4 * 1024 * 1024);
+    for line in 0..100_000u32 {
+        let mark = if line % 4 == 0 { salt } else { 0 };
+        out.push_str(&format!("line {line:06} {mark} {filler}\n"));
+    }
+    out
+}
+
+/// R32. The bytes are read and diffed *outside* the connection mutex, on a
+/// blocking thread, so a diff of two multi-MiB versions stalls nothing: while
+/// one runs, any other database work still gets the connection straight away.
+///
+/// Both other assertions keep the first one honest. `still_running` rules out
+/// a probe that simply arrived after the diff was over, and comparing the wait
+/// against the diff's own duration is what makes the bound independent of how
+/// fast the machine is: holding the lock would make the wait most of the diff,
+/// as it did before this fix (~240 ms of a ~330 ms diff).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_diff_does_not_hold_the_database_connection() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    let f = Fixture::new();
+    let row = f.put(OWNER, "Notes", &multi_mib_text(1), None);
+    f.put_again(OWNER, "Notes", &multi_mib_text(2), None);
+
+    let finished = Arc::new(AtomicBool::new(false));
+    let diff = tokio::spawn({
+        let db = f.db.clone();
+        let id = row.id.clone();
+        let finished = Arc::clone(&finished);
+        async move {
+            let started = Instant::now();
+            let response = artifact_diff(&db, OWNER, &id, 1, 2).await;
+            finished.store(true, Ordering::SeqCst);
+            (response, started.elapsed())
+        }
+    });
+
+    // Long enough for the diff to be past the part that legitimately holds the
+    // connection, short enough to be deep inside the reading and diffing.
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    let waited = tokio::task::spawn_blocking({
+        let db = f.db.clone();
+        move || {
+            let started = Instant::now();
+            db.with_connection(|_| Ok(())).expect("probe the connection");
+            started.elapsed()
+        }
+    })
+    .await
+    .expect("probe task");
+    let still_running = !finished.load(Ordering::SeqCst);
+
+    let (response, took) = diff.await.expect("diff task");
+    assert!(
+        still_running,
+        "the diff finished in {took:?}, before the probe ran — it proves nothing"
+    );
+    assert!(
+        waited < Duration::from_millis(100) && waited * 4 < took,
+        "another caller waited {waited:?} for the connection while a {took:?} diff ran"
+    );
+
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 64 << 20)
+        .await
+        .expect("read the patch");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["added_lines"], 25_000);
+    assert_eq!(body["removed_lines"], 25_000);
 }
 
 // ============================================================================
