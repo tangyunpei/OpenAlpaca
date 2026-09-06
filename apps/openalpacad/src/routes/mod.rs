@@ -89,7 +89,7 @@ pub use skills::skill_health_handler;
 pub use status::status_handler;
 pub use tasks::{
     create_task_handler, get_task_handler, get_task_timeline_handler, list_tasks_handler,
-    task_action_handler,
+    steer_task_handler, task_action_handler,
 };
 pub use tools::list_tools_handler;
 

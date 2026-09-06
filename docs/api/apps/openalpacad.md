@@ -5,7 +5,7 @@
 ## Overview
 
 - Router source: `apps/openalpacad/src/router.rs`.
-- Total documented method/path endpoints: 82.
+- Total documented method/path endpoints: 83.
 - Includes public, bearer-protected, WebSocket, and SSE routes.
 
 ## Auth
@@ -99,6 +99,7 @@
 | POST | `/v1/tasks` | `bearer` | `create_task_handler` | `CreateTaskRequest` | - | `apps/openalpacad/src/routes/tasks.rs` |
 | GET | `/v1/tasks/{id}` | `bearer` | `get_task_handler` | - | - | `apps/openalpacad/src/routes/tasks.rs` |
 | POST | `/v1/tasks/{id}/action` | `bearer` | `task_action_handler` | `TaskActionRequest` | - | `apps/openalpacad/src/routes/tasks.rs` |
+| POST | `/v1/tasks/{id}/steer` | `bearer` | `steer_task_handler` | `SteerTaskRequest` | - | `apps/openalpacad/src/routes/tasks.rs` |
 | GET | `/v1/tasks/{id}/timeline` | `bearer` | `get_task_timeline_handler` | - | - | `apps/openalpacad/src/routes/tasks.rs` |
 | GET | `/v1/tools` | `bearer` | `list_tools_handler` | - | - | `apps/openalpacad/src/routes/tools.rs` |
 
@@ -177,6 +178,10 @@
 - External or generic type; see handler source.
 
 ### `SetKeyPriorityRequest`
+
+- External or generic type; see handler source.
+
+### `SteerTaskRequest`
 
 - External or generic type; see handler source.
 

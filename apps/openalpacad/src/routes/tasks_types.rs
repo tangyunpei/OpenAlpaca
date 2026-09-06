@@ -27,6 +27,33 @@ pub struct TaskActionRequest {
     pub action: String, // "cancel", "pause", "resume"
 }
 
+/// `POST /v1/tasks/{id}/steer` (GAP-02) — a user interjection addressed at one
+/// *run*, which is what a GUI has in hand. The lane is not a field: it is read
+/// from the run's own `source_lane`, so a client cannot steer a workflow into
+/// somebody else's conversation.
+#[derive(Debug, Deserialize)]
+pub struct SteerTaskRequest {
+    pub message: String,
+    /// The project this interjection belongs to. Omitted, it is the run's own
+    /// `workspace_id`, so a message that outlives the workflow and re-enters as
+    /// an `unprocessed_steering` follow-up is scoped to the same project.
+    #[serde(default)]
+    pub workspace_path: Option<String>,
+}
+
+/// `POST /v1/tasks/{id}/steer` — what the queue accepted.
+///
+/// `accepted` is deliberately not a promise the workflow *read* the message:
+/// the rail drains at the next round boundary, so `inbox_depth` (the queue
+/// depth after this push) is the only honest acknowledgement there is.
+#[derive(Debug, Serialize)]
+pub struct SteerTaskResponse {
+    pub task_id: String,
+    pub accepted: bool,
+    pub inbox_depth: usize,
+    pub lane_key: String,
+}
+
 /// `GET /v1/tasks/{id}`.
 ///
 /// The legacy `assignments` array (`agent_task_history` rows under a serde

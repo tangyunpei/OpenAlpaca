@@ -68,6 +68,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/tasks/{id}/action",
             post(crate::routes::task_action_handler),
         )
+        // Task-addressed steering (GAP-02) — the same rail the `/steer ` chat
+        // prefix pushes into, aimed at a run instead of at a lane.
+        .route(
+            "/v1/tasks/{id}/steer",
+            post(crate::routes::steer_task_handler),
+        )
 
         .route("/v1/agents", get(crate::routes::list_agents_handler))
         .route("/v1/agents", post(crate::routes::create_agent_handler))

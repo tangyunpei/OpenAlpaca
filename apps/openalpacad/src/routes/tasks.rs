@@ -5,6 +5,7 @@
 //! GET  /v1/tasks/{id}      -> get a single task + agent runs
 //! GET  /v1/tasks/{id}/timeline -> the run's swimlanes (GAP-09)
 //! POST /v1/tasks/{id}/action -> perform action (cancel, pause, resume)
+//! POST /v1/tasks/{id}/steer  -> inject a message into a running run (GAP-02)
 //!
 //! Neither task shape carries agent runs any more: the legacy
 //! `assigned_agents` / `assignments` payload (read from `agent_task_history`)
@@ -15,21 +16,26 @@ use axum::{
     Json,
     extract::{Path, Query, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use chrono::Utc;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use openalpaca_core::bus::EventBus;
+use openalpaca_core::context::SharedContext;
+use openalpaca_core::daemon_config::RoutingConfig;
 use openalpaca_core::events::SystemEvent;
 use openalpaca_core::orchestrator::{TaskActionError, apply_task_action, parse_outcome};
+use openalpaca_core::runner::steering::{SteeringMsg, SteeringPushError, push_steering};
 use openalpaca_core::security::confirmation::ConfirmationBroker;
+use openalpaca_core::security::policy::{Principal, Scope};
 use openalpaca_storage::{
     Database, LlmUsageRepository, SPAN_DETAIL_INTERRUPTED, SubagentSpanRepository, Task,
     TaskRepository, TaskStatus,
 };
 
-use super::tasks_types::*;
+use super::{api_error, tasks_types::*};
 use crate::AppState;
 
 // ── Handlers ──────────────────────────────────────────────────────
@@ -405,9 +411,129 @@ pub async fn task_action_handler(
     }
 }
 
+// ── POST /v1/tasks/{id}/steer (GAP-02) ────────────────────────────
+//
+// Pure reuse. The steering rail is `runner/steering.rs`, it is already
+// task-addressed, and `push_steering` already publishes `WorkflowSteered` for
+// every producer — so this route is one more producer, not a second mechanism.
+// What it adds is the *address*: a GUI holds a run id, not a lane, and the
+// chat `/steer ` prefix can only aim at the lane's sole running workflow. The
+// lane the event is stamped with therefore comes from the run's own
+// `source_lane`, never from the request.
+//
+// The chat prefix is untouched: it is the CLI's and Telegram's only channel.
+
+/// Apply one steering push, as a `Response`. Split out from the handler so
+/// every status code is provable without a router or an `AppState`.
+fn steer_task(
+    db: &Database,
+    shared_context: &SharedContext,
+    bus: &EventBus,
+    routing: &RoutingConfig,
+    owner_id: &str,
+    id: &str,
+    request: SteerTaskRequest,
+) -> Response {
+    // The rollback switch governs the whole rail, so it answers before the
+    // route looks at the request or the row: with steering off there is no
+    // inbox on any workflow to inject into, and a 404/409 would misreport why.
+    if !routing.steering_enabled {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "STEERING_DISABLED",
+            "Steering is disabled — set [orchestrator.routing] steering_enabled = true to \
+             inject messages into running workflows.",
+        );
+    }
+
+    let message = request.message.trim();
+    if message.is_empty() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "EMPTY_MESSAGE",
+            "message must not be empty",
+        );
+    }
+
+    // A run this caller cannot see is a run that does not exist — the same
+    // `404` `routes/files.rs` and `routes/artifacts.rs` already answer with,
+    // rather than a `403` that would confirm the id belongs to someone.
+    let task = match TaskRepository::new(db).get(id) {
+        Ok(Some(task)) if task.created_by == owner_id => task,
+        Ok(_) => return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Task not found"),
+        Err(e) => {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string());
+        }
+    };
+
+    let msg = SteeringMsg {
+        text: message.to_string(),
+        request_id: Uuid::new_v4(),
+        // The identity a leftover message re-enters the front door with, if the
+        // workflow exits before draining it (follow-up conversion).
+        principal: Principal::User {
+            global_id: owner_id.to_string(),
+        },
+        scope: Scope::Global,
+        workspace_path: request.workspace_path.or_else(|| task.workspace_id.clone()),
+        received_at: Utc::now(),
+    };
+
+    match push_steering(shared_context, bus, &task.id, &task.source_lane, msg) {
+        Ok(inbox_depth) => Json(SteerTaskResponse {
+            task_id: task.id,
+            accepted: true,
+            inbox_depth,
+            lane_key: task.source_lane,
+        })
+        .into_response(),
+        Err(SteeringPushError::Full) => api_error(
+            StatusCode::CONFLICT,
+            "STEERING_INBOX_FULL",
+            format!(
+                "The steering queue for this run is full ({} messages) — it has not caught up \
+                 with earlier ones yet.",
+                routing.steering_inbox_cap,
+            ),
+        ),
+        // One code for both ways a run is unsteerable — it never registered an
+        // inbox (queued, or dispatched by a daemon generation that is gone) and
+        // it closed the one it had (finished or cancelled). Neither is
+        // something the caller can retry into.
+        Err(SteeringPushError::Closed) => api_error(
+            StatusCode::CONFLICT,
+            "TASK_NOT_STEERABLE",
+            "This run is not accepting steering messages — it is not running, or it has \
+             already finished.",
+        ),
+    }
+}
+
+/// POST /v1/tasks/{id}/steer
+pub async fn steer_task_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(request): Json<SteerTaskRequest>,
+) -> Response {
+    steer_task(
+        &state.db,
+        &state.gateway.shared_context,
+        &state.gateway.bus,
+        &state.daemon_config.load().orchestrator.routing,
+        &state.local_user_id,
+        &id,
+        request,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
+    use openalpaca_core::bus::EventBus;
+    use openalpaca_core::context::SharedContext;
+    use openalpaca_core::daemon_config::RoutingConfig;
+    use openalpaca_core::runner::steering::{SteeringInbox, SteeringMsg};
     use openalpaca_storage::OutcomeKind;
 
     fn make_test_task() -> Task {
@@ -1009,5 +1135,307 @@ mod tests {
         let v = serde_json::to_value(make_test_task()).unwrap();
         assert!(v.get("workspace_id").is_some());
         assert!(v["workspace_id"].is_null());
+    }
+
+    // ── POST /v1/tasks/{id}/steer (GAP-02) ────────────────────────
+
+    const STEER_OWNER: &str = "user-1";
+
+    /// A temp database holding one `Running` task owned by [`STEER_OWNER`],
+    /// on lane `lane-1`, optionally carrying a project.
+    fn steer_db(workspace_id: Option<&str>) -> (tempfile::TempDir, Database) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::open(&dir.path().join("test.db")).expect("open db");
+        let mut task = make_test_task();
+        task.status = TaskStatus::Running;
+        task.completed_at = None;
+        task.workspace_id = workspace_id.map(str::to_string);
+        TaskRepository::new(&db).create(&task).expect("create task");
+        (dir, db)
+    }
+
+    /// A live workflow: a registered inbox for `task-1`, at the given cap.
+    fn steerable(cap: usize) -> (Arc<SharedContext>, EventBus, Arc<SteeringInbox>) {
+        let shared = Arc::new(SharedContext::new());
+        let bus = EventBus::default();
+        let inbox = Arc::new(SteeringInbox::new(cap));
+        shared.register_steering_inbox("task-1", inbox.clone());
+        (shared, bus, inbox)
+    }
+
+    fn steer_request(message: &str) -> SteerTaskRequest {
+        SteerTaskRequest {
+            message: message.to_string(),
+            workspace_path: None,
+        }
+    }
+
+    /// Split a `Response` into its status and its JSON body.
+    async fn split(response: axum::response::Response) -> (StatusCode, serde_json::Value) {
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("read the response body");
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    /// The happy path: the message lands in the run's own inbox, the lane comes
+    /// from `task.source_lane` (the caller addresses a *run*, not a lane), and
+    /// the acknowledgement is the queue depth — not a promise it was read.
+    #[tokio::test]
+    async fn steering_a_running_task_queues_the_message_and_answers_with_the_depth() {
+        let (_dir, db) = steer_db(None);
+        let (shared, bus, inbox) = steerable(16);
+        let mut rx = bus.subscribe();
+
+        let (status, body) = split(steer_task(
+            &db,
+            &shared,
+            &bus,
+            &RoutingConfig::default(),
+            STEER_OWNER,
+            "task-1",
+            steer_request("  focus on the tests  "),
+        ))
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["task_id"], "task-1");
+        assert_eq!(body["accepted"], true);
+        assert_eq!(body["inbox_depth"], 1);
+        assert_eq!(body["lane_key"], "lane-1");
+
+        // The text is trimmed, and the identity is the owner's, so a leftover
+        // message re-enters the front door as this user.
+        let drained = inbox.drain_all();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].text, "focus on the tests");
+        assert_eq!(
+            drained[0].principal,
+            openalpaca_core::security::policy::Principal::User {
+                global_id: STEER_OWNER.to_string(),
+            }
+        );
+
+        // The rail's own event, from the shared push helper — no new family.
+        let mut steered = 0;
+        while let Ok(event) = rx.try_recv() {
+            if let SystemEvent::WorkflowSteered {
+                task_id, lane_key, ..
+            } = event
+            {
+                assert_eq!(task_id, "task-1");
+                assert_eq!(lane_key, "lane-1");
+                steered += 1;
+            }
+        }
+        assert_eq!(steered, 1, "exactly one WorkflowSteered");
+    }
+
+    /// The optional `workspace_path` defaults to the run's own project, so an
+    /// `unprocessed_steering` leftover re-enters scoped where the run was.
+    #[tokio::test]
+    async fn the_message_inherits_the_runs_project_unless_the_caller_names_one() {
+        let (_dir, db) = steer_db(Some("/Users/dev/openalpaca"));
+        let (shared, bus, inbox) = steerable(16);
+
+        let _ = steer_task(
+            &db,
+            &shared,
+            &bus,
+            &RoutingConfig::default(),
+            STEER_OWNER,
+            "task-1",
+            steer_request("inherit"),
+        );
+        assert_eq!(
+            inbox.drain_all()[0].workspace_path.as_deref(),
+            Some("/Users/dev/openalpaca"),
+        );
+
+        let _ = steer_task(
+            &db,
+            &shared,
+            &bus,
+            &RoutingConfig::default(),
+            STEER_OWNER,
+            "task-1",
+            SteerTaskRequest {
+                message: "override".to_string(),
+                workspace_path: Some("/tmp/other".to_string()),
+            },
+        );
+        assert_eq!(
+            inbox.drain_all()[0].workspace_path.as_deref(),
+            Some("/tmp/other"),
+        );
+    }
+
+    /// A backlogged inbox is a `409`, not a dropped message: the caller is told
+    /// the queue is full so it can offer the follow-up instead.
+    #[tokio::test]
+    async fn a_full_inbox_is_a_409_steering_inbox_full() {
+        let (_dir, db) = steer_db(None);
+        let (shared, bus, inbox) = steerable(1);
+        inbox
+            .push(SteeringMsg {
+                text: "earlier".to_string(),
+                request_id: Uuid::new_v4(),
+                principal: openalpaca_core::security::policy::Principal::System,
+                scope: openalpaca_core::security::policy::Scope::Global,
+                workspace_path: None,
+                received_at: Utc::now(),
+            })
+            .expect("seed the queue");
+
+        let (status, body) = split(steer_task(
+            &db,
+            &shared,
+            &bus,
+            &RoutingConfig::default(),
+            STEER_OWNER,
+            "task-1",
+            steer_request("one more"),
+        ))
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "STEERING_INBOX_FULL");
+        // Nothing was queued past the cap.
+        assert_eq!(inbox.drain_all().len(), 1);
+    }
+
+    /// Two ways a run stops being steerable — it never registered an inbox, or
+    /// it finished and closed the one it had — and both are the same `409`.
+    #[tokio::test]
+    async fn a_run_with_no_live_inbox_is_a_409_task_not_steerable() {
+        let (_dir, db) = steer_db(None);
+
+        // Never registered: the row exists, the workflow does not.
+        let shared = Arc::new(SharedContext::new());
+        let bus = EventBus::default();
+        let (status, body) = split(steer_task(
+            &db,
+            &shared,
+            &bus,
+            &RoutingConfig::default(),
+            STEER_OWNER,
+            "task-1",
+            steer_request("too early"),
+        ))
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "TASK_NOT_STEERABLE");
+
+        // Detached: the workflow finished and closed its inbox.
+        let (shared, bus, inbox) = steerable(16);
+        inbox.close_and_drain();
+        let (status, body) = split(steer_task(
+            &db,
+            &shared,
+            &bus,
+            &RoutingConfig::default(),
+            STEER_OWNER,
+            "task-1",
+            steer_request("too late"),
+        ))
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "TASK_NOT_STEERABLE");
+    }
+
+    /// The rollback switch answers for the whole route, before it looks at
+    /// anything else: with the rail off there is nothing to inject into.
+    #[tokio::test]
+    async fn steering_disabled_is_a_503_for_every_request() {
+        let (_dir, db) = steer_db(None);
+        let (shared, bus, inbox) = steerable(16);
+        let routing = RoutingConfig {
+            steering_enabled: false,
+            ..RoutingConfig::default()
+        };
+
+        let (status, body) = split(steer_task(
+            &db, &shared, &bus, &routing, STEER_OWNER, "task-1",
+            steer_request("go"),
+        ))
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "STEERING_DISABLED");
+        assert!(inbox.is_empty(), "nothing is queued while the rail is off");
+
+        // Not a per-task answer: an unknown run gets the same 503.
+        let (status, _) = split(steer_task(
+            &db, &shared, &bus, &routing, STEER_OWNER, "no-such-task",
+            steer_request("go"),
+        ))
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// An unknown run and another owner's run are the same `404` — a run this
+    /// caller cannot see is a run that does not exist.
+    #[tokio::test]
+    async fn an_unknown_or_foreign_run_is_a_404() {
+        let (_dir, db) = steer_db(None);
+        let (shared, bus, inbox) = steerable(16);
+
+        let (status, body) = split(steer_task(
+            &db,
+            &shared,
+            &bus,
+            &RoutingConfig::default(),
+            STEER_OWNER,
+            "no-such-task",
+            steer_request("go"),
+        ))
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "NOT_FOUND");
+
+        let (status, body) = split(steer_task(
+            &db,
+            &shared,
+            &bus,
+            &RoutingConfig::default(),
+            "someone-else",
+            "task-1",
+            steer_request("go"),
+        ))
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "NOT_FOUND");
+        assert_eq!(
+            body["error"]["message"], "Task not found",
+            "a foreign run must not read differently from a missing one"
+        );
+        assert!(inbox.is_empty());
+    }
+
+    /// An empty (or whitespace-only) message is a `400`: injecting it would
+    /// spend a round on nothing.
+    #[tokio::test]
+    async fn an_empty_message_is_a_400() {
+        let (_dir, db) = steer_db(None);
+        let (shared, bus, inbox) = steerable(16);
+
+        for message in ["", "   \n\t "] {
+            let (status, body) = split(steer_task(
+                &db,
+                &shared,
+                &bus,
+                &RoutingConfig::default(),
+                STEER_OWNER,
+                "task-1",
+                steer_request(message),
+            ))
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body["error"]["code"], "EMPTY_MESSAGE");
+        }
+        assert!(inbox.is_empty());
     }
 }
