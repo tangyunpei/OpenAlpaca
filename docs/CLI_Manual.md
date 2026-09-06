@@ -162,7 +162,9 @@ openalpaca tasks resume <task_id>
 ```
 
 Notes:
-- `--status` accepts `queued`, `running`, `completed`, `failed`, `cancelled`, `paused`, `active`.
+- `--status` accepts `queued`, `running`, `completed`, `failed`, `cancelled`, `paused`,
+  `interrupted`, `active`. `interrupted` is what the daemon writes at boot for a run it
+  was driving when it went away — terminal, but not a failure, and re-runnable.
 - `--limit` defaults to 50 (for both `list` and `log`).
 - `create` prompts for a title if the description argument is omitted; `--priority` defaults to 0.
 
