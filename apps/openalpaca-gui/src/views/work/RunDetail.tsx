@@ -29,11 +29,20 @@ import {
   type RunActionId,
 } from "@/components/work/run-actions";
 import { runEventsFromRing } from "@/components/work/run-events";
-import { toRun, type Run } from "@/components/work/run-model";
+import {
+  toRun,
+  type OutcomeArtifact,
+  type Run,
+} from "@/components/work/run-model";
+import { toFileKind } from "@/components/ui";
+import { useArtifacts } from "@/hooks/useArtifacts";
 import { useEventRing } from "@/hooks/useDaemonEvents";
 import { useTask } from "@/hooks/useTasks";
 import { useTaskTimeline } from "@/hooks/useUnbacked";
 import { isLive } from "@/components/ui";
+import { useUiStore } from "@/stores/ui";
+
+import { formatClock } from "@/components/work/run-model";
 
 import { EventLogSection } from "./EventLogSection";
 import { OutputSection } from "./OutputSection";
@@ -55,6 +64,7 @@ export function RunDetail({
   busy = null,
   onAction,
 }: RunDetailProps) {
+  const openSidePanel = useUiStore((state) => state.openSidePanel);
   const detail = useTask(runId);
   const timeline = useTaskTimeline(runId);
   const ring = useEventRing();
@@ -82,6 +92,25 @@ export function RunDetail({
   const events = useMemo(
     () => (runId === null ? [] : runEventsFromRing(ring, runId)),
     [ring, runId],
+  );
+
+  // The run's own files, with ids that open. `run.outcome.artifacts` stays the
+  // fallback for a run the list cannot answer for.
+  const files = useArtifacts(
+    { taskId: runId ?? "" },
+    { enabled: runId !== null },
+  );
+  const outputs = useMemo<OutcomeArtifact[] | null>(
+    () =>
+      files.data === undefined
+        ? null
+        : files.data.artifacts.map((artifact) => ({
+            id: artifact.id,
+            name: artifact.name,
+            kind: toFileKind(artifact.kind),
+            stamp: formatClock(artifact.updated_at),
+          })),
+    [files.data],
   );
 
   if (runId === null || run === null) {
@@ -152,7 +181,18 @@ export function RunDetail({
         assignments={assignments}
         blocked={blocked}
       />
-      <OutputSection artifacts={run.artifacts} count={run.artifactCount} />
+      <OutputSection
+        artifacts={outputs ?? run.artifacts}
+        count={run.artifactCount}
+        onOpen={(artifact) => {
+          if (artifact.id !== null) openSidePanel(artifact.id);
+        }}
+        note={
+          files.error !== null
+            ? `The run's files could not be listed — ${files.error.message}`
+            : null
+        }
+      />
       <EventLogSection events={events} />
     </div>
   );

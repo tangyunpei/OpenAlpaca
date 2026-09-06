@@ -1,27 +1,35 @@
 /**
- * The aside's file-panel mode (DESIGN_SPEC §3.23), wired to real files.
+ * The aside's file-panel mode (DESIGN_SPEC §3.23), wired to the artifact API.
  *
- * `panelArtifactId` is a `FileAsset` id — the only artifact identity the
- * daemon has (GAP-04). Everything shown here comes from
- * `GET /v1/files/{id}`: filename, mime type and `extracted_text`.
+ * `panelArtifactId` is an artifact id — the same identity the Library uses, and
+ * the same one an attachment carries, because uploads and produced files are
+ * one resource. So this panel is the Library detail at `size="compact"`: the
+ * row from `GET /v1/artifacts/{id}`, the bytes, the versions and the patch,
+ * through the very same renderers, with `previewPlan` making the same call
+ * about what may be drawn.
  *
- * The three unbacked surfaces render the design's own shell with an honest
- * note rather than invented content:
- *   * the artifact switcher would list the Library — GAP-04, no list route;
- *   * `Diff` and `History` — GAP-05, nothing versioned exists in storage;
- *   * `Library ↗` still navigates, because the Library view is real chrome
- *     even while its data is not.
+ * `Library ↗` carries the current tab across (§4.2 `openInLibrary`).
  */
 
 import { FilePanel, formatClock } from "@/components/chat";
 import { toFileKind } from "@/components/ui";
+import { ArtifactDiffTab } from "@/components/work";
 import { ArtifactPreview } from "@/components/work/preview";
-import { useArtifacts, useTogglePin } from "@/hooks/useArtifacts";
-import { useFileMetadata } from "@/hooks/useFiles";
-import { GAPS, gapNote } from "@/lib/unavailable";
+import {
+  useArtifact,
+  useArtifactDiff,
+  useArtifactText,
+  useArtifactVersions,
+  useArtifacts,
+  useTogglePin,
+} from "@/hooks/useArtifacts";
+import { artifactContentUrl } from "@/lib/api/artifacts";
+import { ApiError } from "@/lib/http";
 import { useUiStore } from "@/stores/ui";
+import { HistoryTab } from "@/views/library/HistoryTab";
+import { diffPair, previewPlan } from "@/views/library/preview";
 
-import { fileKind, fileLanguage } from "./artifact";
+import { fileLanguage } from "./artifact";
 
 /** As many rows as the design's 340px-tall dropdown can usefully show. */
 const PICKER_LIMIT = 30;
@@ -31,10 +39,19 @@ export interface FilePanelSlotProps {
 }
 
 export function FilePanelSlot({ artifactId }: FilePanelSlotProps) {
-  const metadata = useFileMetadata(artifactId);
-  // The switcher lists the Library, newest first — the same rows the Library
-  // view shows, capped to what the dropdown can hold.
+  const row = useArtifact(artifactId);
+  const model = row.data ?? null;
+
+  // The switcher lists the Library — the same rows the Library view shows,
+  // capped to what the dropdown can hold.
   const library = useArtifacts({ limit: PICKER_LIMIT });
+
+  const versions = useArtifactVersions(artifactId);
+  const pair = model === null ? null : diffPair(model);
+  const diff = useArtifactDiff(artifactId, pair?.from ?? 0, pair?.to ?? 0);
+
+  const plan = model === null ? null : previewPlan(model);
+  const content = useArtifactText(artifactId, plan?.mode === "text");
 
   const panelTab = useUiStore((s) => s.panelTab);
   const setPanelTab = useUiStore((s) => s.setPanelTab);
@@ -45,12 +62,13 @@ export function FilePanelSlot({ artifactId }: FilePanelSlotProps) {
   const backToWork = useUiStore((s) => s.backToWork);
   const closePanel = useUiStore((s) => s.closePanel);
   const openInLibrary = useUiStore((s) => s.openInLibrary);
+  const focusRun = useUiStore((s) => s.focusRun);
   const togglePin = useTogglePin();
   const pins = useUiStore((s) => s.pins);
-  const pinned = pins[artifactId] === true;
-
-  const file = metadata.data ?? null;
-  const name = file?.filename ?? null;
+  const pinned =
+    model === null
+      ? pins[artifactId] === true
+      : (pins[model.id] ?? model.pinned);
 
   const pickerItems = (library.data?.artifacts ?? []).map((entry) => ({
     id: entry.id,
@@ -62,27 +80,26 @@ export function FilePanelSlot({ artifactId }: FilePanelSlotProps) {
   }));
 
   const artifact =
-    file === null || name === null
+    model === null
       ? null
       : {
-          id: artifactId,
-          name,
-          kind: fileKind(name, file.mime_type),
-          language: fileLanguage(name),
-          // GAP-05: nothing versioned exists, so no version is claimed.
-          version: null,
-          agent: null,
-          runId: null,
+          id: model.id,
+          name: model.name,
+          kind: toFileKind(model.kind),
+          language: fileLanguage(model.name),
+          version: model.version,
+          agent: model.agent_template_id ?? model.agent_id,
+          runId: model.task_title ?? model.task_id,
         };
 
   const artifactNote =
     artifact !== null
       ? null
-      : metadata.isLoading
+      : row.isLoading
         ? "Reading the file…"
-        : metadata.error !== null
-          ? metadata.error.message
-          : gapNote(GAPS["GAP-04"]);
+        : row.error instanceof ApiError && row.error.isNotFound
+          ? "This file is not in the library any more."
+          : (row.error?.message ?? "This file could not be read.");
 
   return (
     <FilePanel
@@ -107,32 +124,72 @@ export function FilePanelSlot({ artifactId }: FilePanelSlotProps) {
       onBackToWork={backToWork}
       onClose={closePanel}
       onOpenInLibrary={openInLibrary}
+      onJumpRun={
+        model?.task_id == null
+          ? undefined
+          : () => focusRun(model.task_id as string)
+      }
       pinned={pinned}
       onTogglePin={() => togglePin.mutate({ id: artifactId, pinned: !pinned })}
-      previewNote={
-        file === null
-          ? gapNote(GAPS["GAP-04"])
-          : "This file has no extracted text to preview"
-      }
-      diffNote={gapNote(GAPS["GAP-05"])}
-      historyNote={gapNote(GAPS["GAP-05"])}
       preview={
-        artifact === null ? undefined : (
+        model === null || plan === null ? undefined : plan.mode === "image" ? (
+          <ArtifactPreview
+            size="compact"
+            meta={{ name: model.name, kind: "image" }}
+            content={null}
+            src={artifactContentUrl(model.id)}
+            note={null}
+          />
+        ) : (
           <ArtifactPreview
             size="compact"
             meta={{
-              name: artifact.name,
-              kind: artifact.kind,
-              language: artifact.language,
+              name: model.name,
+              kind: plan.mode === "text" ? plan.kind : "term",
+              language: fileLanguage(model.name),
             }}
-            content={file?.extracted_text ?? null}
+            content={plan.mode === "text" ? (content.data ?? null) : null}
             note={
-              file?.extracted_text == null
-                ? "This file has no extracted text to preview"
-                : null
+              plan.mode === "none"
+                ? plan.note
+                : content.error !== null
+                  ? content.error.message
+                  : content.isLoading
+                    ? "Reading the file…"
+                    : plan.note
             }
           />
         )
+      }
+      diff={
+        model === null ? undefined : (
+          <ArtifactDiffTab
+            size="compact"
+            diff={diff.data ?? null}
+            note={
+              pair === null
+                ? "Only one version of this file exists."
+                : diff.error !== null
+                  ? diff.error.message
+                  : diff.isLoading
+                    ? "Reading the patch…"
+                    : null
+            }
+          />
+        )
+      }
+      history={
+        versions.data === undefined ||
+        versions.data.length === 0 ? undefined : (
+          <HistoryTab versions={versions.data} size="compact" />
+        )
+      }
+      historyNote={
+        versions.error !== null
+          ? versions.error.message
+          : versions.isLoading
+            ? "Reading the history…"
+            : "No version history for this file."
       }
     />
   );

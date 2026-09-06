@@ -21,13 +21,23 @@ describe("gap registry", () => {
 
   // GAP-01/07/08a/08b/16 retired in Phase 0; GAP-19 became GAP-24 (widened to
   // both extension kinds) and GAP-22 closed with the six `plugin_*` variants
-  // C7 deleted — the family that replaced them carries `ts`/`instance_id`.
-  it("covers the 19 gaps still open from API_MAP §3", () => {
-    expect(listGaps()).toHaveLength(19);
+  // C7 deleted. Phase 3 closed four more: the artifact resource (GAP-04), its
+  // versions and diff (GAP-05), browser-loadable content (GAP-11) and
+  // server-side pins (GAP-12).
+  it("covers the 15 gaps still open from API_MAP §3", () => {
+    expect(listGaps()).toHaveLength(15);
     expect(listGaps()[0]?.id).toBe("GAP-02");
     expect(listGaps().at(-1)?.id).toBe("GAP-24");
-    expect(listGaps().map((gap) => gap.id)).not.toContain("GAP-19");
-    expect(listGaps().map((gap) => gap.id)).not.toContain("GAP-22");
+    for (const closed of [
+      "GAP-04",
+      "GAP-05",
+      "GAP-11",
+      "GAP-12",
+      "GAP-19",
+      "GAP-22",
+    ]) {
+      expect(listGaps().map((gap) => gap.id)).not.toContain(closed);
+    }
   });
 
   // §9.1: the tool half is served by `GET /v1/tools`; the `enabled` half of
@@ -42,17 +52,17 @@ describe("gap registry", () => {
 
 describe("Unavailable results", () => {
   it("carries a note that names the missing API", () => {
-    const result = unavailable("GAP-04");
+    const result = unavailable("GAP-03");
 
     expect(isAvailable(result)).toBe(false);
-    expect(result.reason).toBe("Artifact API not yet available");
-    expect(result.missingApi).toContain("/v1/artifacts");
-    expect(result.gap.id).toBe("GAP-04");
+    expect(result.reason).toBe("Follow-up API not yet available");
+    expect(result.missingApi).toContain("/followups");
+    expect(result.gap.id).toBe("GAP-03");
   });
 
   it("uses the override phrasing where the generic sentence would read wrong", () => {
-    expect(gapNote(GAPS["GAP-12"])).toBe(
-      "Pins are stored on this machine only",
+    expect(gapNote(GAPS["GAP-02"])).toBe(
+      "Steering has no direct endpoint — sent through chat as `/steer …`",
     );
   });
 
@@ -63,6 +73,6 @@ describe("Unavailable results", () => {
   });
 
   it("unwraps to the fallback rather than to fabricated data", () => {
-    expect(unwrapOr(unavailable("GAP-04"), [])).toEqual([]);
+    expect(unwrapOr(unavailable("GAP-03"), [])).toEqual([]);
   });
 });

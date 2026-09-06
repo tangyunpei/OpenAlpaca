@@ -18,14 +18,10 @@
 export type GapId =
   | "GAP-02"
   | "GAP-03"
-  | "GAP-04"
-  | "GAP-05"
   | "GAP-06"
   | "GAP-08c"
   | "GAP-09"
   | "GAP-10"
-  | "GAP-11"
-  | "GAP-12"
   | "GAP-13"
   | "GAP-14"
   | "GAP-15"
@@ -73,24 +69,13 @@ export const GAPS: Record<GapId, GapDescriptor> = {
     blocks: "Queue follow-up button; pending follow-ups list",
     fixSize: "M",
   },
-  "GAP-04": {
-    id: "GAP-04",
-    label: "Artifact API",
-    missingApi:
-      "no /v1/artifacts list route; FileAsset has no task_id/agent_id/kind",
-    proposedEndpoint: "GET /v1/artifacts?task_id=&kind=&limit=&offset=",
-    blocks:
-      "The entire Library view; per-run Files sections; inline artifact cards",
-    fixSize: "L",
-  },
-  "GAP-05": {
-    id: "GAP-05",
-    label: "Artifact version history",
-    missingApi: "nothing versioned exists in storage",
-    proposedEndpoint: "GET /v1/artifacts/{id}/versions and /diff?from=&to=",
-    blocks: "The History and Diff tabs; `v2 of 2` stamps",
-    fixSize: "L",
-  },
+  // GAP-04 (no artifact resource), GAP-05 (no versions or diff), GAP-11
+  // (content unloadable by the browser) and GAP-12 (no server-side pins) all
+  // closed with Phase 3: `/v1/artifacts*` lists, reads, versions, diffs and
+  // pins, the content routes take `?token=` inline so an `<img>` can load them,
+  // and `PUT …/pin` made the pin server state. HTML/SVG previews are *shown as
+  // source* by choice, not by absence — rendering agent markup in the webview
+  // is a security review, not a missing route, so it is not a gap.
   "GAP-06": {
     id: "GAP-06",
     label: "Re-run and Start actions",
@@ -128,26 +113,6 @@ export const GAPS: Record<GapId, GapDescriptor> = {
     proposedEndpoint: "GET /v1/events/history?task_id=&before=&event_type=",
     blocks: "The run detail's Event log",
     fixSize: "M",
-  },
-  "GAP-11": {
-    id: "GAP-11",
-    label: "Direct artifact content URLs",
-    missingApi:
-      "GET /v1/files/{id}/content is Bearer-only, so <img>/<iframe> cannot load it",
-    proposedEndpoint: "GET /v1/files/{id}/content?token=",
-    blocks: "Inline image and HTML previews",
-    fixSize: "S",
-    noteOverride:
-      "Previews are fetched into memory because the content route is header-authenticated",
-  },
-  "GAP-12": {
-    id: "GAP-12",
-    label: "Server-side pins",
-    missingApi: "no pinned column anywhere in storage",
-    proposedEndpoint: "PUT /v1/artifacts/{id}/pin — or keep pins client-side",
-    blocks: "Nothing: pins are per-machine and live in localStorage",
-    fixSize: "XS",
-    noteOverride: "Pins are stored on this machine only",
   },
   "GAP-13": {
     id: "GAP-13",

@@ -2,18 +2,12 @@
  * `ArtifactCard` (DESIGN_SPEC §3.13) — an artifact shown inline in the
  * transcript.
  *
- * Three of the card's parts have no backing API and are handled honestly
- * rather than faked:
- *   * the version chip (`v2`) — GAP-05, nothing versioned exists in storage,
- *     so the chip is rendered only when a version is actually known;
- *   * `Diff v1→v2` — GAP-05 again; the control stays visible (it is part of the
- *     design) and reports the gap when pressed instead of drawing a diff;
- *   * the preview body — the only real source is the file's extracted text
- *     (`FileAsset.extracted_text`). With no lines, the body says so and names
- *     the missing API; it never invents plausible-looking content.
- *
- * Pins are deliberately client-side (GAP-12 — no pinned column exists, and a
- * per-machine pin is the correct model for one anyway).
+ * Presentational, and honest about what it does not have: the version chip is
+ * rendered only when a version is actually known, and the preview body is the
+ * file's extracted text (`FileAsset.extracted_text`) — with no lines it says so
+ * rather than inventing plausible-looking content. `Diff` and the pin are the
+ * caller's handlers; `TranscriptArtifact` sends the first to the file panel's
+ * Diff tab and the second to `PUT /v1/artifacts/{id}/pin`.
  */
 
 import { Button, FileBadge, type FileKind } from "@/components/ui";
@@ -23,7 +17,7 @@ export interface ArtifactCardProps {
   name: string;
   kind: FileKind;
   language?: string | null;
-  /** Rendered only when a real version number is known (GAP-05). */
+  /** Rendered only when a real version number is known. */
   version?: number | null;
   /** The first lines of the artifact; the first is styled as its heading. */
   previewLines?: readonly string[];

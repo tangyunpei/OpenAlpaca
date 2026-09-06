@@ -42,9 +42,9 @@ export interface ChartBar {
 
 /**
  * What a renderer needs beyond the bytes: the header strip's byline, the
- * terminal's exit code, the image's dimensions. Every field is nullable —
- * none of it is served today (GAP-05 records no per-kind metadata), so the
- * renderers must draw correctly without any of it.
+ * terminal's exit code, the image's dimensions. Every field is nullable — the
+ * artifact row records no per-kind metadata, so the renderers must draw
+ * correctly without any of it.
  */
 export interface PreviewMeta {
   name: string;

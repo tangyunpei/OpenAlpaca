@@ -1,20 +1,17 @@
 /**
- * An `ArtifactCard` (DESIGN_SPEC §3.13) wired to a real file.
+ * An `ArtifactCard` (DESIGN_SPEC §3.13) for a file a turn referenced.
  *
- * The only artifacts the daemon can actually name today are the files a turn
- * referenced: `ChatMessage.attachments` (filename and mime inline) and the SSE
- * `done.attachments_used` ids, both resolvable through `GET /v1/files/{id}`.
- * The preview body is that file's `extracted_text` — never invented lines.
- *
- * Two card affordances have no backing API and say so instead of pretending:
- * the version chip and `Diff` are GAP-05, and the pin is client-side by design
- * (GAP-12).
+ * The card's identity comes from the attachment itself
+ * (`ChatMessage.attachments`, or the SSE `done.attachments_used` ids) and its
+ * preview body from that file's `extracted_text` — never invented lines. Its
+ * version and pin come from the artifact row, which is the same record under
+ * another route, and `Diff` opens the file panel on its Diff tab rather than
+ * drawing a patch inside a transcript card.
  */
 
 import { ArtifactCard } from "@/components/chat";
-import { useTogglePin } from "@/hooks/useArtifacts";
+import { useArtifact, useTogglePin } from "@/hooks/useArtifacts";
 import { useFileMetadata } from "@/hooks/useFiles";
-import { GAPS, gapNote } from "@/lib/unavailable";
 import { useUiStore } from "@/stores/ui";
 
 import { fileKind, fileLanguage, textPreview } from "./artifact";
@@ -26,10 +23,12 @@ export interface TranscriptArtifactProps {
 
 export function TranscriptArtifact({ attachment }: TranscriptArtifactProps) {
   const metadata = useFileMetadata(attachment.fileId);
+  const row = useArtifact(attachment.fileId);
   const openSidePanel = useUiStore((s) => s.openSidePanel);
+  const setPanelTab = useUiStore((s) => s.setPanelTab);
   const togglePin = useTogglePin();
-  const showToast = useUiStore((s) => s.showToast);
-  const pinned = useUiStore((s) => s.pins[attachment.fileId] === true);
+  const cachedPin = useUiStore((s) => s.pins[attachment.fileId]);
+  const pinned = cachedPin ?? row.data?.pinned ?? false;
 
   const name =
     attachment.filename ?? metadata.data?.filename ?? attachment.fileId;
@@ -48,7 +47,7 @@ export function TranscriptArtifact({ attachment }: TranscriptArtifactProps) {
       name={name}
       kind={fileKind(name, mime)}
       language={fileLanguage(name)}
-      version={null}
+      version={row.data?.version ?? null}
       previewLines={preview.lines}
       remainingLines={preview.remaining}
       unavailableNote={note}
@@ -57,7 +56,10 @@ export function TranscriptArtifact({ attachment }: TranscriptArtifactProps) {
       onTogglePin={() =>
         togglePin.mutate({ id: attachment.fileId, pinned: !pinned })
       }
-      onDiff={() => showToast(gapNote(GAPS["GAP-05"]))}
+      onDiff={() => {
+        openSidePanel(attachment.fileId);
+        setPanelTab("diff");
+      }}
     />
   );
 }

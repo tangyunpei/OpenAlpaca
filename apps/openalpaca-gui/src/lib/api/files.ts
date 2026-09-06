@@ -1,10 +1,10 @@
 /**
  * `/v1/files*` — metadata, download, and host-side open.
  *
- * Inline preview of file CONTENT is deliberately absent: `/content` sits behind
- * the auth middleware, so `<img src>`/`<iframe src>` cannot load it (API_MAP
- * GAP-11). The `fetch → blob → createObjectURL` workaround lands together with
- * the artifact API (GAP-04), which is what would supply a preview source.
+ * Reading content for a *preview* lives in `api/artifacts` instead: the content
+ * routes take `?token=` inline, so `artifactContentUrl` hands a browser a URL
+ * it can load and `getArtifactText` reads the characters. `downloadFile` here
+ * stays the blob a viewer saves.
  */
 
 import { apiFetch, apiFetchBlob } from "../http";
@@ -30,11 +30,6 @@ export async function downloadFile(
   });
 }
 
-/**
- * A blob object URL for `<img>`/`<iframe>`, plus its revoke function.
- * Purely a workaround for GAP-11 — delete this once the content route accepts
- * `?token=`.
- */
 /**
  * `POST /v1/files/{id}/open` — opens with the daemon host's default app. Note
  * this *opens*, it does not reveal in Finder; revealing needs a Tauri command

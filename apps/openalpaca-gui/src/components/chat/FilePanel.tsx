@@ -5,14 +5,11 @@
  * never both mounted (§8.4). `‹ Work` restores the Work pane; `›` collapses the
  * aside entirely.
  *
- * What the daemon can and cannot serve here:
- *   * the artifact switcher lists the Library — GAP-04, there is no artifact
- *     listing route, so the dropdown shows its head and says so rather than
- *     inventing rows;
- *   * `Diff` and `History` are GAP-05 — nothing versioned exists in storage;
- *   * `Preview` renders whatever the caller can actually resolve (a real file's
- *     extracted text) through `preview` — `FilePanelSlot` fills that slot with
- *     the shared §3.25 renderers at `size="compact"`.
+ * Every tab body is the caller's: `FilePanelSlot` fills `preview`, `diff` and
+ * `history` with the shared §3.25 renderers at `size="compact"`, so the panel
+ * and the Library detail show one artifact the same way. A slot left empty
+ * falls back to its note — which says what could not be read, never what the
+ * daemon cannot serve.
  */
 
 import { FileBadge, Tab, type FileKind } from "@/components/ui";
@@ -24,7 +21,7 @@ export interface PanelArtifact {
   name: string;
   kind: FileKind;
   language?: string | null;
-  /** Only when a real version is known (GAP-05 keeps this `null` today). */
+  /** Only when a real version is known. */
   version?: number | null;
   agent?: string | null;
   runId?: string | null;
@@ -64,10 +61,12 @@ export interface FilePanelProps {
   pinned: boolean;
   onTogglePin: () => void;
 
-  /** Tab bodies. Each falls back to its gap note when not supplied. */
+  /** Tab bodies. Each falls back to its note when not supplied. */
   preview?: React.ReactNode;
   previewNote?: string | null;
+  diff?: React.ReactNode;
   diffNote?: string | null;
+  history?: React.ReactNode;
   historyNote?: string | null;
 }
 
@@ -78,7 +77,8 @@ const TAB_LABEL: Record<ArtifactTab, string> = {
   history: "History",
 };
 
-function GapBody({ note }: { note: string }) {
+/** The design's empty body: the sentence, plus why there is nothing to draw. */
+function EmptyBody({ note }: { note: string }) {
   return (
     <div className="rounded-2xl border border-dashed border-line bg-raised px-[14px] py-[13px]">
       <p className="m-0 text-md text-muted-fg">Nothing to show here yet.</p>
@@ -106,7 +106,9 @@ export function FilePanel({
   onTogglePin,
   preview,
   previewNote = null,
+  diff,
   diffNote = null,
+  history,
   historyNote = null,
 }: FilePanelProps) {
   const name = artifact?.name ?? "Unknown file";
@@ -270,19 +272,21 @@ export function FilePanel({
         </div>
 
         {artifact === null && artifactNote !== null ? (
-          <GapBody note={artifactNote} />
+          <EmptyBody note={artifactNote} />
         ) : tab === "preview" ? (
           (preview ?? (
-            <GapBody
+            <EmptyBody
               note={previewNote ?? "Preview not available for this file"}
             />
           ))
         ) : tab === "diff" ? (
-          <GapBody note={diffNote ?? "Artifact diff not yet available"} />
+          (diff ?? <EmptyBody note={diffNote ?? "No diff for this file."} />)
         ) : (
-          <GapBody
-            note={historyNote ?? "Artifact version history not yet available"}
-          />
+          (history ?? (
+            <EmptyBody
+              note={historyNote ?? "No version history for this file."}
+            />
+          ))
         )}
       </div>
     </>

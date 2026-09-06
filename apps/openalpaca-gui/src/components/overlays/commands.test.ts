@@ -31,7 +31,7 @@ describe("buildCommands (§3.33)", () => {
     expect(groups).not.toContain("Approve");
   });
 
-  it("never ships a Find row — there is no artifact API to search (GAP-04)", () => {
+  it("ships no Find row: those are a query, built by the palette itself", () => {
     const labels = buildCommands(
       input({
         activeRun: { id: "b41c8e02", title: "Connector audit" },

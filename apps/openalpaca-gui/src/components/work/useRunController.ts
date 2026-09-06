@@ -109,7 +109,7 @@ export function useRunController(): RunController {
       setLibraryKind("All");
       const first = run.artifacts.find((artifact) => artifact.id !== null);
       // Without an artifact id there is nothing to select — the Library opens
-      // unfiltered rather than on a guessed row (GAP-04).
+      // unfiltered rather than on a guessed row.
       if (first?.id !== undefined && first.id !== null) openArtifact(first.id);
       else setView("library");
     },

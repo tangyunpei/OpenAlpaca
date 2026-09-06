@@ -1,9 +1,8 @@
 /**
  * `LibraryRow` (DESIGN_SPEC §3.30).
  *
- * Presentational, and typed against the *proposed* `Artifact` resource
- * (API_MAP §3, GAP-04) rather than any fixture — the day `GET /v1/artifacts`
- * lands, this row renders it unchanged.
+ * Presentational, and typed against the `Artifact` resource
+ * `GET /v1/artifacts` serves — never a fixture.
  *
  * The subtitle is `agent · run · when`. Any of the three can legitimately be
  * absent on the wire (`agent_id` and `task_title` are nullable in the proposal),

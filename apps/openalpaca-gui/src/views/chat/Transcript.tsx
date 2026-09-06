@@ -20,7 +20,6 @@ import {
 } from "@/components/chat";
 import { languageFromName, toFileKind } from "@/components/ui";
 import type { ArtifactKind } from "@/lib/api/artifacts";
-import { GAPS, gapNote } from "@/lib/unavailable";
 import { useUiStore } from "@/stores/ui";
 
 import { TranscriptArtifact } from "./TranscriptArtifact";
@@ -81,7 +80,7 @@ export function Transcript({ items, dense }: TranscriptProps) {
                 summary={item.report.summary}
                 note={
                   item.report.artifactCount > 0
-                    ? `${item.report.artifactCount} file${item.report.artifactCount === 1 ? "" : "s"} produced · ${gapNote(GAPS["GAP-04"])}`
+                    ? `${item.report.artifactCount} file${item.report.artifactCount === 1 ? "" : "s"} produced — in the Library`
                     : null
                 }
               />

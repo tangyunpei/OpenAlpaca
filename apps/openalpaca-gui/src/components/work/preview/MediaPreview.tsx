@@ -3,10 +3,9 @@
  * §3.25g draws inside the HTML card.
  *
  * `ImagePreview` keeps the dashed box as the loading/missing state and swaps in
- * the real bytes when a `src` exists. It stays the *only* state today: the
- * content route is Bearer-authenticated, so an `<img src>` pointed at the
- * daemon is rejected (GAP-11) — a caller must fetch the bytes and hand over an
- * object URL.
+ * the real bytes when a `src` exists. That `src` is the daemon's own content
+ * route with its `?token=` (`artifactContentUrl`), which the webview's CSP
+ * allows for the loopback origins; an object URL works just as well.
  *
  * `HtmlPreview` sanitizes before rendering, for the same reason
  * `DocumentPreview` does: artifact bytes are agent output.

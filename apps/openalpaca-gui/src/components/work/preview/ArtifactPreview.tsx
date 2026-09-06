@@ -2,9 +2,9 @@
  * Kind → renderer (DESIGN_SPEC §3.25). One entry point for both sizes.
  *
  * The dispatcher owns the parse step so the renderers stay presentational, and
- * it owns the *no bytes yet* state — which is the normal state today, because
- * there is no artifact API to fetch bytes from (GAP-04). In that state it
- * renders the empty card plus the caller's note rather than a fake document.
+ * it owns the *no bytes* state — still reading, too large, binary, or gone. In
+ * that state it renders the empty card plus the caller's note rather than a
+ * fake document.
  */
 
 import { useMemo } from "react";
@@ -75,7 +75,7 @@ export interface ArtifactPreviewProps {
   /** Artifact bytes as text; `null` when they have not been (or cannot be) fetched. */
   content: string | null;
   size: PreviewSize;
-  /** Object URL for image bytes — see GAP-11 for why it is not a daemon URL. */
+  /** Where the browser loads the image from — `artifactContentUrl(id)`. */
   src?: string | null;
   /** Shown under the empty sentence when `content` is `null`. */
   note?: string | null;

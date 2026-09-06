@@ -8,7 +8,7 @@
  *   * the connection row comes from the live socket and `/v1/health`.
  *
  * The Library count is **omitted**, not zeroed: there is no artifact listing
- * route (API_MAP §3, GAP-04), and a `0` beside Library would be a claim about
+ * route on the rail's own budget, and a `0` beside Library would be a claim about
  * the user's library that this app cannot make. The count returns with the API.
  */
 

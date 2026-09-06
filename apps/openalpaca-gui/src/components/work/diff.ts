@@ -3,7 +3,7 @@
  * the code preview's added/removed line states (§3.25b).
  *
  * The proposed artifact-diff endpoint returns `{ format: "unified", patch }`
- * (API_MAP GAP-05), so the client parses a real patch rather than inventing a
+ * (`GET /v1/artifacts/{id}/diff`), so the client parses a real patch rather than inventing a
  * line model. Nothing here renders; it is the parse step, and it is where the
  * `+9 / −2` counters come from — those are *counted*, never taken on trust
  * from a caller.

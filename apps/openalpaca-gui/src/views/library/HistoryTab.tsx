@@ -1,5 +1,9 @@
 /**
- * `HistoryTab` / `VersionRow`, full size (DESIGN_SPEC §3.25).
+ * `HistoryTab` / `VersionRow` (DESIGN_SPEC §3.25), in both sizes.
+ *
+ * `compact` is the chat aside's file panel and `full` the Library detail, the
+ * same pair every other artifact renderer takes — one component so the two
+ * cannot drift.
  *
  * Versions are newest first and index 0 takes the raised treatment. The
  * `+3 −1` pair is the daemon's own stored count for that write, computed from
@@ -8,6 +12,7 @@
  * and for the kinds that are not text, and is simply omitted there.
  */
 
+import type { PreviewSize } from "@/components/work/preview";
 import { cn } from "@/lib/cn";
 import type { ArtifactVersion } from "@/lib/api/artifacts";
 
@@ -15,17 +20,24 @@ import { relativeTime } from "./format";
 
 export interface HistoryTabProps {
   versions: readonly ArtifactVersion[];
+  size?: PreviewSize;
 }
 
-export function HistoryTab({ versions }: HistoryTabProps) {
+export function HistoryTab({ versions, size = "full" }: HistoryTabProps) {
   const ordered = [...versions].sort((a, b) => b.version - a.version);
   return (
-    <div className="flex max-w-[660px] flex-col gap-[8px]">
+    <div
+      className={cn(
+        "flex flex-col",
+        size === "full" ? "max-w-[660px] gap-[8px]" : "gap-[6px]",
+      )}
+    >
       {ordered.map((version, index) => (
         <VersionRow
           key={version.version}
           version={version}
           latest={index === 0}
+          size={size}
         />
       ))}
     </div>
@@ -35,13 +47,16 @@ export function HistoryTab({ versions }: HistoryTabProps) {
 interface VersionRowProps {
   version: ArtifactVersion;
   latest: boolean;
+  size: PreviewSize;
 }
 
-function VersionRow({ version, latest }: VersionRowProps) {
+function VersionRow({ version, latest, size }: VersionRowProps) {
+  const full = size === "full";
   return (
     <div
       className={cn(
-        "flex items-start gap-[12px] rounded-2xl border px-[14px] py-[12px]",
+        "flex items-start gap-[12px] rounded-2xl border",
+        full ? "px-[14px] py-[12px]" : "px-[11px] py-[9px]",
         latest
           ? "border-line-popover bg-raised"
           : "border-line-subtle bg-inactive",
@@ -51,7 +66,12 @@ function VersionRow({ version, latest }: VersionRowProps) {
         v{version.version}
       </span>
       <span className="min-w-0 flex-1">
-        <span className="block text-base-plus leading-[1.5] text-ink">
+        <span
+          className={cn(
+            "block leading-[1.5] text-ink",
+            full ? "text-base-plus" : "text-base",
+          )}
+        >
           {version.note}
         </span>
         {version.author_agent_id !== null && (

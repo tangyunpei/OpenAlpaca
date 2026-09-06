@@ -1,11 +1,11 @@
 /**
  * The work detail's `Output` card (DESIGN_SPEC §5.2, §3.27 framed variant).
  *
- * The rows come from `task.outcome.artifacts` — free-form JSON the dispatcher
- * writes, the only link between a run and what it produced. There is no
- * artifact resource (GAP-04): entries carry no stable id, no kind and no
- * content route, so a row states what the run reported and does not pretend to
- * open it. When ids appear, `onOpen` is wired and the rows become buttons.
+ * The rows are `GET /v1/artifacts?task_id=` — this run's files, with real ids,
+ * kinds and stamps, so every row opens. `task.outcome.artifacts` (free-form
+ * JSON the dispatcher writes) is the fallback for a run whose files the list
+ * cannot answer for, and those entries carry no id, so such a row states what
+ * the run reported without pretending to open it.
  */
 
 import {
@@ -16,13 +16,10 @@ import {
 } from "@/components/ui";
 import type { OutcomeArtifact } from "@/components/work/run-model";
 import { cn } from "@/lib/cn";
-import { GAPS, gapNote } from "@/lib/unavailable";
 
 /** The design's own empty sentence for this card. */
 export const OUTPUT_EMPTY =
   "Nothing produced yet. Files land here and in the Library as the run works.";
-
-const OUTPUT_NOTE = `${gapNote(GAPS["GAP-04"])} — ${GAPS["GAP-04"].missingApi}. Proposed: ${GAPS["GAP-04"].proposedEndpoint}`;
 
 export interface OutputSectionProps {
   artifacts: readonly OutcomeArtifact[];
@@ -30,17 +27,20 @@ export interface OutputSectionProps {
   count: number;
   /** Present only once artifacts have ids to open. */
   onOpen?: (artifact: OutcomeArtifact) => void;
+  /** Why the list is short or absent — a failed request, never a gap. */
+  note?: string | null;
 }
 
 export function OutputSection({
   artifacts,
   count,
   onOpen,
+  note = null,
 }: OutputSectionProps) {
   if (artifacts.length === 0) {
     return (
       <SectionCard title="Output">
-        <SectionEmpty note={count > 0 ? OUTPUT_NOTE : undefined}>
+        <SectionEmpty note={note ?? undefined}>
           {count > 0
             ? `This run reported ${count} file${count === 1 ? "" : "s"}, but none of them can be listed.`
             : OUTPUT_EMPTY}
@@ -97,9 +97,11 @@ export function OutputSection({
           );
         })}
       </div>
-      <p className="m-0 px-[16px] pt-[8px] pb-[12px] font-mono text-2xs-plus leading-[1.5] text-faint">
-        {OUTPUT_NOTE}
-      </p>
+      {note !== null && note !== "" && (
+        <p className="m-0 px-[16px] pt-[8px] pb-[12px] font-mono text-2xs-plus leading-[1.5] text-faint">
+          {note}
+        </p>
+      )}
     </SectionCard>
   );
 }

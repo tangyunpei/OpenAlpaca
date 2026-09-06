@@ -17,7 +17,7 @@
  *   `stamp`  — `completed_at` (falling back to `updated_at`) as `HH:MM`.
  *   `files`  — read out of `task.outcome.artifacts`, which is free-form JSON
  *              (`Value[]`), so entries that carry no readable name are dropped
- *              rather than rendered as a blank row (GAP-04 is why the shape is
+ *              rather than rendered as a blank row (the blob is why the shape is
  *              schema-less in the first place).
  *
  * Everything here is pure so the Work view's status → visual mapping can be
@@ -83,9 +83,11 @@ export function isSameLocalDay(a: Date, b: Date): boolean {
 // ── Artifacts referenced by a run's outcome ─────────────────────────────────
 
 /**
- * One entry of `task.outcome.artifacts`. The daemon writes free-form JSON here
- * (GAP-04: artifacts are not a resource), so every field is optional and the
- * parser keeps only what it can actually read.
+ * One entry of `task.outcome.artifacts`. The daemon writes free-form JSON
+ * here, so every field is optional and the parser keeps only what it can
+ * actually read. `GET /v1/artifacts?task_id=` is the *typed* answer to the same
+ * question, and `RunDetail` prefers it; this shape stays as the fallback and as
+ * what the run cards read.
  */
 export interface OutcomeArtifact {
   /** `null` when the entry carries no id — such a row cannot be opened. */

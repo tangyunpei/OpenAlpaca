@@ -3,7 +3,7 @@
  *
  * The header dot is green on exit 0 and red otherwise. When the exit code is
  * unknown — which is every artifact today, because nothing records per-kind
- * metadata (GAP-05) — the dot is neutral and the `exit …` text is simply
+ * metadata — the dot is neutral and the `exit …` text is simply
  * absent rather than assumed to be zero.
  */
 

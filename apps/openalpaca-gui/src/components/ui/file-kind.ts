@@ -1,9 +1,9 @@
 /**
  * Artifact kinds and their badge abbreviations (DESIGN_SPEC §3.22).
  *
- * The design names seven kinds. The proposed artifact API (API_MAP §3, GAP-04)
- * names eight — its `markdown`/`terminal` spellings plus a `binary` catch-all —
- * so the translation lives here rather than in a view.
+ * The design names seven kinds; `/v1/artifacts` serves eight — its
+ * `markdown`/`terminal` spellings plus a `binary` catch-all — so the
+ * translation lives here rather than in a view.
  *
  * The `code` badge is language-derived (`RS` in the design). With no language
  * the honest abbreviation is `SRC`, not a guessed one.

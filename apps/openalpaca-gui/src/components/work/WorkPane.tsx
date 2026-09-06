@@ -32,7 +32,6 @@ import { useTasks } from "@/hooks/useTasks";
 import { useTaskTimeline } from "@/hooks/useUnbacked";
 import { Button } from "@/components/ui";
 import { cn } from "@/lib/cn";
-import { GAPS, gapNote } from "@/lib/unavailable";
 import { useUiStore } from "@/stores/ui";
 
 import { RunCard } from "./RunCard";
@@ -47,8 +46,14 @@ import { useRunController, type RunController } from "./useRunController";
 /** Enough rows to fill the pane and the "done" counter without paging. */
 const RUN_WINDOW = 60;
 
-/** Shown under a card's file rows when they cannot be opened (GAP-04). */
-const FILES_NOTE = gapNote(GAPS["GAP-04"]);
+/**
+ * Shown under a card's file rows when the run's outcome blob names more files
+ * than it gives ids for. The rows here come from that blob, not from
+ * `/v1/artifacts` — a per-card list request for sixty cards would be a poor
+ * trade — so the note points at the two places that do have every file.
+ */
+const FILES_NOTE =
+  "Some of this run's files are not listed here — open the run, or the Library.";
 
 export interface WorkPaneProps {
   /**

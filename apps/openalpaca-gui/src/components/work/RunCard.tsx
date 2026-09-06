@@ -6,7 +6,8 @@
  * → visual mapping is testable without a query client.
  *
  * The `Files` block reads `task.outcome.artifacts`, which is free-form JSON the
- * dispatcher happens to write — there is no artifact resource (GAP-04). Rows
+ * dispatcher happens to write, not `/v1/artifacts` (a per-card list request
+ * for every card on screen would be a poor trade). Rows
  * whose entry carries no id cannot be opened, so they render as plain rows and
  * the block carries the note naming the missing API rather than pretending the
  * click does something.

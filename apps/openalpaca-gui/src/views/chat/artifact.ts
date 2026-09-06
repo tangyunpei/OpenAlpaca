@@ -1,11 +1,10 @@
 /**
  * File → artifact presentation helpers for the transcript.
  *
- * The daemon has no artifact resource (GAP-04), but it does have real files:
- * a message's `attachments` and a `done` frame's `attachments_used` are
- * `FileAsset` ids that `GET /v1/files/{id}` answers for, with a real filename,
- * mime type and `extracted_text`. Everything the chat shows about an artifact
- * comes from there — nothing is synthesised.
+ * A message's `attachments` and a `done` frame's `attachments_used` are file
+ * ids that `GET /v1/files/{id}` answers for, with a real filename, mime type
+ * and `extracted_text`; the same id is an artifact id, so the panel reads the
+ * row, its versions and its bytes. Nothing here is synthesised.
  */
 
 import { languageFromName, type FileKind } from "@/components/ui";

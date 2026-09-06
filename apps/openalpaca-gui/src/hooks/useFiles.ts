@@ -1,9 +1,9 @@
 /**
  * File metadata and host-side file actions.
  *
- * Note: inline preview of file CONTENT is not implemented — the content route
- * is header-authenticated (API_MAP GAP-11), so a browser cannot load it into
- * `<img>`/`<iframe>` directly. The blob-URL workaround lands with GAP-04.
+ * Content is read through `api/artifacts` instead: `useArtifactText` for
+ * characters and `artifactContentUrl` for the URL an `<img>` loads. `download`
+ * here is still the one that hands the viewer a blob to save.
  */
 
 import {

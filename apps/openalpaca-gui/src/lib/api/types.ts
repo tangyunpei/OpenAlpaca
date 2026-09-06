@@ -30,7 +30,7 @@ export interface TaskAssignedAgent {
   completed_at: string | null;
 }
 
-/** Free-form artifact reference parsed out of `task.outcome_json`. Schema-less by design — see GAP-04. */
+/** Free-form artifact reference parsed out of `task.outcome_json`. Schema-less by design; `/v1/artifacts?task_id=` is the typed answer. */
 export interface ParsedOutcome {
   outcome_summary: string | null;
   outcome_kind: string;

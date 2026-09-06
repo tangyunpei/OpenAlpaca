@@ -83,7 +83,7 @@ describe("TimelineSection (GAP-09)", () => {
   });
 });
 
-describe("OutputSection (GAP-04)", () => {
+describe("OutputSection", () => {
   const artifact = (patch: Partial<OutcomeArtifact> = {}): OutcomeArtifact => ({
     id: null,
     name: "findings.md",
@@ -97,10 +97,16 @@ describe("OutputSection (GAP-04)", () => {
     expect(screen.getByText(OUTPUT_EMPTY)).toBeInTheDocument();
   });
 
-  it("says so when a run counted files it cannot list, and names the route", () => {
-    render(<OutputSection artifacts={[]} count={3} />);
+  it("says so when a run counted files the list did not return", () => {
+    render(
+      <OutputSection
+        artifacts={[]}
+        count={3}
+        note="The run's files could not be listed — database is locked"
+      />,
+    );
     expect(screen.getByText(/reported 3 files/)).toBeInTheDocument();
-    expect(screen.getByText(/\/v1\/artifacts/)).toBeInTheDocument();
+    expect(screen.getByText(/database is locked/)).toBeInTheDocument();
   });
 
   it("lists what the outcome did report, unclickable without an id", () => {
