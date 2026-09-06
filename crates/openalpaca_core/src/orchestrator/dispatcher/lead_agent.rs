@@ -197,6 +197,19 @@ impl TaskDispatcher {
             timestamp: now,
         });
 
+        // §5.1: the session this run was started from, resolved once at
+        // dispatch. It is what makes the completion report land in the
+        // conversation that asked for the work, even when the user has opened
+        // another one by the time the run finishes.
+        let session_id = self.db.as_ref().and_then(|db| {
+            openalpaca_storage::ConversationRepository::new(db)
+                .active_session_id(lane_key)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(%lane_key, "Failed to resolve the lane's active session: {e}");
+                    None
+                })
+        });
+
         // Persist task to DB
         if let Some(ref db) = self.db {
             let repo = openalpaca_storage::repository::TaskRepository::new(db);
@@ -228,6 +241,7 @@ impl TaskDispatcher {
                 // Set only by `rerun`, which is the only dispatch that copies
                 // another run's goal onto a new id (GAP-06).
                 source_task_id: source_task_id.clone(),
+                session_id: session_id.clone(),
             };
             let persisted = match row_write {
                 RowWrite::Create => repo.create(&task),
@@ -269,6 +283,7 @@ impl TaskDispatcher {
             source.to_string(),
             created_by.to_string(),
             workspace,
+            session_id,
         );
 
         let ack = format!(
@@ -297,6 +312,7 @@ impl TaskDispatcher {
         source: String,
         created_by: String,
         workspace: MemoryScopeContext,
+        session_id: Option<String>,
     ) {
         let Some(router) = self.require_router(&task_id) else {
             // Nothing will run, so nothing will clean up after it: release the
@@ -632,10 +648,14 @@ impl TaskDispatcher {
                 // GAP-23: the report carries the run it closed *and* a
                 // `role='artifact'` link per file the run produced — the two
                 // things a reloaded transcript cannot otherwise know.
+                // §5.3: into the session this run was *started from*, which
+                // may since have been archived — not into whatever the lane is
+                // currently showing.
                 persist_completion_report(
                     db,
                     &lane_key,
                     &source,
+                    session_id.as_deref(),
                     content,
                     Some(actual_model.to_string()),
                     result.loop_result.total_input_tokens as i64,

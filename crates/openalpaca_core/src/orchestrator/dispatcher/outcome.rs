@@ -346,11 +346,18 @@ pub(super) fn completion_status_line(
 /// other caller — the lead's `post_update` progress note, the daemon's
 /// extension notices — passes `None`: those are lane chatter, not the run's
 /// own record. Returns the new message's id, or `None` if nothing was written.
+///
+/// `session_id` is §5.3's pin. `Some` writes into that conversation whatever
+/// the lane is currently showing — the caller has a reason to name it, and the
+/// only reason that exists is that this message belongs to a run started
+/// there. `None` means "wherever this lane is talking now", which is what lane
+/// chatter wants, and it creates the lane's session if it has none.
 #[allow(clippy::too_many_arguments)]
 pub fn persist_conversation(
     db: &openalpaca_storage::Database,
     lane_key: &str,
     source: &str,
+    session_id: Option<&str>,
     content: String,
     model: Option<String>,
     tokens_in: i64,
@@ -359,9 +366,11 @@ pub fn persist_conversation(
     task_id: Option<&str>,
 ) -> Option<i64> {
     let conv_repo = openalpaca_storage::ConversationRepository::new(db);
-    if let Err(e) = conv_repo.get_or_create_conversation(lane_key, source) {
+    if session_id.is_none()
+        && let Err(e) = conv_repo.get_or_create_active_session(lane_key, source, None)
+    {
         tracing::warn!(
-            "persist_conversation: failed to get/create conversation for lane '{}': {e}",
+            "persist_conversation: failed to get/create session for lane '{}': {e}",
             lane_key
         );
         return None;
@@ -377,12 +386,17 @@ pub fn persist_conversation(
         tokens_out: Some(tokens_out),
         duration_ms: Some(runtime_secs * 1000),
         task_id: task_id.map(str::to_string),
+        session_id: session_id.map(str::to_string),
         ..Default::default()
     };
 
     match conv_repo.insert(&msg) {
         Ok(message_id) => {
-            if let Err(e) = conv_repo.increment_message_count(lane_key) {
+            let counted = match session_id {
+                Some(id) => conv_repo.increment_message_count_for_session(id),
+                None => conv_repo.increment_message_count(lane_key),
+            };
+            if let Err(e) = counted {
                 tracing::warn!(
                     "persist_conversation: failed to increment message count for lane '{}': {e}",
                     lane_key
@@ -416,6 +430,7 @@ pub fn persist_completion_report(
     db: &openalpaca_storage::Database,
     lane_key: &str,
     source: &str,
+    session_id: Option<&str>,
     content: String,
     model: Option<String>,
     tokens_in: i64,
@@ -427,6 +442,7 @@ pub fn persist_completion_report(
         db,
         lane_key,
         source,
+        session_id,
         content,
         model,
         tokens_in,

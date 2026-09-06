@@ -1299,6 +1299,7 @@ fn make_test_task() -> openalpaca_storage::Task {
         artifact_count: 0,
         workspace_id: None,
         source_task_id: None,
+        session_id: None,
     }
 }
 
@@ -3470,4 +3471,61 @@ impl openalpaca_api::plugin_traits::PluginSkillExecutor for TombstoneStubExecuto
     fn skill_id(&self) -> &str {
         "ntriage"
     }
+}
+
+// ── Phase 7a: the turn's context is the *session's* transcript ───────
+
+/// Two sessions on one lane produce two clean transcripts (§5.1 verify): a
+/// new conversation does not inherit the previous one's tail, and the
+/// archived one still reads back in full.
+#[test]
+fn a_new_session_starts_the_context_window_clean() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    let first = repo
+        .get_or_create_active_session("user1:cli", "cli", None)
+        .unwrap();
+    for (role, content) in [("user", "what is a lane"), ("assistant", "a routing address")] {
+        repo.insert(&openalpaca_storage::ConversationMessage {
+            lane_key: "user1:cli".to_string(),
+            role: role.to_string(),
+            content: content.to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    let ctx = orch.build_context("user1:cli", "go");
+    assert_eq!(ctx.recent_messages.len(), 2);
+
+    // "New chat" on the same lane.
+    repo.create_session("user1:cli", "cli", None, None).unwrap();
+    let ctx = orch.build_context("user1:cli", "go");
+    assert!(
+        ctx.recent_messages.is_empty(),
+        "a new session must not inherit the previous conversation"
+    );
+
+    // The archived conversation is intact, not deleted.
+    assert_eq!(repo.count_by_session(&first.id).unwrap(), 2);
+
+    // And the new session's own turns show up in it, alone.
+    repo.insert(&openalpaca_storage::ConversationMessage {
+        lane_key: "user1:cli".to_string(),
+        role: "user".to_string(),
+        content: "fresh start".to_string(),
+        ..Default::default()
+    })
+    .unwrap();
+    let ctx = orch.build_context("user1:cli", "go");
+    assert_eq!(ctx.recent_messages.len(), 1);
 }

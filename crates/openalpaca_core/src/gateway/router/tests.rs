@@ -428,7 +428,7 @@ async fn test_gateway_persists_messages() {
 
     // Verify conversation master record
     let conv = repo
-        .get_conversation_by_lane("alice:telegram")
+        .get_active_session_for_lane("alice:telegram")
         .unwrap()
         .unwrap();
     assert_eq!(conv.source, "telegram");

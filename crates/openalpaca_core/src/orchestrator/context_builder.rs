@@ -23,16 +23,26 @@ impl Orchestrator {
 
         let repo = ConversationRepository::new(db);
 
-        // Step 1: Load summary from conversations table
+        // The lane's active session (migration 039). Everything below reads
+        // that conversation's own transcript, so a new session on a lane
+        // starts clean instead of inheriting the previous one's tail. `None`
+        // — a lane that has never persisted a turn through the gateway —
+        // falls back to the lane-wide read, which is what the rows written
+        // before any session existed are reachable by.
+        let session_id = repo.active_session_id(lane_key).unwrap_or_default();
+
+        // Step 1: Load summary from the session row
         let (summary_text, summary_version, last_summarized_id) =
             repo.get_summary(lane_key).unwrap_or_default();
 
         // Step 2: Load recent messages (40, not 120)
         let dcfg = self.daemon_config.load();
-        let raw_messages = match repo.list_recent_by_lane(
-            lane_key,
-            dcfg.orchestrator.memory.prompt_recent_messages as i64,
-        ) {
+        let recent_limit = dcfg.orchestrator.memory.prompt_recent_messages as i64;
+        let raw_messages = match &session_id {
+            Some(id) => repo.list_recent_by_session(id, recent_limit),
+            None => repo.list_recent_by_lane(lane_key, recent_limit),
+        };
+        let raw_messages = match raw_messages {
             Ok(msgs) => msgs,
             Err(_) => return empty,
         };
@@ -73,7 +83,15 @@ impl Orchestrator {
 
         // Step 5: Load unsummarized older messages via ID-range query (fixes 120-window bug)
         let older_window = if last_summarized_id < first_recent_id {
-            match repo.list_by_lane_id_range(lane_key, last_summarized_id, first_recent_id, 500) {
+            let older = match &session_id {
+                Some(id) => {
+                    repo.list_by_session_id_range(id, last_summarized_id, first_recent_id, 500)
+                }
+                None => {
+                    repo.list_by_lane_id_range(lane_key, last_summarized_id, first_recent_id, 500)
+                }
+            };
+            match older {
                 Ok(msgs) => msgs
                     .into_iter()
                     .filter(|msg| {

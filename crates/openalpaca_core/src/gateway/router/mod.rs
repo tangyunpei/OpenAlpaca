@@ -204,16 +204,22 @@ impl Gateway {
         // Record message on the lane
         lane.record_message();
 
-        // Persist user message
+        // Persist user message. This is where the turn resolves lane →
+        // session (§5.1): the workspace the request carried binds the
+        // session's project the first time one is seen.
         if let Some(ref p) = self.persistence {
+            let workspace_path = req.workspace_path.as_deref();
             if req.attachments.is_empty() {
-                if let Err(e) = p.persist_user_message(&lane_key_str, &req.content, &source_name) {
+                if let Err(e) =
+                    p.persist_user_message(&lane_key_str, &req.content, &source_name, workspace_path)
+                {
                     tracing::warn!("Failed to persist user message: {e}");
                 }
             } else if let Err(e) = p.persist_user_message_with_attachments(
                 &lane_key_str,
                 &req.content,
                 &source_name,
+                workspace_path,
                 &req.attachments,
             ) {
                 tracing::warn!("Failed to persist user message with attachments: {e}");

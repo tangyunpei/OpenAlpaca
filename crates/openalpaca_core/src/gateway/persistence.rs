@@ -26,10 +26,22 @@ impl GatewayPersistence {
         &self.db
     }
 
-    /// Persist a user message, ensuring the conversation master record exists.
-    pub fn persist_user_message(&self, lane_key: &str, content: &str, source: &str) -> Result<i64> {
+    /// Persist a user message, ensuring the lane has an active session.
+    ///
+    /// This is the one place per turn that resolves lane → session (§5.1):
+    /// the runtime stays lane-keyed, persistence becomes session-keyed, and
+    /// the message rows below take their `session_id` from the row this call
+    /// guarantees exists. `workspace_path` binds the session's project the
+    /// first time one is seen and is ignored thereafter.
+    pub fn persist_user_message(
+        &self,
+        lane_key: &str,
+        content: &str,
+        source: &str,
+        workspace_path: Option<&str>,
+    ) -> Result<i64> {
         let repo = ConversationRepository::new(&self.db);
-        repo.get_or_create_conversation(lane_key, source)?;
+        repo.get_or_create_active_session(lane_key, source, workspace_path)?;
         let id = repo.insert(&ConversationMessage {
             lane_key: lane_key.to_string(),
             role: "user".to_string(),
@@ -47,10 +59,11 @@ impl GatewayPersistence {
         lane_key: &str,
         content: &str,
         source: &str,
+        workspace_path: Option<&str>,
         attachments: &[ResolvedAttachment],
     ) -> Result<i64> {
         let repo = ConversationRepository::new(&self.db);
-        repo.get_or_create_conversation(lane_key, source)?;
+        repo.get_or_create_active_session(lane_key, source, workspace_path)?;
 
         // Build content_json
         let mut parts = Vec::with_capacity(attachments.len() + 1);
@@ -200,7 +213,7 @@ mod tests {
         let persistence = GatewayPersistence::new(db.clone());
 
         let id = persistence
-            .persist_user_message_with_attachments("user1:gui", "", "gui", &[sample_attachment()])
+            .persist_user_message_with_attachments("user1:gui", "", "gui", None, &[sample_attachment()])
             .expect("persist message");
         assert!(id > 0);
 
@@ -237,6 +250,7 @@ mod tests {
                 "user2:gui",
                 "please analyze",
                 "gui",
+                None,
                 &[sample_attachment()],
             )
             .expect("persist message");
@@ -273,6 +287,7 @@ mod tests {
                 "user3:gui",
                 "review this resume",
                 "gui",
+                None,
                 &[sample_attachment_with_text(
                     "Candidate has 5 years experience",
                 )],

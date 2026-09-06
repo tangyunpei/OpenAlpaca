@@ -506,6 +506,7 @@ fn test_build_task_outcome_with_db_and_state_json() {
         artifact_count: 0,
         workspace_id: None,
         source_task_id: None,
+        session_id: None,
     };
     repo.create(&task).unwrap();
 
@@ -601,6 +602,7 @@ fn test_finalize_task_with_outcome_persists_and_reads_back() {
         artifact_count: 0,
         workspace_id: None,
         source_task_id: None,
+        session_id: None,
     };
     repo.create(&task).unwrap();
 
@@ -935,6 +937,7 @@ fn test_completion_report_links_the_runs_produced_artifacts() {
         &db,
         "user1:cli",
         "cli",
+        None,
         "Done — two files written.".to_string(),
         None,
         0,
@@ -971,6 +974,7 @@ fn test_completion_report_with_no_artifacts_links_nothing() {
         &db,
         "user1:cli",
         "cli",
+        None,
         "Done — nothing to show.".to_string(),
         None,
         0,
@@ -1007,6 +1011,7 @@ fn test_plain_persist_conversation_leaves_the_run_link_null() {
         &db,
         "user1:cli",
         "cli",
+        None,
         "Halfway there.".to_string(),
         None,
         0,
@@ -1205,4 +1210,51 @@ async fn the_run_slot_is_held_until_the_row_is_terminal() {
         // against the wall-clock deadline on a loaded test runner.
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
     }
+}
+
+/// §5.3: the completion report is written into the session the run was
+/// *started from*, even after the user has opened another conversation on the
+/// same lane — the report belongs to the exchange that asked for the work.
+#[test]
+fn test_completion_report_lands_in_the_session_that_started_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+
+    let origin = repo
+        .get_or_create_active_session("user1:cli", "cli", None)
+        .unwrap();
+    let current = repo.create_session("user1:cli", "cli", None, None).unwrap();
+
+    outcome::persist_completion_report(
+        &db,
+        "user1:cli",
+        "cli",
+        Some(&origin.id),
+        "Done — while you were elsewhere.".to_string(),
+        None,
+        0,
+        0,
+        0,
+        "task-1",
+    );
+
+    let there = repo.list_by_session(&origin.id, 50, 0).unwrap();
+    assert_eq!(there.len(), 1, "the report lands in its own conversation");
+    assert_eq!(there[0].task_id.as_deref(), Some("task-1"));
+    assert_eq!(
+        repo.get_session(&origin.id).unwrap().unwrap().message_count,
+        1,
+        "and is counted there"
+    );
+
+    assert!(
+        repo.list_by_session(&current.id, 50, 0).unwrap().is_empty(),
+        "the conversation the user opened since is untouched"
+    );
+    assert_eq!(
+        repo.get_session(&current.id).unwrap().unwrap().status,
+        openalpaca_storage::SESSION_ACTIVE,
+        "and stays the live one — a report does not re-home the lane"
+    );
 }

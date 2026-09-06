@@ -1186,6 +1186,9 @@ impl BuiltInTool for PostUpdateTool {
                 db,
                 &self.lane_key,
                 &self.source,
+                // Lane chatter goes wherever the lane is talking now — only
+                // the completion report is pinned to the run's own session.
+                None,
                 message.to_string(),
                 None,
                 0,

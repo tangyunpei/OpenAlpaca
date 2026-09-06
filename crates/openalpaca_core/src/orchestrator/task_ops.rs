@@ -461,6 +461,7 @@ mod tests {
             artifact_count: 0,
             workspace_id: None,
             source_task_id: None,
+            session_id: None,
         }
     }
 
