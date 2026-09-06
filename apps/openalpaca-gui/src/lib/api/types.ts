@@ -55,6 +55,14 @@ export interface Task {
    * such field yet; that unification is a later phase (see `run-model.ts`).
    */
   cost_usd?: number;
+  /**
+   * List route only (R38) — how many agents the run spawned, from one grouped
+   * `subagent_span` query per page. This is what is left of the
+   * `assigned_agents` array P8 deleted: a count, not names. A span opens at
+   * spawn, so an agent still working is counted. Absent on the detail route,
+   * and on a daemon older than the field.
+   */
+  subagent_count?: number;
 }
 
 /**

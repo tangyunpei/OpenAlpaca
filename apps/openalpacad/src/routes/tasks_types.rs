@@ -92,7 +92,12 @@ pub struct TaskTimelineResponse {
 ///
 /// The `assigned_agents` summary array went with P8: a run's agents are the
 /// timeline's business (`GET /v1/tasks/{id}/timeline`), and building it here
-/// cost one `agent_task_history` query per row of every page.
+/// cost one `agent_task_history` query per row of every page. What a list row
+/// keeps of it is `subagent_count` — how many agents the run spawned, from one
+/// grouped `SubagentSpanRepository::counts_for_tasks` query over the page's
+/// ids, defaulted to 0 for a run with no spans. Counting spans means an agent
+/// still working is counted; `agent_task_history` only ever knew about the
+/// ones that had already returned.
 #[derive(Debug, Serialize)]
 pub struct TaskSummaryResponse {
     #[serde(flatten)]
@@ -100,4 +105,5 @@ pub struct TaskSummaryResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<ParsedOutcomeFields>,
     pub cost_usd: f64,
+    pub subagent_count: i64,
 }

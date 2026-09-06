@@ -213,6 +213,12 @@ export interface Run {
   finishedAt: Date | null;
   /** `task.cost_usd` (list route only — GAP-08b) — `null`, never guessed. */
   costUsd: number | null;
+  /**
+   * `task.subagent_count` (list route only — R38): how many agents the run
+   * spawned. `null` when the route does not serve it, which is not the same
+   * as the `0` a run the lead handled alone reports.
+   */
+  subagentCount: number | null;
 }
 
 /**
@@ -252,8 +258,13 @@ export function runDurationMs(task: Task, now: Date): number | null {
 }
 
 /**
- * `11m 04s · 5/8 steps · $0.41`. The cost segment is added only when
- * `task.cost_usd` is a number — omitted, never estimated, when it is not.
+ * `11m 04s · 5/8 steps · 3 agents · $0.41`. The cost segment is added only
+ * when `task.cost_usd` is a number — omitted, never estimated, when it is not.
+ *
+ * The agent segment (R38) is the per-run signal the list route lost with P8.
+ * Zero is omitted rather than rendered: unlike a cost, "no agents" is the
+ * ordinary shape of a run the lead handled alone, and the detail route does
+ * not serve the field at all.
  */
 export function runMeta(task: Task, now: Date): string {
   const segments: string[] = [];
@@ -262,6 +273,10 @@ export function runMeta(task: Task, now: Date): string {
   const { progress_current: current, progress_total: total } = task;
   if (total !== null && total > 0) {
     segments.push(`${current ?? 0}/${total} steps`);
+  }
+  const agents = task.subagent_count;
+  if (typeof agents === "number" && agents > 0) {
+    segments.push(`${agents} ${agents === 1 ? "agent" : "agents"}`);
   }
   if (typeof task.cost_usd === "number") {
     segments.push(`$${task.cost_usd.toFixed(2)}`);
@@ -291,6 +306,8 @@ export function toRun(task: Task, now: Date = new Date()): Run {
     finishedAt:
       parseTimestamp(task.completed_at) ?? parseTimestamp(task.updated_at),
     costUsd: typeof task.cost_usd === "number" ? task.cost_usd : null,
+    subagentCount:
+      typeof task.subagent_count === "number" ? task.subagent_count : null,
   };
 }
 

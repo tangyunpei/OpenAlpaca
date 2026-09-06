@@ -326,6 +326,44 @@ impl<'a> SubagentSpanRepository<'a> {
         })
     }
 
+    /// How many spans each of the given runs opened, keyed by task id — the
+    /// per-run agent count `GET /v1/tasks` serves.
+    ///
+    /// One grouped query for the whole page, the same shape
+    /// [`LlmUsageRepository::cost_for_tasks`] uses for the page's costs: the
+    /// `assigned_agents` array P8 deleted cost one `agent_task_history` read
+    /// per row of every list page. A run with no spans is absent from the map,
+    /// and the caller reports `0`.
+    ///
+    /// [`LlmUsageRepository::cost_for_tasks`]: crate::LlmUsageRepository::cost_for_tasks
+    pub fn counts_for_tasks(
+        &self,
+        task_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, i64>> {
+        if task_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        self.db.with_connection(|conn| {
+            let placeholders: String = task_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "SELECT task_id, COUNT(*) FROM subagent_span \
+                 WHERE task_id IN ({placeholders}) GROUP BY task_id"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let params: Vec<&dyn rusqlite::ToSql> = task_ids
+                .iter()
+                .map(|id| id as &dyn rusqlite::ToSql)
+                .collect();
+            let rows = stmt
+                .query_map(params.as_slice(), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })?
+                .collect::<std::result::Result<std::collections::HashMap<_, _>, _>>()
+                .context("Failed to read subagent span counts by task")?;
+            Ok(rows)
+        })
+    }
+
     /// Boot-time sweep: a span still `running` on a task that has already
     /// reached a terminal state belongs to a dead daemon generation — the
     /// tokio task that would have closed it is gone. Report it as `cancelled`

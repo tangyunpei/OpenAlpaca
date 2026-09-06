@@ -79,6 +79,12 @@ struct TaskItem {
     #[serde(default)]
     priority: i32,
     created_at: Option<String>,
+    /// How many agents the run spawned, from one grouped `subagent_span`
+    /// query per page (R38). `#[serde(default)]` because a daemon older than
+    /// the field omits it — 0 then reads the same as a run that spawned none,
+    /// which is the honest thing a count can say without a second call.
+    #[serde(default)]
+    subagent_count: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -176,11 +182,18 @@ struct EventHistoryPage {
 }
 
 impl TableRow for TaskItem {
-    /// No AGENTS column: the list route no longer carries `assigned_agents`
-    /// (P8), and a per-row timeline call would be one request per row.
-    /// `openalpaca tasks status <id>` shows a run's lanes.
+    /// AGENTS is a *count* now, not the names the deleted `assigned_agents`
+    /// array carried (P8): the list route serves `subagent_count` from one
+    /// grouped `subagent_span` query per page, so the column costs no extra
+    /// request. `openalpaca tasks status <id>` names the agents.
     fn headers() -> Vec<(&'static str, usize)> {
-        vec![("ID", 10), ("TITLE", 30), ("STATUS", 12), ("CREATED", 20)]
+        vec![
+            ("ID", 10),
+            ("TITLE", 30),
+            ("STATUS", 12),
+            ("AGENTS", 8),
+            ("CREATED", 20),
+        ]
     }
 
     fn table_row(&self) -> String {
@@ -188,6 +201,13 @@ impl TableRow for TaskItem {
             &self.id[..8]
         } else {
             &self.id
+        };
+        // `-`, as the empty array read before P8: a bare `0` in a column of
+        // numbers looks like a lookup that failed.
+        let agents = if self.subagent_count > 0 {
+            self.subagent_count.to_string()
+        } else {
+            "-".to_string()
         };
         let created = self
             .created_at
@@ -198,10 +218,11 @@ impl TableRow for TaskItem {
             .collect::<String>();
 
         format!(
-            "{:<10} {:<30} {:<12} {:<20}",
+            "{:<10} {:<30} {:<12} {:<8} {:<20}",
             short_id,
             truncate(&self.title, 28),
             status_color(&self.status),
+            agents,
             created,
         )
     }
@@ -460,6 +481,69 @@ async fn create_task(description: Option<String>, priority: i32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `colored` decides by tty at first use; pin it off so a table row's
+    /// cells can be read literally.
+    fn plain() {
+        colored::control::set_override(false);
+    }
+
+    fn item(subagent_count: i64) -> TaskItem {
+        TaskItem {
+            id: "task-1234-5678".to_string(),
+            title: "Audit".to_string(),
+            status: "running".to_string(),
+            priority: 0,
+            created_at: Some("2026-09-04T09:15:00.000Z".to_string()),
+            subagent_count,
+        }
+    }
+
+    /// R38 — the AGENTS column is back, as the count the list route now
+    /// carries (`subagent_count`, one grouped `subagent_span` query per page)
+    /// rather than the per-row `agent_task_history` array P8 deleted.
+    #[test]
+    fn task_list_rows_count_the_agents_a_run_spawned() {
+        plain();
+        assert!(
+            TaskItem::headers().iter().any(|(name, _)| *name == "AGENTS"),
+            "the list table names the column"
+        );
+
+        let row = item(3).table_row();
+        let cells: Vec<&str> = row.split_whitespace().collect();
+        assert_eq!(
+            cells,
+            vec!["task-123", "Audit", "running", "3", "2026-09-04T09:15:00"]
+        );
+    }
+
+    /// A run that spawned nothing reads `-`, the same as the deleted array's
+    /// empty case — not a bare `0`, which looks like a failed lookup.
+    #[test]
+    fn task_list_rows_show_a_dash_for_a_run_that_spawned_nothing() {
+        plain();
+        let row = item(0).table_row();
+        let cells: Vec<&str> = row.split_whitespace().collect();
+        assert_eq!(cells[3], "-");
+    }
+
+    /// A daemon older than the field omits it; the row must still render.
+    #[test]
+    fn a_task_row_from_a_daemon_without_the_count_reads_as_none() {
+        plain();
+        let item: TaskItem = serde_json::from_value(serde_json::json!({
+            "id": "task-1234-5678",
+            "title": "Audit",
+            "status": "running",
+            "created_at": "2026-09-04T09:15:00.000Z",
+        }))
+        .expect("a row without subagent_count still deserializes");
+        assert_eq!(item.subagent_count, 0);
+        let row = item.table_row();
+        let cells: Vec<&str> = row.split_whitespace().collect();
+        assert_eq!(cells[3], "-");
+    }
 
     fn task() -> TaskInner {
         TaskInner {

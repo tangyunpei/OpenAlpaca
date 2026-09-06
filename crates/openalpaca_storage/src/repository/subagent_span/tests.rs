@@ -296,3 +296,74 @@ fn run_counts_on_an_empty_table_are_empty() {
             .is_empty()
     );
 }
+
+// ── Span counts per task (the list route's AGENTS signal) ─────────
+
+/// One grouped query over a whole page of task ids, the same shape
+/// `LlmUsageRepository::cost_for_tasks` uses for the page's costs — never one
+/// query per row, which is what the deleted `agent_task_history` summary cost.
+#[test]
+fn span_counts_group_every_span_by_its_task() {
+    let db = setup_db();
+    make_task(&db, "t1", TaskStatus::Running);
+    make_task(&db, "t2", TaskStatus::Completed);
+    make_task(&db, "t3", TaskStatus::Running);
+    open(&db, "t1", "n1", "review_agent");
+    open(&db, "t1", "n2", "writing_agent");
+    open(&db, "t2", "n3", "review_agent");
+
+    // A closed span still counts, and so does one still in flight — the
+    // number is "agents this run spawned", not "agents still working".
+    SubagentSpanRepository::new(&db)
+        .close("n1", SpanState::Done, None, None)
+        .unwrap();
+
+    let counts = SubagentSpanRepository::new(&db)
+        .counts_for_tasks(&[
+            "t1".to_string(),
+            "t2".to_string(),
+            "t3".to_string(),
+            "never-existed".to_string(),
+        ])
+        .unwrap();
+
+    assert_eq!(counts.get("t1").copied(), Some(2));
+    assert_eq!(counts.get("t2").copied(), Some(1));
+    // A run that spawned nothing is absent, not zero-valued: the caller
+    // defaults to 0 rather than this query inventing rows.
+    assert!(counts.get("t3").is_none(), "a run with no spans has no entry");
+    assert!(counts.get("never-existed").is_none());
+}
+
+/// Ids the caller did not ask about are not counted, so a page's numbers
+/// cannot borrow another page's spans.
+#[test]
+fn span_counts_are_scoped_to_the_ids_asked_for() {
+    let db = setup_db();
+    make_task(&db, "t1", TaskStatus::Running);
+    make_task(&db, "t2", TaskStatus::Running);
+    open(&db, "t1", "n1", "review_agent");
+    open(&db, "t2", "n2", "review_agent");
+
+    let counts = SubagentSpanRepository::new(&db)
+        .counts_for_tasks(&["t1".to_string()])
+        .unwrap();
+
+    assert_eq!(counts.len(), 1);
+    assert_eq!(counts.get("t1").copied(), Some(1));
+}
+
+/// An empty page asks no question, so it runs no query.
+#[test]
+fn span_counts_for_no_tasks_are_empty() {
+    let db = setup_db();
+    make_task(&db, "t1", TaskStatus::Running);
+    open(&db, "t1", "n1", "review_agent");
+
+    assert!(
+        SubagentSpanRepository::new(&db)
+            .counts_for_tasks(&[])
+            .unwrap()
+            .is_empty()
+    );
+}

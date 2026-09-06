@@ -100,6 +100,38 @@ describe("runMeta", () => {
     expect(runMeta(task({ progress_total: null }), now)).toBe("11m 04s");
   });
 
+  /**
+   * R38 — the per-run agent signal the list route lost with P8, back as
+   * `subagent_count` (one grouped `subagent_span` query per page). It sits
+   * before the cost so the design's cost tail stays last.
+   */
+  it("names how many agents the run spawned", () => {
+    expect(runMeta(task({ subagent_count: 3 }), now)).toBe(
+      "11m 04s · 5/8 steps · 3 agents",
+    );
+    expect(runMeta(task({ subagent_count: 3, cost_usd: 0.41 }), now)).toBe(
+      "11m 04s · 5/8 steps · 3 agents · $0.41",
+    );
+  });
+
+  it("says 1 agent in the singular", () => {
+    expect(runMeta(task({ subagent_count: 1 }), now)).toBe(
+      "11m 04s · 5/8 steps · 1 agent",
+    );
+  });
+
+  /**
+   * Unlike the cost, zero is not a fact worth a segment: a run the lead
+   * handled alone has no agents to count, and the detail route does not serve
+   * the field at all.
+   */
+  it("omits the agent segment for a run that spawned none", () => {
+    expect(runMeta(task({ subagent_count: 0 }), now)).toBe(
+      "11m 04s · 5/8 steps",
+    );
+    expect(runMeta(task(), now)).toBe("11m 04s · 5/8 steps");
+  });
+
   it("measures a terminal run to its completion, not to now", () => {
     const finished = task({
       status: "completed",
@@ -132,6 +164,12 @@ describe("toRun", () => {
   it("carries cost_usd through as costUsd, null when the route omits it", () => {
     expect(toRun(task()).costUsd).toBeNull();
     expect(toRun(task({ cost_usd: 1.25 })).costUsd).toBe(1.25);
+  });
+
+  it("carries subagent_count through, null when the route omits it", () => {
+    expect(toRun(task()).subagentCount).toBeNull();
+    expect(toRun(task({ subagent_count: 0 })).subagentCount).toBe(0);
+    expect(toRun(task({ subagent_count: 4 })).subagentCount).toBe(4);
   });
 });
 

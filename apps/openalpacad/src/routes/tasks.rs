@@ -153,20 +153,32 @@ pub async fn list_tasks_handler(
     match tasks {
         Ok(tasks) => {
             // GAP-08b: one grouped query for every task on the page, rather
-            // than a per-row lookup.
+            // than a per-row lookup. R38's agent count is the same shape over
+            // `subagent_span` — the per-row agent signal the deleted
+            // `assigned_agents` array carried, at one query per page instead
+            // of one per row. A read failure yields an empty map, so the page
+            // renders with zeroes rather than 500-ing.
             let task_ids: Vec<String> = tasks.iter().map(|t| t.id.clone()).collect();
             let costs = LlmUsageRepository::new(&state.db)
                 .cost_for_tasks(&task_ids)
                 .unwrap_or_default();
+            let subagent_counts = SubagentSpanRepository::new(&state.db)
+                .counts_for_tasks(&task_ids)
+                .unwrap_or_else(|e| {
+                    tracing::warn!("Failed to read subagent counts for task list: {e}");
+                    Default::default()
+                });
             let summaries: Vec<TaskSummaryResponse> = tasks
                 .into_iter()
                 .map(|t| {
                     let outcome = parse_outcome(&t);
                     let cost_usd = costs.get(&t.id).copied().unwrap_or(0.0);
+                    let subagent_count = subagent_counts.get(&t.id).copied().unwrap_or(0);
                     TaskSummaryResponse {
                         task: t,
                         outcome,
                         cost_usd,
+                        subagent_count,
                     }
                 })
                 .collect();
@@ -562,6 +574,7 @@ mod tests {
             task: make_test_task(),
             outcome: None,
             cost_usd: 0.0,
+            subagent_count: 0,
         })
         .unwrap();
         for key in ["assignments", "assigned_agents", "agents"] {
@@ -630,7 +643,7 @@ mod tests {
     ///
     /// The `assigned_agents` key the old algorithm also injected is deliberately absent:
     /// P8 deleted it, and the test above pins that.
-    fn pre_refactor_shape(task: &Task, cost_usd: f64) -> serde_json::Value {
+    fn pre_refactor_shape(task: &Task, cost_usd: f64, subagent_count: i64) -> serde_json::Value {
         let mut v = serde_json::to_value(task).unwrap();
         if let Some(obj) = v.as_object_mut() {
             let outcome_val =
@@ -639,6 +652,10 @@ mod tests {
                 obj.insert("outcome".to_string(), outcome_val);
             }
             obj.insert("cost_usd".to_string(), serde_json::json!(cost_usd));
+            obj.insert(
+                "subagent_count".to_string(),
+                serde_json::json!(subagent_count),
+            );
         }
         v
     }
@@ -875,12 +892,13 @@ mod tests {
             })
             .to_string(),
         );
-        let expected = pre_refactor_shape(&task, 1.25);
+        let expected = pre_refactor_shape(&task, 1.25, 2);
         let outcome = parse_outcome(&task);
         let summary = TaskSummaryResponse {
             task,
             outcome,
             cost_usd: 1.25,
+            subagent_count: 2,
         };
         let actual = serde_json::to_value(&summary).unwrap();
 
@@ -898,13 +916,14 @@ mod tests {
         // old code never inserted an "outcome" key in that case.
         let task = make_test_task();
 
-        let expected = pre_refactor_shape(&task, 0.0);
+        let expected = pre_refactor_shape(&task, 0.0, 0);
         let outcome = parse_outcome(&task);
         assert!(outcome.is_none());
         let summary = TaskSummaryResponse {
             task,
             outcome,
             cost_usd: 0.0,
+            subagent_count: 0,
         };
         let actual = serde_json::to_value(&summary).unwrap();
 
@@ -913,6 +932,50 @@ mod tests {
         // omitted field.
         assert_eq!(actual["cost_usd"], 0.0);
         assert!(actual.get("outcome").is_none());
+    }
+
+    /// R38 — the per-run agent signal the list route lost with P8, back as a
+    /// count rather than the old `agent_task_history` array: one grouped
+    /// `SubagentSpanRepository::counts_for_tasks` query over the page's ids,
+    /// exactly the shape `cost_for_tasks` already had. Always serialized, so a
+    /// run that spawned nothing is distinguishable from a daemon too old to
+    /// know the field.
+    #[test]
+    fn task_summary_rows_carry_the_number_of_agents_the_run_spawned() {
+        let v = serde_json::to_value(TaskSummaryResponse {
+            task: make_test_task(),
+            outcome: None,
+            cost_usd: 0.0,
+            subagent_count: 3,
+        })
+        .unwrap();
+        assert_eq!(v["subagent_count"], 3);
+
+        // A run with no spans is absent from the grouped map — the handler's
+        // `unwrap_or(0)` is what turns that into a number, and the key is
+        // still present on the wire.
+        let counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        let v = serde_json::to_value(TaskSummaryResponse {
+            task: make_test_task(),
+            outcome: None,
+            cost_usd: 0.0,
+            subagent_count: counts.get("task-1").copied().unwrap_or(0),
+        })
+        .unwrap();
+        assert!(
+            v.get("subagent_count").is_some(),
+            "a run that spawned nothing still carries the key"
+        );
+        assert_eq!(v["subagent_count"], 0);
+
+        // A list-row field, like `cost_usd`: the detail route's shape is
+        // untouched, and API_MAP §5's warning that the two disagree stands.
+        let detail = serde_json::to_value(TaskResponse {
+            task: make_test_task(),
+            outcome: None,
+        })
+        .unwrap();
+        assert!(detail["task"].get("subagent_count").is_none());
     }
 
     /// §4.7 item 3 — the row shape both task routes serve carries the project
@@ -929,6 +992,7 @@ mod tests {
             task: task.clone(),
             outcome: None,
             cost_usd: 0.0,
+            subagent_count: 0,
         };
         let v = serde_json::to_value(&summary).unwrap();
         assert_eq!(v["workspace_id"], "/Users/dev/openalpaca");

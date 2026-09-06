@@ -20,6 +20,7 @@ const run = (patch: Partial<Run> = {}): Run => ({
   artifacts: [],
   finishedAt: null,
   costUsd: null,
+  subagentCount: null,
   ...patch,
 });
 
