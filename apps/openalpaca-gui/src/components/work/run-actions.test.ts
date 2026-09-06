@@ -165,12 +165,12 @@ describe("unavailableActionNotes", () => {
         label: "Start now",
         tone: "secondary",
         enabled: false,
-        gap: "GAP-14",
+        gap: "GAP-15",
       },
     ]);
     expect(notes).toHaveLength(1);
     expect(notes[0]).toContain("Start now");
-    expect(notes[0]).toContain("/v1/status");
+    expect(notes[0]).toContain("/v1/settings/llm/providers");
   });
 
   it("is empty when every action works", () => {

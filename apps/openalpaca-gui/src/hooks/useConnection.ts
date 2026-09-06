@@ -45,11 +45,19 @@ export function useHealth(): UseQueryResult<HealthResponse> {
 }
 
 /**
- * `GET /v1/status` for one window's project — the canonical root the daemon
- * resolves that path to (R50), plus the store roots.
+ * `GET /v1/status` — the daemon's own numbers (uptime, schema version, log
+ * path, store sizes) plus the canonical root it resolves this window's project
+ * path to (R50).
  *
- * Disabled with no project: the route would answer `project_root: null`, which
- * is what a window with no project already means, and asking costs a request.
+ * Asked even with no project. It used to be disabled there, because the only
+ * field that moved was `project_root` and `null` is what "no project" already
+ * means; now the route carries the whole of GAP-14, so a projectless window
+ * still has every reason to ask. The path stays in the query key: the answer
+ * genuinely differs per project.
+ *
+ * `uptime_secs` is a snapshot, so the panel re-asks on a timer rather than
+ * counting up locally — a client-side clock would keep ticking through a
+ * restart the daemon would report as a fresh `started_at`.
  */
 export function useDaemonStatus(
   workspacePath: string | null,
@@ -57,8 +65,8 @@ export function useDaemonStatus(
   return useQuery({
     queryKey: qk.status(workspacePath),
     queryFn: ({ signal }) => getDaemonStatus(workspacePath, signal),
-    enabled: workspacePath !== null,
-    staleTime: 30_000,
+    refetchInterval: 30_000,
+    staleTime: 10_000,
   });
 }
 

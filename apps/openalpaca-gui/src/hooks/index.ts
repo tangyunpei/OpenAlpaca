@@ -15,5 +15,7 @@ export * from "./useOrchestrator";
 export * from "./useSettings";
 export * from "./useSkills";
 export * from "./useTasks";
-export * from "./useUnbacked";
+// `useUnbacked` is gone with `lib/api/unbacked.ts`: GAP-14 was the last adapter
+// either file held, and `GET /v1/status` serves it. The gaps that remain are
+// rendered at the point of use, straight off `lib/unavailable.ts`.
 export * from "./useUsage";

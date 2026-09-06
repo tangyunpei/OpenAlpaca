@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { DaemonStatus } from "@/lib/api/types";
 import { useProjectStore } from "@/stores/project";
 import { useUiStore } from "@/stores/ui";
 
@@ -10,12 +11,28 @@ import { extensionRow } from "./extension-fixture";
 
 /**
  * Every server-backed hook is mocked so the sections render against a known
- * payload; the *unbacked* hooks (`useDaemonStatusDetail`, `useExtensionInstall`)
- * stay real, because their unavailable branches are exactly what these tests
- * are checking.
+ * payload; the gap adapters that remain (the extension install flow) stay
+ * real, because their unavailable branches are exactly what these tests are
+ * checking.
  */
 const query = (data: unknown) => ({ data, isPending: false, error: null });
 const mutation = () => ({ mutate: vi.fn(), isPending: false });
+
+/** `GET /v1/status`, mutable so one test can take the log path away. */
+const DAEMON_STATUS: DaemonStatus = {
+  home_root: "/Users/dev/.openalpaca",
+  state_dir: "/Users/dev/.openalpaca/state",
+  db_path: "/Users/dev/.openalpaca/state/openalpaca.db",
+  project_root: null,
+  started_at: "2026-08-27T12:00:00Z",
+  uptime_secs: 4 * 86_400 + 2 * 3_600 + 61,
+  schema_version: 39,
+  log_path: "/Users/dev/.openalpaca/state/logs/daemon.log",
+  upload_bytes: 2_621_440,
+  produced_bytes: 1_048_576,
+  sessions: { last_sweep: null, dropped_records: 0 },
+};
+let daemonStatus: DaemonStatus = { ...DAEMON_STATUS };
 
 vi.mock("@/hooks/useConnection", () => ({
   useConnectionStatus: () => ({
@@ -27,6 +44,7 @@ vi.mock("@/hooks/useConnection", () => ({
     endpoint: "127.0.0.1:51823",
     reconnect: vi.fn(),
   }),
+  useDaemonStatus: () => query(daemonStatus),
 }));
 
 vi.mock("@/hooks/useTasks", () => ({
@@ -257,6 +275,7 @@ vi.mock("@/hooks/useEventHistory", async (importOriginal) => ({
 beforeEach(() => {
   useUiStore.setState({ settingsSectionId: "connection", toast: null });
   useProjectStore.setState({ path: null });
+  daemonStatus = { ...DAEMON_STATUS };
   localStorage.clear();
 });
 
@@ -283,16 +302,46 @@ describe("SettingsView (§2.5, §5.4)", () => {
     ).toHaveTextContent(/^Connection$/);
   });
 
-  it("shows the daemon's identity and names what /v1/health cannot serve", () => {
+  it("shows the daemon's identity, uptime, schema and store sizes from /v1/status", () => {
     render(<SettingsView />);
     expect(screen.getByText("Daemon connected")).toBeInTheDocument();
     expect(screen.getByText("127.0.0.1:51823")).toBeInTheDocument();
+    // GAP-14's three: uptime, `Schema vNN`, and a log path worth copying.
+    expect(screen.getByText("uptime 4d 02h")).toBeInTheDocument();
+    expect(screen.getByText("v39")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy log path" })).toBeEnabled();
     expect(
-      screen.getByText(/Daemon status detail not yet available/),
-    ).toHaveTextContent("GET /v1/status");
+      screen.queryByText(/Daemon status detail not yet available/),
+    ).toBeNull();
+    // §4.8's two numbers, never one.
+    expect(screen.getByText("2.5 MB")).toBeInTheDocument();
+    expect(screen.getByText("1.0 MB")).toBeInTheDocument();
+  });
+
+  it("copies the daemon log path the route reported", async () => {
+    const user = userEvent.setup();
+    render(<SettingsView />);
+
+    await user.click(screen.getByRole("button", { name: "Copy log path" }));
+
+    expect(await window.navigator.clipboard.readText()).toBe(
+      "/Users/dev/.openalpaca/state/logs/daemon.log",
+    );
+    // The toast renders in the app shell, not this subtree; the store is where
+    // the confirmation is observable from here.
+    expect(useUiStore.getState().toast).toMatch(/Log path copied/);
+  });
+
+  /// A daemon the CLI did not start writes no `daemon.log`, and the route says
+  /// `null`. The button goes inert with the reason — never a path to nothing.
+  it("disables Copy log path when the daemon reports none", () => {
+    daemonStatus = { ...DAEMON_STATUS, log_path: null };
+    render(<SettingsView />);
+
     expect(
       screen.getByRole("button", { name: "Copy log path" }),
     ).toBeDisabled();
+    expect(screen.getByText(/no daemon\.log/i)).toBeInTheDocument();
   });
 
   it("offers the provider's models and disables the switch it cannot flip", async () => {

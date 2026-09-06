@@ -41,3 +41,31 @@ export function compactCount(value: number): string {
 export function percent(fraction: number): string {
   return `${Math.round(fraction * 100)}%`;
 }
+
+/**
+ * The design's `4d 02h`, from `GET /v1/status`'s `uptime_secs`.
+ *
+ * Coarsest non-zero unit and its neighbour, never a full breakdown: the
+ * question the panel answers is "has this daemon been up a while, or did it
+ * just restart", and seconds under a four-day uptime are noise. An answer the
+ * route has not given yet is the design's em dash — `0s` would read as a
+ * restart that did not happen.
+ */
+export function formatUptime(seconds: number | undefined): string {
+  if (seconds === undefined || !Number.isFinite(seconds) || seconds < 0) {
+    return "—";
+  }
+  const whole = Math.floor(seconds);
+  const days = Math.floor(whole / 86_400);
+  const hours = Math.floor((whole % 86_400) / 3_600);
+  const minutes = Math.floor((whole % 3_600) / 60);
+
+  if (days > 0) return `${days}d ${pad(hours)}h`;
+  if (hours > 0) return `${hours}h ${pad(minutes)}m`;
+  if (minutes > 0) return `${minutes}m`;
+  return `${whole}s`;
+}
+
+function pad(value: number): string {
+  return `${value}`.padStart(2, "0");
+}

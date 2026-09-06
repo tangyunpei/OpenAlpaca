@@ -815,6 +815,45 @@ export interface DaemonStatus {
    * no header was sent, or when the path is not inside a project.
    */
   project_root: string | null;
+  /** When this daemon run began, RFC 3339. */
+  started_at: string;
+  /** Seconds since `started_at` — the daemon's own clock, never negative. */
+  uptime_secs: number;
+  /** The migration version the open database is at, not a compile-time count. */
+  schema_version: number;
+  /**
+   * `<state_dir>/logs/daemon.log`, when the CLI wrote one. `null` for a daemon
+   * started any other way (`cargo run`, the GUI sidecar) — there is no such
+   * file to copy a path to.
+   */
+  log_path: string | null;
+  /** Bytes the user uploaded — what the daemon's upload cap is read against. */
+  upload_bytes: number;
+  /** Bytes agents produced. Informational; never charged against the cap. */
+  produced_bytes: number;
+  sessions: DaemonSessionsStatus;
+}
+
+export interface DaemonSessionsStatus {
+  /** The boot session-log sweep's account, or `null` when no pass ran. */
+  last_sweep: SessionSweep | null;
+  /**
+   * Log records the writers dropped this boot (a full channel, or a directory
+   * that would not open). Non-zero means a transcript has a hole in it.
+   */
+  dropped_records: number;
+}
+
+export interface SessionSweep {
+  sessions_visited: number;
+  sessions_evicted: number;
+  files_removed: number;
+  bytes_freed: number;
+  bytes_before: number;
+  bytes_after: number;
+  /** Still over the total cap with only protected bytes left — worth saying. */
+  over_cap_after: boolean;
+  index_rows_cleared: number;
 }
 
 export interface DaemonProvidersResponse {

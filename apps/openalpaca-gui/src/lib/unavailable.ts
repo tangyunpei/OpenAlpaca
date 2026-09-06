@@ -16,14 +16,7 @@
  */
 
 export type GapId =
-  | "GAP-08c"
-  | "GAP-13"
-  | "GAP-14"
-  | "GAP-15"
-  | "GAP-17"
-  | "GAP-18"
-  | "GAP-20"
-  | "GAP-24";
+  "GAP-08c" | "GAP-13" | "GAP-15" | "GAP-17" | "GAP-18" | "GAP-20" | "GAP-24";
 
 export type GapFixSize = "XS" | "S" | "S–M" | "M" | "L";
 
@@ -106,15 +99,16 @@ export const GAPS: Record<GapId, GapDescriptor> = {
     noteOverride:
       "Changing the model here changes the daemon default for every client",
   },
-  "GAP-14": {
-    id: "GAP-14",
-    label: "Daemon status detail",
-    missingApi: "/v1/health returns status/version/pid/instance_id only",
-    proposedEndpoint:
-      "GET /v1/status with started_at, uptime_secs, schema_version, log_path",
-    blocks: "uptime, Schema vNN, Copy log path",
-    fixSize: "S",
-  },
+  // GAP-14 (no uptime, schema version or log path) closed in Phase 8:
+  // `GET /v1/status` carries `started_at`/`uptime_secs` from the top of the
+  // daemon's own `async_main`, `schema_version` read from the open database
+  // rather than counted from the migration files, and `log_path` — the
+  // CLI-managed `state/logs/daemon.log`, or `null` for a daemon started any
+  // other way, which is the honest answer rather than a path to a file nobody
+  // wrote. It also carries §4.8's two size totals and the boot session-log
+  // sweep, so the Connection panel says what the store costs. The daemon log
+  // is bounded in the same change (16 MB, three generations), because serving
+  // a path to an unbounded file would be an invitation.
   "GAP-15": {
     id: "GAP-15",
     label: "Provider enable/disable",

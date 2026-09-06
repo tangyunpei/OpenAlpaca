@@ -184,12 +184,6 @@
 - Exported functions: none
 - Endpoints: none
 
-### `unbacked.ts`
-
-- Source: `apps/openalpaca-gui/src/lib/api/unbacked.ts`
-- Exported functions: none
-- Endpoints: none
-
 ### `usage.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/usage.ts`

@@ -36,11 +36,13 @@ describe("gap registry", () => {
   // `conversation_messages.task_id` plus the report's `role='artifact'` links,
   // both served by the two history routes. Phase 7a closed conversation
   // rename/delete (GAP-21): migration 039's `PATCH`/`DELETE /v1/sessions/{id}`
-  // and the chat view's conversation sidebar, which calls them. GAP-20 is
-  // *narrowed*, not closed: its run counts are served now, its toggle is not —
-  // so the count is 8.
-  it("covers the 8 gaps still open from API_MAP §3", () => {
-    expect(listGaps()).toHaveLength(8);
+  // and the chat view's conversation sidebar, which calls them. Phase 8 closed
+  // the daemon status detail (GAP-14): `GET /v1/status` carries `started_at`,
+  // `uptime_secs`, `schema_version` and `log_path`, so uptime, `Schema vNN` and
+  // `Copy log path` are all served. GAP-20 is *narrowed*, not closed: its run
+  // counts are served now, its toggle is not — so the count is 7.
+  it("covers the 7 gaps still open from API_MAP §3", () => {
+    expect(listGaps()).toHaveLength(7);
     expect(listGaps()[0]?.id).toBe("GAP-08c");
     expect(listGaps().at(-1)?.id).toBe("GAP-24");
     for (const closed of [
@@ -53,6 +55,7 @@ describe("gap registry", () => {
       "GAP-10",
       "GAP-11",
       "GAP-12",
+      "GAP-14",
       "GAP-19",
       "GAP-21",
       "GAP-22",
@@ -102,9 +105,9 @@ describe("Unavailable results", () => {
   });
 
   it("accepts a caller-supplied reason", () => {
-    expect(unavailable("GAP-14", "No uptime for this daemon yet").reason).toBe(
-      "No uptime for this daemon yet",
-    );
+    expect(
+      unavailable("GAP-17", "No call counts for this connector").reason,
+    ).toBe("No call counts for this connector");
   });
 
   it("unwraps to the fallback rather than to fabricated data", () => {

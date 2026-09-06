@@ -16,32 +16,39 @@
  * no project concept to enumerate (plan §10), so the honest control is the one
  * path the owner types.
  *
- * Unavailable: uptime, `Schema vNN` and `Copy log path` — `/v1/health` is four
- * fields and the migration count is compile-time only (GAP-14) — and the spend
- * *cap*, which nothing serves because there is no daily budget by design (N4:
- * caps are per-workflow/per-turn), so the design's progress bar has no
- * denominator and is omitted rather than drawn against a guess (GAP-08c).
+ * Also real since Phase 8: **uptime, `Schema vNN` and `Copy log path`** —
+ * GAP-14, closed. `GET /v1/status` carries `started_at`/`uptime_secs`, the open
+ * database's `schema_version` (not a compile-time count of migration files) and
+ * the CLI-managed `log_path`, plus §4.8's two size totals and what the boot
+ * session-log sweep did. The log path is `null` for a daemon the CLI did not
+ * start — the sidecar, a `cargo run` — and the Copy button is inert there,
+ * because a path to a file that was never written is worse than no path.
+ *
+ * Unavailable: the spend *cap*, which nothing serves because there is no daily
+ * budget by design (N4: caps are per-workflow/per-turn), so the design's
+ * progress bar has no denominator and is omitted rather than drawn against a
+ * guess (GAP-08c).
  */
 
 import { useState } from "react";
 
 import { Button, Eyebrow } from "@/components/ui";
-import { useConnectionStatus } from "@/hooks/useConnection";
+import { useConnectionStatus, useDaemonStatus } from "@/hooks/useConnection";
 import { useOrchestratorConfig } from "@/hooks/useOrchestrator";
 import { useTasks } from "@/hooks/useTasks";
-import { useDaemonStatusDetail } from "@/hooks/useUnbacked";
 import { COST_NOTE, useTodaySpend, formatSpend } from "@/hooks/useUsage";
+import { formatFileSize, type DaemonStatus } from "@/lib/api/types";
 import { todayIsoDate } from "@/lib/api/usage";
-import { gapDetail } from "@/lib/unavailable";
 import { isAbsolutePath, useProjectStore } from "@/stores/project";
 import { useUiStore } from "@/stores/ui";
 
 import { Card, GapNote, StatCard, StatusCard } from "./primitives";
-import { compactCount } from "./format";
+import { compactCount, formatUptime } from "./format";
 
 export function ConnectionSection() {
   const connection = useConnectionStatus();
-  const detail = useDaemonStatusDetail();
+  const projectPath = useProjectStore((s) => s.path);
+  const status = useDaemonStatus(projectPath);
   const orchestrator = useOrchestratorConfig();
   const spend = useTodaySpend();
   const showToast = useUiStore((s) => s.showToast);
@@ -54,8 +61,7 @@ export function ConnectionSection() {
     task.created_at.startsWith(today),
   ).length;
 
-  // GAP-14 is permanent until `/v1/status` lands; narrow rather than assume.
-  const detailNote = detail.available ? null : gapDetail(detail);
+  const logPath = status.data?.log_path ?? null;
 
   // Tokens have no source but the daily rollup; cost is the daemon's own
   // authoritative figure (same rows, computed server-side).
@@ -68,11 +74,17 @@ export function ConnectionSection() {
       <StatusCard
         ok={connection.connected}
         title={connection.connected ? "Daemon connected" : "Daemon unreachable"}
-        meta="uptime —"
+        meta={`uptime ${formatUptime(status.data?.uptime_secs)}`}
         cells={[
           { label: "Instance", value: connection.instanceChip ?? "—" },
           { label: "Endpoint", value: connection.endpoint ?? "—" },
-          { label: "Schema", value: "—" },
+          {
+            label: "Schema",
+            value:
+              status.data === undefined
+                ? "—"
+                : `v${status.data.schema_version}`,
+          },
         ]}
       >
         <div className="mt-[16px] flex gap-[6px]">
@@ -85,12 +97,28 @@ export function ConnectionSection() {
           >
             Reconnect
           </Button>
-          <Button variant="ghostSm" disabled title={detailNote ?? undefined}>
+          <Button
+            variant="ghostSm"
+            disabled={logPath === null}
+            title={logPath ?? undefined}
+            onClick={() => {
+              if (logPath === null) return;
+              void navigator.clipboard.writeText(logPath);
+              showToast("Log path copied to the clipboard");
+            }}
+          >
             Copy log path
           </Button>
         </div>
-        {detailNote !== null && <GapNote>{detailNote}</GapNote>}
+        {logPath === null && status.data !== undefined && (
+          <GapNote>
+            This daemon has no daemon.log — the log file is written by
+            `openalpaca daemon start`, not by a daemon the app launched itself.
+          </GapNote>
+        )}
       </StatusCard>
+
+      <StorageCard status={status.data} />
 
       <StatCard
         title="Today"
@@ -114,6 +142,65 @@ export function ConnectionSection() {
 
       <ProjectCard />
     </div>
+  );
+}
+
+/**
+ * What the daemon's storage costs — §4.8's two numbers, never one.
+ *
+ * `uploads` is the quota-bearing total the daemon checks an upload against;
+ * `produced` is agent output, informational and never charged. They are kept
+ * apart here for the same reason the daemon keeps them apart: a run that wrote
+ * a large artifact must not look like it consumed the upload allowance.
+ *
+ * The session line under them is the boot sweep's own account. It is silent on
+ * a daemon whose sweep found nothing to do — an eviction that never happened
+ * is not news — and says so plainly when the log is *still* over its cap,
+ * which is the one state the owner can act on.
+ */
+function StorageCard({ status }: { status: DaemonStatus | undefined }) {
+  const sweep = status?.sessions.last_sweep ?? null;
+  const dropped = status?.sessions.dropped_records ?? 0;
+
+  return (
+    <StatCard
+      title="Storage"
+      stats={[
+        {
+          label: "uploads",
+          value:
+            status === undefined ? "—" : formatFileSize(status.upload_bytes),
+        },
+        {
+          label: "produced",
+          value:
+            status === undefined ? "—" : formatFileSize(status.produced_bytes),
+        },
+      ]}
+    >
+      {sweep !== null && sweep.files_removed > 0 && (
+        <GapNote>
+          Session logs: this boot's sweep freed{" "}
+          {formatFileSize(sweep.bytes_freed)} from {sweep.sessions_evicted} of{" "}
+          {sweep.sessions_visited} sessions
+          {sweep.over_cap_after
+            ? " — still over the total cap, with only active sessions left to evict."
+            : "."}
+        </GapNote>
+      )}
+      {sweep !== null && sweep.files_removed === 0 && sweep.over_cap_after && (
+        <GapNote>
+          Session logs are over the total cap and everything left is protected —
+          raise `log_max_total_bytes` or archive some conversations.
+        </GapNote>
+      )}
+      {dropped > 0 && (
+        <GapNote>
+          {dropped} session-log records were dropped this boot: those
+          transcripts have gaps.
+        </GapNote>
+      )}
+    </StatCard>
   );
 }
 
