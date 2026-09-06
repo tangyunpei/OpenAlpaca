@@ -5,9 +5,12 @@
  * this store holds view selection, density, pane geometry, the overlays, and
  * the single-slot toast.
  *
- * Two things are persisted, both per-machine by design:
- *   `oa-pane-widths` — the three resizable columns (§4.6)
- *   `oa-pins`        — artifact pins (GAP-12: correct as a local preference)
+ * Two things are persisted:
+ *   `oa-pane-widths` — the three resizable columns (§4.6), per-machine by design
+ *   `oa-pins`        — the artifact-pin **cache**. The pin itself lives on the
+ *                      daemon (`PUT /v1/artifacts/{id}/pin`); this mirror only
+ *                      makes the star instant and survives a reload, and every
+ *                      server answer overwrites it (`setPin` / `syncPins`).
  */
 
 import { create } from "zustand";
@@ -132,7 +135,10 @@ export interface UiState {
   resetPaneWidth: (key: PaneKey) => void;
   persistPaneWidths: () => void;
 
-  togglePin: (artifactId: string) => boolean;
+  /** Optimistic write; the daemon's answer to `PUT …/pin` overwrites it. */
+  setPin: (artifactId: string, pinned: boolean) => void;
+  /** Overwrite the cache from a server page — the row's `pinned` is the truth. */
+  syncPins: (entries: Record<string, boolean>) => void;
   isPinned: (artifactId: string) => boolean;
 
   /** The strictly-ordered Escape ladder. `"none"` ⇒ the caller should deny. */
@@ -249,12 +255,23 @@ export const useUiStore = create<UiState>((set, get) => ({
   },
   persistPaneWidths: () => savePaneWidths(get().paneWidths),
 
-  togglePin: (artifactId) => {
-    const next = !get().pins[artifactId];
-    const pins = { ...get().pins, [artifactId]: next };
+  setPin: (artifactId, pinned) => {
+    if (get().pins[artifactId] === pinned) return;
+    const pins = { ...get().pins, [artifactId]: pinned };
     set({ pins });
     savePins(pins);
-    return next;
+  },
+  syncPins: (entries) => {
+    const current = get().pins;
+    const changed = Object.entries(entries).filter(
+      ([id, pinned]) => current[id] !== pinned,
+    );
+    // A no-op sync must keep the same object: `pins` is read by every row, and
+    // a fresh identity on each refetch would re-render the whole list.
+    if (changed.length === 0) return;
+    const pins = { ...current, ...Object.fromEntries(changed) };
+    set({ pins });
+    savePins(pins);
   },
   isPinned: (artifactId) => get().pins[artifactId] === true,
 

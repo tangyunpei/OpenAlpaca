@@ -12,6 +12,7 @@
  */
 
 import { ArtifactCard } from "@/components/chat";
+import { useTogglePin } from "@/hooks/useArtifacts";
 import { useFileMetadata } from "@/hooks/useFiles";
 import { GAPS, gapNote } from "@/lib/unavailable";
 import { useUiStore } from "@/stores/ui";
@@ -26,7 +27,7 @@ export interface TranscriptArtifactProps {
 export function TranscriptArtifact({ attachment }: TranscriptArtifactProps) {
   const metadata = useFileMetadata(attachment.fileId);
   const openSidePanel = useUiStore((s) => s.openSidePanel);
-  const togglePin = useUiStore((s) => s.togglePin);
+  const togglePin = useTogglePin();
   const showToast = useUiStore((s) => s.showToast);
   const pinned = useUiStore((s) => s.pins[attachment.fileId] === true);
 
@@ -53,7 +54,9 @@ export function TranscriptArtifact({ attachment }: TranscriptArtifactProps) {
       unavailableNote={note}
       pinned={pinned}
       onOpen={() => openSidePanel(attachment.fileId)}
-      onTogglePin={() => togglePin(attachment.fileId)}
+      onTogglePin={() =>
+        togglePin.mutate({ id: attachment.fileId, pinned: !pinned })
+      }
       onDiff={() => showToast(gapNote(GAPS["GAP-05"]))}
     />
   );

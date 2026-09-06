@@ -119,13 +119,48 @@ describe("toast", () => {
   });
 });
 
+/**
+ * `PUT /v1/artifacts/{id}/pin` made the server the authority. `oa-pins` stays
+ * only as the optimistic cache: it shows a star before the round trip finishes
+ * and survives a reload, and the server's own answer overwrites it.
+ */
 describe("pins", () => {
-  it("toggles and persists to localStorage (GAP-12: a local preference)", () => {
-    expect(useUiStore.getState().togglePin("findings")).toBe(true);
+  beforeEach(() => {
+    useUiStore.setState({ pins: {} });
+    localStorage.removeItem("oa-pins");
+  });
+
+  it("writes optimistically and persists to localStorage", () => {
+    useUiStore.getState().setPin("findings", true);
     expect(useUiStore.getState().isPinned("findings")).toBe(true);
     expect(localStorage.getItem("oa-pins")).toBe('{"findings":true}');
 
-    expect(useUiStore.getState().togglePin("findings")).toBe(false);
+    useUiStore.getState().setPin("findings", false);
     expect(useUiStore.getState().isPinned("findings")).toBe(false);
+  });
+
+  it("lets a server page overwrite the cache, disagreement and all", () => {
+    useUiStore.getState().setPin("findings", true);
+    useUiStore.getState().setPin("notes", true);
+
+    // The rows came back saying `findings` is not pinned — the server wins.
+    useUiStore.getState().syncPins({ findings: false });
+
+    expect(useUiStore.getState().isPinned("findings")).toBe(false);
+    // A row the page did not carry keeps whatever it had.
+    expect(useUiStore.getState().isPinned("notes")).toBe(true);
+    expect(localStorage.getItem("oa-pins")).toBe(
+      '{"findings":false,"notes":true}',
+    );
+  });
+
+  it("does not touch the store when a page agrees with the cache", () => {
+    useUiStore.getState().setPin("findings", true);
+    const before = useUiStore.getState().pins;
+
+    useUiStore.getState().syncPins({ findings: true });
+
+    // Identity matters: a new object every fetch would re-render every row.
+    expect(useUiStore.getState().pins).toBe(before);
   });
 });

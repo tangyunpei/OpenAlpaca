@@ -15,6 +15,7 @@
 
 import { FilePanel } from "@/components/chat";
 import { ArtifactPreview } from "@/components/work/preview";
+import { useTogglePin } from "@/hooks/useArtifacts";
 import { useArtifacts } from "@/hooks/useUnbacked";
 import { useFileMetadata } from "@/hooks/useFiles";
 import { GAPS, gapNote } from "@/lib/unavailable";
@@ -39,7 +40,7 @@ export function FilePanelSlot({ artifactId }: FilePanelSlotProps) {
   const backToWork = useUiStore((s) => s.backToWork);
   const closePanel = useUiStore((s) => s.closePanel);
   const openInLibrary = useUiStore((s) => s.openInLibrary);
-  const togglePin = useUiStore((s) => s.togglePin);
+  const togglePin = useTogglePin();
   const pinned = useUiStore((s) => s.pins[artifactId] === true);
 
   const file = metadata.data ?? null;
@@ -84,7 +85,7 @@ export function FilePanelSlot({ artifactId }: FilePanelSlotProps) {
       onClose={closePanel}
       onOpenInLibrary={openInLibrary}
       pinned={pinned}
-      onTogglePin={() => togglePin(artifactId)}
+      onTogglePin={() => togglePin.mutate({ id: artifactId, pinned: !pinned })}
       previewNote={
         file === null
           ? gapNote(GAPS["GAP-04"])

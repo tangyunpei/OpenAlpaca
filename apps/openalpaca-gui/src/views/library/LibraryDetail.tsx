@@ -17,6 +17,7 @@
 import { SectionEmpty, toFileKind } from "@/components/ui";
 import { ArtifactDiffTab } from "@/components/work";
 import { ArtifactPreview } from "@/components/work/preview";
+import { useTogglePin } from "@/hooks/useArtifacts";
 import { useDownloadFile, useOpenFile } from "@/hooks/useFiles";
 import {
   useArtifact,
@@ -41,7 +42,7 @@ export function LibraryDetail({ artifactId }: LibraryDetailProps) {
   const tab = useUiStore((s) => s.libraryTab);
   const setTab = useUiStore((s) => s.setLibraryTab);
   const pins = useUiStore((s) => s.pins);
-  const togglePin = useUiStore((s) => s.togglePin);
+  const togglePin = useTogglePin();
   const showToast = useUiStore((s) => s.showToast);
   const focusRun = useUiStore((s) => s.focusRun);
 
@@ -110,8 +111,17 @@ export function LibraryDetail({ artifactId }: LibraryDetailProps) {
           tab={tab}
           onTabChange={setTab}
           onTogglePin={() => {
-            const next = togglePin(model.id);
-            showToast(`${model.name} ${next ? "pinned" : "unpinned"}`);
+            togglePin.mutate(
+              { id: model.id, pinned: !pinned },
+              {
+                onSuccess: (state) =>
+                  showToast(
+                    `${model.name} ${state.pinned ? "pinned" : "unpinned"}`,
+                  ),
+                onError: (error) =>
+                  showToast(`Could not pin — ${error.message}`),
+              },
+            );
           }}
           onExport={onExport}
           onReveal={onReveal}
