@@ -230,8 +230,8 @@ below for what shipped). The design's `ARTS[]` fixture shape is:
 | `9 uses today`                                                          | ✅ `invocations_today` on both catalog rows — `tool_execution_log` / `skill_execution_log` counted from today's local midnight converted to UTC. `SkillHealthMetrics.total_invocations` stays lifetime                                                                                                                                                                                                                                                                                                                                                                                                                            |                                                                                                                                                      |
 | skill lifecycle events                                                  | ✅ WS `skill_catalog_updated`, `skill_invocation_started` `{ request_id, skill_id, query_preview }`, `skill_completed` `{ request_id, skill_id, duration_ms, output_preview }`, `skill_failed` `{ request_id, skill_id, error }`                                                                                                                                                                                                                                                                                                                                                                                                  |                                                                                                                                                      |
 | **Extensions** rows (MCP servers + plugins)                             | ✅ `GET /v1/extensions?include_orphaned=true` → the 23-field row of ADR-030 §8 (`kind, id, version, transport, enabled, consent, state, reason, actionable, detail, hint, missing_config_keys, added_capabilities, tools, skipped_tools, withdrawn_by_server, tools_changed_at, declared, skills, agents, connector, provider, since`)                                                                                                                                                                                                                                                                                            |                                                                                                                                                      |
-| enable/disable/reload/approve/deny/config/remove                        | ✅ `POST /v1/extensions/{kind}/{id}/{enable\|disable\|reload\|approve\|deny}`; `GET\|POST /v1/extensions/{kind}/{id}/config`; `DELETE /v1/extensions/plugin/{id}` (orphans only). `/v1/plugins*` was deleted in C7                                                                                                                                                                                                                                                                                                                                                                                                                |                                                                                                                                                      |
-| `Add extension` (install / uninstall)                                   | ❌ **GAP-24**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |                                                                                                                                                      |
+| enable/disable/reload/approve/deny/config/remove                        | ✅ `POST /v1/extensions/{kind}/{id}/{enable\|disable\|reload\|approve\|deny}`; `GET\|POST /v1/extensions/{kind}/{id}/config`; `DELETE /v1/extensions/plugin/{id}` (orphans only — the uninstall is the same path with `?uninstall=true`). `/v1/plugins*` was deleted in C7                                                                                                                                                                                                                                                                                                                                                        |                                                                                                                                                      |
+| `Add extension` (install / uninstall)                                   | ✅ **GAP-24, closed** — `POST /v1/extensions/plugin` `{ source: "path", path }` copies a directory in and answers `201 { extension, manifest }`; `POST /v1/extensions/mcp` `{ name, transport, … }` writes a `[servers.<name>]` block; `POST /v1/extensions/plugin/validate` `{ path }` is the dry run; `PUT /v1/extensions/plugin/{id}` replaces a tree; `DELETE /v1/extensions/{kind}/{id}?uninstall=true[&keep_data=false]` is the real removal. An install grants nothing (`unapproved`/`never_seen`; `approve` starts it) and an uninstall deletes nothing (moved to `plugins/.trash/`)                                      |                                                                                                                                                      |
 | `Declares 2 connectors, 0 registered` warn tag                          | ⚠️ derivable: `extensions[].connector` non-null vs. absent from `GET /v1/connectors` — client-side join                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | extension lifecycle                                                     | ✅ WS `extension_state_changed` `{ kind, id, state, generation, tools_changed, ts, instance_id }`, `extension_capability_withheld`, `extension_capability_withdrawn` — the six `plugin_*` variants were deleted with `/v1/plugins*` in C7, and this family carries `ts`/`instance_id` on every frame (former GAP-22)                                                                                                                                                                                                                                                                                                              |                                                                                                                                                      |
 | **Agents** rows (templates)                                             | ✅ `GET /v1/agent-templates?window=7d\|30d\|all` → `TemplateResponse[] { id, name, description, icon?, singleton, capabilities[], denied_capabilities[], temperature, verbosity, model?, fallback_models[], max_tool_calls?, timeout_seconds?, max_cost_per_task?, require_confirmation_for[], persona, body, run_count: i64, last_run_at?, window: string }`                                                                                                                                                                                                                                                                     | plus `GET\|PUT\|DELETE /v1/agent-templates/{id}`, `POST /v1/agent-templates`                                                                         |
@@ -1137,8 +1137,11 @@ POST /v1/connectors { "kind": "slack", "credentials": { … } }
 → 201 { "id": "slack", … }
 ```
 
-Which presupposes a connector registry that is not a compile-time `vec!` — the
-same shape GAP-24 needs for extensions, and worth doing once for both.
+Which presupposes a connector registry that is not a compile-time `vec!`.
+GAP-24 needed the same shape for extensions and has since shipped it, but only
+because a plugin and an MCP server are _already_ declared on disk — a directory
+and a `[servers.<name>]` block. A connector has no such declaration to write, so
+the two are no longer one piece of work.
 
 ---
 
@@ -1374,39 +1377,76 @@ schema change, but a typed field is far easier for the client to rely on.
 
 ---
 
-### GAP-24 — No extension install / uninstall route
+### GAP-24 — No extension install / uninstall route — **RESOLVED (Phase 8 item 9)**
 
 _(Was GAP-19, "no plugin install route", widened in ADR-030 §9.1 to both extension kinds:
-the same mechanism is missing for an MCP server, which had no gap id at all.)_
+the same mechanism was missing for an MCP server, which had no gap id at all.)_
 
-**UI needs:** `Add extension` in Settings → Extensions, and a real uninstall.
-
-**Why nothing fits:** `/v1/extensions` covers the whole lifecycle of an extension that is
-already _declared_ — enable, disable, reload, approve, deny, config — plus `DELETE
-/v1/extensions/plugin/{id}`, which removes an **orphan's** `.permissions.toml` entry and
-its ledger record and deliberately never touches a directory. Installing still means
-copying a plugin directory into the plugins root, or writing a `[servers.<name>]` block
-into `config/mcp.toml`, and restarting.
-
-**Proposal:**
+**What shipped**, in the shape proposed — the `path` variant only, `{kind}` singular the
+way the rest of the family speaks, and the uninstall as a **flag on the DELETE that
+already existed** rather than a second path:
 
 ```
-POST /v1/extensions/plugin
-{ "source": "path", "path": "/Users/…/my-plugin" }        // or { "source": "url", "url": "…" }
-→ 202 { "kind": "plugin", "id": "openalpaca-notion", "version": "0.3.1",
-        "state": "unapproved", "reason": "never_seen" }
+POST /v1/extensions/plugin  { "source": "path", "path": "/Users/…/my-plugin" }
+→ 201 { "extension": <the §8 row>, "manifest": { name, version, description, entry,
+        capabilities, virtual_capabilities, types, required_config_keys,
+        sensitive_config_keys }, "added_capabilities": [], "consent_reset": false }
 
-POST /v1/extensions/mcp
-{ "id": "github", "transport": "stdio", "command": "…", "args": [], "enabled": true }
-→ 201 the §8 row
+POST /v1/extensions/plugin/validate  { "path": "…" }
+→ 200 { "manifest": { … }, "installed": false }          // the dry run; copies nothing
 
-DELETE /v1/extensions/{kind}/{id}?uninstall=true
-→ 200 { "removed": "openalpaca-notion" }        // trashes the directory / the block
+PUT  /v1/extensions/plugin/{id}  { "source": "path", "path": "…" }
+→ 200 the same envelope, with `added_capabilities` / `consent_reset` filled in
+
+POST /v1/extensions/mcp  { "name": "github", "transport": "stdio", "command": "npx",
+                           "args": [], "enabled": true }
+→ 201 { "extension": <the §8 row>, "manifest": null }
+
+DELETE /v1/extensions/{kind}/{id}?uninstall=true[&keep_data=false]
+→ 200 { "removed": "…", "trashed": "…/plugins/.trash/notion-2026…", "kept_data": true,
+        "data_trashed": null }
 ```
 
-The existing `approve` verb then completes a plugin's first load, and
-`extension_state_changed` narrates it over WS. If URL installs are out of scope for the
-local-first threat model, ship the `path` variant only.
+Four things the routes make true rather than promise.
+
+**An install grants nothing.** The directory lands with its toggle at the serde default
+(on) and _no consent decision_, so the row reads `unapproved`/`never_seen` and the
+existing `approve` verb is the single action that starts it — which is why the manifest
+summary travels beside the row: it is the approval preview, and the row alone cannot
+answer "what would approving grant?". The `.permissions.toml` entry records
+`installed_from`/`installed_at`.
+
+**An uninstall deletes nothing.** T0–T5, then the permissions entry through the same
+atomic writer, then the directory _moved_ to `plugins/.trash/<id>-<ts>/` — a directory
+the owner dropped in is never `rm -rf`'d — and `keep_data` (default true) decides
+`plugins/.data/<id>/`, which is moved rather than removed when it is not kept. It is
+also the only path that **expires the C5 tombstones**: with no uninstall, `/slash` and
+`spawn_subagent` kept answering for a plugin that no longer existed, and a re-install
+under the same name inherited them.
+
+**Nothing is ever half-copied.** A copy lands in `plugins/.staging/` and becomes
+`plugins/<name>` with one rename; an abandoned staging copy sweeps itself. An update
+stages _before_ it tears the running plugin down, so a source that cannot be copied has
+not cost the owner anything — and because the child runs with `current_dir(plugin_dir)`,
+the incumbent is trashed and the staged tree renamed into the name it vacated rather
+than replaced in place.
+
+**The bare DELETE still means what it meant.** Without `?uninstall=true` it is C6's
+orphan-row removal, which never touches a directory. The destructive half has to be
+asked for by name.
+
+Refusals: `400` `invalid_path` / `escaping_symlink` / `unsupported_source` /
+`invalid_declaration`, `404` `source_not_found`, `422` `invalid_manifest`, `409`
+`already_installed` / `already_declared` / `not_disabled` / `busy`, `500` `copy_failed`
+— each with the word a client branches on and a sentence a person reads.
+`extension_state_changed` narrates the result over WS.
+
+**Still declined:** `source: "url"`. Fetching and unpacking an archive from the network
+is its own security review, and it is refused by name rather than by serde error.
+
+CLI: `openalpaca ext install|update|uninstall`, `ext mcp add|remove`. GUI: Settings →
+Extensions grows the `Add extension` panel (with the dry run behind `Check`), and each
+row's overflow menu grows `Update…` and `Uninstall…`.
 
 ---
 
@@ -1421,27 +1461,30 @@ deleted, and their replacements carry `ts`/`instance_id`), **GAP-19 became GAP-2
 (widened to both extension kinds), and **GAP-18 closed in both halves** —
 `GET /v1/tools` took the tool one and `GET /v1/skills` the skill one. **GAP-15
 closed** with `PUT /v1/settings/llm/providers/{provider}/enabled`, which writes
-the bit and then unloads or reloads the provider — its row is struck below too;
-sixteen remain.
+the bit and then unloads or reloads the provider — its row is struck below too.
+**GAP-24 closed in Phase 8 item 9**: `POST /v1/extensions/{kind}` installs a
+plugin from a local path or declares an MCP server, `PUT …/plugin/{id}`
+replaces a plugin's tree, and `DELETE …?uninstall=true` removes either for
+good — its row is struck below too; fifteen remain.
 
-| #   | Gap                                   | Blocks                          | Fix size                         |
-| --- | ------------------------------------- | ------------------------------- | -------------------------------- |
-| 11  | content route is header-auth only     | image/html preview              | **S** (query token)              |
-| 14  | uptime / schema / log path            | Connection panel                | **S**                            |
-| 06  | no `rerun` / `start` action           | Re-run, Start now               | **S**                            |
-| 02  | no steer endpoint                     | Steer button                    | **S–M**                          |
-| 03  | no follow-up API                      | Queue follow-up                 | **M**                            |
-| 21  | no conversation rename/delete         | Conversations rows              | **S**                            |
-| 13  | per-chat model override is global     | model picker                    | **M**                            |
-| 20  | no template run counts / enabled      | Agents section                  | **M**                            |
-| 17  | no `Connect service` add flow         | Connectors section's Add button | **M**                            |
-| 24  | no extension install / uninstall      | Add extension                   | **M**                            |
-| 10  | event log has no `task_id`            | per-run event log               | **M** (migration)                |
-| 23  | messages not linked to runs/artifacts | transcript recap cards          | **M** (migration)                |
-| 09  | no subagent timeline                  | **Parallel work swimlanes**     | **L** (migration + events)       |
-| 04  | no artifact list / attribution        | **entire Library view**         | **L** (migration + routes)       |
-| 05  | no artifact versions / diff           | History + Diff tabs             | **L** (migration + routes)       |
-| 12  | no pin state                          | ★ Pin                           | **XS** — do it in `localStorage` |
+| #      | Gap                                   | Blocks                          | Fix size                         |
+| ------ | ------------------------------------- | ------------------------------- | -------------------------------- |
+| 11     | content route is header-auth only     | image/html preview              | **S** (query token)              |
+| 14     | uptime / schema / log path            | Connection panel                | **S**                            |
+| 06     | no `rerun` / `start` action           | Re-run, Start now               | **S**                            |
+| 02     | no steer endpoint                     | Steer button                    | **S–M**                          |
+| 03     | no follow-up API                      | Queue follow-up                 | **M**                            |
+| 21     | no conversation rename/delete         | Conversations rows              | **S**                            |
+| 13     | per-chat model override is global     | model picker                    | **M**                            |
+| 20     | no template run counts / enabled      | Agents section                  | **M**                            |
+| 17     | no `Connect service` add flow         | Connectors section's Add button | **M**                            |
+| ~~24~~ | ~~no extension install / uninstall~~  | ~~Add extension~~               | ~~**M**~~ — **closed (T52)**     |
+| 10     | event log has no `task_id`            | per-run event log               | **M** (migration)                |
+| 23     | messages not linked to runs/artifacts | transcript recap cards          | **M** (migration)                |
+| 09     | no subagent timeline                  | **Parallel work swimlanes**     | **L** (migration + events)       |
+| 04     | no artifact list / attribution        | **entire Library view**         | **L** (migration + routes)       |
+| 05     | no artifact versions / diff           | History + Diff tabs             | **L** (migration + routes)       |
+| 12     | no pin state                          | ★ Pin                           | **XS** — do it in `localStorage` |
 
 **Recommended order:** the XS/S column first (11, 14, 06, 02, 21) unblocks roughly two-thirds of the design for a handful of one-file changes. Then
 04 + 05 + 09 as one "run observability + artifacts" milestone, since they share the
