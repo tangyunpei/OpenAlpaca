@@ -167,6 +167,19 @@ Notes:
   was driving when it went away — terminal, but not a failure, and re-runnable.
 - `--limit` defaults to 50 (for both `list` and `log`).
 - `create` prompts for a title if the description argument is omitted; `--priority` defaults to 0.
+- `resume` is one word over two verbs. On a **paused** run it is the plain
+  transition back to running, as it has always been. On an **interrupted** one it
+  is *replay resume* — **experimental, and off by default**: the daemon rebuilds
+  the run's loop history from its session log (its rounds and their tool results)
+  and continues it under the same id, telling the model not to repeat
+  side-effecting calls it already made. Nothing recorded is re-executed. Turn it
+  on with `resume_enabled = true` under `[orchestrator.routing]` in `daemon.toml`.
+  Until then an interrupted run answers `RESUME_DISABLED`, and the way to redo
+  the work is a re-run — the GUI's `Re-run` button, or
+  `POST /v1/tasks/{id}/rerun` directly; the CLI has no `rerun` verb yet. A resume
+  that finds no usable transcript (the sweep took the log) answers
+  `RESUME_LOG_MISSING` and leaves the row exactly as it was. When it succeeds the
+  command names how much came back: `replayed 3 rounds from session <id>`.
 
 ### `agents`
 

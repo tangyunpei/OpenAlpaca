@@ -1,4 +1,9 @@
 //! Tasks command — list, status, log, create, cancel, pause, resume
+//!
+//! `resume` is one word over two verbs, exactly as the daemon route is: it
+//! un-pauses a paused run, and — when the daemon has §5.6c's experimental
+//! replay resume enabled — continues an `interrupted` one from the history
+//! its session log kept.
 
 use anyhow::Result;
 use clap::{Args, Subcommand};
@@ -62,7 +67,9 @@ pub enum TasksCommands {
         /// Task ID
         task_id: String,
     },
-    /// Resume a paused task
+    /// Resume a paused task — or, when the daemon has the experimental replay
+    /// resume enabled ([orchestrator.routing] resume_enabled, off by default),
+    /// continue an interrupted run from its session log
     Resume {
         /// Task ID
         task_id: String,
@@ -669,6 +676,62 @@ mod tests {
             "the --status help must list interrupted, matching docs/CLI_Manual.md: {help}"
         );
     }
+
+    /// An un-pause prints what it always printed: one line, no replay clause.
+    #[test]
+    fn a_plain_action_prints_one_line() {
+        plain();
+        let body = serde_json::json!({"task_id": "task-1234-5678", "status": "running"});
+        assert_eq!(
+            action_line("task-1234-5678", &body),
+            "\u{2713} Task task-123 -> running"
+        );
+    }
+
+    /// §5.6c — a replay resume says how much of the run came back. Without
+    /// this the line cannot be told from a run that started over.
+    #[test]
+    fn a_replay_resume_names_the_rounds_it_recovered() {
+        plain();
+        let body = serde_json::json!({
+            "task_id": "task-1234-5678",
+            "status": "running",
+            "session_id": "s1",
+            "rounds_replayed": 3,
+            "from_seq": 1,
+            "to_seq": 12,
+        });
+        let line = action_line("task-1234-5678", &body);
+        assert!(line.starts_with("\u{2713} Task task-123 -> running"), "{line}");
+        assert!(line.contains("replayed 3 rounds from session s1"), "{line}");
+
+        let one =
+            serde_json::json!({"status": "running", "session_id": "s1", "rounds_replayed": 1});
+        assert!(
+            action_line("task-1", &one).contains("replayed 1 round from session s1"),
+            "one round is singular"
+        );
+    }
+
+    /// `openalpaca tasks resume --help` has to say that the word grew a second
+    /// meaning and that it is off by default — otherwise an operator reading
+    /// the help cannot tell why an interrupted run refuses.
+    #[test]
+    fn tasks_resume_help_names_the_experimental_replay() {
+        use clap::Args as _;
+        let command = TasksArgs::augment_args(clap::Command::new("tasks"));
+        let resume = command
+            .get_subcommands()
+            .find(|c| c.get_name() == "resume")
+            .expect("the resume subcommand");
+        let about = resume.get_about().expect("resume has help").to_string();
+        for word in ["paused", "interrupted", "resume_enabled", "off by default"] {
+            assert!(
+                about.contains(word),
+                "resume --help must mention {word}: {about}"
+            );
+        }
+    }
 }
 
 async fn task_action(task_id: &str, action: &str) -> Result<()> {
@@ -678,12 +741,33 @@ async fn task_action(task_id: &str, action: &str) -> Result<()> {
         .post(&format!("/v1/tasks/{}/action", task_id), &body)
         .await?;
 
+    println!("{}", action_line(task_id, &result));
+    Ok(())
+}
+
+/// The one line an action prints, split out so its shape is testable without
+/// a daemon.
+///
+/// §5.6c gives `resume` a second meaning, and the extra clause is why it is
+/// worth a function: "Task abc12345 -> running" reads the same whether a
+/// transcript came back or the run started from nothing, and those are very
+/// different things to have just done. The clause appears only when the
+/// response carries the replay's own numbers, so an un-pause — and a daemon
+/// too old to send them — prints exactly what it printed before.
+fn action_line(task_id: &str, result: &serde_json::Value) -> String {
     let status = result["status"].as_str().unwrap_or("unknown");
-    println!(
+    let mut line = format!(
         "{} Task {} -> {}",
         "✓".green(),
         &task_id[..8.min(task_id.len())],
         status_color(status)
     );
-    Ok(())
+    if let Some(rounds) = result["rounds_replayed"].as_u64() {
+        line.push_str(&format!(
+            "\n  replayed {rounds} round{} from session {}",
+            if rounds == 1 { "" } else { "s" },
+            result["session_id"].as_str().unwrap_or("?")
+        ));
+    }
+    line
 }
