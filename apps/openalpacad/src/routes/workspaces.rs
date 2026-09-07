@@ -26,10 +26,11 @@
 //! was seeded), and what a re-base would actually move.
 //!
 //! Nothing here re-bases on its own. The `PATCH` is the only writer, and it
-//! refuses rather than guesses: `404` when no row names the old root, `409`
-//! when rows already name the new one (two projects must not merge silently),
-//! `409` while a run under the old root is in flight, `409` when either root is
-//! the home store, and `409` when the store directory itself cannot be moved.
+//! refuses rather than guesses: `404` when no row of the caller's names the old
+//! root (or a row there belongs to somebody else), `409` when rows already name
+//! the new one (two projects must not merge silently), `409` while a run under
+//! the old root is in flight, `409` when either root is the home store, and
+//! `409` when the store directory itself cannot be moved.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -172,7 +173,7 @@ pub(crate) fn get_workspace(db: &Database, query: WorkspaceQuery) -> Response {
     };
     let moved = matches!(&recorded_root, Some(recorded) if recorded != &root);
 
-    let rows = match ArtifactStore::new(db).workspace_rows(&root) {
+    let rows = match ArtifactStore::new(db).workspace_rows(&root, None) {
         Ok(rows) => rows,
         Err(e) => {
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string());
@@ -214,7 +215,13 @@ fn workspace_json(
 /// The order is the plan's: rows first, bytes second. The move is *planned*
 /// before the transaction opens, so the one failure that would leave rows
 /// pointing at a directory nobody moved is refused up front instead.
-pub(crate) fn rebase_workspace(db: &Database, request: RebaseRequest) -> Response {
+///
+/// Owner-scoped like every other injecting write: the rows this rewrites must
+/// belong to `owner_id`, and a root holding somebody else's is a `404` rather
+/// than a transaction over rows the caller cannot see. `session` and `task`
+/// carry no owner column, which is precisely why the answer is a refusal and
+/// not a half-scoped update.
+pub(crate) fn rebase_workspace(db: &Database, owner_id: &str, request: RebaseRequest) -> Response {
     let old_root = match resolve_root(&request.old_path) {
         Ok(root) => root,
         Err(response) => return response,
@@ -237,15 +244,26 @@ pub(crate) fn rebase_workspace(db: &Database, request: RebaseRequest) -> Respons
     }
 
     let store = ArtifactStore::new(db);
-    let old_rows = match store.workspace_rows(&old_root) {
+    let old_rows = match store.workspace_rows(&old_root, Some(owner_id)) {
         Ok(rows) => rows,
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string()),
     };
+    if old_rows.other_owners > 0 {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "WORKSPACE_NOT_FOUND",
+            format!(
+                "{} row(s) under {old_root} belong to another owner; re-basing would rewrite \
+                 rows you cannot see",
+                old_rows.other_owners
+            ),
+        );
+    }
     if old_rows.counts.is_empty() {
         return api_error(
             StatusCode::NOT_FOUND,
             "WORKSPACE_NOT_FOUND",
-            format!("nothing is recorded under {old_root}"),
+            format!("nothing of yours is recorded under {old_root}"),
         );
     }
     if old_rows.active_tasks > 0 {
@@ -260,7 +278,10 @@ pub(crate) fn rebase_workspace(db: &Database, request: RebaseRequest) -> Respons
         );
     }
 
-    let new_rows = match store.workspace_rows(&new_root) {
+    // Unscoped on purpose: *anybody's* rows at the destination are the merge
+    // this refusal exists to prevent, and one owner cannot re-base over
+    // another's history by not being able to see it.
+    let new_rows = match store.workspace_rows(&new_root, None) {
         Ok(rows) => rows,
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string()),
     };
@@ -358,7 +379,7 @@ pub async fn rebase_workspace_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<RebaseRequest>,
 ) -> Response {
-    rebase_workspace(&state.db, request)
+    rebase_workspace(&state.db, &state.local_user_id, request)
 }
 
 #[cfg(test)]

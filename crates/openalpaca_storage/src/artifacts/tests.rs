@@ -143,13 +143,17 @@ impl Fixture {
     }
 
     fn memory(&self, content: &str, scope_id: &str) {
+        self.memory_owned(content, scope_id, OWNER);
+    }
+
+    fn memory_owned(&self, content: &str, scope_id: &str, owner: &str) {
         self.db
             .with_connection(|conn| {
                 conn.execute(
                     "INSERT INTO memory
                         (owner_id, kind, scope, scope_id, source, content, content_hash)
                      VALUES (?1, 'fact', 'workspace', ?2, 'test', ?3, ?3)",
-                    rusqlite::params![OWNER, scope_id, content],
+                    rusqlite::params![owner, scope_id, content],
                 )?;
                 Ok(())
             })
@@ -1407,10 +1411,16 @@ fn workspace_rows_counts_the_members_and_the_runs_in_flight() {
     let f = Fixture::new();
     let root = f.project_root().to_string_lossy().to_string();
     assert_eq!(
-        f.store().workspace_rows(&root).unwrap(),
+        f.store().workspace_rows(&root, None).unwrap(),
         WorkspaceRows::default()
     );
-    assert!(f.store().workspace_rows(&root).unwrap().counts.is_empty());
+    assert!(
+        f.store()
+            .workspace_rows(&root, None)
+            .unwrap()
+            .counts
+            .is_empty()
+    );
 
     let scope = f.scope();
     let mut produced = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"a");
@@ -1421,7 +1431,7 @@ fn workspace_rows_counts_the_members_and_the_runs_in_flight() {
     f.task_in("queued", &root, "queued");
     f.memory("a fact", &root);
 
-    let rows = f.store().workspace_rows(&root).unwrap();
+    let rows = f.store().workspace_rows(&root, None).unwrap();
     assert_eq!(
         rows.counts,
         RebaseCounts {
@@ -1438,7 +1448,49 @@ fn workspace_rows_counts_the_members_and_the_runs_in_flight() {
 
     f.task_in("live", &root, "running");
     f.task_in("held", &root, "paused");
-    assert_eq!(f.store().workspace_rows(&root).unwrap().active_tasks, 2);
+    assert_eq!(
+        f.store().workspace_rows(&root, None).unwrap().active_tasks,
+        2
+    );
+}
+
+#[test]
+fn workspace_rows_scopes_the_two_members_that_have_an_owner() {
+    let f = Fixture::new();
+    let root = f.project_root().to_string_lossy().to_string();
+    let scope = f.scope();
+
+    let mut mine = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Mine", b"a");
+    mine.created = at(1);
+    f.store().put(mine).unwrap();
+    let mut theirs = NewArtifact::new("owner-2", &scope, ArtifactKind::Markdown, "Theirs", b"b");
+    theirs.created = at(1);
+    f.store().put(theirs).unwrap();
+    f.memory("mine", &root);
+    f.memory_owned("theirs", &root, "owner-2");
+    f.session("session-1", &root);
+    f.task_in("task-1", &root, "completed");
+
+    let all = f.store().workspace_rows(&root, None).unwrap();
+    assert_eq!(all.counts.file_assets, 2);
+    assert_eq!(all.counts.memories, 2);
+    assert_eq!(all.other_owners, 0, "an unscoped count leaves nobody out");
+
+    let mine = f.store().workspace_rows(&root, Some(OWNER)).unwrap();
+    assert_eq!(mine.counts.file_assets, 1);
+    assert_eq!(mine.counts.memories, 1);
+    assert_eq!(
+        mine.other_owners, 2,
+        "one artifact and one memory belong to somebody else"
+    );
+    // `session` and `task` carry no owner, so their counts are the root's
+    // either way — which is why the route refuses rather than half-scopes.
+    assert_eq!(mine.counts.sessions, 1);
+    assert_eq!(mine.counts.tasks, 1);
+
+    let nobody = f.store().workspace_rows(&root, Some("owner-3")).unwrap();
+    assert_eq!(nobody.counts.file_assets, 0);
+    assert_eq!(nobody.other_owners, 4);
 }
 
 // ============================================================================

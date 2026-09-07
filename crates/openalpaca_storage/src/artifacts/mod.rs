@@ -622,6 +622,14 @@ pub struct WorkspaceRows {
     /// does not count: it has not resolved anything yet, and its row moves with
     /// the rest.
     pub active_tasks: usize,
+    /// Rows under this root that belong to **another** owner — `file_assets`
+    /// and `memory`, the two members that carry an `owner_id` at all. Always
+    /// `0` for an unscoped count.
+    ///
+    /// A re-base is owner-scoped, and this is how: a root holding rows the
+    /// caller cannot see is a `404`, not a transaction that quietly rewrites
+    /// them.
+    pub other_owners: usize,
 }
 
 /// What one [`ArtifactStore::verify`] pass found.
@@ -1378,6 +1386,12 @@ impl<'a> ArtifactStore<'a> {
     /// Rows only. Moving the store *directory*, when the caller is asking for a
     /// move rather than recording one that already happened, is
     /// [`crate::store::migrate::move_project_store`].
+    ///
+    /// **Path-scoped, not owner-scoped**, and deliberately: `session` and `task`
+    /// carry no `owner_id`, so a half-scoped transaction would leave a project
+    /// whose artifacts moved and whose runs did not. The route is what makes it
+    /// owner-safe — it refuses a root holding rows the caller does not own
+    /// ([`WorkspaceRows::other_owners`]) rather than rewrite them here.
     pub fn rebase_project(&self, old_root: &str, new_root: &str) -> Result<RebaseCounts> {
         self.db.with_connection(|conn| {
             let tx = conn.unchecked_transaction()?;
@@ -1431,7 +1445,15 @@ impl<'a> ArtifactStore<'a> {
     /// a rebase onto a root that already has rows would merge two projects, and
     /// one out from under a running task would rewrite the row without moving
     /// the process.
-    pub fn workspace_rows(&self, root: &str) -> Result<WorkspaceRows> {
+    ///
+    /// `owner_id` scopes the two members that carry one — `file_assets` and
+    /// `memory` — and fills [`WorkspaceRows::other_owners`] with what it
+    /// therefore left out. `session` and `task` have no owner column at all, so
+    /// their counts are the root's whether or not a caller is named; that
+    /// asymmetry is exactly why a root holding another owner's rows is refused
+    /// rather than partly re-based. `None` counts every owner, which is what
+    /// describing a root (rather than writing it) asks for.
+    pub fn workspace_rows(&self, root: &str, owner_id: Option<&str>) -> Result<WorkspaceRows> {
         self.db.with_connection(|conn| {
             let count = |sql: &str| -> Result<usize> {
                 Ok(
@@ -1439,19 +1461,50 @@ impl<'a> ArtifactStore<'a> {
                         as usize,
                 )
             };
-            Ok(WorkspaceRows {
-                counts: RebaseCounts {
-                    file_assets: count("SELECT COUNT(*) FROM file_assets WHERE project_root = ?1")?,
-                    sessions: count("SELECT COUNT(*) FROM session WHERE workspace_id = ?1")?,
-                    tasks: count("SELECT COUNT(*) FROM task WHERE workspace_id = ?1")?,
-                    memories: count(
+            let owned = |sql: &str| -> Result<usize> {
+                Ok(
+                    conn.query_row(sql, rusqlite::params![root, owner_id], |row| {
+                        row.get::<_, i64>(0)
+                    })? as usize,
+                )
+            };
+            let (file_assets, memories, other_owners) = match owner_id {
+                Some(_) => (
+                    owned(
+                        "SELECT COUNT(*) FROM file_assets
+                          WHERE project_root = ?1 AND owner_id = ?2",
+                    )?,
+                    owned(
+                        "SELECT COUNT(*) FROM memory
+                          WHERE scope = 'workspace' AND scope_id = ?1 AND owner_id = ?2",
+                    )?,
+                    owned(
+                        "SELECT (SELECT COUNT(*) FROM file_assets
+                                  WHERE project_root = ?1 AND owner_id <> ?2)
+                              + (SELECT COUNT(*) FROM memory
+                                  WHERE scope = 'workspace' AND scope_id = ?1 AND owner_id <> ?2)",
+                    )?,
+                ),
+                None => (
+                    count("SELECT COUNT(*) FROM file_assets WHERE project_root = ?1")?,
+                    count(
                         "SELECT COUNT(*) FROM memory WHERE scope = 'workspace' AND scope_id = ?1",
                     )?,
+                    0,
+                ),
+            };
+            Ok(WorkspaceRows {
+                counts: RebaseCounts {
+                    file_assets,
+                    sessions: count("SELECT COUNT(*) FROM session WHERE workspace_id = ?1")?,
+                    tasks: count("SELECT COUNT(*) FROM task WHERE workspace_id = ?1")?,
+                    memories,
                 },
                 active_tasks: count(
                     "SELECT COUNT(*) FROM task
                       WHERE workspace_id = ?1 AND status IN ('running', 'paused')",
                 )?,
+                other_owners,
             })
         })
     }

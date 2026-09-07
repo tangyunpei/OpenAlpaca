@@ -121,8 +121,13 @@ impl Fixture {
     }
 
     async fn patch(&self, old: &str, new: &str) -> (StatusCode, serde_json::Value) {
+        self.patch_as(OWNER, old, new).await
+    }
+
+    async fn patch_as(&self, owner: &str, old: &str, new: &str) -> (StatusCode, serde_json::Value) {
         split(rebase_workspace(
             &self.db,
+            owner,
             RebaseRequest {
                 old_path: old.to_string(),
                 new_path: new.to_string(),
@@ -150,6 +155,14 @@ impl Fixture {
             .expect("canonicalize home")
             .to_string_lossy()
             .into_owned()
+    }
+
+    /// One produced artifact under `root`, owned by somebody else.
+    fn artifact_owned(&self, root: &str, title: &str, owner: &str) {
+        let scope = StoreScope::Project(std::path::PathBuf::from(root));
+        let mut new = NewArtifact::new(owner, &scope, ArtifactKind::Markdown, title, b"body\n");
+        new.created = chrono::Utc::now();
+        ArtifactStore::new(&self.db).put(new).expect("put");
     }
 }
 
@@ -360,6 +373,29 @@ async fn re_basing_to_or_from_the_home_store_is_a_409() {
 
     let (_, old_body) = f.get(Some(&old)).await;
     assert_eq!(old_body["rows"]["artifacts"], 1, "nothing moved");
+}
+
+#[tokio::test]
+async fn re_basing_rows_another_owner_holds_is_a_404() {
+    let f = Fixture::new();
+    let old = f.project("old-project");
+    let new = f.bare_dir("new-project");
+    f.artifact_owned(&old, "Theirs", "owner-2");
+
+    let (status, body) = f.patch(&old, &new).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(error_code(&body), "WORKSPACE_NOT_FOUND");
+
+    // A root the caller only partly owns is refused too: the transaction moves
+    // sessions and tasks, which carry no owner, so a partial re-base would
+    // strand the other owner's artifacts under a path nothing else names.
+    f.artifact(&old, "Mine");
+    let (status, body) = f.patch(&old, &new).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(error_code(&body), "WORKSPACE_NOT_FOUND");
+
+    let (_, old_body) = f.get(Some(&old)).await;
+    assert_eq!(old_body["rows"]["artifacts"], 2, "nothing moved");
 }
 
 #[tokio::test]
