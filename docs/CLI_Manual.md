@@ -297,6 +297,13 @@ variable from its own environment each time it starts the server, exactly as
 `--bearer-env` does for HTTP. A variable that is not set is a start failure
 naming it, never an empty value handed to the server.
 
+The same rule covers HTTP headers, which is where a remote server's credential
+actually travels. A header named `Authorization`, `Proxy-Authorization`,
+`Cookie` or `X-Api-Key`, or one whose name or value looks like a credential, is
+refused with `secret_literal_refused`; `--header-from HEADER=HOST_VAR` records
+the variable's *name* and the daemon reads it from its own environment each time
+it connects.
+
 ```bash
 export GITHUB_TOKEN=ghp_xxx            # in the daemon's environment
 openalpaca ext mcp add github --command npx \
@@ -304,6 +311,9 @@ openalpaca ext mcp add github --command npx \
   --env-from GITHUB_TOKEN=GITHUB_TOKEN
 openalpaca ext mcp add remote --transport http \
   --url https://example.com/mcp --bearer-env REMOTE_TOKEN
+openalpaca ext mcp add tracked --transport http \
+  --url https://example.com/mcp \
+  --header-from Authorization=REMOTE_TOKEN
 openalpaca ext disable mcp github && openalpaca ext mcp remove github
 ```
 

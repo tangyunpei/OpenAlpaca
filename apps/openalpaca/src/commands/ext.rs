@@ -186,6 +186,9 @@ pub enum ExtMcpCommands {
         /// http: the environment variable holding the API key
         #[arg(long)]
         api_key_env: Option<String>,
+        /// http: one HEADER=HOST_VAR indirection for a credential repeatable
+        #[arg(long = "header-from")]
+        headers_from: Vec<String>,
         /// Seconds to wait for the connection
         #[arg(long)]
         connect_timeout_secs: Option<u64>,
@@ -475,8 +478,9 @@ pub(crate) fn uninstall_path(kind: &str, id: &str, keep_data: bool) -> String {
     format!("/v1/extensions/{kind}/{id}?uninstall=true&keep_data={keep_data}")
 }
 
-/// One `--env KEY=VALUE` or `--env-from KEY=HOST_VAR`, split on the **first**
-/// `=` so a value may hold one.
+/// One `--env KEY=VALUE`, `--env-from KEY=HOST_VAR` or
+/// `--header-from HEADER=HOST_VAR`, split on the **first** `=` so a value may
+/// hold one.
 fn env_pair(flag: &str, entry: &str) -> Result<(String, String)> {
     match entry.split_once('=') {
         Some((key, value)) if !key.is_empty() => Ok((key.to_string(), value.to_string())),
@@ -501,6 +505,7 @@ pub(crate) fn mcp_add_body(command: ExtMcpCommands) -> Result<serde_json::Value>
         bearer_env,
         api_key_header,
         api_key_env,
+        headers_from,
         connect_timeout_secs,
         request_timeout_secs,
         disabled,
@@ -540,6 +545,7 @@ pub(crate) fn mcp_add_body(command: ExtMcpCommands) -> Result<serde_json::Value>
     for (flag, field, entries) in [
         ("--env", "env", &envs),
         ("--env-from", "env_from", &envs_from),
+        ("--header-from", "extra_headers_from", &headers_from),
     ] {
         if entries.is_empty() {
             continue;
@@ -920,7 +926,8 @@ mod tests {
 
         let body = mcp_add_body(parse_mcp(&[
             "ext", "mcp", "add", "remote", "--transport", "http", "--url",
-            "https://example.com/mcp", "--bearer-env", "TOKEN", "--disabled",
+            "https://example.com/mcp", "--bearer-env", "TOKEN", "--header-from",
+            "Authorization=REMOTE_TOKEN", "--disabled",
         ]))
         .expect("an http declaration");
         assert_eq!(
@@ -931,6 +938,7 @@ mod tests {
                 "enabled": false,
                 "url": "https://example.com/mcp",
                 "bearer_env": "TOKEN",
+                "extra_headers_from": { "Authorization": "REMOTE_TOKEN" },
             })
         );
     }
@@ -953,6 +961,17 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("--env-from expects KEY=VALUE"), "got: {error}");
+
+        let error = mcp_add_body(parse_mcp(&[
+            "ext", "mcp", "add", "remote", "--transport", "http", "--url",
+            "https://example.com/mcp", "--header-from", "NOPE",
+        ]))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("--header-from expects KEY=VALUE"),
+            "got: {error}"
+        );
     }
 
     fn parse_mcp(argv: &[&str]) -> ExtMcpCommands {

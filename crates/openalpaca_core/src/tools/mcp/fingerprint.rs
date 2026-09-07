@@ -20,11 +20,13 @@
 //! needed: every `env.*` value, every `extra_headers.*` value and a literal
 //! `auth.bearer` are replaced by the fixed marker `<masked>` (keys kept).
 //! Those three are the only places a credential byte can appear in a block
-//! (`config.rs` — `bearer_env`/`api_key_env`/`env_from` are name-only), so the
-//! preimage covers structure, `command`/`args`/`url`/`cwd`/timeouts, env and
-//! header *names*, the `env_from` indirection and the auth *kind*, and nothing
-//! else. `env_from` is **not** masked: a change of which host variable a server
-//! reads is a change to what the server is, and it is a name, not a secret.
+//! (`config.rs` — `bearer_env`/`api_key_env`/`env_from`/`extra_headers_from`
+//! are name-only), so the preimage covers structure,
+//! `command`/`args`/`url`/`cwd`/timeouts, env and header *names*, the
+//! `env_from` and `extra_headers_from` indirections and the auth *kind*, and
+//! nothing else. Neither indirection is masked: a change of which host variable
+//! a server reads is a change to what the server is, and it is a name, not a
+//! secret.
 //!
 //! Consequence, stated because the design states it: a rotated credential
 //! **value** under an unchanged name is invisible to the watcher by design. It
@@ -351,6 +353,43 @@ mod tests {
         );
         assert_eq!(config_fingerprint(&one), config_fingerprint(&two));
         assert_ne!(config_fingerprint(&one), config_fingerprint(&renamed));
+    }
+
+    /// `extra_headers_from` names a host variable rather than holding a secret,
+    /// so — like `env_from` — it is **not** masked: repointing a header at a
+    /// different variable changes what the server sends, and the watcher has to
+    /// see that (R65a).
+    #[test]
+    fn an_extra_headers_from_rename_changes_the_fingerprint() {
+        let plain = block(
+            r#"
+            [servers.x]
+            transport = "http"
+            url = "https://example.com/mcp"
+        "#,
+        );
+        let indirect = block(
+            r#"
+            [servers.x]
+            transport = "http"
+            url = "https://example.com/mcp"
+            extra_headers_from = { "Authorization" = "HOST_ONE" }
+        "#,
+        );
+        let repointed = block(
+            r#"
+            [servers.x]
+            transport = "http"
+            url = "https://example.com/mcp"
+            extra_headers_from = { "Authorization" = "HOST_TWO" }
+        "#,
+        );
+        assert_ne!(config_fingerprint(&plain), config_fingerprint(&indirect));
+        assert_ne!(
+            config_fingerprint(&indirect),
+            config_fingerprint(&repointed),
+            "which variable the header reads is part of what the server is"
+        );
     }
 
     #[test]

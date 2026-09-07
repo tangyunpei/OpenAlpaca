@@ -1528,6 +1528,68 @@ async fn an_ordinary_env_value_is_still_written() {
     );
 }
 
+/// **R65a.** The http side's literal is a header, not an `env` entry, and
+/// `extra_headers` used to go through this route verbatim — which is how a
+/// bearer token reached `config/mcp.toml` and the five rotated copies behind
+/// it. An auth-bearing header is `422`, and the refusal points at the
+/// indirection that works.
+#[tokio::test]
+async fn a_header_that_carries_a_secret_is_refused_and_extra_headers_from_is_offered() {
+    let h = Harness::new();
+    h.write_mcp("");
+    h.mcp.reconcile_all().await;
+
+    let (status, body) = h
+        .install(
+            "mcp",
+            serde_json::json!({
+                "name": "remote",
+                "transport": "http",
+                "url": "https://example.com/mcp",
+                "extra_headers": { "Authorization": "Bearer ghp_secret" },
+            }),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(error_word(&body), "secret_literal_refused");
+    let message = body["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("extra_headers_from") && message.contains("Authorization"),
+        "the refusal names the header and the shape that works: {message}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(h.mcp_config_path()).unwrap(),
+        "",
+        "and nothing was written"
+    );
+
+    // The same declaration as a name indirection is accepted.
+    let (status, _) = h
+        .install(
+            "mcp",
+            serde_json::json!({
+                "name": "remote",
+                "transport": "http",
+                "url": "https://example.com/mcp",
+                "connect_timeout_secs": 1,
+                "enabled": false,
+                "extra_headers_from": { "Authorization": "OPENALPACA_TEST_REMOTE_TOKEN" },
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let written = std::fs::read_to_string(h.mcp_config_path()).unwrap();
+    assert!(
+        written.contains("extra_headers_from") && written.contains("OPENALPACA_TEST_REMOTE_TOKEN"),
+        "the block carries the variable name, not a value: {written}"
+    );
+    assert!(
+        !written.contains("ghp_secret"),
+        "no secret reached the file: {written}"
+    );
+}
+
 #[tokio::test]
 async fn removing_an_mcp_server_needs_it_disabled_first() {
     let h = Harness::new();

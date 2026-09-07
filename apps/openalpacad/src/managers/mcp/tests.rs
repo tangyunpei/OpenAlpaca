@@ -2523,3 +2523,187 @@ fn an_env_from_that_resolves_lands_in_the_child_environment() {
     assert_eq!(resolved.get("SERVER_TOKEN"), Some(&expected));
     assert_eq!(resolved.get("RUST_LOG").map(String::as_str), Some("debug"));
 }
+
+// ============================================================================
+// R65a — the same rule on `extra_headers`, the http side's literal
+// ============================================================================
+
+/// A header is where an http server's credential actually travels, and
+/// `extra_headers` was accepted verbatim: `Authorization = "Bearer ghp_…"` put
+/// the token in `config/mcp.toml` in the clear and in the five rotated copies
+/// behind it. The name test is explicit because the `env` heuristic does not
+/// save it — `Authorization` contains none of the five markers.
+#[tokio::test]
+async fn an_auth_bearing_header_is_refused_before_the_writer_sees_it() {
+    let h = Harness::new(1);
+    h.write_config("");
+    h.supervisor.reconcile_all().await;
+
+    let cases = [
+        ("Authorization", "Bearer ghp_secret"),
+        ("proxy-authorization", "Basic abc"),
+        ("Cookie", "session=abc"),
+        ("X-Api-Key", "abc123"),
+        // The heuristic still covers the shapes it always did, on the name…
+        ("X-Session-Token", "abc123"),
+        // …and now on the value too.
+        ("X-Trace", "secret-abc"),
+    ];
+    for (header, value) in cases {
+        let error = h
+            .supervisor
+            .add_server(McpDeclaration {
+                name: "remote".to_string(),
+                transport: "http".to_string(),
+                url: Some("https://example.com/mcp".to_string()),
+                extra_headers: BTreeMap::from([(header.to_string(), value.to_string())]),
+                ..McpDeclaration::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.code(),
+            "secret_literal_refused",
+            "for header '{header}'"
+        );
+        assert!(
+            error.to_string().contains("extra_headers_from"),
+            "the refusal points at the shape that works: {error}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(&h.config_path).unwrap(),
+        "",
+        "nothing was written"
+    );
+}
+
+/// A header that carries no credential is still written as a literal — the rule
+/// is about secrets, not about headers.
+#[tokio::test]
+async fn an_ordinary_header_is_still_written() {
+    let h = Harness::new(1);
+    h.write_config("");
+    h.supervisor.reconcile_all().await;
+
+    h.supervisor
+        .add_server(McpDeclaration {
+            name: "remote".to_string(),
+            transport: "http".to_string(),
+            url: Some("https://example.com/mcp".to_string()),
+            extra_headers: BTreeMap::from([(
+                "X-Client-Name".to_string(),
+                "openalpaca".to_string(),
+            )]),
+            enabled: false,
+            ..McpDeclaration::default()
+        })
+        .await
+        .expect("add");
+
+    let parsed = McpConfig::load(&h.config_path).expect("the result parses");
+    match &parsed.servers["remote"] {
+        McpServerConfig::Http { extra_headers, .. } => assert_eq!(
+            extra_headers.get("X-Client-Name").map(String::as_str),
+            Some("openalpaca")
+        ),
+        other => panic!("expected an http block, got {other:?}"),
+    }
+}
+
+/// The round trip: what the route writes is what the reader reads, in its own
+/// table, and the **name** is what is on disk.
+#[tokio::test]
+async fn an_extra_headers_from_declaration_round_trips_as_a_name() {
+    let h = Harness::new(1);
+    h.write_config("");
+    h.supervisor.reconcile_all().await;
+
+    h.supervisor
+        .add_server(McpDeclaration {
+            name: "remote".to_string(),
+            transport: "http".to_string(),
+            url: Some("https://example.com/mcp".to_string()),
+            extra_headers: BTreeMap::from([(
+                "X-Client-Name".to_string(),
+                "openalpaca".to_string(),
+            )]),
+            extra_headers_from: BTreeMap::from([(
+                "Authorization".to_string(),
+                "OPENALPACA_TEST_REMOTE_TOKEN".to_string(),
+            )]),
+            enabled: false,
+            ..McpDeclaration::default()
+        })
+        .await
+        .expect("add");
+
+    let text = std::fs::read_to_string(&h.config_path).unwrap();
+    assert!(
+        text.contains("extra_headers_from"),
+        "the block carries it: {text}"
+    );
+    let parsed = McpConfig::load(&h.config_path).expect("the result parses");
+    match &parsed.servers["remote"] {
+        McpServerConfig::Http {
+            extra_headers,
+            extra_headers_from,
+            ..
+        } => {
+            assert_eq!(
+                extra_headers.get("X-Client-Name").map(String::as_str),
+                Some("openalpaca")
+            );
+            assert_eq!(
+                extra_headers_from
+                    .get("Authorization")
+                    .map(String::as_str),
+                Some("OPENALPACA_TEST_REMOTE_TOKEN"),
+                "the host variable's *name* is what is stored"
+            );
+        }
+        other => panic!("expected an http block, got {other:?}"),
+    }
+}
+
+/// **The attribution.** A host variable that is not set is a start failure
+/// naming it — `Failed{NeedsConfig{missing: [VAR]}}`, the same classification
+/// `bearer_env` and `env_from` already produce.
+#[test]
+fn an_extra_headers_from_whose_host_variable_is_unset_names_it() {
+    let missing = resolve_http_headers(
+        "remote",
+        &HashMap::new(),
+        &HashMap::from([(
+            "Authorization".to_string(),
+            "OPENALPACA_TEST_VAR_THAT_IS_NEVER_SET".to_string(),
+        )]),
+    )
+    .expect_err("an unset host variable must refuse the load");
+
+    assert_eq!(missing.var, "OPENALPACA_TEST_VAR_THAT_IS_NEVER_SET");
+    assert!(
+        missing.message.contains("Authorization") && missing.message.contains("remote"),
+        "the message names the header and the server: {}",
+        missing.message
+    );
+}
+
+/// And a host variable that *is* set reaches the request headers under the
+/// declared name. `PATH` is used because it is always set and never a secret.
+#[test]
+fn an_extra_headers_from_that_resolves_lands_in_the_request_headers() {
+    let expected = std::env::var("PATH").expect("PATH is set");
+    let resolved = resolve_http_headers(
+        "remote",
+        &HashMap::from([("X-Client-Name".to_string(), "openalpaca".to_string())]),
+        &HashMap::from([("Authorization".to_string(), "PATH".to_string())]),
+    )
+    .expect("resolve");
+
+    assert_eq!(resolved.get("Authorization"), Some(&expected));
+    assert_eq!(
+        resolved.get("X-Client-Name").map(String::as_str),
+        Some("openalpaca")
+    );
+}

@@ -179,8 +179,19 @@ pub struct McpDeclaration {
     pub api_key_header: Option<String>,
     #[serde(default)]
     pub api_key_env: Option<String>,
+    /// Literal `Header = "value"` entries. A header that carries a credential
+    /// — `Authorization`, `Proxy-Authorization`, `Cookie`, `X-Api-Key`, or one
+    /// whose name or value trips the secret heuristic — is refused with
+    /// `422 secret_literal_refused` pointing at `extra_headers_from` (R65a). A
+    /// header is where an http server's credential actually travels, so this is
+    /// the http side of the rule [`Self::env`] states for stdio.
     #[serde(default)]
     pub extra_headers: BTreeMap<String, String>,
+    /// `{ Header = "HOST_VAR" }` — the name indirection that replaces a
+    /// literal. The supervisor resolves `HOST_VAR` from the daemon's own
+    /// environment when it connects, exactly as `bearer_env` is.
+    #[serde(default)]
+    pub extra_headers_from: BTreeMap<String, String>,
     #[serde(default)]
     pub connect_timeout_secs: Option<u64>,
     #[serde(default)]
@@ -214,6 +225,7 @@ impl Default for McpDeclaration {
             api_key_header: None,
             api_key_env: None,
             extra_headers: BTreeMap::new(),
+            extra_headers_from: BTreeMap::new(),
             connect_timeout_secs: None,
             request_timeout_secs: None,
             enabled: declaration_enabled_default(),
@@ -299,8 +311,25 @@ impl McpDeclaration {
                 if let Some(auth) = auth {
                     table["auth"] = toml_edit::value(auth);
                 }
+                if let Some((header, _)) = self
+                    .extra_headers
+                    .iter()
+                    .find(|(header, value)| carries_a_credential(header, value))
+                {
+                    return Err(DeclarationError::SecretLiteral(format!(
+                        "the header '{header}' carries a credential, and this route does not \
+                         write secrets into config/mcp.toml in the clear — the value would \
+                         also land in every rotated copy under state/backups/. Put it in the \
+                         daemon's environment and name the variable: extra_headers_from = \
+                         {{ {header} = \"<HOST_VAR>\" }}"
+                    )));
+                }
                 if !self.extra_headers.is_empty() {
                     table["extra_headers"] = toml_edit::value(inline_map(&self.extra_headers));
+                }
+                if !self.extra_headers_from.is_empty() {
+                    table["extra_headers_from"] =
+                        toml_edit::value(inline_map(&self.extra_headers_from));
                 }
             }
             other => {
@@ -350,6 +379,32 @@ fn looks_like_a_secret(key: &str) -> bool {
     MARKERS.iter().any(|marker| upper.contains(marker))
 }
 
+/// Does this `extra_headers` entry carry a credential? (R65a.)
+///
+/// A header is where an http server's credential actually travels, so the name
+/// test comes first and is **exact**: `Authorization` — the commonest of them —
+/// contains none of [`looks_like_a_secret`]'s five markers, so the heuristic
+/// alone would wave a bearer token straight into the file. The heuristic then
+/// runs over both the name and the *value*, because a header value is short and
+/// purpose-built: a `Bearer`/`Basic` credential or anything self-describing as
+/// a token or a secret is what it says it is.
+///
+/// Like the `env` rule, it governs only what the **daemon writes**. A
+/// hand-authored `mcp.toml` may still carry literal headers; the parser reads
+/// them unchanged.
+fn carries_a_credential(header: &str, value: &str) -> bool {
+    const AUTH_HEADERS: [&str; 4] = [
+        "AUTHORIZATION",
+        "PROXY-AUTHORIZATION",
+        "COOKIE",
+        "X-API-KEY",
+    ];
+    let upper = header.to_ascii_uppercase();
+    AUTH_HEADERS.iter().any(|name| upper == *name)
+        || looks_like_a_secret(header)
+        || looks_like_a_secret(value)
+}
+
 fn string_array(values: &[String]) -> toml_edit::Array {
     let mut array = toml_edit::Array::new();
     for value in values {
@@ -377,10 +432,11 @@ pub enum DeclarationError {
     /// or url. `400`.
     #[error("{0}")]
     Invalid(String),
-    /// An `env` key that names a credential, given as a literal — `422`
-    /// (R65). Distinct from [`Self::Invalid`] because retrying the same
-    /// request will not help: the *declaration* has to change shape, to
-    /// `env_from`.
+    /// A credential given as a literal — an `env` key that names one (R65) or
+    /// an auth-bearing `extra_headers` entry (R65a) — `422`. Distinct from
+    /// [`Self::Invalid`] because retrying the same request will not help: the
+    /// *declaration* has to change shape, to `env_from` or
+    /// `extra_headers_from`.
     #[error("{0}")]
     SecretLiteral(String),
     /// `[servers.<name>]` already exists — `409`.
@@ -2151,13 +2207,14 @@ fn build_client_config(
             url,
             auth,
             extra_headers,
+            extra_headers_from,
             ..
         } => TransportKind::Http {
             url: url.clone(),
-            // Re-resolved on every load, which is how a rotated credential
+            // Both re-resolved on every load, which is how a rotated credential
             // takes effect without a restart (§3.3 E2).
             auth: resolve_http_auth(server_name, auth.as_ref())?,
-            extra_headers: extra_headers.clone(),
+            extra_headers: resolve_http_headers(server_name, extra_headers, extra_headers_from)?,
         },
     };
 
@@ -2200,6 +2257,38 @@ fn resolve_stdio_env(
                     message: format!(
                         "missing env var '{host_var}' for env_from '{name}' on server \
                          '{server_name}'"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(resolved)
+}
+
+/// The request headers: the literal `extra_headers` entries, plus one per
+/// `extra_headers_from` name resolved from the **daemon's** environment (R65a).
+///
+/// The stdio path's [`resolve_stdio_env`], one transport over, with the same
+/// two rules: a missing host variable is refused up front with the variable's
+/// name — `Failed{NeedsConfig{missing: [VAR]}}` — rather than a header sent
+/// empty, and the indirection wins over a literal of the same name.
+fn resolve_http_headers(
+    server_name: &str,
+    extra_headers: &HashMap<String, String>,
+    extra_headers_from: &HashMap<String, String>,
+) -> Result<HashMap<String, String>, MissingEnv> {
+    let mut resolved = extra_headers.clone();
+    for (header, host_var) in extra_headers_from {
+        match std::env::var(host_var) {
+            Ok(value) => {
+                resolved.insert(header.clone(), value);
+            }
+            Err(_) => {
+                return Err(MissingEnv {
+                    var: host_var.clone(),
+                    message: format!(
+                        "missing env var '{host_var}' for extra_headers_from '{header}' on \
+                         server '{server_name}'"
                     ),
                 });
             }

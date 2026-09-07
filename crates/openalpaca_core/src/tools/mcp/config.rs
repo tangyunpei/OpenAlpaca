@@ -90,8 +90,26 @@ pub enum McpServerConfig {
         url: url::Url,
         #[serde(default)]
         auth: Option<HttpAuthConfig>,
+        /// Literal header values, sent as they stand.
         #[serde(default)]
         extra_headers: HashMap<String, String>,
+        /// **Name indirection**: `extra_headers_from = { Authorization =
+        /// "GH_PAT" }` sends `Authorization` with the value the *daemon's*
+        /// `GH_PAT` holds, resolved at connect (`build_client_config`). It is
+        /// the header counterpart of `env_from`, and it is what
+        /// `POST /v1/extensions/mcp` writes for an auth-bearing header: a
+        /// header is where an http server's credential actually travels, and a
+        /// secret the daemon put into a config file in the clear would then
+        /// propagate into every rotated copy under `state/backups/`. A missing
+        /// host variable is a start failure naming it, never an empty header.
+        ///
+        /// `skip_serializing_if` keeps the §3.3 E2 fingerprint preimage of
+        /// every block that does not use it byte-identical to what it was
+        /// before this field existed. The names themselves are *not* masked —
+        /// they are not secrets, and changing which variable a header reads is
+        /// a real change to what the server sends.
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        extra_headers_from: HashMap<String, String>,
         #[serde(default)]
         connect_timeout_secs: Option<u64>,
         #[serde(default)]
