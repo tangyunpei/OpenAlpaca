@@ -3,6 +3,7 @@
 //! ```text
 //! GET   /v1/workspaces?path=<abs>          -> what is recorded at that root
 //! PATCH /v1/workspaces {old_path,new_path} -> re-base everything onto the new one
+//! POST  /v1/workspaces/purge {path|all}    -> delete one project's history
 //! ```
 //!
 //! A project's path is its identity in four places — `file_assets.project_root`,
@@ -34,6 +35,13 @@
 //! the old root is in flight, `409` when either root is the home store, `409`
 //! when the store directory itself cannot be moved, and `422` when the
 //! destination sits inside another project's root.
+//!
+//! The `POST …/purge` is the other writer, and it answers a plan rather than a
+//! number: one line per store entry, in the retention-class terms the seeded
+//! store README already uses, saying `delete` or `keep` for each. `dry_run`
+//! defaults to **true** on the route as well as on the CLI — the daemon fails
+//! closed, so a caller that forgets the field gets the plan and not the
+//! deletion. Its refusals are the re-base's, for the same reasons.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -45,9 +53,10 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use openalpaca_storage::store::{self, migrate};
-use openalpaca_storage::{ArtifactStore, Database, RebaseCounts, WorkspaceRows};
+use openalpaca_storage::{ArtifactStore, Database, PurgePlan, RebaseCounts, WorkspaceRows};
 use serde::Deserialize;
 
+use openalpaca_core::context::SharedContext;
 use openalpaca_core::memory::scope_context::resolves_to_the_home_store;
 
 use super::{api_error, request_project_root};
@@ -66,6 +75,23 @@ pub struct WorkspaceQuery {
 pub struct RebaseRequest {
     pub old_path: String,
     pub new_path: String,
+}
+
+/// `{"path": "<root>"}` **or** `{"all": true}`, never both and never neither,
+/// plus a `dry_run` that defaults to `true`.
+#[derive(Debug, Deserialize)]
+pub struct PurgeRequest {
+    pub path: Option<String>,
+    #[serde(default)]
+    pub all: bool,
+    /// Absent means a dry run. The destructive reading of a missing field is
+    /// the one this route will not take.
+    #[serde(default = "yes")]
+    pub dry_run: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 // ── Path resolution ──────────────────────────────────────────────
@@ -407,6 +433,351 @@ pub(crate) fn rebase_workspace(db: &Database, owner_id: &str, request: RebaseReq
     .into_response()
 }
 
+// ── POST /v1/workspaces/purge ────────────────────────────────────
+
+/// What the purge needs from `AppState`, named so the status codes and the
+/// retention-class plan can be tested without standing up a gateway.
+pub(crate) struct PurgeDeps<'a> {
+    pub db: &'a Database,
+    /// The live lane registry — half of the in-flight guard.
+    pub ctx: &'a SharedContext,
+    /// The local user; every write is scoped to it (R40).
+    pub owner: &'a str,
+    /// The home store's `sessions/`, where every session directory lives.
+    /// `None` when the store could not be resolved at boot: the rows still go,
+    /// and the directories are reported as not removed rather than guessed at.
+    pub sessions_root: Option<std::path::PathBuf>,
+}
+
+/// One line of the plan: an entry of the store, what it holds here, the
+/// retention class the seeded README gives it, and the verdict.
+fn plan_entry(
+    entry: &str,
+    holds: impl Into<String>,
+    retention: &str,
+    action: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "entry": entry,
+        "holds": holds.into(),
+        "retention": retention,
+        "action": action,
+    })
+}
+
+/// The deletion plan for one root, in the README's terms (`HOME_README` /
+/// `PROJECT_README`, `store/mod.rs`).
+///
+/// Every member is named including the zeroes: "nothing else went" is the half
+/// a reader is checking for, and a plan that silently omits an empty entry
+/// cannot be read as a promise about it.
+fn plan_entries(root: &str, plan: &PurgePlan) -> Vec<serde_json::Value> {
+    let c = &plan.counts;
+    let mut entries = vec![
+        plan_entry(
+            "sessions/",
+            format!(
+                "{} conversations, {} messages, {} tool calls, {} follow-ups — their logs live \
+                 in the home store's sessions/",
+                c.sessions, c.messages, c.tool_calls, c.followups
+            ),
+            "size-capped, optional age sweep",
+            "delete",
+        ),
+        plan_entry(
+            "runs (database)",
+            format!(
+                "{} runs, {} subagent spans, {} run events",
+                c.tasks, c.spans, c.run_events
+            ),
+            "never swept — removed only when you ask",
+            "delete",
+        ),
+        plan_entry(
+            "uploads/",
+            format!("{} uploads copied into this project", c.uploads),
+            "swept: an upload attached to no message is deleted once past the grace period",
+            "delete",
+        ),
+        plan_entry(
+            "artifacts/",
+            format!(
+                "{} files produced by runs in this project",
+                plan.kept.artifacts
+            ),
+            "never garbage-collected",
+            "keep",
+        ),
+        plan_entry(
+            "memory/",
+            format!(
+                "{} workspace memories, and the reserved memory/ directory",
+                plan.kept.memories
+            ),
+            "yours — never swept",
+            "keep",
+        ),
+        plan_entry(
+            "skills/, config/",
+            "reserved; not created until used",
+            "yours — never swept",
+            "keep",
+        ),
+        plan_entry(
+            ".layout, README.md, .gitignore",
+            "this store's own markers",
+            "store metadata — never swept",
+            "keep",
+        ),
+    ];
+    for name in store::unknown_entries(&Path::new(root).join(store::STORE_DIR_NAME)) {
+        entries.push(plan_entry(
+            &name,
+            "not created by OpenAlpaca",
+            "the store never deletes what it did not create",
+            "keep",
+        ));
+    }
+    entries
+}
+
+fn purge_counts_json(counts: &openalpaca_storage::PurgeCounts) -> serde_json::Value {
+    serde_json::json!({
+        "sessions": counts.sessions,
+        "messages": counts.messages,
+        "tool_calls": counts.tool_calls,
+        "followups": counts.followups,
+        "tasks": counts.tasks,
+        "spans": counts.spans,
+        "run_events": counts.run_events,
+        "uploads": counts.uploads,
+    })
+}
+
+/// Everything that must be true before a single row of `root` is deleted.
+///
+/// Owner-scoped like the re-base and for the same reason: `session` and `task`
+/// carry no owner column, so a root holding somebody else's rows is a `404`
+/// rather than a transaction over rows the caller cannot see (R40 — never a
+/// `403`). The in-flight guard is two halves, because either alone has a hole:
+/// `active_tasks` catches a `running`/`paused` row whose session is already
+/// gone, and the lane registry catches a live run whose row has not reached
+/// `running` yet.
+#[allow(clippy::result_large_err)]
+fn preflight(deps: &PurgeDeps<'_>, root: &str) -> Result<PurgePlan, Response> {
+    refuse_the_home_root("path", root)?;
+
+    let store = ArtifactStore::new(deps.db);
+    let rows = store
+        .workspace_rows(root, Some(deps.owner))
+        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string()))?;
+    if rows.other_owners > 0 {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "WORKSPACE_NOT_FOUND",
+            format!(
+                "{} row(s) under {root} belong to another owner; purging would delete rows you \
+                 cannot see",
+                rows.other_owners
+            ),
+        ));
+    }
+    if rows.counts.is_empty() {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "WORKSPACE_NOT_FOUND",
+            format!("nothing of yours is recorded under {root}"),
+        ));
+    }
+    if rows.active_tasks > 0 {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "WORKSPACE_BUSY",
+            format!(
+                "{} run(s) under {root} are still in flight; purging would delete the transcript \
+                 a run is about to write into",
+                rows.active_tasks
+            ),
+        ));
+    }
+
+    let plan = store
+        .purge_plan(root)
+        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string()))?;
+    for session in &plan.sessions {
+        if crate::routes::sessions::session_has_live_run(
+            deps.db,
+            deps.ctx,
+            &session.id,
+            &session.lane_key,
+        ) {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "WORKSPACE_BUSY",
+                format!(
+                    "conversation {} under {root} has a run in flight; cancel it before purging",
+                    session.id
+                ),
+            ));
+        }
+    }
+    Ok(plan)
+}
+
+/// The bytes, after the rows: the session directories the transaction orphaned
+/// and the upload blobs its rows addressed.
+///
+/// Rows first is the plan's order, so a crash here leaves files nothing
+/// addresses rather than rows addressing files that are gone. An upload path
+/// outside this project's own store is left alone and logged — the store never
+/// deletes what it did not create, and a row whose `storage_path` points
+/// somewhere else is exactly the ambiguity to fail closed on.
+fn remove_purged_bytes(
+    deps: &PurgeDeps<'_>,
+    root: &str,
+    outcome: &openalpaca_storage::PurgeOutcome,
+) -> (usize, usize) {
+    let mut dirs = 0;
+    if let Some(sessions_root) = deps.sessions_root.as_deref() {
+        for id in &outcome.session_ids {
+            let dir = sessions_root.join(openalpaca_core::session_log::session_dir_name(id));
+            if !dir.exists() {
+                continue;
+            }
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => dirs += 1,
+                Err(e) => tracing::warn!("Purge could not remove {}: {e}", dir.display()),
+            }
+        }
+    } else if !outcome.session_ids.is_empty() {
+        tracing::warn!(
+            "Purged {} session row(s) with no sessions root resolved; their logs stay on disk",
+            outcome.session_ids.len()
+        );
+    }
+
+    let store_root = Path::new(root).join(store::STORE_DIR_NAME);
+    let mut files = 0;
+    for path in &outcome.upload_paths {
+        let path = Path::new(path);
+        if !path.starts_with(&store_root) {
+            tracing::warn!(
+                "Purge left {} alone: it is outside {}",
+                path.display(),
+                store_root.display()
+            );
+            continue;
+        }
+        match std::fs::remove_file(path) {
+            Ok(()) => files += 1,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!("Purge could not remove {}: {e}", path.display()),
+        }
+    }
+    (dirs, files)
+}
+
+/// Delete one project's conversations, runs and uploads — or report what that
+/// would delete, which is what happens unless the caller says `dry_run: false`.
+///
+/// The plan is the answer in both cases, with `applied` saying which call this
+/// was: a dry run whose shape differs from the real one is a plan nobody can
+/// check against the outcome.
+pub(crate) fn purge_workspaces(deps: &PurgeDeps<'_>, request: PurgeRequest) -> Response {
+    let store = ArtifactStore::new(deps.db);
+    let roots = match (request.path.as_deref(), request.all) {
+        (Some(path), false) => match resolve_root(path) {
+            Ok(root) => vec![root],
+            Err(response) => return response,
+        },
+        (None, true) => match store.project_roots() {
+            Ok(roots) => roots,
+            Err(e) => {
+                return api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string());
+            }
+        },
+        _ => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_REQUEST",
+                "name exactly one of \"path\" (one project root) or \"all\": true (every \
+                 recorded root)",
+            );
+        }
+    };
+
+    // Every refusal is decided before the first deletion, so `--all` is never
+    // half applied: one busy root refuses the whole call rather than purging
+    // the others and reporting the failure afterwards.
+    let mut plans = Vec::with_capacity(roots.len());
+    for root in &roots {
+        match preflight(deps, root) {
+            Ok(plan) => plans.push(plan),
+            Err(response) => return response,
+        }
+    }
+
+    let mut projects = Vec::with_capacity(roots.len());
+    for (root, plan) in roots.iter().zip(plans.iter()) {
+        let entries = plan_entries(root, plan);
+        let mut project = serde_json::json!({
+            "path": root,
+            "entries": entries,
+            "counts": purge_counts_json(&plan.counts),
+            "kept": {
+                "artifacts": plan.kept.artifacts,
+                "memories": plan.kept.memories,
+            },
+        });
+        if !request.dry_run {
+            let outcome = match store.purge_project(root) {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    return api_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "DB_ERROR",
+                        format!("purging {root}: {e}"),
+                    );
+                }
+            };
+            let (dirs, files) = remove_purged_bytes(deps, root, &outcome);
+            project["counts"] = purge_counts_json(&outcome.counts);
+            project["removed"] = serde_json::json!({
+                "session_dirs": dirs,
+                "upload_files": files,
+            });
+        }
+        projects.push(project);
+    }
+
+    let mut body = serde_json::json!({
+        "dry_run": request.dry_run,
+        "applied": !request.dry_run,
+        "projects": projects,
+    });
+    // Only `--all` claims to have looked at everything, so only `--all` owes
+    // the reader the line about what it deliberately did not look at.
+    if request.all {
+        let home = match store.home_scope_rows() {
+            Ok(home) => home,
+            Err(e) => {
+                return api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string());
+            }
+        };
+        body["home_scope"] = plan_entry(
+            "no project",
+            format!(
+                "{} conversations and {} uploads with no project — openalpaca sessions delete \
+                 handles those",
+                home.sessions, home.uploads
+            ),
+            "the home store is not a project",
+            "keep",
+        );
+    }
+    Json(body).into_response()
+}
+
 // ── Handlers ─────────────────────────────────────────────────────
 
 pub async fn get_workspace_handler(
@@ -421,6 +792,31 @@ pub async fn rebase_workspace_handler(
     Json(request): Json<RebaseRequest>,
 ) -> Response {
     rebase_workspace(&state.db, &state.local_user_id, request)
+}
+
+/// Delete a project's conversations, runs and uploads, or report the plan.
+///
+/// The flush comes first and unconditionally: a writer holding records for a
+/// transcript this call is about to delete would otherwise re-create the
+/// directory after it went. The same barrier `DELETE /v1/sessions/{id}` awaits.
+pub async fn purge_workspace_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<PurgeRequest>,
+) -> Response {
+    crate::routes::sessions::flush_session_logs(&state).await;
+    purge_workspaces(
+        &PurgeDeps {
+            db: &state.db,
+            ctx: &state.gateway.shared_context,
+            owner: &state.local_user_id,
+            sessions_root: state
+                .gateway
+                .shared_context
+                .session_log()
+                .map(|service| service.root().to_path_buf()),
+        },
+        request,
+    )
 }
 
 #[cfg(test)]

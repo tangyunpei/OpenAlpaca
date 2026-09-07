@@ -232,6 +232,19 @@ pub enum ContentKind {
 }
 
 impl ContentKind {
+    /// Every kind there is. The list a caller walks when it has to reason about
+    /// the whole store rather than one collection — `store purge`, which must
+    /// tell a name the store created from one it did not (§1.3 rule 3).
+    pub const ALL: [ContentKind; 7] = [
+        ContentKind::Artifacts,
+        ContentKind::Uploads,
+        ContentKind::Sessions,
+        ContentKind::Memory,
+        ContentKind::Skills,
+        ContentKind::Scratch,
+        ContentKind::Cache,
+    ];
+
     /// The directory name for this kind, identical in both scopes.
     pub fn dir_name(self) -> &'static str {
         match self {
@@ -289,6 +302,39 @@ pub fn ensure_store(scope: &StoreScope) -> Result<PathBuf> {
 
     ensure_layout(&root, is_home)?;
     Ok(root)
+}
+
+/// Top-level names inside a store root that this store did not create, sorted.
+///
+/// §1.3 rule 3: unknown directories found in a store root are left untouched and
+/// never swept — the store never deletes what it did not create. `store purge`
+/// is the first caller that has to *say* so, entry by entry, and this is the
+/// list it names. Known names are the [`ContentKind`] directories, the three
+/// pieces of store metadata (`.layout`, `README.md`, `.gitignore`), and the
+/// three the **home** root owns beside its content dirs (`state/`, `config/`,
+/// `plugins/`) — so the answer is right for either scope, even though only a
+/// project root is ever purged.
+///
+/// A root that does not exist, or cannot be read, has nothing to report: the
+/// answer is empty rather than an error, because "what else is in there" is a
+/// remark on a plan and never the reason to refuse one.
+pub fn unknown_entries(store_root: &Path) -> Vec<String> {
+    let known: Vec<&str> = ContentKind::ALL
+        .iter()
+        .map(|kind| kind.dir_name())
+        .chain([LAYOUT_FILE, README_FILE, GITIGNORE_FILE])
+        .chain(["state", "config", "plugins"])
+        .collect();
+    let Ok(entries) = fs::read_dir(store_root) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = entries
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| !known.contains(&name.as_str()))
+        .collect();
+    out.sort();
+    out
 }
 
 /// `store_root(scope)/<kind>` — created on use (reserved names stay absent until

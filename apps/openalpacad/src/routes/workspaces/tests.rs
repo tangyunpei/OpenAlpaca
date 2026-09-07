@@ -13,6 +13,8 @@ use openalpaca_storage::store::StoreScope;
 use openalpaca_storage::{ArtifactKind, NewArtifact};
 use tempfile::TempDir;
 
+use openalpaca_core::context::SharedContext;
+
 use crate::test_util::HomeStoreGuard;
 
 const OWNER: &str = "owner-1";
@@ -29,6 +31,11 @@ struct Fixture {
     /// ancestor of the other.
     projects: TempDir,
     db: Database,
+    /// The live lane registry the purge's in-flight guard consults. Empty
+    /// unless a test says otherwise.
+    ctx: SharedContext,
+    /// The home store's `sessions/` — where a purged session's directory is.
+    sessions_root: std::path::PathBuf,
 }
 
 impl Fixture {
@@ -47,12 +54,16 @@ impl Fixture {
         let projects = tempfile::tempdir().expect("projects");
         let db_dir = tempfile::tempdir().expect("db dir");
         let db = Database::open(&db_dir.path().join("test.db")).expect("open db");
+        let sessions_root = home_store.join("sessions");
+        std::fs::create_dir_all(&sessions_root).expect("sessions root");
         Self {
             _home: home,
             _env: env,
             _db_dir: db_dir,
             projects,
             db,
+            ctx: SharedContext::new(),
+            sessions_root,
         }
     }
 
@@ -164,6 +175,116 @@ impl Fixture {
         new.created = chrono::Utc::now();
         ArtifactStore::new(&self.db).put(new).expect("put");
     }
+
+    // ── purge fixtures ───────────────────────────────────────────
+
+    /// A session under `root`, with the log directory a real one would have.
+    fn session_with_log(&self, id: &str, root: &str) -> std::path::PathBuf {
+        self.session(id, root);
+        let dir = self.sessions_root.join(id);
+        std::fs::create_dir_all(&dir).expect("session dir");
+        std::fs::write(dir.join("log.jsonl"), "{}\n").expect("session log");
+        dir
+    }
+
+    fn message(&self, session_id: &str) {
+        self.db
+            .with_connection(|conn| {
+                conn.execute(
+                    "INSERT INTO conversation_messages (lane_key, role, content, session_id)
+                     VALUES (?1, 'user', 'hi', ?1)",
+                    [session_id],
+                )?;
+                Ok(())
+            })
+            .expect("insert message");
+    }
+
+    /// An upload addressed under `root`, with its bytes where the row says.
+    fn upload(&self, root: &str, name: &str) -> std::path::PathBuf {
+        let dir = std::path::Path::new(root)
+            .join(store::STORE_DIR_NAME)
+            .join("uploads");
+        std::fs::create_dir_all(&dir).expect("uploads dir");
+        let path = dir.join(name);
+        std::fs::write(&path, b"bytes").expect("upload bytes");
+        self.db
+            .with_connection(|conn| {
+                conn.execute(
+                    "INSERT INTO file_assets
+                         (id, owner_id, sha256, filename, mime_type, size_bytes, storage_path,
+                          origin, project_root)
+                     VALUES (?1, ?2, 'sha', ?1, 'text/plain', 5, ?3, 'upload', ?4)",
+                    [name, OWNER, &path.to_string_lossy(), root],
+                )?;
+                Ok(())
+            })
+            .expect("insert upload");
+        path
+    }
+
+    fn memory(&self, root: &str, content: &str) {
+        self.db
+            .with_connection(|conn| {
+                conn.execute(
+                    "INSERT INTO memory (owner_id, kind, scope, scope_id, source, content,
+                                         content_hash)
+                     VALUES (?1, 'fact', 'workspace', ?2, 'test', ?3, ?3)",
+                    [OWNER, root, content],
+                )?;
+                Ok(())
+            })
+            .expect("insert memory");
+    }
+
+    fn purge_deps(&self) -> PurgeDeps<'_> {
+        PurgeDeps {
+            db: &self.db,
+            ctx: &self.ctx,
+            owner: OWNER,
+            sessions_root: Some(self.sessions_root.clone()),
+        }
+    }
+
+    async fn purge(
+        &self,
+        path: Option<&str>,
+        all: bool,
+        dry_run: bool,
+    ) -> (StatusCode, serde_json::Value) {
+        split(purge_workspaces(
+            &self.purge_deps(),
+            PurgeRequest {
+                path: path.map(str::to_string),
+                all,
+                dry_run,
+            },
+        ))
+        .await
+    }
+
+    fn row_count(&self, sql: &str) -> i64 {
+        self.db
+            .with_connection(|conn| Ok(conn.query_row(sql, [], |row| row.get::<_, i64>(0))?))
+            .expect("count")
+    }
+}
+
+/// The plan line for one entry, or `None` when the plan does not mention it —
+/// which is itself a failure worth naming, because a plan that omits an entry
+/// makes no promise about it.
+fn entry<'a>(body: &'a serde_json::Value, name: &str) -> Option<&'a serde_json::Value> {
+    body["projects"][0]["entries"]
+        .as_array()?
+        .iter()
+        .find(|e| e["entry"] == name)
+}
+
+fn action(body: &serde_json::Value, name: &str) -> String {
+    entry(body, name).unwrap_or_else(|| panic!("the plan never mentions {name}"))["action"]
+        .as_str()
+        .unwrap_or("<none>")
+        .to_string()
 }
 
 /// Split a `Response` into its status and its JSON body.
@@ -531,4 +652,248 @@ async fn a_store_still_at_the_old_root_is_moved_after_the_transaction() {
         record.storage_path
     );
     assert!(record.storage_path.starts_with(&new));
+}
+
+// ============================================================================
+// POST /v1/workspaces/purge
+// ============================================================================
+
+#[tokio::test]
+async fn a_purge_names_exactly_one_of_a_path_and_all() {
+    let f = Fixture::new();
+    let root = f.project("proj");
+
+    let (status, body) = f.purge(Some(&root), true, true).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_code(&body), "INVALID_REQUEST");
+
+    let (status, body) = f.purge(None, false, true).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_code(&body), "INVALID_REQUEST");
+}
+
+#[tokio::test]
+async fn a_relative_path_is_refused_before_anything_is_counted() {
+    let f = Fixture::new();
+    let (status, body) = f.purge(Some("relative/proj"), false, true).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_code(&body), "INVALID_PATH");
+}
+
+#[tokio::test]
+async fn the_home_store_is_not_a_project_and_cannot_be_purged() {
+    let f = Fixture::new();
+    for path in [f.home_store(), f.home()] {
+        let (status, body) = f.purge(Some(&path), false, true).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{path}");
+        assert_eq!(error_code(&body), "WORKSPACE_IS_HOME", "{path}");
+    }
+}
+
+#[tokio::test]
+async fn a_root_nothing_of_yours_names_is_a_404() {
+    let f = Fixture::new();
+    let empty = f.bare_dir("empty");
+    let (status, body) = f.purge(Some(&empty), false, true).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(error_code(&body), "WORKSPACE_NOT_FOUND");
+}
+
+#[tokio::test]
+async fn a_root_holding_another_owners_rows_is_a_404_not_a_403() {
+    let f = Fixture::new();
+    let root = f.project("theirs");
+    f.artifact_owned(&root, "theirs.md", "someone-else");
+
+    let (status, body) = f.purge(Some(&root), false, true).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(error_code(&body), "WORKSPACE_NOT_FOUND");
+    assert!(body["error"]["message"].as_str().unwrap().contains("owner"));
+}
+
+#[tokio::test]
+async fn a_run_in_flight_refuses_the_whole_purge() {
+    let f = Fixture::new();
+    let root = f.project("busy");
+    f.session_with_log("s-busy", &root);
+    f.task("t-busy", &root, "running");
+
+    let (status, body) = f.purge(Some(&root), false, false).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error_code(&body), "WORKSPACE_BUSY");
+    // Refused before a row moved: the session is still there.
+    assert_eq!(f.row_count("SELECT COUNT(*) FROM session"), 1);
+}
+
+#[tokio::test]
+async fn a_dry_run_deletes_nothing_and_lists_both_verdicts() {
+    let f = Fixture::new();
+    let root = f.project("proj");
+    let dir = f.session_with_log("s-1", &root);
+    f.message("s-1");
+    f.task("t-1", &root, "completed");
+    f.artifact(&root, "report.md");
+    f.memory(&root, "the build takes four minutes");
+    let upload = f.upload(&root, "notes.txt");
+
+    let (status, body) = f.purge(Some(&root), false, true).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["dry_run"], true);
+    assert_eq!(body["applied"], false);
+    assert_eq!(body["projects"][0]["path"], root);
+
+    // Counted, in the plan's own terms.
+    assert_eq!(body["projects"][0]["counts"]["sessions"], 1);
+    assert_eq!(body["projects"][0]["counts"]["messages"], 1);
+    assert_eq!(body["projects"][0]["counts"]["tasks"], 1);
+    assert_eq!(body["projects"][0]["counts"]["uploads"], 1);
+    assert_eq!(body["projects"][0]["kept"]["artifacts"], 1);
+    assert_eq!(body["projects"][0]["kept"]["memories"], 1);
+
+    // Both verdicts, each with the retention class it comes from.
+    assert_eq!(action(&body, "sessions/"), "delete");
+    assert_eq!(action(&body, "runs (database)"), "delete");
+    assert_eq!(action(&body, "uploads/"), "delete");
+    assert_eq!(action(&body, "artifacts/"), "keep");
+    assert_eq!(action(&body, "memory/"), "keep");
+    assert_eq!(action(&body, "skills/, config/"), "keep");
+    assert!(
+        entry(&body, "artifacts/").unwrap()["retention"]
+            .as_str()
+            .unwrap()
+            .contains("never garbage-collected")
+    );
+
+    // And nothing happened.
+    assert_eq!(f.row_count("SELECT COUNT(*) FROM session"), 1);
+    assert_eq!(f.row_count("SELECT COUNT(*) FROM task"), 1);
+    assert_eq!(f.row_count("SELECT COUNT(*) FROM file_assets"), 2);
+    assert!(dir.exists());
+    assert!(upload.exists());
+    assert!(body["projects"][0]["removed"].is_null());
+}
+
+#[tokio::test]
+async fn a_real_purge_removes_the_rows_and_the_bytes_it_named() {
+    let f = Fixture::new();
+    let root = f.project("proj");
+    let dir = f.session_with_log("s-1", &root);
+    f.message("s-1");
+    f.task("t-1", &root, "completed");
+    f.artifact(&root, "report.md");
+    f.memory(&root, "the build takes four minutes");
+    let upload = f.upload(&root, "notes.txt");
+    // A name the store did not create, in the store root itself.
+    let unknown = std::path::Path::new(&root)
+        .join(store::STORE_DIR_NAME)
+        .join("notes-of-my-own");
+    std::fs::create_dir_all(&unknown).expect("unknown dir");
+
+    let (status, body) = f.purge(Some(&root), false, false).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["applied"], true);
+    assert_eq!(body["projects"][0]["counts"]["sessions"], 1);
+    assert_eq!(body["projects"][0]["removed"]["session_dirs"], 1);
+    assert_eq!(body["projects"][0]["removed"]["upload_files"], 1);
+
+    // Gone.
+    assert_eq!(f.row_count("SELECT COUNT(*) FROM session"), 0);
+    assert_eq!(f.row_count("SELECT COUNT(*) FROM conversation_messages"), 0);
+    assert_eq!(f.row_count("SELECT COUNT(*) FROM task"), 0);
+    assert_eq!(
+        f.row_count("SELECT COUNT(*) FROM file_assets WHERE origin = 'upload'"),
+        0
+    );
+    assert!(!dir.exists());
+    assert!(!upload.exists());
+
+    // Kept, and said so in the plan.
+    assert_eq!(
+        f.row_count("SELECT COUNT(*) FROM file_assets WHERE origin = 'produced'"),
+        1
+    );
+    assert_eq!(f.row_count("SELECT COUNT(*) FROM memory"), 1);
+    assert!(
+        unknown.exists(),
+        "the store deleted a name it did not create"
+    );
+    assert_eq!(action(&body, "notes-of-my-own"), "keep");
+    let artifacts = std::path::Path::new(&root)
+        .join(store::STORE_DIR_NAME)
+        .join("artifacts");
+    assert!(artifacts.is_dir());
+}
+
+#[tokio::test]
+async fn purging_everything_lists_each_root_and_keeps_the_home_scope() {
+    let f = Fixture::new();
+    let one = f.project("one");
+    let two = f.project("two");
+    f.session_with_log("s-one", &one);
+    f.session_with_log("s-two", &two);
+    // A conversation with no project: the home scope, which is not a project.
+    f.db.with_connection(|conn| {
+        conn.execute(
+            "INSERT INTO session (id, lane_key, source) VALUES ('s-home', 's-home', 'gui')",
+            [],
+        )?;
+        Ok(())
+    })
+    .expect("home session");
+
+    let (status, body) = f.purge(None, true, false).await;
+    assert_eq!(status, StatusCode::OK);
+    let paths: Vec<&str> = body["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["path"].as_str().unwrap())
+        .collect();
+    assert!(
+        paths.contains(&one.as_str()) && paths.contains(&two.as_str()),
+        "{paths:?}"
+    );
+
+    assert_eq!(body["home_scope"]["action"], "keep");
+    assert!(
+        body["home_scope"]["holds"]
+            .as_str()
+            .unwrap()
+            .contains("1 conversations")
+    );
+    // The projects' sessions went; the home scope's stayed.
+    assert_eq!(
+        f.row_count("SELECT COUNT(*) FROM session WHERE workspace_id IS NULL"),
+        1
+    );
+    assert_eq!(
+        f.row_count("SELECT COUNT(*) FROM session WHERE workspace_id IS NOT NULL"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn one_busy_root_refuses_all_of_them() {
+    let f = Fixture::new();
+    let quiet = f.project("quiet");
+    let busy = f.project("busy");
+    f.session_with_log("s-quiet", &quiet);
+    f.session_with_log("s-busy", &busy);
+    f.task("t-busy", &busy, "paused");
+
+    let (status, body) = f.purge(None, true, false).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error_code(&body), "WORKSPACE_BUSY");
+    // Never half applied: the quiet root's session is still there too.
+    assert_eq!(f.row_count("SELECT COUNT(*) FROM session"), 2);
+}
+
+#[tokio::test]
+async fn a_purge_with_no_dry_run_field_is_a_dry_run() {
+    // The route's own default, not the CLI's: a caller that forgets the field
+    // gets the plan.
+    let request: PurgeRequest =
+        serde_json::from_value(serde_json::json!({ "path": "/somewhere" })).expect("parse");
+    assert!(request.dry_run);
+    assert!(!request.all);
 }

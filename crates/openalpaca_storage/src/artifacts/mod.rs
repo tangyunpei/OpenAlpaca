@@ -632,6 +632,91 @@ pub struct WorkspaceRows {
     pub other_owners: usize,
 }
 
+/// How many rows of each kind a purge removed, or would remove
+/// ([`ArtifactStore::purge_plan`] / [`ArtifactStore::purge_project`]).
+///
+/// Every member is named on the way out, zeroes included — "nothing else went"
+/// is the half a reader is checking for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PurgeCounts {
+    /// `session` rows with `workspace_id = root`.
+    pub sessions: usize,
+    /// `conversation_messages` rows belonging to those sessions.
+    pub messages: usize,
+    /// `tool_execution_log` rows keyed by one of those sessions or runs.
+    pub tool_calls: usize,
+    /// `lane_followups` rows keyed by one of those sessions.
+    pub followups: usize,
+    /// `task` rows with `workspace_id = root`.
+    pub tasks: usize,
+    /// `subagent_span` rows belonging to those runs.
+    pub spans: usize,
+    /// `event_log` rows keyed by one of those runs.
+    pub run_events: usize,
+    /// `file_assets` rows with `origin = 'upload'` addressed under this root.
+    pub uploads: usize,
+}
+
+impl PurgeCounts {
+    /// Would a purge of this root remove anything at all?
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// The rows a purge deliberately leaves where they are (§4.5, §1.3 rule 3).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PurgeKept {
+    /// `file_assets` rows with `origin = 'produced'` — never garbage-collected.
+    pub artifacts: usize,
+    /// `memory` rows scoped to this workspace — the user's, not the store's.
+    pub memories: usize,
+}
+
+/// What the **home** scope holds of the two kinds a project purge removes.
+///
+/// Not a project and never purged by one (§1.1): a conversation with no project
+/// and an upload that carried no project signal belong to the home store, and
+/// `store purge --all` names them as kept rather than sweeping them up.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HomeScopeRows {
+    /// `session` rows with `workspace_id IS NULL`.
+    pub sessions: usize,
+    /// `file_assets` upload rows with no `project_root`.
+    pub uploads: usize,
+}
+
+/// One session a purge would take with it, with the lane it belongs to so a
+/// caller can ask the live registry whether a run of its own is still going.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PurgeSession {
+    pub id: String,
+    pub lane_key: String,
+}
+
+/// What a purge of one root would do, read without changing anything —
+/// the body of `--dry-run` and the preflight of the real call.
+#[derive(Debug, Clone, Default)]
+pub struct PurgePlan {
+    pub counts: PurgeCounts,
+    pub kept: PurgeKept,
+    /// The sessions bound to this root, for the caller's in-flight guard.
+    pub sessions: Vec<PurgeSession>,
+}
+
+/// What a purge actually removed — the counts, plus the bytes the caller must
+/// now remove, gathered **inside** the transaction so the list can never name
+/// a row the transaction did not delete.
+#[derive(Debug, Clone, Default)]
+pub struct PurgeOutcome {
+    pub counts: PurgeCounts,
+    /// The ids whose `sessions/<id>/` directory in the home store is now
+    /// rowless.
+    pub session_ids: Vec<String>,
+    /// `storage_path` of every upload row that went.
+    pub upload_paths: Vec<String>,
+}
+
 /// What one [`ArtifactStore::verify`] pass found.
 #[derive(Debug, Clone, Default)]
 pub struct VerifyReport {
@@ -1505,6 +1590,251 @@ impl<'a> ArtifactStore<'a> {
                       WHERE workspace_id = ?1 AND status IN ('running', 'paused')",
                 )?,
                 other_owners,
+            })
+        })
+    }
+
+    /// Every distinct project root any of the four members names, sorted.
+    ///
+    /// `store purge --all` iterates this; the home scope is deliberately absent
+    /// (its rows carry `NULL`, and the home store is not a project).
+    pub fn project_roots(&self) -> Result<Vec<String>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT root FROM (
+                     SELECT project_root AS root FROM file_assets
+                     UNION SELECT workspace_id FROM session
+                     UNION SELECT workspace_id FROM task
+                     UNION SELECT scope_id FROM memory WHERE scope = 'workspace'
+                 ) WHERE root IS NOT NULL AND root <> ''
+                 ORDER BY root",
+            )?;
+            let roots = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            Ok(roots)
+        })
+    }
+
+    /// What the home scope holds of the two kinds a project purge removes —
+    /// the "and these stay where they are" line of `--all`.
+    pub fn home_scope_rows(&self) -> Result<HomeScopeRows> {
+        self.db.with_connection(|conn| {
+            let count = |sql: &str| -> Result<usize> {
+                Ok(conn.query_row(sql, [], |row| row.get::<_, i64>(0))? as usize)
+            };
+            Ok(HomeScopeRows {
+                sessions: count("SELECT COUNT(*) FROM session WHERE workspace_id IS NULL")?,
+                uploads: count(
+                    "SELECT COUNT(*) FROM file_assets
+                      WHERE origin = 'upload' AND (project_root IS NULL OR project_root = '')",
+                )?,
+            })
+        })
+    }
+
+    /// What a purge of `root` would remove and what it would leave — read-only.
+    ///
+    /// The counting mirrors [`Self::purge_project`]'s statements one for one, so
+    /// a `--dry-run` and the real call cannot disagree about what is there. The
+    /// two kept members are counted for the same reason the deleted ones are:
+    /// "your artifacts and your memories stay" is a claim, and a plan that
+    /// prints it should have looked.
+    pub fn purge_plan(&self, root: &str) -> Result<PurgePlan> {
+        self.db.with_connection(|conn| {
+            let count = |sql: &str| -> Result<usize> {
+                Ok(
+                    conn.query_row(sql, rusqlite::params![root], |row| row.get::<_, i64>(0))?
+                        as usize,
+                )
+            };
+            let mut stmt =
+                conn.prepare("SELECT id, lane_key FROM session WHERE workspace_id = ?1")?;
+            let sessions = stmt
+                .query_map(rusqlite::params![root], |row| {
+                    Ok(PurgeSession {
+                        id: row.get(0)?,
+                        lane_key: row.get(1)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<PurgeSession>>>()?;
+
+            Ok(PurgePlan {
+                counts: PurgeCounts {
+                    sessions: sessions.len(),
+                    messages: count(
+                        "SELECT COUNT(*) FROM conversation_messages
+                          WHERE session_id IN (SELECT id FROM session WHERE workspace_id = ?1)",
+                    )?,
+                    tool_calls: count(
+                        "SELECT COUNT(*) FROM tool_execution_log
+                          WHERE session_id IN (SELECT id FROM session WHERE workspace_id = ?1)
+                             OR task_id IN (SELECT id FROM task WHERE workspace_id = ?1)",
+                    )?,
+                    followups: count(
+                        "SELECT COUNT(*) FROM lane_followups
+                          WHERE session_id IN (SELECT id FROM session WHERE workspace_id = ?1)",
+                    )?,
+                    tasks: count("SELECT COUNT(*) FROM task WHERE workspace_id = ?1")?,
+                    spans: count(
+                        "SELECT COUNT(*) FROM subagent_span
+                          WHERE task_id IN (SELECT id FROM task WHERE workspace_id = ?1)",
+                    )?,
+                    run_events: count(
+                        "SELECT COUNT(*) FROM event_log
+                          WHERE task_id IN (SELECT id FROM task WHERE workspace_id = ?1)",
+                    )?,
+                    uploads: count(
+                        "SELECT COUNT(*) FROM file_assets
+                          WHERE origin = 'upload' AND project_root = ?1",
+                    )?,
+                },
+                kept: PurgeKept {
+                    artifacts: count(
+                        "SELECT COUNT(*) FROM file_assets
+                          WHERE origin = 'produced' AND project_root = ?1",
+                    )?,
+                    memories: count(
+                        "SELECT COUNT(*) FROM memory WHERE scope = 'workspace' AND scope_id = ?1",
+                    )?,
+                },
+                sessions,
+            })
+        })
+    }
+
+    /// Delete one project's conversations, runs and uploads — **one
+    /// transaction**, rows only.
+    ///
+    /// | Goes | Because |
+    /// |---|---|
+    /// | `session` (`workspace_id`), its `conversation_messages`, `tool_execution_log` and `lane_followups` rows | the transcript is the thing being purged |
+    /// | `task` (`workspace_id`), its `subagent_span`, `event_log`, `dispatch_decisions` and `llm_call_log` rows | the run history of this project |
+    /// | `file_assets` where `origin = 'upload'` and `project_root` is this root | copies of what was handed to a turn |
+    ///
+    /// | Stays | Because |
+    /// |---|---|
+    /// | `file_assets` where `origin = 'produced'` | produced artifacts are never garbage-collected (§4.5) |
+    /// | `memory` scoped to this workspace | the user's, not the store's |
+    ///
+    /// `task.session_id` on a run *outside* this root is nulled rather than
+    /// cascaded, exactly as [`ConversationRepository::delete_session`] does
+    /// (`crate::repository::conversation`). `conversation_messages.task_id` is
+    /// left dangling on purpose — migration 038 says so in as many words: a
+    /// purged run must leave the turn that started it readable.
+    ///
+    /// Rows only. The `sessions/<id>/` directories and the upload blobs are the
+    /// caller's to remove, **after** this commits — which is why the outcome
+    /// carries the exact list the transaction deleted rather than a list read
+    /// beforehand.
+    ///
+    /// **Path-scoped, not owner-scoped**, for the same reason
+    /// [`Self::rebase_project`] is: `session` and `task` carry no `owner_id`, so
+    /// a half-scoped transaction would delete a project's transcripts and leave
+    /// its uploads. The route is what makes it owner-safe — it refuses a root
+    /// holding rows the caller does not own ([`WorkspaceRows::other_owners`]).
+    ///
+    /// [`ConversationRepository::delete_session`]: crate::repository::ConversationRepository::delete_session
+    pub fn purge_project(&self, root: &str) -> Result<PurgeOutcome> {
+        self.db.with_connection(|conn| {
+            let tx = conn.unchecked_transaction()?;
+
+            // Read what is about to go, inside the transaction: this list is
+            // what the caller will remove from disk, and a list gathered before
+            // the transaction could name a session the transaction did not
+            // delete (or miss one it did).
+            let session_ids: Vec<String> = {
+                let mut stmt = tx.prepare("SELECT id FROM session WHERE workspace_id = ?1")?;
+                let ids = stmt
+                    .query_map(rusqlite::params![root], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<String>>>()?;
+                ids
+            };
+            let upload_paths: Vec<String> = {
+                let mut stmt = tx.prepare(
+                    "SELECT storage_path FROM file_assets
+                      WHERE origin = 'upload' AND project_root = ?1",
+                )?;
+                let paths = stmt
+                    .query_map(rusqlite::params![root], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<String>>>()?;
+                paths
+            };
+
+            // Every statement below binds the same one parameter.
+            let bind = rusqlite::params![root];
+
+            // Session-keyed rows first: the sub-selects below read `session`,
+            // so its own rows go last of the group.
+            let messages = tx.execute(
+                "DELETE FROM conversation_messages
+                  WHERE session_id IN (SELECT id FROM session WHERE workspace_id = ?1)",
+                bind,
+            )?;
+            let tool_calls = tx.execute(
+                "DELETE FROM tool_execution_log
+                  WHERE session_id IN (SELECT id FROM session WHERE workspace_id = ?1)
+                     OR task_id IN (SELECT id FROM task WHERE workspace_id = ?1)",
+                bind,
+            )?;
+            let followups = tx.execute(
+                "DELETE FROM lane_followups
+                  WHERE session_id IN (SELECT id FROM session WHERE workspace_id = ?1)",
+                bind,
+            )?;
+            // A run under another root that was started from one of these
+            // conversations keeps its row and loses the link.
+            tx.execute(
+                "UPDATE task SET session_id = NULL, updated_at = datetime('now')
+                  WHERE session_id IN (SELECT id FROM session WHERE workspace_id = ?1)",
+                bind,
+            )?;
+            let sessions = tx.execute("DELETE FROM session WHERE workspace_id = ?1", bind)?;
+
+            // Run-keyed rows, then the runs. `subagent_span` would cascade from
+            // `task` on its own; deleting it here is what makes the count
+            // honest.
+            let spans = tx.execute(
+                "DELETE FROM subagent_span
+                  WHERE task_id IN (SELECT id FROM task WHERE workspace_id = ?1)",
+                bind,
+            )?;
+            let run_events = tx.execute(
+                "DELETE FROM event_log
+                  WHERE task_id IN (SELECT id FROM task WHERE workspace_id = ?1)",
+                bind,
+            )?;
+            tx.execute(
+                "DELETE FROM dispatch_decisions
+                  WHERE task_id IN (SELECT id FROM task WHERE workspace_id = ?1)",
+                bind,
+            )?;
+            tx.execute(
+                "DELETE FROM llm_call_log
+                  WHERE task_id IN (SELECT id FROM task WHERE workspace_id = ?1)",
+                bind,
+            )?;
+            let tasks = tx.execute("DELETE FROM task WHERE workspace_id = ?1", bind)?;
+
+            let uploads = tx.execute(
+                "DELETE FROM file_assets WHERE origin = 'upload' AND project_root = ?1",
+                bind,
+            )?;
+
+            tx.commit()?;
+            Ok(PurgeOutcome {
+                counts: PurgeCounts {
+                    sessions,
+                    messages,
+                    tool_calls,
+                    followups,
+                    tasks,
+                    spans,
+                    run_events,
+                    uploads,
+                },
+                session_ids,
+                upload_paths,
             })
         })
     }

@@ -284,10 +284,46 @@ impl Deps<'_> {
 /// deleted — after either, this session's writer may never be asked again,
 /// and `emit` is a `try_send` that syncs on §5.4's boundaries and a 5 s timer.
 /// The same barrier the daemon's shutdown path awaits.
-async fn flush_session_logs(state: &AppState) {
+///
+/// `pub(crate)` because `POST /v1/workspaces/purge` deletes transcripts in
+/// bulk and needs the identical barrier: one writer, one place that stands it
+/// down.
+pub(crate) async fn flush_session_logs(state: &AppState) {
     if let Some(service) = state.gateway.shared_context.session_log() {
         service.flush_all().await;
     }
+}
+
+/// Is a run **this** session started still in flight?
+///
+/// The guard `DELETE /v1/sessions/{id}` and `POST /v1/workspaces/purge` share:
+/// a live run is still going to write into this transcript, so deleting it
+/// would strand the completion report the run is about to post. Only runs
+/// started here count — another conversation on the same lane may well be
+/// busy, and that is no concern of this one.
+///
+/// The lane registry is the authority on what is live; the `task` row is what
+/// says which session a live run belongs to. A row that cannot be read counts
+/// as belonging elsewhere: `active_tasks` on
+/// [`WorkspaceRows`](openalpaca_storage::WorkspaceRows) is the other half of
+/// the guard a purge applies, and catches a `running`/`paused` row on its own.
+pub(crate) fn session_has_live_run(
+    db: &Database,
+    ctx: &SharedContext,
+    session_id: &str,
+    lane_key: &str,
+) -> bool {
+    let live = ctx.workflows_for_lane(lane_key);
+    if live.is_empty() {
+        return false;
+    }
+    let tasks = openalpaca_storage::TaskRepository::new(db);
+    live.iter().any(|task_id| {
+        matches!(
+            tasks.get(task_id),
+            Ok(Some(task)) if task.session_id.as_deref() == Some(session_id)
+        )
+    })
 }
 
 fn deps(state: &AppState) -> Deps<'_> {
@@ -684,26 +720,14 @@ pub(super) fn delete_session(deps: &Deps<'_>, id: &str) -> Response {
         Err(response) => return response,
     };
 
-    // A run in flight is still going to write into this transcript — deleting
-    // it would strand the completion report the run is about to post. Only
-    // runs *this* session started count: another conversation on the same lane
-    // may well be busy, and that is not this session's problem.
-    let live = deps.ctx.workflows_for_lane(&session.lane_key);
-    if !live.is_empty() {
-        let tasks = openalpaca_storage::TaskRepository::new(deps.db);
-        let belongs_here = live.iter().any(|task_id| {
-            matches!(
-                tasks.get(task_id),
-                Ok(Some(task)) if task.session_id.as_deref() == Some(session.id.as_str())
-            )
-        });
-        if belongs_here {
-            return api_error(
-                StatusCode::CONFLICT,
-                "SESSION_HAS_ACTIVE_WORKFLOWS",
-                "This conversation has a run in flight. Cancel it before deleting.",
-            );
-        }
+    // Only runs *this* session started count: another conversation on the same
+    // lane may well be busy, and that is not this session's problem.
+    if session_has_live_run(deps.db, deps.ctx, &session.id, &session.lane_key) {
+        return api_error(
+            StatusCode::CONFLICT,
+            "SESSION_HAS_ACTIVE_WORKFLOWS",
+            "This conversation has a run in flight. Cancel it before deleting.",
+        );
     }
 
     match deps.repo().delete_session(id) {

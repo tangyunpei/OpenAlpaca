@@ -283,6 +283,26 @@ fn ensure_store_seeds_a_project_root() {
 }
 
 #[test]
+fn unknown_entries_names_only_what_the_store_did_not_create() {
+    let tmp = tempdir().unwrap();
+    let scope = StoreScope::Project(tmp.path().to_path_buf());
+    let root = ensure_store(&scope).unwrap();
+    // Two kinds the store created, and two names it did not.
+    fs::create_dir_all(root.join("artifacts")).unwrap();
+    fs::create_dir_all(root.join("uploads")).unwrap();
+    fs::create_dir_all(root.join("my-notes")).unwrap();
+    fs::write(root.join("todo.txt"), "mine").unwrap();
+
+    assert_eq!(
+        unknown_entries(&root),
+        vec!["my-notes".to_string(), "todo.txt".to_string()],
+        "the seeded metadata and every ContentKind are the store's own"
+    );
+    // A root with nothing in it, and one that does not exist, both say nothing.
+    assert!(unknown_entries(&tmp.path().join("no-such-store")).is_empty());
+}
+
+#[test]
 fn install_id_is_appended_once_to_a_pre_existing_layout() {
     let tmp = tempdir().unwrap();
     let _guard = HomeStoreGuard::set(tmp.path());

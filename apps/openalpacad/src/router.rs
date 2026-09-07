@@ -184,6 +184,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/workspaces",
             get(crate::routes::get_workspace_handler).patch(crate::routes::rebase_workspace_handler),
         )
+        // Purge deletes a project's conversations, runs and uploads, and
+        // answers the plan it followed. `dry_run` defaults to true.
+        .route(
+            "/v1/workspaces/purge",
+            post(crate::routes::purge_workspace_handler),
+        )
         // Chat routes (Phase 5.6)
         .route("/v1/chat", post(crate::routes::send_chat_handler))
         .route(

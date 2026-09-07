@@ -1494,6 +1494,242 @@ fn workspace_rows_scopes_the_two_members_that_have_an_owner() {
 }
 
 // ============================================================================
+// purge_project
+// ============================================================================
+
+/// A run under `root` with one row of every table keyed off it, plus the
+/// bystanders that must survive: the same rows under another root, and a run
+/// with no workspace at all that was started from a purged conversation.
+fn seed_for_purge(f: &Fixture, root: &str) {
+    f.session("session-1", root);
+    f.session("session-2", "/elsewhere");
+    f.task_in("task-1", root, "completed");
+    f.task_in("task-2", "/elsewhere", "completed");
+    f.memory("a workspace fact", root);
+
+    f.db
+        .with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO conversation_messages (lane_key, role, content, session_id, task_id)
+                 VALUES ('session-1', 'user', 'hi', 'session-1', 'task-1')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO conversation_messages (lane_key, role, content, session_id)
+                 VALUES ('session-2', 'user', 'hi', 'session-2')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO tool_execution_log (agent_id, tool_name, success, duration_ms,
+                                                 session_id, task_id)
+                 VALUES ('a', 'read', 1, 3, 'session-1', 'task-1')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO lane_followups (lane_key, kind, content, principal_json, session_id)
+                 VALUES ('session-1', 'followup', 'later', '{}', 'session-1')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO subagent_span
+                    (id, task_id, template_id, agent_instance_id, label, started_at)
+                 VALUES ('span-1', 'task-1', 't', 'i', 'review', '2026-09-01T00:00:00Z')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO event_log (event_type, task_id) VALUES ('started', 'task-1')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO dispatch_decisions (request_id, task_id, mode, reason)
+                 VALUES ('r-1', 'task-1', 'lead', 'because')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO llm_call_log (task_id, provider, model)
+                 VALUES ('task-1', 'anthropic', 'sonnet')",
+                [],
+            )?;
+            // A run outside the root, started from a conversation inside it.
+            conn.execute(
+                "INSERT INTO task (id, title, created_by, source_lane, session_id)
+                 VALUES ('task-loose', 'loose', 'test', 'test', 'session-1')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn purge_project_takes_the_conversations_the_runs_and_the_uploads() {
+    let f = Fixture::new();
+    let root = f.project_root().to_string_lossy().to_string();
+    seed_for_purge(&f, &root);
+
+    // The two origins of `file_assets`: one goes, one stays.
+    let scope = f.scope();
+    let mut produced = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"a");
+    produced.created = at(1);
+    let (produced, _) = f.store().put(produced).unwrap();
+    let upload_path = f.artifacts_root().join("loose/2026-09-01/99-uploaded.md");
+    f.foreign_row("upload-1", "loose/2026-09-01/99-uploaded.md", &upload_path);
+
+    let plan = f.store().purge_plan(&root).unwrap();
+    let outcome = f.store().purge_project(&root).unwrap();
+    assert_eq!(
+        plan.counts, outcome.counts,
+        "the dry run and the real call must agree"
+    );
+    assert_eq!(
+        outcome.counts,
+        PurgeCounts {
+            sessions: 1,
+            messages: 1,
+            tool_calls: 1,
+            followups: 1,
+            tasks: 1,
+            spans: 1,
+            run_events: 1,
+            uploads: 1,
+        }
+    );
+    assert_eq!(outcome.session_ids, vec!["session-1".to_string()]);
+    assert_eq!(
+        outcome.upload_paths,
+        vec![upload_path.to_string_lossy().to_string()]
+    );
+
+    // The bystanders under the other root are all still there.
+    assert_eq!(f.members_at("/elsewhere"), (1, 1, 0));
+    let count = |sql: &str| -> i64 {
+        f.db.with_connection(|conn| Ok(conn.query_row(sql, [], |r| r.get(0))?))
+            .unwrap()
+    };
+    assert_eq!(count("SELECT COUNT(*) FROM conversation_messages"), 1);
+    assert_eq!(count("SELECT COUNT(*) FROM tool_execution_log"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM lane_followups"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM subagent_span"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM event_log"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM dispatch_decisions"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM llm_call_log"), 0);
+
+    // The keeps, named in the plan and true in the table.
+    assert_eq!(plan.kept, PurgeKept { artifacts: 1, memories: 1 });
+    assert!(f.store().get(&produced.id, OWNER).unwrap().is_some());
+    assert_eq!(
+        count("SELECT COUNT(*) FROM memory WHERE scope = 'workspace'"),
+        1
+    );
+
+    // The run outside the root keeps its row and loses the link, exactly as
+    // `delete_session` does it.
+    assert_eq!(
+        count("SELECT COUNT(*) FROM task WHERE id = 'task-loose' AND session_id IS NULL"),
+        1
+    );
+}
+
+#[test]
+fn a_purged_run_leaves_the_turn_that_started_it_readable() {
+    // Migration 038 in as many words: `conversation_messages.task_id` is not a
+    // foreign key so that a purge cannot take the transcript with it.
+    let f = Fixture::new();
+    let root = f.project_root().to_string_lossy().to_string();
+    f.task_in("task-1", &root, "completed");
+    f.db
+        .with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO conversation_messages (lane_key, role, content, task_id)
+                 VALUES ('home-lane', 'assistant', 'done', 'task-1')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    f.store().purge_project(&root).unwrap();
+
+    let (content, task_id): (String, Option<String>) = f
+        .db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT content, task_id FROM conversation_messages",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(content, "done");
+    assert_eq!(
+        task_id.as_deref(),
+        Some("task-1"),
+        "the id dangles rather than being nulled or cascaded"
+    );
+}
+
+#[test]
+fn purging_a_root_nothing_names_changes_nothing() {
+    let f = Fixture::new();
+    let root = f.project_root().to_string_lossy().to_string();
+    seed_for_purge(&f, &root);
+
+    let outcome = f.store().purge_project("/nowhere").unwrap();
+    assert!(outcome.counts.is_empty());
+    assert!(outcome.session_ids.is_empty());
+    assert_eq!(f.members_at(&root), (1, 1, 1));
+}
+
+#[test]
+fn project_roots_lists_every_root_the_four_members_name() {
+    let f = Fixture::new();
+    let root = f.project_root().to_string_lossy().to_string();
+    f.session("session-1", &root);
+    f.task_in("task-1", "/b-root", "completed");
+    f.memory("a fact", "/a-root");
+    // The home scope is not a project and never appears.
+    f.session("session-home", "");
+
+    assert_eq!(
+        f.store().project_roots().unwrap(),
+        vec!["/a-root".to_string(), "/b-root".to_string(), root]
+    );
+}
+
+#[test]
+fn the_home_scope_counts_what_a_project_purge_leaves_alone() {
+    let f = Fixture::new();
+    let scope = StoreScope::Home;
+    let mut homely = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"c");
+    homely.created = at(1);
+    f.store().put(homely).unwrap();
+    f.db
+        .with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO session (id, lane_key, source) VALUES ('s-home', 's-home', 'gui')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO file_assets
+                    (id, owner_id, sha256, filename, mime_type, size_bytes, storage_path, origin)
+                 VALUES ('u-home', 'owner-1', 'sha', 'n.txt', 'text/plain', 1, '/tmp/n', 'upload')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    assert_eq!(
+        f.store().home_scope_rows().unwrap(),
+        HomeScopeRows {
+            sessions: 1,
+            uploads: 1
+        },
+        "the produced home artifact is not an upload and is not counted"
+    );
+}
+
+// ============================================================================
 // verify
 // ============================================================================
 

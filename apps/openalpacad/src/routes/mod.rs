@@ -101,7 +101,7 @@ pub use tasks::{
     rerun_task_handler, steer_task_handler, task_action_handler,
 };
 pub use tools::list_tools_handler;
-pub use workspaces::{get_workspace_handler, rebase_workspace_handler};
+pub use workspaces::{get_workspace_handler, purge_workspace_handler, rebase_workspace_handler};
 
 // ── Shared error envelope ────────────────────────────────────────────
 //
