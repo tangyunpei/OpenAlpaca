@@ -321,9 +321,21 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/extensions",
             get(crate::routes::list_extensions_handler),
         )
+        // GAP-24 — install / update / uninstall. The uninstall is a query flag
+        // on the DELETE C6 already registered, so the orphan-row removal keeps
+        // its meaning and the destructive half has to be asked for by name.
+        .route(
+            "/v1/extensions/{kind}",
+            post(crate::routes::install_extension_handler),
+        )
+        .route(
+            "/v1/extensions/plugin/validate",
+            post(crate::routes::validate_plugin_handler),
+        )
         .route(
             "/v1/extensions/{kind}/{id}",
-            delete(crate::routes::delete_extension_handler),
+            delete(crate::routes::delete_extension_handler)
+                .put(crate::routes::update_extension_handler),
         )
         .route(
             "/v1/extensions/{kind}/{id}/config",

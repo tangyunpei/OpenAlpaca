@@ -1845,6 +1845,12 @@ impl PluginManager {
         install::inspect_source(source, &self.plugin_dir).map(|(_, summary)| summary)
     }
 
+    /// Is a plugin of this name already in the store? Read off the disk rather
+    /// than the map, because that is what an install would collide with.
+    pub fn is_installed(&self, name: &str) -> bool {
+        self.plugin_dir.join(name).join("plugin.toml").is_file()
+    }
+
     /// **install** — copy a plugin directory into the plugins root under its
     /// own directory name, then run the load path (GAP-24).
     ///

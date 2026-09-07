@@ -167,7 +167,12 @@ impl McpConfig {
     }
 }
 
-fn is_valid_server_name(s: &str) -> bool {
+/// `^[a-zA-Z][a-zA-Z0-9_-]{0,30}$` — the block name `McpConfig::parse` accepts.
+///
+/// Public because `POST /v1/extensions/mcp` refuses a bad name with a `400`
+/// that says so, rather than letting the writer's mandatory re-parse turn it
+/// into an indistinguishable write failure (GAP-24).
+pub fn is_valid_server_name(s: &str) -> bool {
     if s.len() > 31 { return false; }
     let mut chars = s.chars();
     let first = match chars.next() {

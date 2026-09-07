@@ -11,6 +11,7 @@
 //! onto `ExtensionSupervisor` or onto a plugin-only verb. Nothing in this file
 //! decides a state, a status code or a wording.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -20,9 +21,43 @@ use openalpaca_core::tools::extensions::{
     ExtensionError, ExtensionId, ExtensionKind, ExtensionRecord, ExtensionState,
     ExtensionSupervisor,
 };
-use openalpaca_plugins::PluginManager;
+use openalpaca_plugins::{
+    InstallError, InstallOutcome, ManifestSummary, PluginManager, UninstallOutcome,
+};
 
-use crate::managers::mcp::McpSupervisor;
+use crate::managers::mcp::{DeclarationError, McpDeclaration, McpSupervisor};
+
+/// GAP-24's refusal, over both kinds.
+///
+/// The two supervisors answer in their own vocabularies — a plugin refuses a
+/// path, an MCP server refuses a declaration — and both can also raise the
+/// extension family's own [`ExtensionError`]. This is the union the route maps
+/// to a status code; **nothing here decides one** (§8).
+#[derive(Debug, thiserror::Error)]
+pub enum InstallFailure {
+    #[error("{0}")]
+    Plugin(#[from] InstallError),
+    #[error("{0}")]
+    Mcp(#[from] DeclarationError),
+}
+
+impl InstallFailure {
+    /// The word the flat `{"error": "<word>"}` envelope carries.
+    pub fn code(&self) -> String {
+        match self {
+            Self::Plugin(e) => e.code(),
+            Self::Mcp(e) => e.code(),
+        }
+    }
+}
+
+/// What an uninstall removed. The two kinds have different things to say: a
+/// plugin names where its directory went, an MCP server has only its name.
+#[derive(Debug)]
+pub enum Uninstalled {
+    Plugin(UninstallOutcome),
+    Mcp { removed: String },
+}
 
 /// What a sweep's T4 may add on top of the T3 drain: the plugin half waits
 /// `CHILD_EXIT_TIMEOUT` (2 s) for a child to exit after `shutdown`, and the MCP
@@ -130,6 +165,67 @@ impl Extensions {
     pub async fn remove(&self, id: &ExtensionId) -> Result<(), ExtensionError> {
         self.require_plugin(id)?;
         self.plugins.remove_orphan(&id.name).await
+    }
+
+    // ── GAP-24 ───────────────────────────────────────────────────────
+
+    /// `POST /v1/extensions/plugin/validate` — parse and report, copying
+    /// nothing.
+    pub fn validate_plugin(&self, source: &Path) -> Result<ManifestSummary, InstallFailure> {
+        Ok(self.plugins.validate_source(source)?)
+    }
+
+    /// Is a plugin of this name already in the store? The dry run reports it so
+    /// the caller knows whether it is looking at an install or an update.
+    pub fn plugin_installed(&self, name: &str) -> bool {
+        self.plugins.is_installed(name)
+    }
+
+    /// `POST /v1/extensions/plugin {source:"path", path}`.
+    pub async fn install_plugin(&self, source: &Path) -> Result<InstallOutcome, InstallFailure> {
+        Ok(self.plugins.install_from_path(source).await?)
+    }
+
+    /// `PUT /v1/extensions/plugin/{id} {source:"path", path}`.
+    pub async fn update_plugin(
+        &self,
+        id: &str,
+        source: &Path,
+    ) -> Result<InstallOutcome, InstallFailure> {
+        Ok(self.plugins.update_from_path(id, source).await?)
+    }
+
+    /// `POST /v1/extensions/mcp {name, transport, …}`.
+    pub async fn add_mcp(
+        &self,
+        declaration: McpDeclaration,
+    ) -> Result<ExtensionRecord, InstallFailure> {
+        Ok(self.mcp.add_server(declaration).await?)
+    }
+
+    /// `DELETE /v1/extensions/{kind}/{id}?uninstall=true` — the real removal.
+    ///
+    /// For a plugin that is T0–T5, the permissions entry, the directory to
+    /// `plugins/.trash/` and the tombstones; for an MCP server it is the
+    /// `[servers.<name>]` block, which requires the server to be `Disabled`
+    /// first. `keep_data` is the plugin half's only option and is ignored by
+    /// the other, which has no data directory of its own.
+    pub async fn uninstall(
+        &self,
+        id: &ExtensionId,
+        keep_data: bool,
+    ) -> Result<Uninstalled, InstallFailure> {
+        match id.kind {
+            ExtensionKind::Plugin => Ok(Uninstalled::Plugin(
+                self.plugins.uninstall(&id.name, keep_data).await?,
+            )),
+            ExtensionKind::Mcp => {
+                self.mcp.remove_server(&id.name).await?;
+                Ok(Uninstalled::Mcp {
+                    removed: id.name.clone(),
+                })
+            }
+        }
     }
 
     fn require_plugin(&self, id: &ExtensionId) -> Result<(), ExtensionError> {

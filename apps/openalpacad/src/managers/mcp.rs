@@ -127,6 +127,234 @@ struct MissingEnv {
 }
 
 // ============================================================================
+// GAP-24 — a declaration the daemon writes
+// ============================================================================
+
+/// The body of `POST /v1/extensions/mcp`: one `[servers.<name>]` block as the
+/// caller supplies it, before it becomes TOML.
+///
+/// It is deliberately **not** `McpServerConfig`: that type is the parser's, is
+/// `Serialize` for exactly one reader (the fingerprint preimage), and would
+/// make the request shape a hostage of the fingerprint's canonical rendering.
+/// This is the request, validated once in [`Self::into_table`].
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpDeclaration {
+    /// The block name, which is the extension id. `id` is accepted as an alias
+    /// because `API_MAP.md` proposed the route with that spelling.
+    #[serde(alias = "id")]
+    pub name: String,
+    /// `stdio` or `http`.
+    pub transport: String,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    /// `auth = { bearer_env = "..." }` — the env var holding the token. The
+    /// literal `bearer` form is deliberately not accepted here: a secret the
+    /// daemon writes into a config file in the clear is a decision nobody has
+    /// taken, and the env form is already the one `config/mcp.toml` documents.
+    #[serde(default)]
+    pub bearer_env: Option<String>,
+    #[serde(default)]
+    pub api_key_header: Option<String>,
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+    #[serde(default)]
+    pub extra_headers: BTreeMap<String, String>,
+    #[serde(default)]
+    pub connect_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub request_timeout_secs: Option<u64>,
+    /// The ENABLE bit, written as declared. Defaults to `true`: writing a
+    /// server into your own `config/mcp.toml` is the consent (design §8).
+    #[serde(default = "declaration_enabled_default")]
+    pub enabled: bool,
+}
+
+fn declaration_enabled_default() -> bool {
+    true
+}
+
+/// Hand-written so `Default` and the **serde** default agree on `enabled`.
+/// `#[derive(Default)]` would make an omitted field `false` here and `true` on
+/// the wire, which is the one field where the two disagreeing is a bug that
+/// silently ships a server nobody turned on.
+impl Default for McpDeclaration {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            transport: String::new(),
+            command: None,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            cwd: None,
+            url: None,
+            bearer_env: None,
+            api_key_header: None,
+            api_key_env: None,
+            extra_headers: BTreeMap::new(),
+            connect_timeout_secs: None,
+            request_timeout_secs: None,
+            enabled: declaration_enabled_default(),
+        }
+    }
+}
+
+impl McpDeclaration {
+    /// Validate the declaration and render it as the block that will be
+    /// written. Every refusal here is a `400` that names what is wrong, rather
+    /// than a write failure the caller cannot read.
+    fn into_table(self) -> Result<toml_edit::Table, DeclarationError> {
+        if !openalpaca_core::tools::mcp::is_valid_server_name(&self.name) {
+            return Err(DeclarationError::Invalid(format!(
+                "'{}' is not a valid server name: it must match \
+                 ^[a-zA-Z][a-zA-Z0-9_-]{{0,30}}$",
+                self.name
+            )));
+        }
+
+        let mut table = toml_edit::Table::new();
+        table["transport"] = toml_edit::value(self.transport.as_str());
+
+        match self.transport.as_str() {
+            "stdio" => {
+                let command = self.command.filter(|c| !c.is_empty()).ok_or_else(|| {
+                    DeclarationError::Invalid(
+                        "a stdio server needs a 'command' to run".to_string(),
+                    )
+                })?;
+                table["command"] = toml_edit::value(command);
+                if !self.args.is_empty() {
+                    table["args"] = toml_edit::value(string_array(&self.args));
+                }
+                if !self.env.is_empty() {
+                    table["env"] = toml_edit::value(inline_map(&self.env));
+                }
+                if let Some(cwd) = self.cwd.filter(|c| !c.is_empty()) {
+                    table["cwd"] = toml_edit::value(cwd);
+                }
+            }
+            "http" => {
+                let url = self.url.filter(|u| !u.is_empty()).ok_or_else(|| {
+                    DeclarationError::Invalid(
+                        "an http server needs a 'url' to connect to".to_string(),
+                    )
+                })?;
+                table["url"] = toml_edit::value(url);
+
+                let auth = match (self.bearer_env, self.api_key_header, self.api_key_env) {
+                    (Some(bearer_env), None, None) => {
+                        let mut auth = toml_edit::InlineTable::new();
+                        auth.insert("bearer_env", bearer_env.into());
+                        Some(auth)
+                    }
+                    (None, Some(header), Some(env)) => {
+                        let mut auth = toml_edit::InlineTable::new();
+                        auth.insert("api_key_header", header.into());
+                        auth.insert("api_key_env", env.into());
+                        Some(auth)
+                    }
+                    (None, None, None) => None,
+                    _ => {
+                        return Err(DeclarationError::Invalid(
+                            "give either 'bearer_env' or both 'api_key_header' and \
+                             'api_key_env', not a mixture"
+                                .to_string(),
+                        ));
+                    }
+                };
+                if let Some(auth) = auth {
+                    table["auth"] = toml_edit::value(auth);
+                }
+                if !self.extra_headers.is_empty() {
+                    table["extra_headers"] = toml_edit::value(inline_map(&self.extra_headers));
+                }
+            }
+            other => {
+                return Err(DeclarationError::Invalid(format!(
+                    "unknown transport '{other}' (expected 'stdio' or 'http')"
+                )));
+            }
+        }
+
+        if let Some(secs) = self.connect_timeout_secs {
+            table["connect_timeout_secs"] = toml_edit::value(secs as i64);
+        }
+        if let Some(secs) = self.request_timeout_secs {
+            table["request_timeout_secs"] = toml_edit::value(secs as i64);
+        }
+        table["enabled"] = toml_edit::value(self.enabled);
+
+        // The last word belongs to **the reader's own parser**, on a probe
+        // document rather than on the file: a malformed url, or anything else
+        // the block-level checks above do not name, is the caller's `400` here
+        // instead of an indistinguishable write failure once the writer's
+        // mandatory re-parse rejects it.
+        let mut probe = toml_edit::DocumentMut::new();
+        probe["servers"][self.name.as_str()] = toml_edit::Item::Table(table.clone());
+        McpConfig::parse(&probe.to_string())
+            .map_err(|e| DeclarationError::Invalid(e.to_string()))?;
+
+        Ok(table)
+    }
+}
+
+fn string_array(values: &[String]) -> toml_edit::Array {
+    let mut array = toml_edit::Array::new();
+    for value in values {
+        array.push(value.as_str());
+    }
+    array
+}
+
+fn inline_map(values: &BTreeMap<String, String>) -> toml_edit::InlineTable {
+    let mut table = toml_edit::InlineTable::new();
+    for (key, value) in values {
+        table.insert(key, value.as_str().into());
+    }
+    table
+}
+
+/// Why a declaration was not written or not removed.
+///
+/// The route turns [`Self::code`] into the flat `{"error": "<word>"}` envelope
+/// §8 fixes; for [`Self::Extension`] the word is the extension family's own, so
+/// `store_unreadable` reads the same here as on every other verb.
+#[derive(Debug, thiserror::Error)]
+pub enum DeclarationError {
+    /// A caller mistake — a bad name, an unknown transport, a missing command
+    /// or url. `400`.
+    #[error("{0}")]
+    Invalid(String),
+    /// `[servers.<name>]` already exists — `409`.
+    #[error("{0}")]
+    AlreadyDeclared(String),
+    /// A remove against a server that is not `Disabled` — `409`.
+    #[error("{0}")]
+    NotDisabled(String),
+    #[error("{0}")]
+    Extension(#[from] ExtensionError),
+}
+
+impl DeclarationError {
+    pub fn code(&self) -> String {
+        match self {
+            Self::Invalid(_) => "invalid_declaration".to_string(),
+            Self::AlreadyDeclared(_) => "already_declared".to_string(),
+            Self::NotDisabled(_) => "not_disabled".to_string(),
+            Self::Extension(e) => e.to_string(),
+        }
+    }
+}
+
+// ============================================================================
 // The supervisor
 // ============================================================================
 
@@ -1354,6 +1582,12 @@ impl McpSupervisor {
     /// writer's mandatory re-parse would reject a synthesized one.
     async fn drop_declaration(&self, name: &str) {
         let _lock = self.lock_for(name).await;
+        self.drop_declaration_locked(name).await;
+    }
+
+    /// The same, for a caller that already holds the per-extension mutex —
+    /// `remove_server`, whose file write has to happen under the same hold.
+    async fn drop_declaration_locked(&self, name: &str) {
         let ext = ExtensionId::mcp(name);
         let Some(record) = self.ledger.record(&ext) else {
             return;
@@ -1384,8 +1618,160 @@ impl McpSupervisor {
 
         self.ledger.drop_record(&ext);
         self.handles.lock_or_recover().remove(name);
+        self.declared.lock_or_recover().servers.remove(name);
         tracing::info!(extension = %ext, "MCP declaration removed; record dropped");
         self.emit(&ext, "removed", generation, false);
+    }
+
+    // ── GAP-24 — add and remove a declaration ────────────────────────────
+
+    /// **`POST /v1/extensions/mcp`.** Write a `[servers.<name>]` block, then
+    /// reconcile it.
+    ///
+    /// The write goes through the same atomic, comment-preserving writer every
+    /// other MCP write uses — surgical `toml_edit`, the reader's own parser as
+    /// the mandatory re-parse, the previous version rotated into
+    /// `state/backups/` — so the rest of the file comes back byte for byte and
+    /// the daemon's own write is swallowed by the watcher's dedup ring.
+    ///
+    /// Writing a server into your own `config/mcp.toml` **is** the consent
+    /// (design §8), so a server added with `enabled = true` connects; one added
+    /// `enabled = false` is enumerable and off, and nothing is spawned. There
+    /// is no approve gate on this kind and none is added here.
+    pub async fn add_server(
+        &self,
+        declaration: McpDeclaration,
+    ) -> Result<ExtensionRecord, DeclarationError> {
+        let name = declaration.name.clone();
+        let block = declaration.into_table()?;
+        let ext = ExtensionId::mcp(&name);
+
+        {
+            let _lock = self.lock_for(&name).await;
+
+            // Fail-closed, then refuse a collision: a store that does not parse
+            // cannot be told whether the name is free.
+            match McpConfig::load(&self.config_path) {
+                Ok(config) if config.servers.contains_key(&name) => {
+                    return Err(DeclarationError::AlreadyDeclared(format!(
+                        "'{name}' is already declared in {}",
+                        self.config_path.display()
+                    )));
+                }
+                Ok(_) | Err(LoadError::NotFound(_)) => {}
+                Err(e) => {
+                    return Err(ExtensionError::StoreUnreadable(e.to_string()).into());
+                }
+            }
+
+            let path = self.config_path.clone();
+            atomic_write_toml(
+                &path,
+                |doc| {
+                    // The parent is created **before** the child and marked
+                    // implicit. Left to auto-vivify, `doc["servers"][name] =
+                    // Item::Table(..)` produces an inline `servers = { … }`
+                    // *at the head of the file*, above the owner's own
+                    // comments — valid TOML that rewrites a hand-authored
+                    // document from the top.
+                    if doc.get("servers").is_none() {
+                        let mut parent = toml_edit::Table::new();
+                        parent.set_implicit(true);
+                        doc.insert("servers", toml_edit::Item::Table(parent));
+                    }
+                    doc["servers"][name.as_str()] = toml_edit::Item::Table(block);
+                    Ok(())
+                },
+                |rendered| match McpConfig::parse(rendered) {
+                    Ok(_) => {
+                        self.remember_own_write(rendered);
+                        Ok(())
+                    }
+                    Err(e) => Err(e.to_string()),
+                },
+            )
+            .map_err(|e| {
+                tracing::error!(
+                    server = %name,
+                    path = %self.config_path.display(),
+                    error = %e,
+                    "MCP declaration write failed"
+                );
+                ExtensionError::WriteFailed(e.to_string())
+            })?;
+            tracing::info!(server = %name, "MCP server declared");
+        }
+
+        // The E/T sequence, through the supervisor's own diff: `reconcile`
+        // takes the mutex itself, so the write above releases it first.
+        Ok(self.reconcile(&ext).await?)
+    }
+
+    /// **`DELETE /v1/extensions/mcp/{name}?uninstall=true`.** Remove the
+    /// `[servers.<name>]` block, then drop the record.
+    ///
+    /// **`Disabled` first.** A live server's declaration is not pulled out from
+    /// under a running connection: the owner turns it off — which is the verb
+    /// that runs T0–T5 and reports its stragglers — and then removes it.
+    /// Anything else is `409 not_disabled`.
+    ///
+    /// Write-first, as everywhere else: the block goes before the record does,
+    /// so a crash between the two is a declaration that is already gone and a
+    /// record the next reconcile drops anyway.
+    pub async fn remove_server(&self, name: &str) -> Result<(), DeclarationError> {
+        let ext = ExtensionId::mcp(name);
+        if !self.is_declared(name) {
+            return Err(self.unknown_or_unreadable(&ext).into());
+        }
+        let _lock = self.lock_for(name).await;
+
+        match self.ledger.state(&ext) {
+            None | Some(ExtensionState::Disabled) => {}
+            Some(state) => {
+                return Err(DeclarationError::NotDisabled(format!(
+                    "'{name}' is {}; turn it off before removing its declaration",
+                    state.word()
+                )));
+            }
+        }
+
+        let path = self.config_path.clone();
+        let owned = name.to_string();
+        let shown = path.display().to_string();
+        atomic_write_toml(
+            &path,
+            move |doc| {
+                match doc.get_mut("servers").and_then(|s| s.as_table_like_mut()) {
+                    Some(servers) => {
+                        servers.remove(&owned);
+                        Ok(())
+                    }
+                    None => Err(format!("no [servers] table in {shown}")),
+                }
+            },
+            |rendered| match McpConfig::parse(rendered) {
+                Ok(_) => {
+                    self.remember_own_write(rendered);
+                    Ok(())
+                }
+                Err(e) => Err(e.to_string()),
+            },
+        )
+        .map_err(|e| {
+            tracing::error!(
+                server = %name,
+                path = %self.config_path.display(),
+                error = %e,
+                "MCP declaration removal failed"
+            );
+            ExtensionError::WriteFailed(e.to_string())
+        })?;
+
+        // T5-gone: from `Disabled` there is nothing to tear down, but the path
+        // is the same one the watcher takes when a block disappears by hand.
+        self.drop_declaration_locked(name).await;
+        tracing::info!(server = %name, "MCP declaration removed");
+        Ok(())
     }
 
     /// E0's CAS then the load path. The caller holds the mutex.

@@ -2175,3 +2175,238 @@ enabled = true
     cancel.cancel();
     h.supervisor.shutdown_all().await;
 }
+
+// ============================================================================
+// GAP-24 — add and remove a `[servers.<name>]` block
+// ============================================================================
+
+/// The declaration goes in through the same atomic, comment-preserving writer
+/// every other MCP write uses, so the rest of the file comes back **byte for
+/// byte**: a hand-authored comment, the `[defaults]` block and every other
+/// server survive an add and a remove alike.
+#[tokio::test]
+async fn adding_a_server_leaves_the_rest_of_the_file_byte_identical() {
+    let h = Harness::new(1);
+    let stub = stub_server(h.dir.path(), "srv", StubOpts::default());
+    h.declare(&stub, true);
+    let before = std::fs::read_to_string(&h.config_path).unwrap();
+    h.supervisor.reconcile_all().await;
+
+    let other = stub_server(h.dir.path(), "other", StubOpts::default());
+    let row = h
+        .supervisor
+        .add_server(McpDeclaration {
+            name: "other".to_string(),
+            transport: "stdio".to_string(),
+            command: Some(other.script.display().to_string()),
+            ..McpDeclaration::default()
+        })
+        .await
+        .expect("the declaration is written and reconciled");
+
+    assert_eq!(row.id.name, "other");
+    let after = std::fs::read_to_string(&h.config_path).unwrap();
+    assert!(
+        after.starts_with(&before),
+        "the incumbent text was rewritten:\n--- before ---\n{before}\n--- after ---\n{after}"
+    );
+    assert!(after.contains("[servers.other]"));
+    assert!(
+        after.contains("# a hand-authored comment that must survive every write"),
+        "the comment did not survive"
+    );
+    // It is a real declaration, not just text: the parser reads it back.
+    let parsed = McpConfig::load(&h.config_path).expect("the result parses");
+    assert_eq!(parsed.servers.len(), 2);
+    assert!(parsed.servers["other"].is_enabled());
+    assert_eq!(parsed.defaults.request_timeout_secs, 3, "defaults untouched");
+
+    assert!(
+        eventually(Duration::from_secs(5), || h.state("other")
+            == Some(ExtensionState::Enabled))
+        .await,
+        "an added server connects: {:?}",
+        h.state("other")
+    );
+    h.supervisor.shutdown_all().await;
+}
+
+/// Writing a server into your own `config/mcp.toml` **is** the consent, so an
+/// add that says `enabled = false` is enumerable and off rather than absent —
+/// and nothing is spawned.
+#[tokio::test]
+async fn a_server_added_disabled_is_declared_and_off() {
+    let h = Harness::new(1);
+    h.write_config("");
+    h.supervisor.reconcile_all().await;
+    let stub = stub_server(h.dir.path(), "srv", StubOpts::default());
+
+    let row = h
+        .supervisor
+        .add_server(McpDeclaration {
+            name: "srv".to_string(),
+            transport: "stdio".to_string(),
+            command: Some(stub.script.display().to_string()),
+            enabled: false,
+            ..McpDeclaration::default()
+        })
+        .await
+        .expect("add");
+
+    assert_eq!(row.state, ExtensionState::Disabled);
+    assert!(!row.disposition.0);
+    assert_eq!(stub.spawn_count(), 0, "a disabled server is never spawned");
+}
+
+#[tokio::test]
+async fn adding_a_server_that_is_already_declared_is_refused() {
+    let h = Harness::new(1);
+    let stub = stub_server(h.dir.path(), "srv", StubOpts::default());
+    h.declare(&stub, false);
+    h.supervisor.reconcile_all().await;
+    let before = std::fs::read_to_string(&h.config_path).unwrap();
+
+    let error = h
+        .supervisor
+        .add_server(McpDeclaration {
+            name: "srv".to_string(),
+            transport: "stdio".to_string(),
+            command: Some("/bin/true".to_string()),
+            ..McpDeclaration::default()
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "already_declared");
+    assert_eq!(
+        std::fs::read_to_string(&h.config_path).unwrap(),
+        before,
+        "a refused add must not touch the file"
+    );
+}
+
+/// The three shapes a declaration can be wrong in, refused before the writer
+/// sees them so the answer names the problem rather than "the write failed".
+#[tokio::test]
+async fn a_malformed_declaration_is_refused_by_name() {
+    let h = Harness::new(1);
+    h.write_config("");
+    h.supervisor.reconcile_all().await;
+
+    let cases = [
+        // `is_valid_server_name` rejects it, and a `[servers."a.b"]` block
+        // could collide with the whole-file pseudo-record's id.
+        McpDeclaration {
+            name: "config/mcp.toml".to_string(),
+            transport: "stdio".to_string(),
+            command: Some("/bin/true".to_string()),
+            ..McpDeclaration::default()
+        },
+        McpDeclaration {
+            name: "srv".to_string(),
+            transport: "carrier-pigeon".to_string(),
+            ..McpDeclaration::default()
+        },
+        // stdio with no command.
+        McpDeclaration {
+            name: "srv".to_string(),
+            transport: "stdio".to_string(),
+            ..McpDeclaration::default()
+        },
+        // http with no url.
+        McpDeclaration {
+            name: "srv".to_string(),
+            transport: "http".to_string(),
+            ..McpDeclaration::default()
+        },
+    ];
+    for case in cases {
+        let name = case.name.clone();
+        let transport = case.transport.clone();
+        let error = h.supervisor.add_server(case).await.unwrap_err();
+        assert_eq!(
+            error.code(),
+            "invalid_declaration",
+            "{name}/{transport} should be refused as malformed"
+        );
+    }
+    assert_eq!(std::fs::read_to_string(&h.config_path).unwrap(), "");
+}
+
+/// An HTTP server round-trips through the writer as the parser reads it.
+#[tokio::test]
+async fn an_http_declaration_round_trips_through_the_parser() {
+    let h = Harness::new(1);
+    h.write_config("");
+    h.supervisor.reconcile_all().await;
+
+    h.supervisor
+        .add_server(McpDeclaration {
+            name: "remote".to_string(),
+            transport: "http".to_string(),
+            url: Some("https://example.com/mcp".to_string()),
+            bearer_env: Some("REMOTE_TOKEN".to_string()),
+            request_timeout_secs: Some(45),
+            enabled: false,
+            ..McpDeclaration::default()
+        })
+        .await
+        .expect("add");
+
+    let parsed = McpConfig::load(&h.config_path).expect("the result parses");
+    let server = &parsed.servers["remote"];
+    assert_eq!(server.transport_kind(), "streamable-http");
+    assert_eq!(server.request_timeout_secs(), Some(45));
+    assert!(!server.is_enabled());
+}
+
+/// Remove requires `Disabled` first — the plan's own rule. A live server's
+/// block is not pulled out from under a running connection.
+#[tokio::test]
+async fn removing_a_live_server_is_refused_until_it_is_disabled() {
+    let h = Harness::new(1);
+    let stub = stub_server(h.dir.path(), "srv", StubOpts::default());
+    h.declare(&stub, true);
+    h.supervisor.reconcile_all().await;
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    let before = std::fs::read_to_string(&h.config_path).unwrap();
+
+    let error = h.supervisor.remove_server("srv").await.unwrap_err();
+    assert_eq!(error.code(), "not_disabled");
+    assert_eq!(h.state("srv"), Some(ExtensionState::Enabled));
+    assert_eq!(
+        std::fs::read_to_string(&h.config_path).unwrap(),
+        before,
+        "a refused remove must not touch the file"
+    );
+
+    h.supervisor
+        .disable(&ExtensionId::mcp("srv"))
+        .await
+        .expect("disable");
+    h.supervisor.remove_server("srv").await.expect("remove");
+
+    assert_eq!(h.state("srv"), None, "the record is dropped with the block");
+    let after = std::fs::read_to_string(&h.config_path).unwrap();
+    assert!(!after.contains("[servers.srv]"), "the block is gone: {after}");
+    assert!(
+        after.contains("# a hand-authored comment that must survive every write"),
+        "the rest of the file survived the removal"
+    );
+    assert!(
+        McpConfig::load(&h.config_path)
+            .expect("the result parses")
+            .servers
+            .is_empty()
+    );
+    assert!(!stub.any_alive(), "the child outlived its declaration");
+}
+
+#[tokio::test]
+async fn removing_a_server_that_was_never_declared_is_not_found() {
+    let h = Harness::new(1);
+    h.write_config("");
+    h.supervisor.reconcile_all().await;
+    let error = h.supervisor.remove_server("ghost").await.unwrap_err();
+    assert_eq!(error.code(), "unknown extension 'mcp:ghost'");
+}

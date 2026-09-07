@@ -1107,3 +1107,377 @@ async fn detached_runs_to_completion_after_its_awaiter_is_dropped() {
         "the detached work was cancelled with its awaiter"
     );
 }
+
+// ============================================================================
+// GAP-24 — install / update / uninstall, and MCP add / remove
+// ============================================================================
+
+impl Harness {
+    /// A plugin source tree **outside** the plugins root, ready to install.
+    fn source(&self, name: &str, version: &str, extra: &str) -> std::path::PathBuf {
+        let dir = self.config_dir.path().join("sources").join(name);
+        std::fs::create_dir_all(&dir).expect("source dir");
+        std::fs::write(
+            dir.join("plugin.toml"),
+            format!(
+                "[plugin]\nname = \"{name}\"\nversion = \"{version}\"\nentry = \"./nope\"\n{extra}"
+            ),
+        )
+        .expect("source manifest");
+        dir
+    }
+
+    async fn install(&self, kind: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+        split(super::install_extension(self.extensions.clone(), kind, body).await).await
+    }
+
+    async fn validate(&self, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+        split(super::validate_plugin(self.extensions.clone(), body).await).await
+    }
+
+    async fn update(
+        &self,
+        kind: &str,
+        id: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        split(super::update_extension(self.extensions.clone(), kind, id, body).await).await
+    }
+
+    async fn uninstall(
+        &self,
+        kind: &str,
+        id: &str,
+        keep_data: bool,
+    ) -> (StatusCode, serde_json::Value) {
+        let query = DeleteQuery {
+            uninstall: true,
+            keep_data,
+        };
+        split(super::delete_extension(self.extensions.clone(), kind, id, query).await).await
+    }
+}
+
+// ── plugin install ───────────────────────────────────────────────
+
+/// `201`, the ledger row, and the manifest summary beside it — because the row
+/// alone cannot answer *"what would approving grant?"*, which is the only
+/// question an install leaves the owner with.
+#[tokio::test]
+async fn installing_a_plugin_answers_with_the_row_and_the_approval_preview() {
+    let h = Harness::new();
+    let source = h.source(
+        "notion",
+        "1.4.0",
+        "[types]\ntools = true\n[capabilities]\nprovides = [\"notes_write\"]\n",
+    );
+
+    let (status, body) = h
+        .install(
+            "plugin",
+            serde_json::json!({ "source": "path", "path": source.display().to_string() }),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["extension"]["kind"], "plugin");
+    assert_eq!(body["extension"]["id"], "notion");
+    assert_eq!(body["extension"]["state"], "unapproved");
+    assert_eq!(body["extension"]["reason"], "never_seen");
+    assert_eq!(body["extension"]["consent"], "pending");
+    assert_eq!(body["extension"]["enabled"], true, "the serde default");
+    assert_eq!(body["manifest"]["version"], "1.4.0");
+    assert_eq!(body["manifest"]["capabilities"][0], "notes_write");
+    assert!(
+        body["extension"]["tools"].as_array().is_some_and(|t| t.is_empty()),
+        "an install publishes nothing"
+    );
+    assert!(h.plugins_root.path().join("notion/plugin.toml").is_file());
+}
+
+/// Every refusal, with the code the caller has to branch on.
+#[tokio::test]
+async fn the_install_refusals_each_have_their_own_status() {
+    let h = Harness::new();
+    let source = h.source("notion", "1.0.0", "");
+
+    // A relative path is a caller mistake.
+    let (status, body) = h
+        .install("plugin", serde_json::json!({ "source": "path", "path": "notion" }))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_word(&body), "invalid_path");
+
+    // `source: "url"` stays declined — it is its own security review.
+    let (status, body) = h
+        .install(
+            "plugin",
+            serde_json::json!({ "source": "url", "url": "https://example.com/p.zip" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_word(&body), "unsupported_source");
+
+    // A path that is not there.
+    let (status, body) = h
+        .install(
+            "plugin",
+            serde_json::json!({ "source": "path", "path": "/nonexistent/openalpaca-plugin" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(error_word(&body), "source_not_found");
+
+    // A manifest that does not parse: `422`, and nothing is copied.
+    let broken = h.source("broken", "1.0.0", "");
+    std::fs::write(broken.join("plugin.toml"), "not = = toml [[[").unwrap();
+    let (status, body) = h
+        .install(
+            "plugin",
+            serde_json::json!({ "source": "path", "path": broken.display().to_string() }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(error_word(&body), "invalid_manifest");
+    assert!(!h.plugins_root.path().join("broken").exists());
+
+    // The same name twice.
+    let request = serde_json::json!({ "source": "path", "path": source.display().to_string() });
+    assert_eq!(h.install("plugin", request.clone()).await.0, StatusCode::CREATED);
+    let (status, body) = h.install("plugin", request).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error_word(&body), "already_installed");
+}
+
+/// The dry run: the same summary, and the plugins root untouched.
+#[tokio::test]
+async fn validate_answers_the_preview_without_installing() {
+    let h = Harness::new();
+    let source = h.source("notion", "2.0.0", "[types]\ntools = true\n");
+
+    let (status, body) = h
+        .validate(serde_json::json!({ "path": source.display().to_string() }))
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["manifest"]["name"], "notion");
+    assert_eq!(body["manifest"]["version"], "2.0.0");
+    assert_eq!(body["installed"], false);
+    assert!(!h.plugins_root.path().join("notion").exists());
+}
+
+// ── update ───────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn updating_a_plugin_reports_the_drift_it_found() {
+    let h = Harness::new();
+    let source = h.source(
+        "notion",
+        "1.0.0",
+        "[capabilities]\nprovides = [\"notes_read\"]\n",
+    );
+    h.install(
+        "plugin",
+        serde_json::json!({ "source": "path", "path": source.display().to_string() }),
+    )
+    .await;
+    h.verb("plugin", "notion", Verb::Approve).await;
+
+    let next = h.config_dir.path().join("v2").join("notion");
+    std::fs::create_dir_all(&next).unwrap();
+    std::fs::write(
+        next.join("plugin.toml"),
+        "[plugin]\nname = \"notion\"\nversion = \"2.0.0\"\nentry = \"./nope\"\n\
+         [capabilities]\nprovides = [\"notes_read\", \"notes_write\"]\n",
+    )
+    .unwrap();
+
+    let (status, body) = h
+        .update(
+            "plugin",
+            "notion",
+            serde_json::json!({ "source": "path", "path": next.display().to_string() }),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["manifest"]["version"], "2.0.0");
+    assert_eq!(body["consent_reset"], true);
+    assert_eq!(body["added_capabilities"][0], "notes_write");
+    assert_eq!(body["extension"]["state"], "unapproved");
+    assert_eq!(body["extension"]["reason"], "never_seen");
+}
+
+#[tokio::test]
+async fn updating_an_mcp_server_is_409_unsupported_for_kind() {
+    let h = Harness::new();
+    h.declare_stub("srv", 0);
+    h.mcp.reconcile_all().await;
+
+    let (status, body) = h
+        .update("mcp", "srv", serde_json::json!({ "source": "path", "path": "/tmp/x" }))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error_word(&body), "unsupported_for_kind");
+}
+
+// ── uninstall ────────────────────────────────────────────────────
+
+/// The uninstall is a **query flag** on the existing DELETE, so the verb that
+/// removes an orphan's row is unchanged and the one that removes a plugin from
+/// disk has to say so.
+#[tokio::test]
+async fn delete_without_the_flag_still_only_removes_an_orphan_row() {
+    let h = Harness::new();
+    h.write_plugin("notion");
+    h.plugins.reconcile_all().await;
+
+    let query = DeleteQuery {
+        uninstall: false,
+        keep_data: true,
+    };
+    let (status, body) = split(
+        super::delete_extension(h.extensions.clone(), "plugin", "notion", query).await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error_word(&body), "not_orphaned");
+    assert!(
+        h.plugins_root.path().join("notion/plugin.toml").is_file(),
+        "the directory is untouched"
+    );
+}
+
+#[tokio::test]
+async fn uninstalling_a_plugin_removes_the_row_and_trashes_the_directory() {
+    let h = Harness::new();
+    let source = h.source("notion", "1.0.0", "");
+    h.install(
+        "plugin",
+        serde_json::json!({ "source": "path", "path": source.display().to_string() }),
+    )
+    .await;
+
+    let (status, body) = h.uninstall("plugin", "notion", true).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["removed"], "notion");
+    assert_eq!(body["kept_data"], true);
+    let trashed = body["trashed"].as_str().expect("the directory was kept");
+    assert!(std::path::Path::new(trashed).join("plugin.toml").is_file());
+    assert!(!h.plugins_root.path().join("notion").exists());
+    assert!(
+        h.rows(true).await.iter().all(|r| r["id"] != "notion"),
+        "the row is gone, not disabled"
+    );
+}
+
+#[tokio::test]
+async fn uninstalling_an_unknown_plugin_is_a_404() {
+    let h = Harness::new();
+    let (status, _) = h.uninstall("plugin", "ghost", true).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// ── MCP add / remove ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn adding_an_mcp_server_writes_the_block_and_answers_the_row() {
+    let h = Harness::new();
+    h.write_mcp("# hand-written\n[defaults]\nrequest_timeout_secs = 7\n");
+    h.mcp.reconcile_all().await;
+    let before = std::fs::read_to_string(h.mcp_config_path()).unwrap();
+
+    let (status, body) = h
+        .install(
+            "mcp",
+            serde_json::json!({
+                "name": "github",
+                "transport": "stdio",
+                "command": "/nonexistent/openalpaca-test-server",
+                "connect_timeout_secs": 1,
+            }),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["extension"]["kind"], "mcp");
+    assert_eq!(body["extension"]["id"], "github");
+    assert_eq!(body["extension"]["enabled"], true);
+    assert!(body["manifest"].is_null(), "an MCP server has no manifest");
+
+    let after = std::fs::read_to_string(h.mcp_config_path()).unwrap();
+    assert!(after.starts_with(&before), "the incumbent text was rewritten");
+    assert!(after.contains("[servers.github]"));
+}
+
+#[tokio::test]
+async fn adding_a_duplicate_or_malformed_mcp_server_is_refused() {
+    let h = Harness::new();
+    h.declare_stub("srv", 0);
+    h.mcp.reconcile_all().await;
+
+    let (status, body) = h
+        .install(
+            "mcp",
+            serde_json::json!({ "name": "srv", "transport": "stdio", "command": "/bin/true" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error_word(&body), "already_declared");
+
+    let (status, body) = h
+        .install("mcp", serde_json::json!({ "name": "no-command", "transport": "stdio" }))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_word(&body), "invalid_declaration");
+
+    // A body that is not a declaration at all.
+    let (status, body) = h.install("mcp", serde_json::json!({ "name": "x" })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_word(&body), "invalid_declaration");
+}
+
+#[tokio::test]
+async fn removing_an_mcp_server_needs_it_disabled_first() {
+    let h = Harness::new();
+    h.declare_unreachable("srv", true);
+    h.mcp.reconcile_all().await;
+
+    let (status, body) = h.uninstall("mcp", "srv", true).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error_word(&body), "not_disabled");
+
+    h.verb("mcp", "srv", Verb::Disable).await;
+    let (status, body) = h.uninstall("mcp", "srv", true).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["removed"], "srv");
+    assert!(
+        !std::fs::read_to_string(h.mcp_config_path())
+            .unwrap()
+            .contains("[servers.srv]")
+    );
+    assert!(h.rows(true).await.iter().all(|r| r["id"] != "srv"));
+}
+
+/// The three new paths sit beside the ones C6 registered. `plugin/validate`
+/// looks like `{kind}/{id}`, so this is the assertion that the literal wins and
+/// that the router builds at all — a conflict here is a startup panic.
+#[test]
+fn the_new_paths_do_not_collide_with_the_verb_paths() {
+    use axum::routing::{delete, post};
+
+    let router: axum::Router<()> = axum::Router::new()
+        .route("/v1/extensions", axum::routing::get(|| async { "list" }))
+        .route("/v1/extensions/{kind}", post(|| async { "install" }))
+        .route("/v1/extensions/plugin/validate", post(|| async { "validate" }))
+        .route(
+            "/v1/extensions/{kind}/{id}",
+            delete(|| async { "delete" }).put(|| async { "update" }),
+        )
+        .route("/v1/extensions/{kind}/{id}/config", post(|| async { "config" }))
+        .route("/v1/extensions/{kind}/{id}/{verb}", post(|| async { "verb" }));
+
+    // Building it is the assertion: `Router::route` panics on a conflict.
+    drop(router);
+}

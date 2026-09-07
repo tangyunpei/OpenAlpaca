@@ -11,6 +11,7 @@
 
 - `bridge` (crates/openalpaca_plugins/src/bridge/mod.rs)
 - `error` (crates/openalpaca_plugins/src/error.rs)
+- `install` (crates/openalpaca_plugins/src/install.rs)
 - `manager` (crates/openalpaca_plugins/src/manager.rs)
 - `manifest` (crates/openalpaca_plugins/src/manifest.rs)
 - `permission_gate` (crates/openalpaca_plugins/src/permission_gate.rs)
@@ -25,7 +26,8 @@
 - `pub use bridge::PluginSkillBridge;`
 - `pub use bridge::PluginToolProxy;`
 - `pub use error::PluginError;`
-- `pub use manager::{PluginManager, SecretStorage};`
+- `pub use install::{InstallError, ManifestSummary};`
+- `pub use manager::{InstallOutcome, PluginManager, SecretStorage, UninstallOutcome};`
 - `pub use manifest::PluginManifest;`
 - `pub use permission_gate::{PermissionGate, PermissionTable, SecretReference};`
 - `pub use process_pool::PluginProcess;`

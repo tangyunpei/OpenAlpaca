@@ -71,7 +71,8 @@ pub use events::events_handler;
 pub use events_history::events_history_handler;
 pub use extensions::{
     delete_extension_handler, extension_action_handler, get_extension_config_handler,
-    list_extensions_handler, set_extension_config_handler,
+    install_extension_handler, list_extensions_handler, set_extension_config_handler,
+    update_extension_handler, validate_plugin_handler,
 };
 pub use files::{
     get_file_content_handler, get_file_metadata_handler, open_file_handler, upload_file_handler,

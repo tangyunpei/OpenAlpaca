@@ -9,6 +9,13 @@
 //! GET    /v1/extensions/plugin/{id}/config          -> redacted
 //! POST   /v1/extensions/plugin/{id}/config          -> one key
 //! DELETE /v1/extensions/plugin/{id}                 -> orphaned rows only
+//!
+//! GAP-24 — the extension itself, not its switch:
+//! POST   /v1/extensions/plugin {source:"path",path} -> copy in, then E0–E5
+//! POST   /v1/extensions/mcp {name,transport,…}      -> declare, then E0–E5
+//! POST   /v1/extensions/plugin/validate {path}      -> the dry run
+//! PUT    /v1/extensions/plugin/{id}                 -> T0–T5, replace, E0–E5
+//! DELETE /v1/extensions/{kind}/{id}?uninstall=true  -> the real removal
 //! ```
 //!
 //! Two rules run through the whole file.
@@ -34,13 +41,14 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use openalpaca_core::tools::extensions::{
-    ExtensionError, ExtensionId, ExtensionRecord, ExtensionState, UnapprovedReason,
+    ExtensionError, ExtensionId, ExtensionKind, ExtensionRecord, ExtensionState, UnapprovedReason,
 };
-use openalpaca_plugins::PluginError;
+use openalpaca_plugins::{InstallError, InstallOutcome, PluginError};
 use serde::Deserialize;
 
 use crate::AppState;
-use crate::managers::extensions::Extensions;
+use crate::managers::extensions::{Extensions, InstallFailure, Uninstalled};
+use crate::managers::mcp::{DeclarationError, McpDeclaration};
 
 // ── Request types ────────────────────────────────────────────────
 
@@ -55,6 +63,32 @@ pub struct ListQuery {
     /// `?include_orphaned=true`; default `false` (design §8).
     #[serde(default)]
     pub include_orphaned: bool,
+}
+
+/// `DELETE /v1/extensions/{kind}/{id}`'s two options (GAP-24).
+#[derive(Deserialize)]
+pub struct DeleteQuery {
+    /// Off by default, and that default is the point: without it the DELETE is
+    /// C6's orphan-row removal, which never touches a directory.
+    #[serde(default)]
+    pub uninstall: bool,
+    /// `plugins/.data/<name>/` survives an uninstall unless this is cleared.
+    /// When it is, the data is **moved to the trash**, not deleted.
+    #[serde(default = "keep_data_default")]
+    pub keep_data: bool,
+}
+
+fn keep_data_default() -> bool {
+    true
+}
+
+impl Default for DeleteQuery {
+    fn default() -> Self {
+        Self {
+            uninstall: false,
+            keep_data: keep_data_default(),
+        }
+    }
 }
 
 // ── Status mapping ───────────────────────────────────────────────
@@ -306,27 +340,321 @@ pub async fn extension_action_handler(
     run_verb(state.extensions.clone(), &kind, &id, verb).await
 }
 
-/// `DELETE /v1/extensions/plugin/{id}`
+/// `DELETE /v1/extensions/{kind}/{id}[?uninstall=true[&keep_data=false]]`
 pub async fn delete_extension_handler(
     State(state): State<Arc<AppState>>,
     Path((kind, id)): Path<(String, String)>,
+    Query(query): Query<DeleteQuery>,
 ) -> Response {
-    let Some(kind) = Extensions::parse_kind(&kind) else {
-        return unknown_kind(&kind);
+    delete_extension(state.extensions.clone(), &kind, &id, query).await
+}
+
+/// The two deletes, told apart by one query flag.
+///
+/// **Without `?uninstall=true`** this is C6's verb, unchanged: it removes an
+/// **orphan's** `.permissions.toml` entry and its ledger record, and never
+/// touches a directory (`409 not_orphaned` on anything else).
+///
+/// **With it** this is GAP-24's uninstall: T0–T5, the entry, the directory to
+/// `plugins/.trash/`, the tombstones expired — or, for an MCP server, the
+/// `[servers.<name>]` block, which requires the server to be `Disabled` first.
+///
+/// One path with a flag rather than two paths: the flag is what makes the
+/// dangerous half impossible to reach by accident, and it is the shape
+/// `API_MAP.md` proposed.
+pub(crate) async fn delete_extension(
+    extensions: Arc<Extensions>,
+    kind: &str,
+    id: &str,
+    query: DeleteQuery,
+) -> Response {
+    let Some(kind) = Extensions::parse_kind(kind) else {
+        return unknown_kind(kind);
     };
     let ext = ExtensionId {
         kind,
-        name: id.clone(),
+        name: id.to_string(),
     };
-    let extensions = state.extensions.clone();
-    match detached(async move { extensions.remove(&ext).await }).await {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "removed": id })),
-        )
-            .into_response(),
+
+    if !query.uninstall {
+        let removed = ext.name.clone();
+        let extensions = extensions.clone();
+        return match detached(async move { extensions.remove(&ext).await }).await {
+            Ok(()) => (
+                StatusCode::OK,
+                Json(serde_json::json!({ "removed": removed })),
+            )
+                .into_response(),
+            Err(e) => extension_error(&e),
+        };
+    }
+
+    let keep_data = query.keep_data;
+    match detached(async move { Ok(extensions.uninstall(&ext, keep_data).await) }).await {
+        Ok(Ok(removed)) => (StatusCode::OK, Json(uninstalled_body(&removed))).into_response(),
+        Ok(Err(e)) => gap24_error(&e),
         Err(e) => extension_error(&e),
     }
+}
+
+/// What an uninstall removed, and — for a plugin — where it went. Nothing was
+/// deleted: both paths are moves into `plugins/.trash/`, so the body names them.
+fn uninstalled_body(removed: &Uninstalled) -> serde_json::Value {
+    match removed {
+        Uninstalled::Plugin(outcome) => serde_json::json!({
+            "removed": outcome.removed,
+            "trashed": outcome.trashed.as_ref().map(|p| p.display().to_string()),
+            "kept_data": outcome.kept_data,
+            "data_trashed": outcome.data_trashed.as_ref().map(|p| p.display().to_string()),
+        }),
+        Uninstalled::Mcp { removed } => serde_json::json!({
+            "removed": removed,
+            "trashed": serde_json::Value::Null,
+            "kept_data": true,
+            "data_trashed": serde_json::Value::Null,
+        }),
+    }
+}
+
+// ── GAP-24: install, validate, update ────────────────────────────
+
+/// The GAP-24 status codes. Every one of them is decided here; the supervisors
+/// answer with a fact and a word (design §8).
+///
+/// * `400` — the caller's mistake: a relative path, a symlink out of the tree,
+///   a source that is not `path`, a declaration that is not a declaration.
+/// * `404` — the source directory is not there, or the extension is not known.
+/// * `422` — the source *is* there but its `plugin.toml` cannot make a plugin.
+///   Distinct from `400`, because retrying the request will not help: the
+///   directory is what has to change.
+/// * `409` — a name that is taken, a transition in flight, an MCP server that
+///   is still running.
+/// * `500` — the copy or the write failed.
+pub(crate) fn gap24_error(failure: &InstallFailure) -> Response {
+    let status = match failure {
+        InstallFailure::Plugin(e) => match e {
+            InstallError::InvalidPath(_) | InstallError::EscapingSymlink(_) => {
+                StatusCode::BAD_REQUEST
+            }
+            InstallError::SourceNotFound(_) => StatusCode::NOT_FOUND,
+            InstallError::InvalidManifest(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            InstallError::AlreadyInstalled(_) | InstallError::Busy(_) => StatusCode::CONFLICT,
+            InstallError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            InstallError::Extension(e) => extension_error_status(e),
+        },
+        InstallFailure::Mcp(e) => match e {
+            DeclarationError::Invalid(_) => StatusCode::BAD_REQUEST,
+            DeclarationError::AlreadyDeclared(_) | DeclarationError::NotDisabled(_) => {
+                StatusCode::CONFLICT
+            }
+            DeclarationError::Extension(e) => extension_error_status(e),
+        },
+    };
+    (
+        status,
+        Json(serde_json::json!({
+            "error": failure.code(),
+            // The word is what a client branches on; the sentence is what a
+            // person reads. Both, because a refused install is something the
+            // owner has to act on ("the manifest calls this plugin 'x'…").
+            "message": failure.to_string(),
+        })),
+    )
+        .into_response()
+}
+
+fn bad_request(code: &'static str, message: impl Into<String>) -> Response {
+    SourceRefusal {
+        code,
+        message: message.into(),
+    }
+    .into_response()
+}
+
+/// A `400` the request body earned before any supervisor saw it.
+///
+/// Carried as its two fields rather than as a built `Response`, which is 128
+/// bytes and would make every `Result<PathBuf, _>` on this path an oversized
+/// error type.
+struct SourceRefusal {
+    code: &'static str,
+    message: String,
+}
+
+impl IntoResponse for SourceRefusal {
+    fn into_response(self) -> Response {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": self.code, "message": self.message })),
+        )
+            .into_response()
+    }
+}
+
+/// `{source: "path", path: "/…"}` — the **only** source (plan §8 item 9).
+///
+/// `source: "url"` stays declined: fetching and unpacking an archive from the
+/// network is its own security review, and refusing it by name is more useful
+/// than a serde error about an unknown variant.
+fn plugin_source(body: &serde_json::Value) -> Result<std::path::PathBuf, SourceRefusal> {
+    match body.get("source").and_then(|s| s.as_str()) {
+        Some("path") | None => match body.get("path").and_then(|p| p.as_str()) {
+            Some(path) if !path.is_empty() => Ok(std::path::PathBuf::from(path)),
+            _ => Err(SourceRefusal {
+                code: "invalid_path",
+                message: "give the plugin directory as an absolute 'path'".to_string(),
+            }),
+        },
+        Some(other) => Err(SourceRefusal {
+            code: "unsupported_source",
+            message: format!(
+                "source '{other}' is not supported; only 'path' is — installing from a \
+                 URL is its own security review"
+            ),
+        }),
+    }
+}
+
+fn install_body(outcome: &InstallOutcome) -> serde_json::Value {
+    serde_json::json!({
+        "extension": row_json(&outcome.record),
+        "manifest": outcome.manifest,
+        "added_capabilities": outcome.added_capabilities,
+        "consent_reset": outcome.consent_reset,
+    })
+}
+
+/// `POST /v1/extensions/{kind}` — install a plugin, or declare an MCP server.
+///
+/// Both answer `201` with the same envelope: the ledger row, plus the manifest
+/// summary a plugin needs beside it. **An install grants nothing** — the plugin
+/// lands `unapproved`/`never_seen` and approving is the single action that
+/// starts it — so the summary is the approval preview, and `manifest` is `null`
+/// for an MCP server, which has no consent gate at all (writing a server into
+/// your own `config/mcp.toml` *is* the consent).
+pub(crate) async fn install_extension(
+    extensions: Arc<Extensions>,
+    kind: &str,
+    body: serde_json::Value,
+) -> Response {
+    match kind {
+        "plugin" => {
+            let path = match plugin_source(&body) {
+                Ok(path) => path,
+                Err(refusal) => return refusal.into_response(),
+            };
+            match detached(async move { Ok(extensions.install_plugin(&path).await) }).await {
+                Ok(Ok(outcome)) => {
+                    (StatusCode::CREATED, Json(install_body(&outcome))).into_response()
+                }
+                Ok(Err(e)) => gap24_error(&e),
+                Err(e) => extension_error(&e),
+            }
+        }
+        "mcp" => {
+            let declaration: McpDeclaration = match serde_json::from_value(body) {
+                Ok(declaration) => declaration,
+                Err(e) => return bad_request("invalid_declaration", e.to_string()),
+            };
+            match detached(async move { Ok(extensions.add_mcp(declaration).await) }).await {
+                Ok(Ok(record)) => (
+                    StatusCode::CREATED,
+                    Json(serde_json::json!({
+                        "extension": row_json(&record),
+                        "manifest": serde_json::Value::Null,
+                    })),
+                )
+                    .into_response(),
+                Ok(Err(e)) => gap24_error(&e),
+                Err(e) => extension_error(&e),
+            }
+        }
+        other => unknown_kind(other),
+    }
+}
+
+/// `POST /v1/extensions/{kind}` handler.
+pub async fn install_extension_handler(
+    State(state): State<Arc<AppState>>,
+    Path(kind): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    install_extension(state.extensions.clone(), &kind, body).await
+}
+
+/// `POST /v1/extensions/plugin/validate {path}` — the dry run.
+///
+/// It parses the manifest and reports it without copying anything, so the
+/// owner can see what an install would land — and what approving it would grant
+/// — before the directory is in the store at all.
+pub(crate) async fn validate_plugin(
+    extensions: Arc<Extensions>,
+    body: serde_json::Value,
+) -> Response {
+    let path = match plugin_source(&body) {
+        Ok(path) => path,
+        Err(refusal) => return refusal.into_response(),
+    };
+    match extensions.validate_plugin(&path) {
+        Ok(manifest) => {
+            let installed = extensions.plugin_installed(&manifest.name);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "manifest": manifest, "installed": installed })),
+            )
+                .into_response()
+        }
+        Err(e) => gap24_error(&e),
+    }
+}
+
+/// `POST /v1/extensions/plugin/validate` handler.
+pub async fn validate_plugin_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    validate_plugin(state.extensions.clone(), body).await
+}
+
+/// `PUT /v1/extensions/{kind}/{id} {source:"path", path}` — replace a plugin's
+/// tree in place.
+///
+/// Plugins only. An MCP server's declaration is a block in the owner's own
+/// `config/mcp.toml`: editing it is a text edit plus `reload`, so there is
+/// nothing here to update and `kind=mcp` is `409 unsupported_for_kind` — the
+/// same answer the rest of the plugin-only family gives.
+pub(crate) async fn update_extension(
+    extensions: Arc<Extensions>,
+    kind: &str,
+    id: &str,
+    body: serde_json::Value,
+) -> Response {
+    match Extensions::parse_kind(kind) {
+        Some(ExtensionKind::Plugin) => {}
+        Some(ExtensionKind::Mcp) => {
+            return extension_error(&ExtensionError::UnsupportedForKind);
+        }
+        None => return unknown_kind(kind),
+    }
+    let path = match plugin_source(&body) {
+        Ok(path) => path,
+        Err(refusal) => return refusal.into_response(),
+    };
+    let id = id.to_string();
+    match detached(async move { Ok(extensions.update_plugin(&id, &path).await) }).await {
+        Ok(Ok(outcome)) => (StatusCode::OK, Json(install_body(&outcome))).into_response(),
+        Ok(Err(e)) => gap24_error(&e),
+        Err(e) => extension_error(&e),
+    }
+}
+
+/// `PUT /v1/extensions/{kind}/{id}` handler.
+pub async fn update_extension_handler(
+    State(state): State<Arc<AppState>>,
+    Path((kind, id)): Path<(String, String)>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    update_extension(state.extensions.clone(), &kind, &id, body).await
 }
 
 /// The config pair's two guards, in the order the rest of the family checks

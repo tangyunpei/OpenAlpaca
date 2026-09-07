@@ -11,5 +11,7 @@ pub mod fingerprint;
 // Re-exports are added incrementally as each submodule lands (Tasks 2, 3, 5).
 pub use bridge::{rmcp_tool_to_registered, serialize_call_result};
 pub use classify::{classify_bringup_failure, classify_call_failure};
-pub use config::{HttpAuthConfig, LoadError, McpConfig, McpDefaults, McpServerConfig};
+pub use config::{
+    HttpAuthConfig, LoadError, McpConfig, McpDefaults, McpServerConfig, is_valid_server_name,
+};
 pub use fingerprint::config_fingerprint;

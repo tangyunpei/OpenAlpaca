@@ -5,7 +5,7 @@
 ## Overview
 
 - Router source: `apps/openalpacad/src/router.rs`.
-- Total documented method/path endpoints: 97.
+- Total documented method/path endpoints: 100.
 - Includes public, bearer-protected, WebSocket, and SSE routes.
 
 ## Auth
@@ -61,7 +61,10 @@
 | GET | `/v1/events` | `query_token` | `events_handler` | - | `HashMap<String, String>` | `apps/openalpacad/src/routes/events.rs` |
 | GET | `/v1/events/history` | `bearer` | `events_history_handler` | - | `events_history::HistoryParams` | `apps/openalpacad/src/routes/events_history.rs` |
 | GET | `/v1/extensions` | `bearer` | `list_extensions_handler` | - | `extensions::ListQuery` | `apps/openalpacad/src/routes/extensions.rs` |
-| DELETE | `/v1/extensions/{kind}/{id}` | `bearer` | `delete_extension_handler` | - | - | `apps/openalpacad/src/routes/extensions.rs` |
+| POST | `/v1/extensions/plugin/validate` | `bearer` | `validate_plugin_handler` | `serde_json::Value` | - | `apps/openalpacad/src/routes/extensions.rs` |
+| POST | `/v1/extensions/{kind}` | `bearer` | `install_extension_handler` | `serde_json::Value` | - | `apps/openalpacad/src/routes/extensions.rs` |
+| PUT | `/v1/extensions/{kind}/{id}` | `bearer` | `update_extension_handler` | `serde_json::Value` | - | `apps/openalpacad/src/routes/extensions.rs` |
+| DELETE | `/v1/extensions/{kind}/{id}` | `bearer` | `delete_extension_handler` | - | `extensions::DeleteQuery` | `apps/openalpacad/src/routes/extensions.rs` |
 | GET | `/v1/extensions/{kind}/{id}/config` | `bearer` | `get_extension_config_handler` | - | - | `apps/openalpacad/src/routes/extensions.rs` |
 | POST | `/v1/extensions/{kind}/{id}/config` | `bearer` | `set_extension_config_handler` | `extensions::SetConfigRequest` | - | `apps/openalpacad/src/routes/extensions.rs` |
 | POST | `/v1/extensions/{kind}/{id}/{verb}` | `bearer` | `extension_action_handler` | - | - | `apps/openalpacad/src/routes/extensions.rs` |
@@ -340,6 +343,16 @@
 | `before` | `Option<i64>` |
 | `limit` | `Option<usize>` |
 
+### `extensions::DeleteQuery`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/extensions.rs`
+
+| Field | Type |
+|---|---|
+| `uninstall` | `bool` |
+| `keep_data` | `bool` |
+
 ### `extensions::ListQuery`
 
 - Kind: `struct`
@@ -391,6 +404,10 @@
 | `from` | `Option<String>` |
 | `to` | `Option<String>` |
 | `limit` | `Option<usize>` |
+
+### `serde_json::Value`
+
+- External or generic type; see handler source.
 
 ### `sessions::CreateSessionRequest`
 
