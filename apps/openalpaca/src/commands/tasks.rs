@@ -19,6 +19,11 @@ pub struct TasksArgs {
     pub command: TasksCommands,
 }
 
+/// **No commas in the doc comments below** — including the `//` ones.
+/// `scripts/gen_api_docs.py` splits a `Subcommand` enum body on top-level
+/// commas *before* it strips comment lines, so a comma inside one invents a
+/// variant out of the words that follow it (`when` and `so`, in two drafts of
+/// `Resume`'s help). Semicolons and dashes are safe.
 #[derive(Subcommand)]
 pub enum TasksCommands {
     /// List tasks
@@ -67,9 +72,9 @@ pub enum TasksCommands {
         /// Task ID
         task_id: String,
     },
-    /// Resume a paused task — or, when the daemon has the experimental replay
-    /// resume enabled ([orchestrator.routing] resume_enabled, off by default),
-    /// continue an interrupted run from its session log
+    /// Resume a paused task. On an interrupted run this is instead the
+    /// experimental replay resume — off by default; enable it with
+    /// resume_enabled under [orchestrator.routing] in daemon.toml
     Resume {
         /// Task ID
         task_id: String,
