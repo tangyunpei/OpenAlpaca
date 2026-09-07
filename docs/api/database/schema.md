@@ -6,7 +6,7 @@
 
 - DB path resolver: `openalpaca_storage::paths::database_path()`
 - Migrations entrypoint: `openalpaca_storage::migrations::MIGRATIONS`
-- Registered migrations: 39
+- Registered migrations: 40
 
 ## Tables
 
@@ -576,6 +576,7 @@ result_ref TEXT
 | `idx_link_token_token` | `link_token` | `INDEX` | `token` | `003_identity.sql` |
 | `idx_llm_call_log_agent` | `llm_call_log` | `INDEX` | `agent_id, timestamp DESC` | `008_llm_usage.sql` |
 | `idx_llm_call_log_task` | `llm_call_log` | `INDEX` | `task_id, timestamp DESC` | `008_llm_usage.sql` |
+| `idx_llm_call_log_timestamp` | `llm_call_log` | `INDEX` | `timestamp` | `040_llm_call_log_timestamp_index.sql` |
 | `idx_memory_agent` | `memory` | `INDEX` | `agent_id` | `001_init.sql` |
 | `idx_memory_content_hash` | `memory` | `UNIQUE` | `owner_id, scope, scope_id, content_hash` | `026_memory_scope_dedup.sql` |
 | `idx_memory_decay` | `memory` | `INDEX` | `owner_id, kind, last_accessed_at` | `018_memory_lifecycle.sql` |

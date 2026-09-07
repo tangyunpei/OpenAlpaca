@@ -8,7 +8,7 @@ fn test_database_creation() {
 
     let db = Database::open(&db_path).unwrap();
     assert!(db_path.exists());
-    assert_eq!(db.schema_version().unwrap(), 39);
+    assert_eq!(db.schema_version().unwrap(), 40);
 }
 
 #[test]
@@ -20,14 +20,14 @@ fn test_migrations_idempotent() {
     let _db1 = Database::open(&db_path).unwrap();
     let db2 = Database::open(&db_path).unwrap();
 
-    assert_eq!(db2.schema_version().unwrap(), 39);
+    assert_eq!(db2.schema_version().unwrap(), 40);
 }
 
 #[test]
 fn test_migration_035_drops_planner_telemetry() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 39);
+    assert_eq!(db.schema_version().unwrap(), 40);
 
     db.with_connection(|conn| {
         let columns = |table: &str| -> rusqlite::Result<Vec<String>> {
@@ -183,7 +183,7 @@ fn insert_asset(
 fn test_migration_036_adds_artifact_columns() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 39);
+    assert_eq!(db.schema_version().unwrap(), 40);
 
     db.with_connection(|conn| {
         let columns = |table: &str| -> rusqlite::Result<Vec<String>> {
@@ -365,7 +365,7 @@ fn test_migration_036_artifact_versions_cascade() {
 fn test_migration_037_run_observability_schema() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 39);
+    assert_eq!(db.schema_version().unwrap(), 40);
 
     db.with_connection(|conn| {
         let columns = |table: &str| -> rusqlite::Result<Vec<String>> {
@@ -450,7 +450,7 @@ fn test_migration_037_run_observability_schema() {
 fn test_migration_038_message_run_links() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 39);
+    assert_eq!(db.schema_version().unwrap(), 40);
 
     db.with_connection(|conn| {
         let columns: Vec<String> = conn
@@ -846,4 +846,31 @@ fn factory_reset_runs_on_a_fully_migrated_database() {
         followups, 0,
         "a queued follow-up must not outlive a factory reset"
     );
+}
+
+/// R63: `llm_call_log` had no index leading on `timestamp`, so
+/// `provider_usage_since` (backing `GET /v1/usage/summary`) full-scanned an
+/// append-only log on every `llm_call_completed` refetch. Migration 040 adds
+/// `idx_llm_call_log_timestamp` and bumps `schema_version` to 40.
+#[test]
+fn test_migration_040_adds_llm_call_log_timestamp_index() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    assert_eq!(db.schema_version().unwrap(), 40);
+
+    db.with_connection(|conn| {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master \
+             WHERE type = 'index' AND name = 'idx_llm_call_log_timestamp' \
+             AND tbl_name = 'llm_call_log')",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(
+            exists,
+            "idx_llm_call_log_timestamp should exist on llm_call_log after migration 040"
+        );
+        Ok(())
+    })
+    .unwrap();
 }

@@ -206,4 +206,9 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "sessions",
         sql: include_str!("039_sessions.sql"),
     },
+    Migration {
+        version: 40,
+        name: "llm_call_log_timestamp_index",
+        sql: include_str!("040_llm_call_log_timestamp_index.sql"),
+    },
 ];

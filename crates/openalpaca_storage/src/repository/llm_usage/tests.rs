@@ -198,7 +198,7 @@ fn test_empty_results() {
 #[test]
 fn test_schema_version() {
     let db = setup_db();
-    assert_eq!(db.schema_version().unwrap(), 39);
+    assert_eq!(db.schema_version().unwrap(), 40);
 }
 
 fn call_log_for_task(task_id: &str, cost_usd: f64) -> LlmCallLog {
@@ -343,5 +343,44 @@ fn provider_usage_since_is_empty_before_the_first_call() {
         repo.provider_usage_since("2000-01-01 00:00:00")
             .unwrap()
             .is_empty()
+    );
+}
+
+/// R63: `llm_call_log` had no index leading on `timestamp`, so this query —
+/// re-run on every `llm_call_completed` event while Settings is open —
+/// full-scanned the whole append-only log under the daemon's single
+/// connection lock. Migration 040 adds `idx_llm_call_log_timestamp`; this
+/// proves the query plan actually uses it, not merely that the index exists
+/// unused next to the table.
+#[test]
+fn provider_usage_since_query_plan_uses_the_timestamp_index() {
+    let db = setup_db();
+
+    let plan_lines: Vec<String> = db
+        .with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "EXPLAIN QUERY PLAN SELECT provider, SUM(cost_usd), COUNT(*), \
+                 SUM(input_tokens + output_tokens) FROM llm_call_log WHERE timestamp >= ?1 \
+                 GROUP BY provider ORDER BY provider",
+            )?;
+            let rows = stmt.query_map(rusqlite::params!["2000-01-01 00:00:00"], |row| {
+                row.get::<_, String>(3)
+            })?;
+            let mut lines = Vec::new();
+            for row in rows {
+                lines.push(row?);
+            }
+            Ok(lines)
+        })
+        .unwrap();
+
+    let plan = plan_lines.join(" | ");
+    assert!(
+        plan.contains("idx_llm_call_log_timestamp"),
+        "expected the summary query's plan to use idx_llm_call_log_timestamp, got: {plan}"
+    );
+    assert!(
+        !plan.contains("SCAN llm_call_log"),
+        "the timestamp index should turn the WHERE clause into a SEARCH, not a full SCAN: {plan}"
     );
 }
