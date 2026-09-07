@@ -131,8 +131,11 @@ log_retention_days = 0
 tool_result_inline_bytes = 32768
 # Before file_write overwrites an existing workspace file, its pre-edit bytes
 # are copied into the session's snapshots/. A target larger than this is not
-# imaged and the write is refused rather than performed without one.
-snapshot_max_bytes = 2097152
+# imaged and the write is refused rather than performed without one. Kept
+# equal to file_write's own 10 MB content limit on purpose: lowering this
+# reopens a band of existing files file_write would otherwise refuse to
+# touch at all, purely because this tier exists.
+snapshot_max_bytes = 10485760
 
 [security]
 max_input_length = 32768

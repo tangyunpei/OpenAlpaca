@@ -57,6 +57,14 @@ tool_selection = "core_union"
 # work. `resume` on a *paused* run is unaffected by this flag.
 resume_enabled = false
 
+[orchestrator.sessions]
+# Largest existing file file_write will image into the session's
+# snapshots/ before overwriting it (§5.7). Default 10485760 (10 MB) —
+# kept equal to file_write's own content limit on purpose: a smaller
+# value reopens a band of existing files file_write would otherwise
+# refuse to touch at all, purely because this tier exists.
+# snapshot_max_bytes = 10485760
+
 [security]
 max_input_length = 32768
 

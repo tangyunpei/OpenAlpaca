@@ -544,6 +544,68 @@ mod tests {
         );
     }
 
+    /// The default cap is `file_write`'s own 10 MB content bound: an
+    /// overwrite this size always succeeded before S3 shipped, and it must
+    /// keep succeeding now that S3 has a cap of its own (Task 56 fix round
+    /// 1, Important #2 / R68).
+    #[tokio::test]
+    async fn a_five_megabyte_file_is_imaged_and_overwritten_at_the_default_cap() {
+        let bench = bench();
+        let tool = bench.tool(None);
+        let ctx = bench.ctx("sess-5mb");
+        let old = vec![b'a'; 5 * 1024 * 1024];
+        fs::write(bench.work.path().join("big.bin"), &old).unwrap();
+
+        let result = tool
+            .execute_with_context(
+                &serde_json::json!({"path": "big.bin", "content": "new, much shorter"}),
+                &ctx,
+            )
+            .await;
+        assert!(result.is_ok(), "a 5 MB overwrite at the default cap: {result:?}");
+        assert!(ctx.session_log.as_ref().unwrap().flush().await);
+
+        assert_eq!(
+            fs::read_to_string(bench.work.path().join("big.bin")).unwrap(),
+            "new, much shorter"
+        );
+        let images = bench.images("sess-5mb");
+        assert_eq!(images.len(), 1, "{images:?}");
+        assert_eq!(
+            fs::metadata(&images[0]).unwrap().len(),
+            5 * 1024 * 1024,
+            "the 5 MB pre-edit image was kept"
+        );
+    }
+
+    /// Above the default cap the write is refused, naming the key to raise —
+    /// unchanged behaviour, just no longer reachable by a file `file_write`
+    /// itself could have produced (Important #2 / R68).
+    #[tokio::test]
+    async fn an_eleven_megabyte_file_is_refused_at_the_default_cap() {
+        let bench = bench();
+        let tool = bench.tool(None);
+        let ctx = bench.ctx("sess-11mb");
+        let old = vec![b'a'; 11 * 1024 * 1024];
+        fs::write(bench.work.path().join("huge.bin"), &old).unwrap();
+
+        let refused = tool
+            .execute_with_context(
+                &serde_json::json!({"path": "huge.bin", "content": "clobber"}),
+                &ctx,
+            )
+            .await
+            .expect_err("above the default cap the write is refused");
+        assert!(refused.contains("snapshot_max_bytes"), "{refused}");
+        assert_eq!(
+            fs::metadata(bench.work.path().join("huge.bin"))
+                .unwrap()
+                .len(),
+            11 * 1024 * 1024,
+            "the file is unchanged"
+        );
+    }
+
     /// Fail closed: a snapshot that cannot be written stops the write, rather
     /// than letting it through unimaged.
     #[tokio::test]

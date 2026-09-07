@@ -48,9 +48,14 @@ pub struct SessionsConfig {
     /// It is a **refusal** threshold, not a skip: a snapshot the session
     /// cannot afford means the write does not happen, because silently
     /// overwriting a file whose only copy this was is the outcome the tier
-    /// exists to prevent. 2 MB — `tool_result_inline_bytes × 64`, the same
-    /// number read as "a payload file, not a payload" — keeps one edit from
-    /// consuming a meaningful share of `log_max_session_bytes`.
+    /// exists to prevent. Default 10 MB — deliberately the same number as
+    /// `file_write`'s own content bound (`MAX_FILE_WRITE_SIZE`,
+    /// `tools/builtins/file_ops.rs`), so this tier costs nothing in
+    /// reachability: no overwrite `file_write` could already produce is
+    /// refused purely because S3 was added (Task 56 fix round 1, Important
+    /// #2 / R68). Lower it only with that coupling in mind — a smaller value
+    /// reopens the band of existing files `file_write` refuses to touch at
+    /// all.
     #[serde(default = "default_snapshot_max_bytes")]
     pub snapshot_max_bytes: u64,
 }
@@ -68,7 +73,10 @@ fn default_tool_result_inline_bytes() -> usize {
     32 * 1024
 }
 fn default_snapshot_max_bytes() -> u64 {
-    2 * 1024 * 1024
+    // `file_write`'s own content bound (`MAX_FILE_WRITE_SIZE`,
+    // `tools/builtins/file_ops.rs`) — kept equal on purpose, see the field
+    // doc comment above.
+    10 * 1024 * 1024
 }
 
 impl Default for SessionsConfig {
