@@ -61,7 +61,7 @@
 //! | head file | `.versions/<stem>/v<N-1>.<ext>` | Action |
 //! |---|---|---|
 //! | present | absent  | Healthy store — rotate the head into `v<N-1>` (the ordinary supersede). |
-//! | present | present | An **interrupted put**: the head holds bytes no committed row describes, `v<N-1>` is the committed previous version. Do **not** rotate — step 4's rename discards the orphaned head, and `v<N-1>` is reported as the rotated path. |
+//! | present | present | An **interrupted put**: the head holds bytes no committed row describes, `v<N-1>` is the committed previous version. Do **not** rotate — step 4's rename discards the orphaned head, and `v<N-1>` is reported as the rotated path. Ordinarily `put` never reaches this row any more: the hand-edit check below has already recorded the orphaned head as a version of its own, so N has advanced and `v<N>` is absent. It stands for the one case that check declines — an orphan whose bytes happen to hash to what the row already says. |
 //! | absent  | present | A put died between steps 3 and 4. The bytes are already where they belong; report them so v(N-1)'s row stops claiming the head path. |
 //! | absent  | absent  | The head was removed outside the store. Nothing to rotate. |
 //!
@@ -96,11 +96,11 @@
 //!
 //! Editing a produced file by hand is *the point* of putting artifacts in the
 //! project rather than in an opaque blob store, so the store records the edit
-//! instead of resenting it. [`ArtifactStore::verify`] (the sweep) and
-//! [`ArtifactStore::resolve_content`] (every read) compare the head with the
-//! row: a difference is a version this system did not write, and
-//! [`rotate_rows`] records it as one — `author_agent_id = NULL`, `note =`
-//! [`USER_EDIT_NOTE`].
+//! instead of resenting it. [`ArtifactStore::verify`] (the sweep),
+//! [`ArtifactStore::resolve_content`] (every read) and [`ArtifactStore::put`]
+//! (the write that would otherwise bury it) compare the head with the row: a
+//! difference is a version this system did not write, and [`rotate_rows`]
+//! records it as one — `author_agent_id = NULL`, `note =` [`USER_EDIT_NOTE`].
 //!
 //! **R32 governs the check, not just the diff.** Hashing a head is unbounded in
 //! the artifact's size, and `Database::with_connection` holds the daemon's one
@@ -124,7 +124,9 @@
 //! only as exact as the filesystem's mtime: an edit that restores the byte
 //! count *and* the modification time is invisible to it, which is the price of
 //! not reading every artifact on every request.
-
+//!
+//! `put` runs its own check inline instead, inside the transaction that already
+//! holds the connection for the whole §4.2 protocol — see [`ArtifactStore::put`].
 //!
 //! **The rotation moves no bytes.** It cannot: a hand edit overwrites the head
 //! *in place*, so version N's bytes are already gone by the time anything
@@ -152,8 +154,10 @@
 //! genuinely holds version N's bytes, so re-pointing N's row at them **repairs**
 //! a row that was claiming the head, the line counts come out real rather than
 //! `NULL`, and the orphaned head is preserved as a version instead of being
-//! discarded by the next `put`. `author_agent_id = NULL` says exactly what is
-//! known about it: nobody committed to writing these bytes.
+//! discarded. `author_agent_id = NULL` says exactly what is known about it:
+//! nobody committed to writing these bytes. A read and a `put` now answer that
+//! state identically, so whether those bytes survive no longer depends on
+//! whether anyone happened to open the file first.
 
 use std::fmt;
 use std::fs;
@@ -653,6 +657,9 @@ pub struct ArtifactDiff {
 /// non-test build [`crash_point`] compiles to nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WriteStep {
+    /// After the head's own unnoticed hand edit has been recorded as a version
+    /// and before this write's bytes reach the disk (§4.8).
+    UserEditRotated,
     TmpWritten,
     Fsynced,
     Rotated,
@@ -821,7 +828,29 @@ impl<'a> ArtifactStore<'a> {
             let head_name = artifact_file_name(seq, new.title, &ext);
             let head_path = confine_to_root(&artifacts_root, &dir.join(&head_name))?;
             let head_rel = format!("{rel_dir}/{head_name}");
-            let version = existing.map(|r| r.version + 1).unwrap_or(1);
+
+            // --- The unnoticed hand edit (§4.8) ------------------------------
+            // The head this write is about to replace may hold bytes nobody
+            // committed — a hand edit no read and no sweep has seen. Record it
+            // as the user's version *first*, so no version row ever ends up
+            // carrying a sha that does not describe the bytes its `rel_path`
+            // points at. Both rotations are in this one transaction, so an
+            // abort between them records neither.
+            //
+            // This runs inside `with_connection` where the read path's does
+            // not, because `put` holds the connection for its whole protocol by
+            // design (that is what serialises concurrent puts) — and the stamp
+            // the last write left means an ordinary supersede hashes nothing.
+            let hand_edit = match existing {
+                Some(row) => rotate_hand_edit(&tx, &row.id)?,
+                None => None,
+            };
+            crash_point(WriteStep::UserEditRotated)?;
+            let previous_version = match &hand_edit {
+                Some(rotated) => Some(rotated.version),
+                None => existing.map(|r| r.version),
+            };
+            let version = previous_version.map_or(1, |previous| previous + 1);
 
             // --- The §4.2 write protocol -------------------------------------
             fs::create_dir_all(&dir)
@@ -841,7 +870,7 @@ impl<'a> ArtifactStore<'a> {
                 &head_path,
                 &head_name,
                 new.content,
-                existing.map(|r| r.version),
+                previous_version,
             )?;
             // Stamp the head this call just wrote, so the read path's §4.8
             // check has something to compare against and never hashes a head
@@ -906,12 +935,14 @@ impl<'a> ArtifactStore<'a> {
                             row.id,
                         ],
                     )?;
-                    // The version that was the head now lives under `.versions/`.
-                    if let Some(rel) = &rotated_rel {
+                    // The version that was the head now lives under
+                    // `.versions/` — the hand edit's own version when one was
+                    // just recorded, since that is what stood at the head.
+                    if let (Some(rel), Some(previous)) = (&rotated_rel, previous_version) {
                         tx.execute(
                             "UPDATE artifact_versions SET rel_path = ?1
                              WHERE artifact_id = ?2 AND version = ?3",
-                            rusqlite::params![rel, row.id, row.version],
+                            rusqlite::params![rel, row.id, previous],
                         )?;
                     }
                     row.id.clone()
@@ -1737,6 +1768,26 @@ impl HeadProbe {
             removed_lines,
         })
     }
+}
+
+/// §4.8's check as one call, for a caller that is already inside a transaction
+/// — which is [`ArtifactStore::put`], about to write over the very head this
+/// asks about.
+///
+/// `Ok(None)` is a head holding the bytes its row describes (and every state
+/// [`probe_for`] declines). Nothing is stamped on that path: the `put` this
+/// serves rewrites `metadata_json` with a stamp of its own bytes moments later.
+fn rotate_hand_edit(conn: &Connection, id: &str) -> Result<Option<ArtifactRecord>> {
+    let Some(record) = load_by_id(conn, id)? else {
+        return Ok(None);
+    };
+    let Some(observation) = probe_for(&record).observe() else {
+        return Ok(None);
+    };
+    if observation.sha256 == record.sha256 {
+        return Ok(None);
+    }
+    Ok(Some(rotate_rows(conn, &record, &observation)?))
 }
 
 /// The rows of the rotation, and nothing else — no reads, no hashing, no

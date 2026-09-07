@@ -837,12 +837,14 @@ fn a_put_after_a_crash_still_succeeds() {
 }
 
 #[test]
-fn a_put_after_an_interrupted_head_rename_never_rotates_over_v1() {
+fn a_put_after_an_interrupted_head_rename_keeps_v1_and_records_the_orphan() {
     // The crash at `HeadRenamed` leaves the *uncommitted* new bytes at the head
     // and the true, committed v1 at `.versions/01-notes/v1.md` (the row rolled
-    // back to v1 with sha("old\n")). A recovering put must not rotate the
-    // orphaned head over v1 — that would destroy v1's only copy and leave v1's
-    // row describing bytes of another version.
+    // back to v1 with sha("old\n")). The head therefore holds bytes v1's row
+    // does not describe, which is §4.8's hand edit however it got there: the
+    // recovering put records it as the version nobody wrote *before* writing
+    // its own, exactly as a read of the same state does. v1's only copy is
+    // never rotated over.
     let (f, dir, id) = crash_during_second_put(WriteStep::HeadRenamed);
     let v1_sha = f.store().versions(&id).unwrap()[0].sha256.clone();
     assert_eq!(v1_sha, sha256_hex(b"old\n"), "the row still describes v1");
@@ -853,7 +855,7 @@ fn a_put_after_an_interrupted_head_rename_never_rotates_over_v1() {
     let (record, created) = f.store().put(retry).unwrap();
     assert!(!created);
     assert_eq!(record.id, id);
-    assert_eq!(record.version, 2);
+    assert_eq!(record.version, 3, "the orphan is v2, this write is v3");
 
     assert_eq!(
         fs::read_to_string(dir.join("01-notes.md")).unwrap(),
@@ -865,25 +867,29 @@ fn a_put_after_an_interrupted_head_rename_never_rotates_over_v1() {
         "old\n",
         "v1's committed bytes must survive the recovering put"
     );
+    assert_eq!(
+        fs::read_to_string(dir.join(".versions/01-notes/v2.md")).unwrap(),
+        "new\n",
+        "the orphaned head is kept under the version that now describes it"
+    );
     let mut on_disk: Vec<String> = fs::read_dir(dir.join(".versions/01-notes"))
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
         .collect();
     on_disk.sort();
-    assert_eq!(
-        on_disk,
-        vec!["v1.md".to_string()],
-        "the orphaned head is discarded, not parked in .versions/"
-    );
+    assert_eq!(on_disk, vec!["v1.md".to_string(), "v2.md".to_string()]);
 
     let rows = f.store().versions(&id).unwrap();
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 3);
     let v1 = rows.iter().find(|r| r.version == 1).unwrap();
     assert_eq!(v1.rel_path, "loose/2026-09-01/.versions/01-notes/v1.md");
     assert_eq!(
         v1.sha256, v1_sha,
         "v1's row sha still describes v1's own bytes"
     );
+    let v2 = rows.iter().find(|r| r.version == 2).unwrap();
+    assert_eq!(v2.author_agent_id, None, "nobody committed to those bytes");
+    assert_eq!(v2.sha256, sha256_hex(b"new\n"));
     let path = f.store().resolve_content(&id, Some(1)).unwrap();
     assert_eq!(
         fs::read_to_string(path).unwrap(),
@@ -1807,6 +1813,100 @@ fn a_crash_between_the_rotation_steps_records_nothing() {
 }
 
 #[test]
+fn a_put_onto_an_unnoticed_hand_edit_records_the_edit_first() {
+    // Nothing has read this artifact since it was edited by hand, so the agent
+    // is about to write over bytes no version row describes.
+    let (f, v1) = hand_edited("mine\n");
+
+    let scope = f.scope();
+    let mut third = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"theirs\n");
+    third.created = at(1);
+    third.agent_id = Some("writer::1");
+    let (record, created) = f.store().put(third).unwrap();
+    assert!(!created);
+    assert_eq!(
+        record.version, 3,
+        "the hand edit is v2 and the agent's write is v3"
+    );
+    assert_eq!(record.version_count, 3);
+
+    let rows = f.store().versions(&v1.id).unwrap();
+    assert_eq!(rows.len(), 3);
+
+    // v3 is the agent's, and its bytes are at the head.
+    assert_eq!(rows[0].version, 3);
+    assert_eq!(rows[0].author_agent_id.as_deref(), Some("writer::1"));
+    assert_eq!(rows[0].sha256, sha256_hex(b"theirs\n"));
+
+    // v2 is the hand edit, and every row's sha describes the bytes its
+    // rel_path points at — which is the whole point.
+    assert_eq!(rows[1].version, 2);
+    assert_eq!(rows[1].author_agent_id, None);
+    assert_eq!(rows[1].note.as_deref(), Some(USER_EDIT_NOTE));
+    assert_eq!(rows[1].sha256, sha256_hex(b"mine\n"));
+    let v2_path = f.store().resolve_content(&v1.id, Some(2)).unwrap();
+    assert_eq!(fs::read_to_string(v2_path).unwrap(), "mine\n");
+
+    // v1's bytes were overwritten in place by the hand edit; its row says so
+    // rather than claiming the user's bytes.
+    assert_eq!(rows[2].version, 1);
+    assert_eq!(rows[2].sha256, v1.sha256);
+    let err = f.store().resolve_content(&v1.id, Some(1)).unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<ArtifactError>().unwrap().code(),
+        "ARTIFACT_GONE"
+    );
+
+    // And the read that follows finds nothing left to record.
+    assert!(
+        f.store()
+            .resolve_content_with_edit(&v1.id, None)
+            .unwrap()
+            .1
+            .is_none()
+    );
+}
+
+#[test]
+fn a_crash_between_the_two_rotations_records_neither() {
+    let (f, v1) = hand_edited("mine\n");
+    let scope = f.scope();
+
+    {
+        let _crash = CrashGuard::after(WriteStep::UserEditRotated);
+        let mut third =
+            NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"theirs\n");
+        third.created = at(1);
+        let err = f.store().put(third).unwrap_err();
+        assert!(
+            err.to_string().contains("simulated crash"),
+            "expected the injected failure, got: {err}"
+        );
+    }
+
+    // Both rotations are in one transaction, so the abort leaves the store
+    // exactly as it was — the user's bytes still standing at the head.
+    let after = f.store().get(&v1.id, OWNER).unwrap().unwrap();
+    assert_eq!(after.version, 1);
+    assert_eq!(after.sha256, v1.sha256);
+    assert_eq!(after.version_count, 1);
+    let rows = f.store().versions(&v1.id).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].rel_path, v1.rel_path.clone().unwrap());
+    assert_eq!(fs::read_to_string(&after.storage_path).unwrap(), "mine\n");
+
+    // So the next read records the edit exactly once, as if nothing had tried.
+    let edit = f
+        .store()
+        .resolve_content_with_edit(&v1.id, None)
+        .unwrap()
+        .1
+        .expect("the retry records it");
+    assert_eq!(edit.version, 2);
+    assert_eq!(f.store().versions(&v1.id).unwrap().len(), 2);
+}
+
+#[test]
 fn a_put_after_a_recorded_hand_edit_supersedes_it() {
     let (f, v1) = hand_edited("mine\n");
     f.store().resolve_content(&v1.id, None).unwrap();
@@ -2133,13 +2233,14 @@ fn the_stored_line_counts_are_the_patch_totals() {
     );
 }
 
-/// The T23 re-review's Minor 8. An interrupted put parks *uncommitted* bytes at
-/// the head while the committed v(N−1) waits under `.versions/`; the recovering
-/// put discards that head. Counting the new version against it would compare it
-/// to bytes no row ever described — the pair belongs to the two versions the
-/// rows claim, which is where `write_bytes` says v(N−1) actually is.
+/// The T23 re-review's Minor 8, as §4.8 leaves it. An interrupted put parks
+/// bytes at the head that no row describes; the recovering put now *records*
+/// them as the version nobody wrote before writing its own, so the counts are
+/// still taken against the bytes the rows claim — they are simply one more
+/// version than they used to be. Nothing is ever counted against a file no row
+/// describes.
 #[test]
-fn the_line_counts_are_taken_against_the_committed_previous_version() {
+fn the_line_counts_are_taken_against_the_version_the_rows_describe() {
     let f = Fixture::new();
     let scope = f.scope();
 
@@ -2175,21 +2276,25 @@ fn the_line_counts_are_taken_against_the_committed_previous_version() {
         b"alpha\nbeta\ndelta\n",
     );
     retry.created = at(1);
-    let (v2, _) = f.store().put(retry).unwrap();
-    assert_eq!(v2.version, 2);
+    let (v3, _) = f.store().put(retry).unwrap();
+    assert_eq!(v3.version, 3, "the orphan became v2 and this is v3");
 
     let rows = f.store().versions(&v1.id).unwrap();
-    assert_eq!(rows[0].version, 2);
+    assert_eq!(rows[0].version, 3);
     assert_eq!(
         (rows[0].added_lines, rows[0].removed_lines),
-        (Some(1), Some(0)),
-        "counted against v1's committed bytes (+delta), not the orphan (+3 −1)"
+        (Some(3), Some(1)),
+        "counted against v2 — the orphan, now a version with a row of its own"
     );
 
     // …and the patch over the pair the rows describe says the same thing.
-    let diff = f.store().diff(&v1.id, 1, 2).unwrap();
-    assert_eq!((diff.added_lines, diff.removed_lines), (1, 0));
-    assert_eq!(patch_totals(&diff.patch), (1, 0));
+    let diff = f.store().diff(&v1.id, 2, 3).unwrap();
+    assert_eq!((diff.added_lines, diff.removed_lines), (3, 1));
+    assert_eq!(patch_totals(&diff.patch), (3, 1));
+
+    // v1's own bytes are still readable and still its own.
+    let path = f.store().resolve_content(&v1.id, Some(1)).unwrap();
+    assert_eq!(fs::read_to_string(path).unwrap(), "alpha\nbeta\n");
 }
 
 #[test]
