@@ -168,8 +168,15 @@ async fn check_response(resp: Response) -> Result<Response> {
     if let Some(msg) = body["error"]["message"].as_str() {
         bail!("{} (HTTP {})", msg, status.as_u16());
     }
-    // Try flat format: { "error": "..." }
+    // Try flat format: { "error": "..." }, optionally with a sibling
+    // { "message": "..." }. The extension family answers a refusal as a word a
+    // client branches on plus a sentence a person reads (GAP-24), and dropping
+    // the sentence left `invalid_manifest` as the whole of what an operator was
+    // told about a plugin that could not be installed.
     if let Some(msg) = body["error"].as_str() {
+        if let Some(detail) = body["message"].as_str() {
+            bail!("{}: {} (HTTP {})", msg, detail, status.as_u16());
+        }
         bail!("{} (HTTP {})", msg, status.as_u16());
     }
 

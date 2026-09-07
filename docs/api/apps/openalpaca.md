@@ -137,7 +137,14 @@
   - `approve` (fields: `id`)
   - `deny` (fields: `id`)
   - `remove` (fields: `id`)
-- Parsed flags: `--format`, `--include-orphaned`
+  - `install` (fields: `path`, `dry_run`)
+  - `update` (fields: `id`, `path`)
+  - `uninstall` (fields: `kind`, `id`, `purge_data`)
+  - `mcp` (fields: `command`)
+- Enum `ExtMcpCommands` variants:
+  - `add` (fields: `name`, `transport`, `command`, `args`, `envs`, `cwd`, `url`, `bearer_env`, `api_key_header`, `api_key_env`, `connect_timeout_secs`, `request_timeout_secs`, `disabled`)
+  - `remove` (fields: `name`)
+- Parsed flags: `--api-key-env`, `--api-key-header`, `--arg`, `--bearer-env`, `--command`, `--connect-timeout-secs`, `--cwd`, `--disabled`, `--dry-run`, `--env`, `--format`, `--include-orphaned`, `--purge-data`, `--request-timeout-secs`, `--transport`, `--url`
 
 ### `gui`
 

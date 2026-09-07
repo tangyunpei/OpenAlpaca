@@ -221,6 +221,12 @@ openalpaca ext reload <kind> <id>
 openalpaca ext approve <plugin-id>
 openalpaca ext deny <plugin-id>
 openalpaca ext remove <plugin-id>
+
+openalpaca ext install <path> [--dry-run]
+openalpaca ext update <plugin-id> <path>
+openalpaca ext uninstall <kind> <id> [--purge-data]
+openalpaca ext mcp add <name> [--transport stdio|http] ...
+openalpaca ext mcp remove <name>
 ```
 
 Notes:
@@ -236,6 +242,61 @@ Notes:
 - Rows report `kind`, `id`, `enabled`, `state` (`enabled`, `disabled`,
   `unapproved`, `failed`, `orphaned`, and the in-flight `enabling`/`disabling`)
   and what the extension contributes.
+
+#### Installing and removing extensions
+
+`install` copies a plugin directory into the plugins root under **its own
+directory name**, which becomes the plugin's id. The path must be absolute and
+outside the plugins root, and its `plugin.toml` must name the same directory —
+a manifest that renames itself is refused rather than landed, because such a
+directory can never load.
+
+**Installing grants nothing.** The plugin arrives with its toggle at the
+default (on) and *no consent decision*, so it sits `unapproved`/`never_seen`
+and nothing runs. `ext approve <id>` is the single action that starts it. The
+command prints the manifest first — what it contributes, what capabilities it
+asks for, which config keys it needs — because that is the decision approving
+makes.
+
+```bash
+openalpaca ext install ~/src/openalpaca-notion --dry-run   # parse and report only
+openalpaca ext install ~/src/openalpaca-notion
+openalpaca ext approve openalpaca-notion                   # now it runs
+```
+
+`update <id> <path>` replaces an installed plugin's tree: the plugin is torn
+down first (its child runs with its directory as the working directory, so an
+in-place replace is never allowed), the incumbent tree is moved to
+`plugins/.trash/`, the replacement is renamed into place, and the load path
+runs again. Consent survives an update whose declared capabilities are
+unchanged; if they changed, consent goes back to pending and the command says
+what the new version also asks for.
+
+`uninstall <kind> <id>` is the real removal, and it **deletes nothing**: the
+plugin is unloaded, its `.permissions.toml` entry removed, and its directory
+*moved* to `plugins/.trash/<id>-<timestamp>/` — the command prints where.
+`plugins/.data/<id>/` is kept unless you pass `--purge-data`, which moves it to
+the trash as well. For `kind = mcp` this removes the `[servers.<name>]` block
+from `config/mcp.toml`; the server must be turned off first (`ext disable mcp
+<name>`), otherwise the command refuses with `not_disabled`.
+
+`ext mcp add` writes a `[servers.<name>]` block into `config/mcp.toml` through
+the daemon's atomic, comment-preserving writer — your comments, defaults and
+other servers come back unchanged — and then connects it. Writing a server into
+your own config *is* the consent, so there is no approve step; `--disabled`
+declares it turned off instead.
+
+```bash
+openalpaca ext mcp add github --command npx \
+  --arg -y --arg @modelcontextprotocol/server-github \
+  --env GITHUB_TOKEN=ghp_xxx
+openalpaca ext mcp add remote --transport http \
+  --url https://example.com/mcp --bearer-env REMOTE_TOKEN
+openalpaca ext disable mcp github && openalpaca ext mcp remove github
+```
+
+Installing from a URL is **not** supported: `source: "url"` is declined until it
+has had its own security review. Only a local directory can be installed.
 
 ### `plugin`
 
