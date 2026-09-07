@@ -58,48 +58,76 @@ impl HandleResult {
     }
 }
 
-/// Trait for processing messages through the pipeline.
-/// The daemon implements this by delegating to the Orchestrator.
-#[allow(clippy::too_many_arguments)]
-#[async_trait]
-pub trait MessageHandler: Send + Sync {
-    async fn handle(
-        &self,
+/// One inbound turn, as a [`MessageHandler`] receives it.
+///
+/// This used to be a positional argument list, and GAP-13's `model_override`
+/// would have been its ninth entry — eight already needed
+/// `#[allow(clippy::too_many_arguments)]`, and a call site passing
+/// `None, None, None` in a row says nothing about which `None` is which. Named
+/// fields make each caller legible and let the next field be added without
+/// re-punctuating every one of them.
+#[derive(Debug, Clone)]
+pub struct HandleRequest {
+    pub request_id: Uuid,
+    /// The derived source name ("gui", "cli", "telegram", …), not the raw
+    /// `EventSource`.
+    pub source: String,
+    pub content: String,
+    pub principal: Principal,
+    pub scope: Scope,
+    /// The lane this turn landed on, canonical `"{user_id}:{source}"`.
+    pub lane_key: String,
+    /// Workspace path the client provided (GUI project dir, CLI cwd).
+    pub workspace_path: Option<String>,
+    /// SSE stream ID for routing tool confirmation prompts to the chat stream.
+    pub stream_id: Option<String>,
+    /// GAP-13 — the model this **one** turn runs on, already validated against
+    /// the model registry by the route that accepted it. `None` leaves the
+    /// daemon default in place. Request-scoped by construction: nothing is
+    /// persisted, so the next turn on the same lane is back on the default.
+    pub model_override: Option<String>,
+}
+
+impl HandleRequest {
+    /// A turn with no workspace, no stream and no model override — the three
+    /// optional fields most callers leave empty. Set one with struct update
+    /// syntax: `HandleRequest { stream_id: Some(id), ..HandleRequest::new(…) }`.
+    pub fn new(
         request_id: Uuid,
-        source: String,
-        content: String,
+        source: impl Into<String>,
+        content: impl Into<String>,
         principal: Principal,
         scope: Scope,
-        lane_key: String,
-        workspace_path: Option<String>,
-        stream_id: Option<String>,
-    ) -> Result<HandleResult, String>;
+        lane_key: impl Into<String>,
+    ) -> Self {
+        Self {
+            request_id,
+            source: source.into(),
+            content: content.into(),
+            principal,
+            scope,
+            lane_key: lane_key.into(),
+            workspace_path: None,
+            stream_id: None,
+            model_override: None,
+        }
+    }
+}
+
+/// Trait for processing messages through the pipeline.
+/// The daemon implements this by delegating to the Orchestrator.
+#[async_trait]
+pub trait MessageHandler: Send + Sync {
+    async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String>;
 
     /// Handle a message with attachments. Default delegates to `handle()`.
     async fn handle_with_attachments(
         &self,
-        request_id: Uuid,
-        source: String,
-        content: String,
+        request: HandleRequest,
         attachments: Vec<ResolvedAttachment>,
-        principal: Principal,
-        scope: Scope,
-        lane_key: String,
-        workspace_path: Option<String>,
-        stream_id: Option<String>,
     ) -> Result<HandleResult, String> {
         let _ = attachments; // default: ignore attachments
-        self.handle(
-            request_id,
-            source,
-            content,
-            principal,
-            scope,
-            lane_key,
-            workspace_path,
-            stream_id,
-        )
-        .await
+        self.handle(request).await
     }
 }
 
@@ -123,6 +151,10 @@ pub struct GatewayRequest {
     /// follow-up runner so re-entered turns continue the ORIGINATING
     /// conversation; `None` everywhere else.
     pub lane_override: Option<String>,
+    /// GAP-13 — the model this one turn runs on, validated by the route that
+    /// accepted it (`POST /v1/chat`). `None` — every other entry point —
+    /// leaves the daemon default in place.
+    pub model_override: Option<String>,
 }
 
 /// Response from the gateway after handling a message.
@@ -294,32 +326,22 @@ impl Gateway {
         let start = std::time::Instant::now();
 
         // Delegate to the handler — use attachment-aware path when attachments present
+        let handle_request = HandleRequest {
+            request_id,
+            source: source_name.clone(),
+            content: req.content,
+            principal: req.principal,
+            scope: req.scope,
+            lane_key: lane_key_str.clone(),
+            workspace_path: req.workspace_path,
+            stream_id: req.stream_id,
+            model_override: req.model_override,
+        };
         let handler_result = if req.attachments.is_empty() {
-            self.handler
-                .handle(
-                    request_id,
-                    source_name.clone(),
-                    req.content,
-                    req.principal,
-                    req.scope,
-                    lane_key_str.clone(),
-                    req.workspace_path,
-                    req.stream_id,
-                )
-                .await
+            self.handler.handle(handle_request).await
         } else {
             self.handler
-                .handle_with_attachments(
-                    request_id,
-                    source_name.clone(),
-                    req.content,
-                    req.attachments,
-                    req.principal,
-                    req.scope,
-                    lane_key_str.clone(),
-                    req.workspace_path,
-                    req.stream_id,
-                )
+                .handle_with_attachments(handle_request, req.attachments)
                 .await
         };
 

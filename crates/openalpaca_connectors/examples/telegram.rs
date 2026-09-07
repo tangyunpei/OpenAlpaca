@@ -11,13 +11,11 @@ use openalpaca_core::{
     bus::EventBus,
     context::SharedContext,
     daemon_config::DaemonConfig,
-    gateway::{Gateway, HandleResult, MessageHandler},
+    gateway::{Gateway, HandleRequest, HandleResult, MessageHandler},
     lane::LaneManager,
-    security::policy::{Principal, Scope},
 };
 use openalpaca_storage::store;
 use std::sync::Arc;
-use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -45,18 +43,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     #[async_trait]
     impl MessageHandler for EchoHandler {
-        async fn handle(
-            &self,
-            _request_id: Uuid,
-            _source: String,
-            content: String,
-            _principal: Principal,
-            _scope: Scope,
-            _lane_key: String,
-            _workspace_path: Option<String>,
-            _stream_id: Option<String>,
-        ) -> Result<HandleResult, String> {
-            Ok(HandleResult::text(format!("Echo: {content}")))
+        async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
+            Ok(HandleResult::text(format!("Echo: {}", request.content)))
         }
     }
 

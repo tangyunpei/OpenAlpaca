@@ -613,6 +613,7 @@ impl DiscordConnector {
                 workspace_path: None,
                 stream_id: None,
                 lane_override: None,
+                model_override: None,
             })
             .await;
 

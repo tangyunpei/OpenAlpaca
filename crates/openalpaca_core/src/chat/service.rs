@@ -157,6 +157,7 @@ impl ChatService {
                     workspace_path,
                     stream_id: Some(sid.clone()),
                     lane_override: None,
+                    model_override: None,
                 })
                 .await;
 

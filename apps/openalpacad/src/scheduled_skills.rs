@@ -210,6 +210,7 @@ pub fn spawn_timer_turn(
                 // Land on the dedicated scheduled lane instead of the
                 // "{user}:internal" lane EventSource::Internal would derive.
                 lane_override: Some(lane_key),
+                model_override: None,
             })
             .await;
         if response.is_error {
@@ -226,14 +227,13 @@ mod tests {
     use async_trait::async_trait;
     use openalpaca_core::bus::EventBus;
     use openalpaca_core::context::SharedContext;
-    use openalpaca_core::gateway::{HandleResult, MessageHandler};
+    use openalpaca_core::gateway::{HandleRequest, HandleResult, MessageHandler};
     use openalpaca_core::lane::LaneManager;
     use openalpaca_core::middleware::skill::SkillScope;
     use std::io::Write;
     use std::path::Path;
     use std::sync::Mutex;
     use tokio::sync::mpsc;
-    use uuid::Uuid;
 
     fn create_skill_dir(parent: &Path, name: &str, skill_md: &str) {
         let dir = parent.join(name);
@@ -356,21 +356,13 @@ Body.
 
     #[async_trait]
     impl MessageHandler for StubHandler {
-        async fn handle(
-            &self,
-            _request_id: Uuid,
-            source: String,
-            content: String,
-            principal: Principal,
-            _scope: Scope,
-            lane_key: String,
-            _workspace_path: Option<String>,
-            _stream_id: Option<String>,
-        ) -> Result<HandleResult, String> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push((source, content, principal, lane_key));
+        async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
+            self.calls.lock().unwrap().push((
+                request.source,
+                request.content,
+                request.principal,
+                request.lane_key,
+            ));
             Ok(HandleResult::text("ack".to_string()))
         }
     }

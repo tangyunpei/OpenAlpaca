@@ -1,8 +1,9 @@
 use super::{Orchestrator, principal_id};
 use crate::events::SystemEvent;
+use crate::gateway::HandleRequest;
 use crate::memory::scope_context::MemoryScopeContext;
 use crate::security::gate::SecurityGate;
-use crate::security::policy::{Principal, Scope};
+use crate::security::policy::Principal;
 use crate::types::Capability;
 use chrono::Utc;
 use openalpaca_llm::ContentPart;
@@ -16,53 +17,36 @@ use super::intent::Intent;
 
 impl Orchestrator {
     /// Public entry point for processing a user message.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn handle_message(
+    pub async fn handle_message(&self, request: HandleRequest) -> Result<String, String> {
+        let model_input_content = request.content.clone();
+        self.handle_message_internal(request, model_input_content, false, None)
+            .await
+    }
+
+    /// Internal message handler that separates the model input from the intent source.
+    ///
+    /// `request.content` is the intent source — used only for intent
+    /// classification checks; `model_input_content` is used for LLM calls and
+    /// context building. The two differ on the attachment path, where the model
+    /// sees the message augmented with the files' extracted text.
+    pub(super) async fn handle_message_internal(
         &self,
-        request_id: Uuid,
-        source: String,
-        content: String,
-        principal: Principal,
-        scope: Scope,
-        lane_key: String,
-        workspace_path: Option<String>,
-        stream_id: Option<String>,
+        request: HandleRequest,
+        model_input_content: String,
+        force_simple_query: bool,
+        current_parts: Option<Vec<ContentPart>>,
     ) -> Result<String, String> {
-        self.handle_message_internal(
+        let HandleRequest {
             request_id,
             source,
-            content.clone(),
-            content,
-            false,
-            None,
+            content: intent_source_content,
             principal,
             scope,
             lane_key,
             workspace_path,
             stream_id,
-        )
-        .await
-    }
-
-    /// Internal message handler that separates the model input from the intent source.
-    ///
-    /// `intent_source_content` is used only for intent classification checks.
-    /// `model_input_content` is used for LLM calls and context building.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) async fn handle_message_internal(
-        &self,
-        request_id: Uuid,
-        source: String,
-        model_input_content: String,
-        intent_source_content: String,
-        force_simple_query: bool,
-        current_parts: Option<Vec<ContentPart>>,
-        principal: Principal,
-        scope: Scope,
-        lane_key: String,
-        workspace_path: Option<String>,
-        stream_id: Option<String>,
-    ) -> Result<String, String> {
+            model_override,
+        } = request;
         let ack_start = Instant::now();
 
         // 1. Permission check via SecurityGate (wraps TrustGate)
@@ -270,6 +254,7 @@ impl Orchestrator {
                 stream_id.as_deref(),
                 Some(super::query_handler::LoopOverrides::MainLoop {
                     workspace_path: workspace_path.clone(),
+                    model_override: model_override.clone(),
                 }),
             )
             .await

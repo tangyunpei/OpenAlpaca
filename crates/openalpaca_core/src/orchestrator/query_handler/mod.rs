@@ -13,6 +13,12 @@ pub(super) enum LoopOverrides {
         /// into `ToolContext` so steer/followup items can restore scope on
         /// re-entry.
         workspace_path: Option<String>,
+        /// GAP-13 — the model this one turn runs on (`HandleRequest`'s field,
+        /// already validated against the registry by the route that accepted
+        /// it). It reaches `LoopConfig.model` for this loop and nothing else:
+        /// the orchestrator's own `loop_config` is never written, so the next
+        /// turn on the lane is back on the daemon default.
+        model_override: Option<String>,
     },
 }
 

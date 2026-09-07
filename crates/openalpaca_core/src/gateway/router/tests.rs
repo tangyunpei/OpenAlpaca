@@ -5,18 +5,8 @@ struct StubHandler;
 
 #[async_trait]
 impl MessageHandler for StubHandler {
-    async fn handle(
-        &self,
-        _request_id: Uuid,
-        _source: String,
-        content: String,
-        _principal: Principal,
-        _scope: Scope,
-        _lane_key: String,
-        _workspace_path: Option<String>,
-        _stream_id: Option<String>,
-    ) -> Result<HandleResult, String> {
-        Ok(HandleResult::text(format!("Echo: {content}")))
+    async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
+        Ok(HandleResult::text(format!("Echo: {}", request.content)))
     }
 }
 
@@ -25,17 +15,7 @@ struct DelegatingHandler;
 
 #[async_trait]
 impl MessageHandler for DelegatingHandler {
-    async fn handle(
-        &self,
-        _request_id: Uuid,
-        _source: String,
-        _content: String,
-        _principal: Principal,
-        _scope: Scope,
-        _lane_key: String,
-        _workspace_path: Option<String>,
-        _stream_id: Option<String>,
-    ) -> Result<HandleResult, String> {
+    async fn handle(&self, _request: HandleRequest) -> Result<HandleResult, String> {
         let mut result = HandleResult::text("ack".to_string());
         result.delegation = Some(DelegationInfo {
             task_id: "task-42".to_string(),
@@ -50,17 +30,7 @@ struct FailHandler;
 
 #[async_trait]
 impl MessageHandler for FailHandler {
-    async fn handle(
-        &self,
-        _request_id: Uuid,
-        _source: String,
-        _content: String,
-        _principal: Principal,
-        _scope: Scope,
-        _lane_key: String,
-        _workspace_path: Option<String>,
-        _stream_id: Option<String>,
-    ) -> Result<HandleResult, String> {
+    async fn handle(&self, _request: HandleRequest) -> Result<HandleResult, String> {
         Err("Access denied".to_string())
     }
 }
@@ -106,6 +76,7 @@ async fn test_handle_event_echo() {
             workspace_path: None,
             stream_id: None,
             lane_override: None,
+            model_override: None,
         })
         .await;
     assert_eq!(resp.lane_key.user_id, "user1");
@@ -136,6 +107,7 @@ async fn test_handle_event_propagates_delegation() {
             workspace_path: None,
             stream_id: None,
             lane_override: None,
+            model_override: None,
         })
         .await;
     assert!(!resp.is_error);
@@ -169,6 +141,7 @@ async fn test_delegating_turn_persists_its_task_id() {
         workspace_path: None,
         stream_id: None,
         lane_override: None,
+        model_override: None,
     })
     .await;
 
@@ -208,6 +181,7 @@ async fn test_plain_turn_persists_no_task_id() {
         workspace_path: None,
         stream_id: None,
         lane_override: None,
+        model_override: None,
     })
     .await;
 
@@ -235,6 +209,7 @@ async fn test_handle_event_creates_lane() {
         workspace_path: None,
         stream_id: None,
         lane_override: None,
+        model_override: None,
     })
     .await;
     assert_eq!(gw.lane_manager.conversation_count(), 1);
@@ -252,6 +227,7 @@ async fn test_handle_event_creates_lane() {
         workspace_path: None,
         stream_id: None,
         lane_override: None,
+        model_override: None,
     })
     .await;
     assert_eq!(gw.lane_manager.conversation_count(), 1);
@@ -272,6 +248,7 @@ async fn test_handle_event_error_propagation() {
             workspace_path: None,
             stream_id: None,
             lane_override: None,
+            model_override: None,
         })
         .await;
     assert!(resp.is_error);
@@ -294,6 +271,7 @@ async fn test_handle_event_records_message_on_lane() {
         workspace_path: None,
         stream_id: None,
         lane_override: None,
+        model_override: None,
     })
     .await;
     gw.handle_event(GatewayRequest {
@@ -308,6 +286,7 @@ async fn test_handle_event_records_message_on_lane() {
         workspace_path: None,
         stream_id: None,
         lane_override: None,
+        model_override: None,
     })
     .await;
 
@@ -336,6 +315,7 @@ async fn test_principal_aware_lane_derivation() {
             workspace_path: None,
             stream_id: None,
             lane_override: None,
+            model_override: None,
         })
         .await;
     assert_eq!(resp.lane_key.user_id, "global1");
@@ -359,6 +339,7 @@ async fn test_principal_aware_lane_derivation() {
             workspace_path: None,
             stream_id: None,
             lane_override: None,
+            model_override: None,
         })
         .await;
     assert_eq!(resp2.lane_key.user_id, "tg_user_456");
@@ -378,6 +359,7 @@ async fn test_principal_aware_lane_derivation() {
             workspace_path: None,
             stream_id: None,
             lane_override: None,
+            model_override: None,
         })
         .await;
     assert_eq!(resp3.lane_key.user_id, "tg_user_789");
@@ -414,6 +396,7 @@ async fn test_gateway_persists_messages() {
         workspace_path: None,
         stream_id: None,
         lane_override: None,
+        model_override: None,
     })
     .await;
 
@@ -468,6 +451,7 @@ async fn test_full_gateway_stack_integration() {
             workspace_path: None,
             stream_id: None,
             lane_override: None,
+            model_override: None,
         })
         .await;
     let r2 = gw
@@ -482,6 +466,7 @@ async fn test_full_gateway_stack_integration() {
             workspace_path: None,
             stream_id: None,
             lane_override: None,
+            model_override: None,
         })
         .await;
     let r3 = gw
@@ -497,6 +482,7 @@ async fn test_full_gateway_stack_integration() {
             workspace_path: None,
             stream_id: None,
             lane_override: None,
+            model_override: None,
         })
         .await;
 
@@ -555,6 +541,7 @@ async fn test_handle_event_lane_override_pins_originating_lane() {
             workspace_path: None,
             stream_id: None,
             lane_override: Some("junpei:cli".to_string()),
+            model_override: None,
         })
         .await;
     assert_eq!(resp.lane_key.user_id, "junpei");
@@ -577,6 +564,7 @@ async fn test_handle_event_malformed_lane_override_falls_back() {
             workspace_path: None,
             stream_id: None,
             lane_override: Some("no_colon".to_string()),
+            model_override: None,
         })
         .await;
     // Malformed override → derived lane (principal + internal source).
@@ -593,19 +581,9 @@ struct NewChatMidTurnHandler {
 
 #[async_trait]
 impl MessageHandler for NewChatMidTurnHandler {
-    async fn handle(
-        &self,
-        _request_id: Uuid,
-        _source: String,
-        _content: String,
-        _principal: Principal,
-        _scope: Scope,
-        lane_key: String,
-        _workspace_path: Option<String>,
-        _stream_id: Option<String>,
-    ) -> Result<HandleResult, String> {
+    async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
         openalpaca_storage::ConversationRepository::new(&self.db)
-            .create_session(&lane_key, "gui", None, Some("New chat"))
+            .create_session(&request.lane_key, "gui", None, Some("New chat"))
             .map_err(|e| e.to_string())?;
         Ok(HandleResult::text("answer".to_string()))
     }
@@ -638,6 +616,7 @@ async fn test_a_new_chat_mid_turn_keeps_the_turn_in_one_session() {
         workspace_path: None,
         stream_id: None,
         lane_override: None,
+        model_override: None,
     })
     .await;
 
@@ -707,6 +686,7 @@ async fn test_changing_project_opens_a_new_session() {
         workspace_path,
         stream_id: None,
         lane_override: None,
+        model_override: None,
     };
 
     gw.handle_event(turn(Some(project_path(&one)))).await;
@@ -794,6 +774,7 @@ async fn a_turn_writes_its_two_halves_and_its_delegation_to_the_session_log() {
         workspace_path: None,
         stream_id: None,
         lane_override: None,
+        model_override: None,
     })
     .await;
 
@@ -856,6 +837,7 @@ async fn a_gateway_without_a_session_log_still_persists_its_turn() {
             workspace_path: None,
             stream_id: None,
             lane_override: None,
+            model_override: None,
         })
         .await;
     assert!(!resp.is_error);
@@ -863,4 +845,111 @@ async fn a_gateway_without_a_session_log_still_persists_its_turn() {
         .list_by_lane("user1:gui", 50, 0)
         .unwrap();
     assert_eq!(messages.len(), 2);
+}
+
+// ── GAP-13: the per-request model override ──────────────────────────
+
+/// Records the whole request so a test can assert on the fields the gateway
+/// filled in, rather than only on the answer that came back.
+struct RecordingHandler {
+    seen: Arc<std::sync::Mutex<Vec<HandleRequest>>>,
+}
+
+#[async_trait]
+impl MessageHandler for RecordingHandler {
+    async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
+        self.seen.lock().unwrap().push(request);
+        Ok(HandleResult::text("ack".to_string()))
+    }
+
+    async fn handle_with_attachments(
+        &self,
+        request: HandleRequest,
+        _attachments: Vec<ResolvedAttachment>,
+    ) -> Result<HandleResult, String> {
+        self.seen.lock().unwrap().push(request);
+        Ok(HandleResult::text("ack".to_string()))
+    }
+}
+
+fn recording_gateway() -> (Gateway, Arc<std::sync::Mutex<Vec<HandleRequest>>>) {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let gw = Gateway::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        Arc::new(RecordingHandler { seen: seen.clone() }),
+        EventBus::default(),
+        None,
+    );
+    (gw, seen)
+}
+
+fn turn(model_override: Option<String>) -> GatewayRequest {
+    GatewayRequest {
+        source: EventSource::Gui {
+            connection_id: "user1".to_string(),
+        },
+        content: "hello".to_string(),
+        attachments: Vec::new(),
+        principal: Principal::System,
+        scope: Scope::Global,
+        workspace_path: None,
+        stream_id: None,
+        lane_override: None,
+        model_override,
+    }
+}
+
+/// GAP-13: a model named on the request reaches the handler on that turn's
+/// `HandleRequest`, with every other field the positional list used to carry
+/// still in place.
+#[tokio::test]
+async fn the_model_override_reaches_the_handler() {
+    let (gw, seen) = recording_gateway();
+
+    gw.handle_event(turn(Some("claude-opus-4-6".to_string())))
+        .await;
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].model_override.as_deref(), Some("claude-opus-4-6"));
+    assert_eq!(seen[0].source, "gui");
+    assert_eq!(seen[0].lane_key, "user1:gui");
+    assert_eq!(seen[0].content, "hello");
+}
+
+/// The default is untouched: a turn that names no model hands the handler
+/// `None`, which is what leaves the daemon default in place.
+#[tokio::test]
+async fn a_turn_that_names_no_model_carries_none() {
+    let (gw, seen) = recording_gateway();
+
+    gw.handle_event(turn(None)).await;
+
+    assert_eq!(seen.lock().unwrap()[0].model_override, None);
+}
+
+/// The attachment path is the same seam, not a second one: a multimodal turn
+/// carries the override too.
+#[tokio::test]
+async fn the_attachment_path_carries_the_override_as_well() {
+    let (gw, seen) = recording_gateway();
+
+    gw.handle_event(GatewayRequest {
+        attachments: vec![ResolvedAttachment {
+            file_id: "file-1".to_string(),
+            filename: "note.txt".to_string(),
+            mime_type: "text/plain".to_string(),
+            size_bytes: 4,
+            extracted_text: Some("note".to_string()),
+            storage_path: "/tmp/note.txt".to_string(),
+        }],
+        ..turn(Some("gpt-5.2".to_string()))
+    })
+    .await;
+
+    assert_eq!(
+        seen.lock().unwrap()[0].model_override.as_deref(),
+        Some("gpt-5.2")
+    );
 }

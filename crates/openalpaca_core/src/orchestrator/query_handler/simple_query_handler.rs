@@ -136,7 +136,9 @@ impl Orchestrator {
             // items persist it for re-entry scope; None elsewhere (other
             // paths carry no tools that read it).
             workspace_path: match &loop_overrides {
-                Some(super::LoopOverrides::MainLoop { workspace_path }) => workspace_path.clone(),
+                Some(super::LoopOverrides::MainLoop { workspace_path, .. }) => {
+                    workspace_path.clone()
+                }
                 _ => None,
             },
             // No agent instance: this path is not a subagent lane.
@@ -239,6 +241,18 @@ impl Orchestrator {
             .sessions
             .tool_result_inline_bytes;
 
+        // GAP-13: the model this one turn runs on. The route validated the id
+        // against `model_registry()` before dispatch, so a name that reaches
+        // here resolves — which is what keeps the context window below honest
+        // instead of silently falling back to 200k. Without an override this is
+        // exactly `self.loop_config.model`, and either way the stored config is
+        // left alone: the override dies with the request.
+        let turn_model = match &loop_overrides {
+            Some(super::LoopOverrides::MainLoop { model_override, .. }) => model_override.clone(),
+            None => None,
+        }
+        .or_else(|| self.loop_config.model.clone());
+
         let (tools_for_loop, policy_opt, config_for_loop);
         if !tool_defs.is_empty() {
             tracing::info!(
@@ -285,6 +299,7 @@ impl Orchestrator {
                 thinking: None,
                 session_log: session_log.clone(),
                 tool_result_inline_bytes: inline_bytes,
+                model: turn_model,
                 ..self.loop_config.clone()
             };
             tools_for_loop = tool_defs;
@@ -294,13 +309,18 @@ impl Orchestrator {
             config_for_loop = LoopConfig {
                 session_log: session_log.clone(),
                 tool_result_inline_bytes: inline_bytes,
+                model: turn_model,
                 ..self.loop_config.clone()
             };
         }
 
         // ── Resolve model context window (drives Layer 5 trimming + budget) ──
         //
-        // Default to 200_000 when no LLM router is present (echo-stub path).
+        // Default to 200_000 when no LLM router is present (echo-stub path) or
+        // when the loop names no model and the router's own default governs.
+        // GAP-13's override is the one thing that names a model here, and the
+        // route refuses an id the registry does not know — so a `Some` that
+        // reaches this lookup resolves, and the window is the real one.
         let model_window = self.llm_router.as_ref()
             .and_then(|r| config_for_loop.model.as_deref()
                 .and_then(|m| r.model_registry().get_model_info(m)))
