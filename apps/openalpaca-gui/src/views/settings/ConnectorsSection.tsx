@@ -6,17 +6,25 @@
  * client-side join — a plugin declaring a connector that never appears in
  * `GET /v1/connectors` is exactly what the design's badge means.
  *
- * Unavailable: the `184 calls 7d` figure and the `Connect service` flow
- * (GAP-17). The route returns four fields and nothing counts calls.
+ * Real since T49: the row detail. The design's `184 calls 7d` is served as
+ * `messages_7d` — the messages the daemon actually attributed to that
+ * connector over the last seven UTC days — and the name is the connector's
+ * own, so Discord is no longer printed as `discord`. `registered` answers the
+ * one question `status` cannot: an `error` row is either a connector that
+ * started and exited or one that never started.
+ *
+ * Unavailable: the `Connect service` flow (GAP-17, narrowed). Connectors are
+ * compiled into the daemon; no route adds one.
  */
 
 import { Tag } from "@/components/ui";
 import {
-  CONNECTOR_DETAIL_NOTE,
+  CONNECTOR_ADD_NOTE,
   useConnectorAction,
   useConnectors,
   useUnwiredConnectors,
 } from "@/hooks/useConnectors";
+import type { Connector } from "@/lib/api/types";
 import { useUiStore } from "@/stores/ui";
 
 import { GapNote, ListCard, ListRow, ListState, Toggle } from "./primitives";
@@ -24,6 +32,36 @@ import { GapNote, ListCard, ListRow, ListState, Toggle } from "./primitives";
 /** The daemon reports free-form status strings; these read as "on". */
 function isEnabled(status: string): boolean {
   return /^(connected|running|active|enabled|live)$/i.test(status.trim());
+}
+
+/**
+ * `184 messages · 7d`. A connector nobody messaged this week says so in words —
+ * `0 messages` reads like a metric that failed to load, and the window is named
+ * because a bare zero would otherwise claim the connector has never been used.
+ */
+function connectorMeta(connector: Connector): string {
+  if (!connector.messages_7d) return "No messages · 7d";
+  const noun = connector.messages_7d === 1 ? "message" : "messages";
+  return `${connector.messages_7d} ${noun} · 7d`;
+}
+
+/**
+ * `telegram · configured`, plus what `registered` adds where it adds anything.
+ *
+ * The daemon reports `error` both for a connector whose task exited and for one
+ * that was never spawned at all; `registered` — the manager's handle registry —
+ * is the only thing that tells them apart, so it is spoken only there. On a
+ * healthy row it would be noise: `active` already implies a live handle.
+ */
+function connectorDescription(connector: Connector): string {
+  const parts = [
+    connector.source,
+    connector.configured ? "configured" : "not configured",
+  ];
+  if (connector.status.trim().toLowerCase() === "error") {
+    parts.push(connector.registered ? "started, then exited" : "never started");
+  }
+  return parts.join(" · ");
 }
 
 export function ConnectorsSection() {
@@ -61,11 +99,8 @@ export function ConnectorsSection() {
                     {unwiredIds.has(connector.id) && <Tag value="unwired" />}
                   </>
                 }
-                description={
-                  connector.configured
-                    ? `${connector.id} · configured`
-                    : `${connector.id} · not configured`
-                }
+                description={connectorDescription(connector)}
+                meta={connectorMeta(connector)}
                 control={
                   <Toggle
                     checked={on}
@@ -106,7 +141,7 @@ export function ConnectorsSection() {
           .
         </GapNote>
       )}
-      <GapNote>{CONNECTOR_DETAIL_NOTE}.</GapNote>
+      <GapNote>{CONNECTOR_ADD_NOTE}.</GapNote>
     </>
   );
 }

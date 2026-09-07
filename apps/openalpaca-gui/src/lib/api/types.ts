@@ -762,12 +762,28 @@ export interface ToolCatalogEntry {
   author: string;
 }
 
-/** `ConnectorStatus` — id/name/status/configured and nothing else (GAP-17). */
+/**
+ * `ConnectorStatus` — one row of `GET /v1/connectors` (GAP-17, detail half —
+ * T49).
+ *
+ * `name` is the connector's own display name, taken from its factory: before
+ * T49 the route derived it from a `match` on two ids, so Discord rendered as
+ * `discord`. `source` is the attribution token the daemon grouped
+ * `messages_7d` by — the same string as `id`, carried explicitly so the count
+ * and the rows it counted cannot drift apart. `registered` is whether the
+ * daemon's connector manager holds a *spawned handle*: not "enabled", and not
+ * "alive" — a handle whose task exited is still registered and reports
+ * `status: "error"`.
+ */
 export interface Connector {
   id: string;
   name: string;
   status: string;
   configured: boolean;
+  source: string;
+  registered: boolean;
+  /** Messages attributed to this connector in the last seven UTC days. */
+  messages_7d: number;
 }
 
 export type ConnectorAction = "enable" | "disable" | "delete";

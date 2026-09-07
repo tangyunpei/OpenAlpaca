@@ -1,4 +1,11 @@
-/** Settings → Connectors. Call counts, `unwired`, and Connect service are GAP-17. */
+/**
+ * Settings → Connectors.
+ *
+ * Real since T49: the row detail — `source`, `registered` and `messages_7d`,
+ * plus a display name the connector gives itself. `unwired` was always real,
+ * derived here from the extension rows. What is still missing is the
+ * `Connect service` add flow (GAP-17, narrowed).
+ */
 
 import {
   useMutation,
@@ -43,8 +50,8 @@ export function useUnwiredConnectors(): Array<{
   );
 }
 
-/** Call counts and the `Connect service` flow do not exist yet. */
-export const CONNECTOR_DETAIL_NOTE = gapNote(GAPS["GAP-17"]);
+/** The `Connect service` flow has no route to call. */
+export const CONNECTOR_ADD_NOTE = gapNote(GAPS["GAP-17"]);
 
 export interface ConnectorActionInput {
   id: string;

@@ -4,9 +4,13 @@ import { apiFetch } from "../http";
 import type { Connector, ConnectorAction, ExtensionRow } from "./types";
 
 /**
- * `GET /v1/connectors` — bare array of `{ id, name, status, configured }`.
- * Display names are a hardcoded match on `telegram`/`imessage`; MCP servers and
- * plugin-declared connectors never appear here (GAP-17).
+ * `GET /v1/connectors` — bare array of
+ * `{ id, name, status, configured, source, registered, messages_7d }` (T49).
+ *
+ * The display name is the connector's own now, so Discord is `Discord` rather
+ * than its raw id. MCP servers and plugin-declared connectors still never
+ * appear here — a plugin that declares one and never registers it is what
+ * `findUnwiredConnectors` below finds, client-side.
  */
 export async function listConnectors(
   signal?: AbortSignal,

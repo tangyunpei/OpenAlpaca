@@ -71,6 +71,19 @@ describe("gap registry", () => {
     }
   });
 
+  // Phase 8 item 6 (T49) closed the detail half of GAP-17: `source`,
+  // `registered` and `messages_7d` are on the wire, and the display name comes
+  // off the connector's own factory rather than a two-id `match`. The `unwired`
+  // badge was never a daemon gap — it is the client-side join of the extension
+  // rows against this list. What is left is `Connect service`.
+  it("keeps only the add-flow half of GAP-17, with no claim about counts", () => {
+    expect(GAPS["GAP-17"].missingApi).not.toMatch(/id\/name\/status/);
+    expect(GAPS["GAP-17"].blocks).not.toMatch(/count/i);
+    expect(GAPS["GAP-17"].blocks).not.toMatch(/unwired/i);
+    expect(GAPS["GAP-17"].proposedEndpoint).not.toMatch(/calls_7d/);
+    expect(gapNote(GAPS["GAP-17"])).toMatch(/no route that adds one/);
+  });
+
   // P8's counterpart: run counts are served (`run_count`/`last_run_at` off
   // `subagent_span`), so GAP-20 keeps only the toggle. It stays in the
   // registry because the disabled switch in Settings → Agents still needs a
@@ -103,8 +116,8 @@ describe("Unavailable results", () => {
 
   it("accepts a caller-supplied reason", () => {
     expect(
-      unavailable("GAP-17", "No call counts for this connector").reason,
-    ).toBe("No call counts for this connector");
+      unavailable("GAP-17", "No way to add a connector from here").reason,
+    ).toBe("No way to add a connector from here");
   });
 
   it("unwraps to the fallback rather than to fabricated data", () => {

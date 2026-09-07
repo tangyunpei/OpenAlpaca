@@ -118,13 +118,24 @@ export const GAPS: Record<GapId, GapDescriptor> = {
   // `GET /v1/settings/llm`; only the write was missing. The model picker's
   // `off` group badge is still not drawn — `GET /v1/models` lists models, not
   // providers, and a disabled provider simply has none there.
+  // The detail half of GAP-17 closed with Phase 8 item 6 (T49):
+  // `GET /v1/connectors` rows carry `source` (the token the count was grouped
+  // by), `registered` (the manager holds a spawned handle) and `messages_7d`
+  // — one grouped query over `conversation_messages` for the last seven UTC
+  // days — and the display name comes off the connector's own factory, so
+  // Discord no longer renders as its raw id. The `unwired` badge was never a
+  // daemon gap: it is the client-side join of the extension rows' `connector`
+  // against this list, and it has always been real.
   "GAP-17": {
     id: "GAP-17",
-    label: "Connector detail",
-    missingApi: "GET /v1/connectors returns id/name/status/configured only",
-    proposedEndpoint: "GET /v1/connectors with source, registered, calls_7d",
-    blocks: "Call counts, the `unwired` badge, Connect service",
+    label: "Connect service",
+    missingApi:
+      "no route adds a connector — POST /v1/connectors/{id}/config sets a bearer token on one that is already compiled in",
+    proposedEndpoint: "POST /v1/connectors { kind, credentials }",
+    blocks: "The `Connect service` action in Settings → Connectors",
     fixSize: "M",
+    noteOverride:
+      "Connectors are compiled into the daemon — there is no route that adds one, only a token to set on the ones that exist",
   },
   // GAP-18 (the catalog) closed in two halves. The tool half was
   // `GET /v1/tools` (ADR-030 §8): the Settings → Tools rows are real, and
