@@ -241,45 +241,6 @@ pub fn spawn_event_bridge(
                     );
                     eb.soul_updated(&actor, &mode, &content_sha256, backup_path);
                 }
-                openalpaca_core::events::SystemEvent::DagNodeStarted {
-                    task_id,
-                    node_id,
-                    node_title,
-                    agent_id,
-                    ..
-                } => {
-                    eb.dag_node_status(
-                        &task_id,
-                        &node_id,
-                        &node_title,
-                        &agent_id,
-                        "started",
-                        None,
-                        None,
-                    );
-                }
-                openalpaca_core::events::SystemEvent::DagNodeCompleted {
-                    task_id,
-                    node_id,
-                    node_title,
-                    agent_id,
-                    success,
-                    duration_ms,
-                    output_preview,
-                    ..
-                } => {
-                    let status = if success { "completed" } else { "failed" };
-                    eb.dag_node_status(
-                        &task_id,
-                        &node_id,
-                        &node_title,
-                        &agent_id,
-                        status,
-                        Some(duration_ms),
-                        output_preview,
-                    );
-                }
-
                 // ── Log-only (NOT forwarded to clients) ───────────────────
                 openalpaca_core::events::SystemEvent::ModelAccessDenied {
                     agent_id,

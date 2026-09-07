@@ -292,21 +292,16 @@ impl BuiltInTool for SpawnSubagentTool {
             self.bus.clone(),
         );
 
-        // 4. Emit DagNodeStarted (reusing event, node_id = UUID)
+        // 4. This spawn's node id — the span id below, and the `span_id` on
+        // every event and session-log record this lane produces.
         let node_id = Uuid::new_v4().to_string();
-        self.bus.publish(SystemEvent::DagNodeStarted {
-            task_id: self.task_id.clone(),
-            node_id: node_id.clone(),
-            node_title: objective.chars().take(80).collect(),
-            agent_id: agent_id.to_string(),
-            timestamp: Utc::now(),
-        });
 
-        // …and open this lane's span beside it (plan Phase 4, GAP-09). The
-        // span id *is* the node id, so the swimlane and the DAG events name
-        // the same thing. Unlike `record_agent_history`, which writes nothing
-        // until the run returns, this row exists from the moment the lane
-        // starts — that is the whole point: an in-flight lane must be visible.
+        // …open this lane's span (plan Phase 4, GAP-09). The span id *is* the
+        // node id, so every event and session-log record this lane produces
+        // names the same thing. Unlike `record_agent_history`, which writes
+        // nothing until the run returns, this row exists from the moment the
+        // lane starts — that is the whole point: an in-flight lane must be
+        // visible.
         let span_label = crate::runner::span::open_span(
             self.db.as_ref(),
             &self.bus,
@@ -710,22 +705,6 @@ impl BuiltInTool for SpawnSubagentTool {
                 let duration_ms = agent_start.elapsed().as_millis() as u64;
                 busy_guard.restore();
 
-                bus.publish(SystemEvent::DagNodeCompleted {
-                    task_id: task_id.clone(),
-                    node_id: node_id.clone(),
-                    node_title: objective_preview.clone(),
-                    agent_id: instance_id.clone(),
-                    success: outcome.success(),
-                    duration_ms,
-                    output_preview: match &outcome {
-                        PluginLoopOutcome::Completed { content, .. } if !content.is_empty() => {
-                            Some(content.chars().take(200).collect())
-                        }
-                        _ => None,
-                    },
-                    timestamp: Utc::now(),
-                });
-
                 // Close the lane (GAP-09). A plugin loop has no
                 // `LoopFinishReason` of its own — a cancellation between steps
                 // comes back as `Failed { error: "Cancelled" }` — so the
@@ -820,7 +799,6 @@ impl BuiltInTool for SpawnSubagentTool {
             .await;
 
             let duration_ms = agent_start.elapsed().as_millis() as u64;
-            let now = Utc::now();
 
             let agent_success = matches!(
                 &result.finish_reason,
@@ -831,22 +809,6 @@ impl BuiltInTool for SpawnSubagentTool {
 
             // Destroy instance (explicit restore; guard is backup for panics)
             busy_guard.restore();
-
-            // Emit DagNodeCompleted
-            bus.publish(SystemEvent::DagNodeCompleted {
-                task_id: task_id.clone(),
-                node_id: node_id.clone(),
-                node_title: objective_preview.clone(),
-                agent_id: instance_id.clone(),
-                success: agent_success,
-                duration_ms,
-                output_preview: if result.final_content.is_empty() {
-                    None
-                } else {
-                    Some(result.final_content.chars().take(200).collect())
-                },
-                timestamp: now,
-            });
 
             // Close the lane (GAP-09). `agent_success` folds a cancellation
             // into `false` because the lead agent needs a boolean; the span

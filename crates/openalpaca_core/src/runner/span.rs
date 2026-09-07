@@ -44,8 +44,8 @@ fn publish(bus: &EventBus, record: &SubagentSpanRecord) {
 }
 
 /// Open a lane for a freshly spawned agent. `span_id` is the spawn's
-/// `node_id`, so the span and its `DagNodeStarted`/`DagNodeCompleted` pair
-/// name the same thing.
+/// `node_id`, shared with every other event and session-log record the
+/// spawn produces.
 ///
 /// Returns the assigned label, purely so a caller can log it; the close side
 /// reads its own label back out of the row.

@@ -225,34 +225,6 @@ impl EventBroadcaster {
         let _ = self.tx.send(event);
     }
 
-    /// Broadcast a DAG node status event and persist it
-    #[allow(clippy::too_many_arguments)]
-    pub fn dag_node_status(
-        &self,
-        task_id: &str,
-        node_id: &str,
-        node_title: &str,
-        agent_id: &str,
-        status: &str,
-        duration_ms: Option<u64>,
-        output_preview: Option<String>,
-    ) {
-        let event = ServerEvent::DagNodeStatus {
-            task_id: task_id.to_string(),
-            node_id: node_id.to_string(),
-            node_title: node_title.to_string(),
-            agent_id: agent_id.to_string(),
-            status: status.to_string(),
-            duration_ms,
-            output_preview,
-            ts: Utc::now(),
-            instance_id: self.instance_id.clone(),
-        };
-
-        self.persist(&event);
-        let _ = self.tx.send(event);
-    }
-
     /// Broadcast a security violation event and persist it.
     ///
     /// `task_id` is the run the refused call belonged to (GAP-10).

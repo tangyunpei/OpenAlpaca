@@ -286,30 +286,6 @@ impl EventBroadcaster {
                     });
                     repo.log("skill_failed", None, Some(&detail), None)
                 }
-                // Log DAG node status changes
-                ServerEvent::DagNodeStatus {
-                    task_id,
-                    node_id,
-                    agent_id,
-                    status,
-                    duration_ms,
-                    ..
-                } => {
-                    let detail = serde_json::json!({
-                        "task_id": task_id,
-                        "node_id": node_id,
-                        "agent_id": agent_id,
-                        "status": status,
-                        "duration_ms": duration_ms,
-                    });
-                    repo.log_for_task(
-                        "dag_node_status",
-                        Some(agent_id),
-                        Some(task_id),
-                        Some(&detail),
-                        None,
-                    )
-                }
                 ServerEvent::ToolConfirmationRequested {
                     request_id,
                     agent_id,
@@ -721,7 +697,6 @@ mod tests {
         eb.workflow_steered("t-1", "junpei:cli");
         eb.workflow_started("t-1", "junpei:cli", "A run");
         eb.workflow_progress("t-1", "junpei:cli", "read 12 files");
-        eb.dag_node_status("t-1", "node-1", "review", "review_agent", "started", None, None);
         eb.artifact_written(
             "a-1",
             Some("t-1"),
@@ -756,7 +731,6 @@ mod tests {
             "workflow_steered",
             "workflow_started",
             "workflow_progress",
-            "dag_node_status",
             "artifact_written",
             "subagent_span",
         ] {

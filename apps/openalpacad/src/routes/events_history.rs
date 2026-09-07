@@ -252,6 +252,48 @@ mod tests {
         assert_eq!(third.next_before, None, "a short page ends the walk");
     }
 
+    /// P9 (Phase 8): `DagNodeStatus`/`ServerEvent::DagNodeStatus` were deleted,
+    /// but `event_type` is a plain string column, never a deserialized
+    /// `ServerEvent` — so a row a pre-deletion daemon wrote with
+    /// `event_type = "dag_node_status"` stays perfectly readable history: it
+    /// lists, pages, and filters exactly like any other row, without needing
+    /// to know the daemon no longer emits that string.
+    #[test]
+    fn a_legacy_dag_node_status_row_still_lists() {
+        let (_dir, db) = test_db();
+        let repo = EventLogRepository::new(&db);
+        repo.log_for_task(
+            "dag_node_status",
+            Some("review_agent"),
+            Some("t-1"),
+            Some(&serde_json::json!({
+                "task_id": "t-1",
+                "node_id": "node-1",
+                "agent_id": "review_agent",
+                "status": "completed",
+                "duration_ms": 4200,
+            })),
+            None,
+        )
+        .unwrap();
+
+        let page = history_page(&db, &params(Some("t-1"), None, None)).unwrap();
+        assert_eq!(page.events.len(), 1);
+        assert_eq!(page.events[0].event_type, "dag_node_status");
+
+        // The route serializes `event_type` as a bare string (never the
+        // `ServerEvent` enum), so an old row round-trips through JSON with no
+        // panic and no special-casing.
+        let json = serde_json::to_value(&page).unwrap();
+        assert_eq!(json["events"][0]["event_type"], "dag_node_status");
+
+        // `?event_type=` composes with the legacy string exactly like any
+        // current one.
+        let mut p = params(Some("t-1"), None, None);
+        p.event_type = Some("dag_node_status".to_string());
+        assert_eq!(history_page(&db, &p).unwrap().events.len(), 1);
+    }
+
     /// A run with nothing logged is an empty page, not an error and not a
     /// cursor that would loop.
     #[test]

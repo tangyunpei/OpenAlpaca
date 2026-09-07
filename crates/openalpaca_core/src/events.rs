@@ -200,26 +200,6 @@ pub enum SystemEvent {
         user_populated: bool,
         timestamp: DateTime<Utc>,
     },
-    /// A DAG node started execution
-    DagNodeStarted {
-        task_id: String,
-        node_id: String,
-        node_title: String,
-        agent_id: String,
-        timestamp: DateTime<Utc>,
-    },
-    /// A DAG node completed execution (success or failure)
-    DagNodeCompleted {
-        task_id: String,
-        node_id: String,
-        node_title: String,
-        agent_id: String,
-        success: bool,
-        duration_ms: u64,
-        /// First 200 chars of the node's output (for quick preview)
-        output_preview: Option<String>,
-        timestamp: DateTime<Utc>,
-    },
     /// An agent configuration was created, updated, or deleted
     AgentConfigChanged {
         agent_id: String,

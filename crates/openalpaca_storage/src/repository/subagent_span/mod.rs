@@ -57,7 +57,7 @@ pub const SPAN_DETAIL_INTERRUPTED: &str = "interrupted";
 /// One span row.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubagentSpanRecord {
-    /// The spawn's `node_id` — the same id `DagNodeStarted` carries.
+    /// The spawn's `node_id` — the same id its `SubagentSpan` events carry.
     pub id: String,
     pub task_id: String,
     /// The agent template ("research_agent").
