@@ -22,6 +22,11 @@
 //!    its target. The child runs with `current_dir(plugin_dir)`
 //!    (`process_pool.rs`), so a link out of the tree would be a path the owner
 //!    never reviewed.
+//! 4. **The copy trusts nothing about the source tree's shape.** Only regular
+//!    files and directories are copied — a FIFO would block `fs::copy`'s open
+//!    forever — and the walk is bounded by a visited-directory set (a symlink
+//!    cycle is refused) plus entry and byte budgets. It runs on a blocking
+//!    thread, never on a runtime worker.
 //!
 //! `.staging`, `.trash` and `.data` are invisible to the scan by construction:
 //! [`PluginManager::plugin_directories`] takes the root's immediate children
@@ -346,11 +351,31 @@ impl Drop for Staged {
     }
 }
 
-/// Copy `source` into `<plugins_root>/.staging/<name>.<pid>.<stamp>/`.
+/// Copy `source` into `<plugins_root>/.staging/<name>.<pid>.<stamp>/`, **on a
+/// blocking thread**.
 ///
 /// The staging directory is a sibling of the destination, so the commit is a
 /// rename inside one filesystem rather than a second copy.
-pub fn stage(source: &Path, plugins_root: &Path, name: &str) -> Result<Staged, InstallError> {
+///
+/// The copy is `std::fs` throughout and a plugin tree is arbitrarily large, so
+/// running it inline would hold a tokio worker for its whole duration — the
+/// route's verb runs in a `tokio::spawn`ed task (`routes/extensions.rs`
+/// `detached`), i.e. on a worker, and a handful of concurrent installs would
+/// wedge the runtime. [`spawn_blocking`](tokio::task::spawn_blocking) is where
+/// synchronous I/O belongs.
+pub async fn stage(source: &Path, plugins_root: &Path, name: &str) -> Result<Staged, InstallError> {
+    let source = source.to_path_buf();
+    let plugins_root = plugins_root.to_path_buf();
+    let name = name.to_string();
+    match tokio::task::spawn_blocking(move || stage_blocking(&source, &plugins_root, &name)).await {
+        Ok(result) => result,
+        Err(join) => Err(InstallError::Io(format!("the copy did not complete: {join}"))),
+    }
+}
+
+/// [`stage`]'s body, synchronous — including the [`Staged`] sweep of a failed
+/// copy, which therefore also runs off the runtime.
+fn stage_blocking(source: &Path, plugins_root: &Path, name: &str) -> Result<Staged, InstallError> {
     let staging_root = plugins_root.join(STAGING_DIR);
     std::fs::create_dir_all(&staging_root).map_err(|e| io("cannot create", &staging_root, e))?;
 
@@ -386,12 +411,11 @@ fn copy_tree(root: &Path, from: &Path, to: &Path, depth: usize) -> Result<(), In
         let source_path = entry.path();
         let target = to.join(entry.file_name());
 
-        let link = source_path
+        let kind = source_path
             .symlink_metadata()
             .map_err(|e| io("cannot stat", &source_path, e))?
-            .file_type()
-            .is_symlink();
-        if link {
+            .file_type();
+        if kind.is_symlink() {
             // Dereferenced, never re-created: the copy must not hold a path the
             // owner did not review, and the child runs with its cwd here.
             let resolved = source_path.canonicalize().map_err(|e| {
@@ -407,21 +431,69 @@ fn copy_tree(root: &Path, from: &Path, to: &Path, depth: usize) -> Result<(), In
                     resolved.display()
                 )));
             }
-            if resolved.is_dir() {
+            // The *target's* type is what will be copied, so it is the one that
+            // has to be a directory or a regular file.
+            let resolved_kind = resolved
+                .symlink_metadata()
+                .map_err(|e| io("cannot stat", &resolved, e))?
+                .file_type();
+            if resolved_kind.is_dir() {
                 copy_tree(root, &resolved, &target, depth + 1)?;
-            } else {
+            } else if resolved_kind.is_file() {
                 copy_file(&resolved, &target)?;
+            } else {
+                return Err(irregular(&source_path, resolved_kind));
             }
             continue;
         }
 
-        if source_path.is_dir() {
+        if kind.is_dir() {
             copy_tree(root, &source_path, &target, depth + 1)?;
-        } else {
+        } else if kind.is_file() {
             copy_file(&source_path, &target)?;
+        } else {
+            return Err(irregular(&source_path, kind));
         }
     }
     Ok(())
+}
+
+/// An entry that is neither a directory nor a regular file, refused by name.
+///
+/// **`fs::copy` opens the source for reading**, and opening a FIFO with no
+/// writer blocks forever — on the blocking thread the copy runs on, with no
+/// timeout anywhere on the path. A device node or a unix socket is no more
+/// copyable. `mkfifo` inside an unpacked third-party plugin directory is all it
+/// takes, and absorbing a directory the owner did not write is this module's
+/// whole job, so the type is checked rather than assumed.
+fn irregular(path: &Path, kind: std::fs::FileType) -> InstallError {
+    InstallError::InvalidPath(format!(
+        "'{}' is {}, which a plugin directory may not contain: \
+         only regular files and directories are copied",
+        path.display(),
+        describe(kind)
+    ))
+}
+
+fn describe(kind: std::fs::FileType) -> &'static str {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        if kind.is_fifo() {
+            return "a named pipe";
+        }
+        if kind.is_socket() {
+            return "a socket";
+        }
+        if kind.is_block_device() {
+            return "a block device";
+        }
+        if kind.is_char_device() {
+            return "a character device";
+        }
+    }
+    let _ = kind;
+    "not a regular file"
 }
 
 /// One file, with its mode, flushed to disk before the tree can be renamed

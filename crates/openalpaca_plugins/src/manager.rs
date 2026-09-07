@@ -1904,7 +1904,7 @@ impl PluginManager {
                     .map_err(store_error)?;
             }
 
-            let staged = install::stage(source, &self.plugin_dir, &name)?;
+            let staged = install::stage(source, &self.plugin_dir, &name).await?;
             staged.commit(&dest)?;
 
             self.record_provenance(&name, source)
@@ -1963,7 +1963,7 @@ impl PluginManager {
             let approved: std::collections::BTreeSet<&String> = recorded.iter().collect();
             let consent_reset = table.approved(id).is_some() && declared != approved;
 
-            let staged = install::stage(source, &self.plugin_dir, id)?;
+            let staged = install::stage(source, &self.plugin_dir, id).await?;
 
             // T0–T5 with **no W**: an update is not a toggle, so the owner's
             // disposition is untouched (design §3.4.1's shape).
