@@ -345,9 +345,9 @@ async fn sweep_session_logs(
             "Session logs are within their total cap"
         );
     } else if report.over_cap_after {
-        // Everything left over the cap is protected — an active session,
-        // `snapshots/`, or a name this store did not create. Nothing further
-        // can be done at boot, so it is said once, loudly.
+        // Everything left over the cap is protected — an active session, or a
+        // name this store did not create. Nothing further can be done at boot,
+        // so it is said once, loudly.
         tracing::warn!(
             sessions_visited = report.sessions_visited,
             sessions_evicted = report.sessions_evicted,

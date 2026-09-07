@@ -5,7 +5,7 @@
 //!   log.jsonl                    ← the live segment
 //!   log.<first>-<last>.jsonl     ← rotated segments
 //!   results/                     ← spilled tool results (T42)
-//!   snapshots/                   ← reserved (Phase 8)
+//!   snapshots/                   ← pre-edit images of overwritten files (T56)
 //! ```
 //!
 //! One JSON object per line, append-only, `{v, seq, ts, type, task_id?,
@@ -45,7 +45,7 @@ pub use reader::{
 };
 pub use record::{
     ENVELOPE_DATA_CAP_BYTES, ENVELOPE_VERSION, PREVIEW_CHARS, RESULTS_DIR, Record, RecordType,
-    Spill, spill_preview, spill_stub,
+    SNAPSHOTS_DIR, Spill, spill_preview, spill_stub,
 };
 pub use writer::SessionLogLimits;
 
@@ -290,9 +290,75 @@ pub struct SessionLogHandle {
     next_spill: Arc<AtomicU64>,
 }
 
+/// A handle prints as the session it writes for: `ToolContext` carries one and
+/// derives `Debug`, and the channel behind it has nothing worth printing.
+impl std::fmt::Debug for SessionLogHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionLogHandle")
+            .field("session_id", &self.session_id)
+            .field("closed", &self.tx.is_closed())
+            .finish()
+    }
+}
+
+/// What a caller asks the writer to image, before it overwrites the file
+/// (§5.7's `snapshots/`).
+///
+/// `source` is the **resolved** file to copy — the caller has already decided
+/// it exists, is a regular file and is inside the workspace. `path` is the
+/// workspace-relative path the record is keyed by, which is what a reader
+/// recognises the file from; the writer only slugs it into a filename.
+#[derive(Debug, Clone)]
+pub struct SnapshotSpec {
+    pub source: PathBuf,
+    pub path: String,
+    pub task_id: Option<String>,
+    pub span_id: Option<String>,
+    pub agent: Option<String>,
+}
+
+/// The image the writer took, as its `file_snapshot` record names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileSnapshot {
+    /// `snapshots/<seq>-<slug>`, relative to the session directory.
+    pub rel: String,
+    /// The seq of the `file_snapshot` record that commits it — and the number
+    /// in `rel`, which is that seq exactly.
+    pub seq: u64,
+    pub size: u64,
+    pub sha256: String,
+}
+
 impl SessionLogHandle {
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Copy `spec.source` into this session's `snapshots/` and commit it with
+    /// a `file_snapshot` record — the pre-edit image §5.7 specifies.
+    ///
+    /// Unlike [`emit`](Self::emit) this **waits**, and it is the only thing in
+    /// the log that does. A snapshot is not observability: its caller is about
+    /// to destroy the bytes it images, so it has to know whether the image was
+    /// taken before it does. The wait is the whole contract — a caller that
+    /// gets `Err` must not perform its write.
+    ///
+    /// Everything that touches the disk happens in the writer task, on its
+    /// blocking half, in the same batch discipline as a spill: the copy is
+    /// `tmp → fsync → rename` and never overwrites, and the record is written
+    /// **after** the bytes are in place. A copy that lands but whose record
+    /// does not is reclaimed rather than left behind (R33: a file no record
+    /// references is an uncommitted write).
+    pub async fn snapshot(&self, spec: SnapshotSpec) -> Result<FileSnapshot, String> {
+        let (ack, wait) = oneshot::channel();
+        let request = Box::new(writer::SnapshotRequest { spec, ack });
+        if self.tx.send(Msg::Snapshot(request)).await.is_err() {
+            return Err("the session log writer is gone".to_string());
+        }
+        match wait.await {
+            Ok(outcome) => outcome,
+            Err(_) => Err("the session log writer did not answer".to_string()),
+        }
     }
 
     /// Reserve the `results/` reference for a tool result too large to sit
@@ -403,6 +469,33 @@ fn slug(name: &str) -> String {
     } else {
         cleaned
     }
+}
+
+/// The name §5.7 gives a pre-edit image: `snapshots/<seq>-<slug>`.
+///
+/// The number is not a reservation the way a spill's is — it is the `seq` of
+/// the `file_snapshot` record itself, which the writer knows because it is the
+/// thing that assigns seqs and it builds this name inside the same turn it
+/// writes the record. So the file and its record name each other, in both
+/// directions, with nothing to drift.
+pub(crate) fn snapshot_name(seq: u64, path: &str) -> String {
+    format!("{}/{seq:06}-{}", record::SNAPSHOTS_DIR, path_slug(path))
+}
+
+/// A workspace-relative path reduced to one filename-safe segment.
+///
+/// The **tail** is kept rather than the head: a deep path's identity is its
+/// file name, and `src/routes/handlers/…` would otherwise be all that survived.
+fn path_slug(path: &str) -> String {
+    let cleaned: String = path
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    if cleaned.is_empty() {
+        return "file".to_string();
+    }
+    let start = cleaned.len().saturating_sub(48);
+    cleaned[start..].to_string()
 }
 
 /// The directory name a session's log lives under, relative to the sessions

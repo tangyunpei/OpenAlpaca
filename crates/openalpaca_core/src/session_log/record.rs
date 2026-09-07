@@ -48,6 +48,10 @@ pub enum RecordType {
     SkillInvoked,
     Compaction,
     ArtifactWritten,
+    /// §5.7 — the pre-edit image of a user file `file_write` is about to
+    /// overwrite: the bytes are in `snapshots/`, this record is what says they
+    /// are, and what they were.
+    FileSnapshot,
     FollowupQueued,
     LogTrimmed,
     WorkflowDone,
@@ -60,7 +64,7 @@ pub enum RecordType {
 impl RecordType {
     /// Every variant, in catalog order — the list a reader, a sweep or a test
     /// enumerates instead of re-deriving one.
-    pub const ALL: [RecordType; 23] = [
+    pub const ALL: [RecordType; 24] = [
         RecordType::SessionStart,
         RecordType::SessionEnd,
         RecordType::WorkspaceChanged,
@@ -79,6 +83,7 @@ impl RecordType {
         RecordType::SkillInvoked,
         RecordType::Compaction,
         RecordType::ArtifactWritten,
+        RecordType::FileSnapshot,
         RecordType::FollowupQueued,
         RecordType::LogTrimmed,
         RecordType::WorkflowDone,
@@ -106,6 +111,7 @@ impl RecordType {
             RecordType::SkillInvoked => "skill_invoked",
             RecordType::Compaction => "compaction",
             RecordType::ArtifactWritten => "artifact_written",
+            RecordType::FileSnapshot => "file_snapshot",
             RecordType::FollowupQueued => "followup_queued",
             RecordType::LogTrimmed => "log_trimmed",
             RecordType::WorkflowDone => "workflow_done",
@@ -145,6 +151,15 @@ impl RecordType {
 /// The directory a session's spilled tool results live in, relative to the
 /// session directory (§5.4's `results/`).
 pub const RESULTS_DIR: &str = "results";
+
+/// The directory a session's pre-edit file images live in, relative to the
+/// session directory (§5.7's `snapshots/`).
+///
+/// One file per overwrite `file_write` performs on an existing workspace file,
+/// named `<seq>-<slug>` after the [`RecordType::FileSnapshot`] record that
+/// commits it. Bounded by the same two caps as [`RESULTS_DIR`] and evicted
+/// beside it.
+pub const SNAPSHOTS_DIR: &str = "snapshots";
 
 /// A tool result too large to sit inline: the bytes travel with the record and
 /// the writer puts them in `results/` once, on its blocking thread (§5.4's

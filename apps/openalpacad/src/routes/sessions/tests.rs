@@ -784,6 +784,60 @@ async fn a_session_with_no_log_answers_an_empty_page() {
     assert_eq!(body["next_after_seq"], 0);
 }
 
+/// §5.7's `file_snapshot` is storage-only: nothing new was built to serve it,
+/// because the events route already does. Written by the real writer rather
+/// than hand-typed, so this pins the whole path — record, reader, route.
+#[tokio::test]
+async fn the_event_log_serves_a_file_snapshot_record() {
+    use openalpaca_core::session_log::{SessionLogLimits, SessionLogService, SnapshotSpec};
+
+    let h = Harness::new();
+    let session = h
+        .repo()
+        .get_or_create_active_session(LANE, "gui", None)
+        .expect("session");
+
+    let work = tempfile::tempdir().expect("workspace");
+    let source = work.path().join("report.md");
+    std::fs::write(&source, "the old draft").expect("source");
+
+    let service = SessionLogService::new(
+        h.sessions_root.clone(),
+        None,
+        SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for(&session.id);
+    let taken = handle
+        .snapshot(SnapshotSpec {
+            source,
+            path: "docs/report.md".to_string(),
+            task_id: None,
+            span_id: None,
+            agent: Some("lead_agent::a1".to_string()),
+        })
+        .await
+        .expect("the image is taken");
+    assert!(handle.flush().await);
+
+    let (status, body) = split(get_session_events(
+        &h.deps(),
+        &session.id,
+        SessionEventsQuery { types: Some("file_snapshot".into()), ..Default::default() },
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let events = body["events"].as_array().expect("events");
+    assert_eq!(events.len(), 1, "{body}");
+    assert_eq!(events[0]["type"], "file_snapshot");
+    assert_eq!(events[0]["seq"].as_u64(), Some(taken.seq));
+    assert_eq!(events[0]["agent"], "lead_agent::a1");
+    assert_eq!(events[0]["data"]["path"], "docs/report.md");
+    assert_eq!(events[0]["data"]["snapshot_ref"], format!("file:{}", taken.rel));
+    assert_eq!(events[0]["data"]["size"], 13);
+    assert_eq!(events[0]["data"]["sha256"], taken.sha256);
+}
+
 /// An unknown id answers `404 SESSION_NOT_FOUND` — the reason the route was
 /// registered before it could be served, and still true now that it is.
 #[tokio::test]

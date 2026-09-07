@@ -12,8 +12,10 @@
 //! and §5.4 says where it runs: "once at boot for the global cap".
 //!
 //! **What it removes, and in what order** (R54). Within one **archived**
-//! session, least-destructive first: the `results/` spill files, then the
-//! rotated `log.<first>-<last>.jsonl` segments, and last of all the live
+//! session, least-destructive first: the payload directories — `results/`
+//! spill files and `snapshots/` pre-edit images (§5.7, bounded by the same two
+//! caps and evicted beside the spills) — then the rotated
+//! `log.<first>-<last>.jsonl` segments, and last of all the live
 //! `log.jsonl`. Evicting an archived session's live segment is what makes the
 //! cap enforceable at all: §5.4 says most sessions never rotate, so most
 //! sessions have exactly one segment — the live one — and nothing under
@@ -23,13 +25,13 @@
 //! and the JSONL is loop detail.
 //!
 //! **What it never touches**: an **active** session — that is where the line
-//! is drawn, not between a live segment and a rotated one — anything under
-//! `snapshots/` (reserved for Phase 8), and any name at the sessions root that
-//! this store did not create. A stray *file* at the root is counted (it is
-//! taking the disk the cap is about) and left alone; a *directory* is read as
-//! a session, and only the names this store writes inside one — `log.jsonl`,
-//! `log.<first>-<last>.jsonl`, `results/*` — are ever candidates, so an
-//! unrelated directory loses nothing.
+//! is drawn, not between a live segment and a rotated one — and any name at
+//! the sessions root that this store did not create. A stray *file* at the
+//! root is counted (it is taking the disk the cap is about) and left alone; a
+//! *directory* is read as a session, and only the names this store writes
+//! inside one — `log.jsonl`, `log.<first>-<last>.jsonl`, `results/*`,
+//! `snapshots/*` — are ever candidates, so an unrelated directory loses
+//! nothing.
 //!
 //! **Its only record is the deletions themselves**, so a crash between two of
 //! them leaves a partially swept root and the next boot simply continues: the
@@ -71,8 +73,8 @@ pub struct SweepReport {
     pub bytes_before: u64,
     pub bytes_after: u64,
     /// True when the cap could not be met because everything still over it is
-    /// protected — an active session, or `snapshots/`, or a name this store
-    /// did not create. Reported rather than hidden: the alternative is
+    /// protected — an active session, or a name this store did not create.
+    /// Reported rather than hidden: the alternative is
     /// deleting something §5.4 says must stay. Carried on
     /// [`SessionLogService`](super::SessionLogService) after the boot pass so
     /// T44's status route can say it, and logged at `warn` at boot.
@@ -89,7 +91,8 @@ pub struct SweepReport {
 /// the database still calls active. Ids are matched against the **directory
 /// name**, which is `session_dir_name(id)`, so the caller passes raw ids.
 /// Everything else is archived, and an archived session gives up its
-/// `results/` files, then its rotated segments, then its live segment (R54).
+/// `results/` and `snapshots/` files, then its rotated segments, then its live
+/// segment (R54).
 pub fn enforce_total_cap(
     root: &Path,
     max_total_bytes: u64,
@@ -197,8 +200,9 @@ struct SessionDir {
     bytes: u64,
     /// An active session — counted towards the total, never evicted from.
     protected: bool,
-    /// Least destructive first: `results/` spills, then rotated segments, then
-    /// the live segment (R54). Empty for an active session.
+    /// Least destructive first: `results/` spills and `snapshots/` images,
+    /// then rotated segments, then the live segment (R54). Empty for an active
+    /// session.
     evictable: Vec<Victim>,
 }
 
@@ -239,12 +243,15 @@ fn scan_session(dir: &Path, id: String, protected: bool) -> SessionDir {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
         if path.is_dir() {
-            // `snapshots/` is reserved for Phase 8 and is not the sweep's to
-            // empty; its bytes still count.
+            // The two payload directories the caps count and the sweep may
+            // empty (§5.4's `results/`, §5.7's `snapshots/`). Any other
+            // directory's bytes still count towards the total — it is taking
+            // the disk the cap is about — but nothing inside it is a
+            // candidate.
             let (dir_bytes, dir_touched, files) = walk(&path);
             bytes += dir_bytes;
             touched = touched.max(dir_touched);
-            if name == super::RESULTS_DIR {
+            if name == super::RESULTS_DIR || name == super::SNAPSHOTS_DIR {
                 spills.extend(files);
             }
             continue;

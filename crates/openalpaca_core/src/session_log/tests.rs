@@ -913,6 +913,222 @@ async fn a_trim_drops_exactly_the_spill_files_the_dropped_segment_referenced() {
     }
 }
 
+// ── §5.7: the `snapshots/` pre-edit image ───────────────────────────
+
+fn spec(source: &Path, path: &str) -> SnapshotSpec {
+    SnapshotSpec {
+        source: source.to_path_buf(),
+        path: path.to_string(),
+        task_id: Some("task-9".to_string()),
+        span_id: Some("lead::task-9".to_string()),
+        agent: Some("lead_agent::a1".to_string()),
+    }
+}
+
+/// The whole contract in one test: the bytes land under `snapshots/`, the
+/// record that commits them carries §5.7's five fields, and the file's number
+/// **is** that record's seq — the two name each other in both directions.
+#[tokio::test]
+async fn a_snapshot_lands_in_snapshots_and_its_record_names_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let svc = service(&dir);
+    let handle = svc.handle_for("sess-snap");
+
+    let source = work.path().join("report.md");
+    fs::write(&source, "the bytes about to be destroyed").unwrap();
+
+    let taken = handle
+        .snapshot(spec(&source, "docs/report.md"))
+        .await
+        .expect("the image is taken");
+    assert!(handle.flush().await);
+
+    let session_dir = dir.path().join("sess-snap");
+    let image = session_dir.join(&taken.rel);
+    assert!(image.exists(), "the image is on disk at {}", taken.rel);
+    assert_eq!(
+        fs::read_to_string(&image).unwrap(),
+        "the bytes about to be destroyed",
+        "the image is the pre-edit content, byte for byte"
+    );
+    assert_eq!(
+        taken.rel,
+        super::snapshot_name(taken.seq, "docs/report.md"),
+        "the name is <seq>-<slug> under snapshots/"
+    );
+    assert!(taken.rel.starts_with("snapshots/"), "{}", taken.rel);
+
+    let rows = lines(&log_path(dir.path(), "sess-snap"));
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let row = &rows[0];
+    assert_eq!(row["type"], "file_snapshot");
+    assert_eq!(
+        row["seq"].as_u64(),
+        Some(taken.seq),
+        "the file is named after the record that commits it"
+    );
+    assert_eq!(row["task_id"], "task-9");
+    assert_eq!(row["span_id"], "lead::task-9");
+    assert_eq!(row["agent"], "lead_agent::a1");
+    assert_eq!(row["data"]["path"], "docs/report.md");
+    assert_eq!(row["data"]["snapshot_ref"], format!("file:{}", taken.rel));
+    assert_eq!(row["data"]["size"].as_u64(), Some(taken.size));
+    assert_eq!(row["data"]["seq"].as_u64(), Some(taken.seq));
+    assert_eq!(row["data"]["sha256"], taken.sha256);
+    assert_eq!(
+        taken.sha256.len(),
+        64,
+        "sha256 is 64 hex characters: {}",
+        taken.sha256
+    );
+}
+
+/// Fail closed: a source that cannot be read is an error, and it leaves the
+/// log with nothing to say — a `file_snapshot` record only ever exists once
+/// its bytes do.
+#[tokio::test]
+async fn a_snapshot_of_an_unreadable_source_is_refused_and_writes_no_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let svc = service(&dir);
+    let handle = svc.handle_for("sess-miss");
+
+    let missing = work.path().join("not-there.txt");
+    let refused = handle.snapshot(spec(&missing, "not-there.txt")).await;
+    assert!(refused.is_err(), "{refused:?}");
+    assert!(handle.flush().await);
+
+    let session_dir = dir.path().join("sess-miss");
+    assert!(
+        !session_dir.join(SNAPSHOTS_DIR).exists(),
+        "a refused snapshot creates nothing"
+    );
+    assert!(
+        read_records(&session_dir)
+            .unwrap_or_default()
+            .iter()
+            .all(|r| r.kind != "file_snapshot"),
+        "no record commits bytes that were never written"
+    );
+}
+
+/// An image is never overwritten: the name belongs to one record, and a second
+/// arrival at it means a seq was reused. Refused, and the bytes already there
+/// are untouched.
+#[tokio::test]
+async fn a_snapshot_never_overwrites_an_existing_image() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let svc = service(&dir);
+    let handle = svc.handle_for("sess-clash");
+
+    // One record first, so the snapshot below is seq 2 and its name is known.
+    handle.emit(Record::new(RecordType::UserMsg).with_data(serde_json::json!({"msg_id": 1})));
+    assert!(handle.flush().await);
+
+    let session_dir = dir.path().join("sess-clash");
+    let taken_name = super::snapshot_name(2, "notes.txt");
+    fs::create_dir_all(session_dir.join(SNAPSHOTS_DIR)).unwrap();
+    fs::write(session_dir.join(&taken_name), "an older image").unwrap();
+
+    let source = work.path().join("notes.txt");
+    fs::write(&source, "new content").unwrap();
+    let refused = handle.snapshot(spec(&source, "notes.txt")).await;
+
+    assert!(refused.is_err(), "{refused:?}");
+    assert_eq!(
+        fs::read_to_string(session_dir.join(&taken_name)).unwrap(),
+        "an older image",
+        "the image that was already there is untouched"
+    );
+}
+
+/// A writer that cannot open its log has nowhere to commit an image, so it
+/// refuses rather than leaving bytes no record accounts for.
+#[tokio::test]
+async fn a_snapshot_without_a_usable_log_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    // The live segment's name is taken by a directory: the log cannot open.
+    fs::create_dir_all(dir.path().join("sess-broken").join(LIVE_SEGMENT)).unwrap();
+
+    let svc = service(&dir);
+    let handle = svc.handle_for("sess-broken");
+    let source = work.path().join("a.txt");
+    fs::write(&source, "content").unwrap();
+
+    let refused = handle.snapshot(spec(&source, "a.txt")).await;
+    assert!(refused.is_err(), "{refused:?}");
+    assert!(
+        !dir.path().join("sess-broken").join(SNAPSHOTS_DIR).exists(),
+        "nothing is copied when nothing can commit it"
+    );
+}
+
+/// §5.7's images are bounded by the same caps as §5.4's spills: a trim that
+/// drops a segment takes the snapshots that segment referenced with it, and
+/// leaves the ones surviving records still name.
+#[tokio::test]
+async fn a_trim_drops_the_snapshots_the_dropped_segment_referenced() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let svc = service_with(
+        &dir,
+        None,
+        SessionLogLimits {
+            rotate_bytes: 700,
+            max_session_bytes: 2_000,
+            ..SessionLogLimits::default()
+        },
+    );
+    let handle = svc.handle_for("sess-snaptrim");
+    let session_dir = dir.path().join("sess-snaptrim");
+
+    let source = work.path().join("big.txt");
+    fs::write(&source, "s".repeat(200)).unwrap();
+
+    let mut rels = Vec::new();
+    for i in 0..30 {
+        let taken = handle
+            .snapshot(spec(&source, &format!("dir{i}/big.txt")))
+            .await
+            .expect("each image is taken");
+        rels.push(taken.rel);
+    }
+    assert!(handle.flush().await);
+
+    let surviving: Vec<&String> = rels
+        .iter()
+        .filter(|rel| session_dir.join(rel).exists())
+        .collect();
+    assert!(!surviving.is_empty(), "the newest images survive");
+    assert!(surviving.len() < rels.len(), "the oldest images were evicted");
+
+    let referenced: Vec<String> = read_records(&session_dir)
+        .unwrap()
+        .into_iter()
+        .filter_map(|r| {
+            r.data
+                .get("snapshot_ref")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim_start_matches("file:").to_string())
+        })
+        .collect();
+    for rel in &referenced {
+        assert!(
+            session_dir.join(rel).exists(),
+            "a surviving record's image was evicted under it: {rel}"
+        );
+    }
+    for rel in &surviving {
+        assert!(
+            referenced.contains(rel),
+            "an evicted record left its image behind: {rel}"
+        );
+    }
+}
+
 // ── Lifecycle ───────────────────────────────────────────────────────
 
 /// An idle writer closes its file and exits; the next emit transparently
@@ -1623,20 +1839,55 @@ fn the_boot_sweep_leaves_names_it_did_not_create_alone() {
     seed_session(root, "a", 4, 1_000);
     age(root, "a", 9_000);
     fs::write(root.join("NOTES.md"), "not the store's").unwrap();
-    fs::create_dir_all(root.join("a").join("snapshots")).unwrap();
-    fs::write(root.join("a").join("snapshots/keep.png"), "reserved").unwrap();
+    fs::create_dir_all(root.join("a").join("cache")).unwrap();
+    fs::write(root.join("a").join("cache/keep.bin"), "not the store's").unwrap();
 
     let active = std::collections::HashSet::new();
     sweep::enforce_total_cap(root, 1, &active, None).unwrap();
 
     assert!(root.join("NOTES.md").exists(), "an unknown name is left alone");
     assert!(
-        root.join("a").join("snapshots/keep.png").exists(),
-        "snapshots/ is reserved for Phase 8, not the sweep's to empty"
+        root.join("a").join("cache/keep.bin").exists(),
+        "a directory this store does not write is counted, never emptied"
     );
     // Only the names this store writes are ever removed — and `a` is
     // archived, so under R54 that now includes its live segment.
     assert!(!root.join("a").join(LIVE_SEGMENT).exists());
+}
+
+/// §5.7's `snapshots/` is bounded by the same global cap as §5.4's `results/`
+/// and is given up beside it, before any of the narrative.
+#[test]
+fn the_boot_sweep_evicts_snapshots_beside_results() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_session(root, "a", 4, 1_000);
+    age(root, "a", 9_000);
+    fs::create_dir_all(root.join("a").join(SNAPSHOTS_DIR)).unwrap();
+    fs::write(
+        root.join("a").join(SNAPSHOTS_DIR).join("000001-notes_txt"),
+        "x".repeat(1_000),
+    )
+    .unwrap();
+
+    let active = std::collections::HashSet::new();
+    // 7 000 bytes: 5 000 of payload (four spills and one image) and 2 000 of
+    // narrative. A cap of exactly the narrative is met by the payload alone.
+    let report = sweep::enforce_total_cap(root, 2_000, &active, None).unwrap();
+
+    assert!(report.files_removed > 0);
+    assert!(
+        !root
+            .join("a")
+            .join(SNAPSHOTS_DIR)
+            .join("000001-notes_txt")
+            .exists(),
+        "an archived session's images go with its spills"
+    );
+    assert!(
+        root.join("a").join(LIVE_SEGMENT).exists(),
+        "the payload directories are given up before the narrative"
+    );
 }
 
 /// The pass's report outlives it on the service, so T44's `GET /v1/status`
