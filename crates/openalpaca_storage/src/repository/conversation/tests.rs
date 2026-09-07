@@ -835,3 +835,86 @@ fn active_session_ids_names_every_lanes_live_session() {
         "the archived session is not protected from the sweep"
     );
 }
+
+// ── messages_7d (GAP-17, T49) ────────────────────────────────────────────────
+
+/// Backdate a stored message so a window test can put it outside the cutoff.
+fn backdate(db: &crate::Database, id: i64, created_at: &str) {
+    db.with_connection(|conn| {
+        conn.execute(
+            "UPDATE conversation_messages SET created_at = ?1 WHERE id = ?2",
+            rusqlite::params![created_at, id],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+}
+
+fn message_from(lane_key: &str, source: &str) -> ConversationMessage {
+    ConversationMessage {
+        lane_key: lane_key.to_string(),
+        role: "user".to_string(),
+        content: "hi".to_string(),
+        source: Some(source.to_string()),
+        ..Default::default()
+    }
+}
+
+/// `GET /v1/connectors`' `messages_7d`: one grouped count per source, so the
+/// panel's whole list costs one query.
+#[test]
+fn message_counts_by_source_groups_every_source_in_one_read() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+
+    repo.insert(&message_from("u1:telegram", "telegram")).unwrap();
+    repo.insert(&message_from("u2:telegram", "telegram")).unwrap();
+    repo.insert(&message_from("u1:imessage", "imessage")).unwrap();
+    repo.insert(&message_from("u1:gui", "gui")).unwrap();
+
+    let counts = repo
+        .message_counts_by_source_since("2000-01-01 00:00:00")
+        .unwrap();
+    assert_eq!(counts.get("telegram"), Some(&2));
+    assert_eq!(counts.get("imessage"), Some(&1));
+    assert_eq!(counts.get("gui"), Some(&1));
+    assert_eq!(counts.len(), 3);
+}
+
+/// The cutoff is the window: an older message is not this week's traffic.
+#[test]
+fn message_counts_by_source_excludes_rows_before_the_cutoff() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+
+    let stale = repo.insert(&message_from("u1:telegram", "telegram")).unwrap();
+    backdate(&db, stale, "2026-08-01 12:00:00");
+    repo.insert(&message_from("u1:telegram", "telegram")).unwrap();
+
+    let counts = repo
+        .message_counts_by_source_since("2026-09-01 00:00:00")
+        .unwrap();
+    assert_eq!(counts.get("telegram"), Some(&1));
+}
+
+/// A source-less row (nothing has attributed it) is counted for no connector
+/// rather than for a guessed one.
+#[test]
+fn message_counts_by_source_ignores_unattributed_rows() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+
+    repo.insert(&ConversationMessage {
+        lane_key: "u1:telegram".to_string(),
+        role: "user".to_string(),
+        content: "hi".to_string(),
+        source: None,
+        ..Default::default()
+    })
+    .unwrap();
+
+    let counts = repo
+        .message_counts_by_source_since("2000-01-01 00:00:00")
+        .unwrap();
+    assert!(counts.is_empty(), "an unattributed row counts for nobody");
+}

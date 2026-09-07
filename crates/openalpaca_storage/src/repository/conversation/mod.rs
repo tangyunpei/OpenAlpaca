@@ -870,6 +870,40 @@ impl<'a> ConversationRepository<'a> {
         })
     }
 
+    /// `source → COUNT(*)` over `conversation_messages` since `since_utc`, for
+    /// `GET /v1/connectors`' `messages_7d` (GAP-17, T49).
+    ///
+    /// `since_utc` is **already UTC** in the table's own `%Y-%m-%d %H:%M:%S`
+    /// text form: `created_at` defaults to `datetime('now')`, which is UTC, so
+    /// a local cutoff would be off by the daemon's offset. The caller converts.
+    ///
+    /// The grouping column is `source` — the connector id the gateway stamped
+    /// on the turn — not the lane key's suffix: a lane key is a routing
+    /// address that a follow-up can override, while `source` is what actually
+    /// attributed the message. A row with no source (nothing attributed it) is
+    /// counted for no connector rather than for a guessed one.
+    ///
+    /// One grouped query for the whole list: the Connectors panel renders every
+    /// connector from one call, and a per-connector count would be an N+1.
+    pub fn message_counts_by_source_since(
+        &self,
+        since_utc: &str,
+    ) -> Result<std::collections::HashMap<String, i64>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT source, COUNT(*) FROM conversation_messages \
+                 WHERE source IS NOT NULL AND created_at >= ?1 \
+                 GROUP BY source",
+            )?;
+            let mut rows = stmt.query(rusqlite::params![since_utc])?;
+            let mut counts = std::collections::HashMap::new();
+            while let Some(row) = rows.next()? {
+                counts.insert(row.get::<_, String>(0)?, row.get::<_, i64>(1)?);
+            }
+            Ok(counts)
+        })
+    }
+
     fn row_to_session(row: &rusqlite::Row<'_>) -> Result<Conversation> {
         Ok(Conversation {
             id: row.get(0)?,

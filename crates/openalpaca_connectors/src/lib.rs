@@ -171,6 +171,14 @@ pub trait ConnectorFactory: Send + Sync {
     /// Get the unique name of the connector (e.g. "telegram")
     fn name(&self) -> &str;
 
+    /// The human-facing name of the connector (e.g. "Telegram").
+    ///
+    /// Required rather than defaulted: `GET /v1/connectors` used to derive
+    /// this with a `match` on two ids, so Discord — added later — rendered as
+    /// its raw id (GAP-17, T49). A connector that knows its own name cannot
+    /// fall out of a list it was never added to.
+    fn display_name(&self) -> &str;
+
     /// Create and spawn a new instance of the connector
     fn spawn(
         &self,
@@ -206,6 +214,10 @@ impl ConnectorFactory for TelegramFactory {
         "telegram"
     }
 
+    fn display_name(&self) -> &str {
+        "Telegram"
+    }
+
     fn spawn(
         &self,
         token: String,
@@ -234,6 +246,10 @@ struct IMessageFactory;
 impl ConnectorFactory for IMessageFactory {
     fn name(&self) -> &str {
         "imessage"
+    }
+
+    fn display_name(&self) -> &str {
+        "iMessage"
     }
 
     fn spawn(
@@ -284,6 +300,10 @@ impl ConnectorFactory for DiscordFactory {
         "discord"
     }
 
+    fn display_name(&self) -> &str {
+        "Discord"
+    }
+
     fn spawn(
         &self,
         token: String,
@@ -314,5 +334,50 @@ impl ConnectorFactory for DiscordFactory {
             }
         });
         Ok(startup::ConnectorHandle::Discord(cancel_token, running))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// GAP-17/T49: the display name belongs to the connector, not to a `match`
+    /// in a route. The invariant holds for every compiled factory, so a new
+    /// connector cannot be added without naming itself — which is exactly how
+    /// Discord came to render as its raw id.
+    #[test]
+    fn every_supported_connector_names_itself() {
+        for factory in get_supported_connectors() {
+            let name = factory.display_name();
+            assert!(
+                !name.is_empty(),
+                "{} has no display name",
+                factory.name()
+            );
+            assert_ne!(
+                name,
+                factory.name(),
+                "{} falls back to its raw id",
+                factory.name()
+            );
+        }
+    }
+
+    #[cfg(feature = "telegram")]
+    #[test]
+    fn telegram_display_name() {
+        assert_eq!(TelegramFactory.display_name(), "Telegram");
+    }
+
+    #[cfg(all(feature = "imessage", target_os = "macos"))]
+    #[test]
+    fn imessage_display_name() {
+        assert_eq!(IMessageFactory.display_name(), "iMessage");
+    }
+
+    #[cfg(feature = "discord")]
+    #[test]
+    fn discord_display_name() {
+        assert_eq!(DiscordFactory.display_name(), "Discord");
     }
 }
