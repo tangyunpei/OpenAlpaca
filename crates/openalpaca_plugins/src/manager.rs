@@ -1841,8 +1841,10 @@ impl PluginManager {
 
     /// The dry run behind `POST /v1/extensions/plugin/validate`: parse and
     /// report, copying nothing.
-    pub fn validate_source(&self, source: &Path) -> Result<ManifestSummary, InstallError> {
-        install::inspect_source(source, &self.plugin_dir).map(|(_, summary)| summary)
+    pub async fn validate_source(&self, source: &Path) -> Result<ManifestSummary, InstallError> {
+        install::inspect_source(source, &self.plugin_dir)
+            .await
+            .map(|(_, summary)| summary)
     }
 
     /// Is a plugin of this name already in the store? Read off the disk rather
@@ -1869,7 +1871,7 @@ impl PluginManager {
     /// window exists in which an unreviewed tree sits under an `approved =
     /// true` entry.
     pub async fn install_from_path(&self, source: &Path) -> Result<InstallOutcome, InstallError> {
-        let (name, manifest) = install::inspect_source(source, &self.plugin_dir)?;
+        let (name, manifest) = install::inspect_source(source, &self.plugin_dir).await?;
         let ext = ExtensionId::plugin(name.clone());
         let dest = self.plugin_dir.join(&name);
 
@@ -1948,7 +1950,7 @@ impl PluginManager {
         source: &Path,
     ) -> Result<InstallOutcome, InstallError> {
         let ext = ExtensionId::plugin(id.to_string());
-        let manifest = install::inspect_update_source(source, &self.plugin_dir, id)?;
+        let manifest = install::inspect_update_source(source, &self.plugin_dir, id).await?;
         self.known(&ext).await?;
         self.guard_orphan(&ext)?;
 

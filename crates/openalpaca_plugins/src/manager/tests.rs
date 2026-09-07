@@ -2470,7 +2470,7 @@ mod install_tests {
         let h = Harness::new();
         let source = h.source("echo-test", "2.0.0", "[capabilities]\nprovides = [\"notes\"]\n");
 
-        let summary = h.manager.validate_source(&source).expect("validate");
+        let summary = h.manager.validate_source(&source).await.expect("validate");
 
         assert_eq!(summary.name, "echo-test");
         assert_eq!(summary.version, "2.0.0");

@@ -600,7 +600,7 @@ pub(crate) async fn validate_plugin(
         Ok(path) => path,
         Err(refusal) => return refusal.into_response(),
     };
-    match extensions.validate_plugin(&path) {
+    match extensions.validate_plugin(&path).await {
         Ok(manifest) => {
             let installed = extensions.plugin_installed(&manifest.name);
             (

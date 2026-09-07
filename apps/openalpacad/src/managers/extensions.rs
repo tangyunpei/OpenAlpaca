@@ -171,8 +171,8 @@ impl Extensions {
 
     /// `POST /v1/extensions/plugin/validate` — parse and report, copying
     /// nothing.
-    pub fn validate_plugin(&self, source: &Path) -> Result<ManifestSummary, InstallFailure> {
-        Ok(self.plugins.validate_source(source)?)
+    pub async fn validate_plugin(&self, source: &Path) -> Result<ManifestSummary, InstallFailure> {
+        Ok(self.plugins.validate_source(source).await?)
     }
 
     /// Is a plugin of this name already in the store? The dry run reports it so

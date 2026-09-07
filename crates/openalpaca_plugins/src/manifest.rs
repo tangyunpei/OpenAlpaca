@@ -93,12 +93,29 @@ pub struct ConfigField {
 
 impl PluginManifest {
     /// Parse a plugin.toml file from a plugin directory.
+    ///
+    /// **The type is checked before the open.** A source directory is whatever
+    /// the caller pointed at, and `read_to_string` on a FIFO with no writer
+    /// never returns — a `mkfifo plugin.toml` inside an unpacked third-party
+    /// plugin used to park this read forever, with the file-type check that
+    /// would have caught it living downstream in `install::copy_tree`, which
+    /// the manifest read runs *before*. `symlink_metadata` is the check that
+    /// does not follow a link, so a symlinked `plugin.toml` is refused too:
+    /// what an install copies in is a regular file, and that is what a plugin
+    /// directory must hold.
     pub fn from_dir(plugin_dir: &Path) -> Result<Self, PluginError> {
         let manifest_path = plugin_dir.join("plugin.toml");
-        if !manifest_path.exists() {
+        let Ok(meta) = std::fs::symlink_metadata(&manifest_path) else {
             return Err(PluginError::ManifestNotFound(
                 manifest_path.display().to_string(),
             ));
+        };
+        if !meta.file_type().is_file() {
+            return Err(PluginError::InvalidManifest(format!(
+                "'{}' is not a regular file ({}), and a manifest must be one",
+                manifest_path.display(),
+                crate::install::describe(meta.file_type())
+            )));
         }
         let content = std::fs::read_to_string(&manifest_path)
             .map_err(|e| PluginError::InvalidManifest(e.to_string()))?;

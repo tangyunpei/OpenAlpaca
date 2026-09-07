@@ -272,10 +272,32 @@ fn io(context: &str, path: &Path, e: std::io::Error) -> InstallError {
 // ============================================================================
 
 /// Validate a source directory and summarise its manifest — **before** any
-/// byte is copied.
+/// byte is copied, and **on a blocking thread**.
 ///
 /// Returns the directory name, which is the extension id it will install as.
-pub fn inspect_source(
+///
+/// The read is `std::fs` and the source is whatever directory the caller
+/// pointed at, so it belongs off the runtime for the same reason [`stage`]
+/// does: the route runs its verb in a `tokio::spawn`ed task, and a manifest
+/// that is slow — or is not a regular file at all — must cost a blocking
+/// thread rather than a worker.
+pub async fn inspect_source(
+    source: &Path,
+    plugins_root: &Path,
+) -> Result<(String, ManifestSummary), InstallError> {
+    let source = source.to_path_buf();
+    let plugins_root = plugins_root.to_path_buf();
+    match tokio::task::spawn_blocking(move || inspect_source_blocking(&source, &plugins_root)).await
+    {
+        Ok(result) => result,
+        Err(join) => Err(InstallError::Io(format!(
+            "the source inspection did not complete: {join}"
+        ))),
+    }
+}
+
+/// [`inspect_source`]'s body, synchronous.
+pub fn inspect_source_blocking(
     source: &Path,
     plugins_root: &Path,
 ) -> Result<(String, ManifestSummary), InstallError> {
@@ -344,13 +366,34 @@ pub fn inspect_source(
 
 /// The same manifest read, for a directory **already** in the store — the
 /// update path, where the target name is the installed id rather than the
-/// source's own directory name.
-pub fn inspect_update_source(
+/// source's own directory name. Off the runtime, like [`inspect_source`].
+pub async fn inspect_update_source(
     source: &Path,
     plugins_root: &Path,
     id: &str,
 ) -> Result<ManifestSummary, InstallError> {
-    let summary = match inspect_source(source, plugins_root) {
+    let source = source.to_path_buf();
+    let plugins_root = plugins_root.to_path_buf();
+    let id = id.to_string();
+    match tokio::task::spawn_blocking(move || {
+        inspect_update_source_blocking(&source, &plugins_root, &id)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(join) => Err(InstallError::Io(format!(
+            "the source inspection did not complete: {join}"
+        ))),
+    }
+}
+
+/// [`inspect_update_source`]'s body, synchronous.
+pub fn inspect_update_source_blocking(
+    source: &Path,
+    plugins_root: &Path,
+    id: &str,
+) -> Result<ManifestSummary, InstallError> {
+    let summary = match inspect_source_blocking(source, plugins_root) {
         Ok((_, summary)) => summary,
         // The source may legitimately sit in a build directory whose name is
         // not the plugin's; only the *manifest* name has to match the id.
@@ -596,7 +639,10 @@ fn irregular(path: &Path, kind: std::fs::FileType) -> InstallError {
     ))
 }
 
-fn describe(kind: std::fs::FileType) -> &'static str {
+/// What an entry is, when it is not a regular file. Shared with
+/// [`crate::manifest::PluginManifest::from_dir`], which refuses a `plugin.toml`
+/// that is not one for the same reason and wants the same words.
+pub(crate) fn describe(kind: std::fs::FileType) -> &'static str {
     #[cfg(unix)]
     {
         use std::os::unix::fs::FileTypeExt;

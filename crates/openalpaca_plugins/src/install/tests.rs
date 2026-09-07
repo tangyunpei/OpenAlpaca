@@ -41,7 +41,7 @@ fn a_source_directory_is_summarised_before_anything_is_copied() {
     let (_tmp, plugins, sources) = roots();
     let dir = source(&sources, "notion", "notion");
 
-    let (name, summary) = inspect_source(&dir, &plugins).expect("a valid source");
+    let (name, summary) = inspect_source_blocking(&dir, &plugins).expect("a valid source");
 
     assert_eq!(name, "notion", "the directory name is the extension id");
     assert_eq!(summary.version, "1.0.0");
@@ -59,7 +59,7 @@ fn a_source_directory_is_summarised_before_anything_is_copied() {
 #[test]
 fn a_relative_source_is_refused_before_the_filesystem_is_touched() {
     let (_tmp, plugins, _sources) = roots();
-    let error = inspect_source(Path::new("some/plugin"), &plugins).unwrap_err();
+    let error = inspect_source_blocking(Path::new("some/plugin"), &plugins).unwrap_err();
     assert_eq!(error.code(), "invalid_path");
 }
 
@@ -70,14 +70,14 @@ fn a_relative_source_is_refused_before_the_filesystem_is_touched() {
 fn a_source_inside_the_plugins_root_is_refused() {
     let (_tmp, plugins, _sources) = roots();
     let inside = source(&plugins, "notion", "notion");
-    let error = inspect_source(&inside, &plugins).unwrap_err();
+    let error = inspect_source_blocking(&inside, &plugins).unwrap_err();
     assert_eq!(error.code(), "invalid_path");
 }
 
 #[test]
 fn a_missing_directory_is_source_not_found() {
     let (_tmp, plugins, sources) = roots();
-    let error = inspect_source(&sources.join("nope"), &plugins).unwrap_err();
+    let error = inspect_source_blocking(&sources.join("nope"), &plugins).unwrap_err();
     assert_eq!(error.code(), "source_not_found");
 }
 
@@ -87,13 +87,13 @@ fn a_directory_with_no_manifest_is_invalid_manifest() {
     let bare = sources.join("bare");
     std::fs::create_dir_all(&bare).unwrap();
     assert_eq!(
-        inspect_source(&bare, &plugins).unwrap_err().code(),
+        inspect_source_blocking(&bare, &plugins).unwrap_err().code(),
         "invalid_manifest"
     );
 
     std::fs::write(bare.join("plugin.toml"), "this is not = = toml [[[").unwrap();
     assert_eq!(
-        inspect_source(&bare, &plugins).unwrap_err().code(),
+        inspect_source_blocking(&bare, &plugins).unwrap_err().code(),
         "invalid_manifest"
     );
 }
@@ -106,7 +106,7 @@ fn a_directory_with_no_manifest_is_invalid_manifest() {
 fn a_manifest_that_renames_itself_is_refused_at_install_time() {
     let (_tmp, plugins, sources) = roots();
     let dir = source(&sources, "notion", "notion-for-openalpaca");
-    let error = inspect_source(&dir, &plugins).unwrap_err();
+    let error = inspect_source_blocking(&dir, &plugins).unwrap_err();
     assert_eq!(error.code(), "invalid_manifest");
     assert!(
         error.to_string().contains("notion-for-openalpaca"),
@@ -121,9 +121,92 @@ fn a_dot_directory_can_never_be_installed_as_a_plugin() {
     let (_tmp, plugins, sources) = roots();
     let dir = source(&sources, ".config", ".config");
     assert_eq!(
-        inspect_source(&dir, &plugins).unwrap_err().code(),
+        inspect_source_blocking(&dir, &plugins).unwrap_err().code(),
         "invalid_path"
     );
+}
+
+/// **The hang, one path over.** `copy_tree` refuses a FIFO because opening one
+/// with no writer never returns — but the manifest is read *before* the copy,
+/// and `plugin.toml` itself is an entry in the source directory. A
+/// `mkfifo plugin.toml` used to reach `read_to_string` with the type check
+/// living downstream in a `copy_tree` that is never reached, so the inspection
+/// parked forever. The type is checked with `symlink_metadata` before the open;
+/// the timeout is what makes the assertion honest.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_fifo_plugin_toml_is_refused_rather_than_opened() {
+    let (_tmp, plugins, sources) = roots();
+    let dir = sources.join("notion");
+    std::fs::create_dir_all(&dir).expect("source dir");
+    let made = std::process::Command::new("mkfifo")
+        .arg(dir.join("plugin.toml"))
+        .status()
+        .expect("mkfifo");
+    assert!(made.success(), "mkfifo failed");
+
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        inspect_source(&dir, &plugins),
+    )
+    .await
+    .expect("the inspection must refuse a FIFO manifest, not block on opening it")
+    .unwrap_err();
+
+    assert_eq!(error.code(), "invalid_manifest");
+    assert!(
+        error.to_string().contains("plugin.toml") && error.to_string().contains("regular file"),
+        "the refusal names the file and what is wrong with it: {error}"
+    );
+}
+
+/// The update path reads the manifest through its own second call site
+/// (`inspect_update_source`'s fallback for a source directory whose name is not
+/// the plugin's), so it gets the same refusal rather than the same hang.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_fifo_plugin_toml_is_refused_on_the_update_path_too() {
+    let (_tmp, plugins, sources) = roots();
+    let dir = sources.join("build-output");
+    std::fs::create_dir_all(&dir).expect("source dir");
+    let made = std::process::Command::new("mkfifo")
+        .arg(dir.join("plugin.toml"))
+        .status()
+        .expect("mkfifo");
+    assert!(made.success(), "mkfifo failed");
+
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        inspect_update_source(&dir, &plugins, "notion"),
+    )
+    .await
+    .expect("the update inspection must refuse a FIFO manifest too")
+    .unwrap_err();
+
+    assert_eq!(error.code(), "invalid_manifest");
+}
+
+/// The read is `std::fs` and the route runs its verb in a `tokio::spawn`ed task
+/// — i.e. on a runtime worker. On a **current-thread** runtime, an inspection
+/// done inline would return `Ready` without ever yielding, so the task spawned
+/// just before it could not have run; this asserts one did, which is only true
+/// if the read went to `spawn_blocking`.
+#[tokio::test(flavor = "current_thread")]
+async fn the_manifest_read_runs_off_the_runtime_worker() {
+    let (_tmp, plugins, sources) = roots();
+    let dir = source(&sources, "notion", "notion");
+
+    let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&ran);
+    tokio::spawn(async move { flag.store(true, std::sync::atomic::Ordering::SeqCst) });
+
+    let (name, _) = inspect_source(&dir, &plugins).await.expect("inspect");
+
+    assert!(
+        ran.load(std::sync::atomic::Ordering::SeqCst),
+        "the runtime polled another task while the manifest was read; it was not done inline"
+    );
+    assert_eq!(name, "notion", "and it inspected the right directory");
 }
 
 // ── stage → commit ───────────────────────────────────────────────────────
