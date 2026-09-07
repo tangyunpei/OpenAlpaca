@@ -70,10 +70,16 @@ pub struct UsageSummaryQuery {
 /// own `todayIsoDate()` is local: the two disagree for up to twelve hours a
 /// day, and a total labelled with the wrong day is worse than no total.
 ///
-/// `total_usd` is an unbounded figure. Per **N4** there is no daily budget and
-/// none is to be added, so there is no `daily_*` key here and nothing to draw
-/// a progress bar against — `caps` are the per-workflow and per-turn limits
-/// that actually exist, which is what the panel says instead.
+/// `total_usd` is `sum(by_provider[].usd)` — one source, computed from the
+/// same `llm_call_log` rows the breakdown is grouped from, so it adds up by
+/// construction (R64). It is **not** the `llm_usage_daily` rollup that
+/// `GET /v1/orchestrator/config.daily_cost_usd` reports; that rollup is a
+/// separate writer and is not served by this route.
+///
+/// `total_usd` is otherwise an unbounded figure. Per **N4** there is no daily
+/// budget and none is to be added, so there is no `daily_*` key here and
+/// nothing to draw a progress bar against — `caps` are the per-workflow and
+/// per-turn limits that actually exist, which is what the panel says instead.
 #[derive(Debug, Serialize)]
 pub(super) struct UsageSummaryResponse {
     pub date: String,

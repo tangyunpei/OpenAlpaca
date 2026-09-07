@@ -296,8 +296,10 @@ pub async fn refresh_models(State(state): State<Arc<AppState>>) -> impl IntoResp
 /// booted (GAP-08a). A day's distinct `(agent_id, model)` rows are few; the
 /// query's limit is a generous cap, not a real pagination bound.
 ///
-/// The date is passed in rather than computed here so that `GET
-/// /v1/usage/summary` reports the total for the very date it echoes (T50).
+/// Backs `GET /v1/orchestrator/config.daily_cost_usd` only. `GET
+/// /v1/usage/summary` used to call this for its own `total_usd`, but that made
+/// the total a second writer that could disagree with `by_provider` (R64) —
+/// the summary route now sums `by_provider` instead and never calls this.
 fn cost_for_utc_date(db: &openalpaca_storage::Database, date: &str) -> f64 {
     let repo = openalpaca_storage::repository::LlmUsageRepository::new(db);
     repo.query_daily_usage(None, Some(date), 10_000)
@@ -459,24 +461,31 @@ fn utc_day_start(now: DateTime<Utc>) -> String {
 
 /// Assemble the summary. Pure, so the shape — and N4's absence of any daily
 /// budget in it — is tested without a daemon.
+///
+/// `total_usd` is **not** a separate figure: it is `sum(by_provider[].usd)`,
+/// computed here from the very rows the breakdown is built from (R64). There
+/// is deliberately no second source (the `llm_usage_daily` rollup) for this
+/// route to disagree with — the breakdown adds up to the total by
+/// construction, not by convention.
 fn usage_summary(
     date: String,
-    total_usd: f64,
     providers: Vec<openalpaca_storage::ProviderCallUsage>,
     caps: UsageCaps,
 ) -> UsageSummaryResponse {
+    let by_provider: Vec<ProviderUsageRow> = providers
+        .into_iter()
+        .map(|p| ProviderUsageRow {
+            provider: p.provider,
+            usd: p.cost_usd,
+            calls: p.calls,
+            tokens: p.tokens,
+        })
+        .collect();
+    let total_usd = by_provider.iter().map(|p| p.usd).sum();
     UsageSummaryResponse {
         date,
         total_usd,
-        by_provider: providers
-            .into_iter()
-            .map(|p| ProviderUsageRow {
-                provider: p.provider,
-                usd: p.cost_usd,
-                calls: p.calls,
-                tokens: p.tokens,
-            })
-            .collect(),
+        by_provider,
         caps,
     }
 }
@@ -484,12 +493,14 @@ fn usage_summary(
 /// GET /v1/usage/summary?window=today — today's spend, and the caps that
 /// actually bound it (GAP-08c).
 ///
-/// The total comes from the `llm_usage_daily` rollup and `by_provider` from
-/// today's `llm_call_log` rows; the two are separate writers, so a call the
-/// rollup's best-effort upsert missed can leave them a fraction apart. Both are
-/// the daemon's own numbers for the same UTC day, which is the day `date` names
-/// — the GUI's own `todayIsoDate()` is local and disagrees for up to twelve
-/// hours.
+/// `total_usd` and `by_provider` are one source: both come out of today's
+/// `llm_call_log` rows (`provider_usage_since`), so the breakdown always sums
+/// to the total (R64). The `llm_usage_daily` rollup is a second writer with
+/// its own upsert path and is **not** served by this route — it still backs
+/// `GET /v1/orchestrator/config.daily_cost_usd` and `GET
+/// /v1/llm/usage/daily`, which is where a caller wanting that number goes.
+/// `date` is the UTC day the figures cover, echoed because the GUI's own
+/// `todayIsoDate()` is local and disagrees for up to twelve hours.
 ///
 /// Per **N4** the caps are per-workflow and per-turn `max_cost`. There is no
 /// daily budget, no `daily_*` key, and today's total ships with no denominator.
@@ -524,12 +535,7 @@ pub async fn get_usage_summary(
         agent_max_cost_usd: execution.agent_defaults.max_cost,
     };
 
-    let summary = usage_summary(
-        date.clone(),
-        cost_for_utc_date(&state.db, &date),
-        providers,
-        caps,
-    );
+    let summary = usage_summary(date, providers, caps);
     (StatusCode::OK, Json(summary)).into_response()
 }
 
@@ -935,7 +941,6 @@ mod tests {
     fn summary_reports_the_total_and_one_row_per_provider() {
         let summary = usage_summary(
             "2026-09-08".to_string(),
-            0.35,
             vec![
                 provider("anthropic", 0.30, 4, 1200),
                 provider("openai", 0.05, 1, 300),
@@ -953,6 +958,39 @@ mod tests {
         assert_eq!(first.tokens, 1200);
     }
 
+    /// R64: `total_usd` is not a second source that can disagree with the
+    /// breakdown — it is computed FROM `by_provider`, so the two add up by
+    /// construction. A two-provider fixture with an amount that would expose
+    /// float-summation slip if the total came from anywhere else.
+    #[test]
+    fn summary_total_usd_is_the_sum_of_by_provider_usd_for_two_providers() {
+        let summary = usage_summary(
+            "2026-09-08".to_string(),
+            vec![
+                provider("anthropic", 0.0184, 71, 41125),
+                provider("openai", 0.0512, 3, 900),
+            ],
+            caps(),
+        );
+
+        let summed: f64 = summary.by_provider.iter().map(|p| p.usd).sum();
+        assert!(
+            (summary.total_usd - summed).abs() < 1e-12,
+            "total_usd ({}) must equal sum(by_provider.usd) ({summed}) exactly, by construction",
+            summary.total_usd
+        );
+        assert!((summary.total_usd - 0.0696).abs() < 1e-9);
+    }
+
+    /// No providers today means no spend today — not a total left over from
+    /// some other source.
+    #[test]
+    fn summary_total_usd_is_zero_with_no_provider_rows() {
+        let summary = usage_summary("2026-09-08".to_string(), vec![], caps());
+        assert_eq!(summary.total_usd, 0.0);
+        assert!(summary.by_provider.is_empty());
+    }
+
     /// N4, on the wire: the caps are the per-workflow and per-turn `max_cost`,
     /// named as such, and **no** `daily_*` key exists to be drawn as a
     /// denominator under today's total.
@@ -960,7 +998,6 @@ mod tests {
     fn summary_carries_the_two_caps_and_no_daily_budget() {
         let value = serde_json::to_value(usage_summary(
             "2026-09-08".to_string(),
-            0.35,
             vec![provider("anthropic", 0.30, 4, 1200)],
             caps(),
         ))

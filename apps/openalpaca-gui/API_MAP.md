@@ -647,13 +647,14 @@ GET /v1/usage/summary?window=today
 - `date` is the daemon's UTC day and every figure is that day's. The GUI's Today
   card filters its run count by this date too, so all three numbers describe one
   day — before T50 spend was UTC and runs were the browser's local day.
-- `total_usd` is the `llm_usage_daily` rollup for that date
-  (`cost_for_utc_date`); `by_provider` is that date's `llm_call_log` rows grouped
-  once (`LlmUsageRepository::provider_usage_since`), **not** the lifetime
-  `CostTracker::all_provider_usage()` the Models panel showed under a "today"
-  heading. They are two writers, so a call the rollup's best-effort upsert missed
-  can leave them a fraction apart; both are the daemon's own numbers for the same
-  day.
+- `total_usd` is `sum(by_provider[].usd)` — one source, computed from the same
+  `llm_call_log` rows grouped by `LlmUsageRepository::provider_usage_since`, so
+  the breakdown adds up to the total by construction (fix round 1, R64). It is
+  **not** the `llm_usage_daily` rollup (`cost_for_utc_date`) that
+  `GET /v1/orchestrator/config.daily_cost_usd` reports — that rollup is a
+  separate writer and this route does not serve it. `by_provider` is also
+  **not** the lifetime `CostTracker::all_provider_usage()` the Models panel
+  showed under a "today" heading.
 - `tokens` rides on each row because the design's per-provider figure is a token
   count and the call log already holds the columns — cost and calls alone would
   have left that half of the gap open.
