@@ -269,6 +269,9 @@ describe("launchErrorMessage", () => {
       "TASK_NOT_STARTABLE",
       "DISPATCH_FAILED",
       "NOT_FOUND",
+      "RESUME_DISABLED",
+      "TASK_NOT_RESUMABLE",
+      "RESUME_LOG_MISSING",
     ] as const;
     const messages = codes.map((code) =>
       launchErrorMessage(new ApiError("raw daemon text", 409, code)),
@@ -288,6 +291,12 @@ describe("launchErrorMessage", () => {
     expect(messages[4]).toMatch(/finished/i);
     expect(messages[4]).toMatch(/re-run/i);
     expect(messages[5]).toMatch(/no agent is free/i);
+    // §5.6c's three. Each has to say what to do next, and the first has to
+    // name the switch — "resume is disabled" with no key is a dead end.
+    expect(messages[7]).toMatch(/resume_enabled/i);
+    expect(messages[7]).toMatch(/re-run/i);
+    expect(messages[8]).toMatch(/interrupted/i);
+    expect(messages[9]).toMatch(/re-run/i);
   });
 
   it("falls back to the daemon's own message for an unknown code", () => {

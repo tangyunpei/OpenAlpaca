@@ -7,9 +7,12 @@
  * Nothing here is a dead branch any more: GAP-06 closed, so `Start now` and
  * `Re-run` reach the daemon like the rest.
  *
- * The two launch verbs render the daemon's refusal rather than a generic
- * failure: a run that did *not* start must never read like one that did, and
- * the codes say which of five things went wrong (`launchErrorMessage`).
+ * The launch verbs render the daemon's refusal rather than a generic failure:
+ * a run that did *not* start must never read like one that did, and the codes
+ * say which of eight things went wrong (`launchErrorMessage`). `resume` is one
+ * of them on an interrupted run — §5.6c's replay — and a plain transition on a
+ * paused one, which is why its error path is the launch path and its success
+ * copy names the rounds when the daemon sends them.
  *
  * Toast copy is §4.4's, with the run's full title in place of the design's
  * hand-written `short` (there is no short title on the wire).
@@ -75,15 +78,27 @@ export function useRunController(): RunController {
         mutate(
           { id: run.id, action: verb },
           {
-            onSuccess: () => {
+            onSuccess: (result) => {
+              // §5.6c — a replay resume brought a transcript back, and
+              // "Audit resumed" reads the same as a run that started over.
+              // The clause only appears when the daemon sent the numbers, so
+              // an un-pause keeps §4.4's copy exactly.
+              const rounds = result.rounds_replayed;
+              if (action === "resume" && rounds !== undefined) {
+                showToast(
+                  `${run.title} resumed — ${rounds} round${rounds === 1 ? "" : "s"} replayed`,
+                );
+                return;
+              }
               const toast = actionToast(action, run.title);
               if (toast !== null) showToast(toast);
             },
             onError: (error: Error) => {
               // `start`'s refusals have their own codes and their own
-              // sentences; a transition's 409 carries the daemon's own
-              // ("cannot pause a completed task"), which beats inventing one.
-              if (action === "start") {
+              // sentences, and so do §5.6c's three for `resume`; a plain
+              // transition's 409 carries the daemon's own ("cannot pause a
+              // completed task"), which beats inventing one.
+              if (action === "start" || action === "resume") {
                 showToast(launchErrorMessage(error));
                 return;
               }

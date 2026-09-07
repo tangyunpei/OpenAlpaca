@@ -36,6 +36,7 @@ import {
 } from "@/components/work/run-model";
 import { toFileKind } from "@/components/ui";
 import { useArtifacts } from "@/hooks/useArtifacts";
+import { useResumeEnabled } from "@/hooks/useConnection";
 import { useRunEventLog } from "@/hooks/useEventHistory";
 import { useTask, useTaskTimeline } from "@/hooks/useTasks";
 import { isLive } from "@/components/ui";
@@ -64,6 +65,7 @@ export function RunDetail({
   onAction,
 }: RunDetailProps) {
   const openSidePanel = useUiStore((state) => state.openSidePanel);
+  const resumeEnabled = useResumeEnabled();
   const detail = useTask(runId);
   const timeline = useTaskTimeline(runId);
   const eventLog = useRunEventLog(runId);
@@ -125,7 +127,7 @@ export function RunDetail({
   const live = isLive(run.status);
   const actions = live
     ? liveRunActions(run.status, steerDisabledReason(run))
-    : terminalRunActions();
+    : terminalRunActions(run.status === "interrupted" && resumeEnabled);
   const blocked = blockedRunId === run.id;
 
   return (

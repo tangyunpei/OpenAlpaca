@@ -128,6 +128,16 @@ export interface CreateTaskResponse {
 export interface TaskActionResponse {
   task_id: string;
   status: string;
+  /**
+   * §5.6c's replay resume only: the conversation the history came from, and
+   * how much of it did. Absent for every transition and for `start`, so their
+   * copy is unchanged — and `rounds_replayed` is what tells a resumed run from
+   * one that quietly started over under the same id.
+   */
+  session_id?: string;
+  rounds_replayed?: number;
+  from_seq?: number | null;
+  to_seq?: number | null;
 }
 
 /**
@@ -1015,6 +1025,21 @@ export interface DaemonStatus {
    */
   retention: DaemonRetentionStatus;
   sessions: DaemonSessionsStatus;
+  /**
+   * The `orchestrator.routing` switches a client renders against. Today that
+   * is one: §5.6c's experimental replay resume. The flag lives in the
+   * daemon's `daemon.toml`, so the daemon is what says — the alternative is a
+   * `Resume` control whose only possible answer is `409 RESUME_DISABLED`.
+   */
+  routing: DaemonRoutingStatus;
+}
+
+export interface DaemonRoutingStatus {
+  /**
+   * Whether this daemon would honour `{"action":"resume"}` on an
+   * `interrupted` run. Off unless a `daemon.toml` turns it on.
+   */
+  resume_enabled: boolean;
 }
 
 export interface DaemonRetentionStatus {

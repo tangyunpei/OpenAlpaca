@@ -175,7 +175,9 @@ export async function startTaskNow(id: string): Promise<TaskActionResponse> {
  * `TASK_NOT_RERUNNABLE` and `TASK_NOT_DISPATCHABLE` — so the daemon says which
  * without the client having to remember what it asked. `TASK_NOT_STARTABLE` is
  * a different refusal at a different status (409, R43): the run is over, and
- * `Re-run` is the way to run it again.
+ * `Re-run` is the way to run it again. §5.6c's three resume refusals are here
+ * for the same reason — `Resume` on an interrupted run is a launch verb, not a
+ * transition, and `Re-run` is what every one of them points back at.
  *
  * An unrecognised code falls back to the daemon's own message rather than to a
  * shrug.
@@ -197,6 +199,15 @@ export function launchErrorMessage(error: unknown): string {
         return "No agent is free to lead a run right now — try again shortly.";
       case "NOT_FOUND":
         return "That run no longer exists — nothing was started.";
+      // §5.6c's replay resume. It is experimental and off by default, so the
+      // first of these has to name the switch: "resume is disabled" with no
+      // key is a dead end for whoever reads the toast.
+      case "RESUME_DISABLED":
+        return "Replay resume is experimental and off — set resume_enabled under [orchestrator.routing] in daemon.toml, or use Re-run.";
+      case "TASK_NOT_RESUMABLE":
+        return "Only an interrupted run can be resumed — use Re-run for this one.";
+      case "RESUME_LOG_MISSING":
+        return "That run's transcript is gone, so there is nothing to resume from — use Re-run.";
       default:
         break;
     }

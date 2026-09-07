@@ -30,6 +30,18 @@
  * it carries no `gap` and stays out of the unavailable-actions footnote.
  *
  * `Cancel` / `Pause` / `Resume` are real and wired to `POST /v1/tasks/{id}/action`.
+ *
+ * `Resume` is two controls sharing one id, because the daemon's verb is two
+ * verbs sharing one word. On a **paused** run it is the plain transition back
+ * to running, on the live action bar, as it has always been. On an
+ * **interrupted** one it is §5.6c's replay resume: the daemon rebuilds the
+ * run's loop history from its session log and continues it under the same id.
+ * That second one is experimental and off by default, so it appears on the
+ * terminal banner only when `GET /v1/status` reports
+ * `routing.resume_enabled` — the flag lives in the daemon's `daemon.toml`, so
+ * guessing here would mean a button whose only possible answer is
+ * `409 RESUME_DISABLED`. It is a property of the daemon, not a missing API, so
+ * like `steerable` it carries no `gap`.
  */
 
 import type { UiStatus } from "@/components/ui";
@@ -145,11 +157,30 @@ export function liveRunActions(
   ];
 }
 
-/** The terminal banner's two controls (§3.26). The card shows only `Re-run`. */
-export function terminalRunActions(): RunActionDescriptor[] {
+/**
+ * The terminal banner's controls (§3.26). The card shows only `Re-run`.
+ *
+ * `resumable` adds §5.6c's `Resume` ahead of it, and is deliberately two
+ * conditions rather than one: the run has to be `interrupted` — the only
+ * status the daemon will replay — *and* this daemon has to have the
+ * experimental flag on (`GET /v1/status`'s `routing.resume_enabled`).
+ * Offering it otherwise would put a control on the card whose only possible
+ * answer is `409 RESUME_DISABLED`, and hiding it when it works would leave a
+ * recovered transcript unreachable. `Re-run` stays beside it either way — it
+ * is the fallback every resume refusal points back at.
+ */
+export function terminalRunActions(resumable = false): RunActionDescriptor[] {
+  const rerun: RunActionDescriptor = {
+    id: "rerun",
+    label: "Re-run",
+    tone: "secondary",
+    enabled: true,
+  };
+  if (!resumable) return [JUMP, rerun];
   return [
     JUMP,
-    { id: "rerun", label: "Re-run", tone: "secondary", enabled: true },
+    { id: "resume", label: "Resume", tone: "secondary", enabled: true },
+    rerun,
   ];
 }
 
@@ -157,15 +188,18 @@ export function terminalRunActions(): RunActionDescriptor[] {
 export function runActions(
   status: UiStatus,
   steerReason: string | null = null,
+  resumeEnabled = false,
 ): RunActionDescriptor[] {
   // `interrupted` (§5.6b) is terminal, so it gets the terminal bar — and that
   // bar's `Re-run` is exactly the restart the daemon allows: `start` refuses a
-  // finished row (R43), `rerun` copies the goal onto a new id.
+  // finished row (R43), `rerun` copies the goal onto a new id. §5.6c adds
+  // `Resume` there, and only there: a run that *chose* to stop has nothing to
+  // continue from.
   return status === "done" ||
     status === "cancelled" ||
     status === "failed" ||
     status === "interrupted"
-    ? terminalRunActions()
+    ? terminalRunActions(status === "interrupted" && resumeEnabled)
     : liveRunActions(status, steerReason);
 }
 

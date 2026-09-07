@@ -105,6 +105,7 @@ function status(overrides: Partial<DaemonStatus> = {}): DaemonStatus {
       log_retention_days: 0,
     },
     sessions: { last_sweep: null, dropped_records: 0 },
+    routing: { resume_enabled: false },
     ...overrides,
   };
 }

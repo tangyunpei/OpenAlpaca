@@ -202,6 +202,32 @@ describe("actionToast", () => {
     expect(runActions("interrupted").every((a) => a.enabled)).toBe(true);
   });
 
+  /**
+   * §5.6c — replay resume is experimental and off by default, so the control
+   * only appears when the daemon says it would honour it (`GET /v1/status`'s
+   * `routing.resume_enabled`). Offering it otherwise would put a button on the
+   * card whose only possible answer is `409 RESUME_DISABLED`.
+   */
+  it("offers Resume on an interrupted run only when the daemon allows it", () => {
+    expect(runActions("interrupted", null, true).map((a) => a.id)).toEqual([
+      "jump",
+      "resume",
+      "rerun",
+    ]);
+    expect(runActions("interrupted", null, false).map((a) => a.id)).toEqual([
+      "jump",
+      "rerun",
+    ]);
+    // The flag alone is not the condition: only an interrupted run is
+    // resumable, and `Re-run` stays beside it as the fallback either way.
+    for (const status of ["done", "failed", "cancelled"] as const) {
+      expect(runActions(status, null, true).map((a) => a.id)).toEqual([
+        "jump",
+        "rerun",
+      ]);
+    }
+  });
+
   it("uses §4.4's copy for the three real verbs", () => {
     expect(actionToast("pause", "Connector audit")).toBe(
       "Connector audit paused",

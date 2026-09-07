@@ -28,6 +28,7 @@
 import { useMemo } from "react";
 
 import { PaneHeader } from "@/components/ui";
+import { useResumeEnabled } from "@/hooks/useConnection";
 import { useTasks } from "@/hooks/useTasks";
 import { useTaskTimeline } from "@/hooks/useTasks";
 import { Button } from "@/components/ui";
@@ -87,6 +88,7 @@ export function WorkPane({
   const closeWorkPane = useUiStore((s) => s.closeWorkPane);
   const openSidePanel = useUiStore((s) => s.openSidePanel);
   const controller = useRunController();
+  const resumeEnabled = useResumeEnabled();
 
   const query = useTasks({ limit: RUN_WINDOW });
   const tasks = query.data;
@@ -148,6 +150,7 @@ export function WorkPane({
               dense={dense}
               blocked={blockedRunId !== null && blockedRunId === run.id}
               controller={controller}
+              resumeEnabled={resumeEnabled}
               onOpenFile={openFile}
             />
           ))
@@ -162,6 +165,7 @@ interface RunCardSlotProps {
   dense: boolean;
   blocked: boolean;
   controller: RunController;
+  resumeEnabled: boolean;
   onOpenFile: (artifact: OutcomeArtifact) => void;
 }
 
@@ -175,6 +179,7 @@ function RunCardSlot({
   dense,
   blocked,
   controller,
+  resumeEnabled,
   onOpenFile,
 }: RunCardSlotProps) {
   const timeline = useTaskTimeline(run.id);
@@ -194,6 +199,7 @@ function RunCardSlot({
       onOpenFile={(artifact) => onOpenFile(artifact)}
       onAllFiles={controller.openRunFiles}
       filesNote={unopenable ? FILES_NOTE : null}
+      resumeEnabled={resumeEnabled}
     />
   );
 }

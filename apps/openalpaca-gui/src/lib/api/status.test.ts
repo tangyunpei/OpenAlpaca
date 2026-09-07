@@ -51,6 +51,7 @@ const STATUS: DaemonStatus = {
     },
     dropped_records: 0,
   },
+  routing: { resume_enabled: false },
 };
 
 let requests: { url: string; headers: Headers }[] = [];

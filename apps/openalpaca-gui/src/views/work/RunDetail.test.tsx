@@ -334,3 +334,85 @@ describe("RunDetail — interrupted banner", () => {
     expect(screen.getByRole("button", { name: "Re-run" })).toBeInTheDocument();
   });
 });
+
+describe("RunDetail — §5.6c Resume", () => {
+  /** Every route the detail asks for, with `/v1/status` under our control. */
+  function stubFetch(resumeEnabled: boolean) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        requested.push(url);
+        if (url.includes("/v1/status")) {
+          return json({
+            home_root: "/home/.openalpaca",
+            state_dir: "/home/.openalpaca/state",
+            db_path: "/home/.openalpaca/state/openalpaca.db",
+            project_root: null,
+            started_at: "2026-09-05T09:00:00Z",
+            uptime_secs: 10,
+            schema_version: 39,
+            log_path: null,
+            upload_bytes: 0,
+            produced_bytes: 0,
+            retention: {
+              log_max_session_bytes: 1,
+              log_max_total_bytes: 1,
+              log_retention_days: 0,
+            },
+            sessions: { last_sweep: null, dropped_records: 0 },
+            routing: { resume_enabled: resumeEnabled },
+          });
+        }
+        if (url.includes("/v1/events/history")) return eventsReply();
+        if (url.includes("/v1/artifacts")) return artifactsReply();
+        if (url.includes("/timeline")) {
+          return json({
+            task_id: "task-1",
+            started_at: "2026-08-31T14:22:41Z",
+            now: "2026-08-31T14:32:41Z",
+            completed_at: null,
+            lanes: [],
+          });
+        }
+        if (url.includes("/v1/tasks/")) {
+          return json({ task: { ...task, status: "interrupted" } });
+        }
+        return json({ error: "not found" }, 404);
+      }),
+    );
+  }
+
+  /**
+   * The control is the daemon's to allow. S2 is experimental and off by
+   * default, so a button whose only possible answer is `409 RESUME_DISABLED`
+   * must not be on the banner — the daemon says, and this is where it is
+   * asked.
+   */
+  it("hides Resume while the daemon reports the flag off", async () => {
+    stubFetch(false);
+    renderDetail();
+
+    expect(
+      await screen.findByRole("button", { name: "Re-run" }),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(requested.some((url) => url.includes("/v1/status"))).toBe(true),
+    );
+    expect(
+      screen.queryByRole("button", { name: "Resume" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("offers Resume beside Re-run once the daemon reports it enabled", async () => {
+    stubFetch(true);
+    renderDetail();
+
+    expect(
+      await screen.findByRole("button", { name: "Resume" }),
+    ).toBeInTheDocument();
+    // Never instead of `Re-run`: it is the fallback every resume refusal
+    // points back at.
+    expect(screen.getByRole("button", { name: "Re-run" })).toBeInTheDocument();
+  });
+});

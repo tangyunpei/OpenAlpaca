@@ -58,6 +58,12 @@ export interface RunCardProps {
   onAllFiles?: (run: Run) => void;
   /** Muted line under the file rows — the reason they cannot be opened. */
   filesNote?: string | null;
+  /**
+   * Whether this daemon would honour §5.6c's replay resume. A prop, not a
+   * hook, so the card stays renderable without a query client — the view that
+   * owns the run list reads it once (`useResumeEnabled`) and passes it down.
+   */
+  resumeEnabled?: boolean;
   className?: string;
 }
 
@@ -72,12 +78,13 @@ export function RunCard({
   onOpenFile,
   onAllFiles,
   filesNote,
+  resumeEnabled = false,
   className,
 }: RunCardProps) {
   const raised = isRaisedRun(run.status);
   const terminal = isTerminalRun(run.status);
   const actions = terminal
-    ? terminalRunActions()
+    ? terminalRunActions(run.status === "interrupted" && resumeEnabled)
     : liveRunActions(run.status, steerDisabledReason(run));
   const rerun = actions.find((action) => action.id === "rerun");
   const visible = run.artifacts.slice(0, MAX_FILE_ROWS);

@@ -26,6 +26,7 @@ import {
 } from "@/lib/connection";
 import { daemonEvents, type EventsStatus } from "@/lib/events";
 import { qk } from "@/lib/query-keys";
+import { useProjectStore } from "@/stores/project";
 
 /** The cached `ConnectionInfo`, kept in sync with the connection module. */
 export function useConnectionInfo(): ConnectionInfo | null {
@@ -68,6 +69,25 @@ export function useDaemonStatus(
     refetchInterval: 30_000,
     staleTime: 10_000,
   });
+}
+
+/**
+ * Whether this daemon would honour §5.6c's replay resume on an `interrupted`
+ * run — `GET /v1/status`'s `routing.resume_enabled`.
+ *
+ * It reads the *same* query the Connection panel does, keyed by this window's
+ * project, so asking it from a run card costs nothing beyond a cache read.
+ *
+ * The default is `false` on every uncertainty — still loading, the request
+ * failed, or a daemon too old to send the field — because the failure modes
+ * are not symmetric: a hidden control that should have been there is a
+ * missing affordance, while a shown one that should not have been is a button
+ * whose only possible answer is `409 RESUME_DISABLED`.
+ */
+export function useResumeEnabled(): boolean {
+  const projectPath = useProjectStore((s) => s.path);
+  const status = useDaemonStatus(projectPath);
+  return status.data?.routing?.resume_enabled === true;
 }
 
 export interface ConnectionStatus {
