@@ -28,8 +28,8 @@
 //! Nothing here re-bases on its own. The `PATCH` is the only writer, and it
 //! refuses rather than guesses: `404` when no row names the old root, `409`
 //! when rows already name the new one (two projects must not merge silently),
-//! `409` while a run under the old root is in flight, and `409` when the store
-//! directory itself cannot be moved.
+//! `409` while a run under the old root is in flight, `409` when either root is
+//! the home store, and `409` when the store directory itself cannot be moved.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -43,6 +43,8 @@ use axum::{
 use openalpaca_storage::store::{self, migrate};
 use openalpaca_storage::{ArtifactStore, Database, RebaseCounts, WorkspaceRows};
 use serde::Deserialize;
+
+use openalpaca_core::memory::scope_context::resolves_to_the_home_store;
 
 use super::{api_error, request_project_root};
 use crate::AppState;
@@ -90,11 +92,34 @@ fn resolve_root(input: &str) -> Result<String, Response> {
     let resolved = canonical.as_deref().unwrap_or(path);
     let text = resolved.to_string_lossy();
     // `/repo/` and `/repo` are one project; a bare root keeps its separator.
-    let trimmed_text = text.trim_end_matches('/');
-    Ok(match trimmed_text.is_empty() {
+    let without_slash = text.trim_end_matches('/');
+    Ok(match without_slash.is_empty() {
         true => text.to_string(),
-        false => trimmed_text.to_string(),
+        false => without_slash.to_string(),
     })
+}
+
+/// The home store is not a project and never becomes one (R24, and the fold in
+/// `memory::scope_context`): its artifacts directory is one identity space, and
+/// a project re-based onto it would share that directory with the home scope —
+/// where a later home-scope `put` sees those rows as belonging to no address of
+/// its own and removes the files (§4.2).
+///
+/// Both roots are checked, because a re-base *out of* `$HOME` would record the
+/// home store as a project just as surely.
+#[allow(clippy::result_large_err)]
+fn refuse_the_home_root(field: &str, root: &str) -> Result<(), Response> {
+    if !resolves_to_the_home_store(Path::new(root)) {
+        return Ok(());
+    }
+    Err(api_error(
+        StatusCode::CONFLICT,
+        "WORKSPACE_IS_HOME",
+        format!(
+            "{field} resolves to {root}, which is the home store — that is not a project and \
+             cannot be one. Name the project directory itself"
+        ),
+    ))
 }
 
 // ── Serialisation ────────────────────────────────────────────────
@@ -198,6 +223,11 @@ pub(crate) fn rebase_workspace(db: &Database, request: RebaseRequest) -> Respons
         Ok(root) => root,
         Err(response) => return response,
     };
+    for (field, root) in [("old_path", &old_root), ("new_path", &new_root)] {
+        if let Err(response) = refuse_the_home_root(field, root) {
+            return response;
+        }
+    }
     if old_root == new_root {
         return api_error(
             StatusCode::BAD_REQUEST,

@@ -22,6 +22,7 @@
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use colored::Colorize;
+use openalpaca_core::memory::scope_context::resolves_to_the_home_store;
 use serde::{Deserialize, Serialize};
 
 use crate::client::DaemonClient;
@@ -161,6 +162,22 @@ fn print_plan(from: &WorkspaceView, to: &WorkspaceView) {
         to.path
     );
     println!("  {}", from.rows.describe());
+
+    // Advisory: this reads *this* process's home root, which is the daemon's on
+    // the machine they share. The daemon is what actually refuses.
+    for (label, view) in [("the old path", from), ("the new path", to)] {
+        if resolves_to_the_home_store(std::path::Path::new(&view.path)) {
+            println!(
+                "  {}",
+                format!(
+                    "{label} resolves to {}, which is the home store rather than a project; \
+                     the re-base would be refused",
+                    view.path
+                )
+                .yellow()
+            );
+        }
+    }
 
     if from.rows.is_empty() {
         println!(

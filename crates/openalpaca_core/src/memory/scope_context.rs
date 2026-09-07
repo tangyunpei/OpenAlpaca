@@ -35,7 +35,12 @@ use openalpaca_storage::store::{self, StoreScope};
 ///
 /// A real project under the home directory — anything with its own marker —
 /// is untouched.
-fn resolves_to_the_home_store(root: &Path) -> bool {
+///
+/// Public because the fold is a *rule*, not a detail of this struct: a re-base
+/// (`PATCH /v1/workspaces`) refuses either root that answers `true` here, for
+/// the same reason placement folds it — the home store's artifacts directory
+/// belongs to one identity space, and a project pointed at it would share it.
+pub fn resolves_to_the_home_store(root: &Path) -> bool {
     let Ok(home) = store::home_root() else {
         // No home directory to compare against: leave the root alone rather
         // than silently demoting every request to the home store.

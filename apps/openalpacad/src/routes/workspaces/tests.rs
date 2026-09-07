@@ -34,7 +34,16 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let home = tempfile::tempdir().expect("home root");
-        let env = HomeStoreGuard::set(&home.path().canonicalize().expect("canonicalize home"));
+        // The home root is `<tmp>/.openalpaca`, exactly as it is in a real
+        // install — so `<tmp>` stands in for `$HOME` and both shapes of the
+        // home fold are reachable from a test.
+        let home_store = home
+            .path()
+            .canonicalize()
+            .expect("canonicalize home")
+            .join(store::STORE_DIR_NAME);
+        std::fs::create_dir_all(&home_store).expect("home store");
+        let env = HomeStoreGuard::set(&home_store);
         let projects = tempfile::tempdir().expect("projects");
         let db_dir = tempfile::tempdir().expect("db dir");
         let db = Database::open(&db_dir.path().join("test.db")).expect("open db");
@@ -120,6 +129,27 @@ impl Fixture {
             },
         ))
         .await
+    }
+
+    /// The home store root itself — `~/.openalpaca`.
+    fn home_store(&self) -> String {
+        self._home
+            .path()
+            .canonicalize()
+            .expect("canonicalize home")
+            .join(store::STORE_DIR_NAME)
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// `$HOME`: the directory whose project store *is* the home store.
+    fn home(&self) -> String {
+        self._home
+            .path()
+            .canonicalize()
+            .expect("canonicalize home")
+            .to_string_lossy()
+            .into_owned()
     }
 }
 
@@ -305,6 +335,31 @@ async fn two_stores_block_the_re_base_before_the_transaction() {
         old_body["rows"]["artifacts"], 1,
         "the rows are untouched — the move is decided first"
     );
+}
+
+#[tokio::test]
+async fn re_basing_to_or_from_the_home_store_is_a_409() {
+    let f = Fixture::new();
+    let old = f.project("old-project");
+    f.artifact(&old, "Notes");
+
+    // Both shapes of the fold: the home store root itself, and the `$HOME`
+    // whose project store *is* that root.
+    for destination in [f.home_store(), f.home()] {
+        let (status, body) = f.patch(&old, &destination).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{destination}: {body}");
+        assert_eq!(error_code(&body), "WORKSPACE_IS_HOME", "{destination}");
+    }
+
+    // And as the source, which would record the home store as a project just
+    // as surely.
+    let new = f.bare_dir("new-project");
+    let (status, body) = f.patch(&f.home(), &new).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error_code(&body), "WORKSPACE_IS_HOME");
+
+    let (_, old_body) = f.get(Some(&old)).await;
+    assert_eq!(old_body["rows"]["artifacts"], 1, "nothing moved");
 }
 
 #[tokio::test]
