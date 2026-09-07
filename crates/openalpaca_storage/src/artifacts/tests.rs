@@ -836,35 +836,46 @@ fn a_put_after_an_interrupted_head_rename_never_rotates_over_v1() {
 }
 
 #[test]
-fn an_interrupted_head_rename_leaves_v1_readable_without_a_put() {
-    // The same interrupted state, read rather than written: `resolve_content`
-    // and `verify` must find everything present and destroy nothing.
+fn an_interrupted_head_rename_leaves_v1_readable_and_records_the_orphaned_head() {
+    // The same interrupted state, read rather than written. The head holds
+    // bytes no completed write left there, so its hash does not match v1's row
+    // — §4.8's hand-edit rotation, which repairs v1's row (it was claiming the
+    // head path) and preserves the orphaned bytes as v2 rather than letting the
+    // next put discard them. Nothing on disk is destroyed either way.
     let (f, dir, id) = crash_during_second_put(WriteStep::HeadRenamed);
 
     let root = f.project_root().to_string_lossy().to_string();
+    let report = f.store().verify(Some(&root)).unwrap();
     assert_eq!(
-        f.store().verify(Some(&root)).unwrap(),
-        0,
+        report.missing, 0,
         "the head is present, so nothing is marked missing"
     );
+    assert_eq!(report.user_edits.len(), 1, "the orphaned head is recorded");
+    assert_eq!(report.user_edits[0].version, 2);
+
     let record = f.store().get(&id, OWNER).unwrap().unwrap();
     assert!(!record.missing());
-    assert_eq!(record.version, 1);
+    assert_eq!(record.version, 2);
+    assert_eq!(record.sha256, sha256_hex(b"new\n"));
 
-    // v1 *is* the current version, so it resolves to the head — whose bytes the
-    // interrupted put replaced. That stale sha is §4.8's hand-edit row (the
-    // next put or `verify` records it as a version — Phase 8). What must not
-    // happen is the loss of v1's bytes: they are whole under `.versions/`.
     let head = f.store().resolve_content(&id, None).unwrap();
     assert_eq!(head, dir.join("01-notes.md"));
-    assert_eq!(f.store().resolve_content(&id, Some(1)).unwrap(), head);
+    assert_eq!(fs::read_to_string(&head).unwrap(), "new\n");
+
+    // v1's row now points where v1's bytes actually are, so reading it serves
+    // them instead of another version's.
+    let v1 = f.store().resolve_content(&id, Some(1)).unwrap();
+    assert_eq!(v1, dir.join(".versions/01-notes/v1.md"));
+    assert_eq!(fs::read_to_string(&v1).unwrap(), "old\n");
+
+    let rows = f.store().versions(&id).unwrap();
+    let v2 = rows.iter().find(|r| r.version == 2).unwrap();
+    assert_eq!(v2.author_agent_id, None);
+    assert_eq!(v2.note.as_deref(), Some(USER_EDIT_NOTE));
+    // The previous version's bytes survived, so the counts are real.
+    assert_eq!((v2.added_lines, v2.removed_lines), (Some(1), Some(1)));
     assert_eq!(
-        fs::read_to_string(dir.join(".versions/01-notes/v1.md")).unwrap(),
-        "old\n",
-        "reads must not disturb the committed v1 bytes"
-    );
-    assert_eq!(
-        f.store().versions(&id).unwrap()[0].sha256,
+        rows.iter().find(|r| r.version == 1).unwrap().sha256,
         sha256_hex(b"old\n")
     );
     assert_no_tmp_leftovers(&dir);
@@ -1256,12 +1267,12 @@ fn verify_counts_and_marks_the_missing_rows_under_a_root() {
     let (c, _) = f.store().put(c).unwrap();
 
     let root = f.project_root().to_string_lossy().to_string();
-    assert_eq!(f.store().verify(Some(&root)).unwrap(), 0);
+    assert_eq!(f.store().verify(Some(&root)).unwrap().missing, 0);
 
     fs::remove_file(&a.storage_path).unwrap();
     fs::remove_file(&c.storage_path).unwrap();
 
-    assert_eq!(f.store().verify(Some(&root)).unwrap(), 1);
+    assert_eq!(f.store().verify(Some(&root)).unwrap().missing, 1);
     assert!(f.store().get(&a.id, OWNER).unwrap().unwrap().missing());
     assert!(!f.store().get(&b.id, OWNER).unwrap().unwrap().missing());
     assert!(
@@ -1270,11 +1281,233 @@ fn verify_counts_and_marks_the_missing_rows_under_a_root() {
     );
 
     // Idempotent: a second pass still reports the same count.
-    assert_eq!(f.store().verify(Some(&root)).unwrap(), 1);
+    assert_eq!(f.store().verify(Some(&root)).unwrap().missing, 1);
 
     // None sweeps every root.
-    assert_eq!(f.store().verify(None).unwrap(), 2);
+    assert_eq!(f.store().verify(None).unwrap().missing, 2);
     assert!(f.store().get(&c.id, OWNER).unwrap().unwrap().missing());
+}
+
+// ============================================================================
+// The hand edit (§4.8) — user-edit detection as a version
+// ============================================================================
+
+/// Restores the rotation crash hook even if the test panics mid-assertion.
+struct RotateCrashGuard;
+
+impl RotateCrashGuard {
+    fn after(step: RotateStep) -> Self {
+        crash_rotate_after(step);
+        Self
+    }
+}
+
+impl Drop for RotateCrashGuard {
+    fn drop(&mut self) {
+        clear_rotate_crash();
+    }
+}
+
+/// One artifact at v1, with its head overwritten by hand.
+fn hand_edited(body: &str) -> (Fixture, ArtifactRecord) {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"one\ntwo\n");
+    new.created = at(1);
+    let (record, _) = f.store().put(new).unwrap();
+    fs::write(&record.storage_path, body).unwrap();
+    (f, record)
+}
+
+#[test]
+fn a_read_records_a_hand_edited_head_as_a_version_authored_by_nobody() {
+    let (f, v1) = hand_edited("one\ntwo\nthree\n");
+
+    let (path, edit) = f.store().resolve_content_with_edit(&v1.id, None).unwrap();
+    assert_eq!(path, PathBuf::from(&v1.storage_path));
+    let edit = edit.expect("the edit is reported so the daemon can announce it");
+    assert_eq!(edit.version, 2);
+    assert_eq!(edit.sha256, sha256_hex(b"one\ntwo\nthree\n"));
+    assert_eq!(edit.size_bytes, 14);
+    assert_eq!(edit.version_count, 2);
+    assert!(!edit.missing());
+
+    let rows = f.store().versions(&v1.id).unwrap();
+    assert_eq!(rows.len(), 2);
+    let v2 = &rows[0];
+    assert_eq!(v2.version, 2);
+    assert_eq!(v2.author_agent_id, None, "nobody in OpenAlpaca wrote it");
+    assert_eq!(v2.note.as_deref(), Some(USER_EDIT_NOTE));
+    assert_eq!(v2.rel_path, v1.rel_path.clone().unwrap());
+    // The bytes v2 replaced were overwritten in place, so there is nothing to
+    // count against — the same `NULL` a put records when v(N-1) is gone.
+    assert_eq!((v2.added_lines, v2.removed_lines), (None, None));
+
+    // v1's row points at the slot its bytes would have been rotated into.
+    // Nothing is there, and saying so is the truth about a file edited in place.
+    assert_eq!(rows[1].rel_path, "loose/2026-09-01/.versions/01-notes/v1.md");
+    let err = f.store().resolve_content(&v1.id, Some(1)).unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<ArtifactError>().unwrap().code(),
+        "ARTIFACT_GONE"
+    );
+}
+
+#[test]
+fn the_hand_edit_is_recorded_exactly_once() {
+    let (f, v1) = hand_edited("edited\n");
+
+    assert!(
+        f.store()
+            .resolve_content_with_edit(&v1.id, None)
+            .unwrap()
+            .1
+            .is_some()
+    );
+    // Every later read finds the bytes the row now describes.
+    for _ in 0..3 {
+        assert!(
+            f.store()
+                .resolve_content_with_edit(&v1.id, None)
+                .unwrap()
+                .1
+                .is_none()
+        );
+    }
+    let root = f.project_root().to_string_lossy().to_string();
+    assert!(f.store().verify(Some(&root)).unwrap().user_edits.is_empty());
+    assert_eq!(f.store().versions(&v1.id).unwrap().len(), 2);
+}
+
+#[test]
+fn verify_records_the_hand_edits_it_finds() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut a = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Alpha", b"a\n");
+    a.created = at(1);
+    let (a, _) = f.store().put(a).unwrap();
+    let mut b = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Beta", b"b\n");
+    b.created = at(1);
+    let (b, _) = f.store().put(b).unwrap();
+
+    fs::write(&a.storage_path, "a edited\n").unwrap();
+
+    let root = f.project_root().to_string_lossy().to_string();
+    let report = f.store().verify(Some(&root)).unwrap();
+    assert_eq!(report.missing, 0);
+    assert_eq!(report.user_edits.len(), 1);
+    assert_eq!(report.user_edits[0].id, a.id);
+    assert_eq!(report.user_edits[0].version, 2);
+
+    assert_eq!(f.store().get(&b.id, OWNER).unwrap().unwrap().version, 1);
+}
+
+#[test]
+fn a_missing_head_is_never_rotated() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"body\n");
+    new.created = at(1);
+    let (record, _) = f.store().put(new).unwrap();
+
+    // Absent bytes: the sweep marks the row and records no edit.
+    fs::remove_file(&record.storage_path).unwrap();
+    let root = f.project_root().to_string_lossy().to_string();
+    let report = f.store().verify(Some(&root)).unwrap();
+    assert_eq!(report.missing, 1);
+    assert!(report.user_edits.is_empty());
+    assert!(f.store().get(&record.id, OWNER).unwrap().unwrap().missing());
+
+    // The bytes come back, different — and the row is still `missing`, which
+    // only a put clears. A missing head is never rotated (§4.8): the version
+    // history of a row whose bytes went away and returned is the writer's to
+    // re-establish, not the reader's.
+    fs::write(&record.storage_path, "restored by hand\n").unwrap();
+    let report = f.store().verify(Some(&root)).unwrap();
+    assert!(report.user_edits.is_empty());
+    assert_eq!(f.store().get(&record.id, OWNER).unwrap().unwrap().version, 1);
+    assert_eq!(f.store().versions(&record.id).unwrap().len(), 1);
+}
+
+#[test]
+fn an_upload_is_never_rotated() {
+    let f = Fixture::new();
+    let dir = f.artifacts_root().join("loose/2026-09-01");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("01-notes.md");
+    fs::write(&path, "uploaded\n").unwrap();
+    f.foreign_row("upload-1", "loose/2026-09-01/01-notes.md", &path);
+
+    // `foreign_row` writes sha 'sha', which no bytes hash to — so the only
+    // thing keeping this row out of the rotation is its origin.
+    assert!(
+        f.store()
+            .resolve_content_with_edit("upload-1", None)
+            .unwrap()
+            .1
+            .is_none()
+    );
+    assert_eq!(f.store().versions("upload-1").unwrap().len(), 0);
+}
+
+#[test]
+fn a_crash_between_the_rotation_steps_records_nothing() {
+    for step in [RotateStep::PreviousRepointed, RotateStep::VersionInserted] {
+        let (f, v1) = hand_edited("edited\n");
+        {
+            let _crash = RotateCrashGuard::after(step);
+            let err = f
+                .store()
+                .resolve_content_with_edit(&v1.id, None)
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("simulated crash"),
+                "expected the injected failure at {step:?}, got: {err}"
+            );
+        }
+
+        // The transaction rolled back: the row, the version history and v1's
+        // own rel_path are all exactly as they were.
+        let after = f.store().get(&v1.id, OWNER).unwrap().unwrap();
+        assert_eq!(after.version, 1, "{step:?}");
+        assert_eq!(after.sha256, v1.sha256, "{step:?}");
+        assert_eq!(after.version_count, 1, "{step:?}");
+        let rows = f.store().versions(&v1.id).unwrap();
+        assert_eq!(rows.len(), 1, "{step:?}");
+        assert_eq!(rows[0].rel_path, v1.rel_path.clone().unwrap(), "{step:?}");
+
+        // And the next read records the edit exactly once.
+        let edit = f
+            .store()
+            .resolve_content_with_edit(&v1.id, None)
+            .unwrap()
+            .1
+            .expect("the retry records it");
+        assert_eq!(edit.version, 2, "{step:?}");
+        assert_eq!(f.store().versions(&v1.id).unwrap().len(), 2, "{step:?}");
+    }
+}
+
+#[test]
+fn a_put_after_a_recorded_hand_edit_supersedes_it() {
+    let (f, v1) = hand_edited("mine\n");
+    f.store().resolve_content(&v1.id, None).unwrap();
+
+    let scope = f.scope();
+    let mut third = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"theirs\n");
+    third.created = at(1);
+    third.agent_id = Some("writer::1");
+    let (record, created) = f.store().put(third).unwrap();
+    assert!(!created);
+    assert_eq!(record.version, 3);
+
+    let rows = f.store().versions(&v1.id).unwrap();
+    assert_eq!(rows[0].version, 3);
+    assert_eq!(rows[0].author_agent_id.as_deref(), Some("writer::1"));
+    // v2 — the hand edit — kept its bytes: the put rotated them into the slot.
+    let v2 = f.store().resolve_content(&v1.id, Some(2)).unwrap();
+    assert_eq!(fs::read_to_string(v2).unwrap(), "mine\n");
+    assert_eq!((rows[0].added_lines, rows[0].removed_lines), (Some(1), Some(1)));
 }
 
 // ============================================================================

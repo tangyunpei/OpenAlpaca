@@ -91,6 +91,45 @@
 //! Within the process the reclaim is never needed: [`HeadReservation`]'s `Drop`
 //! removes the file on every path out of `put` but the committed one. It exists
 //! for the crash that ends the process between the two.
+//!
+//! ## The hand edit (§4.8, "User edits a file by hand")
+//!
+//! Editing a produced file by hand is *the point* of putting artifacts in the
+//! project rather than in an opaque blob store, so the store records the edit
+//! instead of resenting it. [`ArtifactStore::verify`] (the sweep) and
+//! [`ArtifactStore::resolve_content`] (every read) hash the head and compare it
+//! with the row: a difference is a version this system did not write, and
+//! [`rotate_user_edit`] records it as one — `author_agent_id = NULL`, `note =`
+//! [`USER_EDIT_NOTE`].
+//!
+//! **The rotation moves no bytes.** It cannot: a hand edit overwrites the head
+//! *in place*, so version N's bytes are already gone by the time anything
+//! notices, and the only honest record is
+//!
+//! | Row | After the rotation |
+//! |---|---|
+//! | the head (`file_assets`) | `version = N+1`, `sha256`/`size_bytes` of the bytes on disk |
+//! | `artifact_versions` N+1 | the head's own `rel_path`, `author_agent_id = NULL` |
+//! | `artifact_versions` N | re-pointed at `.versions/<stem>/v<N>.<ext>` — where its bytes *would* have been kept had OpenAlpaca written N+1 itself. Nothing is there, so reading v(N) is [`ArtifactError::Gone`], which is the truth. |
+//!
+//! So the whole rotation is one transaction and there is nothing to unlink,
+//! which is the strongest form of "rows before any unlink". `added_lines` /
+//! `removed_lines` go through the same [`line_counts`] path a `put` uses,
+//! against the same thing — the bytes version N's row now points at — and land
+//! `NULL` for the same reason a `put` does when v(N-1)'s bytes are gone, which
+//! after an in-place hand edit they are.
+//!
+//! A **missing** head is never rotated: `missing_since` set, or no file at all,
+//! means there are no bytes to record.
+//!
+//! The *interrupted put* of the recovery table above reaches this the same way
+//! — the head holds bytes no completed write left there, so its hash does not
+//! match the row — and the outcome is right for it too: `.versions/<stem>/v<N>`
+//! genuinely holds version N's bytes, so re-pointing N's row at them **repairs**
+//! a row that was claiming the head, the line counts come out real rather than
+//! `NULL`, and the orphaned head is preserved as a version instead of being
+//! discarded by the next `put`. `author_agent_id = NULL` says exactly what is
+//! known about it: nobody committed to writing these bytes.
 
 use std::fmt;
 use std::fs;
@@ -118,6 +157,13 @@ pub const DEFAULT_MAX_VERSIONS_PER_ARTIFACT: u32 = 20;
 
 /// [`ArtifactQuery::limit`]'s default page size when the caller leaves it unset.
 pub const DEFAULT_LIST_LIMIT: i64 = 50;
+
+/// `artifact_versions.note` for a version this system did not write (§4.8).
+///
+/// Paired with `author_agent_id = NULL`, which is the column's documented
+/// meaning — "a human edited the file by hand" — so the Library can render the
+/// row as a user edit without parsing the note.
+pub const USER_EDIT_NOTE: &str = "edited outside OpenAlpaca";
 
 /// Unchanged lines kept either side of a change in [`ArtifactStore::diff`]'s
 /// patch — the unified-diff default, and what every diff viewer expects.
@@ -404,6 +450,18 @@ pub struct ArtifactVersionRow {
     pub created_at: String,
 }
 
+/// What one [`ArtifactStore::verify`] pass found.
+#[derive(Debug, Clone, Default)]
+pub struct VerifyReport {
+    /// How many produced rows under the swept root have no bytes — the running
+    /// total, not this pass's delta.
+    pub missing: usize,
+    /// The heads **this** pass found edited outside OpenAlpaca, each as the
+    /// record stands after the rotation. One `ArtifactWritten` (with a null
+    /// `agent_id`) per entry.
+    pub user_edits: Vec<ArtifactRecord>,
+}
+
 /// Field-for-field the `ArtifactDiff` of `unbacked.ts:72-79`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactDiff {
@@ -458,6 +516,46 @@ fn crash_point(step: WriteStep) -> Result<()> {
 #[cfg(not(test))]
 #[inline(always)]
 fn crash_point(_step: WriteStep) -> Result<()> {
+    Ok(())
+}
+
+/// The two row steps of [`rotate_user_edit`], named so a test can abort the
+/// rotation *between* them. They are inside one transaction, so an abort at
+/// either point must leave the store exactly as it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RotateStep {
+    /// After version N's row has been re-pointed at its `.versions/` slot.
+    PreviousRepointed,
+    /// After version N+1's row has been inserted.
+    VersionInserted,
+}
+
+#[cfg(test)]
+thread_local! {
+    static ROTATE_CRASH_AT: std::cell::Cell<Option<RotateStep>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn crash_rotate_after(step: RotateStep) {
+    ROTATE_CRASH_AT.with(|c| c.set(Some(step)));
+}
+
+#[cfg(test)]
+fn clear_rotate_crash() {
+    ROTATE_CRASH_AT.with(|c| c.set(None));
+}
+
+#[cfg(test)]
+fn rotate_crash_point(step: RotateStep) -> Result<()> {
+    if ROTATE_CRASH_AT.with(|c| c.get()) == Some(step) {
+        bail!("simulated crash after {step:?}");
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn rotate_crash_point(_step: RotateStep) -> Result<()> {
     Ok(())
 }
 
@@ -809,10 +907,41 @@ impl<'a> ArtifactStore<'a> {
     /// returns [`ArtifactError::Gone`], which the route renders as **410**. An
     /// absent *older* version is equally `Gone` but does not mark the row —
     /// `missing` describes the head, which may be perfectly fine.
+    ///
+    /// A read is also where a **hand edit** is noticed (see the module docs):
+    /// the head is hashed and, if its bytes are not the ones the row describes,
+    /// recorded as a version with `author_agent_id = NULL` before the path is
+    /// resolved. [`Self::resolve_content_with_edit`] is the same call for a
+    /// caller that wants to announce that.
     pub fn resolve_content(&self, id: &str, version: Option<u32>) -> Result<PathBuf> {
+        self.resolve_content_with_edit(id, version)
+            .map(|(path, _)| path)
+    }
+
+    /// [`Self::resolve_content`], reporting the hand edit it recorded.
+    ///
+    /// `Some(record)` is the head **after** the rotation — its `version` is the
+    /// new one — and is what the daemon turns into an `ArtifactWritten` with a
+    /// null `agent_id`. `None` is the ordinary read where the bytes on disk are
+    /// the bytes the row describes.
+    ///
+    /// The head is read once to hash it and once more by whoever serves the
+    /// path. That second read is the price of an exact answer: nothing else on
+    /// a `file_assets` row records when the bytes were last touched, and a
+    /// clock comparison would miss an edit made in the same second as the write
+    /// it replaced.
+    pub fn resolve_content_with_edit(
+        &self,
+        id: &str,
+        version: Option<u32>,
+    ) -> Result<(PathBuf, Option<ArtifactRecord>)> {
         self.db.with_connection(|conn| {
             let record = load_by_id(conn, id)?.ok_or_else(|| not_found(id))?;
-            resolve_version_path(conn, &record, version)
+            let edit = rotate_user_edit(conn, &record)?;
+            // Resolve against the rotated record: `version` numbers moved.
+            let current = edit.clone().unwrap_or(record);
+            let path = resolve_version_path(conn, &current, version)?;
+            Ok((path, edit))
         })
     }
 
@@ -973,49 +1102,74 @@ impl<'a> ArtifactStore<'a> {
 
     /// Re-stat every produced row under `project_root` (`Some("")` = the home
     /// store, `None` = every root), stamping `missing_since` on those whose
-    /// bytes are gone.
+    /// bytes are gone and recording as a version every head whose bytes were
+    /// edited outside OpenAlpaca (§4.8).
     ///
-    /// Returns how many rows are missing — not how many this pass newly marked
-    /// — so a status caller gets the same answer every time it asks.
-    pub fn verify(&self, project_root: Option<&str>) -> Result<usize> {
+    /// [`VerifyReport::missing`] is how many rows *are* missing — not how many
+    /// this pass newly marked — so a status caller gets the same answer every
+    /// time it asks. [`VerifyReport::user_edits`] is the opposite: the edits
+    /// **this** pass recorded, since each is a one-off event to announce, and a
+    /// second pass over the same store finds none.
+    ///
+    /// The missing sweep commits before the first rotation, and each rotation
+    /// is its own transaction, so a sweep that dies half way keeps everything
+    /// it had already recorded and the next one resumes from there.
+    pub fn verify(&self, project_root: Option<&str>) -> Result<VerifyReport> {
         self.db.with_connection(|conn| {
-            let tx = conn.unchecked_transaction()?;
-            let mut sql = String::from(
-                "SELECT id, storage_path, missing_since FROM file_assets WHERE origin = 'produced'",
-            );
+            let mut sql =
+                format!("SELECT {RECORD_COLUMNS} FROM file_assets WHERE origin = 'produced'");
             if project_root.is_some() {
                 sql.push_str(" AND COALESCE(project_root, '') = ?1");
             }
-            let rows: Vec<(String, String, Option<String>)> = {
-                let mut stmt = tx.prepare(&sql)?;
-                let mapped = match project_root {
+            let records: Vec<ArtifactRecord> = {
+                let mut stmt = conn.prepare(&sql)?;
+                let mut mapped = match project_root {
                     Some(root) => stmt.query(rusqlite::params![root])?,
                     None => stmt.query([])?,
                 };
-                let mut mapped = mapped;
                 let mut out = Vec::new();
                 while let Some(row) = mapped.next()? {
-                    out.push((row.get(0)?, row.get(1)?, row.get(2)?));
+                    out.push(row_to_record(row)?);
                 }
                 out
             };
 
+            let tx = conn.unchecked_transaction()?;
             let mut missing = 0usize;
-            for (id, storage_path, missing_since) in rows {
-                if Path::new(&storage_path).exists() {
+            let mut present: Vec<&ArtifactRecord> = Vec::new();
+            for record in &records {
+                if Path::new(&record.storage_path).exists() {
+                    present.push(record);
                     continue;
                 }
                 missing += 1;
-                if missing_since.is_none() {
+                if record.missing_since.is_none() {
                     tx.execute(
                         "UPDATE file_assets SET missing_since = datetime('now'),
                             updated_at = datetime('now') WHERE id = ?1",
-                        rusqlite::params![id],
+                        rusqlite::params![record.id],
                     )?;
                 }
             }
             tx.commit()?;
-            Ok(missing)
+
+            let mut user_edits = Vec::new();
+            for record in present {
+                match rotate_user_edit(conn, record) {
+                    Ok(Some(rotated)) => user_edits.push(rotated),
+                    Ok(None) => {}
+                    // One unreadable artifact must not abandon the sweep: the
+                    // rows it would have fixed are still there next boot.
+                    Err(e) => tracing::warn!(
+                        "Failed to record a hand edit of artifact {}: {e:#}",
+                        record.id
+                    ),
+                }
+            }
+            Ok(VerifyReport {
+                missing,
+                user_edits,
+            })
         })
     }
 }
@@ -1141,6 +1295,133 @@ fn resolve_version_path(
         }));
     }
     Ok(path)
+}
+
+/// §4.8's hand edit: record the bytes standing at the head as a version this
+/// system did not write, and return the head record as it stands afterwards.
+///
+/// `Ok(None)` is every ordinary read — the bytes are the ones the row
+/// describes — and every state this must not touch:
+///
+/// * an **upload**: `UploadStore` owns those bytes, they have no version
+///   history, and inventing a v2 for one would leave a v1 no row describes;
+/// * a row with no `rel_path` (it predates migration 036, so it has no address
+///   in this grammar);
+/// * a **missing** head — `missing_since` set, or simply no file — because
+///   there are no bytes to record.
+///
+/// Everything it does is rows, in one transaction, and nothing is unlinked —
+/// see the module docs for why version N's bytes cannot be preserved.
+fn rotate_user_edit(conn: &Connection, record: &ArtifactRecord) -> Result<Option<ArtifactRecord>> {
+    if record.origin != ArtifactOrigin::Produced || record.missing_since.is_some() {
+        return Ok(None);
+    }
+    let Some(rel) = record.rel_path.as_deref() else {
+        return Ok(None);
+    };
+    let root = artifacts_root_for(record)?;
+    let head = root.join(rel);
+
+    let bytes = match fs::read(&head) {
+        Ok(bytes) => bytes,
+        // Absent is `verify`'s and `resolve_version_path`'s business, not this
+        // one; anything else is a store we cannot read, and refusing the whole
+        // request over it would turn a permission problem into an outage.
+        Err(e) => {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    "Cannot check {} for a hand edit: {e}",
+                    head.display()
+                );
+            }
+            return Ok(None);
+        }
+    };
+    let sha256 = sha256_hex(&bytes);
+    if sha256 == record.sha256 {
+        return Ok(None);
+    }
+
+    let slot = version_file_path(&head, record.version)?;
+    let slot_rel = relative_to(&root, &slot)?;
+    let version = record.version + 1;
+    let size_bytes = bytes.len() as i64;
+
+    tracing::info!(
+        "Artifact {} was edited outside OpenAlpaca; recording {} as version {version}",
+        record.id,
+        head.display()
+    );
+
+    let tx = conn.unchecked_transaction()?;
+    // Version N's bytes were overwritten in place. Its row moves to the slot
+    // they would have been rotated into, where nothing is — so reading v(N)
+    // answers `Gone`, which is what happened to it.
+    tx.execute(
+        "UPDATE artifact_versions SET rel_path = ?1
+         WHERE artifact_id = ?2 AND version = ?3",
+        rusqlite::params![slot_rel, record.id, record.version],
+    )?;
+    rotate_crash_point(RotateStep::PreviousRepointed)?;
+
+    // The same line-count path `put` takes, against the same thing: the bytes
+    // the previous version's row now points at. After a hand edit they are
+    // gone, so this is `NULL` — exactly as it is for a `put` whose v(N-1) bytes
+    // were removed.
+    let (added_lines, removed_lines) = match (is_text_kind_of(record), fs::read(&slot)) {
+        (true, Ok(previous)) => {
+            let (a, r) = line_counts(&previous, &bytes);
+            (Some(a), Some(r))
+        }
+        _ => (None, None),
+    };
+
+    tx.execute(
+        "INSERT INTO artifact_versions
+            (artifact_id, version, rel_path, sha256, size_bytes, note, author_agent_id,
+             added_lines, removed_lines)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8)",
+        rusqlite::params![
+            record.id,
+            version,
+            rel,
+            sha256,
+            size_bytes,
+            USER_EDIT_NOTE,
+            added_lines,
+            removed_lines,
+        ],
+    )?;
+    rotate_crash_point(RotateStep::VersionInserted)?;
+
+    // No pruning here: `max_versions_per_artifact` is the *writer's* setting and
+    // this path has no caller to read it from. The next `put` prunes with the
+    // real one, and one extra retained version until then beats trimming a
+    // history by a default the owner may not have chosen.
+    tx.execute(
+        "UPDATE file_assets
+            SET sha256 = ?1, size_bytes = ?2, version = ?3,
+                version_count = (SELECT COUNT(*) FROM artifact_versions WHERE artifact_id = ?4),
+                updated_at = datetime('now')
+          WHERE id = ?4",
+        rusqlite::params![sha256, size_bytes, version, record.id],
+    )?;
+
+    let rotated = load_by_id(&tx, &record.id)?
+        .with_context(|| format!("artifact {} vanished inside its own rotation", record.id))?;
+    tx.commit()?;
+    Ok(Some(rotated))
+}
+
+/// [`is_text_kind`] for a stored row, whose `kind` column may be `NULL`. An
+/// unknown kind is projected from the MIME type, the same fallback the routes
+/// serialise with.
+fn is_text_kind_of(record: &ArtifactRecord) -> bool {
+    is_text_kind(
+        record
+            .kind
+            .unwrap_or_else(|| ArtifactKind::for_mime(&record.mime_type)),
+    )
 }
 
 /// One version's bytes as text, refused above [`MAX_DIFF_BYTES`] off its
