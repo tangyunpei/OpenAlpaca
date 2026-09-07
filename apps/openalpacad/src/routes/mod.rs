@@ -32,6 +32,7 @@ pub mod status;
 pub mod tasks;
 mod tasks_types;
 pub mod tools;
+pub mod workspaces;
 
 pub use agents::{
     agent_action_handler,
@@ -100,6 +101,7 @@ pub use tasks::{
     rerun_task_handler, steer_task_handler, task_action_handler,
 };
 pub use tools::list_tools_handler;
+pub use workspaces::{get_workspace_handler, rebase_workspace_handler};
 
 // ── Shared error envelope ────────────────────────────────────────────
 //

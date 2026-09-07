@@ -178,6 +178,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/artifacts/{id}/pin",
             put(crate::routes::pin_artifact_handler),
         )
+        // Workspaces (plan §4.8, "Project moved"). One root per call: the GET
+        // describes it, the PATCH re-bases everything addressed under it.
+        .route(
+            "/v1/workspaces",
+            get(crate::routes::get_workspace_handler).patch(crate::routes::rebase_workspace_handler),
+        )
         // Chat routes (Phase 5.6)
         .route("/v1/chat", post(crate::routes::send_chat_handler))
         .route(

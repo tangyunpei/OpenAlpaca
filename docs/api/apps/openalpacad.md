@@ -5,7 +5,7 @@
 ## Overview
 
 - Router source: `apps/openalpacad/src/router.rs`.
-- Total documented method/path endpoints: 100.
+- Total documented method/path endpoints: 102.
 - Includes public, bearer-protected, WebSocket, and SSE routes.
 
 ## Auth
@@ -119,6 +119,8 @@
 | GET | `/v1/tasks/{id}/timeline` | `bearer` | `get_task_timeline_handler` | - | - | `apps/openalpacad/src/routes/tasks.rs` |
 | GET | `/v1/tools` | `bearer` | `list_tools_handler` | - | - | `apps/openalpacad/src/routes/tools.rs` |
 | GET | `/v1/usage/summary` | `bearer` | `get_usage_summary` | - | `UsageSummaryQuery` | `apps/openalpacad/src/routes/settings.rs` |
+| GET | `/v1/workspaces` | `bearer` | `get_workspace_handler` | - | `workspaces::WorkspaceQuery` | `apps/openalpacad/src/routes/workspaces.rs` |
+| PATCH | `/v1/workspaces` | `bearer` | `rebase_workspace_handler` | `workspaces::RebaseRequest` | - | `apps/openalpacad/src/routes/workspaces.rs` |
 
 ## Request/Query Types
 
@@ -482,6 +484,25 @@
 ### `super::TokenParams`
 
 - External or generic type; see handler source.
+
+### `workspaces::RebaseRequest`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/workspaces.rs`
+
+| Field | Type |
+|---|---|
+| `old_path` | `String` |
+| `new_path` | `String` |
+
+### `workspaces::WorkspaceQuery`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/workspaces.rs`
+
+| Field | Type |
+|---|---|
+| `path` | `Option<String>` |
 
 ## Response Shapes
 
