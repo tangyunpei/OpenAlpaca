@@ -585,6 +585,7 @@
 | `produced_bytes` | `i64` |
 | `retention` | `RetentionStatus` |
 | `sessions` | `SessionsStatus` |
+| `routing` | `RoutingStatus` |
 
 ## Streaming
 

@@ -54,7 +54,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Utc};
-use openalpaca_core::daemon_config::SessionsConfig;
+use openalpaca_core::daemon_config::{RoutingConfig, SessionsConfig};
 use openalpaca_core::session_log::{SessionLogService, sweep::SweepReport};
 use openalpaca_storage::{Database, FileAssetRepository, store};
 use serde::Serialize;
@@ -95,6 +95,28 @@ pub struct StatusResponse {
     pub retention: RetentionStatus,
     /// What the session event log has to say for itself.
     pub sessions: SessionsStatus,
+    /// The routing switches a client has to know about to decide what to
+    /// offer. Today that is one: the experimental replay resume of §5.6c.
+    pub routing: RoutingStatus,
+}
+
+/// The `[orchestrator.routing]` flags a client renders against.
+///
+/// `resume_enabled` is served because the alternative is a GUI that offers a
+/// `Resume` control the daemon will answer `409 RESUME_DISABLED` to, or hides
+/// one that works. The flag belongs to the daemon, so the daemon is what says.
+#[derive(Debug, Serialize)]
+pub struct RoutingStatus {
+    /// Replay resume, §5.6c (S2). Off unless a `daemon.toml` turns it on.
+    pub resume_enabled: bool,
+}
+
+impl From<&RoutingConfig> for RoutingStatus {
+    fn from(config: &RoutingConfig) -> Self {
+        Self {
+            resume_enabled: config.resume_enabled,
+        }
+    }
 }
 
 /// The three `orchestrator.sessions` limits this daemon is actually
@@ -185,6 +207,8 @@ pub(crate) struct StatusInputs<'a> {
     pub managed_log: bool,
     /// `orchestrator.sessions`, as this daemon is actually enforcing it.
     pub sessions_config: SessionsConfig,
+    /// `orchestrator.routing`, likewise.
+    pub routing_config: RoutingConfig,
 }
 
 /// `GET /v1/status`
@@ -197,6 +221,7 @@ pub async fn status_handler(State(state): State<Arc<AppState>>, headers: HeaderM
             session_log: state.gateway.shared_context.session_log().map(Arc::as_ref),
             managed_log: state.managed_log,
             sessions_config: state.daemon_config.load().orchestrator.sessions.clone(),
+            routing_config: state.daemon_config.load().orchestrator.routing.clone(),
         },
         &headers,
     )
@@ -248,6 +273,7 @@ fn status_response(inputs: &StatusInputs<'_>, headers: &HeaderMap) -> Response {
                 .map(SessionLogService::dropped_total)
                 .unwrap_or(0),
         },
+        routing: RoutingStatus::from(&inputs.routing_config),
     };
     (StatusCode::OK, Json(body)).into_response()
 }

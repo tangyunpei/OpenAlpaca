@@ -5,6 +5,9 @@
 //! GET  /v1/tasks/{id}      -> get a single task + agent runs
 //! GET  /v1/tasks/{id}/timeline -> the run's swimlanes (GAP-09)
 //! POST /v1/tasks/{id}/action -> perform action (cancel, pause, resume, start)
+//!                               `resume` un-pauses a paused run, and — on an
+//!                               `interrupted` one, with `resume_enabled` —
+//!                               replays it from its session log (§5.6c, S2)
 //! POST /v1/tasks/{id}/steer  -> inject a message into a running run (GAP-02)
 //! POST /v1/tasks/{id}/rerun  -> dispatch a new run from a finished one (GAP-06)
 //!
@@ -390,14 +393,28 @@ pub async fn task_action_handler(
     // Shared with the orchestrator chat handler: registry-first resolution with
     // DB fallback, transition validation, token cancel, persistence, lane sync,
     // and TaskUpdated event all live in core.
-    match apply_task_action(
+    let outcome = apply_task_action(
         &state.gateway.shared_context,
         &state.gateway.lane_manager,
         &state.gateway.bus,
         Some(&state.db),
         &id,
         &request.action,
-    ) {
+    );
+
+    // §5.6c — `resume` is two verbs sharing one word, and the row decides
+    // which. `apply_task_action` owns the original: paused → running, a pure
+    // transition. Everything it refuses (`CannotResume`) is where S2's replay
+    // resume takes over, so the un-pause path is untouched byte for byte and
+    // the new verb answers exactly the cases the old one never could —
+    // starting with `interrupted`, which is the only status it accepts.
+    if request.action == RESUME_ACTION
+        && matches!(outcome, Err(TaskActionError::CannotResume { .. }))
+    {
+        return resume_task(&state.orchestrator, &state.db, &state.local_user_id, &id).await;
+    }
+
+    match outcome {
         Ok(new_status) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -439,6 +456,9 @@ pub async fn task_action_handler(
 /// Every word `POST /v1/tasks/{id}/action` accepts: the three transitions
 /// `apply_task_action` knows, plus [`START_ACTION`], which this route answers
 /// itself. Named so the refusal cannot list a set the route does not honour.
+///
+/// `resume` is one word over two verbs — un-pause a paused run, or (§5.6c,
+/// opt-in) replay-resume an interrupted one — so the set does not grow.
 const VALID_ACTIONS: &str = "cancel, pause, resume, start";
 
 /// The `400` for a word that is none of [`VALID_ACTIONS`]. Keeps the ad-hoc
@@ -478,6 +498,10 @@ fn unknown_action(action: &str) -> (StatusCode, Json<serde_json::Value>) {
 /// The action word the route intercepts before [`apply_task_action`].
 const START_ACTION: &str = "start";
 
+/// The action word the route hands to §5.6c's replay resume **after**
+/// [`apply_task_action`] has refused it — see [`task_action_handler`].
+const RESUME_ACTION: &str = "resume";
+
 /// `Ok(())` when `id` names a run this owner started; the refusal otherwise.
 ///
 /// A run this caller cannot see gets the same `404` a missing one does — never
@@ -504,6 +528,7 @@ fn owned_run(db: &Database, owner_id: &str, id: &str) -> Result<(), Response> {
 enum LaunchVerb {
     Rerun,
     Start,
+    Resume,
 }
 
 /// One response per refusal, so a client can say which one happened without
@@ -559,29 +584,25 @@ fn launch_refusal(error: TaskLaunchError, verb: LaunchVerb) -> Response {
                 "This run has no description to re-dispatch — there is no goal to give a \
                  lead agent.",
             ),
-            LaunchVerb::Start => api_error(
+            LaunchVerb::Start | LaunchVerb::Resume => api_error(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "TASK_NOT_DISPATCHABLE",
                 "This task has no description to dispatch — there is no goal to give a \
                  lead agent.",
             ),
         },
-        // §5.6c's three, which only `resume` can produce. The verb that reaches
-        // them is wired in the commit after this one; the arms land with the
-        // variants, because `TaskLaunchError` is matched exhaustively here.
-        //
-        // S2 is the plan's one speculative piece and ships off: `409` because
-        // the request is well-formed and it is the daemon's configuration that
-        // refuses it, and the message names both the key to turn on and the
-        // verb that works without it.
+        // `resume` only (§5.6c). S2 is the plan's one speculative piece and
+        // ships off; `409` because the request is well-formed and it is the
+        // daemon's configuration that refuses it, and the message names both
+        // the key to turn on and the verb that works without it.
         TaskLaunchError::ResumeDisabled => api_error(
             StatusCode::CONFLICT,
             "RESUME_DISABLED",
             "Replay resume is experimental and disabled — set [orchestrator.routing] \
              resume_enabled = true in daemon.toml to enable it, or re-run this task instead.",
         ),
-        // Every status but `interrupted` either chose to stop (that is
-        // `rerun`'s) or has not stopped at all.
+        // `resume` only. Every status but `interrupted` either chose to stop
+        // (that is `rerun`'s) or has not stopped at all.
         TaskLaunchError::NotResumable { current } => api_error(
             StatusCode::CONFLICT,
             "TASK_NOT_RESUMABLE",
@@ -590,9 +611,9 @@ fn launch_refusal(error: TaskLaunchError, verb: LaunchVerb) -> Response {
                  instead."
             ),
         ),
-        // §5.6c's own words: "a gutted log is a clean 409 pointing at `rerun`".
-        // Nothing was claimed or dispatched, so the row is exactly as it was
-        // and `rerun` is still there.
+        // `resume` only, and §5.6c's own words: "a gutted log is a clean 409
+        // pointing at `rerun`". Nothing was claimed or dispatched, so the row
+        // is exactly as it was and `rerun` is still there.
         TaskLaunchError::ResumeLogMissing => api_error(
             StatusCode::CONFLICT,
             "RESUME_LOG_MISSING",
@@ -645,6 +666,37 @@ fn start_task(orchestrator: &Orchestrator, db: &Database, owner_id: &str, id: &s
         }))
         .into_response(),
         Err(e) => launch_refusal(e, LaunchVerb::Start),
+    }
+}
+
+/// `POST /v1/tasks/{id}/action {"action":"resume"}` on an **interrupted** run
+/// (§5.6c, S2), as a `Response`.
+///
+/// The success body is `start`'s, widened with what the replay recovered: a
+/// client told only "resumed" cannot tell a rebuilt history from a fresh
+/// start under the same id, and those are very different things to show a
+/// user. Owner-scoped like the other two launch verbs (R40) — this puts work
+/// into the daemon as this user.
+async fn resume_task(
+    orchestrator: &Orchestrator,
+    db: &Database,
+    owner_id: &str,
+    id: &str,
+) -> Response {
+    if let Err(refusal) = owned_run(db, owner_id, id) {
+        return refusal;
+    }
+    match orchestrator.resume_task(id).await {
+        Ok(outcome) => Json(serde_json::json!({
+            "task_id": outcome.task_id,
+            "status": outcome.status,
+            "session_id": outcome.session_id,
+            "rounds_replayed": outcome.rounds_replayed,
+            "from_seq": outcome.from_seq,
+            "to_seq": outcome.to_seq,
+        }))
+        .into_response(),
+        Err(e) => launch_refusal(e, LaunchVerb::Resume),
     }
 }
 
@@ -2217,6 +2269,166 @@ mod tests {
 
         let (code, _) = split(start_task(&orchestrator, &db, "someone-else", "task-1")).await;
         assert_eq!(code, StatusCode::NOT_FOUND);
+    }
+
+    // ── resume (§5.6c, S2) ─────────────────────────────────────────
+
+    /// A run with a session, whose log holds one complete round.
+    fn resumable_db(status: TaskStatus) -> (tempfile::TempDir, tempfile::TempDir, Database) {
+        let (dir, db) = launch_db(status, Some("write the changelog"));
+        let logs = tempfile::tempdir().expect("tempdir");
+        let session = logs.path().join("s1");
+        std::fs::create_dir_all(&session).unwrap();
+        let body = [
+            serde_json::json!({
+                "v": 1, "seq": 1, "ts": "2026-09-06T10:00:00.000Z", "type": "round",
+                "task_id": "task-1",
+                "data": {
+                    "round": 1, "text": "reading",
+                    "tool_use": [{"id": "tu-1", "name": "file_read", "input": {}}],
+                },
+            }),
+            serde_json::json!({
+                "v": 1, "seq": 2, "ts": "2026-09-06T10:00:01.000Z", "type": "tool_result",
+                "task_id": "task-1",
+                "data": {"tool_use_id": "tu-1", "name": "file_read", "ok": true, "result": "ok"},
+            }),
+        ]
+        .iter()
+        .map(|r| format!("{}\n", serde_json::to_string(r).unwrap()))
+        .collect::<String>();
+        std::fs::write(session.join("log.jsonl"), body).unwrap();
+        db.with_connection(|conn| {
+            conn.execute("UPDATE task SET session_id = 's1' WHERE id = 'task-1'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        (dir, logs, db)
+    }
+
+    /// Point the orchestrator's session-log service at `root`, and optionally
+    /// turn S2 on the way a hand-edited `daemon.toml` would.
+    fn with_session_logs(orchestrator: &Orchestrator, root: &std::path::Path, resume: bool) {
+        orchestrator.shared_context.set_session_log(Arc::new(
+            openalpaca_core::session_log::SessionLogService::new(
+                root.to_path_buf(),
+                None,
+                openalpaca_core::session_log::SessionLogLimits::default(),
+                "test".to_string(),
+            ),
+        ));
+        let mut config = openalpaca_core::daemon_config::DaemonConfig::clone(
+            &orchestrator.daemon_config.load(),
+        );
+        config.orchestrator.routing.resume_enabled = resume;
+        orchestrator.daemon_config.store(Arc::new(config));
+    }
+
+    /// The flag ships off, so the verb that would replay a transcript refuses
+    /// and names both the key and `rerun`.
+    #[tokio::test]
+    async fn resuming_an_interrupted_run_with_the_flag_off_is_a_409_resume_disabled() {
+        let (_dir, logs, db) = resumable_db(TaskStatus::Interrupted);
+        let orchestrator = launch_orchestrator(&db, true);
+        with_session_logs(&orchestrator, logs.path(), false);
+
+        let (code, body) = split(resume_task(&orchestrator, &db, LAUNCH_OWNER, "task-1").await).await;
+        assert_eq!(code, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "RESUME_DISABLED");
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("resume_enabled"), "{message}");
+        assert!(message.contains("re-run"), "{message}");
+    }
+
+    /// `resume` is for an interrupted run. Anything else is `rerun`'s, and the
+    /// refusal says which one the caller has.
+    #[tokio::test]
+    async fn resuming_a_run_that_is_not_interrupted_is_a_409_task_not_resumable() {
+        for status in [TaskStatus::Completed, TaskStatus::Failed, TaskStatus::Running] {
+            let (_dir, logs, db) = resumable_db(status);
+            let orchestrator = launch_orchestrator(&db, true);
+            with_session_logs(&orchestrator, logs.path(), true);
+
+            let (code, body) =
+                split(resume_task(&orchestrator, &db, LAUNCH_OWNER, "task-1").await).await;
+            assert_eq!(code, StatusCode::CONFLICT, "{status:?}");
+            assert_eq!(body["error"]["code"], "TASK_NOT_RESUMABLE");
+            assert!(
+                body["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(status.as_str()),
+                "the refusal names the row's own status",
+            );
+        }
+    }
+
+    /// §5.6c: "a gutted log is a clean 409 pointing at `rerun`" — and the row
+    /// is untouched, so that `rerun` is still there to take.
+    #[tokio::test]
+    async fn resuming_a_run_whose_log_is_gone_is_a_409_resume_log_missing() {
+        let (_dir, logs, db) = resumable_db(TaskStatus::Interrupted);
+        std::fs::remove_file(logs.path().join("s1").join("log.jsonl")).unwrap();
+        let orchestrator = launch_orchestrator(&db, true);
+        with_session_logs(&orchestrator, logs.path(), true);
+
+        let (code, body) = split(resume_task(&orchestrator, &db, LAUNCH_OWNER, "task-1").await).await;
+        assert_eq!(code, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "RESUME_LOG_MISSING");
+        let row = TaskRepository::new(&db).get("task-1").unwrap().unwrap();
+        assert_eq!(row.status, TaskStatus::Interrupted, "nothing was spent");
+    }
+
+    /// The happy path: the same id (D5), and a body that says how much of the
+    /// transcript came back — "resumed" alone cannot be told from a fresh
+    /// start under the same id.
+    #[tokio::test]
+    async fn resuming_an_interrupted_run_is_a_200_with_the_same_id_and_the_replay_span() {
+        let (_dir, logs, db) = resumable_db(TaskStatus::Interrupted);
+        let orchestrator = launch_orchestrator(&db, true);
+        with_session_logs(&orchestrator, logs.path(), true);
+
+        let (code, body) = split(resume_task(&orchestrator, &db, LAUNCH_OWNER, "task-1").await).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body["task_id"], "task-1");
+        assert_eq!(body["session_id"], "s1");
+        assert_eq!(body["rounds_replayed"], 1);
+        assert_eq!(body["from_seq"], 1);
+        assert_eq!(body["to_seq"], 2);
+        assert_eq!(TaskRepository::new(&db).list_recent(10).unwrap().len(), 1);
+    }
+
+    /// R40 — a verb that puts work into the daemon as this user is
+    /// owner-scoped, and a run this caller cannot see is a `404`, never a
+    /// `403` that would confirm the id belongs to somebody.
+    #[tokio::test]
+    async fn resuming_an_unknown_or_foreign_run_is_a_404() {
+        let (_dir, logs, db) = resumable_db(TaskStatus::Interrupted);
+        let orchestrator = launch_orchestrator(&db, true);
+        with_session_logs(&orchestrator, logs.path(), true);
+
+        let (code, _) = split(resume_task(&orchestrator, &db, LAUNCH_OWNER, "nope").await).await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        let (code, _) = split(resume_task(&orchestrator, &db, "someone-else", "task-1").await).await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+    }
+
+    /// The word `resume` still means what it always meant on a **paused** run:
+    /// `apply_task_action`'s transition, untouched, and reached without the
+    /// replay verb ever being consulted (the flag is off here, and a
+    /// flag-first route would have refused this).
+    #[tokio::test]
+    async fn resuming_a_paused_run_is_still_the_plain_transition() {
+        let (_dir, db) = launch_db(TaskStatus::Paused, Some("write the changelog"));
+        let ctx = Arc::new(SharedContext::new());
+        let lanes = Arc::new(LaneManager::new());
+        let bus = EventBus::default();
+
+        let new_status = apply_task_action(&ctx, &lanes, &bus, Some(&db), "task-1", "resume")
+            .expect("a paused run resumes");
+        assert_eq!(new_status.as_str(), "running");
+        let row = TaskRepository::new(&db).get("task-1").unwrap().unwrap();
+        assert_eq!(row.status, TaskStatus::Running);
     }
 
     /// The refusal a client sees for a typo has to list the verb the route

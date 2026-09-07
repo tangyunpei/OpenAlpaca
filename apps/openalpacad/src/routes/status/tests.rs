@@ -13,7 +13,7 @@ use super::*;
 use crate::test_util::HomeStoreGuard;
 use axum::body::to_bytes;
 use chrono::TimeDelta;
-use openalpaca_core::daemon_config::SessionsConfig;
+use openalpaca_core::daemon_config::{RoutingConfig, SessionsConfig};
 use openalpaca_core::session_log::{SessionLogLimits, SessionLogService};
 use openalpaca_storage::{Database, FileAssetRepository};
 use openalpaca_storage::models::file_asset::{FileAsset, FileAssetStatus};
@@ -43,6 +43,7 @@ fn inputs<'a>(db: &'a Database, started_at: DateTime<Utc>) -> StatusInputs<'a> {
         session_log: None,
         managed_log: true,
         sessions_config: SessionsConfig::default(),
+        routing_config: RoutingConfig::default(),
     }
 }
 
@@ -331,6 +332,31 @@ async fn serves_the_retention_limits_the_daemon_actually_enforces() {
     // governs tool-result spill, not retention, and is not part of this
     // block.
     assert!(body["retention"].get("tool_result_inline_bytes").is_none());
+}
+
+/// §5.6c — a client cannot decide whether to offer `Resume` on an interrupted
+/// run without knowing whether this daemon would honour it, and the flag lives
+/// in `daemon.toml`. So the daemon says, and the GUI hides the control rather
+/// than offering one that answers `409 RESUME_DISABLED`.
+#[tokio::test]
+async fn serves_whether_replay_resume_is_enabled() {
+    let tmp = TempDir::new().unwrap();
+    let _guard = HomeStoreGuard::set(&tmp.path().join(".openalpaca"));
+    let db = test_db(&tmp);
+
+    let body = body_of(status_response(&inputs(&db, Utc::now()), &headers_with(None))).await;
+    assert_eq!(
+        body["routing"]["resume_enabled"], false,
+        "S2 is opt-in, so the default answer is no: {body}"
+    );
+
+    let mut on = inputs(&db, Utc::now());
+    on.routing_config = RoutingConfig {
+        resume_enabled: true,
+        ..RoutingConfig::default()
+    };
+    let body = body_of(status_response(&on, &headers_with(None))).await;
+    assert_eq!(body["routing"]["resume_enabled"], true);
 }
 
 fn asset(id: &str, size_bytes: i64) -> FileAsset {
