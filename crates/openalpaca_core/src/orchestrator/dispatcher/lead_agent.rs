@@ -11,7 +11,8 @@ use crate::context::TaskEntryStatus;
 use crate::events::SystemEvent;
 use crate::memory::scope_context::MemoryScopeContext;
 use crate::runner::lead_agent::run_lead_agent;
-use crate::runner::steering::SteeringInbox;
+use crate::runner::steering::{SteeringInbox, SteeringMsg};
+use crate::session_log::replay::{ResumeHistory, ResumeSeed, resume_interjection};
 use chrono::Utc;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -55,6 +56,7 @@ impl TaskDispatcher {
             workspace,
             None,
             RowWrite::Create,
+            None,
         )
     }
 
@@ -86,6 +88,7 @@ impl TaskDispatcher {
             workspace,
             Some(source_task_id.to_string()),
             RowWrite::Create,
+            None,
         )
     }
 
@@ -116,6 +119,42 @@ impl TaskDispatcher {
             workspace,
             None,
             RowWrite::Relaunch,
+            None,
+        )
+    }
+
+    /// §5.6c's `resume` (S2): `start`'s path, plus the history the run left
+    /// behind.
+    ///
+    /// It goes through the same [`Self::dispatch_lead_agent_with_id`] machinery
+    /// — `RowWrite::Relaunch`, one id, one row — rather than a dispatcher of
+    /// its own, because everything except the seeded history is identical: the
+    /// caller holds the id, the row is re-queued in place, and the run slot was
+    /// claimed before this was called. The seed is what the lead's loop reads
+    /// to rebuild its messages instead of starting from the objective alone.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn dispatch_lead_agent_resume(
+        &self,
+        task_id: &str,
+        description: &str,
+        title: String,
+        created_by: &str,
+        lane_key: &str,
+        source: &str,
+        workspace: MemoryScopeContext,
+        resume: ResumeSeed,
+    ) -> Result<DispatchOutcome, String> {
+        self.dispatch_lead_agent_inner(
+            task_id.to_string(),
+            description,
+            title,
+            created_by,
+            lane_key,
+            source,
+            workspace,
+            None,
+            RowWrite::Relaunch,
+            Some(resume),
         )
     }
 
@@ -131,6 +170,7 @@ impl TaskDispatcher {
         workspace: MemoryScopeContext,
         source_task_id: Option<String>,
         row_write: RowWrite,
+        resume: Option<ResumeSeed>,
     ) -> Result<DispatchOutcome, String> {
         let now = Utc::now();
 
@@ -201,13 +241,20 @@ impl TaskDispatcher {
         // dispatch. It is what makes the completion report land in the
         // conversation that asked for the work, even when the user has opened
         // another one by the time the run finishes.
-        let session_id = self.db.as_ref().and_then(|db| {
-            openalpaca_storage::ConversationRepository::new(db)
-                .active_session_id(lane_key)
-                .unwrap_or_else(|e| {
-                    tracing::warn!(%lane_key, "Failed to resolve the lane's active session: {e}");
-                    None
-                })
+        //
+        // §5.6c: a resume keeps the run's **own** session — the conversation
+        // whose log it was rebuilt from. Re-resolving the lane's current one
+        // would re-home the row mid-recovery and point the run's log at a
+        // transcript it has no history in.
+        let session_id = resume.as_ref().map(|r| r.session_id.clone()).or_else(|| {
+            self.db.as_ref().and_then(|db| {
+                openalpaca_storage::ConversationRepository::new(db)
+                    .active_session_id(lane_key)
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(%lane_key, "Failed to resolve the lane's active session: {e}");
+                        None
+                    })
+            })
         });
 
         // Persist task to DB
@@ -284,6 +331,7 @@ impl TaskDispatcher {
             created_by.to_string(),
             workspace,
             session_id,
+            resume,
         );
 
         let ack = format!(
@@ -313,6 +361,7 @@ impl TaskDispatcher {
         created_by: String,
         workspace: MemoryScopeContext,
         session_id: Option<String>,
+        resume: Option<ResumeSeed>,
     ) {
         let Some(router) = self.require_router(&task_id) else {
             // Nothing will run, so nothing will clean up after it: release the
@@ -360,6 +409,44 @@ impl TaskDispatcher {
                 None
             }
         };
+
+        // §5.6c — the resume note goes in through the **steering rail**, not
+        // as a message appended by hand: the loop drains its inbox at the
+        // round boundary immediately before it builds the first request, so a
+        // push here is delivered as `<user_interjection>` in round 1, on the
+        // channel the lead's own prompt already teaches it to obey mid-run.
+        //
+        // With steering off there is no rail to use, and a push the inbox
+        // refuses is not worth failing a resume over — either way the same
+        // text is carried inline by the rebuilt history instead.
+        let resume = resume.map(|seed| {
+            let plan = seed.replay;
+            let note = resume_interjection(plan.last_ts.unwrap_or_else(Utc::now));
+            let delivered = steering_inbox.as_ref().is_some_and(|inbox| {
+                inbox
+                    .push(SteeringMsg {
+                        text: note.clone(),
+                        request_id: Uuid::new_v4(),
+                        // The daemon wrote this, not the user.
+                        principal: crate::security::policy::Principal::System,
+                        scope: crate::security::policy::Scope::Global,
+                        workspace_path: workspace.request_workspace_root.clone(),
+                        received_at: Utc::now(),
+                    })
+                    .inspect_err(|e| {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            "The resume interjection could not enter the steering rail ({e:?}); \
+                             the rebuilt history will carry it inline instead"
+                        );
+                    })
+                    .is_ok()
+            });
+            ResumeHistory {
+                plan,
+                inline_note: (!delivered).then_some(note),
+            }
+        });
 
         tokio::spawn(async move {
             let start_time = std::time::Instant::now();
@@ -470,6 +557,7 @@ impl TaskDispatcher {
                 skill_catalog,
                 context_manager,
                 compose_engine,
+                resume,
             )
             .await;
 

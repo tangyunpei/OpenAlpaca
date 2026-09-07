@@ -1304,6 +1304,7 @@ async fn run_lead_for_test(
         skill_catalog,
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
     )
     .await
 }
@@ -1632,4 +1633,176 @@ async fn a_subagent_lane_is_narrated_into_the_runs_session_log() {
     // Both halves name the same 037 span, which is the whole filter.
     assert_eq!(open.span_id, close.span_id);
     assert_eq!(open.span_id.as_deref(), open.data["span_id"].as_str());
+}
+
+// ── §5.6c: the resumed run's first request ────────────────────────────
+
+/// A `ReplayPlan` holding one complete round, as `session_log::replay`
+/// rebuilds one.
+fn replayed_round() -> crate::session_log::replay::ReplayPlan {
+    crate::session_log::replay::ReplayPlan {
+        messages: vec![
+            openalpaca_llm::ChatMessage {
+                role: openalpaca_llm::Role::Assistant,
+                content: "reading the file".to_string(),
+                parts: None,
+                tool_calls: Some(vec![openalpaca_llm::ToolCall {
+                    id: "tu-1".to_string(),
+                    name: "file_read".to_string(),
+                    arguments: serde_json::json!({"path": "a.rs"}),
+                }]),
+                tool_call_id: None,
+            },
+            openalpaca_llm::ChatMessage::tool_result("tu-1", "fn main() {}"),
+        ],
+        rounds: 1,
+        tool_results: 1,
+        from_seq: Some(1),
+        to_seq: Some(2),
+        last_ts: Some(
+            chrono::DateTime::parse_from_rfc3339("2026-09-06T10:00:01Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        ),
+        ..Default::default()
+    }
+}
+
+/// The whole shape of a resume, in one request: the persona and the objective
+/// are composed fresh, the run's own rounds sit behind them in the order the
+/// log recorded them, and the synthetic interjection arrives **through the
+/// steering rail** — so the model reads it as the `<user_interjection>` its
+/// prompt already teaches it to obey, not as a second objective.
+#[tokio::test]
+async fn a_resumed_run_is_primed_with_its_replayed_rounds_and_the_interjection() {
+    let provider = ScriptedProvider::new(vec![scripted_response("carrying on", vec![])]);
+    let config = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
+    let inbox = Arc::new(crate::runner::steering::SteeringInbox::new(8));
+    let note = crate::session_log::replay::resume_interjection(
+        chrono::DateTime::parse_from_rfc3339("2026-09-06T10:00:01Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+    );
+    inbox
+        .push(crate::runner::steering::SteeringMsg {
+            text: note.clone(),
+            request_id: uuid::Uuid::new_v4(),
+            principal: crate::security::policy::Principal::System,
+            scope: crate::security::policy::Scope::Global,
+            workspace_path: None,
+            received_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+    let tmp = tempfile::tempdir().unwrap();
+    run_lead_agent(
+        &lead_subagent(),
+        "do the thing",
+        scripted_router(provider.clone()),
+        Arc::new(ToolRegistry::default()),
+        Arc::new(SharedContext::new()),
+        EventBus::default(),
+        None,
+        None,
+        "task-1",
+        "user-1",
+        "user-1:cli",
+        "cli",
+        &config,
+        MemoryScopeContext::global_only(),
+        None,
+        Some(inbox),
+        None,
+        "lead::task-1",
+        "",
+        None,
+        fixture_skill_catalog(&tmp),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        Some(crate::session_log::replay::ResumeHistory {
+            plan: replayed_round(),
+            inline_note: None,
+        }),
+    )
+    .await;
+
+    let messages = provider.seen_messages.lock().unwrap();
+    let first = &messages[0];
+    assert_eq!(first[0].role, openalpaca_llm::Role::System, "persona, fresh");
+    assert_eq!(
+        first[1].content, "do the thing",
+        "the objective from the row, not from the log"
+    );
+    // The replayed round, verbatim — the assistant's `tool_use` and the
+    // result that answered it.
+    assert_eq!(first[2].role, openalpaca_llm::Role::Assistant);
+    assert_eq!(first[2].content, "reading the file");
+    assert_eq!(
+        first[2].tool_calls.as_ref().unwrap()[0].name,
+        "file_read",
+        "the recorded call is described, never dispatched"
+    );
+    assert_eq!(first[3].role, openalpaca_llm::Role::Tool);
+    assert_eq!(first[3].content, "fn main() {}");
+    // …and the rail's interjection last.
+    let last = first.last().unwrap();
+    assert_eq!(last.role, openalpaca_llm::Role::User);
+    assert!(
+        last.content.starts_with(crate::runner::steering::USER_INTERJECTION_PREFIX),
+        "the rail wraps it as an interjection: {}",
+        last.content
+    );
+    assert!(last.content.contains("This run was interrupted at 2026-09-06T10:00:01"));
+    assert!(last.content.contains("Do not repeat side-effecting tool calls already recorded."));
+}
+
+/// With steering off there is no rail, so the same text has to arrive on the
+/// same channel by the only other route: the rebuilt history's last message,
+/// wrapped identically.
+#[tokio::test]
+async fn with_no_steering_rail_the_resume_note_is_still_an_interjection() {
+    let provider = ScriptedProvider::new(vec![scripted_response("carrying on", vec![])]);
+    let config = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
+    let note = crate::session_log::replay::resume_interjection(chrono::Utc::now());
+
+    let tmp = tempfile::tempdir().unwrap();
+    run_lead_agent(
+        &lead_subagent(),
+        "do the thing",
+        scripted_router(provider.clone()),
+        Arc::new(ToolRegistry::default()),
+        Arc::new(SharedContext::new()),
+        EventBus::default(),
+        None,
+        None,
+        "task-1",
+        "user-1",
+        "user-1:cli",
+        "cli",
+        &config,
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        fixture_skill_catalog(&tmp),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        Some(crate::session_log::replay::ResumeHistory {
+            plan: replayed_round(),
+            inline_note: Some(note),
+        }),
+    )
+    .await;
+
+    let messages = provider.seen_messages.lock().unwrap();
+    let last = messages[0].last().unwrap();
+    assert!(
+        last.content.starts_with(crate::runner::steering::USER_INTERJECTION_PREFIX),
+        "{}",
+        last.content
+    );
+    assert!(last.content.contains("Do not repeat side-effecting tool calls already recorded."));
 }

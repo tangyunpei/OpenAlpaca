@@ -1956,3 +1956,380 @@ fn a_live_segment_that_cannot_be_de_indexed_is_not_evicted() {
     assert_eq!(report.index_rows_cleared, 0);
     assert!(report.over_cap_after, "and the pass says so rather than pretending");
 }
+
+// ── §5.6c: replaying an interrupted run's history ────────────────────
+
+/// A `round` record as the loop writes one: the assistant's text plus its
+/// `tool_use` blocks verbatim.
+fn round_record(round: u32, text: &str, calls: &[(&str, &str, serde_json::Value)]) -> serde_json::Value {
+    serde_json::json!({
+        "round": round,
+        "model": "stub-model",
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "cache_read_input_tokens": 0,
+        "stop_reason": "ToolUse",
+        "text": text,
+        "tool_use": calls
+            .iter()
+            .map(|(id, name, input)| serde_json::json!({
+                "id": id, "name": name, "input": input,
+            }))
+            .collect::<Vec<_>>(),
+        "context": serde_json::Value::Null,
+    })
+}
+
+/// A `tool_result` record with the result sitting inline.
+fn tool_result_record(tool_use_id: &str, name: &str, ok: bool, result: &str) -> serde_json::Value {
+    serde_json::json!({
+        "tool_use_id": tool_use_id,
+        "name": name,
+        "ok": ok,
+        "duration_ms": 12,
+        "error": (!ok).then(|| result.to_string()),
+        "result": result,
+        "ext": serde_json::Value::Null,
+    })
+}
+
+/// A `tool_result` record whose payload went to `results/` (T42's spill).
+fn spilled_result_record(
+    tool_use_id: &str,
+    name: &str,
+    rel: &str,
+    bytes: usize,
+    preview: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "tool_use_id": tool_use_id,
+        "name": name,
+        "ok": true,
+        "duration_ms": 900,
+        "error": serde_json::Value::Null,
+        "result": {
+            "spill": {"rel": rel, "bytes": bytes, "sha256": "deadbeef", "mime": "text/plain"},
+            "preview": preview,
+        },
+        "result_ref": format!("file:{rel}"),
+        "ext": serde_json::Value::Null,
+    })
+}
+
+/// §5.6c's core: the loop's alternation comes back out of the log — the
+/// assistant message with its `tool_use` blocks verbatim, then one
+/// `tool_result` message per call, in the order the round made them.
+#[test]
+fn a_replay_rebuilds_the_rounds_and_their_results() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_records(
+        root,
+        "s1",
+        &[
+            ("session_start", "t1", serde_json::json!({"boot_id": "b1"})),
+            (
+                "round",
+                "t1",
+                round_record(1, "let me look", &[("tu-1", "file_read", serde_json::json!({"path": "a.rs"}))]),
+            ),
+            ("tool_call", "t1", serde_json::json!({"tool_use_id": "tu-1", "name": "file_read"})),
+            ("tool_result", "t1", tool_result_record("tu-1", "file_read", true, "fn main() {}")),
+            (
+                "round",
+                "t1",
+                round_record(2, "and now the tests", &[("tu-2", "shell_execute", serde_json::json!({"cmd": "cargo test"}))]),
+            ),
+            ("tool_result", "t1", tool_result_record("tu-2", "shell_execute", false, "[tool_error] boom")),
+        ],
+    );
+
+    let plan = replay::rebuild(&root.join("s1"), "t1", 4).unwrap();
+
+    assert_eq!(plan.rounds, 2);
+    assert_eq!(plan.tool_results, 2);
+    assert!(!plan.dropped_incomplete_round);
+    assert_eq!(plan.from_seq, Some(2), "the first round record");
+    assert_eq!(plan.to_seq, Some(6), "the last result it consumed");
+
+    let m = &plan.messages;
+    assert_eq!(m.len(), 4, "assistant/result ×2: {m:?}");
+    assert_eq!(m[0].role, openalpaca_llm::Role::Assistant);
+    assert_eq!(m[0].content, "let me look");
+    let calls = m[0].tool_calls.as_ref().expect("the round's tool_use, verbatim");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id, "tu-1");
+    assert_eq!(calls[0].name, "file_read");
+    assert_eq!(calls[0].arguments["path"], "a.rs");
+    assert_eq!(m[1].role, openalpaca_llm::Role::Tool);
+    assert_eq!(m[1].tool_call_id.as_deref(), Some("tu-1"));
+    assert_eq!(m[1].content, "fn main() {}");
+    assert_eq!(m[2].content, "and now the tests");
+    assert_eq!(m[3].tool_call_id.as_deref(), Some("tu-2"));
+    assert_eq!(m[3].content, "[tool_error] boom", "an Err comes back as it was");
+}
+
+/// A spilled result is replayed as the **stub the model actually saw** — the
+/// bytes never went into the context the first time and must not now. When
+/// the `results/` file is still there the stub's `read_result` promise still
+/// holds; when the sweep has taken it, the replay says so instead.
+#[test]
+fn a_spilled_result_is_replayed_as_the_stub_the_model_saw() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let rel = "results/000004-shell_execute-tu-1.txt";
+    seed_records(
+        root,
+        "s1",
+        &[
+            (
+                "round",
+                "t1",
+                round_record(1, "", &[("tu-1", "shell_execute", serde_json::json!({"cmd": "cargo test"}))]),
+            ),
+            ("tool_result", "t1", spilled_result_record("tu-1", "shell_execute", rel, 204_812, "test result: FAILED")),
+        ],
+    );
+    let session = root.join("s1");
+    fs::create_dir_all(session.join(RESULTS_DIR)).unwrap();
+    fs::write(session.join(rel), "the whole 200 KB").unwrap();
+
+    let plan = replay::rebuild(&session, "t1", 4).unwrap();
+    assert_eq!(plan.spills_referenced, 1);
+    assert_eq!(plan.missing_spills, 0);
+    let replayed = &plan.messages[1].content;
+    assert_eq!(
+        replayed,
+        &spill_stub(204_812, "test result: FAILED", rel),
+        "byte-for-byte the stub the loop handed the model"
+    );
+
+    // The sweep takes the file; the replay must not promise a page of it.
+    fs::remove_file(session.join(rel)).unwrap();
+    let plan = replay::rebuild(&session, "t1", 4).unwrap();
+    assert_eq!(plan.missing_spills, 1);
+    let replayed = &plan.messages[1].content;
+    assert!(replayed.contains("test result: FAILED"), "the preview survives: {replayed}");
+    assert!(!replayed.contains("read_result"), "but nothing to page: {replayed}");
+}
+
+/// §5.6c: "stop at the last *complete* round (all its results present — the
+/// model re-does at most one round)". A crash between the call and its result
+/// is exactly what a round with a missing `tool_result` is.
+#[test]
+fn an_incomplete_final_round_is_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_records(
+        root,
+        "s1",
+        &[
+            ("round", "t1", round_record(1, "one", &[("tu-1", "file_read", serde_json::json!({}))])),
+            ("tool_result", "t1", tool_result_record("tu-1", "file_read", true, "ok")),
+            (
+                "round",
+                "t1",
+                round_record(2, "two", &[
+                    ("tu-2", "file_read", serde_json::json!({})),
+                    ("tu-3", "shell_execute", serde_json::json!({})),
+                ]),
+            ),
+            // Only one of the two results made it to disk before the crash.
+            ("tool_result", "t1", tool_result_record("tu-2", "file_read", true, "half")),
+        ],
+    );
+
+    let plan = replay::rebuild(&root.join("s1"), "t1", 4).unwrap();
+
+    assert_eq!(plan.rounds, 1, "only the complete round is replayed");
+    assert!(plan.dropped_incomplete_round);
+    assert_eq!(plan.messages.len(), 2);
+    assert!(
+        plan.messages.iter().all(|m| m.tool_call_id.as_deref() != Some("tu-2")),
+        "half a round is no round: {:?}",
+        plan.messages
+    );
+}
+
+/// The T55 hand-off note, honoured: `preserved_from_seq` is the last seq
+/// before the compaction record, **not** the boundary of the tail compaction
+/// retained — so the replay adds the retained tail explicitly, and says how
+/// much of the head it dropped instead of silently re-inflating it.
+#[test]
+fn a_compaction_keeps_the_retained_tail_and_every_round_after_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let mut records: Vec<(&str, &str, serde_json::Value)> = Vec::new();
+    let ids = ["tu-1", "tu-2", "tu-3", "tu-4"];
+    let texts = ["one", "two", "three", "four"];
+    for (i, (id, text)) in ids.iter().zip(texts).enumerate() {
+        records.push((
+            "round",
+            "t1",
+            round_record(i as u32 + 1, text, &[(id, "file_read", serde_json::json!({}))]),
+        ));
+        records.push(("tool_result", "t1", tool_result_record(id, "file_read", true, text)));
+    }
+    // seq 9: the compaction. `preserved_from_seq` = 8, the last seq written.
+    records.push((
+        "compaction",
+        "t1",
+        serde_json::json!({
+            "tier": "HeuristicSummary",
+            "trigger": "auto",
+            "pre_tokens": 9000, "post_tokens": 3000,
+            "messages_before": 12, "messages_after": 6,
+            "messages_discarded": 6, "memories_extracted": 0,
+            "tiers_applied": "[DiscardSocial, HeuristicSummary]",
+            "cumulative_dropped_tokens": 6000,
+            "dropped_from_seq": serde_json::Value::Null,
+            "summary_msg_id": serde_json::Value::Null,
+            "preserved_from_seq": 8,
+        }),
+    ));
+    records.push((
+        "round",
+        "t1",
+        round_record(5, "five", &[("tu-5", "file_read", serde_json::json!({}))]),
+    ));
+    records.push(("tool_result", "t1", tool_result_record("tu-5", "file_read", true, "five")));
+
+    seed_records(root, "s1", &records);
+
+    // tail_keep = 1: one round from before the boundary, plus everything after.
+    let plan = replay::rebuild(&root.join("s1"), "t1", 1).unwrap();
+    assert_eq!(plan.compacted_from_seq, Some(8));
+    assert_eq!(plan.rounds, 2, "the retained tail (round 4) plus round 5");
+    let texts: Vec<&str> = plan
+        .messages
+        .iter()
+        .filter(|m| m.role == openalpaca_llm::Role::Assistant)
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(texts, vec!["four", "five"]);
+    // The head that compaction dropped is named, never re-inflated and never
+    // invented: the compaction record carries no summary text.
+    let note = &plan.messages[0];
+    assert_eq!(note.role, openalpaca_llm::Role::User);
+    assert!(note.content.contains("context_compacted"), "{}", note.content);
+    assert!(note.content.contains("3 earlier round"), "{}", note.content);
+
+    // tail_keep large enough to cover everything: no head was dropped, so no
+    // note is needed.
+    let plan = replay::rebuild(&root.join("s1"), "t1", 8).unwrap();
+    assert_eq!(plan.rounds, 5);
+    assert!(
+        !plan.messages[0].content.contains("context_compacted"),
+        "nothing was dropped, so nothing is announced"
+    );
+}
+
+/// A session holds every run started from that conversation (§5.1) — a
+/// replay must never hand one run the rounds of the run beside it.
+#[test]
+fn the_replay_is_scoped_to_one_run_inside_a_shared_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_records(
+        root,
+        "s1",
+        &[
+            ("round", "t1", round_record(1, "mine", &[("tu-1", "file_read", serde_json::json!({}))])),
+            ("round", "t2", round_record(1, "theirs", &[("tu-2", "file_read", serde_json::json!({}))])),
+            ("tool_result", "t2", tool_result_record("tu-2", "file_read", true, "theirs")),
+            ("tool_result", "t1", tool_result_record("tu-1", "file_read", true, "mine")),
+        ],
+    );
+
+    let plan = replay::rebuild(&root.join("s1"), "t1", 4).unwrap();
+    assert_eq!(plan.rounds, 1);
+    assert_eq!(plan.messages[0].content, "mine");
+    assert_eq!(plan.messages[1].content, "mine");
+}
+
+/// §5.6c's "a gutted log is a clean 409": a replay of a run the log holds
+/// nothing for rebuilds nothing, and says so, rather than inventing a start.
+#[test]
+fn a_log_with_nothing_for_this_run_rebuilds_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_records(
+        root,
+        "s1",
+        &[("round", "t2", round_record(1, "theirs", &[]))],
+    );
+
+    let plan = replay::rebuild(&root.join("s1"), "t1", 4).unwrap();
+    assert_eq!(plan.rounds, 0);
+    assert!(plan.messages.is_empty());
+    assert_eq!(plan.from_seq, None);
+
+    // And a session directory that is not there at all is the same answer.
+    let plan = replay::rebuild(&root.join("nope"), "t1", 4).unwrap();
+    assert_eq!(plan.rounds, 0);
+}
+
+/// **Replay re-primes context; it never re-runs anything.** The recorded
+/// calls come back as message history and nothing dispatches them — the
+/// tool's own counter is the proof, because a replay that executed
+/// `shell_execute` twice would be the worst bug this feature could have.
+#[tokio::test]
+async fn rebuilding_executes_no_tool() {
+    use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Counter(std::sync::Arc<AtomicUsize>);
+    #[async_trait::async_trait]
+    impl BuiltInTool for Counter {
+        async fn execute(&self, _args: &serde_json::Value) -> Result<String, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok("ran".to_string())
+        }
+    }
+
+    let calls = std::sync::Arc::new(AtomicUsize::new(0));
+    let registry = crate::tools::ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "shell_execute".to_string(),
+                description: "counts".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                ..Default::default()
+            },
+            backend: ToolBackend::BuiltIn(std::sync::Arc::new(Counter(calls.clone()))),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test".to_string(),
+            author: "test".to_string(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_records(
+        root,
+        "s1",
+        &[
+            (
+                "round",
+                "t1",
+                round_record(1, "", &[("tu-1", "shell_execute", serde_json::json!({"cmd": "rm -rf /"}))]),
+            ),
+            ("tool_result", "t1", tool_result_record("tu-1", "shell_execute", true, "done")),
+        ],
+    );
+
+    let plan = replay::rebuild(&root.join("s1"), "t1", 4).unwrap();
+
+    assert_eq!(plan.rounds, 1);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "a replay re-primes the context — it must never dispatch a recorded call"
+    );
+    // The call is *described* to the model, which is the whole point.
+    assert_eq!(plan.messages[0].tool_calls.as_ref().unwrap()[0].name, "shell_execute");
+}

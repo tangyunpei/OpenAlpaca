@@ -252,6 +252,9 @@ fn assert_routing_is_default(routing: &crate::daemon_config::RoutingConfig) {
     assert_eq!(routing.main_loop_max_tools_per_round, 4);
     assert_eq!(routing.tool_selection, "core_union");
     assert!(routing.scheduled_skills_enabled);
+    // §5.6c's S2 replay resume is the plan's one speculative piece and ships
+    // off. A default that flipped this on would adopt a pending decision.
+    assert!(!routing.resume_enabled);
 }
 
 #[test]
@@ -292,6 +295,7 @@ steering_inbox_cap = 8
     assert!(routing.steering_enabled);
     assert!(routing.followup_autostart);
     assert!(routing.scheduled_skills_enabled);
+    assert!(!routing.resume_enabled);
     assert_eq!(routing.main_loop_max_rounds, 8);
     assert_eq!(routing.main_loop_max_tools_per_round, 4);
     assert_eq!(routing.tool_selection, "core_union");
@@ -315,9 +319,11 @@ followup_autostart = false
 main_loop_max_rounds = 12
 main_loop_max_tools_per_round = 6
 tool_selection = "full"
+resume_enabled = true
 "#;
     let config: DaemonConfig = toml::from_str(toml_str).unwrap();
     assert!(config.orchestrator.routing.steering_enabled);
+    assert!(config.orchestrator.routing.resume_enabled, "and it can be turned on");
     assert_eq!(config.orchestrator.routing.steering_inbox_cap, 8);
     assert_eq!(config.orchestrator.routing.max_workflows_per_lane, 2);
     assert!(!config.orchestrator.routing.followup_autostart);

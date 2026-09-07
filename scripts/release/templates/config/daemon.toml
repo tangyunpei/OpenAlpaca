@@ -44,6 +44,18 @@ main_loop_max_tools_per_round = 4
 # (the entire registry; escape hatch). Both modes drop the tools of a
 # disabled MCP server or plugin; there is no per-tool opt-out.
 tool_selection = "core_union"
+# EXPERIMENTAL (§5.6c, S2) — replay resume, off by default.
+# With this on, `POST /v1/tasks/{id}/action {"action":"resume"}` re-enters an
+# `interrupted` run under its own id: the loop's history is rebuilt from that
+# run's session-log records (its rounds and their tool results, honouring the
+# newest compaction boundary) and continued with a synthetic
+# `<user_interjection>` telling the model not to repeat side-effecting calls
+# it already made. Nothing recorded is re-executed — a replay re-primes
+# context. Leave it off unless you are exercising it: `rerun` (a new id, a
+# clean start) is the trusted way to run an interrupted goal again, and a
+# replay that misreads a torn log hands the model a false account of its own
+# work. `resume` on a *paused* run is unaffected by this flag.
+resume_enabled = false
 
 [security]
 max_input_length = 32768

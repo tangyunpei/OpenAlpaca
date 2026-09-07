@@ -471,3 +471,182 @@ async fn a_start_with_no_router_releases_the_run_slot() {
         "a run that could never start must not hold the id"
     );
 }
+
+// ── resume: the same id, re-primed from the log (§5.6c, S2) ───────────
+
+/// A run with a session, and a session log holding one complete round of it.
+fn store_interrupted_with_log(
+    db: &Database,
+    ctx: &Arc<SharedContext>,
+    root: &std::path::Path,
+    id: &str,
+    session_id: &str,
+) -> Task {
+    let now = Utc::now();
+    let task = Task {
+        session_id: Some(session_id.to_string()),
+        completed_at: Some(now),
+        result_summary: Some("interrupted — the daemon restarted".to_string()),
+        ..store_task_row(id, TaskStatus::Interrupted, Some("write the changelog"), now)
+    };
+    TaskRepository::new(db).create(&task).expect("create task");
+    seed_log(root, session_id, id);
+    ctx.set_session_log(Arc::new(crate::session_log::SessionLogService::new(
+        root.to_path_buf(),
+        None,
+        crate::session_log::SessionLogLimits::default(),
+        "test".to_string(),
+    )));
+    task
+}
+
+/// One `round` and its `tool_result`, written the way the writer writes them.
+fn seed_log(root: &std::path::Path, session_id: &str, task_id: &str) {
+    let dir = root.join(session_id);
+    std::fs::create_dir_all(&dir).unwrap();
+    let records = [
+        serde_json::json!({
+            "v": 1, "seq": 1, "ts": "2026-09-06T10:00:00.000Z", "type": "round",
+            "task_id": task_id,
+            "data": {
+                "round": 1, "text": "reading the file",
+                "tool_use": [{"id": "tu-1", "name": "file_read", "input": {"path": "a.rs"}}],
+            },
+        }),
+        serde_json::json!({
+            "v": 1, "seq": 2, "ts": "2026-09-06T10:00:01.000Z", "type": "tool_result",
+            "task_id": task_id,
+            "data": {"tool_use_id": "tu-1", "name": "file_read", "ok": true, "result": "fn main"},
+        }),
+    ];
+    let body: String = records
+        .iter()
+        .map(|r| format!("{}\n", serde_json::to_string(r).unwrap()))
+        .collect();
+    std::fs::write(dir.join(crate::session_log::LIVE_SEGMENT), body).unwrap();
+}
+
+/// The flag is the whole point: S2 is the plan's one speculative piece and
+/// ships **off**, so the verb refuses until an owner turns it on.
+#[tokio::test]
+async fn resume_is_refused_while_the_flag_is_off() {
+    let (_dir, db) = temp_db();
+    let logs = tempfile::tempdir().unwrap();
+    let (orchestrator, ctx) = ready(&db);
+    store_interrupted_with_log(&db, &ctx, logs.path(), "t1", "s1");
+
+    assert!(!DaemonConfig::default().orchestrator.routing.resume_enabled);
+    assert_eq!(
+        orchestrator.resume_task("t1").await,
+        Err(TaskLaunchError::ResumeDisabled)
+    );
+    // And nothing was launched behind the refusal.
+    let row = TaskRepository::new(&db).get("t1").unwrap().unwrap();
+    assert_eq!(row.status, TaskStatus::Interrupted);
+}
+
+/// `resume` is for an `interrupted` run and nothing else — a finished one is
+/// `rerun`'s, a live one is nobody's.
+#[tokio::test]
+async fn resume_is_refused_on_a_run_that_was_not_interrupted() {
+    let (_dir, db) = temp_db();
+    let logs = tempfile::tempdir().unwrap();
+    let (orchestrator, ctx) = ready(&db);
+    enable_resume(&orchestrator);
+    seed_log(logs.path(), "s1", "t1");
+    ctx.set_session_log(Arc::new(crate::session_log::SessionLogService::new(
+        logs.path().to_path_buf(),
+        None,
+        crate::session_log::SessionLogLimits::default(),
+        "test".to_string(),
+    )));
+    for status in [
+        TaskStatus::Completed,
+        TaskStatus::Running,
+        TaskStatus::Queued,
+        TaskStatus::Cancelled,
+    ] {
+        let id = format!("t-{}", status.as_str());
+        store_task(&db, &id, status, Some("write the changelog"));
+        assert_eq!(
+            orchestrator.resume_task(&id).await,
+            Err(TaskLaunchError::NotResumable {
+                current: status.as_str()
+            }),
+            "{status:?}"
+        );
+    }
+    assert_eq!(
+        orchestrator.resume_task("no-such-run").await,
+        Err(TaskLaunchError::NotFound)
+    );
+}
+
+/// §5.6c: "a gutted log is a clean 409 pointing at `rerun`". A run whose
+/// session the byte-cap sweep has emptied has nothing to re-prime from, and
+/// the verb must say that rather than quietly starting from scratch under an
+/// id whose row already carries a result.
+#[tokio::test]
+async fn resume_is_refused_when_the_log_is_gone() {
+    let (_dir, db) = temp_db();
+    let logs = tempfile::tempdir().unwrap();
+    let (orchestrator, ctx) = ready(&db);
+    let _task = store_interrupted_with_log(&db, &ctx, logs.path(), "t1", "s1");
+    enable_resume(&orchestrator);
+
+    // The sweep took the session's live segment (R54).
+    std::fs::remove_file(logs.path().join("s1").join(crate::session_log::LIVE_SEGMENT)).unwrap();
+    assert_eq!(
+        orchestrator.resume_task("t1").await,
+        Err(TaskLaunchError::ResumeLogMissing)
+    );
+
+    // A run that never had a session at all is the same answer.
+    store_task(&db, "t2", TaskStatus::Interrupted, Some("write the changelog"));
+    assert_eq!(
+        orchestrator.resume_task("t2").await,
+        Err(TaskLaunchError::ResumeLogMissing)
+    );
+}
+
+/// D5's philosophy, applied to the third verb: a resume keeps the id the
+/// client is already holding, and re-enters the row rather than copying it.
+#[tokio::test]
+async fn resume_relaunches_the_run_under_its_own_id() {
+    let (_dir, db) = temp_db();
+    let logs = tempfile::tempdir().unwrap();
+    let (orchestrator, ctx) = ready(&db);
+    store_interrupted_with_log(&db, &ctx, logs.path(), "t1", "s1");
+    enable_resume(&orchestrator);
+
+    let outcome = orchestrator.resume_task("t1").await.expect("resumed");
+
+    assert_eq!(outcome.task_id, "t1", "the same id (D5)");
+    assert_eq!(outcome.title, "Ship the release");
+    assert_eq!(outcome.rounds_replayed, 1);
+    assert_eq!(outcome.from_seq, Some(1));
+    assert_eq!(outcome.to_seq, Some(2));
+
+    let row = TaskRepository::new(&db).get("t1").unwrap().expect("the row");
+    assert!(
+        matches!(row.status, TaskStatus::Queued | TaskStatus::Running),
+        "interrupted → live again, not a new row: {:?}",
+        row.status
+    );
+    assert_eq!(row.source_task_id, None, "a resume is not a copy");
+    assert_eq!(
+        row.session_id.as_deref(),
+        Some("s1"),
+        "the run keeps the conversation it belonged to"
+    );
+    // The slot is claimed for the duration, exactly as `start` claims it.
+    assert!(!ctx.claim_run_slot("t1"));
+}
+
+/// Turn S2 on for one orchestrator, the way a hand-edited `daemon.toml`
+/// would.
+fn enable_resume(orchestrator: &Orchestrator) {
+    let mut config = DaemonConfig::clone(&orchestrator.daemon_config.load());
+    config.orchestrator.routing.resume_enabled = true;
+    orchestrator.daemon_config.store(Arc::new(config));
+}

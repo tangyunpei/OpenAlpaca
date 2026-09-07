@@ -111,6 +111,18 @@ pub struct RoutingConfig {
     /// are ignored.
     #[serde(default = "default_scheduled_skills_enabled")]
     pub scheduled_skills_enabled: bool,
+    /// **Experimental (§5.6c, S2): replay resume.** With this on,
+    /// `POST /v1/tasks/{id}/action {"action":"resume"}` re-enters an
+    /// `interrupted` run under its own id, rebuilding the loop's history from
+    /// the session log and continuing it with a synthetic interjection.
+    ///
+    /// Off by default, and deliberately so: the plan calls S2 its one
+    /// speculative piece, `rerun` is the trusted fallback, and a replay that
+    /// gets the history wrong hands the model a false account of its own
+    /// work. Everything the feature needs is built and tested; what is not
+    /// yet earned is the default.
+    #[serde(default = "default_resume_enabled")]
+    pub resume_enabled: bool,
 }
 
 fn default_steering_enabled() -> bool {
@@ -137,6 +149,9 @@ fn default_tool_selection() -> String {
 fn default_scheduled_skills_enabled() -> bool {
     true
 }
+fn default_resume_enabled() -> bool {
+    false
+}
 
 impl Default for RoutingConfig {
     fn default() -> Self {
@@ -149,6 +164,7 @@ impl Default for RoutingConfig {
             main_loop_max_tools_per_round: default_main_loop_max_tools_per_round(),
             tool_selection: default_tool_selection(),
             scheduled_skills_enabled: default_scheduled_skills_enabled(),
+            resume_enabled: default_resume_enabled(),
         }
     }
 }

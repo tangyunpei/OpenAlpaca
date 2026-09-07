@@ -1,0 +1,389 @@
+//! §5.6(c) — rebuilding an interrupted run's loop history from its log.
+//!
+//! The plan's one speculative piece. A run whose daemon died mid-flight left
+//! its whole conversation on disk — the `round` records carry the assistant's
+//! text and its `tool_use` blocks *verbatim* (§5.5's own reason for writing
+//! them that way), and the `tool_result` records carry what came back. That is
+//! enough to hand a fresh loop the history the dead one had, so the model
+//! continues instead of starting over.
+//!
+//! Three rules, and each one is a promise this module keeps:
+//!
+//! * **Nothing is executed.** A replay re-primes context; the recorded calls
+//!   come back as *messages*, never as dispatches. `rebuild` takes a directory
+//!   and a task id and touches no registry, no sandbox and no network —
+//!   pinned by `rebuilding_executes_no_tool`.
+//! * **The last round is complete or it is not replayed.** §5.6c: "stop at the
+//!   last *complete* round (all its results present — the model re-does at
+//!   most one round)". A crash between a `tool_call` and its `tool_result` is
+//!   exactly a round whose results are missing, and half a round is not a
+//!   round: an assistant message holding a `tool_use` with no answering
+//!   `tool_result` is a malformed request to every provider.
+//! * **A compaction is honoured, not undone.** Replaying every round of a log
+//!   whose live loop had already compacted would re-inflate the context that
+//!   compaction shrank. The newest `compaction` record's `preserved_from_seq`
+//!   is the boundary — and per T41's hand-off it is *the last seq written
+//!   before the compaction record*, **not** the boundary of the tail
+//!   compaction retained, so the retained tail is added back explicitly
+//!   ([`rebuild`]'s `tail_keep`). What is left out is announced in one
+//!   `context_compacted` note rather than summarised: the `compaction` record
+//!   carries counts, not the summary text, and inventing one would be worse
+//!   than saying what happened.
+
+use super::reader::{LoggedRecord, read_records_after};
+use super::record::RESULTS_DIR;
+use super::spill_stub;
+use chrono::{DateTime, Utc};
+use openalpaca_llm::{ChatMessage, ToolCall};
+use serde_json::Value;
+use std::collections::HashMap;
+use std::io;
+use std::path::Path;
+
+/// Records read per page. The same bound `recovery` uses, for the same
+/// reason: a session may hold `log_max_session_bytes` and must never be
+/// materialised whole.
+const PAGE: usize = 512;
+
+/// What a replay rebuilt, and what it had to leave out.
+///
+/// Every count is reported rather than logged away: the `resume` record the
+/// caller writes into the log is built from this, so the next reader can see
+/// exactly which slice of the transcript the resumed run was given.
+#[derive(Debug, Clone, Default)]
+pub struct ReplayPlan {
+    /// The rebuilt history, to be spliced in **after** the caller's system
+    /// prompt and objective message (§5.6c composes those fresh).
+    pub messages: Vec<ChatMessage>,
+    /// Complete rounds replayed.
+    pub rounds: usize,
+    /// Tool results replayed.
+    pub tool_results: usize,
+    /// Lowest / highest log seq consumed — the "source seq range".
+    pub from_seq: Option<u64>,
+    pub to_seq: Option<u64>,
+    /// The `preserved_from_seq` of the newest `compaction` record honoured.
+    pub compacted_from_seq: Option<u64>,
+    /// Rounds dropped ahead of the compaction boundary and its retained tail.
+    pub compacted_rounds_dropped: usize,
+    /// Whether the run's final round was incomplete and therefore dropped —
+    /// the one round the model re-does.
+    pub dropped_incomplete_round: bool,
+    /// `tool_result`s whose payload lives in `results/`.
+    pub spills_referenced: usize,
+    /// …of which the file is gone (the sweep took it): the preview is
+    /// replayed without the promise of a page.
+    pub missing_spills: usize,
+    /// The timestamp of the run's last record — when the run stopped, as far
+    /// as anything on disk knows.
+    pub last_ts: Option<DateTime<Utc>>,
+}
+
+impl ReplayPlan {
+    /// Whether there is anything to resume from. `false` is §5.6c's "gutted
+    /// log", which the launch verb answers as a clean refusal pointing at
+    /// `rerun`.
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
+}
+
+/// The marker that turns a launch into a replay resume.
+///
+/// It is carried through `dispatch_lead_agent_resume` rather than re-derived
+/// in the runner for two reasons: the refusal for a gutted log has to happen
+/// *before* anything is claimed or dispatched (so the row survives it), and
+/// the session to replay is the run's own — not the one the lane happens to
+/// be showing when the resume is asked for.
+#[derive(Debug, Clone)]
+pub struct ResumeSeed {
+    pub session_id: String,
+    pub replay: ReplayPlan,
+}
+
+/// What the lead's runner is handed for a resume.
+///
+/// The plan is carried whole (not just its messages) so the `resume` record
+/// the runner writes into the log can name the slice it was built from.
+#[derive(Debug, Clone)]
+pub struct ResumeHistory {
+    pub plan: ReplayPlan,
+    /// The synthetic interjection — present **only** when the steering rail
+    /// could not carry it (steering disabled, or a push the inbox refused).
+    /// The rebuilt history then carries the identical `<user_interjection>`
+    /// text as its last message instead, so the model reads the same thing
+    /// either way.
+    pub inline_note: Option<String>,
+}
+
+/// The synthetic interjection §5.6c appends after the rebuilt history.
+///
+/// One sentence of fact and one instruction, and the instruction is the
+/// important half: side effects between the last durable record and the crash
+/// are unknowable, so the model is told to treat the recorded calls as done
+/// rather than being left to guess. It goes in through the steering rail, so
+/// the loop sees it as a `<user_interjection>` — the channel the model's
+/// prompt already teaches it to obey mid-run.
+pub fn resume_interjection(interrupted_at: DateTime<Utc>) -> String {
+    format!(
+        "This run was interrupted at {}; continue from the last completed step. \
+         Do not repeat side-effecting tool calls already recorded.",
+        interrupted_at.to_rfc3339()
+    )
+}
+
+/// One round as the log recorded it, with the results that answered it.
+struct Round {
+    seq: u64,
+    text: String,
+    calls: Vec<ToolCall>,
+    /// One entry per call, in call order — `None` until its result is found.
+    /// The seq travels with the message so the plan's reported range covers
+    /// the results as well as the rounds that asked for them.
+    results: Vec<Option<(u64, ChatMessage)>>,
+}
+
+impl Round {
+    fn complete(&self) -> bool {
+        self.results.iter().all(Option::is_some)
+    }
+}
+
+/// Rebuild `task_id`'s loop history from the session log in `session_dir`.
+///
+/// `tail_keep` is the loop's own `context_tail_keep` — the number of rounds a
+/// compaction leaves in place — and is what the replay adds back ahead of a
+/// compaction boundary (see the module doc).
+///
+/// A missing directory, a torn tail and a log holding nothing for this run are
+/// all the same answer: an empty plan. None of them is an error; the caller
+/// decides what an empty plan means.
+pub fn rebuild(session_dir: &Path, task_id: &str, tail_keep: usize) -> io::Result<ReplayPlan> {
+    let mut plan = ReplayPlan::default();
+
+    let mut rounds: Vec<Round> = Vec::new();
+    // tool_use_id → (round index, call index), so a result finds its slot in
+    // one lookup however far it landed from the round that asked for it.
+    let mut slots: HashMap<String, (usize, usize)> = HashMap::new();
+    let mut compaction: Option<(u64, u64)> = None; // (record seq, preserved_from_seq)
+
+    let mut cursor: Option<u64> = None;
+    loop {
+        let page = read_records_after(session_dir, cursor, PAGE)?;
+        if page.is_empty() {
+            break;
+        }
+        cursor = page.last().map(|r| r.seq);
+        let short = page.len() < PAGE;
+        for record in &page {
+            if record.task_id.as_deref() != Some(task_id) {
+                continue;
+            }
+            plan.last_ts = Some(record.ts);
+            match record.kind.as_str() {
+                "round" => {
+                    let calls = tool_calls_of(&record.data);
+                    let index = rounds.len();
+                    for (slot, call) in calls.iter().enumerate() {
+                        slots.insert(call.id.clone(), (index, slot));
+                    }
+                    rounds.push(Round {
+                        seq: record.seq,
+                        text: text_of(&record.data),
+                        results: vec![None; calls.len()],
+                        calls,
+                    });
+                }
+                "tool_result" => {
+                    let Some(id) = record.data.get("tool_use_id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Some(&(round, slot)) = slots.get(id) else {
+                        // A result whose round is not in the log — its segment
+                        // was rotated away. Nothing to attach it to.
+                        continue;
+                    };
+                    let content = result_text(session_dir, record, &mut plan);
+                    rounds[round].results[slot] =
+                        Some((record.seq, ChatMessage::tool_result(id, &content)));
+                }
+                "compaction" => {
+                    if let Some(preserved) =
+                        record.data.get("preserved_from_seq").and_then(Value::as_u64)
+                    {
+                        compaction = Some((record.seq, preserved));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if short {
+            break;
+        }
+    }
+
+    // §5.6c: stop at the last complete round. The first incomplete one ends
+    // the replay — everything after it belongs to a round the model never
+    // finished, and re-doing one round is the documented cost.
+    if let Some(cut) = rounds.iter().position(|r| !r.complete()) {
+        rounds.truncate(cut);
+        plan.dropped_incomplete_round = true;
+    }
+
+    // The compaction boundary, plus the tail compaction kept (T41's hand-off:
+    // `preserved_from_seq` is not that tail's boundary).
+    if let Some((_, preserved)) = compaction {
+        plan.compacted_from_seq = Some(preserved);
+        let after = rounds.iter().filter(|r| r.seq > preserved).count();
+        let keep = after + tail_keep.min(rounds.len() - after);
+        plan.compacted_rounds_dropped = rounds.len() - keep;
+        rounds.drain(..plan.compacted_rounds_dropped);
+    }
+
+    if plan.compacted_rounds_dropped > 0 {
+        plan.messages.push(ChatMessage::user(&compaction_note(
+            plan.compacted_rounds_dropped,
+        )));
+    }
+    let mut span: Option<(u64, u64)> = None;
+    for round in rounds {
+        widen(&mut span, round.seq);
+        plan.rounds += 1;
+        plan.messages.push(assistant_message(&round));
+        for (seq, result) in round.results.into_iter().flatten() {
+            widen(&mut span, seq);
+            plan.tool_results += 1;
+            plan.messages.push(result);
+        }
+    }
+    if let Some((from, to)) = span {
+        plan.from_seq = Some(from);
+        plan.to_seq = Some(to);
+    }
+
+    Ok(plan)
+}
+
+/// Grow the `(lowest, highest)` seq the replay consumed.
+fn widen(span: &mut Option<(u64, u64)>, seq: u64) {
+    *span = Some(match *span {
+        Some((lo, hi)) => (lo.min(seq), hi.max(seq)),
+        None => (seq, seq),
+    });
+}
+
+/// The `round` record's assistant message: its text plus its `tool_use`
+/// blocks verbatim, exactly as `ChatMessage::assistant_with_tools` built it
+/// the first time.
+fn assistant_message(round: &Round) -> ChatMessage {
+    ChatMessage {
+        role: openalpaca_llm::Role::Assistant,
+        content: round.text.clone(),
+        parts: None,
+        tool_calls: (!round.calls.is_empty()).then(|| round.calls.clone()),
+        tool_call_id: None,
+    }
+}
+
+fn text_of(data: &Value) -> String {
+    data.get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn tool_calls_of(data: &Value) -> Vec<ToolCall> {
+    data.get("tool_use")
+        .and_then(Value::as_array)
+        .map(|calls| {
+            calls
+                .iter()
+                .filter_map(|call| {
+                    Some(ToolCall {
+                        id: call.get("id").and_then(Value::as_str)?.to_string(),
+                        name: call.get("name").and_then(Value::as_str)?.to_string(),
+                        arguments: call.get("input").cloned().unwrap_or(Value::Null),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What the model is handed for one recorded result.
+///
+/// A result that sat inline comes back as itself. A **spilled** one comes back
+/// as [`spill_stub`] — byte-for-byte the text the loop handed the model when
+/// the call first ran, because the payload never entered the context the first
+/// time and re-priming must not put it there now. When the sweep has since
+/// taken the `results/` file the stub would promise a page that no longer
+/// exists, so the preview is replayed with that promise removed instead.
+fn result_text(session_dir: &Path, record: &LoggedRecord, plan: &mut ReplayPlan) -> String {
+    match record.data.get("result") {
+        Some(Value::String(inline)) => inline.clone(),
+        Some(Value::Object(spilled)) => {
+            plan.spills_referenced += 1;
+            let preview = spilled
+                .get("preview")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let spill = spilled.get("spill");
+            let rel = spill
+                .and_then(|s| s.get("rel"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let bytes = spill
+                .and_then(|s| s.get("bytes"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize;
+            if rel.is_empty() || !spill_file_present(session_dir, rel) {
+                plan.missing_spills += 1;
+                return format!(
+                    "[result too large: {bytes} bytes; first 2 KB follow]\n{preview}\n\
+                     [the full result was removed by the session-log sweep and cannot be paged]"
+                );
+            }
+            spill_stub(bytes, preview, rel)
+        }
+        // No `result` key at all: a record from a build that did not write one,
+        // or one the envelope cap collapsed to a stub. The call still happened
+        // and the model must be told so rather than shown a hole.
+        _ => "[tool result unavailable — the session log did not record it]".to_string(),
+    }
+}
+
+/// Whether `rel` (`results/<name>`) still exists under this session.
+///
+/// The grammar is deliberately as narrow as `read_result`'s: one file name
+/// directly under `results/`, so a reference read back off disk can never walk
+/// out of the session directory.
+fn spill_file_present(session_dir: &Path, rel: &str) -> bool {
+    let Some(name) = rel.strip_prefix(RESULTS_DIR).and_then(|r| r.strip_prefix('/')) else {
+        return false;
+    };
+    if name.is_empty()
+        || name.starts_with('.')
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+    {
+        return false;
+    }
+    session_dir.join(RESULTS_DIR).join(name).is_file()
+}
+
+/// The one message that stands in for the head a compaction dropped.
+///
+/// Not a summary: the `compaction` record carries token and message counts
+/// and no summary text (§5.4 — the summary lives in the loop's memory, which
+/// died with it), and a fabricated one would be the worst kind of context.
+/// Naming the gap is the honest option, and it is wrapped the way every other
+/// untrusted-context block is so the model reads it as narration.
+fn compaction_note(dropped: usize) -> String {
+    format!(
+        "<context_compacted rounds=\"{dropped}\">This conversation was compacted while it ran. \
+         {dropped} earlier round{} of this run are not shown; their outcomes are reflected in \
+         the steps that follow.</context_compacted>",
+        if dropped == 1 { "" } else { "s" }
+    )
+}

@@ -51,13 +51,16 @@ pub enum RecordType {
     FollowupQueued,
     LogTrimmed,
     WorkflowDone,
+    /// §5.6c — an interrupted run re-entered under its own id, naming the
+    /// slice of this log its history was rebuilt from.
+    Resume,
     Error,
 }
 
 impl RecordType {
     /// Every variant, in catalog order — the list a reader, a sweep or a test
     /// enumerates instead of re-deriving one.
-    pub const ALL: [RecordType; 22] = [
+    pub const ALL: [RecordType; 23] = [
         RecordType::SessionStart,
         RecordType::SessionEnd,
         RecordType::WorkspaceChanged,
@@ -79,6 +82,7 @@ impl RecordType {
         RecordType::FollowupQueued,
         RecordType::LogTrimmed,
         RecordType::WorkflowDone,
+        RecordType::Resume,
         RecordType::Error,
     ];
 
@@ -105,6 +109,7 @@ impl RecordType {
             RecordType::FollowupQueued => "followup_queued",
             RecordType::LogTrimmed => "log_trimmed",
             RecordType::WorkflowDone => "workflow_done",
+            RecordType::Resume => "resume",
             RecordType::Error => "error",
         }
     }

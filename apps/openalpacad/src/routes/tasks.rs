@@ -566,6 +566,39 @@ fn launch_refusal(error: TaskLaunchError, verb: LaunchVerb) -> Response {
                  lead agent.",
             ),
         },
+        // §5.6c's three, which only `resume` can produce. The verb that reaches
+        // them is wired in the commit after this one; the arms land with the
+        // variants, because `TaskLaunchError` is matched exhaustively here.
+        //
+        // S2 is the plan's one speculative piece and ships off: `409` because
+        // the request is well-formed and it is the daemon's configuration that
+        // refuses it, and the message names both the key to turn on and the
+        // verb that works without it.
+        TaskLaunchError::ResumeDisabled => api_error(
+            StatusCode::CONFLICT,
+            "RESUME_DISABLED",
+            "Replay resume is experimental and disabled — set [orchestrator.routing] \
+             resume_enabled = true in daemon.toml to enable it, or re-run this task instead.",
+        ),
+        // Every status but `interrupted` either chose to stop (that is
+        // `rerun`'s) or has not stopped at all.
+        TaskLaunchError::NotResumable { current } => api_error(
+            StatusCode::CONFLICT,
+            "TASK_NOT_RESUMABLE",
+            format!(
+                "Only an interrupted run can be resumed (this one is {current}) — re-run it \
+                 instead."
+            ),
+        ),
+        // §5.6c's own words: "a gutted log is a clean 409 pointing at `rerun`".
+        // Nothing was claimed or dispatched, so the row is exactly as it was
+        // and `rerun` is still there.
+        TaskLaunchError::ResumeLogMissing => api_error(
+            StatusCode::CONFLICT,
+            "RESUME_LOG_MISSING",
+            "This run's session log no longer holds a complete round to resume from — \
+             re-run it instead.",
+        ),
         // Capacity, not a bug: every agent template that could lead a run is
         // busy. `503` says so, and says it is worth trying again.
         TaskLaunchError::Dispatch(reason) => {

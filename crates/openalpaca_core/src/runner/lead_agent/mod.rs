@@ -100,6 +100,10 @@ pub async fn run_lead_agent(
     skill_catalog: Arc<crate::orchestrator::skill_catalog::SkillCatalog>,
     context_manager: Arc<ContextManager>,
     compose_engine: Arc<crate::compose::ComposeEngine>,
+    // §5.6c (S2, opt-in): an interrupted run's history, rebuilt from the
+    // session log, to be spliced in behind the objective. `None` for every
+    // ordinary dispatch — this is the only thing a resume does differently.
+    resume: Option<crate::session_log::replay::ResumeHistory>,
 ) -> LeadAgentResult {
     tracing::info!(
         lead_agent = %lead_agent.id,
@@ -450,6 +454,67 @@ pub async fn run_lead_agent(
     }
 
     messages.push(ChatMessage::user(task_description));
+
+    // 7b. §5.6c — the replayed history.
+    //
+    // It goes in **here**, after the persona layers and the objective and
+    // before anything the loop will add, because that is the shape the loop
+    // itself produced the first time: `messages[0..=1]` is the pair every
+    // compaction is forbidden to touch, and the rounds follow it. The
+    // recorded calls arrive as messages and nothing dispatches them — a
+    // replay re-primes context, it never re-runs work.
+    if let Some(history) = resume {
+        let plan = history.plan;
+        tracing::info!(
+            task_id = task_id,
+            rounds = plan.rounds,
+            tool_results = plan.tool_results,
+            from_seq = ?plan.from_seq,
+            to_seq = ?plan.to_seq,
+            dropped_incomplete_round = plan.dropped_incomplete_round,
+            "Resuming an interrupted run over its replayed history"
+        );
+        // The `resume` record names the slice of the log this run was primed
+        // from, so the transcript says where the seam is.
+        if let Some(ref log) = session_log {
+            log.emit(
+                crate::session_log::Record::new(crate::session_log::RecordType::Resume)
+                    .task(Some(task_id))
+                    .span(Some(lead_span_id))
+                    .agent(Some(&lead_agent.id))
+                    .with_data(serde_json::json!({
+                        "from_seq": plan.from_seq,
+                        "to_seq": plan.to_seq,
+                        "rounds": plan.rounds,
+                        "tool_results": plan.tool_results,
+                        "compacted_from_seq": plan.compacted_from_seq,
+                        "compacted_rounds_dropped": plan.compacted_rounds_dropped,
+                        "dropped_incomplete_round": plan.dropped_incomplete_round,
+                        "spills_referenced": plan.spills_referenced,
+                        "missing_spills": plan.missing_spills,
+                        "interjection": if history.inline_note.is_some() {
+                            "inline"
+                        } else {
+                            "steering_rail"
+                        },
+                    })),
+            );
+        }
+        messages.extend(plan.messages);
+        // The rail carried the interjection whenever there was a rail; this
+        // is the same text on the same channel for the run that had none.
+        if let Some(note) = history.inline_note {
+            messages.push(ChatMessage::user(&crate::runner::steering::SteeringMsg {
+                text: note,
+                request_id: uuid::Uuid::new_v4(),
+                principal: crate::security::policy::Principal::System,
+                scope: crate::security::policy::Scope::Global,
+                workspace_path: None,
+                received_at: chrono::Utc::now(),
+            }
+            .to_interjection()));
+        }
+    }
 
     // 8. Build LoopConfig from lead agent defaults + agent constraint overrides
     let mut loop_config = LoopConfig::from_lead_agent(

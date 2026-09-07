@@ -97,6 +97,18 @@ tool_selection = "core_union"
 # the local user's "scheduled" lane. Set false to disable all skill cron
 # jobs without editing the skills themselves.
 scheduled_skills_enabled = true
+# EXPERIMENTAL (§5.6c, S2) — replay resume, off by default.
+# With this on, `POST /v1/tasks/{id}/action {"action":"resume"}` re-enters an
+# `interrupted` run under its own id: the loop's history is rebuilt from that
+# run's session-log records (its rounds and their tool results, honouring the
+# newest compaction boundary) and continued with a synthetic
+# `<user_interjection>` telling the model not to repeat side-effecting calls
+# it already made. Nothing recorded is re-executed — a replay re-primes
+# context. Leave it off unless you are exercising it: `rerun` (a new id, a
+# clean start) is the trusted way to run an interrupted goal again, and a
+# replay that misreads a torn log hands the model a false account of its own
+# work. `resume` on a *paused* run is unaffected by this flag.
+resume_enabled = false
 
 # Session event log (~/.openalpaca/sessions/<id>/log.jsonl): the append-only
 # per-turn narrative — rounds, tool calls and their payloads, steering drains,
