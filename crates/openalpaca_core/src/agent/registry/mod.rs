@@ -130,6 +130,21 @@ impl AgentRegistry {
         existed
     }
 
+    /// Expire every tombstone this plugin left behind, returning how many were
+    /// dropped.
+    ///
+    /// The uninstall path calls it (GAP-24). Until one existed nothing expired
+    /// a tombstone that was not immediately superseded by the same template
+    /// coming back, so a plugin whose directory had gone kept telling
+    /// `spawn_subagent` that a template was *"withdrawn with plugin 'x'"* for a
+    /// plugin that no longer existed.
+    pub fn clear_plugin_tombstones(&self, plugin_id: &str) -> usize {
+        let mut tombstones = self.lock_template_tombstones();
+        let before = tombstones.len();
+        tombstones.retain(|_, owner| owner != plugin_id);
+        before - tombstones.len()
+    }
+
     /// The plugin a withdrawn template belonged to, if one is recorded.
     pub fn template_tombstone(&self, template_id: &str) -> Option<String> {
         self.lock_template_tombstones().get(template_id).cloned()

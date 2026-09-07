@@ -1,5 +1,6 @@
 pub mod bridge;
 pub mod error;
+pub mod install;
 pub mod manager;
 pub mod manifest;
 pub mod permission_gate;
@@ -12,7 +13,8 @@ pub use bridge::PluginLlmProvider;
 pub use bridge::PluginSkillBridge;
 pub use bridge::PluginToolProxy;
 pub use error::PluginError;
-pub use manager::{PluginManager, SecretStorage};
+pub use install::{InstallError, ManifestSummary};
+pub use manager::{InstallOutcome, PluginManager, SecretStorage, UninstallOutcome};
 pub use manifest::PluginManifest;
 pub use permission_gate::{PermissionGate, PermissionTable, SecretReference};
 pub use process_pool::PluginProcess;

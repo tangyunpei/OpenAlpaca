@@ -73,6 +73,15 @@ pub struct PermissionEntry {
     /// and never read back until the E1 drift check (design §3.3 E1).
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// The source directory `POST /v1/extensions/plugin` copied this plugin
+    /// from, and when (GAP-24). Absent on a directory the owner dropped in by
+    /// hand and on every entry written before the install route existed —
+    /// provenance is a record of what the daemon did, never a claim about a
+    /// directory it did not put there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_at: Option<String>,
 }
 
 impl Default for PermissionEntry {
@@ -82,6 +91,8 @@ impl Default for PermissionEntry {
             approved: None,
             approved_at: None,
             capabilities: Vec::new(),
+            installed_from: None,
+            installed_at: None,
         }
     }
 }
@@ -252,6 +263,42 @@ impl PermissionGate {
             entry["enabled"] = toml_edit::value(enabled);
         })?;
         debug!(plugin = plugin_name, enabled, "plugin disposition written");
+        Ok(())
+    }
+
+    /// Record where an installed plugin came from and when (GAP-24).
+    ///
+    /// It writes **no consent decision**: a freshly installed plugin lands
+    /// `enabled = true` (the serde default) with `approved` absent, so its row
+    /// reads `unapproved`/`never_seen` and approving is the single action that
+    /// starts it. Installing grants nothing.
+    pub fn record_install(&self, plugin_name: &str, source: &str) -> Result<(), PluginError> {
+        let now = Utc::now().to_rfc3339();
+        let source = source.to_string();
+        self.edit(plugin_name, move |entry| {
+            entry["installed_from"] = toml_edit::value(source);
+            entry["installed_at"] = toml_edit::value(now);
+        })?;
+        debug!(plugin = plugin_name, "plugin install recorded");
+        Ok(())
+    }
+
+    /// Drop the consent decision, leaving the entry otherwise intact — the
+    /// update path, when the replacement's permissions are not the ones the
+    /// owner approved (GAP-24).
+    ///
+    /// `enabled` is deliberately untouched, so re-approving puts the plugin
+    /// back exactly where the owner had its toggle. `capabilities` is left as
+    /// the last approved list: `approve` overwrites it with the manifest's
+    /// current one, and until then it is the record of what consent *was* for.
+    pub fn reset_consent(&self, plugin_name: &str) -> Result<(), PluginError> {
+        self.edit(plugin_name, |entry| {
+            if let Some(table) = entry.as_table_mut() {
+                table.remove("approved");
+                table.remove("approved_at");
+            }
+        })?;
+        debug!(plugin = plugin_name, "plugin consent reset to pending");
         Ok(())
     }
 

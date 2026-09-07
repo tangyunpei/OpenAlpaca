@@ -2215,3 +2215,450 @@ mod p3e_integration_tests {
         assert_eq!(tools.len(), 1);
     }
 }
+
+/// GAP-24 — install, update and uninstall of a plugin *directory*.
+///
+/// The design owns the T/E sequences these verbs call; what is proved here is
+/// the ordering on disk and the one rule an install has to keep: **it grants
+/// nothing.** A freshly installed plugin lands `enabled = true` (serde default)
+/// with consent `never_seen`, so approving is the single action that starts it.
+#[cfg(test)]
+mod install_tests {
+    use crate::install::{DATA_DIR, InstallError, TRASH_DIR};
+    use crate::manager::*;
+    use openalpaca_core::agent::registry::AgentRegistry;
+    use openalpaca_core::bus::EventBus;
+    use openalpaca_core::orchestrator::skill_catalog::SkillCatalog;
+    use openalpaca_core::tools::ToolRegistry;
+    use openalpaca_core::tools::extensions::{Consent, UnapprovedReason};
+
+    use crate::permission_gate::tests::HomeStoreGuard;
+
+    fn stub_script() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/echo-plugin/echo-server.sh")
+    }
+
+    struct Harness {
+        manager: Arc<PluginManager>,
+        tools: Arc<ToolRegistry>,
+        skills: Arc<SkillCatalog>,
+        agents: Arc<AgentRegistry>,
+        root: PathBuf,
+        sources: PathBuf,
+        _tmp: tempfile::TempDir,
+        _home: HomeStoreGuard,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let tmp = tempfile::tempdir().unwrap();
+            let home = HomeStoreGuard::set(&tmp.path().join(".home"));
+            let root = tmp.path().join("plugins");
+            let sources = tmp.path().join("src");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::create_dir_all(&sources).unwrap();
+
+            let bus = EventBus::new(256);
+            let tools = Arc::new(ToolRegistry::with_event_bus(bus.clone()).unwrap());
+            let skills = Arc::new(SkillCatalog::new());
+            let agents = Arc::new(AgentRegistry::new());
+            let manager = Arc::new(
+                PluginManager::new(
+                    root.clone(),
+                    Arc::clone(&tools),
+                    Some(Arc::clone(&skills)),
+                    Some(Arc::clone(&agents)),
+                )
+                .with_event_bus(bus)
+                .with_notice_lane("owner:gui"),
+            );
+            Self {
+                manager,
+                tools,
+                skills,
+                agents,
+                root,
+                sources,
+                _tmp: tmp,
+                _home: home,
+            }
+        }
+
+        /// A source tree outside the plugins root, ready to be installed.
+        fn source(&self, name: &str, version: &str, extra: &str) -> PathBuf {
+            let dir = self.sources.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::copy(stub_script(), dir.join("echo-server.sh")).unwrap();
+            std::fs::write(
+                dir.join("plugin.toml"),
+                format!(
+                    "[plugin]\nname = \"{name}\"\nversion = \"{version}\"\n\
+                     entry = \"./echo-server.sh\"\nmcp_compatible = true\n{extra}"
+                ),
+            )
+            .unwrap();
+            dir
+        }
+
+        async fn row(&self, name: &str) -> ExtensionRecord {
+            self.manager
+                .row(&ExtensionId::plugin(name.to_string()))
+                .await
+                .unwrap_or_else(|e| panic!("no row for '{name}': {e}"))
+        }
+
+        async fn holds_process(&self, name: &str) -> bool {
+            self.manager
+                .plugins
+                .read()
+                .await
+                .get(name)
+                .is_some_and(|s| s.process.is_some())
+        }
+
+        fn trashed(&self) -> Vec<String> {
+            std::fs::read_dir(self.root.join(TRASH_DIR))
+                .map(|dir| {
+                    dir.flatten()
+                        .filter_map(|e| e.file_name().to_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+    }
+
+    // ── install ──────────────────────────────────────────────────────
+
+    /// The whole point of the disposition, stated once: **install grants
+    /// nothing.** The directory lands, the row reads `unapproved`/`never_seen`
+    /// with the bit at its serde default, and *nothing executes* until the
+    /// existing approve verb runs.
+    #[tokio::test]
+    async fn an_installed_plugin_lands_never_seen_and_starts_nothing() {
+        let h = Harness::new();
+        let source = h.source("echo-test", "0.1.0", "[types]\ntools = true\n");
+
+        let outcome = h.manager.install_from_path(&source).await.expect("install");
+
+        assert_eq!(outcome.manifest.name, "echo-test");
+        assert_eq!(outcome.manifest.version, "0.1.0");
+        assert_eq!(outcome.record.state, ExtensionState::Unapproved {
+            reason: UnapprovedReason::NeverSeen
+        });
+        assert_eq!(outcome.record.consent, Some(Consent::Pending));
+        assert!(outcome.record.disposition.0, "the bit is the serde default");
+        assert!(
+            !h.holds_process("echo-test").await,
+            "an install must not start the plugin"
+        );
+        assert!(
+            !h.tools.registered_tool_names().iter().any(|n| n == "echo-test::echo"),
+            "an install must publish nothing"
+        );
+        assert!(h.root.join("echo-test/plugin.toml").is_file());
+
+        // …and approving is the single action that starts it.
+        h.manager.approve_plugin("echo-test").await.expect("approve");
+        assert_eq!(h.row("echo-test").await.state, ExtensionState::Enabled);
+        assert!(h.holds_process("echo-test").await);
+    }
+
+    /// The provenance the plan asks for, in the entry the design already owns.
+    #[tokio::test]
+    async fn an_install_records_where_it_came_from() {
+        let h = Harness::new();
+        let source = h.source("echo-test", "0.1.0", "");
+        h.manager.install_from_path(&source).await.expect("install");
+
+        let table = h.manager.permission_gate.load_table().unwrap();
+        let entry = table.entry("echo-test").expect("an entry was written");
+        assert_eq!(
+            entry.installed_from.as_deref(),
+            Some(source.canonicalize().unwrap().to_string_lossy().as_ref())
+        );
+        assert!(entry.installed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn installing_over_an_existing_plugin_is_refused() {
+        let h = Harness::new();
+        let source = h.source("echo-test", "0.1.0", "");
+        h.manager.install_from_path(&source).await.expect("install");
+
+        let error = h.manager.install_from_path(&source).await.unwrap_err();
+        assert_eq!(error.code(), "already_installed");
+        assert!(
+            h.root.join("echo-test/plugin.toml").is_file(),
+            "the incumbent is untouched"
+        );
+    }
+
+    /// The manifest is parsed **before** the copy, so a source that could never
+    /// load leaves nothing behind.
+    #[tokio::test]
+    async fn a_source_that_cannot_load_is_refused_before_it_is_copied() {
+        let h = Harness::new();
+        let source = h.source("echo-test", "0.1.0", "");
+        std::fs::write(source.join("plugin.toml"), "not = = toml [[[").unwrap();
+
+        let error = h.manager.install_from_path(&source).await.unwrap_err();
+        assert_eq!(error.code(), "invalid_manifest");
+        assert!(!h.root.join("echo-test").exists());
+        assert!(
+            h.manager.permission_gate.load_table().unwrap().entry("echo-test").is_none(),
+            "a refused install writes no entry"
+        );
+    }
+
+    /// The dry run answers with the same summary and copies nothing.
+    #[tokio::test]
+    async fn validate_reports_without_installing() {
+        let h = Harness::new();
+        let source = h.source("echo-test", "2.0.0", "[capabilities]\nprovides = [\"notes\"]\n");
+
+        let summary = h.manager.validate_source(&source).expect("validate");
+
+        assert_eq!(summary.name, "echo-test");
+        assert_eq!(summary.version, "2.0.0");
+        assert_eq!(summary.capabilities, vec!["notes".to_string()]);
+        assert!(!h.root.join("echo-test").exists(), "validate copies nothing");
+    }
+
+    // ── update ───────────────────────────────────────────────────────
+
+    /// The child runs with `current_dir(plugin_dir)`, so a live plugin is never
+    /// replaced in place: T0–T5 first, then the staged rename, then the load
+    /// path. Consent survives an update whose permissions did not change.
+    #[tokio::test]
+    async fn an_update_tears_down_replaces_and_comes_back_on_the_new_version() {
+        let h = Harness::new();
+        let source = h.source("echo-test", "0.1.0", "[types]\ntools = true\n");
+        h.manager.install_from_path(&source).await.expect("install");
+        h.manager.approve_plugin("echo-test").await.expect("approve");
+        assert_eq!(h.row("echo-test").await.state, ExtensionState::Enabled);
+        let old_pid = h
+            .manager
+            .plugins
+            .read()
+            .await
+            .get("echo-test")
+            .and_then(|s| s.process.as_ref())
+            .and_then(|p| p.child.id())
+            .expect("a child");
+
+        let next = h.source("echo-test", "0.2.0", "[types]\ntools = true\n");
+        std::fs::write(next.join("NEW"), "second version\n").unwrap();
+        let outcome = h.manager.update_from_path("echo-test", &next).await.expect("update");
+
+        assert!(!outcome.consent_reset, "the permissions did not change");
+        assert!(outcome.added_capabilities.is_empty());
+        assert_eq!(outcome.manifest.version, "0.2.0");
+        assert_eq!(outcome.record.state, ExtensionState::Enabled);
+        assert_eq!(outcome.record.version.as_deref(), Some("0.2.0"));
+        assert!(h.root.join("echo-test/NEW").is_file(), "the tree was replaced");
+        assert_eq!(
+            h.trashed().len(),
+            1,
+            "the replaced tree is kept, never deleted: {:?}",
+            h.trashed()
+        );
+
+        let new_pid = h
+            .manager
+            .plugins
+            .read()
+            .await
+            .get("echo-test")
+            .and_then(|s| s.process.as_ref())
+            .and_then(|p| p.child.id())
+            .expect("a fresh child");
+        assert_ne!(old_pid, new_pid, "the old child was not replaced");
+    }
+
+    /// A replacement that asks for more than the owner approved drops the
+    /// consent decision: the row goes back to `never_seen` and **nothing
+    /// runs** until the owner approves the new list. The delta travels on the
+    /// response, which is the "Now also asks for: …" preview.
+    #[tokio::test]
+    async fn an_update_that_asks_for_more_takes_consent_back_to_never_seen() {
+        let h = Harness::new();
+        let source = h.source(
+            "echo-test",
+            "0.1.0",
+            "[types]\ntools = true\n[capabilities]\nprovides = [\"notes_read\"]\n",
+        );
+        h.manager.install_from_path(&source).await.expect("install");
+        h.manager.approve_plugin("echo-test").await.expect("approve");
+        assert_eq!(h.row("echo-test").await.state, ExtensionState::Enabled);
+
+        let next = h.source(
+            "echo-test",
+            "0.2.0",
+            "[types]\ntools = true\n[capabilities]\nprovides = [\"notes_read\", \"notes_write\"]\n",
+        );
+        let outcome = h.manager.update_from_path("echo-test", &next).await.expect("update");
+
+        assert!(outcome.consent_reset);
+        assert_eq!(outcome.added_capabilities, vec!["notes_write".to_string()]);
+        assert_eq!(outcome.record.consent, Some(Consent::Pending));
+        assert_eq!(outcome.record.state, ExtensionState::Unapproved {
+            reason: UnapprovedReason::NeverSeen
+        });
+        assert!(
+            !h.holds_process("echo-test").await,
+            "the replacement must not run under the old consent"
+        );
+        assert!(!h.tools.registered_tool_names().iter().any(|n| n == "echo-test::echo"));
+    }
+
+    #[tokio::test]
+    async fn an_update_never_renames_a_plugin() {
+        let h = Harness::new();
+        h.manager
+            .install_from_path(&h.source("echo-test", "0.1.0", ""))
+            .await
+            .expect("install");
+
+        let other = h.source("other-name", "0.2.0", "");
+        let error = h.manager.update_from_path("echo-test", &other).await.unwrap_err();
+        assert_eq!(error.code(), "invalid_manifest");
+    }
+
+    #[tokio::test]
+    async fn updating_an_unknown_plugin_is_not_found() {
+        let h = Harness::new();
+        let source = h.source("echo-test", "0.1.0", "");
+        let error = h.manager.update_from_path("echo-test", &source).await.unwrap_err();
+        assert!(matches!(
+            error,
+            InstallError::Extension(ExtensionError::NotFound(_))
+        ));
+    }
+
+    // ── uninstall ────────────────────────────────────────────────────
+
+    /// The full sequence: T0–T5, the permissions entry through the same atomic
+    /// writer, the directory to `.trash/` (never `rm -rf`), and **the
+    /// tombstones expired** — which is what lets the same name be installed
+    /// again and answer for itself.
+    #[tokio::test]
+    async fn uninstalling_tears_down_trashes_and_expires_the_tombstones() {
+        let h = Harness::new();
+        let source = h.source(
+            "echo-test",
+            "0.1.0",
+            "[types]\ntools = true\nskill = true\nagent = true\n",
+        );
+        h.manager.install_from_path(&source).await.expect("install");
+        h.manager.approve_plugin("echo-test").await.expect("approve");
+        assert_eq!(h.row("echo-test").await.state, ExtensionState::Enabled);
+        assert!(h.skills.get("echo-test").is_some());
+        assert!(h.agents.get_template("echo-test").is_some());
+
+        let outcome = h.manager.uninstall("echo-test", true).await.expect("uninstall");
+
+        // The process and every contribution are gone.
+        assert!(!h.holds_process("echo-test").await);
+        assert!(!h.tools.registered_tool_names().iter().any(|n| n == "echo-test::echo"));
+        // The row is gone, not disabled.
+        assert!(
+            h.manager
+                .row(&ExtensionId::plugin("echo-test".to_string()))
+                .await
+                .is_err()
+        );
+        // The entry went through the atomic writer.
+        assert!(
+            h.manager.permission_gate.load_table().unwrap().entry("echo-test").is_none()
+        );
+        // The directory is kept, not deleted.
+        assert!(!h.root.join("echo-test").exists());
+        assert!(
+            outcome
+                .trashed
+                .expect("the directory went to the trash")
+                .join("plugin.toml")
+                .is_file()
+        );
+        assert!(outcome.kept_data);
+
+        // **The tombstones are expired.** Until GAP-24 nothing ever cleared
+        // them, so `/echo-test` would keep answering for a plugin that is no
+        // longer installed.
+        assert!(
+            h.skills.tombstone("echo-test").is_none(),
+            "the skill tombstone outlived the plugin"
+        );
+        assert!(
+            h.agents.template_tombstone("echo-test").is_none(),
+            "the agent-template tombstone outlived the plugin"
+        );
+    }
+
+    /// The tombstone does its job while the plugin is merely *disabled* — that
+    /// is what it is for — and only the uninstall expires it. Re-installing
+    /// under the same name then starts from a clean slate.
+    #[tokio::test]
+    async fn a_tombstone_answers_while_disabled_and_expires_on_uninstall() {
+        let h = Harness::new();
+        let source = h.source(
+            "echo-test",
+            "0.1.0",
+            "[types]\ntools = true\nskill = true\n",
+        );
+        h.manager.install_from_path(&source).await.expect("install");
+        h.manager.approve_plugin("echo-test").await.expect("approve");
+
+        h.manager
+            .disable(&ExtensionId::plugin("echo-test".to_string()))
+            .await
+            .expect("disable");
+        assert_eq!(
+            h.skills.tombstone("echo-test").map(|t| t.plugin_id),
+            Some("echo-test".to_string()),
+            "a disabled plugin's skill still says who withdrew it"
+        );
+
+        h.manager.uninstall("echo-test", true).await.expect("uninstall");
+        assert!(h.skills.tombstone("echo-test").is_none());
+
+        // …and the same name installs again.
+        let again = h.source("echo-test", "0.3.0", "[types]\ntools = true\n");
+        let outcome = h.manager.install_from_path(&again).await.expect("re-install");
+        assert_eq!(outcome.manifest.version, "0.3.0");
+        assert_eq!(outcome.record.consent, Some(Consent::Pending));
+    }
+
+    /// `keep_data` defaults to true at the route; when it is cleared the data
+    /// directory is *moved to the trash* with the plugin, never deleted.
+    #[tokio::test]
+    async fn the_data_directory_is_kept_unless_the_caller_says_otherwise() {
+        let h = Harness::new();
+        let data = h.root.join(DATA_DIR).join("echo-test");
+        for keep in [true, false] {
+            let source = h.source("echo-test", "0.1.0", "");
+            h.manager.install_from_path(&source).await.expect("install");
+            std::fs::create_dir_all(&data).unwrap();
+            std::fs::write(data.join("state.json"), "{}").unwrap();
+
+            let outcome = h.manager.uninstall("echo-test", keep).await.expect("uninstall");
+            assert_eq!(outcome.kept_data, keep);
+            assert_eq!(data.exists(), keep, "keep_data = {keep}");
+            if !keep {
+                let moved = outcome.data_trashed.expect("the data went to the trash");
+                assert!(moved.join("state.json").is_file(), "data is never deleted");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn uninstalling_an_unknown_plugin_is_not_found() {
+        let h = Harness::new();
+        let error = h.manager.uninstall("nope", true).await.unwrap_err();
+        assert!(matches!(
+            error,
+            InstallError::Extension(ExtensionError::NotFound(_))
+        ));
+    }
+}

@@ -228,6 +228,29 @@ impl SkillCatalog {
         self.tombstones.read().ok()?.get(&key).cloned()
     }
 
+    /// Expire every tombstone this plugin left behind. Returns how many
+    /// **skills** were expired (a skill may hold several keys — its id, its
+    /// slash command, each alias).
+    ///
+    /// The uninstall path calls it (GAP-24). Until one existed nothing ever
+    /// expired a tombstone that was not immediately superseded by the same
+    /// skill coming back, so a plugin whose directory had gone kept answering
+    /// `/slash` with *"provided by plugin 'x'"* for a plugin that no longer
+    /// existed — and a re-install under the same directory name inherited the
+    /// stale keys for any skill it no longer declares.
+    pub fn clear_plugin_tombstones(&self, plugin_id: &str) -> usize {
+        let Ok(mut tombstones) = self.tombstones.write() else {
+            return 0;
+        };
+        let expired: std::collections::BTreeSet<String> = tombstones
+            .values()
+            .filter(|tomb| tomb.plugin_id == plugin_id)
+            .map(|tomb| tomb.skill_id.clone())
+            .collect();
+        tombstones.retain(|_, tomb| tomb.plugin_id != plugin_id);
+        expired.len()
+    }
+
     /// Drop every tombstone belonging to a skill that has just come back, plus
     /// any keyed by a command the new entry claims.
     fn clear_tombstones(&self, skill_id: &str, commands: &[String]) {

@@ -60,6 +60,7 @@ use openalpaca_llm::{SecretStore, ToolDefinition};
 
 use crate::bridge::{PluginAgentBridge, PluginSkillBridge, PluginToolProxy};
 use crate::error::PluginError;
+use crate::install::{self, InstallError, ManifestSummary};
 use crate::manifest::PluginManifest;
 use crate::permission_gate::{
     PermissionGate, PermissionTable, REDACTED, SecretReference, secret_reference,
@@ -197,6 +198,38 @@ struct Discovered {
     models: Vec<String>,
     skill: Option<(String, SkillFrontmatter, Arc<PluginSkillBridge>)>,
     agent: Option<AgentTemplate>,
+}
+
+// ── GAP-24 outcomes ─────────────────────────────────────────────────────
+
+/// What an install or an update did: the resulting row **plus** the manifest
+/// summary the owner needs while deciding whether to approve it.
+///
+/// The two travel together because an install grants nothing — the row says
+/// `unapproved`/`never_seen` and the summary says what approving would grant.
+#[derive(Debug)]
+pub struct InstallOutcome {
+    pub record: ExtensionRecord,
+    pub manifest: ManifestSummary,
+    /// Update only: what the replacement asks for that the recorded consent
+    /// does not cover — the *"Now also asks for: …"* preview.
+    pub added_capabilities: Vec<String>,
+    /// Update only: the consent decision was dropped, so the plugin is waiting
+    /// on the owner again.
+    pub consent_reset: bool,
+}
+
+/// What an uninstall did. Nothing here was deleted: both paths are moves into
+/// `plugins/.trash/`.
+#[derive(Debug)]
+pub struct UninstallOutcome {
+    pub removed: String,
+    /// Where the plugin directory went. `None` for an orphan, whose directory
+    /// was already gone.
+    pub trashed: Option<std::path::PathBuf>,
+    pub kept_data: bool,
+    /// Where `plugins/.data/<name>/` went, when it was not kept.
+    pub data_trashed: Option<std::path::PathBuf>,
 }
 
 // ── PluginManager ───────────────────────────────────────────────────────
@@ -1802,6 +1835,255 @@ impl PluginManager {
         self.plugins.write().await.remove(name);
         info!(plugin = name, "orphaned plugin entry removed");
         Ok(())
+    }
+
+    // ── GAP-24 — install / update / uninstall ────────────────────────
+
+    /// The dry run behind `POST /v1/extensions/plugin/validate`: parse and
+    /// report, copying nothing.
+    pub fn validate_source(&self, source: &Path) -> Result<ManifestSummary, InstallError> {
+        install::inspect_source(source, &self.plugin_dir).map(|(_, summary)| summary)
+    }
+
+    /// **install** — copy a plugin directory into the plugins root under its
+    /// own directory name, then run the load path (GAP-24).
+    ///
+    /// **It grants nothing.** The entry it writes carries provenance and *no*
+    /// consent decision, so the plugin lands `enabled = true` (the serde
+    /// default) with consent `never_seen` and the load path parks it
+    /// `Unapproved{NeverSeen}` without spawning anything. Approving is the
+    /// single action that starts it.
+    ///
+    /// Order: parse the manifest → refuse a collision → stage the copy →
+    /// rename it into place → write the entry → load. The manifest is read
+    /// **before** the copy, so a source that could never load leaves nothing
+    /// behind, and the copy is staged, so a crash can never leave a partial
+    /// `plugins/<name>` for the next boot scan to treat as real.
+    pub async fn install_from_path(&self, source: &Path) -> Result<InstallOutcome, InstallError> {
+        let (name, manifest) = install::inspect_source(source, &self.plugin_dir)?;
+        let ext = ExtensionId::plugin(name.clone());
+        let dest = self.plugin_dir.join(&name);
+
+        let staged = {
+            let _lock = self.lock_for(&name).await;
+            // Fail-closed, like every other write path: a store nobody can
+            // read refuses the install before a byte lands.
+            let table = self.permission_gate.load_table().map_err(store_error)?;
+            if dest.exists() {
+                return Err(InstallError::AlreadyInstalled(format!(
+                    "a plugin directory already exists at '{}'; update it or uninstall it first",
+                    dest.display()
+                )));
+            }
+
+            let staged = install::stage(source, &self.plugin_dir, &name)?;
+            staged.commit(&dest)?;
+
+            // An entry may survive from an earlier install of the same name —
+            // §5.1 keeps an orphan's disposition and consent on purpose. The
+            // tree that arrives now is not the tree the owner approved, so the
+            // decision does not carry over.
+            if table.approved(&name).is_some() {
+                self.permission_gate
+                    .reset_consent(&name)
+                    .map_err(store_error)?;
+            }
+            self.record_provenance(&name, source)
+        };
+
+        let mut record = self.reconcile(&ext).await?;
+        record.warnings.extend(staged);
+        info!(plugin = %name, from = %source.display(), "plugin installed");
+        Ok(InstallOutcome {
+            record,
+            manifest,
+            added_capabilities: Vec::new(),
+            consent_reset: false,
+        })
+    }
+
+    /// **update** — T0–T5, replace the tree, then the load path (GAP-24).
+    ///
+    /// The child runs with `current_dir(plugin_dir)` (`process_pool.rs`), so a
+    /// live plugin is **never** replaced in place: the incumbent goes to
+    /// `.trash/` and the staged copy is renamed into the name it vacated.
+    /// `plugins/.data/<name>/` is what survives the swap.
+    ///
+    /// The copy is staged **before** the teardown, so a source that cannot be
+    /// copied has not cost the owner a running plugin.
+    ///
+    /// Consent survives an update whose declared permissions are unchanged and
+    /// is taken back to `never_seen` otherwise — the drift is computed against
+    /// the entry on disk before the switch-in, and travels back on the response
+    /// as `added_capabilities` so the caller can show *"Now also asks for: …"*.
+    pub async fn update_from_path(
+        &self,
+        id: &str,
+        source: &Path,
+    ) -> Result<InstallOutcome, InstallError> {
+        let ext = ExtensionId::plugin(id.to_string());
+        let manifest = install::inspect_update_source(source, &self.plugin_dir, id)?;
+        self.known(&ext).await?;
+        self.guard_orphan(&ext)?;
+
+        let dest = self.plugin_dir.join(id);
+        let (added, consent_reset, warnings) = {
+            let _lock = self.lock_for(id).await;
+            self.guard_settled(&ext)?;
+            let table = self.permission_gate.load_table().map_err(store_error)?;
+
+            let recorded = table.recorded_capabilities(id);
+            let added: Vec<String> = manifest
+                .capabilities
+                .iter()
+                .filter(|cap| !recorded.contains(cap))
+                .cloned()
+                .collect();
+            let declared: std::collections::BTreeSet<&String> =
+                manifest.capabilities.iter().collect();
+            let approved: std::collections::BTreeSet<&String> = recorded.iter().collect();
+            let consent_reset = table.approved(id).is_some() && declared != approved;
+
+            let staged = install::stage(source, &self.plugin_dir, id)?;
+
+            // T0–T5 with **no W**: an update is not a toggle, so the owner's
+            // disposition is untouched (design §3.4.1's shape).
+            self.teardown_held(&ext, WithdrawalCause::Reload).await;
+            if matches!(self.ledger.state(&ext), Some(ExtensionState::Disabling)) {
+                self.ledger.store_state(&ext, ExtensionState::Disabled);
+            }
+
+            if dest.exists() {
+                install::trash(&self.plugin_dir, &dest, id)?;
+            }
+            staged.commit(&dest)?;
+
+            if consent_reset {
+                info!(plugin = id, ?added, "the replacement asks for a different \
+                     set of capabilities; consent is back to pending");
+                self.permission_gate.reset_consent(id).map_err(store_error)?;
+            }
+            (added, consent_reset, self.record_provenance(id, source))
+        };
+
+        let mut record = self.reconcile(&ext).await?;
+        record.warnings.extend(warnings);
+        info!(plugin = id, from = %source.display(), "plugin updated");
+        Ok(InstallOutcome {
+            record,
+            manifest,
+            added_capabilities: added,
+            consent_reset,
+        })
+    }
+
+    /// **uninstall** — T0–T5, the permissions entry, the directory, the
+    /// tombstones (GAP-24).
+    ///
+    /// In that order, and none of it is a delete: the directory is *moved* to
+    /// `plugins/.trash/<name>-<ts>/`, because it is a directory the owner
+    /// dropped in (§1.3 rule 3). `keep_data` decides `plugins/.data/<name>/`,
+    /// which is also moved rather than removed when it is not kept.
+    ///
+    /// **The tombstones are expired here and nowhere else.** C5 leaves one
+    /// behind every withdrawn plugin skill and agent template so the loss can
+    /// be attributed; with no uninstall path they were never cleared, so after
+    /// the directory was gone `/slash` and `spawn_subagent` kept answering for
+    /// a plugin that no longer existed — and a re-install under the same name
+    /// inherited them. The ledger's own capability tombstones go with
+    /// `drop_record` (ruling R13).
+    ///
+    /// An `Orphaned` row is uninstallable: it is `DELETE`'s case plus the
+    /// tombstone sweep, and there is no directory left to trash.
+    pub async fn uninstall(
+        &self,
+        name: &str,
+        keep_data: bool,
+    ) -> Result<UninstallOutcome, InstallError> {
+        let ext = ExtensionId::plugin(name.to_string());
+        self.known(&ext).await?;
+        let _lock = self.lock_for(name).await;
+        self.guard_settled(&ext)?;
+        // Fail-closed before anything is torn down: an unreadable store cannot
+        // have its entry removed, and a teardown that is not followed by one
+        // would leave the plugin loading again at the next boot.
+        self.permission_gate.load_table().map_err(store_error)?;
+
+        let generation = self.ledger.generation(&ext).unwrap_or(0);
+        self.teardown_held(&ext, WithdrawalCause::Disable).await;
+
+        self.permission_gate
+            .remove_entry(name)
+            .map_err(store_error)?;
+
+        let dir = self.plugin_dir.join(name);
+        let trashed = if dir.is_dir() {
+            Some(install::trash(&self.plugin_dir, &dir, name)?)
+        } else {
+            None
+        };
+        let data = install::data_dir(&self.plugin_dir, name);
+        let data_trashed = match (keep_data, data.is_dir()) {
+            (false, true) => Some(install::trash(
+                &self.plugin_dir,
+                &data,
+                &format!("{name}-data"),
+            )?),
+            _ => None,
+        };
+
+        // The row disappears, and its tombstones with it.
+        self.ledger.drop_record(&ext);
+        if let Some(catalog) = &self.skill_catalog {
+            catalog.clear_plugin_tombstones(name);
+        }
+        if let Some(agents) = &self.agent_registry {
+            agents.clear_plugin_tombstones(name);
+        }
+        self.plugins.write().await.remove(name);
+        self.emit_state(&ext, "removed", generation);
+        info!(plugin = name, keep_data, "plugin uninstalled");
+
+        Ok(UninstallOutcome {
+            removed: name.to_string(),
+            trashed,
+            kept_data: keep_data,
+            data_trashed,
+        })
+    }
+
+    /// Record where an installed tree came from, as a warning rather than a
+    /// failure: the copy has already landed, so a store that refuses the write
+    /// costs the row its provenance and nothing else.
+    fn record_provenance(&self, name: &str, source: &Path) -> Vec<String> {
+        let from = source
+            .canonicalize()
+            .unwrap_or_else(|_| source.to_path_buf())
+            .display()
+            .to_string();
+        match self.permission_gate.record_install(name, &from) {
+            Ok(()) => Vec::new(),
+            Err(e) => {
+                warn!(plugin = name, error = %e, "could not record the install provenance");
+                vec![format!("the install provenance was not recorded: {e}")]
+            }
+        }
+    }
+
+    /// A transition is in flight for this extension, so the tree underneath it
+    /// must not move. Held under the per-extension mutex, this catches a record
+    /// stranded in `Enabling`/`Disabling` rather than a race.
+    fn guard_settled(&self, ext: &ExtensionId) -> Result<(), InstallError> {
+        match self.ledger.state(ext) {
+            Some(state @ (ExtensionState::Enabling | ExtensionState::Disabling)) => {
+                Err(InstallError::Busy(format!(
+                    "'{}' is {} right now; try again once it settles",
+                    ext.name,
+                    state.word()
+                )))
+            }
+            _ => Ok(()),
+        }
     }
 
     // ── Config ───────────────────────────────────────────────────────

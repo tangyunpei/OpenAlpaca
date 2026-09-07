@@ -226,3 +226,64 @@ fn plugin_config_round_trips_and_redacts_only_references() {
         "a secret reference was served verbatim"
     );
 }
+
+// ── GAP-24: provenance and the consent reset ────────────────────────────
+
+/// An installed plugin's entry records **where it came from and when**, and
+/// carries no consent decision: install grants nothing, so the row reads
+/// `never_seen` and the toggle reads its serde default, `true`.
+#[test]
+fn recording_an_install_leaves_the_entry_pending_and_enabled() {
+    let tmp = TempDir::new().unwrap();
+    let (gate, _home) = gate(&tmp);
+
+    gate.record_install("notion", "/Users/o/src/notion").unwrap();
+
+    let table = gate.load_table().unwrap();
+    let entry = table.entry("notion").expect("the install wrote an entry");
+    assert_eq!(entry.installed_from.as_deref(), Some("/Users/o/src/notion"));
+    assert!(entry.installed_at.is_some(), "the stamp is recorded");
+    assert_eq!(entry.approved, None, "install grants nothing");
+    assert!(entry.enabled, "the serde default — approving is what starts it");
+}
+
+/// An update whose manifest asks for something new drops the consent decision
+/// and keeps everything else — the toggle position included, so a re-approval
+/// puts the plugin back exactly where the owner had it.
+#[test]
+fn resetting_consent_keeps_the_toggle_and_the_provenance() {
+    let tmp = TempDir::new().unwrap();
+    let (gate, _home) = gate(&tmp);
+
+    gate.record_install("notion", "/src/notion").unwrap();
+    gate.approve("notion", &["notes_read".into()]).unwrap();
+    gate.set_enabled("notion", false).unwrap();
+
+    gate.reset_consent("notion").unwrap();
+
+    let table = gate.load_table().unwrap();
+    let entry = table.entry("notion").expect("the entry survives");
+    assert_eq!(entry.approved, None, "back to never_seen");
+    assert_eq!(entry.approved_at, None);
+    assert!(!entry.enabled, "the owner's toggle position is untouched");
+    assert_eq!(entry.installed_from.as_deref(), Some("/src/notion"));
+}
+
+/// A `.permissions.toml` written before GAP-24 has neither key, and must keep
+/// parsing exactly as it did.
+#[test]
+fn an_entry_written_before_provenance_existed_still_parses() {
+    let tmp = TempDir::new().unwrap();
+    let (gate, _home) = gate(&tmp);
+    std::fs::write(
+        gate.permissions_path(),
+        "[notion]\nenabled = true\napproved = true\ncapabilities = [\"notes_read\"]\n",
+    )
+    .unwrap();
+
+    let table = gate.load_table().unwrap();
+    let entry = table.entry("notion").expect("the legacy entry parses");
+    assert_eq!(entry.approved, Some(true));
+    assert_eq!(entry.installed_from, None);
+    assert_eq!(entry.installed_at, None);
+}
