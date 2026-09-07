@@ -12,7 +12,7 @@
 //! - llm: Manage LLM settings, keys, and usage
 //! - chat: Chat with the Orchestrator
 //! - sessions: List the conversations a lane holds
-//! - store: Manage the content store (rebase a moved project)
+//! - store: Manage the content store (rebase a moved project, purge one you are done with)
 
 mod chat_stream;
 mod client;
@@ -67,7 +67,7 @@ enum Commands {
     /// Manage extensions — MCP servers and plugins (list, info, enable, disable, reload, approve, deny, remove)
     Ext(commands::ext::ExtArgs),
 
-    /// Manage the content store (rebase a moved project)
+    /// Manage the content store (rebase a moved project, purge one you are done with)
     Store(commands::store::StoreArgs),
 }
 

@@ -28,7 +28,7 @@
 | `openalpaca sessions` | List the conversations a lane holds (plan §5.7) | `apps/openalpaca/src/commands/sessions.rs` |
 | `openalpaca plugin` | Manage plugins (list, approve, deny, enable, disable, config) | `apps/openalpaca/src/commands/plugin.rs` |
 | `openalpaca ext` | Manage extensions — MCP servers and plugins (list, info, enable, disable, reload, approve, deny, remove) | `apps/openalpaca/src/commands/ext.rs` |
-| `openalpaca store` | Manage the content store (rebase a moved project) | `apps/openalpaca/src/commands/store.rs` |
+| `openalpaca store` | Manage the content store (rebase a moved project, purge one you are done with) | `apps/openalpaca/src/commands/store.rs` |
 
 ## Request/Query Types
 
@@ -220,7 +220,8 @@
 - Source: `apps/openalpaca/src/commands/store.rs`
 - Enum `StoreCommands` variants:
   - `rebase` (fields: `old`, `new`, `dry_run`)
-- Parsed flags: `--dry-run`
+  - `purge` (fields: `project`, `all`, `dry_run`, `yes`)
+- Parsed flags: `--all`, `--dry-run`, `--yes`, `-y`
 
 ### `tail`
 

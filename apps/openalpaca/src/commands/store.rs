@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! openalpaca store rebase <old> <new> [--dry-run]
+//! openalpaca store purge  <project>|--all [--dry-run] [-y]
 //! ```
 //!
 //! A project's path is its identity in four places — its artifacts, its
@@ -17,9 +18,18 @@
 //! destination that sits inside another project's root rather than quietly
 //! re-basing onto that root instead.
 //!
-//! Deliberately not a re-implementation of the transaction: everything below is
-//! `GET`/`PATCH /v1/workspaces`. The daemon owns the refusals, and the CLI
-//! prints them.
+//! `purge` is the other direction: a project you are done with, deleted from
+//! the store. It prints a plan first — one line per entry of the store, in the
+//! retention-class terms the seeded README already uses, saying `delete` or
+//! `keep` for each — and prints it *instead of* purging unless you pass `-y`.
+//! Conversations, runs and uploads go; produced artifacts, workspace memories
+//! and anything OpenAlpaca did not create stay, and the plan says so by name
+//! rather than by omission.
+//!
+//! Deliberately not a re-implementation of either transaction: everything below
+//! is `GET`/`PATCH /v1/workspaces` and `POST /v1/workspaces/purge`. The daemon
+//! owns the DB and the session-log writers, so the CLI never touches the store
+//! directly; it owns the refusals too, and the CLI prints them.
 
 use anyhow::Result;
 use clap::{Args, Subcommand};
@@ -46,6 +56,21 @@ pub enum StoreCommands {
         /// Report what would move and change nothing
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Delete the history of a project you are done with
+    Purge {
+        /// The project root to purge
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        project: Option<String>,
+        /// Purge every project root on record
+        #[arg(long)]
+        all: bool,
+        /// Print the plan and change nothing — what happens anyway without -y
+        #[arg(long)]
+        dry_run: bool,
+        /// Carry the plan out
+        #[arg(short = 'y', long = "yes", conflicts_with = "dry_run")]
+        yes: bool,
     },
 }
 
@@ -107,10 +132,113 @@ struct RebaseRequest<'a> {
     new_path: &'a str,
 }
 
+// ── purge ────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct PurgeRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<&'a str>,
+    all: bool,
+    dry_run: bool,
+}
+
+/// One line of the daemon's plan: a store entry, what it holds under this root,
+/// the retention class the README gives it, and `delete` or `keep`.
+#[derive(Debug, Deserialize)]
+struct PlanEntry {
+    entry: String,
+    holds: String,
+    retention: String,
+    action: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PurgeCounts {
+    #[serde(default)]
+    sessions: usize,
+    #[serde(default)]
+    messages: usize,
+    #[serde(default)]
+    tool_calls: usize,
+    #[serde(default)]
+    followups: usize,
+    #[serde(default)]
+    tasks: usize,
+    #[serde(default)]
+    spans: usize,
+    #[serde(default)]
+    run_events: usize,
+    #[serde(default)]
+    uploads: usize,
+}
+
+impl PurgeCounts {
+    /// Every member named, zeroes included — the `Counts::describe`
+    /// convention: "nothing else went" is the part a reader is checking for.
+    fn describe(&self) -> String {
+        format!(
+            "{} conversations, {} messages, {} tool calls, {} follow-ups, {} runs, {} spans, \
+             {} run events, {} uploads",
+            self.sessions,
+            self.messages,
+            self.tool_calls,
+            self.followups,
+            self.tasks,
+            self.spans,
+            self.run_events,
+            self.uploads
+        )
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct Removed {
+    #[serde(default)]
+    session_dirs: usize,
+    #[serde(default)]
+    upload_files: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct PurgeProject {
+    path: String,
+    #[serde(default)]
+    entries: Vec<PlanEntry>,
+    #[serde(default)]
+    counts: PurgeCounts,
+    #[serde(default)]
+    removed: Option<Removed>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PurgeResult {
+    #[serde(default)]
+    applied: bool,
+    #[serde(default)]
+    projects: Vec<PurgeProject>,
+    #[serde(default)]
+    home_scope: Option<PlanEntry>,
+}
+
 pub async fn run(args: StoreArgs) -> Result<()> {
     match args.command {
         StoreCommands::Rebase { old, new, dry_run } => rebase(&old, &new, dry_run).await,
+        StoreCommands::Purge {
+            project,
+            all,
+            dry_run,
+            yes,
+        } => purge(project.as_deref(), all, purge_is_dry(dry_run, yes)).await,
     }
+}
+
+/// `--dry-run` is the default until `-y`.
+///
+/// The two flags conflict in the parser, so this is not resolving a
+/// contradiction — it is the statement that the *absence* of both means the
+/// safe one.
+fn purge_is_dry(dry_run: bool, yes: bool) -> bool {
+    dry_run || !yes
 }
 
 fn workspace_query(path: &str) -> String {
@@ -148,6 +276,90 @@ async fn rebase(old: &str, new: &str, dry_run: bool) -> Result<()> {
         println!("  the store directory moved with them");
     }
     Ok(())
+}
+
+async fn purge(project: Option<&str>, all: bool, dry_run: bool) -> Result<()> {
+    let client = DaemonClient::connect()?;
+    let result: PurgeResult = client
+        .post(
+            "/v1/workspaces/purge",
+            &PurgeRequest {
+                path: project,
+                all,
+                dry_run,
+            },
+        )
+        .await?;
+
+    if result.projects.is_empty() {
+        println!("{}", "No project roots are on record.".yellow());
+    }
+    for project in &result.projects {
+        println!();
+        let heading = match result.applied {
+            true => format!("{} {}", "Purged".green().bold(), project.path),
+            false => format!("{} {}", "Would purge".bold(), project.path),
+        };
+        println!("{heading}");
+        print_entries(&project.entries);
+        // Present only on a real run: the daemon fills it from what the
+        // transaction actually deleted, not from the plan it was given.
+        if let Some(removed) = &project.removed {
+            println!("  {} {}", "deleted:".bold(), project.counts.describe());
+            println!(
+                "  {} {} session log directories, {} upload files",
+                "removed:".bold(),
+                removed.session_dirs,
+                removed.upload_files
+            );
+        }
+    }
+    if let Some(home) = &result.home_scope {
+        println!();
+        print_entries(std::slice::from_ref(home));
+    }
+    if !result.applied {
+        println!();
+        println!(
+            "{}",
+            "Nothing was deleted. Re-run with -y to carry this out.".dimmed()
+        );
+    }
+    Ok(())
+}
+
+/// The plan, one entry per two lines: the verdict and what is there, then the
+/// retention class that verdict comes from.
+///
+/// The class is printed for the keeps as much as for the deletes — "artifacts
+/// are never garbage-collected" is the sentence that makes the delete lines
+/// trustworthy.
+fn print_entries(entries: &[PlanEntry]) {
+    let width = entries
+        .iter()
+        .map(|e| e.entry.chars().count())
+        .max()
+        .unwrap_or(0);
+    for entry in entries {
+        // Padded before it is coloured: a width applied to a `ColoredString`
+        // counts the escape bytes and the column stops lining up.
+        let deletes = entry.action == "delete";
+        let padded = format!("{:>6}", entry.action);
+        let verdict = match deletes {
+            true => padded.red().bold(),
+            false => padded.green().bold(),
+        };
+        println!(
+            "  {verdict}  {name:<width$}  {holds}",
+            name = entry.entry,
+            holds = entry.holds,
+        );
+        println!(
+            "          {:<width$}  {}",
+            "",
+            format!("({})", entry.retention).dimmed(),
+        );
+    }
 }
 
 /// The ancestor a destination would be walked up to, when the daemon resolved
@@ -265,6 +477,11 @@ mod tests {
         Harness::parse_from(std::iter::once("openalpaca").chain(args.iter().copied())).command
     }
 
+    fn try_parse(args: &[&str]) -> Result<StoreCommands, clap::Error> {
+        Harness::try_parse_from(std::iter::once("openalpaca").chain(args.iter().copied()))
+            .map(|h| h.command)
+    }
+
     #[test]
     fn rebase_takes_two_paths_and_an_optional_dry_run() {
         assert!(matches!(
@@ -298,6 +515,68 @@ mod tests {
         // separator and all.
         assert_eq!(destination_ancestor("/new/proj", "/new/proj"), None);
         assert_eq!(destination_ancestor("/new/proj/", "/new/proj"), None);
+    }
+
+    #[test]
+    fn purge_takes_one_project_or_all_and_never_both() {
+        assert!(matches!(
+            parse(&["purge", "/some/proj"]),
+            StoreCommands::Purge { project: Some(p), all: false, .. } if p == "/some/proj"
+        ));
+        assert!(matches!(
+            parse(&["purge", "--all"]),
+            StoreCommands::Purge {
+                project: None,
+                all: true,
+                ..
+            }
+        ));
+        // Both is a parse error, and so is neither — the destructive verb
+        // never has to guess which project was meant.
+        assert!(try_parse(&["purge", "/some/proj", "--all"]).is_err());
+        assert!(try_parse(&["purge"]).is_err());
+        // `--dry-run` and `-y` are the same question asked twice.
+        assert!(try_parse(&["purge", "/some/proj", "--dry-run", "-y"]).is_err());
+    }
+
+    #[test]
+    fn a_purge_is_a_dry_run_until_minus_y() {
+        // Neither flag: the plan, not the deletion.
+        assert!(purge_is_dry(false, false));
+        assert!(purge_is_dry(true, false));
+        assert!(!purge_is_dry(false, true));
+
+        let StoreCommands::Purge { dry_run, yes, .. } = parse(&["purge", "/p"]) else {
+            panic!("not a purge");
+        };
+        assert!(purge_is_dry(dry_run, yes));
+        let StoreCommands::Purge { dry_run, yes, .. } = parse(&["purge", "/p", "-y"]) else {
+            panic!("not a purge");
+        };
+        assert!(!purge_is_dry(dry_run, yes));
+        let StoreCommands::Purge { dry_run, yes, .. } = parse(&["purge", "--all", "--yes"]) else {
+            panic!("not a purge");
+        };
+        assert!(!purge_is_dry(dry_run, yes));
+    }
+
+    #[test]
+    fn a_purge_names_every_member_including_the_zeroes() {
+        let counts = PurgeCounts {
+            sessions: 3,
+            messages: 41,
+            tool_calls: 12,
+            followups: 0,
+            tasks: 2,
+            spans: 5,
+            run_events: 18,
+            uploads: 0,
+        };
+        assert_eq!(
+            counts.describe(),
+            "3 conversations, 41 messages, 12 tool calls, 0 follow-ups, 2 runs, 5 spans, \
+             18 run events, 0 uploads"
+        );
     }
 
     #[test]
