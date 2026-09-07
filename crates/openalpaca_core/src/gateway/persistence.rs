@@ -233,9 +233,7 @@ impl GatewayPersistence {
     ///
     /// `task_id` is GAP-23's first link: the turn that *started* a workflow is
     /// stored carrying that run's id, so a reload can tell which assistant
-    /// message the delegation came from. It is `None` for ordinary chat — the
-    /// caller reads it off `HandleResult::delegation`, never off whatever the
-    /// lane happens to be running.
+    /// message the delegation came from. It is `None` for ordinary chat.
     ///
     /// `session_id` is the turn's session, as the user-message persist
     /// resolved it. It is passed explicitly — the same way
@@ -244,15 +242,27 @@ impl GatewayPersistence {
     /// file the answer in whatever conversation a mid-turn "New chat" left
     /// active. `None` (a turn whose user half failed to persist) falls back to
     /// the lane's active session.
+    ///
+    /// The answer arrives as the whole [`HandleResult`], not as a fan of
+    /// positional pieces: the two fields read off it — the run a delegating
+    /// turn started, and the model that answered — both have to come from
+    /// *this* result rather than from whatever the lane happens to be running
+    /// or defaulting to, and taking the struct is what makes that structural.
+    /// `model` fills a column that has always existed and that the transcript
+    /// has always rendered, but that nothing wrote: a reload dropped the
+    /// answer's model on the floor. GAP-13 makes that visible, since a turn can
+    /// now run on a model the picker is not showing. It stays `None` on the
+    /// non-LLM paths, which is honest — a slash command was answered by no
+    /// model at all.
     pub fn persist_assistant_message(
         &self,
         lane_key: &str,
-        content: &str,
+        result: &super::HandleResult,
         duration_ms: Option<i64>,
         source: &str,
-        task_id: Option<&str>,
         session_id: Option<&str>,
     ) -> Result<i64> {
+        let content = result.content.as_str();
         if content.trim().is_empty() {
             tracing::debug!("Skipping empty assistant message for lane {}", lane_key);
             return Ok(0);
@@ -263,8 +273,9 @@ impl GatewayPersistence {
             role: "assistant".to_string(),
             content: content.to_string(),
             source: Some(source.to_string()),
+            model: result.model.clone(),
             duration_ms,
-            task_id: task_id.map(str::to_string),
+            task_id: result.delegation.as_ref().map(|d| d.task_id.clone()),
             session_id: session_id.map(str::to_string),
             ..Default::default()
         })?;

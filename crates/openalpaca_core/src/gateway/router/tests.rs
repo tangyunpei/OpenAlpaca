@@ -953,3 +953,51 @@ async fn the_attachment_path_carries_the_override_as_well() {
         Some("gpt-5.2")
     );
 }
+
+/// The model that answered is stored on the assistant row, so the transcript
+/// still names it after a reload. The SSE `done` frame carries it only for the
+/// live turn — GAP-13 makes that gap visible, because a turn can now run on a
+/// model the picker is not showing.
+#[tokio::test]
+async fn the_answering_model_is_stored_on_the_assistant_row() {
+    struct ModelNamingHandler;
+
+    #[async_trait]
+    impl MessageHandler for ModelNamingHandler {
+        async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
+            let mut result = HandleResult::text("answer".to_string());
+            result.model = request.model_override.or(Some("the-default".to_string()));
+            Ok(result)
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let gw = Gateway::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        Arc::new(ModelNamingHandler),
+        EventBus::default(),
+        Some(db.clone()),
+    );
+
+    gw.handle_event(turn(Some("claude-opus-4-6".to_string())))
+        .await;
+    gw.handle_event(turn(None)).await;
+
+    let messages = openalpaca_storage::ConversationRepository::new(&db)
+        .list_by_lane("user1:gui", 50, 0)
+        .unwrap();
+    let models: Vec<Option<String>> = messages
+        .iter()
+        .filter(|m| m.role == "assistant")
+        .map(|m| m.model.clone())
+        .collect();
+    assert_eq!(
+        models,
+        vec![
+            Some("claude-opus-4-6".to_string()),
+            Some("the-default".to_string())
+        ]
+    );
+}

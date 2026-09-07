@@ -18,12 +18,24 @@ pub struct ChatSendRequest {
     /// lane.
     #[serde(default)]
     pub activate: bool,
+    /// GAP-13 — run **this turn** on a named model instead of the daemon
+    /// default. Validated against the model registry before dispatch
+    /// (`400 UNKNOWN_MODEL`), and request-scoped: nothing is written, so the
+    /// next turn on the lane is back on the default. Absent — the default.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Serialize)]
 pub struct ChatSendResponseBody {
     pub stream_id: String,
     pub lane_key: String,
+    /// The model this turn will run on: the request's `model` when it named
+    /// one, else the daemon default. `null` only on a daemon with no LLM
+    /// router at all, where there is no model to name. The client does not
+    /// have to guess which of the two it got, and the SSE `done` frame's own
+    /// `model` still reports what actually answered.
+    pub model_used: Option<String>,
 }
 
 #[derive(Deserialize)]

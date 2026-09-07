@@ -351,15 +351,14 @@ impl Gateway {
                 let mut assistant_msg_id: i64 = 0;
                 // Persist assistant message and link to skill execution log
                 if let Some(ref p) = self.persistence {
+                    // The whole result: GAP-23's run link and GAP-13's
+                    // answering model are both read off *it*, so both survive
+                    // the reload that the SSE `done` frame below does not.
                     match p.persist_assistant_message(
                         &lane_key_str,
-                        &result.content,
+                        &result,
                         Some(duration_ms),
                         &source_name,
-                        // GAP-23: a delegating turn is stored carrying the run
-                        // it started, so the link survives the reload that the
-                        // SSE `done` frame below does not.
-                        result.delegation.as_ref().map(|d| d.task_id.as_str()),
                         // §5.1: the session this turn resolved when it began.
                         turn_session.as_deref(),
                     ) {

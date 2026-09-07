@@ -67,12 +67,18 @@ impl ChatService {
     /// 3. `Done { content, model, tokens_in, tokens_out, duration_ms }` — full text + metadata
     ///
     /// On error: `Thinking` → `Error { message }`.
+    ///
+    /// `model_override` (GAP-13) runs this one turn on a named model. The
+    /// route validated the id against the model registry before calling —
+    /// this path only carries it — and nothing persists it, so the next turn
+    /// on the lane is back on the daemon default.
     pub fn send_message(
         &self,
         content: String,
         attachment_refs: Vec<AttachmentRef>,
         principal: &str,
         workspace_path: Option<String>,
+        model_override: Option<String>,
     ) -> Result<ChatSendResponse> {
         // Fast preflight check so invalid attachment IDs still fail the request immediately.
         let file_repo = FileAssetRepository::new(&self.db);
@@ -157,7 +163,7 @@ impl ChatService {
                     workspace_path,
                     stream_id: Some(sid.clone()),
                     lane_override: None,
-                    model_override: None,
+                    model_override,
                 })
                 .await;
 

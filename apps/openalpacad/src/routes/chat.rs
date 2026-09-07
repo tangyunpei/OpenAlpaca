@@ -211,6 +211,61 @@ fn resolve_history_session(
     }
 }
 
+// ── The turn's model (GAP-13) ───────────────────────────────────────
+
+/// Resolve what `POST /v1/chat`'s optional `model` means for this turn, and
+/// refuse an id the daemon cannot serve **before** anything is dispatched.
+///
+/// Refusing early is the point. A bogus id is not inert downstream:
+/// `handle_simple_query` sizes the turn's trimming budget from
+/// `model_registry().get_model_info(model)` and falls back to a 200k window
+/// when the lookup misses, so an unrecognised name would quietly change how
+/// much context the turn keeps instead of failing — silent degradation, which
+/// the rules reject.
+///
+/// **A model whose provider is disabled is refused by the same lookup, with
+/// the same code.** R58b takes a disabled provider's rows *out* of the
+/// registry — neither its `[models]` entries nor its compiled defaults are
+/// registered — so "not in the registry" is the one true answer for both
+/// cases, and the message says so rather than pretending the two are
+/// distinguishable here. The picker the GUI offers is built from
+/// `GET /v1/models`, which reads the same registry, so neither kind of
+/// refused id is selectable in the first place.
+///
+/// Returns the model the turn will run on: the named one, or the router's
+/// current default when the request named none.
+#[allow(clippy::result_large_err)]
+fn resolve_turn_model(
+    router: Option<&openalpaca_llm::LlmRouter>,
+    requested: Option<&str>,
+) -> Result<Option<String>, Response> {
+    let Some(requested) = requested else {
+        return Ok(router.map(|r| r.default_model()));
+    };
+    let Some(router) = router else {
+        // Nothing to validate against, and nothing that could run it.
+        return Err(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "LLM_NOT_CONFIGURED",
+            "LLM router is not configured, so this daemon cannot run a named model",
+        )
+        .into_response());
+    };
+    if router.model_registry().get_model_info(requested).is_none() {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "UNKNOWN_MODEL",
+            &format!(
+                "Unknown model '{requested}': it is not in the model registry. \
+                 A model whose provider is disabled is not registered either — \
+                 re-enable the provider to make its models selectable."
+            ),
+        )
+        .into_response());
+    }
+    Ok(Some(requested.to_string()))
+}
+
 // ── POST /v1/chat ───────────────────────────────────────────────────
 
 pub async fn send_chat_handler(
@@ -271,7 +326,27 @@ pub async fn send_chat_handler(
         Err(response) => return response,
     };
 
-    match chat_service.send_message(body.content, body.attachments, principal, workspace_path) {
+    // GAP-13: which model this one turn runs on, refused here if the daemon
+    // cannot serve it. `model_used` is echoed so the client never has to guess
+    // whether its override took.
+    let model_used = match resolve_turn_model(
+        state
+            .llm_settings_service
+            .as_ref()
+            .map(|s| s.router().as_ref()),
+        body.model.as_deref(),
+    ) {
+        Ok(model) => model,
+        Err(response) => return response,
+    };
+
+    match chat_service.send_message(
+        body.content,
+        body.attachments,
+        principal,
+        workspace_path,
+        body.model,
+    ) {
         Ok(resp) => {
             // Publish to EventBus; bridge forwards to WebSocket clients
             let _ = state.gateway.bus.publish(SystemEvent::ChatStreamStarted {
@@ -283,6 +358,7 @@ pub async fn send_chat_handler(
             Json(ChatSendResponseBody {
                 stream_id: resp.stream_id,
                 lane_key: resp.lane_key,
+                model_used,
             })
             .into_response()
         }
@@ -741,6 +817,103 @@ mod tests {
             target_session(&db, &bus, "user1", &bound.id, false).expect("accepted"),
             Some("/repo/one".to_string())
         );
+    }
+
+    // ── GAP-13: the turn's model ────────────────────────────────
+
+    /// A router with no providers at all — enough to answer "is this id
+    /// registered?" and "what is the default?", which is all the route asks.
+    fn router_with(disabled: &[openalpaca_llm::ProviderType]) -> openalpaca_llm::LlmRouter {
+        let disabled: std::collections::HashSet<_> = disabled.iter().cloned().collect();
+        openalpaca_llm::LlmRouter::new(
+            std::collections::HashMap::new(),
+            openalpaca_llm::ModelRegistry::with_defaults_and_config(
+                &std::collections::HashMap::new(),
+                &disabled,
+            ),
+            std::collections::HashMap::new(),
+            Arc::new(openalpaca_llm::CostTracker::new(
+                openalpaca_llm::ModelRegistry::with_defaults(),
+            )),
+            "claude-sonnet-4-6".to_string(),
+        )
+    }
+
+    /// The default: no `model`, so the turn runs on the router's own default
+    /// and the response says which that is.
+    #[tokio::test]
+    async fn a_turn_that_names_no_model_reports_the_daemon_default() {
+        let router = router_with(&[]);
+        assert_eq!(
+            resolve_turn_model(Some(&router), None).expect("accepted"),
+            Some("claude-sonnet-4-6".to_string())
+        );
+    }
+
+    /// A registered id is accepted and echoed back as the turn's model.
+    #[tokio::test]
+    async fn a_registered_model_is_accepted_and_echoed() {
+        let router = router_with(&[]);
+        assert_eq!(
+            resolve_turn_model(Some(&router), Some("claude-opus-4-6")).expect("accepted"),
+            Some("claude-opus-4-6".to_string())
+        );
+    }
+
+    /// An id the registry does not know is refused *before* dispatch, rather
+    /// than silently resizing the turn's trimming budget downstream.
+    #[tokio::test]
+    async fn an_unknown_model_is_400_unknown_model() {
+        let router = router_with(&[]);
+        let err = resolve_turn_model(Some(&router), Some("gpt-9-turbo")).expect_err("refused");
+        let (status, body) = refusal(err).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "UNKNOWN_MODEL");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .expect("message")
+                .contains("gpt-9-turbo"),
+            "the refusal must name the id it refused"
+        );
+        // An empty string is not a model id either.
+        let err = resolve_turn_model(Some(&router), Some("")).expect_err("refused");
+        assert_eq!(refusal(err).await.0, StatusCode::BAD_REQUEST);
+    }
+
+    /// A disabled provider's models are refused by the same lookup: R58b takes
+    /// its rows out of the registry, so there is nothing here to select.
+    #[tokio::test]
+    async fn a_disabled_providers_model_is_refused_too() {
+        let router = router_with(&[openalpaca_llm::ProviderType::OpenAI]);
+        // Sanity: the same id is fine while its provider is on.
+        assert!(resolve_turn_model(Some(&router_with(&[])), Some("gpt-5.2")).is_ok());
+
+        let err = resolve_turn_model(Some(&router), Some("gpt-5.2")).expect_err("refused");
+        let (status, body) = refusal(err).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "UNKNOWN_MODEL");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .expect("message")
+                .contains("provider is disabled"),
+            "the refusal must say why an id that used to work no longer does"
+        );
+        // The provider that is still on keeps its models.
+        assert!(resolve_turn_model(Some(&router), Some("claude-opus-4-6")).is_ok());
+    }
+
+    /// No router at all: naming a model is refused rather than accepted and
+    /// dropped, but a turn that names none is still fine (`model_used: null`).
+    #[tokio::test]
+    async fn naming_a_model_without_an_llm_router_is_503() {
+        assert_eq!(resolve_turn_model(None, None).expect("accepted"), None);
+
+        let err = resolve_turn_model(None, Some("claude-opus-4-6")).expect_err("refused");
+        let (status, body) = refusal(err).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "LLM_NOT_CONFIGURED");
     }
 
     #[tokio::test]
