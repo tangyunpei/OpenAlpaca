@@ -173,6 +173,9 @@ impl TaskDispatcher {
         resume: Option<ResumeSeed>,
     ) -> Result<DispatchOutcome, String> {
         let now = Utc::now();
+        // Whether this dispatch is §5.6c's `resume`, asked before the seed is
+        // moved into the spawn: the row write and the state init both differ.
+        let resuming = resume.is_some();
 
         // Spawn a lead agent instance from the singleton template.
         // Prefer templates with "orchestration" capability, fall back to any template.
@@ -292,27 +295,54 @@ impl TaskDispatcher {
             };
             let persisted = match row_write {
                 RowWrite::Create => repo.create(&task),
-                // D5 — the row is already there under this id, and the run
-                // about to start replaces whatever the last one left on it.
+                // §5.6c: a resume re-enters a row that *did* run, and its
+                // final artifact list is built from `state_json` — so the
+                // accumulators stay (Important 3). Every other relaunch is
+                // D5's `start` on a row that never ran, and replaces whatever
+                // the last attempt left on it.
+                RowWrite::Relaunch if resuming => repo.upsert_queued_preserving_state(&task),
                 RowWrite::Relaunch => repo.upsert_queued(&task),
             };
             if let Err(e) = persisted {
                 tracing::warn!("Failed to persist lead agent task to DB: {e}");
             }
 
-            // Initialize state_json with workspace
-            let step_info = vec![(
-                lead_agent.id.clone(),
-                lead_agent.name.clone(),
-                "lead_orchestrator".to_string(),
-            )];
-            let initial_state = TaskState::initial(description, &step_info);
-            let state_json = initial_state.to_json();
-            match repo.update_state(&task_id, &state_json, 0) {
+            // The run's working state. A resume keeps the one the crashed half
+            // left — its steps carry the artifact pointers the completion
+            // report is assembled from — and only hands the lead's step to the
+            // instance now running it, after claiming what the dead instance
+            // wrote into the workspace but never got to claim. Re-initialising
+            // here would make the resumed run disown the files it already
+            // produced.
+            let preserved = resuming
+                .then(|| repo.get(&task_id).ok().flatten())
+                .flatten()
+                .and_then(|row| {
+                    let version = row.state_version;
+                    serde_json::from_str::<TaskState>(row.state_json.as_deref()?)
+                        .ok()
+                        .map(|state| (state, version))
+                });
+            let (state_json, base_version) = match preserved {
+                Some((mut state, version)) => {
+                    state.scan_workspace_artifacts(0);
+                    state.rebind_step_agent(0, &lead_agent.id, &lead_agent.name);
+                    (state.to_json(), version)
+                }
+                None => {
+                    let step_info = vec![(
+                        lead_agent.id.clone(),
+                        lead_agent.name.clone(),
+                        "lead_orchestrator".to_string(),
+                    )];
+                    (TaskState::initial(description, &step_info).to_json(), 0)
+                }
+            };
+            match repo.update_state(&task_id, &state_json, base_version) {
                 Ok(true) => {}
                 Ok(false) => {
                     tracing::warn!(task_id = %task_id, "State init version conflict, retrying");
-                    let _ = repo.update_state(&task_id, &state_json, 1);
+                    let _ = repo.update_state(&task_id, &state_json, base_version + 1);
                 }
                 Err(e) => {
                     tracing::error!(task_id = %task_id, error = %e, "Failed to initialize task state");

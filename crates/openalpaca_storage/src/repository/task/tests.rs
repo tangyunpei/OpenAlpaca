@@ -551,6 +551,66 @@ fn upsert_queued_relaunches_an_existing_row_in_place() {
     assert_eq!(repo.list_recent(10).unwrap().len(), 1);
 }
 
+/// §5.6c's `resume` is the first verb to re-launch a row that **did** run.
+/// The final outcome's artifact list is built from `state_json`
+/// (`TaskState::collect_artifacts` walks the steps' pointers), not from a
+/// query over the run's assets — so clearing it here would make a run that
+/// wrote three files before it crashed finish claiming only what it produced
+/// after the resume. The accumulators survive; everything that describes a
+/// run that has *stopped* still goes.
+#[test]
+fn upsert_queued_preserving_state_keeps_what_the_crashed_half_accumulated() {
+    let db = setup_db();
+    let repo = TaskRepository::new(&db);
+
+    let mut original = make_task("t1", "Ship the release");
+    original.priority = 7;
+    original.description = Some("first attempt".to_string());
+    repo.create(&original).unwrap();
+    repo.update_state("t1", r#"{"objective":"half done"}"#, 0)
+        .unwrap();
+    repo.set_result("t1", "interrupted — the daemon restarted")
+        .unwrap();
+    repo.set_outcome("t1", r#"{"summary":"partial"}"#, OutcomeKind::Mixed, 3)
+        .unwrap();
+    repo.update_status("t1", TaskStatus::Interrupted).unwrap();
+    let version = repo.get("t1").unwrap().unwrap().state_version;
+
+    let mut relaunch = make_task("t1", "Ship the release");
+    relaunch.description = Some("first attempt".to_string());
+    repo.upsert_queued_preserving_state(&relaunch).unwrap();
+
+    let stored = repo.get("t1").unwrap().unwrap();
+    // The run is live again…
+    assert_eq!(stored.status, TaskStatus::Queued);
+    assert!(stored.completed_at.is_none(), "it has not finished again");
+    assert!(
+        stored.result_summary.is_none(),
+        "the crash's summary does not describe the run that is now running"
+    );
+    // …over everything the crashed half accumulated.
+    assert_eq!(
+        stored.state_json.as_deref(),
+        Some(r#"{"objective":"half done"}"#),
+        "the outcome's artifact list is built from this"
+    );
+    assert_eq!(
+        stored.state_version, version,
+        "a preserved state keeps the version its next writer must match"
+    );
+    assert_eq!(stored.artifact_count, 3);
+    assert_eq!(stored.outcome_json.as_deref(), Some(r#"{"summary":"partial"}"#));
+    assert_eq!(stored.outcome_kind, Some(OutcomeKind::Mixed));
+    assert_eq!(stored.priority, 7, "identity is not re-minted");
+    assert_eq!(repo.list_recent(10).unwrap().len(), 1);
+
+    // And `upsert_queued` still resets: the two verbs are different verbs.
+    repo.upsert_queued(&relaunch).unwrap();
+    let reset = repo.get("t1").unwrap().unwrap();
+    assert!(reset.state_json.is_none());
+    assert_eq!(reset.artifact_count, 0);
+}
+
 /// Idempotent in the sense the dispatcher needs: calling it twice leaves one
 /// queued row, not two rows or an error.
 #[test]

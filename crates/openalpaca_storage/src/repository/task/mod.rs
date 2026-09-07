@@ -69,6 +69,30 @@ const RELAUNCH_ON_CONFLICT: &str = "ON CONFLICT(id) DO UPDATE SET \
      source_task_id = excluded.source_task_id, \
      session_id = excluded.session_id";
 
+/// [`TaskRepository::upsert_queued_preserving_state`]'s conflict tail — the
+/// row goes live again **over what the last attempt accumulated**.
+///
+/// The difference from [`RELAUNCH_ON_CONFLICT`] is exactly the columns a run
+/// builds up as it works: `state_json` (and the `state_version` its next
+/// writer must match), `outcome_json`, `outcome_kind` and `artifact_count`.
+/// What describes a run that has *stopped* still goes — the summary, the
+/// progress counters and `completed_at` — because the run this row names has
+/// not stopped.
+const RESUME_ON_CONFLICT: &str = "ON CONFLICT(id) DO UPDATE SET \
+     title = excluded.title, \
+     description = excluded.description, \
+     status = excluded.status, \
+     progress_current = NULL, \
+     progress_total = NULL, \
+     result_summary = NULL, \
+     created_by = excluded.created_by, \
+     source_lane = excluded.source_lane, \
+     updated_at = excluded.updated_at, \
+     completed_at = NULL, \
+     workspace_id = excluded.workspace_id, \
+     source_task_id = excluded.source_task_id, \
+     session_id = excluded.session_id";
+
 /// Repository for task CRUD operations.
 pub struct TaskRepository<'a> {
     db: &'a Database,
@@ -110,6 +134,25 @@ impl<'a> TaskRepository<'a> {
     /// the goal onto a new id and leaves the original untouched.
     pub fn upsert_queued(&self, task: &Task) -> Result<()> {
         self.insert_row(task, RELAUNCH_ON_CONFLICT, "Failed to upsert queued task")
+    }
+
+    /// [`Self::upsert_queued`]'s sibling for §5.6c's `resume`: the row goes
+    /// live again **without** losing what the interrupted attempt accumulated.
+    ///
+    /// `start` and `rerun` never need this — `start` only ever re-launches a
+    /// row that never ran (R43) and `rerun` writes a new row — but `resume` is
+    /// the first verb to re-enter a row that *did* run, and the completion
+    /// report's artifact list is built from `state_json`
+    /// (`TaskState::collect_artifacts`), not from a query over the run's
+    /// assets. Resetting it would leave a run that wrote three files before it
+    /// crashed finishing with only what it produced after the resume, the
+    /// earlier files still on disk and claimed by nothing.
+    ///
+    /// Kept as a second `ON CONFLICT` tail rather than a flag on one: the two
+    /// verbs mean different things to a stored row, and a reader should be
+    /// able to see which columns each keeps without following a boolean.
+    pub fn upsert_queued_preserving_state(&self, task: &Task) -> Result<()> {
+        self.insert_row(task, RESUME_ON_CONFLICT, "Failed to resume queued task")
     }
 
     /// The one `INSERT INTO task`, with an optional `ON CONFLICT` tail.

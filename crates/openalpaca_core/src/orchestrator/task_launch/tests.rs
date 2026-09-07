@@ -643,6 +643,80 @@ async fn resume_relaunches_the_run_under_its_own_id() {
     assert!(!ctx.claim_run_slot("t1"));
 }
 
+/// The resumed run finishes claiming the files the crashed half wrote.
+///
+/// `resume` is the first verb to re-launch a row that *did* run, and the
+/// completion report's artifact list comes from `state_json` — so a run that
+/// wrote three files, crashed and was resumed would otherwise finish listing
+/// only what it produced after the resume, with the earlier files still on
+/// disk and no longer claimed by anything.
+///
+/// No router here, so nothing runs behind the dispatch: what is asserted is
+/// exactly what the launch left on the row.
+#[tokio::test]
+async fn a_resume_keeps_the_state_and_artifacts_the_crashed_half_accumulated() {
+    use crate::orchestrator::task_state::TaskState;
+
+    let (_dir, db) = temp_db();
+    let logs = tempfile::tempdir().unwrap();
+    let (orchestrator, ctx) =
+        make_orchestrator(&db, vec![make_agent("lead_agent", vec!["orchestration"])], false);
+    store_interrupted_with_log(&db, &ctx, logs.path(), "t1", "s1");
+    enable_resume(&orchestrator);
+
+    // What the crashed half left behind: a lead step holding the pointer to
+    // the file it wrote, and a workspace entry it never got to claim.
+    let repo = TaskRepository::new(&db);
+    let mut state = TaskState::initial(
+        "write the changelog",
+        &[(
+            "lead_agent::dead".to_string(),
+            "Lead".to_string(),
+            "lead_orchestrator".to_string(),
+        )],
+    );
+    state.steps[0].add_artifact("report.md", "The report", None);
+    state
+        .workspace
+        .write(
+            "notes.md",
+            "notes",
+            "lead_agent::dead",
+            crate::orchestrator::task_state::WorkspaceEntryType::Artifact,
+            &[],
+        )
+        .unwrap();
+    repo.update_state("t1", &state.to_json(), 0).unwrap();
+    repo.set_outcome("t1", r#"{"summary":"partial"}"#, openalpaca_storage::OutcomeKind::Mixed, 1)
+        .unwrap();
+
+    orchestrator.resume_task("t1").await.expect("resumed");
+
+    let row = repo.get("t1").unwrap().expect("the row");
+    assert_eq!(
+        row.artifact_count, 1,
+        "the crashed half's count is not reset to zero under it"
+    );
+    let stored: TaskState =
+        serde_json::from_str(row.state_json.as_deref().expect("state survives")).unwrap();
+    let pointers = &stored.steps[0].artifact_pointers;
+    assert!(
+        pointers.iter().any(|p| p.contains("report.md")),
+        "the pointer the crashed half recorded: {pointers:?}"
+    );
+    assert!(
+        pointers.iter().any(|p| p.contains("notes.md")),
+        "and what it wrote but never claimed, claimed for it before the step \
+         changes hands: {pointers:?}"
+    );
+    assert_eq!(
+        stored.steps[0].agent_id, "lead_agent",
+        "the step belongs to the instance now running it, so *its* artifacts \
+         are collected too"
+    );
+    assert_eq!(stored.objective, "write the changelog");
+}
+
 /// Turn S2 on for one orchestrator, the way a hand-edited `daemon.toml`
 /// would.
 fn enable_resume(orchestrator: &Orchestrator) {
