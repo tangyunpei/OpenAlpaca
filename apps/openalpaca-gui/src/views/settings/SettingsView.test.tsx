@@ -231,6 +231,11 @@ vi.mock("@/hooks/useExtensions", async (importOriginal) => ({
   useExtensionVerb: () => mutation(),
   useRemoveExtension: () => mutation(),
   useSetExtensionConfig: () => mutation(),
+  useInstallPlugin: () => mutation(),
+  useValidatePlugin: () => mutation(),
+  useUpdatePlugin: () => mutation(),
+  useAddMcpServer: () => mutation(),
+  useUninstallExtension: () => mutation(),
 }));
 
 vi.mock("@/hooks/useAgents", async (importOriginal) => ({

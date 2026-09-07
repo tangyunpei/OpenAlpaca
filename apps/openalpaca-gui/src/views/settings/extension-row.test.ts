@@ -349,6 +349,67 @@ describe("orderExtensions (G-4)", () => {
   });
 });
 
+// ── GAP-24: what is installed, as distinct from what is on ────────────────
+
+describe("the install menu (GAP-24)", () => {
+  it("offers Update and Uninstall on a plugin, in the overflow menu", () => {
+    const view = extensionRowView(
+      extensionRow({ kind: "plugin", id: "notion", state: "enabled" }),
+    );
+    expect(view.menu).toEqual(["reload", "update", "uninstall"]);
+    // Never promoted to a primary control: these change what is installed.
+    expect(view.actions).not.toContain("update");
+    expect(view.actions).not.toContain("uninstall");
+  });
+
+  /**
+   * An MCP declaration is a block in the owner's own `config/mcp.toml`:
+   * editing it is a text edit plus `reload`, and `PUT` answers
+   * `409 unsupported_for_kind`. Removing it requires the server to be off
+   * first, so the item is offered only where the daemon would take it.
+   */
+  it("never offers Update on an MCP server, and Uninstall only once it is off", () => {
+    const live = extensionRowView(
+      extensionRow({ kind: "mcp", id: "github", state: "enabled" }),
+    );
+    expect(live.menu).toEqual(["reload"]);
+
+    const off = extensionRowView(
+      extensionRow({
+        kind: "mcp",
+        id: "github",
+        state: "disabled",
+        enabled: false,
+      }),
+    );
+    expect(off.menu).toEqual(["uninstall"]);
+  });
+
+  /**
+   * An orphan already carries `Remove` as its primary control — a second door
+   * to the same place would be two answers to one question.
+   */
+  it("leaves an orphan its Remove button and no install menu", () => {
+    const view = extensionRowView(
+      extensionRow({ kind: "plugin", id: "ghost", state: "orphaned" }),
+    );
+    expect(view.actions).toEqual(["remove"]);
+    expect(view.menu).toEqual([]);
+  });
+
+  it("offers Uninstall on a plugin the daemon could not load", () => {
+    const view = extensionRowView(
+      extensionRow({
+        kind: "plugin",
+        id: "broken",
+        state: "failed",
+        reason: "crashed",
+      }),
+    );
+    expect(view.menu).toContain("uninstall");
+  });
+});
+
 describe("extensionErrorCopy (§8's flat envelope)", () => {
   it("turns each refusal word into something a person can act on", () => {
     expect(extensionErrorCopy("not_loaded")).toMatch(/Nothing is loaded/);
@@ -358,6 +419,26 @@ describe("extensionErrorCopy (§8's flat envelope)", () => {
     expect(extensionErrorCopy("unsupported_for_kind")).toMatch(
       /does not apply/,
     );
+  });
+
+  it("covers every word the install family answers with (GAP-24)", () => {
+    for (const [word, expected] of [
+      ["invalid_path", /absolute directory/],
+      ["unsupported_source", /Only a local directory/],
+      ["source_not_found", /no directory at that path/],
+      ["invalid_manifest", /nothing was copied/],
+      ["escaping_symlink", /links to files outside itself/],
+      ["already_installed", /update it instead/],
+      ["already_declared", /already declared/],
+      ["invalid_declaration", /incomplete/],
+      ["not_disabled", /Turn this server off/],
+      ["busy", /starting or stopping/],
+      ["copy_failed", /nothing changed/],
+    ] as const) {
+      const copy = extensionErrorCopy(word);
+      expect(copy, word).toMatch(expected);
+      expect(copy, `${word} must not be shown as its raw word`).not.toBe(word);
+    }
   });
 
   it("passes anything it does not recognise through verbatim", () => {

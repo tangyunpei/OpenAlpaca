@@ -30,6 +30,14 @@ import { whenStamp } from "./format";
 export type ExtensionAction =
   "approve" | "deny" | "retry" | "remove" | "configure";
 
+/**
+ * The row's overflow menu (GAP-24). Nothing here is a primary control:
+ * `reload` because nothing is wrong, `update` and `uninstall` because they
+ * change what is *installed* rather than whether it is on, and an owner should
+ * have to go looking for the one that moves a directory.
+ */
+export type ExtensionMenuItem = "reload" | "update" | "uninstall";
+
 export interface ExtensionRowView {
   /** The state word itself — §9.2's tag text, kept as the row's own word. */
   tag: string;
@@ -46,7 +54,7 @@ export interface ExtensionRowView {
   secondary: string | null;
   actions: ExtensionAction[];
   /** Overflow-menu items; a reload is not a primary control. */
-  menu: "reload"[];
+  menu: ExtensionMenuItem[];
   /** Degraded first (G-4): 0 failed/unapproved/orphaned, 1 live, 2 disabled. */
   rank: 0 | 1 | 2;
   /** `hint` on a `needs_authorization` row — the URL the owner must visit. */
@@ -103,7 +111,7 @@ const UNREADABLE =
   "the daemon cannot read this extension's on/off setting, so it will not change it";
 
 export function extensionRowView(row: ExtensionRow): ExtensionRowView {
-  const view = describe(row);
+  const view = withInstallMenu(row, describe(row));
   // §4/§8: a `null` bit is unknown, not `false`. Drawing a live switch over it
   // would repeat exactly the lie this commit fixes, so the control is inert
   // and says why.
@@ -111,6 +119,33 @@ export function extensionRowView(row: ExtensionRow): ExtensionRowView {
     return { ...view, toggleDisabled: true, disabledReason: UNREADABLE };
   }
   return view;
+}
+
+/**
+ * The two GAP-24 menu items, added to every state's row rather than written
+ * into each one: what is installed is orthogonal to whether it is on.
+ *
+ * Two rules:
+ *
+ *  * **`update` is plugins only.** An MCP server is a block in the owner's own
+ *    `config/mcp.toml` — editing it is a text edit plus `reload`, and the route
+ *    answers `409 unsupported_for_kind`.
+ *  * **`uninstall` is offered only where the daemon would take it.** Removing a
+ *    server's declaration requires it to be `Disabled` first, so the item
+ *    appears on an MCP row only then; and an orphan already carries `Remove` as
+ *    its primary control, so it does not get a second door to the same place.
+ */
+function withInstallMenu(
+  row: ExtensionRow,
+  view: ExtensionRowView,
+): ExtensionRowView {
+  const menu = [...view.menu];
+  if (row.kind === "plugin" && row.state !== "orphaned") menu.push("update");
+  const removable =
+    row.state !== "orphaned" &&
+    (row.kind === "plugin" || row.state === "disabled");
+  if (removable) menu.push("uninstall");
+  return { ...view, menu };
 }
 
 function describe(row: ExtensionRow): ExtensionRowView {
@@ -121,7 +156,7 @@ function describe(row: ExtensionRow): ExtensionRowView {
     toggleDisabled: false,
     secondary: null,
     actions: [] as ExtensionAction[],
-    menu: [] as "reload"[],
+    menu: [] as ExtensionMenuItem[],
     authorizeUrl: null,
   };
 
@@ -326,6 +361,30 @@ export function extensionErrorCopy(message: string): string {
       return "This extension is still declared, so it cannot be removed.";
     case "unsupported_for_kind":
       return "That action does not apply to this kind of extension.";
+
+    // GAP-24 — the words the install family answers with.
+    case "invalid_path":
+      return "That path cannot be installed: give an absolute directory outside the plugins folder.";
+    case "unsupported_source":
+      return "Only a local directory can be installed — installing from a URL is not supported.";
+    case "source_not_found":
+      return "There is no directory at that path.";
+    case "invalid_manifest":
+      return "That directory's plugin.toml cannot make a plugin, so nothing was copied.";
+    case "escaping_symlink":
+      return "That directory links to files outside itself, so it was not copied.";
+    case "already_installed":
+      return "A plugin of that name is already installed — update it instead.";
+    case "already_declared":
+      return "A server of that name is already declared.";
+    case "invalid_declaration":
+      return "That server declaration is incomplete.";
+    case "not_disabled":
+      return "Turn this server off before removing its declaration.";
+    case "busy":
+      return "This extension is still starting or stopping — try again in a moment.";
+    case "copy_failed":
+      return "The files could not be copied, so nothing changed.";
     default:
       return message;
   }

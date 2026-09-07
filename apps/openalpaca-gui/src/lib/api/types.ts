@@ -787,6 +787,70 @@ export type ExtensionVerb =
   "enable" | "disable" | "reload" | "approve" | "deny";
 
 /**
+ * What a `plugin.toml` declares, read **before** the directory is copied
+ * (GAP-24). It is the approval preview: an install grants nothing, so this is
+ * what the owner is deciding about when they approve.
+ */
+export interface ManifestSummary {
+  /** The directory name the plugin takes, which is its extension id. */
+  name: string;
+  version: string;
+  description: string;
+  entry: string;
+  capabilities: string[];
+  virtual_capabilities: string[];
+  /** The `[types]` table as declared: `tool`, `skill`, `agent`, … */
+  types: Record<string, boolean>;
+  required_config_keys: string[];
+  /** Values that never land in `plugins/.config/<name>.toml`. */
+  sensitive_config_keys: string[];
+}
+
+/** `POST /v1/extensions/{kind}` and `PUT /v1/extensions/plugin/{id}`. */
+export interface InstallResponse {
+  extension: ExtensionRow;
+  /** `null` for an MCP server, which has no manifest and no consent gate. */
+  manifest: ManifestSummary | null;
+  /** Update only: what the replacement asks for beyond the recorded consent. */
+  added_capabilities?: string[];
+  /** Update only: the consent decision was dropped, so it is waiting again. */
+  consent_reset?: boolean;
+}
+
+/** `POST /v1/extensions/plugin/validate` — the dry run. */
+export interface ValidateResponse {
+  manifest: ManifestSummary;
+  /** A plugin of this name is already in the store, so this would be an update. */
+  installed: boolean;
+}
+
+/** `DELETE /v1/extensions/{kind}/{id}?uninstall=true`. */
+export interface UninstallResponse {
+  removed: string;
+  /** Where the directory went. Nothing is deleted — it is moved to the trash. */
+  trashed: string | null;
+  kept_data: boolean;
+  data_trashed: string | null;
+}
+
+/** The body of `POST /v1/extensions/mcp` — one `[servers.<name>]` block. */
+export interface McpDeclaration {
+  name: string;
+  transport: "stdio" | "http";
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+  url?: string;
+  bearer_env?: string;
+  api_key_header?: string;
+  api_key_env?: string;
+  connect_timeout_secs?: number;
+  request_timeout_secs?: number;
+  enabled?: boolean;
+}
+
+/**
  * Where an extension tool came from (`GET /v1/tools`). `null` for builtins and
  * for `config/tools/*.toml` tools — a builtin row carries no enable field at
  * all, because there is no per-tool enable state anywhere (S1, §8).

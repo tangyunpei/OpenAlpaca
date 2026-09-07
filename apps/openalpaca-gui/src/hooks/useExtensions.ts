@@ -1,5 +1,6 @@
 /**
- * Settings → Extensions (ADR-030 §9.2). Install / uninstall is GAP-24.
+ * Settings → Extensions (ADR-030 §9.2), install and uninstall included
+ * (GAP-24).
  *
  * Every verb returns the resulting row, so a mutation's `onSuccess` has the
  * truth in hand — but nothing is rendered from it: the list query is
@@ -17,18 +18,26 @@ import {
 } from "@tanstack/react-query";
 
 import {
+  addMcpServer,
+  installPlugin,
   listExtensions,
   removeExtension,
   runExtensionVerb,
   setExtensionConfig,
+  uninstallExtension,
+  updatePlugin,
+  validatePlugin,
 } from "@/lib/api/extensions";
 import type {
   ExtensionKind,
   ExtensionRow,
   ExtensionVerb,
+  InstallResponse,
+  McpDeclaration,
+  UninstallResponse,
+  ValidateResponse,
 } from "@/lib/api/types";
 import { qk } from "@/lib/query-keys";
-import { unavailable, type Availability } from "@/lib/unavailable";
 
 export function useExtensions(): UseQueryResult<ExtensionRow[]> {
   return useQuery({
@@ -108,11 +117,89 @@ function invalidateExtensionKeys(
 }
 
 /**
- * GAP-24 — installing an extension still means dropping a directory into the
- * plugins root, or writing a `[servers.<name>]` block into `config/mcp.toml`,
- * and restarting. `DELETE /v1/extensions/plugin/{id}` removes an *orphan's*
- * entry; it is not an uninstall.
+ * `POST /v1/extensions/plugin` — copy a directory in.
+ *
+ * It starts nothing: the row comes back `unapproved`/`never_seen` and the
+ * `approve` verb is what runs it. The caller shows `manifest` as the approval
+ * preview rather than pretending the plugin is live.
  */
-export function useExtensionInstall(): Availability<never> {
-  return unavailable("GAP-24");
+export function useInstallPlugin(): UseMutationResult<
+  InstallResponse,
+  Error,
+  string
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (path: string) => installPlugin(path),
+    onSuccess: () => invalidateExtensionKeys(client),
+  });
+}
+
+/**
+ * `POST /v1/extensions/plugin/validate` — the dry run behind the Add form's
+ * preview. It invalidates nothing, because it changed nothing.
+ */
+export function useValidatePlugin(): UseMutationResult<
+  ValidateResponse,
+  Error,
+  string
+> {
+  return useMutation({ mutationFn: (path: string) => validatePlugin(path) });
+}
+
+export interface UpdatePluginInput {
+  id: string;
+  path: string;
+}
+
+/** `PUT /v1/extensions/plugin/{id}` — replace an installed plugin's tree. */
+export function useUpdatePlugin(): UseMutationResult<
+  InstallResponse,
+  Error,
+  UpdatePluginInput
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (input: UpdatePluginInput) =>
+      updatePlugin(input.id, input.path),
+    onSuccess: () => invalidateExtensionKeys(client),
+  });
+}
+
+/** `POST /v1/extensions/mcp` — declare a server and connect it. */
+export function useAddMcpServer(): UseMutationResult<
+  InstallResponse,
+  Error,
+  McpDeclaration
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (declaration: McpDeclaration) => addMcpServer(declaration),
+    onSuccess: () => invalidateExtensionKeys(client),
+  });
+}
+
+export interface UninstallInput {
+  kind: ExtensionKind;
+  id: string;
+  keepData: boolean;
+}
+
+/**
+ * `DELETE /v1/extensions/{kind}/{id}?uninstall=true` — the real removal.
+ *
+ * Distinct from [`useRemoveExtension`], which only drops an orphan's row. The
+ * response names where the directory went, because nothing was deleted.
+ */
+export function useUninstallExtension(): UseMutationResult<
+  UninstallResponse,
+  Error,
+  UninstallInput
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (input: UninstallInput) =>
+      uninstallExtension(input.kind, input.id, input.keepData),
+    onSuccess: () => invalidateExtensionKeys(client),
+  });
 }

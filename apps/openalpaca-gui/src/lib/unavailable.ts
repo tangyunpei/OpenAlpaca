@@ -15,7 +15,7 @@
  * does not render.
  */
 
-export type GapId = "GAP-17" | "GAP-20" | "GAP-24";
+export type GapId = "GAP-17" | "GAP-20";
 
 export type GapFixSize = "XS" | "S" | "S–M" | "M" | "L";
 
@@ -182,20 +182,19 @@ export const GAPS: Record<GapId, GapDescriptor> = {
   // serve them. The transcript reads the run pill and the chips off history;
   // the recap *card* stays session-local, because the status, duration and
   // summary it prints live on the `task_status` frame, not on a message.
-  // Was GAP-19 ("plugin install"), widened to both extension kinds: the same
-  // mechanism is missing for an MCP server, which had no gap id at all
-  // (ADR-030 §9.1). `DELETE /v1/extensions/plugin/{id}` removes an orphan's
-  // permissions entry — it is not an uninstall and never touches a directory.
-  "GAP-24": {
-    id: "GAP-24",
-    label: "Extension install / uninstall",
-    missingApi:
-      "no install or uninstall route for either kind; a plugin is a directory copied into the plugins root, an MCP server a hand-written [servers.<name>] block",
-    proposedEndpoint:
-      "POST /v1/extensions/{kind} { source } and DELETE /v1/extensions/{kind}/{id}?uninstall=true",
-    blocks: "Add extension; removing an installed plugin or MCP server",
-    fixSize: "M",
-  },
+  // GAP-24 (was GAP-19, "plugin install", widened in ADR-030 §9.1 to both
+  // extension kinds) is closed with Phase 8 item 9, in the shape §3 proposed:
+  // `POST /v1/extensions/{kind}` installs a plugin from a local path or writes
+  // a `[servers.<name>]` block, `PUT …/plugin/{id}` replaces a plugin's tree
+  // through T0–T5 → staged rename → the load path, and
+  // `DELETE …/{kind}/{id}?uninstall=true` is the real removal — the flag being
+  // what keeps the bare DELETE the orphan-row verb it always was.
+  // Two things the route surface makes true rather than promising: an install
+  // **grants nothing** (the row lands `unapproved`/`never_seen` and `approve`
+  // is the single action that starts it, with the manifest returned beside it
+  // as the preview), and an uninstall **deletes nothing** (the directory is
+  // moved to `plugins/.trash/`, and the response says where). `source: "url"`
+  // stays declined; it is its own security review.
 };
 
 // ── Result type ─────────────────────────────────────────────────────────────

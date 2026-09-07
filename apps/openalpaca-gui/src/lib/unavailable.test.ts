@@ -20,7 +20,7 @@ describe("gap registry", () => {
   });
 
   // GAP-01/07/08a/08b/16 retired in Phase 0; GAP-19 became GAP-24 (widened to
-  // both extension kinds) and GAP-22 closed with the six `plugin_*` variants
+  // both extension kinds, and now closed) and GAP-22 closed with the six `plugin_*` variants
   // C7 deleted. Phase 3 closed four more: the artifact resource (GAP-04), its
   // versions and diff (GAP-05), browser-loadable content (GAP-11) and
   // server-side pins (GAP-12). Phase 4 closed two: the subagent timeline
@@ -50,12 +50,16 @@ describe("gap registry", () => {
   // per-provider breakdown and the two caps that actually bound spend. Item 8
   // (T51) closed GAP-13: `POST /v1/chat` takes a `model` that governs that one
   // turn and is persisted nowhere, so the composer's picker is
-  // conversation-scoped and no longer writes the daemon-wide default. That
-  // leaves 3.
-  it("covers the 3 gaps still open from API_MAP §3", () => {
-    expect(listGaps()).toHaveLength(3);
+  // conversation-scoped and no longer writes the daemon-wide default. Item 9
+  // (T52) closed GAP-24: `POST /v1/extensions/{kind}` installs a plugin from a
+  // local path or declares an MCP server, `PUT …/plugin/{id}` replaces a
+  // plugin's tree, and `DELETE …?uninstall=true` removes either for good — the
+  // flag being what keeps the bare DELETE the orphan-row verb it was. That
+  // leaves 2.
+  it("covers the 2 gaps still open from API_MAP §3", () => {
+    expect(listGaps()).toHaveLength(2);
     expect(listGaps()[0]?.id).toBe("GAP-17");
-    expect(listGaps().at(-1)?.id).toBe("GAP-24");
+    expect(listGaps().at(-1)?.id).toBe("GAP-20");
     for (const closed of [
       "GAP-02",
       "GAP-08c",
@@ -75,6 +79,7 @@ describe("gap registry", () => {
       "GAP-21",
       "GAP-22",
       "GAP-23",
+      "GAP-24",
     ]) {
       expect(listGaps().map((gap) => gap.id)).not.toContain(closed);
     }
@@ -107,14 +112,14 @@ describe("gap registry", () => {
 
 describe("Unavailable results", () => {
   it("carries a note that names the missing API", () => {
-    const result = unavailable("GAP-24");
+    const result = unavailable("GAP-17");
 
     expect(isAvailable(result)).toBe(false);
     expect(result.reason).toBe(
-      "Extension install / uninstall not yet available",
+      "Connectors are compiled into the daemon — there is no route that adds one, only a token to set on the ones that exist",
     );
-    expect(result.missingApi).toContain("no install or uninstall route");
-    expect(result.gap.id).toBe("GAP-24");
+    expect(result.missingApi).toContain("no route adds a connector");
+    expect(result.gap.id).toBe("GAP-17");
   });
 
   it("uses the override phrasing where the generic sentence would read wrong", () => {
