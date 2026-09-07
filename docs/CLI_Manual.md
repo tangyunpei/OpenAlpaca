@@ -358,6 +358,9 @@ Notes:
 - `config get` reads the plugin's configuration back through the daemon; a
   value the manifest declares as a secret reads `<redacted>`, and nothing
   prints it in the clear.
+- Non-sensitive values are stored at `~/.openalpaca/plugins/.config/<name>.toml`.
+  That file is the place to look for them, not for secrets: `config set` refuses
+  a key the manifest marks `sensitive`, so nothing secret is ever written there.
 
 ### `sessions`
 
