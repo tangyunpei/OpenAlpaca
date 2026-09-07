@@ -200,6 +200,46 @@ mod tests {
         assert_ne!(config_fingerprint(&before), config_fingerprint(&after));
     }
 
+    /// `env_from` names a host variable rather than holding a secret, so it is
+    /// **not** masked: pointing a server at a different variable changes what
+    /// the server is, and the watcher has to see that (R65).
+    #[test]
+    fn an_env_from_rename_changes_the_fingerprint_and_a_missing_one_changes_nothing() {
+        let plain = block(STDIO);
+        let indirect = block(
+            r#"
+            [servers.x]
+            transport = "stdio"
+            command = "npx"
+            args = ["-y", "server"]
+            env = { TOKEN = "secret-one" }
+            env_from = { OTHER = "HOST_ONE" }
+        "#,
+        );
+        let repointed = block(
+            r#"
+            [servers.x]
+            transport = "stdio"
+            command = "npx"
+            args = ["-y", "server"]
+            env = { TOKEN = "secret-one" }
+            env_from = { OTHER = "HOST_TWO" }
+        "#,
+        );
+        assert_ne!(config_fingerprint(&plain), config_fingerprint(&indirect));
+        assert_ne!(
+            config_fingerprint(&indirect),
+            config_fingerprint(&repointed),
+            "which variable the server reads is part of what it is"
+        );
+        // And a block that does not use it hashes as it always did: the field
+        // is skipped when empty, so no existing declaration reads as changed.
+        assert_eq!(
+            config_fingerprint(&plain),
+            config_fingerprint(&block(STDIO)),
+        );
+    }
+
     #[test]
     fn a_command_edit_changes_the_fingerprint() {
         let before = block(STDIO);
