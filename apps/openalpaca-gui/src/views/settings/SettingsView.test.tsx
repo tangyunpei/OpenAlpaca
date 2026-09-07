@@ -39,6 +39,42 @@ const DAEMON_STATUS: DaemonStatus = {
 };
 let daemonStatus: DaemonStatus = { ...DAEMON_STATUS };
 
+/**
+ * The moved-project offer (§4.8, P-12). `workspace` is mutable so one test can
+ * make the chosen project a moved one; the mutation is a spy, because the whole
+ * point of the card is that it never re-bases without being told to.
+ */
+const workspace = vi.hoisted(() => ({
+  moved: null as {
+    from: string;
+    to: string;
+    rows: {
+      artifacts: number;
+      sessions: number;
+      tasks: number;
+      memories: number;
+    };
+    activeTasks: number;
+  } | null,
+  pending: false,
+  error: null as Error | null,
+  rebase: vi.fn(),
+  rebaseError: null as Error | null,
+}));
+
+vi.mock("@/hooks/useWorkspaces", () => ({
+  useMovedProject: () => ({
+    moved: workspace.moved,
+    pending: workspace.pending,
+    error: workspace.error,
+  }),
+  useRebaseWorkspace: () => ({
+    mutate: workspace.rebase,
+    isPending: false,
+    error: workspace.rebaseError,
+  }),
+}));
+
 vi.mock("@/hooks/useConnection", () => ({
   useConnectionStatus: () => ({
     info: null,
@@ -307,6 +343,11 @@ beforeEach(() => {
   useUiStore.setState({ settingsSectionId: "connection", toast: null });
   useProjectStore.setState({ path: null });
   daemonStatus = { ...DAEMON_STATUS };
+  workspace.moved = null;
+  workspace.pending = false;
+  workspace.error = null;
+  workspace.rebaseError = null;
+  workspace.rebase.mockReset();
   localStorage.clear();
 });
 
@@ -469,5 +510,111 @@ describe("SettingsView (§2.5, §5.4)", () => {
 
     expect(useProjectStore.getState().path).toBeNull();
     expect(screen.getByText(/files go to the home store/)).toBeInTheDocument();
+  });
+
+  // ── The moved project (§4.8, P-12) ─────────────────────────────────────
+
+  it("says nothing about a project that has not moved", () => {
+    useProjectStore.setState({ path: "/Users/dev/openalpaca" });
+    render(<SettingsView />);
+
+    expect(
+      screen.queryByRole("button", { name: "Re-base to this path" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("offers a re-base for a moved project and never takes it alone", async () => {
+    const user = userEvent.setup();
+    useProjectStore.setState({ path: "/Users/dev/moved" });
+    workspace.moved = {
+      from: "/Users/dev/openalpaca",
+      to: "/Users/dev/moved",
+      rows: { artifacts: 12, sessions: 2, tasks: 3, memories: 7 },
+      activeTasks: 0,
+    };
+    render(<SettingsView />);
+
+    // The offer names the old root and every member, so the owner can see
+    // exactly what would move.
+    expect(screen.getByText("/Users/dev/openalpaca")).toBeInTheDocument();
+    expect(
+      screen.getByText(/12 artifacts, 2 conversations, 3 runs and 7 memories/),
+    ).toBeInTheDocument();
+
+    // Offering is not doing: the first click only asks.
+    await user.click(
+      screen.getByRole("button", { name: "Re-base to this path" }),
+    );
+    expect(workspace.rebase).not.toHaveBeenCalled();
+    expect(
+      screen.getByText("Re-base all four onto this path?"),
+    ).toBeInTheDocument();
+
+    // And a second thought takes it away without a request.
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(workspace.rebase).not.toHaveBeenCalled();
+
+    await user.click(
+      screen.getByRole("button", { name: "Re-base to this path" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Re-base" }));
+    expect(workspace.rebase).toHaveBeenCalledTimes(1);
+    expect(workspace.rebase.mock.calls[0]?.[0]).toEqual({
+      from: "/Users/dev/openalpaca",
+      to: "/Users/dev/moved",
+    });
+  });
+
+  it("says a run is still in flight rather than offering a re-base that would be refused", () => {
+    useProjectStore.setState({ path: "/Users/dev/moved" });
+    workspace.moved = {
+      from: "/Users/dev/openalpaca",
+      to: "/Users/dev/moved",
+      rows: { artifacts: 1, sessions: 0, tasks: 1, memories: 0 },
+      activeTasks: 2,
+    };
+    render(<SettingsView />);
+
+    expect(
+      screen.getByText(/2 run\(s\) there are still in flight/),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the daemon's own refusal instead of a generic failure", () => {
+    useProjectStore.setState({ path: "/Users/dev/moved" });
+    workspace.moved = {
+      from: "/Users/dev/openalpaca",
+      to: "/Users/dev/moved",
+      rows: { artifacts: 1, sessions: 0, tasks: 0, memories: 0 },
+      activeTasks: 0,
+    };
+    workspace.rebaseError = new Error(
+      "/Users/dev/moved already has a store recorded against it",
+    );
+    render(<SettingsView />);
+
+    expect(
+      screen.getByText(/already has a store recorded against it/),
+    ).toBeInTheDocument();
+  });
+
+  it("says it is checking rather than showing a project as settled", () => {
+    useProjectStore.setState({ path: "/Users/dev/openalpaca" });
+    workspace.pending = true;
+    render(<SettingsView />);
+
+    expect(
+      screen.getByText(/Checking whether this project has moved/),
+    ).toBeInTheDocument();
+  });
+
+  it("says a failed lookup failed", () => {
+    useProjectStore.setState({ path: "/Users/dev/openalpaca" });
+    workspace.error = new Error("daemon unreachable");
+    render(<SettingsView />);
+
+    expect(
+      screen.getByText(/Could not check whether this project has moved/),
+    ).toBeInTheDocument();
   });
 });

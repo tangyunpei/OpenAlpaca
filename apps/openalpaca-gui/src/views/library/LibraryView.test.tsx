@@ -314,6 +314,10 @@ describe("LibraryDetail", () => {
     expect(screen.getByText("tightened the summary")).toBeInTheDocument();
     expect(screen.getByText("+3")).toBeInTheDocument();
     expect(screen.getByText("−1")).toBeInTheDocument();
+    // v2 names its author; v1 has none, which is §4.8's hand edit rather than
+    // a blank line.
+    expect(screen.getAllByText("review_agent").length).toBeGreaterThan(0);
+    expect(screen.getByText("edited by hand")).toBeInTheDocument();
   });
 
   it("draws the patch the diff route returned", async () => {

@@ -138,7 +138,10 @@ pub(crate) fn get_workspace(db: &Database, query: WorkspaceQuery) -> Response {
         Err(e) => {
             // An unreadable marker is not a reason to refuse the whole answer:
             // the counts below are the half that decides a re-base.
-            tracing::warn!("Cannot read the store marker in {}: {e:#}", store_root.display());
+            tracing::warn!(
+                "Cannot read the store marker in {}: {e:#}",
+                store_root.display()
+            );
             None
         }
     };
@@ -151,7 +154,14 @@ pub(crate) fn get_workspace(db: &Database, query: WorkspaceQuery) -> Response {
         }
     };
 
-    Json(workspace_json(&root, store_present, recorded_root, moved, &rows)).into_response()
+    Json(workspace_json(
+        &root,
+        store_present,
+        recorded_root,
+        moved,
+        &rows,
+    ))
+    .into_response()
 }
 
 fn workspace_json(

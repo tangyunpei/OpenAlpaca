@@ -143,4 +143,13 @@ export const qk = {
     all: () => ["daemon"] as const,
     statusDetail: () => ["daemon", "status-detail"] as const,
   },
+
+  /**
+   * `GET /v1/workspaces?path=`. The path is the key: the route answers about
+   * one root, and another root is a different answer, not a stale one.
+   */
+  workspaces: {
+    all: () => ["workspaces"] as const,
+    detail: (path: string) => ["workspaces", "detail", path] as const,
+  },
 } as const;

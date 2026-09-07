@@ -37,6 +37,17 @@ vi.mock("@/hooks/useUsage", async (importOriginal) => ({
   }),
 }));
 
+// The moved-project offer (§4.8, P-12) reads two queries of its own; this card
+// is not what those tests are about, so it is mocked to "nothing has moved".
+vi.mock("@/hooks/useWorkspaces", () => ({
+  useMovedProject: () => ({ moved: null, pending: false, error: null }),
+  useRebaseWorkspace: () => ({
+    mutate: vi.fn(),
+    isPending: false,
+    error: null,
+  }),
+}));
+
 vi.mock("@/hooks/useConnection", () => ({
   useConnectionStatus: () => ({
     info: null,

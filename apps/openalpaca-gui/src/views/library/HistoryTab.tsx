@@ -10,6 +10,12 @@
  * the same `similar` diff the Diff tab renders — so the number on a row and the
  * patch a reader then opens agree. It is `null` on v1 (nothing to change from)
  * and for the kinds that are not text, and is simply omitted there.
+ *
+ * A `null` author is not "unknown" — it is §4.8's **hand edit**: the daemon
+ * hashes an artifact's head on every read and, when the bytes are not the ones
+ * its row describes, records them as a version nobody in OpenAlpaca wrote.
+ * Editing a produced file by hand is the point of putting artifacts in the
+ * project, so the row says so instead of leaving the author line blank.
  */
 
 import type { PreviewSize } from "@/components/work/preview";
@@ -17,6 +23,9 @@ import { cn } from "@/lib/cn";
 import type { ArtifactVersion } from "@/lib/api/artifacts";
 
 import { relativeTime } from "./format";
+
+/** The author line for a version with no `author_agent_id` (§4.8). */
+export const EDITED_BY_HAND = "edited by hand";
 
 export interface HistoryTabProps {
   versions: readonly ArtifactVersion[];
@@ -74,11 +83,9 @@ function VersionRow({ version, latest, size }: VersionRowProps) {
         >
           {version.note}
         </span>
-        {version.author_agent_id !== null && (
-          <span className="mt-[3px] block font-mono text-2xs-plus text-muted-fg">
-            {version.author_agent_id}
-          </span>
-        )}
+        <span className="mt-[3px] block font-mono text-2xs-plus text-muted-fg">
+          {version.author_agent_id ?? EDITED_BY_HAND}
+        </span>
       </span>
       {version.added_lines !== null && version.removed_lines !== null && (
         <span className="flex shrink-0 items-center gap-[6px] font-mono text-xs">

@@ -384,7 +384,9 @@ async fn a_store_still_at_the_old_root_is_moved_after_the_transaction() {
     let moved_store = std::path::Path::new(&new).join(store::STORE_DIR_NAME);
     assert!(moved_store.is_dir());
     assert_eq!(
-        store::recorded_project_root(&moved_store).unwrap().as_deref(),
+        store::recorded_project_root(&moved_store)
+            .unwrap()
+            .as_deref(),
         Some(new.as_str())
     );
 

@@ -19,3 +19,4 @@ export * from "./useTasks";
 // either file held, and `GET /v1/status` serves it. The gaps that remain are
 // rendered at the point of use, straight off `lib/unavailable.ts`.
 export * from "./useUsage";
+export * from "./useWorkspaces";

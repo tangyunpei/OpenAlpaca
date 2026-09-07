@@ -41,6 +41,7 @@ import { Button, Eyebrow } from "@/components/ui";
 import { useConnectionStatus, useDaemonStatus } from "@/hooks/useConnection";
 import { useTasks } from "@/hooks/useTasks";
 import { capsNote, formatSpend, useUsageSummary } from "@/hooks/useUsage";
+import { useMovedProject, useRebaseWorkspace } from "@/hooks/useWorkspaces";
 import { formatFileSize, type DaemonStatus } from "@/lib/api/types";
 import { isAbsolutePath, useProjectStore } from "@/stores/project";
 import { useUiStore } from "@/stores/ui";
@@ -301,6 +302,8 @@ function ProjectCard() {
         </div>
       </div>
 
+      <MovedProjectOffer path={path} />
+
       <GapNote>
         {invalid
           ? "An absolute path, please — a relative one would be read against the daemon's own directory, not this one."
@@ -309,5 +312,120 @@ function ProjectCard() {
             : "Runs started here record this project; files they produce land in <project>/.openalpaca/."}
       </GapNote>
     </Card>
+  );
+}
+
+/**
+ * The moved-project offer (plan §4.8, P-12).
+ *
+ * A project's path is its identity in four places — its artifacts, its
+ * conversations, its runs and its workspace memories — so moving the directory
+ * strands all four at once. The daemon can re-attach them in one transaction,
+ * but it cannot know where the project went; the owner does, and has just said
+ * so by choosing this path.
+ *
+ * So this offers, and never acts. The detection is exact (the store records the
+ * root it was seeded at, and one standing at a path it does not name has
+ * moved), the counts are the daemon's, and the re-base is one deliberate
+ * confirmation away. Auto-re-basing on a path the owner merely typed would
+ * re-address someone's whole history on a guess.
+ *
+ * Every state is stated rather than hidden: checking, a lookup that failed, a
+ * project that has not moved (nothing at all), the offer, and a refusal with
+ * the daemon's own reason — `WORKSPACE_BUSY` while a run is in flight,
+ * `WORKSPACE_EXISTS` when the new root already has a history of its own.
+ */
+function MovedProjectOffer({ path }: { path: string | null }) {
+  const { moved, pending, error } = useMovedProject(path);
+  const rebase = useRebaseWorkspace();
+  const showToast = useUiStore((s) => s.showToast);
+  const [confirming, setConfirming] = useState(false);
+
+  // A new project (or a completed re-base) puts the confirmation away: the
+  // question it was asking is no longer the one on screen.
+  const offerKey = moved === null ? null : `${moved.from}→${moved.to}`;
+  const [lastOffer, setLastOffer] = useState(offerKey);
+  if (lastOffer !== offerKey) {
+    setLastOffer(offerKey);
+    setConfirming(false);
+  }
+
+  if (path === null) return null;
+  if (pending) {
+    return <GapNote>Checking whether this project has moved…</GapNote>;
+  }
+  if (error !== null) {
+    return (
+      <GapNote>
+        Could not check whether this project has moved: {error.message}
+      </GapNote>
+    );
+  }
+  if (moved === null) return null;
+
+  const { artifacts, sessions, tasks, memories } = moved.rows;
+  const failure = rebase.error;
+
+  return (
+    <div className="mt-[12px] rounded-2xl border border-amber-line bg-amber-surface px-[13px] py-[11px]">
+      <p className="m-0 text-base leading-[1.6] text-ink">
+        This project&rsquo;s store records{" "}
+        <span className="font-mono text-2xs-plus">{moved.from}</span>. Its{" "}
+        {artifacts} artifacts, {sessions} conversations, {tasks} runs and{" "}
+        {memories} memories still point there.
+      </p>
+
+      {moved.activeTasks > 0 && (
+        <p className="mt-[6px] mb-0 text-base leading-[1.6] text-secondary">
+          {moved.activeTasks} run(s) there are still in flight — a re-base waits
+          until they finish.
+        </p>
+      )}
+
+      {failure !== null && (
+        <p className="mt-[6px] mb-0 text-base leading-[1.6] text-red-ink">
+          {failure.message}
+        </p>
+      )}
+
+      <div className="mt-[9px] flex flex-wrap items-center gap-[6px]">
+        {confirming ? (
+          <>
+            <span className="text-base text-secondary">
+              Re-base all four onto this path?
+            </span>
+            <Button
+              variant="primarySm"
+              disabled={rebase.isPending}
+              onClick={() => {
+                rebase.mutate(
+                  { from: moved.from, to: moved.to },
+                  {
+                    onSuccess: (result) => {
+                      setConfirming(false);
+                      showToast(
+                        `Re-based ${result.moved.artifacts} artifacts, ` +
+                          `${result.moved.sessions} conversations, ` +
+                          `${result.moved.tasks} runs and ` +
+                          `${result.moved.memories} memories`,
+                      );
+                    },
+                  },
+                );
+              }}
+            >
+              {rebase.isPending ? "Re-basing…" : "Re-base"}
+            </Button>
+            <Button variant="ghostSm" onClick={() => setConfirming(false)}>
+              Cancel
+            </Button>
+          </>
+        ) : (
+          <Button variant="outlineRaised" onClick={() => setConfirming(true)}>
+            Re-base to this path
+          </Button>
+        )}
+      </div>
+    </div>
   );
 }
