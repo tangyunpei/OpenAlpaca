@@ -58,13 +58,14 @@ vi.mock("@/hooks/useTasks", () => ({
 
 vi.mock("@/hooks/useUsage", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/hooks/useUsage")>()),
-  useTodaySpend: () =>
+  useUsageSummary: () =>
     query({
       date: "2026-08-31",
-      costUsd: 0.0184,
-      tokensIn: 30_000,
-      tokensOut: 11_000,
-      requests: 12,
+      total_usd: 0.0184,
+      by_provider: [
+        { provider: "anthropic", usd: 0.0184, calls: 12, tokens: 41_000 },
+      ],
+      caps: { workflow_max_cost_usd: 5, agent_max_cost_usd: 1 },
     }),
 }));
 
@@ -126,6 +127,9 @@ vi.mock("@/hooks/useConnectors", async (importOriginal) => ({
         name: "Telegram",
         status: "connected",
         configured: true,
+        source: "telegram",
+        registered: true,
+        messages_7d: 184,
       },
     ]),
   useUnwiredConnectors: () => [],

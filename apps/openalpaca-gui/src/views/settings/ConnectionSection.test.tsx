@@ -6,11 +6,61 @@
  * usage/tasks hooks need mocking to exercise its rendering.
  */
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { DaemonStatus, SessionSweep } from "@/lib/api/types";
 
-import { StorageCard } from "./ConnectionSection";
+import { ConnectionSection, StorageCard } from "./ConnectionSection";
+
+/**
+ * The Today card reads `GET /v1/usage/summary` (GAP-08c, T50). Every hook it
+ * needs is mocked so the card renders against a known payload; `StorageCard`
+ * below takes a plain prop and is unaffected by any of this.
+ */
+const summary = vi.hoisted(() => ({
+  data: {
+    date: "2026-09-08",
+    total_usd: 0.0184,
+    by_provider: [
+      { provider: "anthropic", usd: 0.0184, calls: 12, tokens: 41_000 },
+    ],
+    caps: { workflow_max_cost_usd: 5.0, agent_max_cost_usd: 1.0 },
+  } as unknown,
+}));
+
+vi.mock("@/hooks/useUsage", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/hooks/useUsage")>()),
+  useUsageSummary: () => ({
+    data: summary.data,
+    isPending: false,
+    error: null,
+  }),
+}));
+
+vi.mock("@/hooks/useConnection", () => ({
+  useConnectionStatus: () => ({
+    info: null,
+    health: undefined,
+    socket: "connected",
+    connected: true,
+    instanceChip: "7f3a",
+    endpoint: "127.0.0.1:51823",
+    reconnect: vi.fn(),
+  }),
+  useDaemonStatus: () => ({ data: undefined, isPending: false, error: null }),
+}));
+
+vi.mock("@/hooks/useTasks", () => ({
+  useTasks: () => ({
+    data: [
+      { id: "a", created_at: "2026-09-08T09:00:00Z" },
+      { id: "b", created_at: "2026-09-08T23:59:00Z" },
+      { id: "c", created_at: "2026-09-07T22:00:00Z" },
+    ],
+    isPending: false,
+    error: null,
+  }),
+}));
 
 function sweep(overrides: Partial<SessionSweep>): SessionSweep {
   return {
@@ -106,5 +156,53 @@ describe("StorageCard", () => {
 
     expect(screen.queryByText(/cap/)).toBeNull();
     expect(screen.getAllByText("—")).toHaveLength(2);
+  });
+});
+
+describe("the Today card (GAP-08c, T50)", () => {
+  /**
+   * Spend, tokens and runs are all the daemon's own UTC day — the one `date`
+   * names. The client's local date is not consulted anywhere, which is the
+   * point: the two disagree for up to twelve hours.
+   */
+  it("reports spend, tokens and runs for the UTC day the daemon named", () => {
+    render(<ConnectionSection />);
+
+    expect(screen.getByText("$0.0184")).toBeInTheDocument();
+    expect(screen.getByText("41k")).toBeInTheDocument();
+    // Two of the three runs fall on 2026-09-08 UTC.
+    expect(screen.getByText("2")).toBeInTheDocument();
+  });
+
+  /**
+   * N4 on screen: the panel names the two caps that exist instead of implying
+   * a daily budget that does not. The design's progress bar has no
+   * denominator to draw against, and the copy says why.
+   */
+  it("names the per-workflow and per-turn caps, never a daily one", () => {
+    render(<ConnectionSection />);
+
+    const note = screen.getByText(/not capped daily/);
+    expect(note).toHaveTextContent("$5.00 per workflow");
+    expect(note).toHaveTextContent("$1.00 per agent turn");
+    expect(note.textContent ?? "").not.toMatch(/budget/i);
+  });
+
+  /** With no summary yet, the card shows dashes rather than zeroes. */
+  it("shows no figures at all until the summary arrives", () => {
+    summary.data = undefined;
+    try {
+      render(<ConnectionSection />);
+      expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(3);
+    } finally {
+      summary.data = {
+        date: "2026-09-08",
+        total_usd: 0.0184,
+        by_provider: [
+          { provider: "anthropic", usd: 0.0184, calls: 12, tokens: 41_000 },
+        ],
+        caps: { workflow_max_cost_usd: 5.0, agent_max_cost_usd: 1.0 },
+      };
+    }
   });
 });

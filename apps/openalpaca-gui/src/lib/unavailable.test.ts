@@ -43,14 +43,19 @@ describe("gap registry", () => {
   // was `GET /v1/tools` and whose skill half is now `GET /v1/skills`: the
   // health rows are named from it — and the provider toggle (GAP-15), whose
   // route writes `llm.toml` and then unloads or reloads the provider live.
-  // GAP-20 is *narrowed*, not closed: its run counts are served now, its
-  // toggle is not — so the count is 5.
-  it("covers the 5 gaps still open from API_MAP §3", () => {
-    expect(listGaps()).toHaveLength(5);
-    expect(listGaps()[0]?.id).toBe("GAP-08c");
+  // GAP-20 and GAP-17 are *narrowed*, not closed: run counts and connector
+  // detail are served now, the template toggle and the `Connect service` add
+  // flow are not. Phase 8 item 7 (T50) closed GAP-08c outright —
+  // `GET /v1/usage/summary?window=today` serves today's total, its
+  // per-provider breakdown and the two caps that actually bound spend — so the
+  // count is 4.
+  it("covers the 4 gaps still open from API_MAP §3", () => {
+    expect(listGaps()).toHaveLength(4);
+    expect(listGaps()[0]?.id).toBe("GAP-13");
     expect(listGaps().at(-1)?.id).toBe("GAP-24");
     for (const closed of [
       "GAP-02",
+      "GAP-08c",
       "GAP-03",
       "GAP-04",
       "GAP-06",

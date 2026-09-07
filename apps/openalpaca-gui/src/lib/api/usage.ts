@@ -1,7 +1,7 @@
-/** `/v1/llm/usage*`. */
+/** `/v1/llm/usage*` and `/v1/usage/summary`. */
 
 import { apiFetch } from "../http";
-import type { LlmCallLog, LlmUsageDaily } from "./types";
+import type { LlmCallLog, LlmUsageDaily, UsageSummary } from "./types";
 
 export interface LlmUsageQuery {
   agentId?: string;
@@ -38,40 +38,20 @@ export async function getLlmUsageDaily(
   });
 }
 
-export interface DailySpend {
-  date: string;
-  costUsd: number;
-  tokensIn: number;
-  tokensOut: number;
-  requests: number;
-}
-
-/** Local `YYYY-MM-DD`, which is what the `date` query param expects. */
-export function todayIsoDate(now: Date = new Date()): string {
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
 /**
- * Sum a day's per-agent/per-model rows into one figure — tokens and request
- * counts have no other source. (`daily_cost_usd` on `GET /v1/orchestrator/config`
- * now serves the cost half of this from the same rows server-side — GAP-08a,
- * closed — but this stays the only way to get today's token/request totals.)
+ * `GET /v1/usage/summary?window=today` (GAP-08c, closed).
+ *
+ * The daemon computes the day, its total, the per-provider breakdown and the
+ * caps. `today` is the only window it accepts — anything else answers
+ * `400 UNKNOWN_WINDOW` — so the parameter is fixed here rather than exposed:
+ * offering a choice the route does not have would be the client inventing an
+ * API.
  */
-export function summarizeDailyUsage(
-  date: string,
-  rows: LlmUsageDaily[],
-): DailySpend {
-  return rows.reduce<DailySpend>(
-    (acc, row) => ({
-      date: acc.date,
-      costUsd: acc.costUsd + row.total_cost_usd,
-      tokensIn: acc.tokensIn + row.total_input_tokens,
-      tokensOut: acc.tokensOut + row.total_output_tokens,
-      requests: acc.requests + row.total_requests,
-    }),
-    { date, costUsd: 0, tokensIn: 0, tokensOut: 0, requests: 0 },
-  );
+export async function getUsageSummary(
+  signal?: AbortSignal,
+): Promise<UsageSummary> {
+  return await apiFetch<UsageSummary>("/v1/usage/summary", {
+    query: { window: "today" },
+    signal,
+  });
 }

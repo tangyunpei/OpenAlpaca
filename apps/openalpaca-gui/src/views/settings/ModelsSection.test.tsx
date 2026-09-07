@@ -68,6 +68,22 @@ vi.mock("@/hooks/useSettings", async (importOriginal) => ({
   }),
 }));
 
+vi.mock("@/hooks/useUsage", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/hooks/useUsage")>()),
+  useUsageSummary: () => ({
+    data: {
+      date: "2026-09-08",
+      total_usd: 0.03,
+      by_provider: [
+        { provider: "anthropic", usd: 0.03, calls: 4, tokens: 41_000 },
+      ],
+      caps: { workflow_max_cost_usd: 5, agent_max_cost_usd: 1 },
+    },
+    isPending: false,
+    error: null,
+  }),
+}));
+
 vi.mock("@/hooks/useOrchestrator", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/hooks/useOrchestrator")>()),
   useOrchestratorConfig: () => ({
@@ -172,5 +188,32 @@ describe("the provider switch", () => {
     expect(
       screen.queryByText(/Provider enable\/disable not yet available/),
     ).toBeNull();
+  });
+});
+
+/**
+ * GAP-08c's other half: the design's `41k tok today` per provider. It used to
+ * be `ProviderUsageSummary.total_tokens`, which is *lifetime* — the same
+ * number under a heading that said today.
+ */
+describe("per-provider usage (GAP-08c, T50)", () => {
+  it("reports today's tokens and spend for a provider that ran", () => {
+    render(<ModelsSection />);
+
+    expect(screen.getByText(/41k tok today/)).toBeInTheDocument();
+    expect(screen.getByText(/\$0\.0300/)).toBeInTheDocument();
+  });
+
+  /** A provider with no calls today says so — it does not borrow a lifetime figure. */
+  it("says a provider has not been called today", () => {
+    render(<ModelsSection />);
+
+    expect(screen.getByText(/No calls today/)).toBeInTheDocument();
+  });
+
+  it("makes no claim that per-provider counts are lifetime totals", () => {
+    render(<ModelsSection />);
+
+    expect(screen.queryByText(/lifetime/i)).toBeNull();
   });
 });

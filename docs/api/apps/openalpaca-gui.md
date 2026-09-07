@@ -187,5 +187,5 @@
 ### `usage.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/usage.ts`
-- Exported functions: `getLlmUsage`, `getLlmUsageDaily`
+- Exported functions: `getLlmUsage`, `getLlmUsageDaily`, `getUsageSummary`
 - Endpoints: none

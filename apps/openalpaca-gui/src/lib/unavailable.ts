@@ -15,7 +15,7 @@
  * does not render.
  */
 
-export type GapId = "GAP-08c" | "GAP-13" | "GAP-17" | "GAP-20" | "GAP-24";
+export type GapId = "GAP-13" | "GAP-17" | "GAP-20" | "GAP-24";
 
 export type GapFixSize = "XS" | "S" | "S–M" | "M" | "L";
 
@@ -63,18 +63,19 @@ export const GAPS: Record<GapId, GapDescriptor> = {
   // the `source_task_id` it was copied from. A re-run is a second run, and the
   // finished one keeps its row and its result — which is what the user is
   // re-running against — so the two verbs cannot share a response shape.
-  "GAP-08c": {
-    id: "GAP-08c",
-    label: "Usage summary",
-    missingApi:
-      "no GET /v1/usage/summary; the per-provider token figure sums the lifetime all_provider_usage(), not today; no cost cap is served",
-    proposedEndpoint:
-      "GET /v1/usage/summary?window=today → { date, total_cost_usd, by_provider[], caps: { workflow_max_cost_usd, agent_max_cost_usd } }",
-    blocks: "Today's per-provider token figure; a served spend-cap line",
-    fixSize: "S",
-    noteOverride:
-      "Spend is not capped daily by design — caps are per workflow, so the progress bar has no denominator to draw against",
-  },
+  // GAP-08c (no usage rollup, no served cap) closed in Phase 8 item 7:
+  // `GET /v1/usage/summary?window=today` serves `{ date, total_usd,
+  // by_provider: [{ provider, usd, calls, tokens }], caps }`. `date` is the
+  // daemon's UTC day — the client's own is local and the two disagree for up
+  // to twelve hours — the total is the `llm_usage_daily` rollup for it, and
+  // `by_provider` is that day's `llm_call_log` rows, so the per-provider
+  // token figure is finally today's rather than lifetime.
+  // `caps` is N4 on the wire: `workflow_max_cost_usd` and
+  // `agent_max_cost_usd`, the per-workflow and per-turn limits the daemon
+  // actually enforces. There is **no** `daily_*` key and no daily budget —
+  // adding one would be a new enforcement point in the router, not a label —
+  // so today's total ships with no denominator and the design's progress bar
+  // stays undrawn *by decision*, which is what the panel now says.
   // GAP-09 (no subagent timeline) closed with Phase 4: `subagent_span` records
   // each lane from its spawn — start time, label, template, instance and
   // detail — `GET /v1/tasks/{id}/timeline` serves them, and the `subagent_span`

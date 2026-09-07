@@ -81,7 +81,8 @@ export const qk = {
     calls: (query: LlmUsageQuery) => ["usage", "calls", query] as const,
     daily: (query: { agentId?: string; date?: string; limit?: number }) =>
       ["usage", "daily", query] as const,
-    todaySpend: (date: string) => ["usage", "today-spend", date] as const,
+    /** `GET /v1/usage/summary?window=today` — the daemon picks the day. */
+    summary: () => ["usage", "summary"] as const,
   },
 
   orchestrator: {

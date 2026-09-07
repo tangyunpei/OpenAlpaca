@@ -3,9 +3,10 @@
  *
  * Real: the liveness dot and instance id (`GET /v1/health`), the endpoint (the
  * Tauri `ConnectionInfo`), Reconnect (re-bootstrap + reopen the socket), and
- * today's spend/runs/tokens — spend from `GET /v1/orchestrator/config`'s
- * `daily_cost_usd` (GAP-08a, closed), tokens summed client-side from
- * `GET /v1/llm/usage/daily` (still the only source for those).
+ * today's spend/runs/tokens — all three from `GET /v1/usage/summary`
+ * (GAP-08c, closed), which is also where the day itself comes from: the
+ * daemon's UTC date rather than the browser's local one, so the runs filter
+ * and the spend figure are the same day.
  *
  * Also real: **the project** (plan §4.7 item 2). The daemon reads
  * `x-workspace-path` on `POST /v1/chat`; until this field existed no client
@@ -27,21 +28,20 @@
  * inert there, because a path to a file this daemon did not write is worse
  * than no path.
  *
- * Unavailable: the spend *cap*, which nothing serves because there is no daily
- * budget by design (N4: caps are per-workflow/per-turn), so the design's
- * progress bar has no denominator and is omitted rather than drawn against a
- * guess (GAP-08c).
+ * The spend *cap* line is a decision, not a gap: per **N4** there is no daily
+ * budget and none is coming, so today's total has no denominator and the
+ * design's progress bar stays undrawn. The panel names the two caps the
+ * daemon does enforce — per workflow and per agent turn — with the daemon's
+ * own numbers.
  */
 
 import { useState } from "react";
 
 import { Button, Eyebrow } from "@/components/ui";
 import { useConnectionStatus, useDaemonStatus } from "@/hooks/useConnection";
-import { useOrchestratorConfig } from "@/hooks/useOrchestrator";
 import { useTasks } from "@/hooks/useTasks";
-import { COST_NOTE, useTodaySpend, formatSpend } from "@/hooks/useUsage";
+import { capsNote, formatSpend, useUsageSummary } from "@/hooks/useUsage";
 import { formatFileSize, type DaemonStatus } from "@/lib/api/types";
-import { todayIsoDate } from "@/lib/api/usage";
 import { isAbsolutePath, useProjectStore } from "@/stores/project";
 import { useUiStore } from "@/stores/ui";
 
@@ -52,25 +52,30 @@ export function ConnectionSection() {
   const connection = useConnectionStatus();
   const projectPath = useProjectStore((s) => s.path);
   const status = useDaemonStatus(projectPath);
-  const orchestrator = useOrchestratorConfig();
-  const spend = useTodaySpend();
+  const summary = useUsageSummary();
   const showToast = useUiStore((s) => s.showToast);
 
-  // Run count for "today" is a client-side filter: there is no date filter on
-  // `GET /v1/tasks` and no usage rollup that counts runs.
+  // Run count for "today" is still a client-side filter — there is no date
+  // filter on `GET /v1/tasks` and no rollup that counts runs — but the day it
+  // filters on is the daemon's UTC one, off the summary, so all three figures
+  // in this card describe the same day. Without a summary there is no day to
+  // filter by, and the card says so rather than guessing the local one.
   const tasks = useTasks({ limit: 200 });
-  const today = todayIsoDate();
-  const runsToday = (tasks.data ?? []).filter((task) =>
-    task.created_at.startsWith(today),
-  ).length;
+  const today = summary.data?.date;
+  const runsToday =
+    today === undefined
+      ? undefined
+      : (tasks.data ?? []).filter((task) => task.created_at.startsWith(today))
+          .length;
 
   const logPath = status.data?.log_path ?? null;
 
-  // Tokens have no source but the daily rollup; cost is the daemon's own
-  // authoritative figure (same rows, computed server-side).
-  const tokens =
-    spend.data === undefined ? 0 : spend.data.tokensIn + spend.data.tokensOut;
-  const dailyCostUsd = orchestrator.data?.daily_cost_usd;
+  // Both figures are the daemon's own, for the date it named: the total from
+  // the `llm_usage_daily` rollup, the tokens from that day's call rows.
+  const tokens = (summary.data?.by_provider ?? []).reduce(
+    (sum, row) => sum + row.tokens,
+    0,
+  );
 
   return (
     <div className="flex flex-col gap-[16px]">
@@ -128,19 +133,27 @@ export function ConnectionSection() {
         stats={[
           {
             label: "spend",
-            value: dailyCostUsd === undefined ? "—" : formatSpend(dailyCostUsd),
+            value:
+              summary.data === undefined
+                ? "—"
+                : formatSpend(summary.data.total_usd),
           },
           {
             label: "runs",
-            value: tasks.data === undefined ? "—" : `${runsToday}`,
+            value:
+              tasks.data === undefined || runsToday === undefined
+                ? "—"
+                : `${runsToday}`,
           },
           {
             label: "tokens",
-            value: spend.data === undefined ? "—" : compactCount(tokens),
+            value: summary.data === undefined ? "—" : compactCount(tokens),
           },
         ]}
       >
-        <GapNote>{COST_NOTE}.</GapNote>
+        {summary.data !== undefined && (
+          <GapNote>{capsNote(summary.data.caps)}.</GapNote>
+        )}
       </StatCard>
 
       <ProjectCard />

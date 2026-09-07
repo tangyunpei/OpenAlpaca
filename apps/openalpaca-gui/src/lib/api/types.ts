@@ -500,6 +500,40 @@ export interface LlmUsageDaily {
   total_cost_usd: number;
 }
 
+/**
+ * `GET /v1/usage/summary?window=today` (GAP-08c, closed in T50).
+ *
+ * `date` is the daemon's **UTC** day, and every figure here is that day's. It
+ * is echoed because the client's own local date disagrees with it for up to
+ * twelve hours, and a total labelled with the wrong day is worse than none.
+ */
+export interface UsageSummary {
+  date: string;
+  total_usd: number;
+  by_provider: UsageProviderRow[];
+  caps: UsageCaps;
+}
+
+/** One provider's share of the day, from that day's call log — not lifetime. */
+export interface UsageProviderRow {
+  provider: string;
+  usd: number;
+  calls: number;
+  /** Input + output tokens: the design's `41k tok today`. */
+  tokens: number;
+}
+
+/**
+ * The two caps the daemon enforces (N4). There is **no daily budget** and none
+ * is coming: today's total is an informational figure with no denominator, so
+ * the design's spend progress bar stays undrawn and the panel names these
+ * instead.
+ */
+export interface UsageCaps {
+  workflow_max_cost_usd: number;
+  agent_max_cost_usd: number;
+}
+
 // ── Orchestrator ────────────────────────────────────────────────────────────
 
 /** `daily_cost_usd` sums today's UTC `llm_usage_daily` rows (GAP-08a, closed). */

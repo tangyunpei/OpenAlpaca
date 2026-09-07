@@ -184,9 +184,9 @@ describe("unavailableActionNotes", () => {
 
 describe("gapTooltip", () => {
   it("carries both the note and the proposal", () => {
-    const tooltip = gapTooltip("GAP-08c");
-    expect(tooltip).toContain("Spend is not capped daily by design");
-    expect(tooltip).toContain("/v1/usage/summary");
+    const tooltip = gapTooltip("GAP-13");
+    expect(tooltip).toContain("changes the daemon default for every client");
+    expect(tooltip).toContain("/v1/lanes/{lane}/preferences");
   });
 });
 

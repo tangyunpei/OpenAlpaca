@@ -5,9 +5,15 @@
  * catalogue (`GET /v1/models`), and picking a model — which writes
  * `PUT /v1/orchestrator/config`.
  *
- * Two honesty notes ride with that write. It is **daemon-wide**, not
- * per-conversation (GAP-13), and the per-provider token figure the design shows
- * as "today" is lifetime (`ProviderUsageSummary.total_tokens`, GAP-08c).
+ * One honesty note rides with that write: it is **daemon-wide**, not
+ * per-conversation (GAP-13).
+ *
+ * The per-provider figure is real since T50 (GAP-08c, closed). It is today's,
+ * off `GET /v1/usage/summary`'s `by_provider` — that day's `llm_call_log`
+ * rows — where the design's `41k tok today` used to be
+ * `ProviderUsageSummary.total_tokens`, a *lifetime* total under a heading
+ * that said today. A provider with no calls today says so rather than
+ * borrowing its lifetime number.
  *
  * The per-provider switch is real (GAP-15 closed):
  * `PUT /v1/settings/llm/providers/{provider}/enabled` writes the bit to
@@ -33,9 +39,9 @@ import {
 import {
   useLlmSettings,
   useModels,
-  useProviderUsage,
   useSetProviderEnabled,
 } from "@/hooks/useSettings";
+import { formatSpend, useUsageSummary } from "@/hooks/useUsage";
 import { useUiStore } from "@/stores/ui";
 
 import { GapNote, ListCard, ListRow, ListState, Toggle } from "./primitives";
@@ -45,7 +51,7 @@ import { providerToggleErrorCopy } from "./provider-toggle";
 export function ModelsSection() {
   const llm = useLlmSettings();
   const models = useModels();
-  const usage = useProviderUsage();
+  const usage = useUsageSummary();
   const orchestrator = useOrchestratorConfig();
   const updateOrchestrator = useUpdateOrchestratorConfig();
   const setProviderEnabled = useSetProviderEnabled();
@@ -122,7 +128,7 @@ export function ModelsSection() {
             const providerModels = (models.data ?? []).filter(
               (model) => model.provider === provider,
             );
-            const summary = (usage.data ?? []).find(
+            const today = (usage.data?.by_provider ?? []).find(
               (row) => row.provider === provider,
             );
             return (
@@ -159,9 +165,11 @@ export function ModelsSection() {
                       ))
                 }
                 meta={
-                  summary === undefined
+                  usage.data === undefined
                     ? undefined
-                    : `${compactCount(summary.total_tokens)} tok lifetime`
+                    : today === undefined
+                      ? "No calls today"
+                      : `${compactCount(today.tokens)} tok today · ${formatSpend(today.usd)}`
                 }
                 control={
                   <Toggle
@@ -179,10 +187,6 @@ export function ModelsSection() {
       </ListCard>
 
       <GapNote>{MODEL_SCOPE_NOTE}.</GapNote>
-      <GapNote>
-        Per-provider token counts are lifetime totals; the daemon serves no
-        per-day breakdown.
-      </GapNote>
     </>
   );
 }
