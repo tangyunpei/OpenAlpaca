@@ -843,6 +843,7 @@ fn wait_steering_msg(text: &str) -> crate::runner::steering::SteeringMsg {
         scope: crate::security::policy::Scope::Global,
         workspace_path: None,
         received_at: chrono::Utc::now(),
+        origin: crate::runner::steering::SteeringOrigin::User,
     }
 }
 
@@ -1691,6 +1692,7 @@ async fn a_resumed_run_is_primed_with_its_replayed_rounds_and_the_interjection()
             scope: crate::security::policy::Scope::Global,
             workspace_path: None,
             received_at: chrono::Utc::now(),
+            origin: crate::runner::steering::SteeringOrigin::Daemon,
         })
         .unwrap();
 
@@ -1744,12 +1746,18 @@ async fn a_resumed_run_is_primed_with_its_replayed_rounds_and_the_interjection()
     );
     assert_eq!(first[3].role, openalpaca_llm::Role::Tool);
     assert_eq!(first[3].content, "fn main() {}");
-    // …and the rail's interjection last.
+    // …and the rail's note last, as the daemon's own narration: a
+    // `<system_note>`, never a `<user_interjection>` the user never wrote.
     let last = first.last().unwrap();
     assert_eq!(last.role, openalpaca_llm::Role::User);
     assert!(
-        last.content.starts_with(crate::runner::steering::USER_INTERJECTION_PREFIX),
-        "the rail wraps it as an interjection: {}",
+        last.content.starts_with(crate::runner::steering::SYSTEM_NOTE_PREFIX),
+        "the rail wraps it as a system note: {}",
+        last.content
+    );
+    assert!(
+        !last.content.contains("user_interjection"),
+        "daemon-authored text is never attributed to the user: {}",
         last.content
     );
     assert!(last.content.contains("This run was interrupted at 2026-09-06T10:00:01"));
@@ -1758,7 +1766,8 @@ async fn a_resumed_run_is_primed_with_its_replayed_rounds_and_the_interjection()
 
 /// With steering off there is no rail, so the same text has to arrive on the
 /// same channel by the only other route: the rebuilt history's last message,
-/// wrapped identically.
+/// wrapped identically — the same `<system_note>`, so the model cannot tell
+/// which path carried it.
 #[tokio::test]
 async fn with_no_steering_rail_the_resume_note_is_still_an_interjection() {
     let provider = ScriptedProvider::new(vec![scripted_response("carrying on", vec![])]);
@@ -1800,7 +1809,7 @@ async fn with_no_steering_rail_the_resume_note_is_still_an_interjection() {
     let messages = provider.seen_messages.lock().unwrap();
     let last = messages[0].last().unwrap();
     assert!(
-        last.content.starts_with(crate::runner::steering::USER_INTERJECTION_PREFIX),
+        last.content.starts_with(crate::runner::steering::SYSTEM_NOTE_PREFIX),
         "{}",
         last.content
     );

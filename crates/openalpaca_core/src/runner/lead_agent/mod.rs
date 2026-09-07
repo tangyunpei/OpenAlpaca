@@ -503,8 +503,10 @@ pub async fn run_lead_agent(
             );
         }
         messages.extend(plan.messages);
-        // The rail carried the interjection whenever there was a rail; this
-        // is the same text on the same channel for the run that had none.
+        // The rail carried the note whenever there was a rail; this is the
+        // same text in the same wrapper for the run that had none — daemon
+        // origin included, so both paths present it as a `<system_note>`
+        // rather than as an instruction the user never gave.
         if let Some(note) = history.inline_note {
             messages.push(ChatMessage::user(&crate::runner::steering::SteeringMsg {
                 text: note,
@@ -513,6 +515,7 @@ pub async fn run_lead_agent(
                 scope: crate::security::policy::Scope::Global,
                 workspace_path: None,
                 received_at: chrono::Utc::now(),
+                origin: crate::runner::steering::SteeringOrigin::Daemon,
             }
             .to_interjection()));
         }

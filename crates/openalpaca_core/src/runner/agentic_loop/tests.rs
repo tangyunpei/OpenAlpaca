@@ -2038,6 +2038,7 @@ fn steering_msg(text: &str) -> SteeringMsg {
         scope: Scope::Global,
         workspace_path: None,
         received_at: chrono::Utc::now(),
+        origin: crate::runner::steering::SteeringOrigin::User,
     }
 }
 
@@ -3112,6 +3113,7 @@ async fn a_steering_drain_is_narrated_with_its_request_ids() {
             scope: Scope::Global,
             workspace_path: None,
             received_at: chrono::Utc::now(),
+            origin: crate::runner::steering::SteeringOrigin::User,
         })
         .unwrap();
 

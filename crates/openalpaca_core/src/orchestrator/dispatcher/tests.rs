@@ -659,6 +659,7 @@ fn lifecycle_steering_msg(text: &str) -> crate::runner::steering::SteeringMsg {
         scope: crate::security::policy::Scope::Global,
         workspace_path: None,
         received_at: Utc::now(),
+        origin: crate::runner::steering::SteeringOrigin::User,
     }
 }
 
@@ -748,6 +749,77 @@ async fn test_lead_agent_steering_attach_detach_and_leftover_conversion() {
     );
     // …which the finalize autostart hook must never claim.
     assert!(repo.claim_next("user1:cli").unwrap().is_none());
+}
+
+/// Important 2: §5.6c's resume note is pushed onto the rail before the loop
+/// starts. If the loop exits before its first round boundary — cancelled, or
+/// a budget exit that returns drained-but-unsent messages — the leftover
+/// conversion used to file it as an `unprocessed_steering` follow-up, which
+/// the lane's next turn renders as "messages the user sent … act on them
+/// now": daemon-authored text attributed to the user, with the model told to
+/// act on it. A daemon-authored leftover is dropped (with a log line)
+/// instead.
+#[tokio::test]
+async fn a_daemon_authored_leftover_is_dropped_not_filed_as_a_user_followup() {
+    let mut config = DaemonConfig::default();
+    config.orchestrator.routing.steering_enabled = true;
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let dispatcher = setup_with_router_and_db(
+        vec![make_agent("lead-01", vec!["orchestration"])],
+        config,
+        db.clone(),
+    );
+
+    let outcome = dispatcher
+        .dispatch_lead_agent(
+            "Long running task",
+            "Resume note lifecycle".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+        )
+        .unwrap();
+    let task_id = outcome.task_id;
+    let inbox = dispatcher
+        .shared_context
+        .steering_inbox(&task_id)
+        .expect("steering inbox must be registered at dispatch");
+
+    // The resume push, verbatim: the daemon's own narration, and a user's
+    // steer beside it so the skip is proved to be about provenance and not
+    // about the exit.
+    let mut note = lifecycle_steering_msg(&crate::session_log::replay::resume_interjection(
+        Utc::now(),
+    ));
+    note.origin = crate::runner::steering::SteeringOrigin::Daemon;
+    note.principal = crate::security::policy::Principal::System;
+    inbox.push(note).unwrap();
+    inbox.push(lifecycle_steering_msg("switch to staging")).unwrap();
+    assert!(dispatcher.shared_context.cancel_task(&task_id));
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while dispatcher.shared_context.steering_inbox(&task_id).is_some() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "steering detach timed out"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let repo = openalpaca_storage::repository::FollowupRepository::new(&db);
+    let rows = repo.list_queued_by_lane("user1:cli").unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "only the user's own interjection may become a follow-up: {rows:?}"
+    );
+    assert_eq!(rows[0].content, "switch to staging");
+    assert!(
+        !rows[0].content.contains("This run was interrupted"),
+        "the daemon's resume note must never reach the lane as a user message"
+    );
 }
 
 #[tokio::test]

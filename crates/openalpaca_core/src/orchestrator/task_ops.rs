@@ -372,7 +372,7 @@ impl Orchestrator {
         lane_key: &str,
         workspace_path: Option<String>,
     ) -> Result<String, String> {
-        use crate::runner::steering::{SteeringMsg, SteeringPushError, push_steering};
+        use crate::runner::steering::{SteeringMsg, SteeringOrigin, SteeringPushError, push_steering};
 
         let text = text.trim();
         if text.is_empty() {
@@ -396,6 +396,7 @@ impl Orchestrator {
                     scope: scope.clone(),
                     workspace_path,
                     received_at: Utc::now(),
+                    origin: SteeringOrigin::User,
                 };
                 match push_steering(
                     &self.shared_context,

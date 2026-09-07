@@ -8,7 +8,7 @@
 
 use crate::bus::EventBus;
 use crate::context::SharedContext;
-use crate::runner::steering::{SteeringMsg, SteeringPushError, push_steering};
+use crate::runner::steering::{SteeringMsg, SteeringOrigin, SteeringPushError, push_steering};
 use crate::tools::registry::{BuiltInTool, ToolContext};
 use async_trait::async_trait;
 use chrono::Utc;
@@ -116,6 +116,7 @@ impl BuiltInTool for SteerWorkflowTool {
             scope,
             workspace_path: ctx.workspace_path.clone(),
             received_at: Utc::now(),
+            origin: SteeringOrigin::User,
         };
 
         match push_steering(
@@ -266,6 +267,7 @@ mod tests {
                 scope: Scope::Global,
                 workspace_path: None,
                 received_at: Utc::now(),
+                origin: SteeringOrigin::User,
             })
             .unwrap();
 

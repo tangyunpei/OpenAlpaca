@@ -26,10 +26,38 @@ pub const DEFAULT_STEERING_INBOX_CAP: usize = 16;
 /// interjections from heuristic discard/truncation (spec §3).
 pub const USER_INTERJECTION_PREFIX: &str = "<user_interjection";
 
-/// A single user interjection targeted at a running workflow.
+/// Prefix of the block a [`SteeringOrigin::Daemon`] message renders as — the
+/// daemon narrating a fact about the run, never an instruction the user gave.
+pub const SYSTEM_NOTE_PREFIX: &str = "<system_note";
+
+/// Who wrote a steering message.
+///
+/// The rail carries two very different things on one channel, and the
+/// difference is provenance: almost everything on it is a person steering a
+/// running workflow, but §5.6c's resume note is the **daemon** telling the
+/// run what happened to it. Two consequences follow from this field, and both
+/// are why it exists rather than a `principal == System` check (`steer_workflow`
+/// has a degenerate `System` fallback of its own):
+///
+/// * a daemon message is never converted into an `unprocessed_steering`
+///   follow-up — that row is rendered to the model as "messages the user sent
+///   … act on them now", and daemon-authored text filed there is a false
+///   provenance nothing downstream can correct;
+/// * it renders as a `<system_note>`, not a `<user_interjection>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SteeringOrigin {
+    /// A person steering a running workflow (`/steer`, `steer_workflow`).
+    #[default]
+    User,
+    /// The daemon narrating a fact about the run itself (§5.6c's resume note).
+    Daemon,
+}
+
+/// A single interjection targeted at a running workflow.
 ///
 /// Carries the originating principal/scope/workspace so leftover messages
-/// can re-enter the front door as a fresh turn (follow-up conversion).
+/// can re-enter the front door as a fresh turn (follow-up conversion) — and
+/// [`SteeringOrigin`], which says whether that is allowed at all.
 #[derive(Debug, Clone)]
 pub struct SteeringMsg {
     pub text: String,
@@ -38,17 +66,25 @@ pub struct SteeringMsg {
     pub scope: Scope,
     pub workspace_path: Option<String>,
     pub received_at: DateTime<Utc>,
+    /// Who wrote it — see [`SteeringOrigin`].
+    pub origin: SteeringOrigin,
 }
 
 impl SteeringMsg {
-    /// Render this message as the `<user_interjection>` block injected into
-    /// the agentic loop's conversation history.
+    /// Render this message as the block injected into the agentic loop's
+    /// conversation history: `<user_interjection>` for a person's steer,
+    /// `<system_note>` for the daemon's own narration.
     pub fn to_interjection(&self) -> String {
-        format!(
-            "{USER_INTERJECTION_PREFIX} ts=\"{}\">{}</user_interjection>",
-            self.received_at.to_rfc3339(),
-            self.text
-        )
+        let ts = self.received_at.to_rfc3339();
+        match self.origin {
+            SteeringOrigin::User => format!(
+                "{USER_INTERJECTION_PREFIX} ts=\"{ts}\">{}</user_interjection>",
+                self.text
+            ),
+            SteeringOrigin::Daemon => {
+                format!("{SYSTEM_NOTE_PREFIX} ts=\"{ts}\">{}</system_note>", self.text)
+            }
+        }
     }
 }
 
@@ -384,7 +420,27 @@ mod tests {
             scope: Scope::Global,
             workspace_path: None,
             received_at: Utc::now(),
+            origin: SteeringOrigin::User,
         }
+    }
+
+    /// Important 2: the daemon's own narration (§5.6c's resume note) is not a
+    /// user instruction and must not be dressed as one. It carries a distinct
+    /// origin on the rail and renders as a `<system_note>`, so the model reads
+    /// a fact about the run rather than a correction it was never given.
+    #[test]
+    fn a_daemon_authored_message_renders_as_a_system_note() {
+        let mut m = msg("This run was interrupted at 2026-09-06T10:00:01+00:00");
+        m.origin = SteeringOrigin::Daemon;
+        let rendered = m.to_interjection();
+        assert!(rendered.starts_with(SYSTEM_NOTE_PREFIX), "{rendered}");
+        assert!(rendered.ends_with("</system_note>"), "{rendered}");
+        assert!(
+            !rendered.contains("user_interjection"),
+            "daemon text must never be attributed to the user: {rendered}"
+        );
+        // A user's steer is untouched: same channel, same wrapper as before.
+        assert!(msg("focus on the tests").to_interjection().starts_with(USER_INTERJECTION_PREFIX));
     }
 
     #[test]

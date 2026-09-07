@@ -33,7 +33,7 @@ use openalpaca_core::events::SystemEvent;
 use openalpaca_core::orchestrator::{
     Orchestrator, TaskActionError, TaskLaunchError, apply_task_action, parse_outcome,
 };
-use openalpaca_core::runner::steering::{SteeringMsg, SteeringPushError, push_steering};
+use openalpaca_core::runner::steering::{SteeringMsg, SteeringOrigin, SteeringPushError, push_steering};
 use openalpaca_core::security::confirmation::ConfirmationBroker;
 use openalpaca_core::security::policy::{Principal, Scope};
 use openalpaca_storage::{
@@ -846,6 +846,7 @@ fn steer_task(
         scope: Scope::Global,
         workspace_path: request.workspace_path.or_else(|| task.workspace_id.clone()),
         received_at: Utc::now(),
+        origin: SteeringOrigin::User,
     };
 
     match push_steering(
@@ -909,7 +910,7 @@ mod tests {
     use openalpaca_core::bus::EventBus;
     use openalpaca_core::context::SharedContext;
     use openalpaca_core::daemon_config::RoutingConfig;
-    use openalpaca_core::runner::steering::{SteeringInbox, SteeringMsg};
+    use openalpaca_core::runner::steering::{SteeringInbox, SteeringMsg, SteeringOrigin};
     use openalpaca_storage::OutcomeKind;
 
     fn make_test_task() -> Task {
@@ -1681,6 +1682,7 @@ mod tests {
                 scope: openalpaca_core::security::policy::Scope::Global,
                 workspace_path: None,
                 received_at: Utc::now(),
+                origin: SteeringOrigin::User,
             })
             .expect("seed the queue");
 

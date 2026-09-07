@@ -11,7 +11,7 @@ use crate::context::TaskEntryStatus;
 use crate::events::SystemEvent;
 use crate::memory::scope_context::MemoryScopeContext;
 use crate::runner::lead_agent::run_lead_agent;
-use crate::runner::steering::{SteeringInbox, SteeringMsg};
+use crate::runner::steering::{SteeringInbox, SteeringMsg, SteeringOrigin};
 use crate::session_log::replay::{ResumeHistory, ResumeSeed, resume_interjection};
 use chrono::Utc;
 use std::sync::Arc;
@@ -427,11 +427,17 @@ impl TaskDispatcher {
                     .push(SteeringMsg {
                         text: note.clone(),
                         request_id: Uuid::new_v4(),
-                        // The daemon wrote this, not the user.
+                        // The daemon wrote this, not the user — which is a
+                        // fact about the message, not only about its
+                        // principal: the origin is what keeps it out of the
+                        // `unprocessed_steering` queue on an early exit, and
+                        // what renders it as a `<system_note>` rather than an
+                        // instruction the user never gave.
                         principal: crate::security::policy::Principal::System,
                         scope: crate::security::policy::Scope::Global,
                         workspace_path: workspace.request_workspace_root.clone(),
                         received_at: Utc::now(),
+                        origin: SteeringOrigin::Daemon,
                     })
                     .inspect_err(|e| {
                         tracing::warn!(
@@ -590,6 +596,27 @@ impl TaskDispatcher {
             if let Some(ref inbox) = steering_inbox {
                 let leftovers = inbox.close_and_drain();
                 ctx.remove_steering_inbox(&task_id);
+                // §5.6c: the resume note is the daemon's own narration, pushed
+                // onto the rail before the loop starts. A loop that exits
+                // before its first round boundary (cancelled, or a budget exit
+                // returning drained-but-unsent messages) leaves it here — and
+                // an `unprocessed_steering` row is rendered to the model as
+                // "messages the user sent while the last workflow was
+                // finishing … act on them now". Daemon text filed there is a
+                // provenance nothing downstream can correct, so it is dropped
+                // and said so, never queued.
+                let (daemon, leftovers): (Vec<_>, Vec<_>) = leftovers
+                    .into_iter()
+                    .partition(|msg| msg.origin == SteeringOrigin::Daemon);
+                for msg in &daemon {
+                    tracing::info!(
+                        task_id = %task_id,
+                        request_id = %msg.request_id,
+                        "Dropping an undelivered daemon-authored rail message (the loop exited \
+                         before draining it): {}",
+                        msg.text.chars().take(120).collect::<String>()
+                    );
+                }
                 if !leftovers.is_empty() {
                     if let Some(ref db) = db {
                         for msg in leftovers {
