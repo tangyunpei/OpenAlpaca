@@ -50,6 +50,97 @@ pub const DATA_DIR: &str = ".data";
 /// How deep the copy will walk before it decides the tree is pathological.
 const MAX_DEPTH: usize = 32;
 
+/// How many entries one plugin directory may hold. A plugin that ships its
+/// dependencies is large; a plugin with a hundred thousand files is a mistake
+/// somebody is about to make on the owner's disk.
+pub const MAX_ENTRIES: usize = 20_000;
+
+/// How many bytes one plugin directory may hold.
+pub const MAX_BYTES: u64 = 512 * 1024 * 1024;
+
+/// What bounds one copy, besides [`MAX_DEPTH`].
+///
+/// `MAX_DEPTH` bounds the *recursion*, not the *work*: a symlink cycle re-enters
+/// the walk on a tree already copied, so the depth cap fires only after the
+/// tree has been copied once per level. The visited-directory set in
+/// [`copy_tree`] refuses that outright; these two are the belt to its braces,
+/// and they also bound an honest tree that is simply far too big.
+#[derive(Debug, Clone, Copy)]
+pub struct CopyBudget {
+    pub max_entries: usize,
+    pub max_bytes: u64,
+}
+
+impl Default for CopyBudget {
+    fn default() -> Self {
+        Self {
+            max_entries: MAX_ENTRIES,
+            max_bytes: MAX_BYTES,
+        }
+    }
+}
+
+/// What one walk has spent, and what it has already seen.
+struct Walk {
+    budget: CopyBudget,
+    /// Canonical directories already copied. A repeat is a cycle (`link -> .`)
+    /// or a second route to one subtree; either way the copy would duplicate
+    /// work the owner did not ask for, so it is refused rather than followed.
+    visited: std::collections::HashSet<PathBuf>,
+    entries: usize,
+    bytes: u64,
+}
+
+impl Walk {
+    fn new(budget: CopyBudget) -> Self {
+        Self {
+            budget,
+            visited: std::collections::HashSet::new(),
+            entries: 0,
+            bytes: 0,
+        }
+    }
+
+    /// Enter a directory. `Err` when this walk has already copied it.
+    fn enter(&mut self, dir: &Path) -> Result<(), InstallError> {
+        let canonical = dir
+            .canonicalize()
+            .map_err(|e| io("cannot resolve", dir, e))?;
+        if !self.visited.insert(canonical) {
+            return Err(InstallError::InvalidPath(format!(
+                "the source tree reaches '{}' more than once — a symlink cycle or a \
+                 second route to one directory — so copying it would duplicate the tree",
+                dir.display()
+            )));
+        }
+        Ok(())
+    }
+
+    fn count_entry(&mut self) -> Result<(), InstallError> {
+        self.entries += 1;
+        if self.entries > self.budget.max_entries {
+            return Err(InstallError::InvalidPath(format!(
+                "the source tree holds more than {} entries",
+                self.budget.max_entries
+            )));
+        }
+        Ok(())
+    }
+
+    /// Charged **before** the file is copied, so the budget bounds what lands.
+    fn charge(&mut self, path: &Path, len: u64) -> Result<(), InstallError> {
+        self.bytes = self.bytes.saturating_add(len);
+        if self.bytes > self.budget.max_bytes {
+            return Err(InstallError::InvalidPath(format!(
+                "the source tree is larger than {} bytes (at '{}')",
+                self.budget.max_bytes,
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+}
+
 // ============================================================================
 // The approval preview
 // ============================================================================
@@ -367,15 +458,26 @@ pub async fn stage(source: &Path, plugins_root: &Path, name: &str) -> Result<Sta
     let source = source.to_path_buf();
     let plugins_root = plugins_root.to_path_buf();
     let name = name.to_string();
-    match tokio::task::spawn_blocking(move || stage_blocking(&source, &plugins_root, &name)).await {
+    let budget = CopyBudget::default();
+    match tokio::task::spawn_blocking(move || {
+        stage_blocking(&source, &plugins_root, &name, budget)
+    })
+    .await
+    {
         Ok(result) => result,
         Err(join) => Err(InstallError::Io(format!("the copy did not complete: {join}"))),
     }
 }
 
 /// [`stage`]'s body, synchronous — including the [`Staged`] sweep of a failed
-/// copy, which therefore also runs off the runtime.
-fn stage_blocking(source: &Path, plugins_root: &Path, name: &str) -> Result<Staged, InstallError> {
+/// copy, which therefore also runs off the runtime. The budget is a parameter
+/// so a test can trip it without building a tree the size of the real one.
+fn stage_blocking(
+    source: &Path,
+    plugins_root: &Path,
+    name: &str,
+    budget: CopyBudget,
+) -> Result<Staged, InstallError> {
     let staging_root = plugins_root.join(STAGING_DIR);
     std::fs::create_dir_all(&staging_root).map_err(|e| io("cannot create", &staging_root, e))?;
 
@@ -390,19 +492,31 @@ fn stage_blocking(source: &Path, plugins_root: &Path, name: &str) -> Result<Stag
         .map_err(|e| io("cannot resolve", source, e))?;
     // From here on every early return drops `staged`, which sweeps the partial
     // copy — including the escaping-symlink refusal.
-    copy_tree(&root, &root, &staged.path, 0)?;
+    let mut walk = Walk::new(budget);
+    copy_tree(&root, &root, &staged.path, 0, &mut walk)?;
     Ok(staged)
 }
 
 /// Recursive copy, dereferencing symlinks that stay inside `root` and refusing
 /// the ones that do not.
-fn copy_tree(root: &Path, from: &Path, to: &Path, depth: usize) -> Result<(), InstallError> {
+///
+/// Bounded three ways: [`MAX_DEPTH`] on the recursion, [`Walk::visited`] on
+/// repeats (a `link -> .` would otherwise multiply the copy by the branching
+/// factor per level), and the entry/byte budgets on the total work.
+fn copy_tree(
+    root: &Path,
+    from: &Path,
+    to: &Path,
+    depth: usize,
+    walk: &mut Walk,
+) -> Result<(), InstallError> {
     if depth > MAX_DEPTH {
         return Err(InstallError::InvalidPath(format!(
             "the source tree is deeper than {MAX_DEPTH} directories at '{}'",
             from.display()
         )));
     }
+    walk.enter(from)?;
     std::fs::create_dir_all(to).map_err(|e| io("cannot create", to, e))?;
 
     let entries = std::fs::read_dir(from).map_err(|e| io("cannot read", from, e))?;
@@ -410,6 +524,7 @@ fn copy_tree(root: &Path, from: &Path, to: &Path, depth: usize) -> Result<(), In
         let entry = entry.map_err(|e| io("cannot read", from, e))?;
         let source_path = entry.path();
         let target = to.join(entry.file_name());
+        walk.count_entry()?;
 
         let kind = source_path
             .symlink_metadata()
@@ -433,13 +548,14 @@ fn copy_tree(root: &Path, from: &Path, to: &Path, depth: usize) -> Result<(), In
             }
             // The *target's* type is what will be copied, so it is the one that
             // has to be a directory or a regular file.
-            let resolved_kind = resolved
+            let resolved_meta = resolved
                 .symlink_metadata()
-                .map_err(|e| io("cannot stat", &resolved, e))?
-                .file_type();
+                .map_err(|e| io("cannot stat", &resolved, e))?;
+            let resolved_kind = resolved_meta.file_type();
             if resolved_kind.is_dir() {
-                copy_tree(root, &resolved, &target, depth + 1)?;
+                copy_tree(root, &resolved, &target, depth + 1, walk)?;
             } else if resolved_kind.is_file() {
+                walk.charge(&source_path, resolved_meta.len())?;
                 copy_file(&resolved, &target)?;
             } else {
                 return Err(irregular(&source_path, resolved_kind));
@@ -448,8 +564,13 @@ fn copy_tree(root: &Path, from: &Path, to: &Path, depth: usize) -> Result<(), In
         }
 
         if kind.is_dir() {
-            copy_tree(root, &source_path, &target, depth + 1)?;
+            copy_tree(root, &source_path, &target, depth + 1, walk)?;
         } else if kind.is_file() {
+            let len = entry
+                .metadata()
+                .map_err(|e| io("cannot stat", &source_path, e))?
+                .len();
+            walk.charge(&source_path, len)?;
             copy_file(&source_path, &target)?;
         } else {
             return Err(irregular(&source_path, kind));

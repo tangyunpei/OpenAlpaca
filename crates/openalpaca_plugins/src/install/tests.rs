@@ -228,6 +228,110 @@ async fn a_symlink_inside_the_source_is_copied_as_its_target() {
     assert_eq!(std::fs::read_to_string(copied).unwrap(), "// helper\n");
 }
 
+// ── the walk's bounds ────────────────────────────────────────────────────
+
+/// **The multiplier.** `link -> .` canonicalizes to the source root, passes the
+/// `starts_with(root)` check and re-enters the walk on the whole tree, so the
+/// depth cap bounds the recursion but not the work: with two such links per
+/// level the branching factor is 2 and the bound is `2^32` directories. The
+/// disk fills long before the depth cap fires. A visited set of canonical
+/// directories refuses the repeat instead.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlink_cycle_is_refused_rather_than_walked() {
+    let (_tmp, plugins, sources) = roots();
+    let dir = source(&sources, "notion", "notion");
+    std::os::unix::fs::symlink(".", dir.join("loop")).unwrap();
+
+    let error = stage(&dir, &plugins, "notion").await.unwrap_err();
+
+    assert_eq!(error.code(), "invalid_path");
+    assert!(
+        error.to_string().contains("more than once"),
+        "the refusal says the walk would repeat a directory: {error}"
+    );
+    assert!(
+        std::fs::read_dir(plugins.join(STAGING_DIR))
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(true),
+        "and nothing duplicated is left behind"
+    );
+}
+
+/// Two links to one inner directory are the same shape as a cycle — the copy
+/// would duplicate that subtree — so they are refused by the same rule.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_directory_reached_twice_is_refused_by_the_same_rule() {
+    let (_tmp, plugins, sources) = roots();
+    let dir = source(&sources, "notion", "notion");
+    std::os::unix::fs::symlink(dir.join("lib"), dir.join("also-lib")).unwrap();
+
+    let error = stage(&dir, &plugins, "notion").await.unwrap_err();
+    assert_eq!(error.code(), "invalid_path");
+    assert!(error.to_string().contains("more than once"), "{error}");
+}
+
+/// The entry budget, tripped on a synthetic tree. The refusal names which
+/// budget it was.
+#[test]
+fn the_entry_budget_stops_a_tree_with_too_many_files() {
+    let (_tmp, plugins, sources) = roots();
+    let dir = source(&sources, "notion", "notion");
+    for i in 0..20 {
+        std::fs::write(dir.join(format!("lib/file-{i}.js")), "// x\n").unwrap();
+    }
+
+    let budget = CopyBudget {
+        max_entries: 8,
+        ..CopyBudget::default()
+    };
+    let error = stage_blocking(&dir, &plugins, "notion", budget).unwrap_err();
+
+    assert_eq!(error.code(), "invalid_path");
+    assert!(
+        error.to_string().contains("8 entries"),
+        "the refusal names the budget that tripped: {error}"
+    );
+    assert!(
+        std::fs::read_dir(plugins.join(STAGING_DIR))
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(true),
+        "the partial copy is swept"
+    );
+}
+
+/// The byte budget, likewise — and it is checked *before* the file is copied,
+/// so the budget is a bound on what lands rather than a report on it.
+#[test]
+fn the_byte_budget_stops_a_tree_that_is_too_large() {
+    let (_tmp, plugins, sources) = roots();
+    let dir = source(&sources, "notion", "notion");
+    std::fs::write(dir.join("blob.bin"), vec![0u8; 4096]).unwrap();
+
+    let budget = CopyBudget {
+        max_bytes: 1024,
+        ..CopyBudget::default()
+    };
+    let error = stage_blocking(&dir, &plugins, "notion", budget).unwrap_err();
+
+    assert_eq!(error.code(), "invalid_path");
+    assert!(
+        error.to_string().contains("1024 bytes"),
+        "the refusal names the budget that tripped: {error}"
+    );
+}
+
+/// The defaults are the ones a real install runs with, and an ordinary plugin
+/// tree is nowhere near them.
+#[test]
+fn the_default_budgets_pass_an_ordinary_plugin() {
+    let (_tmp, plugins, sources) = roots();
+    let dir = source(&sources, "notion", "notion");
+    let staged = stage_blocking(&dir, &plugins, "notion", CopyBudget::default()).expect("stage");
+    assert!(staged.path().join("lib/helper.js").is_file());
+}
+
 // ── file types ───────────────────────────────────────────────────────────
 
 /// **The hang.** `fs::copy` opens the source for reading, and opening a FIFO
