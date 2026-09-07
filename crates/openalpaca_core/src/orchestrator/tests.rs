@@ -3749,3 +3749,118 @@ async fn the_override_dies_with_its_request() {
         "the stored loop config must not have been rewritten"
     );
 }
+
+// ── Fix round 1, finding #1: every model-answering branch honors the
+// override, not just the main loop ───────────────────────────────────
+
+/// The bootstrap branch (`is_bootstrapping()`) runs a model for the turn just
+/// like the main loop does — the override must reach it too.
+#[tokio::test]
+async fn a_bootstrap_turn_still_gets_the_named_model() {
+    use crate::middleware::bootstrap::{BootstrapDocument, BootstrapFrontmatter};
+
+    let captured = Arc::new(std::sync::Mutex::new(Vec::<ChatRequest>::new()));
+    let orch = make_orchestrator_with_capturing_llm(captured.clone());
+    orch.update_bootstrap_document(Some(BootstrapDocument {
+        frontmatter: BootstrapFrontmatter {
+            summary: "onboarding".to_string(),
+            read_when: vec![],
+        },
+        body: "Welcome! Let's get set up.".to_string(),
+    }));
+
+    orch.handle_message(HandleRequest {
+        model_override: Some("claude-opus-4-6".to_string()),
+        ..HandleRequest::new(
+            Uuid::new_v4(),
+            "cli",
+            "hello",
+            Principal::System,
+            Scope::Global,
+            "test:cli",
+        )
+    })
+    .await
+    .expect("the bootstrap turn should be answered");
+
+    let requests = captured.lock().unwrap();
+    assert!(
+        !requests.is_empty(),
+        "the bootstrap branch should have called the router"
+    );
+    assert_eq!(
+        requests[0].model.as_deref(),
+        Some("claude-opus-4-6"),
+        "the override must reach the bootstrap branch's LoopConfig.model"
+    );
+}
+
+/// An attachment-only turn (`force_simple_query`, set by empty text + files
+/// at `handler_attachments.rs:93`) also runs a model — the override must
+/// reach it too.
+#[tokio::test]
+async fn an_attachment_only_turn_still_gets_the_named_model() {
+    let captured = Arc::new(std::sync::Mutex::new(Vec::<ChatRequest>::new()));
+    let orch = make_orchestrator_with_capturing_llm(captured.clone());
+
+    orch.handle_message_with_attachments(
+        HandleRequest {
+            model_override: Some("claude-opus-4-6".to_string()),
+            ..HandleRequest::new(
+                Uuid::new_v4(),
+                "cli",
+                "",
+                Principal::System,
+                Scope::Global,
+                "test:cli",
+            )
+        },
+        vec![make_attachment_with_text("some file content")],
+    )
+    .await
+    .expect("the attachment-only turn should be answered");
+
+    let requests = captured.lock().unwrap();
+    assert!(
+        !requests.is_empty(),
+        "the attachment-only branch should have called the router"
+    );
+    assert_eq!(
+        requests[0].model.as_deref(),
+        Some("claude-opus-4-6"),
+        "the override must reach the attachment-only branch's LoopConfig.model"
+    );
+}
+
+/// The social fast path ("thanks", "ok", …) also runs a model — the override
+/// must reach it too.
+#[tokio::test]
+async fn the_social_fast_path_still_gets_the_named_model() {
+    let captured = Arc::new(std::sync::Mutex::new(Vec::<ChatRequest>::new()));
+    let orch = make_orchestrator_with_capturing_llm(captured.clone());
+
+    orch.handle_message(HandleRequest {
+        model_override: Some("claude-opus-4-6".to_string()),
+        ..HandleRequest::new(
+            Uuid::new_v4(),
+            "cli",
+            "thanks",
+            Principal::System,
+            Scope::Global,
+            "test:cli",
+        )
+    })
+    .await
+    .expect("the social fast path turn should be answered");
+
+    let requests = captured.lock().unwrap();
+    assert!(
+        !requests.is_empty(),
+        "the social fast path should have called the router"
+    );
+    assert_eq!(
+        requests[0].model.as_deref(),
+        Some("claude-opus-4-6"),
+        "the override must reach the social fast path's LoopConfig.model"
+    );
+}

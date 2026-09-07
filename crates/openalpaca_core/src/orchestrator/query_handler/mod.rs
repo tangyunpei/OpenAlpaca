@@ -20,6 +20,17 @@ pub(super) enum LoopOverrides {
         /// turn on the lane is back on the daemon default.
         model_override: Option<String>,
     },
+    /// GAP-13 fix round 1 (finding #1) — a turn that answers through
+    /// `handle_simple_query` but is *not* the Routing V2 main loop
+    /// (bootstrap onboarding, or an attachment-only forced-simple turn):
+    /// still runs a model for this one turn, so the request's override must
+    /// still reach `LoopConfig.model`, but none of `MainLoop`'s tool-surface
+    /// assembly (workflow context, steering leftovers, the per-request
+    /// tool set) applies — those are main-loop-only.
+    ModelOnly {
+        /// Same contract as `MainLoop::model_override`.
+        model_override: Option<String>,
+    },
 }
 
 mod simple_query_handler;

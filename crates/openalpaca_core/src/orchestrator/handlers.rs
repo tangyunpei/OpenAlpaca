@@ -193,7 +193,9 @@ impl Orchestrator {
                 &scope_ctx,
                 current_parts.as_deref(),
                 stream_id.as_deref(),
-                None,
+                Some(super::query_handler::LoopOverrides::ModelOnly {
+                    model_override: model_override.clone(),
+                }),
             )
             .await
         } else if force_simple_query {
@@ -211,7 +213,9 @@ impl Orchestrator {
                 &scope_ctx,
                 current_parts.as_deref(),
                 stream_id.as_deref(),
-                None,
+                Some(super::query_handler::LoopOverrides::ModelOnly {
+                    model_override: model_override.clone(),
+                }),
             )
             .await
         } else if self.llm_router.is_some()
@@ -230,8 +234,14 @@ impl Orchestrator {
         {
             // Social fast path: ultra-light prompt for "ok", "thanks", "好的" etc.
             mode = "social_fast_path".to_string();
-            self.handle_social_query(request_id, &model_input_content, &lane_key, &ctx)
-                .await
+            self.handle_social_query(
+                request_id,
+                &model_input_content,
+                &lane_key,
+                &ctx,
+                model_override.clone(),
+            )
+            .await
         } else {
             // Routing V2 main loop: the front door for everything that
             // survived the deterministic tier and the social branch.

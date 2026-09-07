@@ -205,7 +205,11 @@ impl Orchestrator {
                         Some(set),
                     )
                 }
-                None => (tool_defs, None, None, None),
+                // `None` (no override at all) and `ModelOnly` (a model
+                // override that isn't the main loop — bootstrap, or an
+                // attachment-only forced-simple turn) both skip the main
+                // loop's tool-surface assembly.
+                _ => (tool_defs, None, None, None),
             };
 
         // Keep the guard/telemetry name list in sync with the actual surface
@@ -248,7 +252,8 @@ impl Orchestrator {
         // exactly `self.loop_config.model`, and either way the stored config is
         // left alone: the override dies with the request.
         let turn_model = match &loop_overrides {
-            Some(super::LoopOverrides::MainLoop { model_override, .. }) => model_override.clone(),
+            Some(super::LoopOverrides::MainLoop { model_override, .. })
+            | Some(super::LoopOverrides::ModelOnly { model_override }) => model_override.clone(),
             None => None,
         }
         .or_else(|| self.loop_config.model.clone());
@@ -861,6 +866,7 @@ impl Orchestrator {
         query: &str,
         lane_key: &str,
         ctx: &ConversationContext,
+        model_override: Option<String>,
     ) -> Result<String, String> {
         let router = self.llm_router.as_ref().ok_or_else(|| "No LLM router".to_string())?;
 
@@ -970,11 +976,17 @@ impl Orchestrator {
 
         let messages: Vec<ChatMessage> = composed.messages.as_ref().clone();
 
+        // GAP-13 fix round 1 (finding #1): the social fast path is one of
+        // the branches that runs a model, so the request's override must
+        // reach `LoopConfig.model` here too — same fallback shape as
+        // `turn_model` above (override, else the daemon default, unchanged
+        // when the request named none).
         let config = LoopConfig {
             max_rounds: 1,
             max_tools_per_round: 0,
             enable_caching: false,
             thinking: None,
+            model: model_override.or_else(|| self.loop_config.model.clone()),
             ..self.loop_config.clone()
         };
 
