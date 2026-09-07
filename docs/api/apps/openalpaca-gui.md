@@ -79,7 +79,7 @@
 ### `extensions.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/extensions.ts`
-- Exported functions: `listExtensions`, `removeExtension`, `runExtensionVerb`, `setExtensionConfig`
+- Exported functions: `addMcpServer`, `installPlugin`, `listExtensions`, `removeExtension`, `runExtensionVerb`, `setExtensionConfig`, `uninstallExtension`, `updatePlugin`, `validatePlugin`
 - Endpoints: none
 
 ### `files.ts`
