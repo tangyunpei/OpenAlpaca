@@ -630,6 +630,7 @@ impl Orchestrator {
                 agent_instance_id: None,
                 // Filled in by the sandbox at dispatch (T28), which owns the bus.
                 session_id: None,
+                session_log: None,
                 event_bus: None,
             };
             let needs_clone = !skill_doc.frontmatter.scripts.is_empty()
@@ -1072,6 +1073,7 @@ impl Orchestrator {
             agent_instance_id: None,
             // Filled in by the sandbox at dispatch (T28), which owns the bus.
             session_id: None,
+            session_log: None,
             event_bus: None,
         };
 

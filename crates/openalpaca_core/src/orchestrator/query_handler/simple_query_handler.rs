@@ -145,6 +145,7 @@ impl Orchestrator {
             agent_instance_id: None,
             // Filled in by the sandbox at dispatch (T28), which owns the bus.
             session_id: None,
+            session_log: None,
             event_bus: None,
         };
 

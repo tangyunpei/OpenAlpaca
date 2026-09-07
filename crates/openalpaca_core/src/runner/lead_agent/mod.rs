@@ -249,6 +249,7 @@ pub async fn run_lead_agent(
         workspace_path: None,
         // Filled in by the sandbox at dispatch (T28), which owns the bus.
         session_id: None,
+        session_log: None,
         event_bus: None,
     };
 

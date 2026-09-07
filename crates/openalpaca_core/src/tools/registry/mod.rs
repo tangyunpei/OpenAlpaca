@@ -87,6 +87,15 @@ pub struct ToolContext {
     /// produced it (`read_result`, T42) — a `results/` reference is scoped to
     /// this id and nothing wider.
     pub session_id: Option<String>,
+    /// The session log's emit side, for the one tool that must **write** to it
+    /// before it acts rather than after: `file_write` takes §5.7's pre-edit
+    /// image of a file it is about to overwrite, and has to know the image was
+    /// taken before it destroys the bytes.
+    ///
+    /// Set from the same handle as [`session_id`](Self::session_id), so the
+    /// two always name one session. `None` off a session — and then no
+    /// snapshot is taken, because there is nowhere to put one.
+    pub session_log: Option<crate::session_log::SessionLogHandle>,
     /// The bus a tool announces its own side effects on — `artifact_write`'s
     /// `SystemEvent::ArtifactWritten` today (plan §4.9).
     ///

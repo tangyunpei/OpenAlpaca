@@ -365,6 +365,7 @@ impl BuiltInTool for SpawnSubagentTool {
             workspace_path: None,
             // Filled in by the sandbox at dispatch (T28), which owns the bus.
             session_id: None,
+            session_log: None,
             event_bus: None,
         };
         let mut sandbox = SandboxManager::new(

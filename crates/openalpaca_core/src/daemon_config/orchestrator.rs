@@ -18,9 +18,10 @@ pub struct OrchestratorConfig {
 /// SQLite.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionsConfig {
-    /// Per session, counting `log.jsonl` segments **plus** `results/`. On
-    /// exceed the writer drops whole oldest segments (never the live one) and
-    /// writes a `log_trimmed` record naming the dropped seq range.
+    /// Per session, counting `log.jsonl` segments **plus** `results/` and
+    /// `snapshots/`. On exceed the writer drops whole oldest segments (never
+    /// the live one) and writes a `log_trimmed` record naming the dropped seq
+    /// range.
     #[serde(default = "default_log_max_session_bytes")]
     pub log_max_session_bytes: u64,
     /// Across all sessions, evicting oldest-touched archived sessions first;
@@ -41,6 +42,17 @@ pub struct SessionsConfig {
     /// the head-only cut at this same size — one number, never two.
     #[serde(default = "default_tool_result_inline_bytes")]
     pub tool_result_inline_bytes: usize,
+    /// §5.7's pre-edit images: the largest file `file_write` will copy into
+    /// the session's `snapshots/` before overwriting it.
+    ///
+    /// It is a **refusal** threshold, not a skip: a snapshot the session
+    /// cannot afford means the write does not happen, because silently
+    /// overwriting a file whose only copy this was is the outcome the tier
+    /// exists to prevent. 2 MB — `tool_result_inline_bytes × 64`, the same
+    /// number read as "a payload file, not a payload" — keeps one edit from
+    /// consuming a meaningful share of `log_max_session_bytes`.
+    #[serde(default = "default_snapshot_max_bytes")]
+    pub snapshot_max_bytes: u64,
 }
 
 fn default_log_max_session_bytes() -> u64 {
@@ -55,6 +67,9 @@ fn default_log_retention_days() -> u32 {
 fn default_tool_result_inline_bytes() -> usize {
     32 * 1024
 }
+fn default_snapshot_max_bytes() -> u64 {
+    2 * 1024 * 1024
+}
 
 impl Default for SessionsConfig {
     fn default() -> Self {
@@ -63,6 +78,7 @@ impl Default for SessionsConfig {
             log_max_total_bytes: default_log_max_total_bytes(),
             log_retention_days: default_log_retention_days(),
             tool_result_inline_bytes: default_tool_result_inline_bytes(),
+            snapshot_max_bytes: default_snapshot_max_bytes(),
         }
     }
 }

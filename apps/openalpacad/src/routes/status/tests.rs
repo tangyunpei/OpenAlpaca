@@ -322,6 +322,7 @@ async fn serves_the_retention_limits_the_daemon_actually_enforces() {
         log_max_total_bytes: 222,
         log_retention_days: 3,
         tool_result_inline_bytes: 4_096,
+        snapshot_max_bytes: 8_192,
     };
 
     let body = body_of(status_response(&with_config, &headers_with(None))).await;
@@ -329,9 +330,10 @@ async fn serves_the_retention_limits_the_daemon_actually_enforces() {
     assert_eq!(body["retention"]["log_max_total_bytes"], 222);
     assert_eq!(body["retention"]["log_retention_days"], 3);
     // Only the three fields the brief names — `tool_result_inline_bytes`
-    // governs tool-result spill, not retention, and is not part of this
-    // block.
+    // governs tool-result spill and `snapshot_max_bytes` the pre-edit image,
+    // neither of which is retention, and neither is part of this block.
     assert!(body["retention"].get("tool_result_inline_bytes").is_none());
+    assert!(body["retention"].get("snapshot_max_bytes").is_none());
 }
 
 /// §5.6c — a client cannot decide whether to offer `Resume` on an interrupted

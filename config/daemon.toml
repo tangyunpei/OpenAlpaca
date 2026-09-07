@@ -115,9 +115,9 @@ resume_enabled = false
 # compaction, subagent spans. The conversation itself lives in SQLite, so a
 # trim here loses loop-interior detail, never the transcript.
 [orchestrator.sessions]
-# Per session, counting the log segments plus the results/ spill directory.
-# On exceed, whole oldest segments are dropped (never the live one) and a
-# `log_trimmed` record names the seq range that went.
+# Per session, counting the log segments plus the results/ spill directory and
+# the snapshots/ pre-edit images. On exceed, whole oldest segments are dropped
+# (never the live one) and a `log_trimmed` record names the seq range that went.
 log_max_session_bytes = 268435456
 # Across all sessions; archived sessions are evicted oldest-touched first and
 # an active session's log is never evicted.
@@ -129,6 +129,10 @@ log_retention_days = 0
 # the model is handed a stub naming it — `read_result` pages the rest. Below it
 # the result travels inline unchanged.
 tool_result_inline_bytes = 32768
+# Before file_write overwrites an existing workspace file, its pre-edit bytes
+# are copied into the session's snapshots/. A target larger than this is not
+# imaged and the write is refused rather than performed without one.
+snapshot_max_bytes = 2097152
 
 [security]
 max_input_length = 32768

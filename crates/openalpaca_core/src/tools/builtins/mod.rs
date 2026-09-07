@@ -324,13 +324,16 @@ pub fn builtin_tools(
     // Clone db before memory_search consumes it — the workspace and artifact
     // tools need it too.
     let ws_db = db.clone();
-    let artifact_cfg = daemon_config.clone();
+    // The daemon config the file, artifact and workspace tools share.
+    let tool_cfg = daemon_config.clone();
 
     let mut tools = vec![
         web_search_tool(ws_cfg),
         web_fetch_tool(),
         file_read_tool(ws_root.clone()),
-        file_write_tool(ws_root),
+        // The config carries §5.7's `snapshot_max_bytes` — the bound on the
+        // pre-edit image `file_write` takes before it overwrites a file.
+        file_write_tool(ws_root, tool_cfg.clone()),
         shell_execute_tool(),
         // §5.4's counterpart to the `results/` spill. Registered on every
         // surface because the stub the loop emits names it on every surface —
@@ -341,7 +344,7 @@ pub fn builtin_tools(
         // Registered unconditionally, like the workspace tools: the definition
         // has to exist for capability resolution even where no database was
         // wired (tests, the CLI), and the tool refuses at call time instead.
-        artifact_write_tool(ws_db.clone(), artifact_cfg.clone()),
+        artifact_write_tool(ws_db.clone(), tool_cfg.clone()),
     ];
     if let (Some(db), Some(dc)) = (db, daemon_config) {
         tools.push(memory_search_tool(db, embedder, dc));
@@ -359,7 +362,7 @@ pub fn builtin_tools(
         } else {
             ToolBackend::BuiltIn(Arc::new(WorkspaceWriteTool {
                 db: ws_db.clone(),
-                daemon_config: artifact_cfg.clone(),
+                daemon_config: tool_cfg.clone(),
             }))
         };
         tools.push(RegisteredTool {
