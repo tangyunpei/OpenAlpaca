@@ -37,7 +37,6 @@ import { useModels } from "@/hooks/useSettings";
 import {
   MODEL_SCOPE_NOTE,
   useOrchestratorConfig,
-  useUpdateOrchestratorConfig,
 } from "@/hooks/useOrchestrator";
 import { formatSpend } from "@/hooks/useUsage";
 import { usePublishConfirmation } from "@/stores/confirmation";
@@ -93,7 +92,6 @@ export default function ChatView({
 
   const models = useModels();
   const orchestrator = useOrchestratorConfig();
-  const updateOrchestrator = useUpdateOrchestratorConfig();
 
   const session = useChatSession();
   const sidebar = useSessionSidebar(session.laneKey, session.sessionId);
@@ -113,6 +111,8 @@ export default function ChatView({
 
   // The store holds no default model on purpose — the daemon's own default is
   // the only truthful starting value (§4.2 seeds a literal; this does not).
+  // Once seeded, the label and the turn agree: every send carries this id as
+  // `model`, so what the composer says is what answers.
   const daemonModel = orchestrator.data?.model ?? null;
   useEffect(() => {
     if (model === null && daemonModel !== null) setModel(daemonModel);
@@ -245,23 +245,24 @@ export default function ChatView({
           modelPickerOpen={modelPickerOpen}
           onToggleModelPicker={toggleModelPicker}
           onCloseModelPicker={closeModelPicker}
+          // GAP-13 (closed): the pick is carried on each `POST /v1/chat` as
+          // that turn's `model`, so it governs this conversation and writes
+          // nothing. Changing the *daemon* default is a different action, in
+          // Settings → Models & keys, and this no longer does it by side
+          // effect.
           onPickModel={(modelId) => {
             setModel(modelId);
-            updateOrchestrator.mutate({
-              model: modelId,
-              fallback_models: orchestrator.data?.fallback_models ?? [],
-            });
             const provider =
               models.data?.find((entry) => entry.id === modelId)?.provider ??
               "unknown provider";
             showToast(`Chat model → ${modelId} (${provider})`);
           }}
+          modelNote={MODEL_SCOPE_NOTE}
           onManageProviders={() => {
             closeModelPicker();
             setSettingsSection("models");
             setView("settings");
           }}
-          modelNote={MODEL_SCOPE_NOTE}
           spend={
             orchestrator.data === undefined
               ? null

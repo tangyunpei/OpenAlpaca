@@ -24,7 +24,15 @@ import type {
   UpdateOrchestratorRequest,
 } from "@/lib/api/types";
 import { qk } from "@/lib/query-keys";
-import { GAPS, gapNote } from "@/lib/unavailable";
+
+/**
+ * The composer picker's footer line. GAP-13 closed, so this states a scope
+ * rather than warning about one: the pick rides on that turn's
+ * `POST /v1/chat` as `model` and is written nowhere, and the daemon-wide
+ * default is a different control in a different place.
+ */
+export const MODEL_SCOPE_NOTE =
+  "Applies to this conversation — the daemon default is in Settings → Models & keys";
 
 export function useOrchestratorConfig(): UseQueryResult<OrchestratorConfigResponse> {
   return useQuery({
@@ -32,9 +40,6 @@ export function useOrchestratorConfig(): UseQueryResult<OrchestratorConfigRespon
     queryFn: ({ signal }) => getOrchestratorConfig(signal),
   });
 }
-
-/** Warn the user: this picker writes the daemon-wide default (GAP-13). */
-export const MODEL_SCOPE_NOTE = gapNote(GAPS["GAP-13"]);
 
 export function useUpdateOrchestratorConfig(): UseMutationResult<
   void,

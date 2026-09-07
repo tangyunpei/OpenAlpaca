@@ -206,9 +206,11 @@ export interface ChatSendRequest {
   content: string;
   attachments?: AttachmentRef[];
   /**
-   * Per-request model override — GAP-13. The daemon ignores unknown fields
-   * (serde default), so sending it keeps the client honest and
-   * forward-compatible without changing daemon behaviour today.
+   * Run this one turn on a named model (GAP-13, closed). Validated against the
+   * registry before dispatch — an id the daemon does not know is
+   * `400 UNKNOWN_MODEL`, and so is every model of a disabled provider.
+   * Request-scoped: nothing is persisted, so the next turn is back on the
+   * daemon default unless this names a model again.
    */
   model?: string;
 }
@@ -216,6 +218,12 @@ export interface ChatSendRequest {
 export interface ChatSendResponse {
   stream_id: string;
   lane_key: string;
+  /**
+   * The model this turn will run on: the request's `model` when it named one,
+   * else the daemon default. `null` only on a daemon with no LLM router at
+   * all. The SSE `done` frame's `model` still reports what actually answered.
+   */
+  model_used: string | null;
 }
 
 export interface ChatHistoryResponse {

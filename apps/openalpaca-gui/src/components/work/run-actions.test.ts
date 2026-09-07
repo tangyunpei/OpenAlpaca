@@ -184,9 +184,9 @@ describe("unavailableActionNotes", () => {
 
 describe("gapTooltip", () => {
   it("carries both the note and the proposal", () => {
-    const tooltip = gapTooltip("GAP-13");
-    expect(tooltip).toContain("changes the daemon default for every client");
-    expect(tooltip).toContain("/v1/lanes/{lane}/preferences");
+    const tooltip = gapTooltip("GAP-20");
+    expect(tooltip).toContain("the per-template toggle is not served");
+    expect(tooltip).toContain("/v1/agent-templates/{id}/enabled");
   });
 });
 

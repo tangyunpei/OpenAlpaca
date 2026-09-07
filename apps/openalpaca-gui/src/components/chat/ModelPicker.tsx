@@ -1,15 +1,16 @@
 /**
  * `ModelPicker` (DESIGN_SPEC §3.17) — the popover above the composer.
  *
- * Two honest departures from the design:
- *   * the **off pill** on a disabled provider is not rendered: the picker is
- *     built from `GET /v1/models`, which lists models rather than providers,
- *     so a disabled provider has no row here to badge in the first place
- *     (turning one off is served now — Settings → Models & keys);
- *   * the footer carries a one-line scope note, because picking a model here
- *     writes the daemon-wide default rather than a per-chat override (GAP-13).
- *     The design assumes a conversation-scoped picker; saying so is the only
- *     way to keep the control truthful.
+ * One honest departure from the design: the **off pill** on a disabled
+ * provider is not rendered. The picker is built from `GET /v1/models`, which
+ * lists models rather than providers, so a disabled provider has no row here
+ * to badge in the first place (turning one off is served — Settings → Models &
+ * keys).
+ *
+ * The footer's one-line scope note used to say that picking here wrote the
+ * daemon-wide default (GAP-13). It no longer does: a pick is carried on each
+ * turn's `POST /v1/chat` as `model`, so the design's conversation-scoped
+ * picker is what this now is, and the note says that instead.
  */
 
 import { Scrim } from "@/components/ui";
@@ -45,7 +46,7 @@ export interface ModelPickerProps {
   onPick: (modelId: string) => void;
   onClose: () => void;
   onManageProviders: () => void;
-  /** GAP-13 — the scope this write actually has. */
+  /** The one-line scope note under the list. */
   note?: string | null;
   /** Set while `/v1/models` is in flight or failed. */
   status?: "ready" | "loading" | "error";

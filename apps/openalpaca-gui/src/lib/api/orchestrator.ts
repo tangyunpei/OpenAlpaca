@@ -19,9 +19,10 @@ export async function getOrchestratorConfig(
 }
 
 /**
- * `PUT /v1/orchestrator/config` — GAP-13: this rewrites `llm.toml` and
- * broadcasts to every client and connector. It is the daemon *default*, not a
- * per-chat setting; label it that way in the UI.
+ * `PUT /v1/orchestrator/config` — this rewrites `llm.toml` and broadcasts to
+ * every client and connector. It is the daemon *default*, not a per-chat
+ * setting; label it that way in the UI. The chat composer's picker no longer
+ * calls it (GAP-13 closed): a pick there rides on that turn's `POST /v1/chat`.
  */
 export async function updateOrchestratorConfig(
   req: UpdateOrchestratorRequest,

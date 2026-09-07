@@ -344,7 +344,11 @@ export async function startChatStream(
 export interface SendChatOptions {
   content: string;
   attachments?: AttachmentRef[];
-  /** GAP-13: the daemon ignores this today; sending it keeps the UI honest. */
+  /**
+   * Run this turn on a named model (GAP-13, closed). The daemon validates it
+   * against the registry and refuses an id it cannot serve, so what the
+   * composer's picker says is what answers.
+   */
   model?: string;
   /** Optional `x-workspace-path` header. */
   workspacePath?: string;

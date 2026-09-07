@@ -15,7 +15,7 @@
  * does not render.
  */
 
-export type GapId = "GAP-13" | "GAP-17" | "GAP-20" | "GAP-24";
+export type GapId = "GAP-17" | "GAP-20" | "GAP-24";
 
 export type GapFixSize = "XS" | "S" | "S–M" | "M" | "L";
 
@@ -87,18 +87,17 @@ export const GAPS: Record<GapId, GapDescriptor> = {
   // run's own log as a keyset-paginated envelope. The run detail reads it, so
   // the card is no longer this session's socket ring with the tool rows
   // missing.
-  "GAP-13": {
-    id: "GAP-13",
-    label: "Per-chat model override",
-    missingApi:
-      "POST /v1/chat takes no model; the only writable setting is global",
-    proposedEndpoint:
-      "POST /v1/chat { model } or PUT /v1/lanes/{lane}/preferences",
-    blocks: "The composer's model picker being conversation-scoped",
-    fixSize: "M",
-    noteOverride:
-      "Changing the model here changes the daemon default for every client",
-  },
+  // GAP-13 (the model picker wrote the daemon-wide default) closed in
+  // Phase 8: `POST /v1/chat` takes an optional `model`, validated against the
+  // registry before dispatch — `400 UNKNOWN_MODEL` for an id it does not know,
+  // which includes every model of a disabled provider, because R58b takes
+  // those rows out of the registry. The id reaches that one turn's
+  // `LoopConfig.model` and nothing else: nothing is persisted, so the picker no
+  // longer changes what every other client gets. The response echoes
+  // `model_used`, and the answering model is now stored on the assistant row,
+  // so the transcript still names it after a reload. Lane-scoped *memory* of a
+  // pick (the `preference` KV) is a separate, later decision — this is
+  // request-scoped by design, not by omission.
   // GAP-14 (no uptime, schema version or log path) closed in Phase 8:
   // `GET /v1/status` carries `started_at`/`uptime_secs` from the top of the
   // daemon's own `async_main`, `schema_version` read from the open database

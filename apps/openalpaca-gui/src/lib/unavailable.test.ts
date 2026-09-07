@@ -47,11 +47,14 @@ describe("gap registry", () => {
   // detail are served now, the template toggle and the `Connect service` add
   // flow are not. Phase 8 item 7 (T50) closed GAP-08c outright —
   // `GET /v1/usage/summary?window=today` serves today's total, its
-  // per-provider breakdown and the two caps that actually bound spend — so the
-  // count is 4.
-  it("covers the 4 gaps still open from API_MAP §3", () => {
-    expect(listGaps()).toHaveLength(4);
-    expect(listGaps()[0]?.id).toBe("GAP-13");
+  // per-provider breakdown and the two caps that actually bound spend. Item 8
+  // (T51) closed GAP-13: `POST /v1/chat` takes a `model` that governs that one
+  // turn and is persisted nowhere, so the composer's picker is
+  // conversation-scoped and no longer writes the daemon-wide default. That
+  // leaves 3.
+  it("covers the 3 gaps still open from API_MAP §3", () => {
+    expect(listGaps()).toHaveLength(3);
+    expect(listGaps()[0]?.id).toBe("GAP-17");
     expect(listGaps().at(-1)?.id).toBe("GAP-24");
     for (const closed of [
       "GAP-02",
@@ -64,6 +67,7 @@ describe("gap registry", () => {
       "GAP-10",
       "GAP-11",
       "GAP-12",
+      "GAP-13",
       "GAP-14",
       "GAP-15",
       "GAP-18",
@@ -114,8 +118,8 @@ describe("Unavailable results", () => {
   });
 
   it("uses the override phrasing where the generic sentence would read wrong", () => {
-    expect(gapNote(GAPS["GAP-13"])).toBe(
-      "Changing the model here changes the daemon default for every client",
+    expect(gapNote(GAPS["GAP-20"])).toBe(
+      "Templates have no enabled flag — the per-template toggle is not served",
     );
   });
 

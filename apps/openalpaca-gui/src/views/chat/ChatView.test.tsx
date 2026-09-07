@@ -14,6 +14,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -365,6 +366,75 @@ describe("ChatView — streaming lifecycle (§3.11, API_MAP §4.1)", () => {
     });
 
     expect(await screen.findByText("the model refused")).toBeInTheDocument();
+  });
+});
+
+describe("ChatView — model picker (GAP-13, closed)", () => {
+  /** The body of the one `POST /v1/chat` a send makes. */
+  function chatBody(): Record<string, unknown> {
+    const post = requests.find(
+      (request) =>
+        request.method === "POST" &&
+        request.url.includes("/v1/chat") &&
+        !request.url.includes("/v1/chat/history"),
+    );
+    if (post === undefined) throw new Error("no POST /v1/chat recorded");
+    return post.body as Record<string, unknown>;
+  }
+
+  /** The picker popover, once open — scoped so the trigger is not a match. */
+  async function openPicker(): Promise<HTMLElement> {
+    await waitFor(() =>
+      expect(screen.getByTitle("Chat model")).toHaveTextContent(
+        "claude-sonnet-4-6",
+      ),
+    );
+    fireEvent.click(screen.getByTitle("Chat model"));
+    return await screen.findByRole("dialog", { name: "Chat model" });
+  }
+
+  it("sends the picked model as this turn's `model`", async () => {
+    renderChat();
+    // The picker seeds from the daemon default, so the label is truthful
+    // before anything is picked — and the turn names the same id the composer
+    // is showing.
+    await waitFor(() =>
+      expect(screen.getByTitle("Chat model")).toHaveTextContent(
+        "claude-sonnet-4-6",
+      ),
+    );
+
+    await sendMessage("audit the connectors");
+
+    expect(chatBody().model).toBe("claude-sonnet-4-6");
+  });
+
+  it("does not write the daemon-wide default when a model is picked", async () => {
+    renderChat();
+    const picker = await openPicker();
+
+    fireEvent.click(
+      within(picker).getByRole("button", { name: /claude-sonnet-4-6/ }),
+    );
+
+    // The pick rides on the next turn, and nothing was PUT to the daemon's
+    // own default — that control lives in Settings → Models & keys now.
+    expect(
+      requests.some(
+        (request) =>
+          request.method === "PUT" &&
+          request.url.includes("/v1/orchestrator/config"),
+      ),
+    ).toBe(false);
+  });
+
+  it("says in the picker footer that the pick is conversation-scoped", async () => {
+    renderChat();
+    const picker = await openPicker();
+
+    expect(
+      within(picker).getByText(/Applies to this conversation/),
+    ).toBeInTheDocument();
   });
 });
 

@@ -5,8 +5,9 @@
  * catalogue (`GET /v1/models`), and picking a model — which writes
  * `PUT /v1/orchestrator/config`.
  *
- * One honesty note rides with that write: it is **daemon-wide**, not
- * per-conversation (GAP-13).
+ * One note rides with that write: it is the **daemon-wide** default. The chat
+ * composer's own picker no longer touches it — GAP-13 closed, and a pick there
+ * is carried on that turn's `POST /v1/chat` as `model` and persisted nowhere.
  *
  * The per-provider figure is real since T50 (GAP-08c, closed). It is today's,
  * off `GET /v1/usage/summary`'s `by_provider` — that day's `llm_call_log`
@@ -32,7 +33,6 @@ import { useState } from "react";
 
 import { Button, Tag, chipVariant } from "@/components/ui";
 import {
-  MODEL_SCOPE_NOTE,
   useOrchestratorConfig,
   useUpdateOrchestratorConfig,
 } from "@/hooks/useOrchestrator";
@@ -186,7 +186,11 @@ export function ModelsSection() {
         </ListState>
       </ListCard>
 
-      <GapNote>{MODEL_SCOPE_NOTE}.</GapNote>
+      <GapNote>
+        This is the daemon-wide default — every client that names no model of
+        its own gets it. The chat composer&apos;s picker is per-conversation and
+        writes nothing here.
+      </GapNote>
     </>
   );
 }
