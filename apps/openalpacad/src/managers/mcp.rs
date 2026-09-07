@@ -118,9 +118,10 @@ pub enum ToolListRefresh {
     FetchFailed,
 }
 
-/// A `bearer_env` / `api_key_env` that is not set in the daemon's environment.
-/// OpenAlpaca refuses up front rather than attempting the connection, so the
-/// row can name the missing key (§4.2, X-31).
+/// A `bearer_env` / `api_key_env` / `env_from` variable that is not set in the
+/// daemon's environment. OpenAlpaca refuses up front rather than attempting the
+/// connection, so the row can name the missing key (§4.2, X-31).
+#[derive(Debug)]
 struct MissingEnv {
     var: String,
     message: String,
@@ -150,8 +151,19 @@ pub struct McpDeclaration {
     pub command: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
+    /// Literal `KEY = "value"` entries. A key that **looks like a secret** is
+    /// refused with `422 secret_literal_refused` pointing at `env_from`
+    /// (R65): D9 already refuses a literal `bearer` on the http path because a
+    /// secret the daemon writes into a config file in the clear is a decision
+    /// nobody has taken, and the value would then propagate into every rotated
+    /// copy under `state/backups/`. The stdio path takes the same line.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// `{ NAME = "HOST_VAR" }` — the name indirection that replaces a literal.
+    /// The supervisor resolves `HOST_VAR` from the daemon's own environment
+    /// when it spawns the child, exactly as `bearer_env` is resolved for http.
+    #[serde(default)]
+    pub env_from: BTreeMap<String, String>,
     #[serde(default)]
     pub cwd: Option<String>,
     #[serde(default)]
@@ -160,6 +172,7 @@ pub struct McpDeclaration {
     /// literal `bearer` form is deliberately not accepted here: a secret the
     /// daemon writes into a config file in the clear is a decision nobody has
     /// taken, and the env form is already the one `config/mcp.toml` documents.
+    /// The stdio side of that rule is [`Self::env`] / [`Self::env_from`].
     #[serde(default)]
     pub bearer_env: Option<String>,
     #[serde(default)]
@@ -194,6 +207,7 @@ impl Default for McpDeclaration {
             command: None,
             args: Vec::new(),
             env: BTreeMap::new(),
+            env_from: BTreeMap::new(),
             cwd: None,
             url: None,
             bearer_env: None,
@@ -234,8 +248,20 @@ impl McpDeclaration {
                 if !self.args.is_empty() {
                     table["args"] = toml_edit::value(string_array(&self.args));
                 }
+                if let Some(key) = self.env.keys().find(|key| looks_like_a_secret(key)) {
+                    return Err(DeclarationError::SecretLiteral(format!(
+                        "'{key}' looks like a secret, and this route does not write secrets \
+                         into config/mcp.toml in the clear — the value would also land in \
+                         every rotated copy under state/backups/. Put it in the daemon's \
+                         environment and name the variable: env_from = {{ {key} = \
+                         \"<HOST_VAR>\" }}"
+                    )));
+                }
                 if !self.env.is_empty() {
                     table["env"] = toml_edit::value(inline_map(&self.env));
+                }
+                if !self.env_from.is_empty() {
+                    table["env_from"] = toml_edit::value(inline_map(&self.env_from));
                 }
                 if let Some(cwd) = self.cwd.filter(|c| !c.is_empty()) {
                     table["cwd"] = toml_edit::value(cwd);
@@ -306,6 +332,24 @@ impl McpDeclaration {
     }
 }
 
+/// Does this `env` key name a credential? (R65.)
+///
+/// Deliberately a name test and deliberately coarse: it is the shape of the
+/// key, not the entropy of the value, that says *"the owner is about to hand
+/// the daemon a secret to write down"*. A false positive costs one `env_from`
+/// indirection, which is the shape this route wants anyway; a false negative
+/// costs a token in a config file and in five rotated backups.
+///
+/// It governs only what the **daemon writes**. A hand-authored `mcp.toml` may
+/// still carry literal `env` values — the parser reads them unchanged — because
+/// that file is the owner's, and this is about the daemon not becoming a
+/// secret-writing tool.
+fn looks_like_a_secret(key: &str) -> bool {
+    const MARKERS: [&str; 5] = ["TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL"];
+    let upper = key.to_ascii_uppercase();
+    MARKERS.iter().any(|marker| upper.contains(marker))
+}
+
 fn string_array(values: &[String]) -> toml_edit::Array {
     let mut array = toml_edit::Array::new();
     for value in values {
@@ -333,6 +377,12 @@ pub enum DeclarationError {
     /// or url. `400`.
     #[error("{0}")]
     Invalid(String),
+    /// An `env` key that names a credential, given as a literal — `422`
+    /// (R65). Distinct from [`Self::Invalid`] because retrying the same
+    /// request will not help: the *declaration* has to change shape, to
+    /// `env_from`.
+    #[error("{0}")]
+    SecretLiteral(String),
     /// `[servers.<name>]` already exists — `409`.
     #[error("{0}")]
     AlreadyDeclared(String),
@@ -347,6 +397,7 @@ impl DeclarationError {
     pub fn code(&self) -> String {
         match self {
             Self::Invalid(_) => "invalid_declaration".to_string(),
+            Self::SecretLiteral(_) => "secret_literal_refused".to_string(),
             Self::AlreadyDeclared(_) => "already_declared".to_string(),
             Self::NotDisabled(_) => "not_disabled".to_string(),
             Self::Extension(e) => e.to_string(),
@@ -2085,12 +2136,15 @@ fn build_client_config(
             command,
             args,
             env,
+            env_from,
             cwd,
             ..
         } => TransportKind::Stdio {
             command: command.clone(),
             args: args.clone(),
-            env: env.clone(),
+            // Re-resolved on every load, exactly like `bearer_env` below, so a
+            // rotated credential takes effect without a restart (§3.3 E2).
+            env: resolve_stdio_env(server_name, env, env_from)?,
             cwd: cwd.clone(),
         },
         McpServerConfig::Http {
@@ -2119,6 +2173,39 @@ fn build_client_config(
         max_reconnect_attempts: defaults.max_reconnect_attempts,
         reconnect_backoff_ms: defaults.reconnect_backoff_ms,
     })
+}
+
+/// The child's environment: the literal `env` entries, plus one entry per
+/// `env_from` name resolved from the **daemon's** environment (R65).
+///
+/// A missing host variable is refused up front with the variable's name, so the
+/// row reads `Failed{NeedsConfig{missing: [VAR]}}` and the owner is told what to
+/// set — never an empty value handed to a server that would then fail with
+/// something unrelated. `env_from` wins over a literal of the same name: the
+/// indirection is the deliberate declaration.
+fn resolve_stdio_env(
+    server_name: &str,
+    env: &HashMap<String, String>,
+    env_from: &HashMap<String, String>,
+) -> Result<HashMap<String, String>, MissingEnv> {
+    let mut resolved = env.clone();
+    for (name, host_var) in env_from {
+        match std::env::var(host_var) {
+            Ok(value) => {
+                resolved.insert(name.clone(), value);
+            }
+            Err(_) => {
+                return Err(MissingEnv {
+                    var: host_var.clone(),
+                    message: format!(
+                        "missing env var '{host_var}' for env_from '{name}' on server \
+                         '{server_name}'"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(resolved)
 }
 
 /// Resolve `bearer_env` / `api_key_env` from the process environment.

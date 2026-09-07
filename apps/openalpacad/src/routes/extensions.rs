@@ -424,9 +424,13 @@ fn uninstalled_body(removed: &Uninstalled) -> serde_json::Value {
 /// * `400` — the caller's mistake: a relative path, a symlink out of the tree,
 ///   a source that is not `path`, a declaration that is not a declaration.
 /// * `404` — the source directory is not there, or the extension is not known.
-/// * `422` — the source *is* there but its `plugin.toml` cannot make a plugin.
-///   Distinct from `400`, because retrying the request will not help: the
-///   directory is what has to change.
+/// * `422` — the source *is* there but its `plugin.toml` cannot make a plugin,
+///   or an MCP declaration hands the daemon a literal secret to write down
+///   (`secret_literal_refused`, R65). Distinct from `400`, because retrying the
+///   request will not help: the directory, or the shape of the declaration, is
+///   what has to change. (No apostrophe in that sentence on purpose — the
+///   doc-comment scanner in `scripts/gen_api_docs.py` reads one as the start of
+///   a char literal and loses the next type it would have qualified.)
 /// * `409` — a name that is taken, a transition in flight, an MCP server that
 ///   is still running.
 /// * `500` — the copy or the write failed.
@@ -444,6 +448,7 @@ pub(crate) fn gap24_error(failure: &InstallFailure) -> Response {
         },
         InstallFailure::Mcp(e) => match e {
             DeclarationError::Invalid(_) => StatusCode::BAD_REQUEST,
+            DeclarationError::SecretLiteral(_) => StatusCode::UNPROCESSABLE_ENTITY,
             DeclarationError::AlreadyDeclared(_) | DeclarationError::NotDisabled(_) => {
                 StatusCode::CONFLICT
             }

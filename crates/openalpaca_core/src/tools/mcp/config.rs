@@ -57,8 +57,26 @@ pub enum McpServerConfig {
         command: String,
         #[serde(default)]
         args: Vec<String>,
+        /// Literal values, written into the child's environment as they stand.
         #[serde(default)]
         env: HashMap<String, String>,
+        /// **Name indirection**: `env_from = { GITHUB_TOKEN = "GH_PAT" }` sets
+        /// `GITHUB_TOKEN` in the child's environment to the value the *daemon's*
+        /// `GH_PAT` holds, resolved at spawn (`build_client_config`). It is the
+        /// stdio counterpart of `bearer_env`, and it is what
+        /// `POST /v1/extensions/mcp` writes: a secret the daemon put into a
+        /// config file in the clear is a decision nobody has taken, and it
+        /// would then propagate into every rotated copy under `state/backups/`.
+        /// A missing host variable is a start failure naming it, never an
+        /// empty value.
+        ///
+        /// `skip_serializing_if` keeps the §3.3 E2 fingerprint preimage of
+        /// every block that does not use it byte-identical to what it was
+        /// before this field existed. The names themselves are *not* masked —
+        /// they are not secrets, and changing which variable a server reads is
+        /// a real change to what the server is.
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        env_from: HashMap<String, String>,
         #[serde(default)]
         cwd: Option<PathBuf>,
         #[serde(default)]

@@ -286,10 +286,22 @@ other servers come back unchanged — and then connects it. Writing a server int
 your own config *is* the consent, so there is no approve step; `--disabled`
 declares it turned off instead.
 
+**The daemon does not write secrets.** `--env KEY=VALUE` carries literal values
+for ordinary settings, but a key that names a credential (anything containing
+`token`, `key`, `secret`, `password` or `credential`) is refused with
+`secret_literal_refused`: the value would sit in `config/mcp.toml` in the clear
+and in every rotated copy under `state/backups/`, which is not somewhere you
+would think to look when rotating a leaked token. Use `--env-from KEY=HOST_VAR`
+instead — the block records the *name* of a variable, and the daemon reads that
+variable from its own environment each time it starts the server, exactly as
+`--bearer-env` does for HTTP. A variable that is not set is a start failure
+naming it, never an empty value handed to the server.
+
 ```bash
+export GITHUB_TOKEN=ghp_xxx            # in the daemon's environment
 openalpaca ext mcp add github --command npx \
   --arg -y --arg @modelcontextprotocol/server-github \
-  --env GITHUB_TOKEN=ghp_xxx
+  --env-from GITHUB_TOKEN=GITHUB_TOKEN
 openalpaca ext mcp add remote --transport http \
   --url https://example.com/mcp --bearer-env REMOTE_TOKEN
 openalpaca ext disable mcp github && openalpaca ext mcp remove github

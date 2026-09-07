@@ -1438,6 +1438,96 @@ async fn adding_a_duplicate_or_malformed_mcp_server_is_refused() {
     assert_eq!(error_word(&body), "invalid_declaration");
 }
 
+/// **R65.** D9 refuses a literal `bearer` because a secret the daemon writes
+/// into a config file in the clear is a decision nobody has taken — and the
+/// value would go on to land in every rotated copy under `state/backups/`. The
+/// stdio `env` path took exactly that decision until now. A key that names a
+/// credential is `422`, and the refusal points at the shape that works.
+#[tokio::test]
+async fn an_env_key_that_names_a_secret_is_refused_and_env_from_is_offered() {
+    let h = Harness::new();
+    h.write_mcp("");
+    h.mcp.reconcile_all().await;
+
+    let (status, body) = h
+        .install(
+            "mcp",
+            serde_json::json!({
+                "name": "github",
+                "transport": "stdio",
+                "command": "/bin/true",
+                "env": { "GITHUB_TOKEN": "ghp_secret" },
+            }),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(error_word(&body), "secret_literal_refused");
+    let message = body["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("env_from") && message.contains("GITHUB_TOKEN"),
+        "the refusal names the key and the shape that works: {message}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(h.mcp_config_path()).unwrap(),
+        "",
+        "and nothing was written"
+    );
+
+    // The same declaration as a name indirection is accepted.
+    let (status, _) = h
+        .install(
+            "mcp",
+            serde_json::json!({
+                "name": "github",
+                "transport": "stdio",
+                "command": "/nonexistent/openalpaca-test-server",
+                "connect_timeout_secs": 1,
+                "env_from": { "GITHUB_TOKEN": "OPENALPACA_TEST_GH_PAT" },
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let written = std::fs::read_to_string(h.mcp_config_path()).unwrap();
+    assert!(
+        written.contains("env_from") && written.contains("OPENALPACA_TEST_GH_PAT"),
+        "the block carries the variable name, not a value: {written}"
+    );
+    assert!(
+        !written.contains("ghp_secret"),
+        "no secret reached the file: {written}"
+    );
+}
+
+/// An `env` key that is not a credential is still written as a literal — the
+/// rule is about secrets, not about `env`.
+#[tokio::test]
+async fn an_ordinary_env_value_is_still_written() {
+    let h = Harness::new();
+    h.write_mcp("");
+    h.mcp.reconcile_all().await;
+
+    let (status, _) = h
+        .install(
+            "mcp",
+            serde_json::json!({
+                "name": "srv",
+                "transport": "stdio",
+                "command": "/nonexistent/openalpaca-test-server",
+                "connect_timeout_secs": 1,
+                "env": { "RUST_LOG": "debug" },
+            }),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(
+        std::fs::read_to_string(h.mcp_config_path())
+            .unwrap()
+            .contains("RUST_LOG")
+    );
+}
+
 #[tokio::test]
 async fn removing_an_mcp_server_needs_it_disabled_first() {
     let h = Harness::new();

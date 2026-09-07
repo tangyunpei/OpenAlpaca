@@ -2410,3 +2410,116 @@ async fn removing_a_server_that_was_never_declared_is_not_found() {
     let error = h.supervisor.remove_server("ghost").await.unwrap_err();
     assert_eq!(error.code(), "unknown extension 'mcp:ghost'");
 }
+
+// ============================================================================
+// R65 — `env_from`, the name indirection that keeps secrets out of the file
+// ============================================================================
+
+/// The round trip: what the route writes is what the reader reads, and the
+/// **name** is what is on disk.
+#[tokio::test]
+async fn an_env_from_declaration_round_trips_as_a_name() {
+    let h = Harness::new(1);
+    h.write_config("");
+    h.supervisor.reconcile_all().await;
+
+    h.supervisor
+        .add_server(McpDeclaration {
+            name: "github".to_string(),
+            transport: "stdio".to_string(),
+            command: Some("/bin/true".to_string()),
+            env: BTreeMap::from([("RUST_LOG".to_string(), "debug".to_string())]),
+            env_from: BTreeMap::from([(
+                "GITHUB_TOKEN".to_string(),
+                "OPENALPACA_TEST_GH_PAT".to_string(),
+            )]),
+            enabled: false,
+            ..McpDeclaration::default()
+        })
+        .await
+        .expect("add");
+
+    let text = std::fs::read_to_string(&h.config_path).unwrap();
+    assert!(text.contains("env_from"), "the block carries it: {text}");
+    let parsed = McpConfig::load(&h.config_path).expect("the result parses");
+    match &parsed.servers["github"] {
+        McpServerConfig::Stdio { env, env_from, .. } => {
+            assert_eq!(env.get("RUST_LOG").map(String::as_str), Some("debug"));
+            assert_eq!(
+                env_from.get("GITHUB_TOKEN").map(String::as_str),
+                Some("OPENALPACA_TEST_GH_PAT"),
+                "the host variable's *name* is what is stored"
+            );
+        }
+        other => panic!("expected a stdio block, got {other:?}"),
+    }
+}
+
+/// A literal under a credential-shaped key never reaches the file, so the
+/// writer is never asked to keep one — nor the five rotated copies behind it.
+#[tokio::test]
+async fn a_literal_secret_is_refused_before_the_writer_sees_it() {
+    let h = Harness::new(1);
+    h.write_config("");
+    h.supervisor.reconcile_all().await;
+
+    for key in ["GITHUB_TOKEN", "api_key", "MyPassword", "CLIENT_SECRET", "aws_credential"] {
+        let error = h
+            .supervisor
+            .add_server(McpDeclaration {
+                name: "srv".to_string(),
+                transport: "stdio".to_string(),
+                command: Some("/bin/true".to_string()),
+                env: BTreeMap::from([(key.to_string(), "s3cret".to_string())]),
+                ..McpDeclaration::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), "secret_literal_refused", "for key '{key}'");
+    }
+    assert_eq!(
+        std::fs::read_to_string(&h.config_path).unwrap(),
+        "",
+        "nothing was written"
+    );
+}
+
+/// **The attribution.** A host variable that is not set is a start failure
+/// naming it — `Failed{NeedsConfig{missing: [VAR]}}`, the same classification
+/// `bearer_env` already produces — rather than an empty value handed to a
+/// server that then fails with something unrelated.
+#[test]
+fn an_env_from_whose_host_variable_is_unset_names_it() {
+    let missing = resolve_stdio_env(
+        "github",
+        &HashMap::new(),
+        &HashMap::from([(
+            "GITHUB_TOKEN".to_string(),
+            "OPENALPACA_TEST_VAR_THAT_IS_NEVER_SET".to_string(),
+        )]),
+    )
+    .expect_err("an unset host variable must refuse the load");
+
+    assert_eq!(missing.var, "OPENALPACA_TEST_VAR_THAT_IS_NEVER_SET");
+    assert!(
+        missing.message.contains("GITHUB_TOKEN") && missing.message.contains("github"),
+        "the message names the entry and the server: {}",
+        missing.message
+    );
+}
+
+/// And a host variable that *is* set reaches the child's environment under the
+/// declared name. `PATH` is used because it is always set and never a secret.
+#[test]
+fn an_env_from_that_resolves_lands_in_the_child_environment() {
+    let expected = std::env::var("PATH").expect("PATH is set");
+    let resolved = resolve_stdio_env(
+        "srv",
+        &HashMap::from([("RUST_LOG".to_string(), "debug".to_string())]),
+        &HashMap::from([("SERVER_TOKEN".to_string(), "PATH".to_string())]),
+    )
+    .expect("resolve");
+
+    assert_eq!(resolved.get("SERVER_TOKEN"), Some(&expected));
+    assert_eq!(resolved.get("RUST_LOG").map(String::as_str), Some("debug"));
+}

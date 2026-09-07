@@ -165,9 +165,12 @@ pub enum ExtMcpCommands {
         /// stdio: one argument, repeatable (a leading dash is fine)
         #[arg(long = "arg", allow_hyphen_values = true)]
         args: Vec<String>,
-        /// stdio: one KEY=VALUE environment entry, repeatable
+        /// stdio: one KEY=VALUE environment entry (never a secret) repeatable
         #[arg(long = "env")]
         envs: Vec<String>,
+        /// stdio: one KEY=HOST_VAR indirection for a secret repeatable
+        #[arg(long = "env-from")]
+        envs_from: Vec<String>,
         /// stdio: the working directory for the child
         #[arg(long)]
         cwd: Option<String>,
@@ -472,11 +475,12 @@ pub(crate) fn uninstall_path(kind: &str, id: &str, keep_data: bool) -> String {
     format!("/v1/extensions/{kind}/{id}?uninstall=true&keep_data={keep_data}")
 }
 
-/// One `--env KEY=VALUE`, split on the **first** `=` so a value may hold one.
-fn env_pair(entry: &str) -> Result<(String, String)> {
+/// One `--env KEY=VALUE` or `--env-from KEY=HOST_VAR`, split on the **first**
+/// `=` so a value may hold one.
+fn env_pair(flag: &str, entry: &str) -> Result<(String, String)> {
     match entry.split_once('=') {
         Some((key, value)) if !key.is_empty() => Ok((key.to_string(), value.to_string())),
-        _ => bail!("--env expects KEY=VALUE, got '{entry}'"),
+        _ => bail!("{flag} expects KEY=VALUE, got '{entry}'"),
     }
 }
 
@@ -491,6 +495,7 @@ pub(crate) fn mcp_add_body(command: ExtMcpCommands) -> Result<serde_json::Value>
         command,
         args,
         envs,
+        envs_from,
         cwd,
         url,
         bearer_env,
@@ -532,13 +537,19 @@ pub(crate) fn mcp_add_body(command: ExtMcpCommands) -> Result<serde_json::Value>
     if !args.is_empty() {
         body.insert("args".into(), serde_json::json!(args));
     }
-    if !envs.is_empty() {
-        let mut env = serde_json::Map::new();
-        for entry in &envs {
-            let (key, value) = env_pair(entry)?;
-            env.insert(key, value.into());
+    for (flag, field, entries) in [
+        ("--env", "env", &envs),
+        ("--env-from", "env_from", &envs_from),
+    ] {
+        if entries.is_empty() {
+            continue;
         }
-        body.insert("env".into(), serde_json::Value::Object(env));
+        let mut map = serde_json::Map::new();
+        for entry in entries {
+            let (key, value) = env_pair(flag, entry)?;
+            map.insert(key, value.into());
+        }
+        body.insert(field.into(), serde_json::Value::Object(map));
     }
 
     Ok(serde_json::Value::Object(body))
@@ -888,7 +899,8 @@ mod tests {
     fn an_mcp_add_body_carries_only_what_was_asked_for() {
         let body = mcp_add_body(parse_mcp(&[
             "ext", "mcp", "add", "github", "--command", "npx", "--arg", "-y", "--arg",
-            "@modelcontextprotocol/server-github", "--env", "GITHUB_TOKEN=abc=123",
+            "@modelcontextprotocol/server-github", "--env", "RUST_LOG=debug=1", "--env-from",
+            "GITHUB_TOKEN=GH_PAT",
         ]))
         .expect("a stdio declaration");
 
@@ -900,7 +912,8 @@ mod tests {
                 "enabled": true,
                 "command": "npx",
                 "args": ["-y", "@modelcontextprotocol/server-github"],
-                "env": { "GITHUB_TOKEN": "abc=123" },
+                "env": { "RUST_LOG": "debug=1" },
+                "env_from": { "GITHUB_TOKEN": "GH_PAT" },
             }),
             "an unasked-for key must not appear: {body}"
         );
@@ -923,7 +936,8 @@ mod tests {
     }
 
     /// `--env` splits on the first `=`, so a value may hold one; anything else
-    /// is refused before the request is sent.
+    /// is refused before the request is sent — and the refusal names the flag
+    /// the caller actually typed.
     #[test]
     fn a_malformed_env_entry_is_refused_locally() {
         let error = mcp_add_body(parse_mcp(&[
@@ -931,7 +945,14 @@ mod tests {
         ]))
         .unwrap_err()
         .to_string();
-        assert!(error.contains("KEY=VALUE"), "got: {error}");
+        assert!(error.contains("--env expects KEY=VALUE"), "got: {error}");
+
+        let error = mcp_add_body(parse_mcp(&[
+            "ext", "mcp", "add", "srv", "--command", "x", "--env-from", "NOPE",
+        ]))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("--env-from expects KEY=VALUE"), "got: {error}");
     }
 
     fn parse_mcp(argv: &[&str]) -> ExtMcpCommands {

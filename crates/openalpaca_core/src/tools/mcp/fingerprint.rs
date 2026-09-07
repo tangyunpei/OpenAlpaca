@@ -20,9 +20,11 @@
 //! needed: every `env.*` value, every `extra_headers.*` value and a literal
 //! `auth.bearer` are replaced by the fixed marker `<masked>` (keys kept).
 //! Those three are the only places a credential byte can appear in a block
-//! (`config.rs` — `bearer_env`/`api_key_env` are name-only), so the preimage
-//! covers structure, `command`/`args`/`url`/`cwd`/timeouts, env and header
-//! *names* and the auth *kind*, and nothing else.
+//! (`config.rs` — `bearer_env`/`api_key_env`/`env_from` are name-only), so the
+//! preimage covers structure, `command`/`args`/`url`/`cwd`/timeouts, env and
+//! header *names*, the `env_from` indirection and the auth *kind*, and nothing
+//! else. `env_from` is **not** masked: a change of which host variable a server
+//! reads is a change to what the server is, and it is a name, not a secret.
 //!
 //! Consequence, stated because the design states it: a rotated credential
 //! **value** under an unchanged name is invisible to the watcher by design. It

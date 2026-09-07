@@ -19,6 +19,20 @@ reconnect_backoff_ms = 100
 # command = "npx"
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 
+# ─── Example: stdio server that needs a credential ───
+# `env` holds literal values. For a secret, name the variable instead: every
+# `env_from` entry sets `<key>` in the child's environment to the value the
+# *daemon's* `<variable>` holds, resolved when the server is spawned — the same
+# indirection `bearer_env` gives an HTTP server. A variable that is not set is a
+# start failure naming it, never an empty value. `openalpaca ext mcp add`
+# refuses to write a literal under a credential-shaped key for this reason.
+# [servers.gh]
+# transport = "stdio"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-github"]
+# env = { RUST_LOG = "info" }
+# env_from = { GITHUB_PERSONAL_ACCESS_TOKEN = "GITHUB_MCP_TOKEN" }
+
 # ─── Example: Remote HTTP server with bearer env ───
 # [servers.brave]
 # transport = "http"
