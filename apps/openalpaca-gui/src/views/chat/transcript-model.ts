@@ -226,7 +226,10 @@ function toArtifacts(
 
 function messageMeta(message: ChatMessage): AssistantMeta | null {
   const meta: AssistantMeta = {};
-  if (message.model !== undefined) meta.model = message.model;
+  // `message.model` is `string | null | undefined` on the wire: `null` for
+  // every row the daemon has nothing to say about (pre-GAP-13 history, and
+  // any template answer that never ran a model). Only a real string counts.
+  if (typeof message.model === "string") meta.model = message.model;
   if (message.duration_ms !== undefined) meta.durationMs = message.duration_ms;
   if (message.tokens_in !== undefined) meta.tokensIn = message.tokens_in;
   if (message.tokens_out !== undefined) meta.tokensOut = message.tokens_out;

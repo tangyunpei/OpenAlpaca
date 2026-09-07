@@ -113,7 +113,12 @@ export function formatElapsed(
 }
 
 export interface AssistantMeta {
-  model?: string;
+  /**
+   * `null` reaches here too — straight off `ChatMessage.model` for a
+   * history row the daemon has nothing to say about — so the render guard
+   * below must not assume a string just because the key is present.
+   */
+  model?: string | null;
   durationMs?: number;
   tokensIn?: number;
   tokensOut?: number;
@@ -125,7 +130,7 @@ export interface AssistantMeta {
  */
 export function assistantMetaLine(meta: AssistantMeta): string | null {
   const parts: string[] = [];
-  if (meta.model !== undefined && meta.model !== "") {
+  if (typeof meta.model === "string" && meta.model !== "") {
     parts.push(shortModelId(meta.model));
   }
   if (meta.durationMs !== undefined) {

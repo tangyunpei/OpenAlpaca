@@ -181,7 +181,14 @@ export interface ChatMessage {
   role: "user" | "assistant" | "system";
   content: string;
   source?: string;
-  model?: string;
+  /**
+   * The model that answered, when the daemon persisted one (GAP-13,
+   * migration 038's column). The wire sends a literal `null` — not an
+   * omitted key — for every row written before that migration, plus any
+   * template answer (slash command, `skill_withdrawn`, the social fast
+   * path's no-router echo) that never ran a model at all.
+   */
+  model?: string | null;
   tokens_in?: number;
   tokens_out?: number;
   duration_ms?: number;

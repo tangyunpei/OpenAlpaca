@@ -54,6 +54,17 @@ describe("assistantMetaLine — 1:1 with the SSE `done` payload", () => {
     );
     expect(assistantMetaLine({})).toBeNull();
   });
+
+  it("does not throw on `model: null` (every row before GAP-13, and every template answer) — omits the segment", () => {
+    expect(
+      assistantMetaLine({
+        model: null,
+        durationMs: 3800,
+        tokensIn: 1284,
+        tokensOut: 612,
+      }),
+    ).toBe("3.8s · 1284/612 tok");
+  });
 });
 
 describe("formatClock / formatElapsed", () => {

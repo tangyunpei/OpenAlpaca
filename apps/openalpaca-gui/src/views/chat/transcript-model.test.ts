@@ -319,6 +319,34 @@ describe("buildTranscript", () => {
     });
   });
 
+  it("renders no model for a `model: null` history row (a template answer, or a row from before GAP-13)", () => {
+    const items = buildTranscript(
+      input({
+        history: [
+          message({
+            id: 3,
+            role: "assistant",
+            content: "done",
+            model: null,
+            tokens_in: 12,
+            tokens_out: 3,
+            duration_ms: 900,
+          }),
+        ],
+      }),
+    );
+    const item = items[0];
+    if (!item || item.kind !== "assistant") {
+      throw new Error("expected an assistant item");
+    }
+    expect(item.meta?.model).toBeUndefined();
+    expect(item.meta).toMatchObject({
+      tokensIn: 12,
+      tokensOut: 3,
+      durationMs: 900,
+    });
+  });
+
   it("skips system messages", () => {
     expect(
       buildTranscript(
