@@ -1935,6 +1935,13 @@ impl PluginManager {
     /// is taken back to `never_seen` otherwise — the drift is computed against
     /// the entry on disk before the switch-in, and travels back on the response
     /// as `added_capabilities` so the caller can show *"Now also asks for: …"*.
+    ///
+    /// Order: parse the manifest → stage the copy → T0–T5 → **drop a consent
+    /// decision the replacement invalidates** → trash the incumbent → rename
+    /// the staged tree into place → write the entry → load. The reset is
+    /// **before** the swap, exactly as it is on install, so no window exists in
+    /// which a tree asking for unapproved capabilities sits under an `approved
+    /// = true` entry.
     pub async fn update_from_path(
         &self,
         id: &str,
@@ -1972,16 +1979,28 @@ impl PluginManager {
                 self.ledger.store_state(&ext, ExtensionState::Disabled);
             }
 
-            if dest.exists() {
-                install::trash(&self.plugin_dir, &dest, id)?;
-            }
-            staged.commit(&dest)?;
-
+            // **Before the tree changes, and that ordering is the invariant.**
+            // `consent_reset` is true exactly when the replacement declares a
+            // different set of capabilities, so the other way round a
+            // `reset_consent` that fails — a read-only store, a lock nobody can
+            // take — or a crash in that window leaves `plugins/<id>` holding a
+            // tree asking for permissions nobody approved under an entry still
+            // reading `approved = true`; the next `reconcile_dir` spawns it,
+            // and no declared-vs-recorded check runs at load time to catch the
+            // drift. Dropping the decision first is free for the same reason it
+            // is on install: the tree it refers to is about to be trashed
+            // either way.
             if consent_reset {
                 info!(plugin = id, ?added, "the replacement asks for a different \
                      set of capabilities; consent is back to pending");
                 self.permission_gate.reset_consent(id).map_err(store_error)?;
             }
+
+            if dest.exists() {
+                install::trash(&self.plugin_dir, &dest, id)?;
+            }
+            staged.commit(&dest)?;
+
             (added, consent_reset, self.record_provenance(id, source))
         };
 

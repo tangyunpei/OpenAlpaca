@@ -2589,6 +2589,89 @@ mod install_tests {
         ));
     }
 
+    /// **The order, on the other verb** (D7). The update path is the worse of
+    /// the two: `consent_reset` is true exactly when the replacement declares a
+    /// *different* set of capabilities, so a reset that runs after the commit
+    /// and fails leaves `plugins/<id>` holding a tree asking for permissions
+    /// nobody approved, under an entry still reading `approved = true` — and
+    /// the next `reconcile_dir` spawns it, because nothing re-checks declared
+    /// against recorded at load time.
+    ///
+    /// Same recorder as the install case: a directory where the writer's lock
+    /// file goes leaves the store readable and unwritable, so `load_table`
+    /// succeeds and `reset_consent` fails. The incumbent tree still being the
+    /// one on disk — the marker file absent, the version still `0.1.0`, nothing
+    /// in `.trash/` — is the proof the reset ran before the swap.
+    #[tokio::test]
+    async fn an_update_consent_reset_that_fails_leaves_the_incumbent_tree() {
+        let h = Harness::new();
+        let source = h.source(
+            "echo-test",
+            "0.1.0",
+            "[types]\ntools = true\n[capabilities]\nprovides = [\"notes_read\"]\n",
+        );
+        h.manager.install_from_path(&source).await.expect("install");
+        h.manager.approve_plugin("echo-test").await.expect("approve");
+
+        // A replacement asking for one capability more: `consent_reset` is
+        // true, which is the only branch this ordering is about.
+        let next = h.source(
+            "echo-test",
+            "0.2.0",
+            "[types]\ntools = true\n[capabilities]\nprovides = [\"notes_read\", \"notes_write\"]\n",
+        );
+        std::fs::write(next.join("NEW"), "second version\n").unwrap();
+
+        let lock = h.root.join(".permissions.toml.lock");
+        let _ = std::fs::remove_file(&lock);
+        std::fs::create_dir_all(&lock).unwrap();
+
+        let error = h
+            .manager
+            .update_from_path("echo-test", &next)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                error,
+                InstallError::Extension(ExtensionError::WriteFailed(_))
+            ),
+            "the store write is what failed: {error:?}"
+        );
+        assert!(
+            !h.root.join("echo-test/NEW").exists(),
+            "a tree asking for unapproved capabilities must never land while the \
+             entry still reads approved"
+        );
+        let incumbent = std::fs::read_to_string(h.root.join("echo-test/plugin.toml"))
+            .expect("the incumbent manifest is still there");
+        assert!(
+            incumbent.contains("0.1.0"),
+            "the incumbent tree is untouched: {incumbent}"
+        );
+        assert!(
+            h.trashed().is_empty(),
+            "and it was not even moved aside: {:?}",
+            h.trashed()
+        );
+        assert_eq!(
+            h.manager
+                .permission_gate
+                .load_table()
+                .unwrap()
+                .approved("echo-test"),
+            Some(true),
+            "the refused update changed nothing at all"
+        );
+        assert!(
+            std::fs::read_dir(h.root.join(crate::install::STAGING_DIR))
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(true),
+            "and it left no staging copy behind"
+        );
+    }
+
     // ── uninstall ────────────────────────────────────────────────────
 
     /// The full sequence: T0–T5, the permissions entry through the same atomic
