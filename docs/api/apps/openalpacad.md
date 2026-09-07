@@ -5,7 +5,7 @@
 ## Overview
 
 - Router source: `apps/openalpacad/src/router.rs`.
-- Total documented method/path endpoints: 96.
+- Total documented method/path endpoints: 97.
 - Includes public, bearer-protected, WebSocket, and SSE routes.
 
 ## Auth
@@ -115,6 +115,7 @@
 | POST | `/v1/tasks/{id}/steer` | `bearer` | `steer_task_handler` | `SteerTaskRequest` | - | `apps/openalpacad/src/routes/tasks.rs` |
 | GET | `/v1/tasks/{id}/timeline` | `bearer` | `get_task_timeline_handler` | - | - | `apps/openalpacad/src/routes/tasks.rs` |
 | GET | `/v1/tools` | `bearer` | `list_tools_handler` | - | - | `apps/openalpacad/src/routes/tools.rs` |
+| GET | `/v1/usage/summary` | `bearer` | `get_usage_summary` | - | `UsageSummaryQuery` | `apps/openalpacad/src/routes/settings.rs` |
 
 ## Request/Query Types
 
@@ -219,6 +220,10 @@
 - External or generic type; see handler source.
 
 ### `UpdateWebSearchRequest`
+
+- External or generic type; see handler source.
+
+### `UsageSummaryQuery`
 
 - External or generic type; see handler source.
 

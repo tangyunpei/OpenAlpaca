@@ -247,6 +247,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/llm/usage/daily",
             get(crate::routes::get_llm_usage_daily),
         )
+        // GAP-08c: today's spend, its per-provider breakdown, and the two caps
+        // that bound it (N4 — there is no daily budget to serve).
+        .route("/v1/usage/summary", get(crate::routes::get_usage_summary))
         // Model discovery routes
         .route("/v1/models", get(crate::routes::list_models))
         .route("/v1/models/refresh", post(crate::routes::refresh_models))

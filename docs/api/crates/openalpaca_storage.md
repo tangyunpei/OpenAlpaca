@@ -39,7 +39,7 @@
 - `pub use models::{PREVIEW_CHARS, SkillExecutionEntry, ToolExecutionEntry};`
 - `pub use models::SkillHealthMetrics;`
 - `pub use repository::{ ARTIFACT_ROLE, ATTACHMENT_ROLE, AgentRepository, ConfigRepository, ConversationRepository, EventLogRepository, FOLLOWUP_KIND_FOLLOWUP, FOLLOWUP_KIND_UNPROCESSED_STEERING, FileAssetRepository, FollowupRecord, FollowupRepository, IdentityRepository, LlmUsageRepository, MemoryRepository, MessageFeedbackRepository, OrchestratorLatencyRepository, PreferenceRepository, SESSION_ACTIVE, SESSION_ARCHIVED, SessionFilter, SkillExecutionRepository, StorageBytes, SubAgentRepository, SubagentSpanRepository, TaskRepository, resolve_skill_key, };`
-- `pub use repository::llm_usage::LlmUsageDaily;`
+- `pub use repository::llm_usage::{LlmUsageDaily, ProviderCallUsage};`
 - `pub use repository::subagent_span::{ NewSubagentSpan, SPAN_DETAIL_INTERRUPTED, SpanState, SubagentSpanRecord, TemplateRunCount, };`
 - `pub use uploads::{NewUpload, StoredUpload, UploadError, UploadStore};`
 

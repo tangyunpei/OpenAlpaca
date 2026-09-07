@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, Query, State},
     response::{IntoResponse, Response},
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use openalpaca_core::events::SystemEvent;
 use openalpaca_llm::SetProviderEnabledError;
 use openalpaca_llm::config::settings_service::{
@@ -290,15 +290,17 @@ pub async fn refresh_models(State(state): State<Arc<AppState>>) -> impl IntoResp
     (StatusCode::OK, Json(serde_json::to_value(models).unwrap())).into_response()
 }
 
-/// Today's total spend (UTC date), summed from the DB's `llm_usage_daily`
-/// aggregate across every agent/model row for today — **not**
+/// Total spend on one **UTC** date, summed from the DB's `llm_usage_daily`
+/// aggregate across every agent/model row for that day — **not**
 /// `CostTracker::total_cost()`, which only measures spend since the daemon
 /// booted (GAP-08a). A day's distinct `(agent_id, model)` rows are few; the
 /// query's limit is a generous cap, not a real pagination bound.
-fn total_daily_cost_usd(db: &openalpaca_storage::Database) -> f64 {
+///
+/// The date is passed in rather than computed here so that `GET
+/// /v1/usage/summary` reports the total for the very date it echoes (T50).
+fn cost_for_utc_date(db: &openalpaca_storage::Database, date: &str) -> f64 {
     let repo = openalpaca_storage::repository::LlmUsageRepository::new(db);
-    let today = Utc::now().format("%Y-%m-%d").to_string();
-    repo.query_daily_usage(None, Some(&today), 10_000)
+    repo.query_daily_usage(None, Some(date), 10_000)
         .map(|rows| rows.iter().map(|r| r.total_cost_usd).sum())
         .unwrap_or(0.0)
 }
@@ -326,7 +328,8 @@ pub async fn get_orchestrator_config(State(state): State<Arc<AppState>>) -> impl
                 .task_registry
                 .list_active()
                 .len();
-            let daily_cost_usd = total_daily_cost_usd(&state.db);
+            let daily_cost_usd =
+                cost_for_utc_date(&state.db, &Utc::now().format("%Y-%m-%d").to_string());
 
             let resp = OrchestratorConfigResponse {
                 model,
@@ -432,6 +435,102 @@ pub async fn get_llm_usage_daily(
         )
         .into_response(),
     }
+}
+
+// ── Usage summary (GAP-08c, T50) ────────────────────────────────────
+
+/// `?window=` on `GET /v1/usage/summary`. `today` is the only window the route
+/// can answer, and an absent one means it — an empty query string behaves the
+/// same as asking explicitly. Anything else is reported back as the token
+/// itself, so the 400 names what it did not recognise instead of quietly
+/// answering a different question. Same code word as `GET /v1/agent-templates`
+/// (T48): one unknown-window refusal across the API.
+fn resolve_usage_window(raw: Option<&str>) -> Result<&'static str, String> {
+    match raw.unwrap_or("today") {
+        "today" => Ok("today"),
+        other => Err(other.to_string()),
+    }
+}
+
+/// UTC midnight of `now`'s date, in `llm_call_log.timestamp`'s own text form.
+fn utc_day_start(now: DateTime<Utc>) -> String {
+    now.format("%Y-%m-%d 00:00:00").to_string()
+}
+
+/// Assemble the summary. Pure, so the shape — and N4's absence of any daily
+/// budget in it — is tested without a daemon.
+fn usage_summary(
+    date: String,
+    total_usd: f64,
+    providers: Vec<openalpaca_storage::ProviderCallUsage>,
+    caps: UsageCaps,
+) -> UsageSummaryResponse {
+    UsageSummaryResponse {
+        date,
+        total_usd,
+        by_provider: providers
+            .into_iter()
+            .map(|p| ProviderUsageRow {
+                provider: p.provider,
+                usd: p.cost_usd,
+                calls: p.calls,
+                tokens: p.tokens,
+            })
+            .collect(),
+        caps,
+    }
+}
+
+/// GET /v1/usage/summary?window=today — today's spend, and the caps that
+/// actually bound it (GAP-08c).
+///
+/// The total comes from the `llm_usage_daily` rollup and `by_provider` from
+/// today's `llm_call_log` rows; the two are separate writers, so a call the
+/// rollup's best-effort upsert missed can leave them a fraction apart. Both are
+/// the daemon's own numbers for the same UTC day, which is the day `date` names
+/// — the GUI's own `todayIsoDate()` is local and disagrees for up to twelve
+/// hours.
+///
+/// Per **N4** the caps are per-workflow and per-turn `max_cost`. There is no
+/// daily budget, no `daily_*` key, and today's total ships with no denominator.
+pub async fn get_usage_summary(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<UsageSummaryQuery>,
+) -> Response {
+    if let Err(bad) = resolve_usage_window(query.window.as_deref()) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "UNKNOWN_WINDOW",
+            format!("Unknown window '{bad}' — use today"),
+        );
+    }
+
+    let now = Utc::now();
+    let date = now.format("%Y-%m-%d").to_string();
+
+    // A read failure costs the breakdown, not the summary: the panel then
+    // shows the total with no per-provider rows, which is what a day with no
+    // calls looks like too — never an invented figure.
+    let providers = openalpaca_storage::repository::LlmUsageRepository::new(&state.db)
+        .provider_usage_since(&utc_day_start(now))
+        .unwrap_or_else(|e| {
+            tracing::warn!("Failed to read today's per-provider usage: {e}");
+            Vec::new()
+        });
+
+    let execution = &state.daemon_config.load().execution;
+    let caps = UsageCaps {
+        workflow_max_cost_usd: execution.lead_agent_defaults.max_cost,
+        agent_max_cost_usd: execution.agent_defaults.max_cost,
+    };
+
+    let summary = usage_summary(
+        date.clone(),
+        cost_for_utc_date(&state.db, &date),
+        providers,
+        caps,
+    );
+    (StatusCode::OK, Json(summary)).into_response()
 }
 
 // ── Credential Discovery endpoints ──────────────────────────────────
@@ -714,8 +813,12 @@ mod provider_enabled_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{load_cli_backends_config, total_daily_cost_usd};
-    use openalpaca_storage::{Database, LlmUsageDaily, LlmUsageRepository};
+    use super::{
+        ProviderUsageRow, UsageCaps, cost_for_utc_date, load_cli_backends_config,
+        resolve_usage_window, usage_summary, utc_day_start,
+    };
+    use chrono::TimeZone;
+    use openalpaca_storage::{Database, LlmUsageDaily, LlmUsageRepository, ProviderCallUsage};
     use std::fs;
     use std::path::PathBuf;
 
@@ -769,7 +872,7 @@ mod tests {
         })
         .unwrap();
 
-        let total = total_daily_cost_usd(&db);
+        let total = cost_for_utc_date(&db, &today);
         assert!(
             (total - 0.35).abs() < 1e-9,
             "expected 0.35, got {total}"
@@ -779,7 +882,108 @@ mod tests {
     #[test]
     fn total_daily_cost_usd_is_zero_with_no_usage() {
         let (_dir, db) = test_db();
-        assert_eq!(total_daily_cost_usd(&db), 0.0);
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        assert_eq!(cost_for_utc_date(&db, &today), 0.0);
+    }
+
+    // ── GET /v1/usage/summary (GAP-08c, T50) ────────────────────────────
+
+    /// An empty query string asks the only question the route can answer.
+    #[test]
+    fn usage_window_defaults_to_today() {
+        assert_eq!(resolve_usage_window(None), Ok("today"));
+        assert_eq!(resolve_usage_window(Some("today")), Ok("today"));
+    }
+
+    /// Anything else is the caller's mistake, reported back as the token
+    /// itself rather than silently answered with a different window.
+    #[test]
+    fn usage_window_rejects_every_other_token() {
+        assert_eq!(resolve_usage_window(Some("7d")), Err("7d".to_string()));
+        assert_eq!(resolve_usage_window(Some("all")), Err("all".to_string()));
+        assert_eq!(resolve_usage_window(Some("")), Err(String::new()));
+    }
+
+    /// The call-log cutoff is UTC midnight of the day the summary reports —
+    /// the client's `todayIsoDate()` is local and the two disagree for up to
+    /// twelve hours a day, which is exactly why `date` is echoed.
+    #[test]
+    fn day_start_is_utc_midnight_of_the_reported_date() {
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 9, 8, 23, 45, 10)
+            .unwrap();
+        assert_eq!(utc_day_start(now), "2026-09-08 00:00:00");
+    }
+
+    fn provider(name: &str, cost_usd: f64, calls: i64, tokens: i64) -> ProviderCallUsage {
+        ProviderCallUsage {
+            provider: name.to_string(),
+            cost_usd,
+            calls,
+            tokens,
+        }
+    }
+
+    fn caps() -> UsageCaps {
+        UsageCaps {
+            workflow_max_cost_usd: 5.0,
+            agent_max_cost_usd: 1.0,
+        }
+    }
+
+    #[test]
+    fn summary_reports_the_total_and_one_row_per_provider() {
+        let summary = usage_summary(
+            "2026-09-08".to_string(),
+            0.35,
+            vec![
+                provider("anthropic", 0.30, 4, 1200),
+                provider("openai", 0.05, 1, 300),
+            ],
+            caps(),
+        );
+
+        assert_eq!(summary.date, "2026-09-08");
+        assert!((summary.total_usd - 0.35).abs() < 1e-9);
+        assert_eq!(summary.by_provider.len(), 2);
+        let first: &ProviderUsageRow = &summary.by_provider[0];
+        assert_eq!(first.provider, "anthropic");
+        assert!((first.usd - 0.30).abs() < 1e-9);
+        assert_eq!(first.calls, 4);
+        assert_eq!(first.tokens, 1200);
+    }
+
+    /// N4, on the wire: the caps are the per-workflow and per-turn `max_cost`,
+    /// named as such, and **no** `daily_*` key exists to be drawn as a
+    /// denominator under today's total.
+    #[test]
+    fn summary_carries_the_two_caps_and_no_daily_budget() {
+        let value = serde_json::to_value(usage_summary(
+            "2026-09-08".to_string(),
+            0.35,
+            vec![provider("anthropic", 0.30, 4, 1200)],
+            caps(),
+        ))
+        .unwrap();
+
+        let object = value.as_object().expect("summary is an object");
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["by_provider", "caps", "date", "total_usd"]);
+
+        let caps_object = object["caps"].as_object().expect("caps is an object");
+        let mut cap_keys: Vec<&str> = caps_object.keys().map(String::as_str).collect();
+        cap_keys.sort_unstable();
+        assert_eq!(cap_keys, ["agent_max_cost_usd", "workflow_max_cost_usd"]);
+        assert_eq!(caps_object["workflow_max_cost_usd"], 5.0);
+        assert_eq!(caps_object["agent_max_cost_usd"], 1.0);
+
+        let rendered = serde_json::to_string(&value).unwrap();
+        assert!(
+            !rendered.contains("daily"),
+            "N4: no daily budget may appear anywhere on this route — {rendered}"
+        );
+        assert!(!rendered.contains("budget"), "N4: no budget key — {rendered}");
     }
 
     #[test]

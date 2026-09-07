@@ -37,6 +37,23 @@ pub struct LlmUsageDaily {
     pub total_cost_usd: f64,
 }
 
+/// One provider's share of a window of `llm_call_log` rows — what
+/// `GET /v1/usage/summary`'s `by_provider` reports (GAP-08c, T50).
+///
+/// Deliberately *not* `CostTracker::all_provider_usage()`, which is lifetime:
+/// the Settings panel showed those totals under a "today" heading.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderCallUsage {
+    pub provider: String,
+    pub cost_usd: f64,
+    /// Logged calls, whatever their `status`: an attempt that errored still
+    /// happened, and a count that quietly dropped them would not add up
+    /// against the call log the same panel can open.
+    pub calls: i64,
+    /// Input + output tokens over those calls.
+    pub tokens: i64,
+}
+
 /// Repository for LLM usage operations.
 pub struct LlmUsageRepository<'a> {
     db: &'a Database,
@@ -269,6 +286,41 @@ impl<'a> LlmUsageRepository<'a> {
                 costs.insert(task_id, cost);
             }
             Ok(costs)
+        })
+    }
+
+    /// Today's (or any window's) per-provider figures, grouped out of
+    /// `llm_call_log` in one query — `GET /v1/usage/summary`'s `by_provider`.
+    ///
+    /// `since_utc` is **already UTC** in the table's own `%Y-%m-%d %H:%M:%S`
+    /// text form: `insert_call_log` formats a `DateTime<Utc>` that way, so a
+    /// local midnight would be off by the daemon's offset. The caller converts
+    /// — and it converts *UTC* midnight, because the summary's `date` is the
+    /// authoritative UTC day, not the client's local one.
+    ///
+    /// Ordered by provider so the wire shape does not depend on a hash seed.
+    /// A provider with no calls in the window is absent rather than reported
+    /// as a row of zeroes.
+    pub fn provider_usage_since(&self, since_utc: &str) -> Result<Vec<ProviderCallUsage>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT provider, SUM(cost_usd), COUNT(*), SUM(input_tokens + output_tokens) \
+                 FROM llm_call_log WHERE timestamp >= ?1 \
+                 GROUP BY provider ORDER BY provider",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![since_utc], |row| {
+                Ok(ProviderCallUsage {
+                    provider: row.get(0)?,
+                    cost_usd: row.get(1)?,
+                    calls: row.get(2)?,
+                    tokens: row.get(3)?,
+                })
+            })?;
+            let mut usage = Vec::new();
+            for row in rows {
+                usage.push(row?);
+            }
+            Ok(usage)
         })
     }
 

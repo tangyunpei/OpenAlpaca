@@ -268,3 +268,80 @@ fn test_cost_for_tasks_empty_input_returns_empty_map_without_querying() {
     let costs = repo.cost_for_tasks(&[]).unwrap();
     assert!(costs.is_empty());
 }
+
+// ── today's per-provider figures (GAP-08c, T50) ─────────────────────────────
+
+fn call(provider: &str, cost_usd: f64, input: i32, output: i32) -> LlmCallLog {
+    LlmCallLog {
+        id: None,
+        timestamp: Utc::now(),
+        agent_id: Some("agent1".to_string()),
+        task_id: None,
+        provider: provider.to_string(),
+        model: "m".to_string(),
+        key_id: None,
+        input_tokens: input,
+        output_tokens: output,
+        cost_usd,
+        status: "success".to_string(),
+        latency_ms: Some(1),
+        error_message: None,
+    }
+}
+
+/// `GET /v1/usage/summary`'s `by_provider`: today's call rows grouped once,
+/// never the lifetime `all_provider_usage()` the Settings panel used to show.
+#[test]
+fn provider_usage_since_groups_todays_calls_by_provider() {
+    let db = setup_db();
+    let repo = LlmUsageRepository::new(&db);
+
+    repo.insert_call_log(&call("anthropic", 0.01, 100, 50)).unwrap();
+    repo.insert_call_log(&call("anthropic", 0.02, 200, 25)).unwrap();
+    repo.insert_call_log(&call("openai", 0.005, 10, 5)).unwrap();
+
+    let rows = repo.provider_usage_since("2000-01-01 00:00:00").unwrap();
+    assert_eq!(rows.len(), 2);
+    // Stable order, so the wire shape does not depend on the hash seed.
+    assert_eq!(rows[0].provider, "anthropic");
+    assert_eq!(rows[0].calls, 2);
+    assert_eq!(rows[0].tokens, 375);
+    assert!((rows[0].cost_usd - 0.03).abs() < 1e-9);
+    assert_eq!(rows[1].provider, "openai");
+    assert_eq!(rows[1].calls, 1);
+    assert_eq!(rows[1].tokens, 15);
+}
+
+/// Yesterday's spend is not today's: the cutoff is the whole point of the row.
+#[test]
+fn provider_usage_since_excludes_calls_before_the_cutoff() {
+    let db = setup_db();
+    let repo = LlmUsageRepository::new(&db);
+
+    let mut old = call("anthropic", 9.99, 1, 1);
+    old.timestamp = Utc::now() - chrono::Duration::days(2);
+    repo.insert_call_log(&old).unwrap();
+    repo.insert_call_log(&call("anthropic", 0.01, 1, 1)).unwrap();
+
+    let since = (Utc::now() - chrono::Duration::days(1))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    let rows = repo.provider_usage_since(&since).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].calls, 1);
+    assert!((rows[0].cost_usd - 0.01).abs() < 1e-9);
+}
+
+/// A day with no calls yet is an empty list, not a row of zeroes for a
+/// provider that has not been used.
+#[test]
+fn provider_usage_since_is_empty_before_the_first_call() {
+    let db = setup_db();
+    let repo = LlmUsageRepository::new(&db);
+
+    assert!(
+        repo.provider_usage_since("2000-01-01 00:00:00")
+            .unwrap()
+            .is_empty()
+    );
+}

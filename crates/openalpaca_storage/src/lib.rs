@@ -42,7 +42,7 @@ pub use repository::{
     SESSION_ACTIVE, SESSION_ARCHIVED, SessionFilter, SkillExecutionRepository, StorageBytes,
     SubAgentRepository, SubagentSpanRepository, TaskRepository, resolve_skill_key,
 };
-pub use repository::llm_usage::LlmUsageDaily;
+pub use repository::llm_usage::{LlmUsageDaily, ProviderCallUsage};
 pub use repository::subagent_span::{
     NewSubagentSpan, SPAN_DETAIL_INTERRUPTED, SpanState, SubagentSpanRecord, TemplateRunCount,
 };
