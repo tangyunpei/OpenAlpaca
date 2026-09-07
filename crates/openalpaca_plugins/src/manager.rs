@@ -510,15 +510,21 @@ impl PluginManager {
             warn!(dir = %dir.display(), "plugin directory has no usable name");
             return;
         };
-        let manifest = match PluginManifest::from_dir(dir) {
+        let ext = ExtensionId::plugin(id.clone());
+        let _lock = self.lock_for(&id).await;
+
+        let manifest = match PluginManifest::from_dir_for_load(dir) {
             Ok(m) => m,
             Err(e) => {
-                warn!(plugin = %id, error = %e, "plugin manifest could not be read; skipping");
+                // R66: a load-path refusal is a `Failed{ConfigInvalid}` row,
+                // never a silent skip — the directory still satisfies
+                // `plugin_directories`'s `.exists()` check, so `park_vanished`
+                // will not pick this one up as an orphan either.
+                warn!(plugin = %id, error = %e, "plugin manifest could not be read; parking as failed");
+                self.park_unparseable(&ext, table, e).await;
                 return;
             }
         };
-        let ext = ExtensionId::plugin(id.clone());
-        let _lock = self.lock_for(&id).await;
 
         // X-3: the directory is the id, and a manifest that disagrees is a
         // config error, not a rename. Two directories could otherwise share one
@@ -653,6 +659,33 @@ impl PluginManager {
     ) {
         self.teardown_held(ext, cause).await;
         self.track(ext, dir, manifest).await;
+        let word = state.word().to_string();
+        self.ledger.upsert(ext, bit, state);
+        let generation = self.ledger.generation(ext).unwrap_or(0);
+        self.emit_state(ext, &word, generation);
+    }
+
+    /// `park`'s manifest-free twin, for a `plugin.toml` that does not even
+    /// parse (R66) — `park`'s other callers always have a manifest in hand
+    /// (a name mismatch, an unreadable store), so they have one to `track`;
+    /// here there is none to offer. The cached declaration, if this name was
+    /// previously loaded, is left as the last-good one — re-identifying a
+    /// plugin from a manifest that no longer explains itself is not this
+    /// scan's job — and only the live handle and the ledger row change:
+    /// whatever it held is torn down, and the row becomes
+    /// `Failed{ConfigInvalid}` with the read error attributed. This is the
+    /// one path `reconcile_dir` must never take silently — the directory
+    /// still satisfies `plugin_directories`'s `.exists()` check, so a plugin
+    /// parked nowhere here is invisible to `park_vanished` too.
+    async fn park_unparseable(
+        &self,
+        ext: &ExtensionId,
+        table: &Result<PermissionTable, PluginError>,
+        error: PluginError,
+    ) {
+        self.teardown_held(ext, WithdrawalCause::Watcher).await;
+        let bit = table.as_ref().map(|t| t.enabled(&ext.name)).unwrap_or(true);
+        let state = self.failure(FailureReason::ConfigInvalid, error.to_string());
         let word = state.word().to_string();
         self.ledger.upsert(ext, bit, state);
         let generation = self.ledger.generation(ext).unwrap_or(0);
@@ -1745,7 +1778,7 @@ impl PluginManager {
             .ok_or_else(|| ExtensionError::NotFound(ext.clone()))?;
 
         let (dir, manifest) = cached;
-        match PluginManifest::from_dir(&dir) {
+        match PluginManifest::from_dir_for_load(&dir) {
             Ok(fresh) if fresh.plugin.name == ext.name => {
                 if let Some(state) = self.plugins.write().await.get_mut(&ext.name) {
                     state.manifest = fresh.clone();

@@ -766,6 +766,103 @@ mcp_compatible = true
         assert_eq!(std::fs::read_to_string(&store).unwrap(), garbage);
     }
 
+    // ── R66 — the load-path symlink policy ──────────────────────────────
+    //
+    // `PluginManifest::from_dir` (the untrusted-source path — install/update)
+    // refuses any symlinked `plugin.toml` outright. `from_dir_for_load` (this
+    // manager's own `reconcile_dir`/`declaration`) is more permissive: a
+    // symlink that resolves inside the plugin's own directory loads, and
+    // anything else refused on this path — an escaping symlink, a FIFO —
+    // must park as `Failed{ConfigInvalid}`, never `reconcile_dir`'s old
+    // `warn!(...); return;`, which left the directory with no record at all.
+
+    /// **An in-tree symlinked `plugin.toml` loads** (R66) — a hand-assembled
+    /// plugin directory that manages its manifest as a symlink to a sibling
+    /// file, not the untrusted-source install/update path, which still
+    /// refuses any symlink outright.
+    #[tokio::test]
+    async fn an_in_tree_symlinked_manifest_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(tmp.path(), "echo-test", "[types]\ntools = true\n");
+        let manifest = dir.join("plugin.toml");
+        std::fs::rename(&manifest, dir.join("plugin.toml.real")).unwrap();
+        std::os::unix::fs::symlink("plugin.toml.real", &manifest).unwrap();
+
+        let h = Harness::new(tmp.path());
+        load_running_stub(&h, "echo-test").await;
+    }
+
+    /// **A `plugin.toml` symlink that escapes the plugin directory parks as
+    /// `Failed{ConfigInvalid}`, visible on `GET /v1/extensions`** (R66).
+    #[tokio::test]
+    async fn an_escaping_symlinked_manifest_parks_as_config_invalid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(tmp.path(), "echo-test", "[types]\ntools = true\n");
+        let manifest = dir.join("plugin.toml");
+        let outside = tmp.path().join("outside-plugin.toml");
+        std::fs::rename(&manifest, &outside).unwrap();
+        std::os::unix::fs::symlink(&outside, &manifest).unwrap();
+
+        let h = Harness::new(tmp.path());
+        h.manager.permission_gate.approve("echo-test", &[]).unwrap();
+        h.scan().await;
+
+        let state = h.state("echo-test").await;
+        assert!(
+            matches!(
+                state,
+                ExtensionState::Failed {
+                    reason: FailureReason::ConfigInvalid,
+                    ..
+                }
+            ),
+            "expected config_invalid for an escaping symlink, got {state:?}"
+        );
+        assert!(
+            !h.has_tool("echo-test::echo"),
+            "a plugin behind an escaping symlink loaded anyway"
+        );
+        // The row is reachable — `GET /v1/extensions` has something to show —
+        // rather than the old silent disappearance.
+        h.row("echo-test").await;
+    }
+
+    /// **A FIFO at `plugin.toml` on the load path parks as
+    /// `Failed{ConfigInvalid}`, without a hang** (R66). The type check already
+    /// refuses a FIFO before the open, so nothing here can block — this test
+    /// asserts the *other* half: that the refusal reaches the ledger instead
+    /// of vanishing behind `reconcile_dir`'s old `warn!(...); return;`.
+    #[tokio::test]
+    async fn a_fifo_on_the_load_path_parks_as_config_invalid_without_a_hang() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(tmp.path(), "echo-test", "[types]\ntools = true\n");
+        let manifest = dir.join("plugin.toml");
+        std::fs::remove_file(&manifest).unwrap();
+        let made = std::process::Command::new("mkfifo")
+            .arg(&manifest)
+            .status()
+            .expect("mkfifo");
+        assert!(made.success(), "mkfifo failed");
+
+        let h = Harness::new(tmp.path());
+        h.manager.permission_gate.approve("echo-test", &[]).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), h.scan())
+            .await
+            .expect("scan hung on a FIFO plugin.toml");
+
+        let state = h.state("echo-test").await;
+        assert!(
+            matches!(
+                state,
+                ExtensionState::Failed {
+                    reason: FailureReason::ConfigInvalid,
+                    ..
+                }
+            ),
+            "expected config_invalid for a FIFO manifest, got {state:?}"
+        );
+    }
+
     /// **A plugin skill with a mixed-case id is reachable by `/slash` and is
     /// removed on unload** (design §6.2 #14).
     ///
