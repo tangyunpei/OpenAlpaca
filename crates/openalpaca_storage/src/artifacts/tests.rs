@@ -1515,6 +1515,122 @@ fn hand_edited(body: &str) -> (Fixture, ArtifactRecord) {
     (f, record)
 }
 
+/// Restores the hash hook even if the test panics mid-assertion.
+struct HashHook;
+
+impl HashHook {
+    fn install(hook: impl Fn() + 'static) -> Self {
+        on_head_hash(Some(std::sync::Arc::new(hook)));
+        Self
+    }
+}
+
+impl Drop for HashHook {
+    fn drop(&mut self) {
+        on_head_hash(None);
+    }
+}
+
+#[test]
+fn an_unchanged_head_is_never_re_hashed() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(
+        OWNER,
+        &scope,
+        ArtifactKind::Markdown,
+        "Notes",
+        b"one\ntwo\n",
+    );
+    new.created = at(1);
+    let (record, _) = f.store().put(new).unwrap();
+
+    // The put stamped the head it had just written, so not even the first read
+    // pays for a hash — and no later one does either.
+    let before = head_hashes();
+    for _ in 0..3 {
+        f.store().resolve_content(&record.id, None).unwrap();
+    }
+    assert_eq!(
+        head_hashes(),
+        before,
+        "an unchanged head is never re-hashed"
+    );
+
+    // The changed path still rotates, hashing exactly once...
+    fs::write(&record.storage_path, "one\ntwo\nthree\n").unwrap();
+    let before = head_hashes();
+    let edit = f
+        .store()
+        .resolve_content_with_edit(&record.id, None)
+        .unwrap()
+        .1
+        .expect("the edit is recorded");
+    assert_eq!(edit.version, 2);
+    assert_eq!(edit.sha256, sha256_hex(b"one\ntwo\nthree\n"));
+    assert_eq!(head_hashes(), before + 1);
+
+    // ...and the rotation re-stamps, so the reads after it are free again.
+    let before = head_hashes();
+    f.store().resolve_content(&record.id, None).unwrap();
+    assert_eq!(head_hashes(), before);
+
+    // The stamp is the store's own bookkeeping: a client is served the
+    // writer's metadata, which here is none at all.
+    let stamped = f.store().get(&record.id, OWNER).unwrap().unwrap();
+    assert!(stamped.metadata_json.is_some(), "the stamp is on the row");
+    assert_eq!(stamped.metadata(), None, "and never on the wire");
+}
+
+#[test]
+fn a_head_stamp_rides_beside_the_writers_metadata() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"body\n");
+    new.created = at(1);
+    new.metadata_json = Some(r#"{"source":"web"}"#);
+    let (record, _) = f.store().put(new).unwrap();
+
+    let stored: serde_json::Value =
+        serde_json::from_str(record.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(stored["source"], "web");
+    assert!(stored.get(HEAD_STAMP_KEY).is_some());
+    assert_eq!(
+        record.metadata(),
+        Some(serde_json::json!({"source": "web"}))
+    );
+}
+
+#[test]
+fn the_head_is_hashed_with_the_connection_free() {
+    let (f, v1) = hand_edited("one\ntwo\nthree\n");
+    let db = f.db.clone();
+    let free = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = free.clone();
+
+    // R32: while the head is being hashed another thread must be able to take
+    // the connection. Inside `with_connection` — where this check used to run —
+    // the hand-off below never completes.
+    let _hook = HashHook::install(move || {
+        let db = db.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let taken = db.with_connection(|_| Ok(())).is_ok();
+            let _ = tx.send(taken);
+        });
+        if rx.recv_timeout(std::time::Duration::from_secs(5)) == Ok(true) {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+
+    let edit = f.store().resolve_content_with_edit(&v1.id, None).unwrap().1;
+    assert!(edit.is_some(), "the edit is still recorded");
+    assert!(
+        free.load(std::sync::atomic::Ordering::SeqCst),
+        "the connection was held while the head was hashed"
+    );
+}
+
 #[test]
 fn a_read_records_a_hand_edited_head_as_a_version_authored_by_nobody() {
     let (f, v1) = hand_edited("one\ntwo\nthree\n");

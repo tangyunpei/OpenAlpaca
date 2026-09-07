@@ -97,10 +97,34 @@
 //! Editing a produced file by hand is *the point* of putting artifacts in the
 //! project rather than in an opaque blob store, so the store records the edit
 //! instead of resenting it. [`ArtifactStore::verify`] (the sweep) and
-//! [`ArtifactStore::resolve_content`] (every read) hash the head and compare it
-//! with the row: a difference is a version this system did not write, and
-//! [`rotate_user_edit`] records it as one — `author_agent_id = NULL`, `note =`
+//! [`ArtifactStore::resolve_content`] (every read) compare the head with the
+//! row: a difference is a version this system did not write, and
+//! [`rotate_rows`] records it as one — `author_agent_id = NULL`, `note =`
 //! [`USER_EDIT_NOTE`].
+//!
+//! **R32 governs the check, not just the diff.** Hashing a head is unbounded in
+//! the artifact's size, and `Database::with_connection` holds the daemon's one
+//! connection for its whole closure, so the read-side check is three phases and
+//! only the first and last touch the database:
+//!
+//! | Phase | Where | What |
+//! |---|---|---|
+//! | [`ArtifactStore::probe_head`] | under the lock | the row, the head path, and — off `stat` alone — whether a hash is needed at all |
+//! | [`HeadProbe::observe`] | **outside** the lock (the route puts it on `spawn_blocking`) | the hash, and the line counts against v(N)'s slot |
+//! | [`ArtifactStore::record_head_observation`] | under the lock | the rotation, or just the stamp — rows only |
+//!
+//! The last phase is a compare-and-set on `sha256`: it touches the row only
+//! while the row still says what it said when the probe was taken, so a `put`
+//! that landed while the hash ran wins and the next read simply re-checks.
+//!
+//! The gate is a [`HeadStamp`] — the head's `(size, mtime)` as they stood when
+//! its bytes were last hashed, stored on the row under [`HEAD_STAMP_KEY`] by
+//! every path that writes a head. An unchanged head is therefore never
+//! re-hashed, and the ordinary read is two short metadata queries. The gate is
+//! only as exact as the filesystem's mtime: an edit that restores the byte
+//! count *and* the modification time is invisible to it, which is the price of
+//! not reading every artifact on every request.
+
 //!
 //! **The rotation moves no bytes.** It cannot: a hand edit overwrites the head
 //! *in place*, so version N's bytes are already gone by the time anything
@@ -164,6 +188,19 @@ pub const DEFAULT_LIST_LIMIT: i64 = 50;
 /// meaning — "a human edited the file by hand" — so the Library can render the
 /// row as a user edit without parsing the note.
 pub const USER_EDIT_NOTE: &str = "edited outside OpenAlpaca";
+
+/// `file_assets.metadata_json`'s reserved key for the head's [`HeadStamp`] —
+/// the cheap gate that keeps §4.8's hand-edit check off the hash for a head
+/// nothing has touched.
+///
+/// **This is where the pair lives.** No column records when a head's bytes were
+/// last hashed and this is not a schema change, so the stamp rides in the
+/// metadata column under a key no caller can collide with: `metadata` is
+/// validated as a JSON *object* whose keys are the writer's own, and no writer
+/// spells one with a `openalpaca:` prefix. It never reaches a client —
+/// [`ArtifactRecord::metadata`] is what the routes serialise, and it takes the
+/// key back out.
+pub const HEAD_STAMP_KEY: &str = "openalpaca:head_stamp";
 
 /// Unchanged lines kept either side of a change in [`ArtifactStore::diff`]'s
 /// patch — the unified-diff default, and what every diff viewer expects.
@@ -389,6 +426,105 @@ impl ArtifactRecord {
     pub fn missing(&self) -> bool {
         self.missing_since.is_some()
     }
+
+    /// The **writer's** metadata — `metadata_json` parsed, with
+    /// [`HEAD_STAMP_KEY`] taken back out. This is what a route serialises: the
+    /// stamp is this module's bookkeeping and no client's business.
+    ///
+    /// An object that held nothing but the stamp is `None`: no caller ever
+    /// wrote metadata there.
+    pub fn metadata(&self) -> Option<serde_json::Value> {
+        let mut value: serde_json::Value =
+            serde_json::from_str(self.metadata_json.as_deref()?).ok()?;
+        if let Some(object) = value.as_object_mut() {
+            object.remove(HEAD_STAMP_KEY);
+            if object.is_empty() {
+                return None;
+            }
+        }
+        Some(value)
+    }
+
+    /// The stamp recorded the last time this head's bytes were hashed.
+    fn head_stamp(&self) -> Option<HeadStamp> {
+        let value: serde_json::Value = serde_json::from_str(self.metadata_json.as_deref()?).ok()?;
+        HeadStamp::from_json(value.get(HEAD_STAMP_KEY)?)
+    }
+}
+
+/// The cheap gate on §4.8's hand-edit check: a head's size and modification
+/// time as they stood when its bytes were last hashed ([`HEAD_STAMP_KEY`]).
+///
+/// Compared for **equality**, never for order — a clock that moved backwards
+/// must re-hash, not skip — and absent means "hash it", so a row that has never
+/// been stamped is checked exactly as before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeadStamp {
+    pub size_bytes: i64,
+    /// Nanoseconds since the Unix epoch, saturating at the ends of `i64`
+    /// (year 2262 and 1678, neither of which any filesystem reports for a file
+    /// this store wrote).
+    pub mtime_ns: i64,
+}
+
+impl HeadStamp {
+    /// The stamp of a head that is standing right now. `None` when the platform
+    /// will not report a modification time — then nothing is ever skipped.
+    fn of(metadata: &fs::Metadata) -> Option<Self> {
+        let modified = metadata.modified().ok()?;
+        let mtime_ns = match modified.duration_since(std::time::UNIX_EPOCH) {
+            Ok(since) => i64::try_from(since.as_nanos()).unwrap_or(i64::MAX),
+            Err(before) => i64::try_from(before.duration().as_nanos())
+                .map(|ns| -ns)
+                .unwrap_or(i64::MIN),
+        };
+        Some(Self {
+            size_bytes: metadata.len() as i64,
+            mtime_ns,
+        })
+    }
+
+    fn from_json(value: &serde_json::Value) -> Option<Self> {
+        Some(Self {
+            size_bytes: value.get("size_bytes")?.as_i64()?,
+            mtime_ns: value.get("mtime_ns")?.as_i64()?,
+        })
+    }
+
+    fn to_json(self) -> serde_json::Value {
+        serde_json::json!({ "size_bytes": self.size_bytes, "mtime_ns": self.mtime_ns })
+    }
+}
+
+/// The stamp of the head standing at `path`, or `None` when it cannot be
+/// stat'd — an unstampable head is simply re-checked next time.
+fn stamp_at(path: &Path) -> Option<HeadStamp> {
+    HeadStamp::of(&fs::metadata(path).ok()?)
+}
+
+/// `metadata_json` carrying `stamp` under [`HEAD_STAMP_KEY`], leaving every
+/// other key exactly as the writer wrote it.
+///
+/// `None` stamp passes the column straight through, and so does metadata that
+/// is not a JSON object: this must never rewrite what a caller stored.
+fn metadata_with_stamp(metadata_json: Option<&str>, stamp: Option<HeadStamp>) -> Option<String> {
+    let Some(stamp) = stamp else {
+        return metadata_json.map(str::to_string);
+    };
+    let mut value = match metadata_json {
+        Some(text) => match serde_json::from_str(text) {
+            Ok(value) => value,
+            // Unparseable metadata is still the writer's; leave it alone and
+            // pay for one hash per read rather than destroy it.
+            Err(_) => return Some(text.to_string()),
+        },
+        None => serde_json::json!({}),
+    };
+    let Some(object) = value.as_object_mut() else {
+        return metadata_json.map(str::to_string);
+    };
+    object.insert(HEAD_STAMP_KEY.to_string(), stamp.to_json());
+    Some(value.to_string())
 }
 
 /// Filters for [`ArtifactStore::list`] — the query string of §4.9.
@@ -707,6 +843,11 @@ impl<'a> ArtifactStore<'a> {
                 new.content,
                 existing.map(|r| r.version),
             )?;
+            // Stamp the head this call just wrote, so the read path's §4.8
+            // check has something to compare against and never hashes a head
+            // nobody has touched since. `None` (an unstattable head) simply
+            // costs one hash on the next read.
+            let metadata_json = metadata_with_stamp(new.metadata_json, stamp_at(&head_path));
 
             // Line counts are recorded at write time (§4.9), against the bytes
             // of the version the *rows* describe — which is what `write_bytes`
@@ -761,7 +902,7 @@ impl<'a> ArtifactStore<'a> {
                             new.agent_template_id,
                             version,
                             new.summary,
-                            new.metadata_json,
+                            metadata_json,
                             row.id,
                         ],
                     )?;
@@ -798,7 +939,7 @@ impl<'a> ArtifactStore<'a> {
                             // keeps them out of `list_by_status(Uploaded)`,
                             // which drives the background extractor.
                             FileAssetStatus::Ready.as_str(),
-                            new.metadata_json,
+                            metadata_json,
                             ArtifactOrigin::Produced.as_str(),
                             new.kind.as_str(),
                             new.task_id,
@@ -959,23 +1100,94 @@ impl<'a> ArtifactStore<'a> {
     /// null `agent_id`. `None` is the ordinary read where the bytes on disk are
     /// the bytes the row describes.
     ///
-    /// The head is read once to hash it and once more by whoever serves the
-    /// path. That second read is the price of an exact answer: nothing else on
-    /// a `file_assets` row records when the bytes were last touched, and a
-    /// clock comparison would miss an edit made in the same second as the write
-    /// it replaced.
+    /// R32: the hash runs **between** two short locked sections, never inside
+    /// one, and a head whose [`HeadStamp`] still matches is not hashed at all —
+    /// so the ordinary read costs one `stat` and two metadata queries. This is
+    /// synchronous throughout; an async caller runs the whole call on
+    /// `spawn_blocking`, which is what puts the hash on a blocking thread.
     pub fn resolve_content_with_edit(
         &self,
         id: &str,
         version: Option<u32>,
     ) -> Result<(PathBuf, Option<ArtifactRecord>)> {
+        let edit = self.check_head(id)?;
         self.db.with_connection(|conn| {
-            let record = load_by_id(conn, id)?.ok_or_else(|| not_found(id))?;
-            let edit = rotate_user_edit(conn, &record)?;
             // Resolve against the rotated record: `version` numbers moved.
-            let current = edit.clone().unwrap_or(record);
+            let current = match &edit {
+                Some(rotated) => rotated.clone(),
+                None => load_by_id(conn, id)?.ok_or_else(|| not_found(id))?,
+            };
             let path = resolve_version_path(conn, &current, version)?;
             Ok((path, edit))
+        })
+    }
+
+    /// §4.8's hand-edit check, all three phases in order — the shape every
+    /// detection site shares, with the hash outside the connection mutex.
+    ///
+    /// `Ok(Some(record))` is the head as it stands after a rotation; `Ok(None)`
+    /// is every other outcome, including the race where a `put` landed while
+    /// the hash ran (phase 3's compare-and-set declines, and the next read
+    /// asks again).
+    pub fn check_head(&self, id: &str) -> Result<Option<ArtifactRecord>> {
+        let probe = self.probe_head(id)?;
+        let Some(observation) = probe.observe() else {
+            return Ok(None);
+        };
+        self.record_head_observation(id, observation)
+    }
+
+    /// Phase 1: the row and the cheap gate, under the lock and off metadata
+    /// alone. [`ArtifactError::NotFound`] when there is no such row.
+    pub fn probe_head(&self, id: &str) -> Result<HeadProbe> {
+        self.db.with_connection(|conn| {
+            let record = load_by_id(conn, id)?.ok_or_else(|| not_found(id))?;
+            Ok(probe_for(&record))
+        })
+    }
+
+    /// Phase 3: the rotation when the bytes differ from what the row describes,
+    /// otherwise just the [`HeadStamp`] that keeps the next read off the hash.
+    /// Rows only — nothing here reads a file.
+    ///
+    /// Compare-and-set on `sha256`: the row is touched only while it still says
+    /// what it said when the probe was taken. A `put` (or another reader's
+    /// rotation) that landed in between therefore wins outright, and this
+    /// answers `None` rather than recording an observation of bytes nobody
+    /// describes any more.
+    pub fn record_head_observation(
+        &self,
+        id: &str,
+        observation: HeadObservation,
+    ) -> Result<Option<ArtifactRecord>> {
+        self.db.with_connection(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let Some(record) = load_by_id(&tx, id)? else {
+                return Ok(None);
+            };
+            if record.sha256 != observation.row_sha256
+                || record.origin != ArtifactOrigin::Produced
+                || record.missing_since.is_some()
+            {
+                return Ok(None);
+            }
+            let rotated = if observation.sha256 == record.sha256 {
+                // The bytes are the ones the row describes after all — the
+                // first read of a head no stamp had reached yet. Remember the
+                // stamp so nothing hashes them again.
+                tx.execute(
+                    "UPDATE file_assets SET metadata_json = ?1 WHERE id = ?2",
+                    rusqlite::params![
+                        metadata_with_stamp(record.metadata_json.as_deref(), observation.stamp),
+                        record.id,
+                    ],
+                )?;
+                None
+            } else {
+                Some(rotate_rows(&tx, &record, &observation)?)
+            };
+            tx.commit()?;
+            Ok(rotated)
         })
     }
 
@@ -1228,61 +1440,59 @@ impl<'a> ArtifactStore<'a> {
     /// is its own transaction, so a sweep that dies half way keeps everything
     /// it had already recorded and the next one resumes from there.
     pub fn verify(&self, project_root: Option<&str>) -> Result<VerifyReport> {
-        self.db.with_connection(|conn| {
+        let records: Vec<ArtifactRecord> = self.db.with_connection(|conn| {
             let mut sql =
                 format!("SELECT {RECORD_COLUMNS} FROM file_assets WHERE origin = 'produced'");
             if project_root.is_some() {
                 sql.push_str(" AND COALESCE(project_root, '') = ?1");
             }
-            let records: Vec<ArtifactRecord> = {
-                let mut stmt = conn.prepare(&sql)?;
-                let mut mapped = match project_root {
-                    Some(root) => stmt.query(rusqlite::params![root])?,
-                    None => stmt.query([])?,
-                };
-                let mut out = Vec::new();
-                while let Some(row) = mapped.next()? {
-                    out.push(row_to_record(row)?);
-                }
-                out
+            let mut stmt = conn.prepare(&sql)?;
+            let mut mapped = match project_root {
+                Some(root) => stmt.query(rusqlite::params![root])?,
+                None => stmt.query([])?,
             };
+            let mut out = Vec::new();
+            while let Some(row) = mapped.next()? {
+                out.push(row_to_record(row)?);
+            }
+            Ok(out)
+        })?;
 
+        // R32 again: the `stat` per row is filesystem work, so it happens with
+        // the connection free and only the marking is done under it.
+        let (present, absent): (Vec<ArtifactRecord>, Vec<ArtifactRecord>) = records
+            .into_iter()
+            .partition(|record| Path::new(&record.storage_path).exists());
+        let missing = absent.len();
+        self.db.with_connection(|conn| {
             let tx = conn.unchecked_transaction()?;
-            let mut missing = 0usize;
-            let mut present: Vec<&ArtifactRecord> = Vec::new();
-            for record in &records {
-                if Path::new(&record.storage_path).exists() {
-                    present.push(record);
-                    continue;
-                }
-                missing += 1;
-                if record.missing_since.is_none() {
-                    tx.execute(
-                        "UPDATE file_assets SET missing_since = datetime('now'),
-                            updated_at = datetime('now') WHERE id = ?1",
-                        rusqlite::params![record.id],
-                    )?;
-                }
+            for record in absent.iter().filter(|r| r.missing_since.is_none()) {
+                tx.execute(
+                    "UPDATE file_assets SET missing_since = datetime('now'),
+                        updated_at = datetime('now') WHERE id = ?1",
+                    rusqlite::params![record.id],
+                )?;
             }
             tx.commit()?;
+            Ok(())
+        })?;
 
-            let mut user_edits = Vec::new();
-            for record in present {
-                match rotate_user_edit(conn, record) {
-                    Ok(Some(rotated)) => user_edits.push(rotated),
-                    Ok(None) => {}
-                    // One unreadable artifact must not abandon the sweep: the
-                    // rows it would have fixed are still there next boot.
-                    Err(e) => tracing::warn!(
-                        "Failed to record a hand edit of artifact {}: {e:#}",
-                        record.id
-                    ),
-                }
+        let mut user_edits = Vec::new();
+        for record in &present {
+            match self.check_head(&record.id) {
+                Ok(Some(rotated)) => user_edits.push(rotated),
+                Ok(None) => {}
+                // One unreadable artifact must not abandon the sweep: the rows
+                // it would have fixed are still there next boot.
+                Err(e) => tracing::warn!(
+                    "Failed to record a hand edit of artifact {}: {e:#}",
+                    record.id
+                ),
             }
-            Ok(VerifyReport {
-                missing,
-                user_edits,
-            })
+        }
+        Ok(VerifyReport {
+            missing,
+            user_edits,
         })
     }
 }
@@ -1410,52 +1620,144 @@ fn resolve_version_path(
     Ok(path)
 }
 
-/// §4.8's hand edit: record the bytes standing at the head as a version this
-/// system did not write, and return the head record as it stands afterwards.
+/// Phase 1 of §4.8's hand-edit check, decided off metadata alone: which head to
+/// hash, and whether it needs hashing at all.
 ///
-/// `Ok(None)` is every ordinary read — the bytes are the ones the row
-/// describes — and every state this must not touch:
+/// Everything it must **not** touch answers `work: None` and costs one `stat`:
 ///
 /// * an **upload**: `UploadStore` owns those bytes, they have no version
 ///   history, and inventing a v2 for one would leave a v1 no row describes;
 /// * a row with no `rel_path` (it predates migration 036, so it has no address
 ///   in this grammar);
 /// * a **missing** head — `missing_since` set, or simply no file — because
-///   there are no bytes to record.
-///
-/// Everything it does is rows, in one transaction, and nothing is unlinked —
-/// see the module docs for why version N's bytes cannot be preserved.
-fn rotate_user_edit(conn: &Connection, record: &ArtifactRecord) -> Result<Option<ArtifactRecord>> {
-    if record.origin != ArtifactOrigin::Produced || record.missing_since.is_some() {
-        return Ok(None);
-    }
-    let Some(rel) = record.rel_path.as_deref() else {
-        return Ok(None);
+///   there are no bytes to record;
+/// * a head whose [`HeadStamp`] is the one the row already carries, which is
+///   every read of a file nobody has touched.
+pub struct HeadProbe {
+    /// The row's `sha256` when the probe was taken — phase 3's compare-and-set.
+    row_sha256: String,
+    work: Option<HeadWork>,
+}
+
+/// What [`HeadProbe::observe`] has to read, once the gate says the head is
+/// worth hashing.
+struct HeadWork {
+    head: PathBuf,
+    /// Where version N's bytes would be kept, read only to count lines. Absent
+    /// after an in-place hand edit; present after an interrupted put.
+    slot: Option<PathBuf>,
+    is_text: bool,
+    stamp: Option<HeadStamp>,
+}
+
+/// What the off-lock half of the check found — the bytes' own sha and size, the
+/// stamp that makes the next read free, and the line counts against v(N).
+pub struct HeadObservation {
+    row_sha256: String,
+    sha256: String,
+    size_bytes: i64,
+    stamp: Option<HeadStamp>,
+    added_lines: Option<i64>,
+    removed_lines: Option<i64>,
+}
+
+fn probe_for(record: &ArtifactRecord) -> HeadProbe {
+    let nothing = HeadProbe {
+        row_sha256: record.sha256.clone(),
+        work: None,
     };
+    if record.origin != ArtifactOrigin::Produced || record.missing_since.is_some() {
+        return nothing;
+    }
+    let (Some(rel), Ok(root)) = (record.rel_path.as_deref(), artifacts_root_for(record)) else {
+        return nothing;
+    };
+    let head = root.join(rel);
+    let Some(stamp) = stamp_at(&head) else {
+        // Absent is `verify`'s and `resolve_version_path`'s business, not this
+        // one; anything else is a store we cannot stat, and refusing the whole
+        // request over it would turn a permission problem into an outage.
+        return nothing;
+    };
+    if record.head_stamp() == Some(stamp) {
+        return nothing;
+    }
+    HeadProbe {
+        row_sha256: record.sha256.clone(),
+        work: Some(HeadWork {
+            slot: version_file_path(&head, record.version).ok(),
+            head,
+            is_text: is_text_kind_of(record),
+            stamp: Some(stamp),
+        }),
+    }
+}
+
+impl HeadProbe {
+    /// Phase 2 — **no database**, and it must stay that way (R32): the read and
+    /// the line diff are unbounded in the artifact's size, and
+    /// `Database::with_connection` holds the daemon's one connection for its
+    /// whole closure.
+    ///
+    /// `None` is a head with nothing to check, or one that vanished between the
+    /// `stat` and the read.
+    pub fn observe(self) -> Option<HeadObservation> {
+        let work = self.work?;
+        let bytes = match fs::read(&work.head) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!("Cannot check {} for a hand edit: {e}", work.head.display());
+                }
+                return None;
+            }
+        };
+        let sha256 = hash_head(&bytes);
+        // The same line-count path `put` takes, against the same thing: the
+        // bytes the previous version's row will point at. After an in-place
+        // hand edit they are gone, so this is `NULL` — exactly as it is for a
+        // `put` whose v(N-1) bytes were removed. It comes out real after an
+        // interrupted put, where the slot genuinely holds version N.
+        let (added_lines, removed_lines) = match (
+            sha256 != self.row_sha256 && work.is_text,
+            work.slot.as_deref().map(fs::read),
+        ) {
+            (true, Some(Ok(previous))) => {
+                let (added, removed) = line_counts(&previous, &bytes);
+                (Some(added), Some(removed))
+            }
+            _ => (None, None),
+        };
+        Some(HeadObservation {
+            row_sha256: self.row_sha256,
+            sha256,
+            size_bytes: bytes.len() as i64,
+            stamp: work.stamp,
+            added_lines,
+            removed_lines,
+        })
+    }
+}
+
+/// The rows of the rotation, and nothing else — no reads, no hashing, no
+/// unlinking. See the module docs for why version N's bytes cannot be
+/// preserved.
+///
+/// Runs inside whatever transaction the caller opened: the read path's own, or
+/// the `put` that is about to write over these very bytes.
+fn rotate_rows(
+    conn: &Connection,
+    record: &ArtifactRecord,
+    observation: &HeadObservation,
+) -> Result<ArtifactRecord> {
+    let rel = record
+        .rel_path
+        .as_deref()
+        .with_context(|| format!("artifact {} has no rel_path to rotate", record.id))?;
     let root = artifacts_root_for(record)?;
     let head = root.join(rel);
-
-    let bytes = match fs::read(&head) {
-        Ok(bytes) => bytes,
-        // Absent is `verify`'s and `resolve_version_path`'s business, not this
-        // one; anything else is a store we cannot read, and refusing the whole
-        // request over it would turn a permission problem into an outage.
-        Err(e) => {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!("Cannot check {} for a hand edit: {e}", head.display());
-            }
-            return Ok(None);
-        }
-    };
-    let sha256 = sha256_hex(&bytes);
-    if sha256 == record.sha256 {
-        return Ok(None);
-    }
-
-    let slot = version_file_path(&head, record.version)?;
-    let slot_rel = relative_to(&root, &slot)?;
+    let slot_rel = relative_to(&root, &version_file_path(&head, record.version)?)?;
     let version = record.version + 1;
-    let size_bytes = bytes.len() as i64;
 
     tracing::info!(
         "Artifact {} was edited outside OpenAlpaca; recording {} as version {version}",
@@ -1463,30 +1765,17 @@ fn rotate_user_edit(conn: &Connection, record: &ArtifactRecord) -> Result<Option
         head.display()
     );
 
-    let tx = conn.unchecked_transaction()?;
     // Version N's bytes were overwritten in place. Its row moves to the slot
     // they would have been rotated into, where nothing is — so reading v(N)
     // answers `Gone`, which is what happened to it.
-    tx.execute(
+    conn.execute(
         "UPDATE artifact_versions SET rel_path = ?1
          WHERE artifact_id = ?2 AND version = ?3",
         rusqlite::params![slot_rel, record.id, record.version],
     )?;
     rotate_crash_point(RotateStep::PreviousRepointed)?;
 
-    // The same line-count path `put` takes, against the same thing: the bytes
-    // the previous version's row now points at. After a hand edit they are
-    // gone, so this is `NULL` — exactly as it is for a `put` whose v(N-1) bytes
-    // were removed.
-    let (added_lines, removed_lines) = match (is_text_kind_of(record), fs::read(&slot)) {
-        (true, Ok(previous)) => {
-            let (a, r) = line_counts(&previous, &bytes);
-            (Some(a), Some(r))
-        }
-        _ => (None, None),
-    };
-
-    tx.execute(
+    conn.execute(
         "INSERT INTO artifact_versions
             (artifact_id, version, rel_path, sha256, size_bytes, note, author_agent_id,
              added_lines, removed_lines)
@@ -1495,11 +1784,11 @@ fn rotate_user_edit(conn: &Connection, record: &ArtifactRecord) -> Result<Option
             record.id,
             version,
             rel,
-            sha256,
-            size_bytes,
+            observation.sha256,
+            observation.size_bytes,
             USER_EDIT_NOTE,
-            added_lines,
-            removed_lines,
+            observation.added_lines,
+            observation.removed_lines,
         ],
     )?;
     rotate_crash_point(RotateStep::VersionInserted)?;
@@ -1508,19 +1797,58 @@ fn rotate_user_edit(conn: &Connection, record: &ArtifactRecord) -> Result<Option
     // this path has no caller to read it from. The next `put` prunes with the
     // real one, and one extra retained version until then beats trimming a
     // history by a default the owner may not have chosen.
-    tx.execute(
+    conn.execute(
         "UPDATE file_assets
-            SET sha256 = ?1, size_bytes = ?2, version = ?3,
-                version_count = (SELECT COUNT(*) FROM artifact_versions WHERE artifact_id = ?4),
+            SET sha256 = ?1, size_bytes = ?2, version = ?3, metadata_json = ?4,
+                version_count = (SELECT COUNT(*) FROM artifact_versions WHERE artifact_id = ?5),
                 updated_at = datetime('now')
-          WHERE id = ?4",
-        rusqlite::params![sha256, size_bytes, version, record.id],
+          WHERE id = ?5",
+        rusqlite::params![
+            observation.sha256,
+            observation.size_bytes,
+            version,
+            metadata_with_stamp(record.metadata_json.as_deref(), observation.stamp),
+            record.id,
+        ],
     )?;
 
-    let rotated = load_by_id(&tx, &record.id)?
-        .with_context(|| format!("artifact {} vanished inside its own rotation", record.id))?;
-    tx.commit()?;
-    Ok(Some(rotated))
+    load_by_id(conn, &record.id)?
+        .with_context(|| format!("artifact {} vanished inside its own rotation", record.id))
+}
+
+/// The head's bytes, hashed — the one place §4.8's check pays for the file.
+///
+/// Counted in test builds ([`head_hashes`]) so a test can prove the
+/// [`HeadStamp`] gate really does skip it, and hooked so one can prove the
+/// connection is free while it runs.
+fn hash_head(bytes: &[u8]) -> String {
+    #[cfg(test)]
+    {
+        HEAD_HASHES.with(|count| count.set(count.get() + 1));
+        let hook = ON_HEAD_HASH.with(|slot| slot.borrow().clone());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+    sha256_hex(bytes)
+}
+
+#[cfg(test)]
+thread_local! {
+    static HEAD_HASHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static ON_HEAD_HASH: std::cell::RefCell<Option<std::sync::Arc<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// How many heads this thread has hashed for the hand-edit check.
+#[cfg(test)]
+pub(crate) fn head_hashes() -> usize {
+    HEAD_HASHES.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn on_head_hash(hook: Option<std::sync::Arc<dyn Fn()>>) {
+    ON_HEAD_HASH.with(|slot| *slot.borrow_mut() = hook);
 }
 
 /// [`is_text_kind`] for a stored row, whose `kind` column may be `NULL`. An

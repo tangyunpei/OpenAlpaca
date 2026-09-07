@@ -176,8 +176,9 @@ fn visible(db: &Database, owner_id: &str, id: &str) -> Result<ArtifactRecord, Re
 /// upload writer to classify one — is projected from its own `mime_type`
 /// ([`ArtifactKind::for_mime`]), so this field is never `null` on the wire and
 /// the client's non-nullable `ArtifactKind` holds. `metadata` is
-/// `metadata_json` *parsed*, so a client never has to `JSON.parse` a string
-/// field.
+/// `metadata_json` *parsed* and stripped of the store's own head stamp
+/// (`ArtifactRecord::metadata`), so a client never has to `JSON.parse` a string
+/// field and never reads bookkeeping no writer put there.
 fn artifact_json(record: &ArtifactRecord, task_title: Option<&str>) -> serde_json::Value {
     serde_json::json!({
         "id": record.id,
@@ -195,10 +196,7 @@ fn artifact_json(record: &ArtifactRecord, task_title: Option<&str>) -> serde_jso
         "version": record.version,
         "version_count": record.version_count,
         "summary": record.summary,
-        "metadata": record
-            .metadata_json
-            .as_deref()
-            .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok()),
+        "metadata": record.metadata(),
         "created_at": record.created_at,
         "updated_at": record.updated_at,
         // Additive — the client type compiles unchanged against these.
@@ -380,9 +378,27 @@ pub(crate) async fn artifact_content(
         Ok(record) => record,
         Err(response) => return response,
     };
-    let (path, edit) = match ArtifactStore::new(db).resolve_content_with_edit(id, version) {
-        Ok(found) => found,
-        Err(e) => return store_error(&e),
+    // R32: the check hashes the head when its stamp says the bytes moved, so
+    // the whole resolution goes on a blocking thread — the hash itself runs
+    // between the store's two short locked sections, never inside one.
+    let owned_db = db.clone();
+    let owned_id = id.to_string();
+    let resolved = tokio::task::spawn_blocking(move || {
+        ArtifactStore::new(&owned_db).resolve_content_with_edit(&owned_id, version)
+    })
+    .await;
+    let (path, edit) = match resolved {
+        Ok(Ok(found)) => found,
+        Ok(Err(e)) => return store_error(&e),
+        // The blocking task panicked or was cancelled: neither is a store
+        // failure, so it does not go through `store_error`'s `DB_ERROR`.
+        Err(e) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "CONTENT_FAILED",
+                format!("the content task did not finish: {e}"),
+            );
+        }
     };
     if let Some(edited) = edit {
         announce_user_edit(bus, &edited);
