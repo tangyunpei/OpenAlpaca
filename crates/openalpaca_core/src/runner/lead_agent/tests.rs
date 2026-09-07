@@ -1806,3 +1806,80 @@ async fn with_no_steering_rail_the_resume_note_is_still_an_interjection() {
     );
     assert!(last.content.contains("Do not repeat side-effecting tool calls already recorded."));
 }
+
+/// What the rebuild had to leave out belongs in the **log** as well as in the
+/// model's context: the `resume` record names the trim (`trimmed_from_seq`
+/// plus its reason) and the rounds no result ever answered, so a later reader
+/// of the transcript sees the seam and the gap rather than inferring both
+/// from a round count.
+#[tokio::test]
+async fn the_resume_record_names_the_trim_and_the_rounds_it_dropped() {
+    use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+
+    let provider = ScriptedProvider::new(vec![scripted_response("carrying on", vec![])]);
+    let config = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
+    let dir = tempfile::tempdir().unwrap();
+    let service = SessionLogService::new(
+        dir.path().to_path_buf(),
+        None,
+        SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-resume");
+
+    let plan = crate::session_log::replay::ReplayPlan {
+        trimmed_from_seq: Some(40),
+        trim_reason: Some("the session log's oldest segments were removed".to_string()),
+        dropped_incomplete_rounds: 2,
+        ..replayed_round()
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    run_lead_agent(
+        &lead_subagent(),
+        "do the thing",
+        scripted_router(provider.clone()),
+        Arc::new(ToolRegistry::default()),
+        Arc::new(SharedContext::new()),
+        EventBus::default(),
+        None,
+        None,
+        "task-1",
+        "user-1",
+        "user-1:cli",
+        "cli",
+        &config,
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        Some(handle.clone()),
+        "lead::task-1",
+        "",
+        None,
+        fixture_skill_catalog(&tmp),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        Some(crate::session_log::replay::ResumeHistory {
+            plan,
+            inline_note: None,
+        }),
+    )
+    .await;
+    assert!(handle.flush().await);
+
+    let records = read_records(&dir.path().join("sess-resume")).unwrap();
+    let resume = records
+        .iter()
+        .find(|r| r.kind == "resume")
+        .expect("the resume record names the slice this run was primed from");
+    assert_eq!(resume.task_id.as_deref(), Some("task-1"));
+    assert_eq!(resume.data["trimmed_from_seq"], 40);
+    assert!(
+        resume.data["trimmed_reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("oldest segments")),
+        "{}",
+        resume.data
+    );
+    assert_eq!(resume.data["dropped_incomplete_rounds"], 2);
+}

@@ -2332,6 +2332,154 @@ fn a_compaction_keeps_the_retained_tail_and_every_round_after_it() {
     );
 }
 
+/// Seed a log whose records carry **explicit** seqs, and whose session-wide
+/// kinds (`log_trimmed`) carry no task id at all — the two things
+/// [`seed_records`] cannot express and a trimmed log is made of.
+fn seed_records_with_seq(
+    root: &Path,
+    session: &str,
+    records: &[(u64, &str, Option<&str>, serde_json::Value)],
+) {
+    let dir = root.join(session);
+    fs::create_dir_all(&dir).unwrap();
+    let mut out = String::new();
+    for (seq, kind, task_id, data) in records {
+        let mut line = serde_json::json!({
+            "v": 1,
+            "seq": seq,
+            "ts": "2026-09-06T10:00:00.000Z",
+            "type": kind,
+            "data": data,
+        });
+        if let Some(task_id) = task_id {
+            line["task_id"] = serde_json::Value::from(*task_id);
+        }
+        out.push_str(&serde_json::to_string(&line).unwrap());
+        out.push('\n');
+    }
+    fs::write(dir.join(LIVE_SEGMENT), out).unwrap();
+}
+
+/// A log whose oldest segments the per-session byte cap has taken hands the
+/// model rounds 20–40 as if they were the whole run — inviting it to re-do
+/// the side effects of rounds 1–19. The compaction path already establishes
+/// the honest pattern (name the gap, never summarise it) and a trimmed head
+/// gets the same: a note at the head of the rebuilt history, and the numbers
+/// on the plan so the `resume` record can state them.
+#[test]
+fn a_trimmed_log_names_the_gap_at_the_head_of_the_rebuilt_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_records_with_seq(
+        root,
+        "s1",
+        &[
+            // What the trim left behind: its own notice, and what came after.
+            (
+                40,
+                "log_trimmed",
+                None,
+                serde_json::json!({
+                    "from_seq": 1, "to_seq": 39, "segments": 2, "bytes_freed": 4096,
+                }),
+            ),
+            (
+                41,
+                "round",
+                Some("t1"),
+                round_record(20, "later", &[("tu-9", "file_read", serde_json::json!({}))]),
+            ),
+            (
+                42,
+                "tool_result",
+                Some("t1"),
+                tool_result_record("tu-9", "file_read", true, "ok"),
+            ),
+        ],
+    );
+
+    let plan = replay::rebuild(&root.join("s1"), "t1", 4).unwrap();
+
+    assert_eq!(
+        plan.trimmed_from_seq,
+        Some(40),
+        "the surviving history starts here"
+    );
+    let reason = plan.trim_reason.as_deref().expect("the trim is explained");
+    assert!(reason.contains("39"), "the removed range is named: {reason}");
+
+    let note = &plan.messages[0];
+    assert_eq!(note.role, openalpaca_llm::Role::User);
+    assert!(
+        note.content.starts_with("<log_trimmed"),
+        "the gap is named the way a compaction's is: {}",
+        note.content
+    );
+    assert!(note.content.contains("40"), "{}", note.content);
+    // The note is a note, not a replacement history: the round still replays.
+    assert_eq!(plan.rounds, 1);
+    assert_eq!(plan.messages[1].content, "later");
+}
+
+/// The other way a log is not whole: a record written only partially (the
+/// daemon died mid-write), which §5.4 calls end-of-log. The reader stops
+/// there, so what followed it in that segment was never read — and the
+/// resumed model is owed that fact rather than a history that looks complete.
+#[test]
+fn a_torn_record_is_named_in_the_rebuilt_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_records(
+        root,
+        "s1",
+        &[
+            ("round", "t1", round_record(1, "one", &[("tu-1", "file_read", serde_json::json!({}))])),
+            ("tool_result", "t1", tool_result_record("tu-1", "file_read", true, "ok")),
+        ],
+    );
+    // The `kill -9` signature: half a line, never terminated.
+    let live = root.join("s1").join(LIVE_SEGMENT);
+    let mut body = fs::read_to_string(&live).unwrap();
+    body.push_str("{\"v\":1,\"seq\":3,\"ts\":\"2026-09-06T10:00:02.000Z\",\"type\":\"tool_res");
+    fs::write(&live, body).unwrap();
+
+    let plan = replay::rebuild(&root.join("s1"), "t1", 4).unwrap();
+
+    assert_eq!(plan.rounds, 1, "what did parse is still replayed");
+    assert_eq!(
+        plan.trimmed_from_seq, None,
+        "nothing was lost from the head — the tear is at the end"
+    );
+    let reason = plan.trim_reason.as_deref().expect("the tear is explained");
+    assert!(
+        reason.contains("partially"),
+        "the note says what happened: {reason}"
+    );
+    let note = &plan.messages[0];
+    assert!(note.content.starts_with("<log_trimmed"), "{}", note.content);
+}
+
+/// A whole log says nothing: the note exists for a gap, and inventing one
+/// where there is none would teach the model to distrust a complete history.
+#[test]
+fn an_untrimmed_log_carries_no_gap_note() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_records(
+        root,
+        "s1",
+        &[
+            ("round", "t1", round_record(1, "one", &[("tu-1", "file_read", serde_json::json!({}))])),
+            ("tool_result", "t1", tool_result_record("tu-1", "file_read", true, "ok")),
+        ],
+    );
+
+    let plan = replay::rebuild(&root.join("s1"), "t1", 4).unwrap();
+    assert_eq!(plan.trimmed_from_seq, None);
+    assert_eq!(plan.trim_reason, None);
+    assert_eq!(plan.messages[0].content, "one");
+}
+
 /// A session holds every run started from that conversation (§5.1) — a
 /// replay must never hand one run the rounds of the run beside it.
 #[test]

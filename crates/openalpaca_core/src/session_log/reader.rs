@@ -157,6 +157,21 @@ pub fn read_records_after(
     read_records_page(dir, after_seq, limit, usize::MAX)
 }
 
+/// [`read_records_after`], plus whether reading stopped at a **torn record**.
+///
+/// A line that does not parse is §5.4's end-of-log, and the reader is the only
+/// place that can see one: by the time a caller has the records back, a
+/// half-written line is indistinguishable from a log that simply ended there.
+/// §5.6c's replay needs the difference — a torn record means the history it
+/// rebuilt is missing whatever followed, which the resumed model is owed.
+pub fn read_records_after_torn(
+    dir: &Path,
+    after_seq: Option<u64>,
+    limit: usize,
+) -> io::Result<(Vec<LoggedRecord>, bool)> {
+    read_records_page_inner(dir, after_seq, limit, usize::MAX)
+}
+
 /// The cursor form with a byte budget as well as a record count.
 ///
 /// Two things keep a page cheap, both of which matter now that a GUI polls
@@ -183,8 +198,20 @@ pub fn read_records_page(
     limit: usize,
     max_bytes: usize,
 ) -> io::Result<Vec<LoggedRecord>> {
+    read_records_page_inner(dir, after_seq, limit, max_bytes).map(|(records, _torn)| records)
+}
+
+/// [`read_records_page`], reporting whether a segment ended at an unparseable
+/// line. See [`read_records_after_torn`] for who needs to know.
+fn read_records_page_inner(
+    dir: &Path,
+    after_seq: Option<u64>,
+    limit: usize,
+    max_bytes: usize,
+) -> io::Result<(Vec<LoggedRecord>, bool)> {
     let mut out = Vec::new();
     let mut bytes = 0usize;
+    let mut torn = false;
     for path in segments(dir)? {
         if out.len() >= limit || bytes >= max_bytes {
             break;
@@ -213,6 +240,7 @@ pub fn read_records_page(
             }
             let Ok(record) = parse_record(&line) else {
                 // §5.4: an unparseable line is end-of-log for this segment.
+                torn = true;
                 break;
             };
             if after_seq.is_some_and(|cursor| record.seq <= cursor) {
@@ -225,7 +253,7 @@ pub fn read_records_page(
             }
         }
     }
-    Ok(out)
+    Ok((out, torn))
 }
 
 /// True when an archived segment's whole range is at or before the cursor.

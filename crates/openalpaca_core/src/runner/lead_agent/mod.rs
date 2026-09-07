@@ -490,6 +490,8 @@ pub async fn run_lead_agent(
                         "compacted_from_seq": plan.compacted_from_seq,
                         "compacted_rounds_dropped": plan.compacted_rounds_dropped,
                         "dropped_incomplete_rounds": plan.dropped_incomplete_rounds,
+                        "trimmed_from_seq": plan.trimmed_from_seq,
+                        "trimmed_reason": plan.trim_reason,
                         "spills_referenced": plan.spills_referenced,
                         "missing_spills": plan.missing_spills,
                         "interjection": if history.inline_note.is_some() {

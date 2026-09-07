@@ -34,7 +34,7 @@
 //!   carries counts, not the summary text, and inventing one would be worse
 //!   than saying what happened.
 
-use super::reader::{LoggedRecord, read_records_after};
+use super::reader::{LoggedRecord, read_records_after_torn};
 use super::record::RESULTS_DIR;
 use super::spill_stub;
 use chrono::{DateTime, Utc};
@@ -76,6 +76,16 @@ pub struct ReplayPlan {
     /// rather than flagged so the `resume` record **states** the gap instead
     /// of leaving it to be inferred from a round count (R67).
     pub dropped_incomplete_rounds: usize,
+    /// The seq the surviving history starts at, when the log is **not whole**
+    /// at its head: the oldest segments were evicted by the per-session byte
+    /// cap, or the records before this one are otherwise gone. `None` means
+    /// nothing was lost from the head — not that nothing was lost at all (see
+    /// [`ReplayPlan::trim_reason`], which a torn record also sets).
+    pub trimmed_from_seq: Option<u64>,
+    /// Why part of the log is missing, in one clause. Present exactly when the
+    /// rebuild found evidence the log is not whole; it is what the head note
+    /// and the `resume` record both say.
+    pub trim_reason: Option<String>,
     /// `tool_result`s whose payload lives in `results/`.
     pub spills_referenced: usize,
     /// …of which the file is gone (the sweep took it): the preview is
@@ -87,11 +97,16 @@ pub struct ReplayPlan {
 }
 
 impl ReplayPlan {
-    /// Whether there is anything to resume from. `false` is §5.6c's "gutted
+    /// Whether there is anything to resume from. `true` is §5.6c's "gutted
     /// log", which the launch verb answers as a clean refusal pointing at
     /// `rerun`.
+    ///
+    /// It is the **rounds** that decide, not the message count: the notes this
+    /// rebuild puts at the head (a trimmed log, a compaction) describe a
+    /// history, and describing one that is not there would resume a run over
+    /// nothing but an apology.
     pub fn is_empty(&self) -> bool {
-        self.messages.is_empty()
+        self.rounds == 0
     }
 }
 
@@ -174,15 +189,41 @@ pub fn rebuild(session_dir: &Path, task_id: &str, tail_keep: usize) -> io::Resul
     let mut slots: HashMap<String, (usize, usize)> = HashMap::new();
     let mut compaction: Option<(u64, u64)> = None; // (record seq, preserved_from_seq)
 
+    // What the log itself says it lost, and what the rebuild noticed: a
+    // trimmed head is invisible from the records that survived it, so the
+    // evidence is gathered as the pages are walked (see `trim_reason`).
+    let mut first_seq: Option<u64> = None;
+    let mut trimmed_range: Option<(u64, u64)> = None;
+    let mut orphan_results = 0usize;
+    let mut torn_record = false;
+
     let mut cursor: Option<u64> = None;
     loop {
-        let page = read_records_after(session_dir, cursor, PAGE)?;
+        let (page, torn) = read_records_after_torn(session_dir, cursor, PAGE)?;
+        torn_record |= torn;
         if page.is_empty() {
             break;
         }
         cursor = page.last().map(|r| r.seq);
         let short = page.len() < PAGE;
         for record in &page {
+            if first_seq.is_none() {
+                first_seq = Some(record.seq);
+            }
+            // §5.4's trim notice carries no task id — it is a fact about the
+            // session's log, not about one run in it — so it is read before
+            // the run filter, which is why the first cut of this module never
+            // saw it.
+            if record.kind == "log_trimmed" {
+                let from = record.data.get("from_seq").and_then(Value::as_u64);
+                let to = record.data.get("to_seq").and_then(Value::as_u64);
+                if let (Some(from), Some(to)) = (from, to) {
+                    trimmed_range = Some(match trimmed_range {
+                        Some((lo, hi)) => (lo.min(from), hi.max(to)),
+                        None => (from, to),
+                    });
+                }
+            }
             if record.task_id.as_deref() != Some(task_id) {
                 continue;
             }
@@ -207,7 +248,9 @@ pub fn rebuild(session_dir: &Path, task_id: &str, tail_keep: usize) -> io::Resul
                     };
                     let Some(&(round, slot)) = slots.get(id) else {
                         // A result whose round is not in the log — its segment
-                        // was rotated away. Nothing to attach it to.
+                        // was rotated away. Nothing to attach it to, and proof
+                        // that rounds of this run are missing.
+                        orphan_results += 1;
                         continue;
                     };
                     let content = result_text(session_dir, record, &mut plan);
@@ -262,6 +305,26 @@ pub fn rebuild(session_dir: &Path, task_id: &str, tail_keep: usize) -> io::Resul
         rounds.drain(..plan.compacted_rounds_dropped);
     }
 
+    // What the log lost before this rebuild ever saw it (§5.4's trim, a torn
+    // record), named at the head of the history the same way a compaction's
+    // gap is. Without it the model is handed rounds 20–40 as if they were the
+    // whole run and told to continue — an invitation to re-do the side effects
+    // of rounds 1–19.
+    (plan.trimmed_from_seq, plan.trim_reason) = trim_evidence(
+        first_seq,
+        trimmed_range,
+        orphan_results,
+        torn_record,
+    );
+    // A note with no history behind it is not a history: a run whose rounds
+    // are all gone is `is_empty`, which the launch verb answers as the clean
+    // refusal pointing at `rerun`.
+    if let Some(ref reason) = plan.trim_reason
+        && !rounds.is_empty()
+    {
+        plan.messages
+            .push(ChatMessage::user(&trim_note(plan.trimmed_from_seq, reason)));
+    }
     if plan.compacted_rounds_dropped > 0 {
         plan.messages.push(ChatMessage::user(&compaction_note(
             plan.compacted_rounds_dropped,
@@ -392,6 +455,67 @@ fn spill_file_present(session_dir: &Path, rel: &str) -> bool {
         return false;
     }
     session_dir.join(RESULTS_DIR).join(name).is_file()
+}
+
+/// What the log says — and what the rebuild noticed — about its own gaps.
+///
+/// Returns the seq the surviving history starts at (only when the **head** is
+/// gone: a log always starts at seq 1, so a first record above it means
+/// records were removed) and the one-clause reason the note and the `resume`
+/// record both carry. `(None, None)` is a whole log.
+fn trim_evidence(
+    first_seq: Option<u64>,
+    trimmed_range: Option<(u64, u64)>,
+    orphan_results: usize,
+    torn_record: bool,
+) -> (Option<u64>, Option<String>) {
+    let head_lost = first_seq.is_some_and(|seq| seq > 1) || trimmed_range.is_some();
+    let mut reasons: Vec<String> = Vec::new();
+    match trimmed_range {
+        // The trim notice survived the trim, so the range it took is known.
+        Some((from, to)) => reasons.push(format!(
+            "the session log's oldest segments were removed by its size cap (seq {from}–{to})"
+        )),
+        None if head_lost => {
+            reasons.push("the session log's oldest records are no longer on disk".to_string())
+        }
+        None => {}
+    }
+    if orphan_results > 0 {
+        reasons.push(format!(
+            "{orphan_results} of this run's recorded tool results have no surviving round"
+        ));
+    }
+    if torn_record {
+        reasons.push(
+            "a record was written only partially (the daemon died mid-write), so what followed it \
+             could not be read"
+                .to_string(),
+        );
+    }
+    if reasons.is_empty() {
+        return (None, None);
+    }
+    (head_lost.then_some(first_seq).flatten(), Some(reasons.join("; ")))
+}
+
+/// The one message that stands in for a history the log no longer holds.
+///
+/// Same contract as [`compaction_note`]: name the gap, never summarise it and
+/// never paper over it. A resumed model that is shown the tail of a run as if
+/// it were the whole run will re-do the side effects of the head.
+fn trim_note(from_seq: Option<u64>, reason: &str) -> String {
+    match from_seq {
+        Some(seq) => format!(
+            "<log_trimmed from_seq=\"{seq}\">Part of this run's transcript is unavailable: \
+             {reason}. History before log seq {seq} is gone — earlier steps of this run are not \
+             shown here, and work they recorded may already be done.</log_trimmed>"
+        ),
+        None => format!(
+            "<log_trimmed>Part of this run's transcript is unavailable: {reason}. The steps it \
+             held are not shown here, and work they recorded may already be done.</log_trimmed>"
+        ),
+    }
 }
 
 /// The one message that stands in for the head a compaction dropped.
