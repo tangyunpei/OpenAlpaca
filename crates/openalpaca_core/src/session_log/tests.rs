@@ -1066,6 +1066,83 @@ async fn a_snapshot_without_a_usable_log_is_refused() {
     );
 }
 
+/// An idle-closed writer must not wedge every later snapshot request: the
+/// handle asks the service for a fresh one under the same id and retries on
+/// it — the same respawn `an_idle_writer_closes_and_the_next_emit_respawns_it`
+/// already proves for `emit` (Task 56 fix round 1, Important #1).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_snapshot_reopens_a_writer_that_idled_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let svc = service_with(
+        &dir,
+        None,
+        SessionLogLimits {
+            idle_close: Duration::from_millis(50),
+            ..SessionLogLimits::default()
+        },
+    )
+    .into_arc();
+    let handle = svc.handle_for("sess-reopen-snap");
+    handle.emit(Record::new(RecordType::UserMsg).with_data(serde_json::json!({})));
+    assert!(handle.flush().await);
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(handle.is_closed(), "the idle writer exited");
+
+    let source = work.path().join("notes.txt");
+    fs::write(&source, "still here").unwrap();
+    let taken = handle
+        .snapshot(spec(&source, "notes.txt"))
+        .await
+        .expect("a fresh writer under the same id takes the image");
+
+    let session_dir = dir.path().join("sess-reopen-snap");
+    assert_eq!(
+        fs::read_to_string(session_dir.join(&taken.rel)).unwrap(),
+        "still here",
+        "the fresh writer actually took the image"
+    );
+}
+
+/// Without a service to ask — the handle was never wrapped by
+/// [`SessionLogService::into_arc`] — a closed writer cannot be reopened. The
+/// refusal names the live segment's path so there is somewhere to look,
+/// rather than the bare "the session log writer is gone" that used to wedge
+/// every later overwrite silently.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_snapshot_with_no_service_to_reopen_names_the_log_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    // Not `.into_arc()`: this handle's `service` stays an empty `Weak`.
+    let svc = service_with(
+        &dir,
+        None,
+        SessionLogLimits {
+            idle_close: Duration::from_millis(50),
+            ..SessionLogLimits::default()
+        },
+    );
+    let handle = svc.handle_for("sess-unreopenable");
+    handle.emit(Record::new(RecordType::UserMsg).with_data(serde_json::json!({})));
+    assert!(handle.flush().await);
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(handle.is_closed(), "the idle writer exited");
+
+    let source = work.path().join("a.txt");
+    fs::write(&source, "content").unwrap();
+    let refused = handle
+        .snapshot(spec(&source, "a.txt"))
+        .await
+        .expect_err("nothing can reopen a writer with no service behind it");
+    let expected_path = log_path(dir.path(), "sess-unreopenable");
+    assert!(
+        refused.contains(expected_path.to_str().unwrap()),
+        "{refused}"
+    );
+}
+
 /// §5.7's images are bounded by the same caps as §5.4's spills: a trim that
 /// drops a segment takes the snapshots that segment referenced with it, and
 /// leaves the ones surviving records still name.

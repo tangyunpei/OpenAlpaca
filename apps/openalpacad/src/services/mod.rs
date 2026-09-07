@@ -102,7 +102,13 @@ pub async fn initialize_services(
             if let Some(report) = swept {
                 service = service.with_last_sweep(report);
             }
-            shared_context.set_session_log(Arc::new(service));
+            // `into_arc` rather than `Arc::new`: it gives the service a
+            // `Weak` handle to itself first, which is what lets
+            // `SessionLogHandle::snapshot` ask for a fresh writer when an
+            // idle-closed or dead one would otherwise wedge every later
+            // `file_write` overwrite in a run (Task 56 fix round 1,
+            // Important #1).
+            shared_context.set_session_log(service.into_arc());
         }
         Err(e) => tracing::warn!("Session event log disabled — no sessions directory: {e}"),
     }

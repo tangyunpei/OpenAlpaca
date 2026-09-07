@@ -52,7 +52,7 @@ pub use writer::SessionLogLimits;
 use dashmap::DashMap;
 use openalpaca_storage::Database;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{mpsc, oneshot};
 use writer::Msg;
@@ -85,6 +85,14 @@ pub struct SessionLogService {
     /// round 1, Important #4: the wire field is a per-boot total and must
     /// never go down).
     retired_dropped: AtomicU64,
+    /// This service's own address, once it has one. Empty (`Weak::new()`)
+    /// until [`into_arc`](Self::into_arc) wraps it — every
+    /// [`SessionLogHandle`] this service ever hands out carries a clone, so
+    /// [`SessionLogHandle::snapshot`] can ask for a fresh writer under the
+    /// same id when the one it was given has since closed (Task 56 fix round
+    /// 1, Important #1), the same way [`open`](Self::open) already does for
+    /// every turn (`simple_query_handler.rs:230-238`).
+    self_ref: Weak<Self>,
 }
 
 impl SessionLogService {
@@ -107,6 +115,7 @@ impl SessionLogService {
             started: DashMap::new(),
             last_sweep: None,
             retired_dropped: AtomicU64::new(0),
+            self_ref: Weak::new(),
         }
     }
 
@@ -114,6 +123,19 @@ impl SessionLogService {
     pub fn with_last_sweep(mut self, report: sweep::SweepReport) -> Self {
         self.last_sweep = Some(report);
         self
+    }
+
+    /// Wrap this service in the `Arc` every caller ends up holding it in
+    /// anyway (`SharedContext::set_session_log`), while giving it back a
+    /// [`Weak`] to itself first: without this, a handle whose writer has
+    /// closed has no way to ask the service for a fresh one, and
+    /// [`SessionLogHandle::snapshot`] can only refuse (Task 56 fix round 1,
+    /// Important #1). Call this last, after any `with_*` builder.
+    pub fn into_arc(self) -> Arc<Self> {
+        Arc::new_cyclic(|weak| Self {
+            self_ref: weak.clone(),
+            ..self
+        })
     }
 
     /// The boot sweep's report — `None` when no pass ran (the active set was
@@ -250,16 +272,19 @@ impl SessionLogService {
     fn spawn(&self, session_id: &str) -> SessionLogHandle {
         let (tx, rx) = mpsc::channel(self.limits.channel_capacity.max(1));
         let written_seq = Arc::new(AtomicU64::new(0));
+        let dir = self.session_dir(session_id);
         let handle = SessionLogHandle {
             session_id: Arc::from(session_id),
+            session_dir: dir.clone(),
             tx,
             dropped: Arc::new(AtomicU64::new(0)),
             written_seq: written_seq.clone(),
             next_spill: Arc::new(AtomicU64::new(1)),
+            service: self.self_ref.clone(),
         };
         tokio::spawn(writer::run(
             session_id.to_string(),
-            self.session_dir(session_id),
+            dir,
             rx,
             self.db.clone(),
             self.limits.clone(),
@@ -278,6 +303,11 @@ impl SessionLogService {
 #[derive(Clone)]
 pub struct SessionLogHandle {
     session_id: Arc<str>,
+    /// This session's directory, named in a refusal when
+    /// [`snapshot`](Self::snapshot) cannot get a live writer to ask — kept
+    /// here rather than re-derived from `service` so the path can still be
+    /// named even when the service itself is gone.
+    session_dir: PathBuf,
     tx: mpsc::Sender<Msg>,
     dropped: Arc<AtomicU64>,
     /// The highest `seq` the writer has actually put on disk. Published by the
@@ -288,6 +318,13 @@ pub struct SessionLogHandle {
     /// The next spill number this boot will hand out, never below
     /// `written_seq + 1`.
     next_spill: Arc<AtomicU64>,
+    /// The service this handle came from, so [`snapshot`](Self::snapshot) can
+    /// ask it for a live writer under the same id when this handle's own has
+    /// closed (Task 56 fix round 1, Important #1). `Weak` because a handle
+    /// must never be what keeps the service alive, and empty when the
+    /// service was never wrapped by [`SessionLogService::into_arc`] — in
+    /// which case a closed writer simply cannot be reopened.
+    service: Weak<SessionLogService>,
 }
 
 /// A handle prints as the session it writes for: `ToolContext` carries one and
@@ -349,16 +386,54 @@ impl SessionLogHandle {
     /// **after** the bytes are in place. A copy that lands but whose record
     /// does not is reclaimed rather than left behind (R33: a file no record
     /// references is an uncommitted write).
+    ///
+    /// **Reopens a closed writer once before giving up** (Task 56 fix round
+    /// 1, Important #1): an idle-closed or dead writer left this handle's
+    /// channel closed long before this call, and without this the refusal
+    /// above would wedge every future overwrite in the run for no disk
+    /// reason at all. So a closed channel first asks
+    /// [`SessionLogService::handle_for`] for a live writer under the same
+    /// id — exactly what [`SessionLogService::open`] already does on every
+    /// turn (`simple_query_handler.rs:230-238`) — and retries on it. Only
+    /// when that is also impossible (the service itself is gone, or the
+    /// fresh handle is closed too) does this refuse, naming the log path so
+    /// there is somewhere for a human to look.
     pub async fn snapshot(&self, spec: SnapshotSpec) -> Result<FileSnapshot, String> {
+        if let Some(outcome) = self.try_snapshot(spec.clone()).await {
+            return outcome;
+        }
+        if let Some(service) = self.service.upgrade() {
+            let fresh = service.handle_for(&self.session_id);
+            if let Some(outcome) = fresh.try_snapshot(spec).await {
+                return outcome;
+            }
+        }
+        Err(format!(
+            "the session log at {} could not be reopened",
+            self.log_path().display()
+        ))
+    }
+
+    /// Send one snapshot request on this handle's own channel and wait for
+    /// the writer's answer. `None` means this handle's writer is already
+    /// gone — the signal [`snapshot`](Self::snapshot) uses to try reopening
+    /// rather than treating it as the final answer.
+    async fn try_snapshot(&self, spec: SnapshotSpec) -> Option<Result<FileSnapshot, String>> {
         let (ack, wait) = oneshot::channel();
         let request = Box::new(writer::SnapshotRequest { spec, ack });
         if self.tx.send(Msg::Snapshot(request)).await.is_err() {
-            return Err("the session log writer is gone".to_string());
+            return None;
         }
-        match wait.await {
+        Some(match wait.await {
             Ok(outcome) => outcome,
             Err(_) => Err("the session log writer did not answer".to_string()),
-        }
+        })
+    }
+
+    /// Where this session's live segment lives, for a refusal that has no
+    /// live writer to ask.
+    fn log_path(&self) -> PathBuf {
+        self.session_dir.join(LIVE_SEGMENT)
     }
 
     /// Reserve the `results/` reference for a tool result too large to sit

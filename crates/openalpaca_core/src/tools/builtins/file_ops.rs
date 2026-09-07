@@ -352,26 +352,33 @@ mod tests {
     use super::*;
     use crate::session_log::{RecordType, SNAPSHOTS_DIR, SessionLogLimits, SessionLogService};
     use std::fs;
+    use std::time::Duration;
 
     // ── §5.7: the pre-edit image `file_write` takes ─────────────────
 
     /// A workspace, a sessions root and a live handle for one session — the
     /// three things every snapshot test needs.
+    ///
+    /// `service` is `Arc`, via [`SessionLogService::into_arc`] rather than a
+    /// plain `Arc::new`: that is what gives a handle a way back to the
+    /// service, which is what a fix-round-1 test needs to prove a closed
+    /// writer gets reopened rather than wedging every later overwrite.
     struct Bench {
         work: tempfile::TempDir,
         sessions: tempfile::TempDir,
-        service: SessionLogService,
+        service: Arc<SessionLogService>,
     }
 
     fn bench() -> Bench {
+        bench_with_limits(SessionLogLimits::default())
+    }
+
+    fn bench_with_limits(limits: SessionLogLimits) -> Bench {
         let work = tempfile::tempdir().unwrap();
         let sessions = tempfile::tempdir().unwrap();
-        let service = SessionLogService::new(
-            sessions.path().to_path_buf(),
-            None,
-            SessionLogLimits::default(),
-            "test".to_string(),
-        );
+        let service =
+            SessionLogService::new(sessions.path().to_path_buf(), None, limits, "test".to_string())
+                .into_arc();
         Bench {
             work,
             sessions,
@@ -561,6 +568,53 @@ mod tests {
             fs::read_to_string(bench.work.path().join("notes.txt")).unwrap(),
             "precious",
             "the file is unchanged"
+        );
+    }
+
+    /// A writer that idles out mid-run must not wedge every later overwrite:
+    /// the next `file_write` over the same session gets a fresh snapshot
+    /// through a writer reopened under the same id (Task 56 fix round 1,
+    /// Important #1).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_write_after_the_writer_idles_out_gets_a_fresh_snapshot() {
+        let bench = bench_with_limits(SessionLogLimits {
+            idle_close: Duration::from_millis(50),
+            ..SessionLogLimits::default()
+        });
+        let tool = bench.tool(None);
+        let ctx = bench.ctx("sess-idle-write");
+        fs::write(bench.work.path().join("notes.txt"), "first draft").unwrap();
+
+        // Drive the writer up, then let it idle out before touching it again.
+        assert!(ctx.session_log.as_ref().unwrap().flush().await);
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(
+            ctx.session_log.as_ref().unwrap().is_closed(),
+            "the idle writer exited"
+        );
+
+        let result = tool
+            .execute_with_context(
+                &serde_json::json!({"path": "notes.txt", "content": "second draft"}),
+                &ctx,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "an idle-closed writer must not wedge the overwrite: {result:?}"
+        );
+
+        assert_eq!(
+            fs::read_to_string(bench.work.path().join("notes.txt")).unwrap(),
+            "second draft",
+            "the write happened"
+        );
+        let images = bench.images("sess-idle-write");
+        assert_eq!(images.len(), 1, "{images:?}");
+        assert_eq!(
+            fs::read_to_string(&images[0]).unwrap(),
+            "first draft",
+            "the fresh writer still took the pre-edit image"
         );
     }
 
