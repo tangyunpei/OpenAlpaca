@@ -63,11 +63,6 @@ export function invalidationKeysFor(
     case "workflow_steered":
       return [qk.tasks.all()];
 
-    // A subagent node changes one run's timeline, not the run list, so this
-    // refreshes that run only rather than re-listing on every node transition.
-    case "dag_node_status":
-      return [qk.tasks.detail(event.task_id), qk.tasks.timeline(event.task_id)];
-
     // A follow-up queued or cancelled changes the lane's pending list; the
     // queued half also changes what the run list will do next (the daemon
     // autostarts one when a workflow finalizes).

@@ -8,6 +8,7 @@ import {
   nextBackoff,
   type ResyncSignal,
   type ServerEvent,
+  type ServerEventType,
   type SocketLike,
 } from "./events";
 import type { ConnectionInfo } from "./connection";
@@ -407,5 +408,17 @@ describe("DaemonEventsClient", () => {
     expect(refresh).toHaveBeenCalledTimes(2);
 
     client.disconnect();
+  });
+});
+
+describe("ServerEvent union", () => {
+  // P9 (Phase 8): `dag_node_status` was deleted from the wire union — the GUI
+  // has rendered `subagent_span` exclusively since T32. If this variant were
+  // ever reintroduced, the assignment below would stop failing to type-check
+  // and `bun run check` would fail on an unused `@ts-expect-error` directive.
+  it("no longer admits dag_node_status", () => {
+    // @ts-expect-error "dag_node_status" was removed from ServerEventType (P9)
+    const legacy: ServerEventType = "dag_node_status";
+    expect(legacy).toBe("dag_node_status");
   });
 });

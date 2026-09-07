@@ -98,12 +98,6 @@ describe("invalidationKeysFor", () => {
     ).toEqual([qk.sessions.all(), qk.chat.all()]);
   });
 
-  it("scopes a subagent node to its own run", () => {
-    expect(
-      invalidationKeysFor(event("dag_node_status", { task_id: "run-1" })),
-    ).toEqual([qk.tasks.detail("run-1"), qk.tasks.timeline("run-1")]);
-  });
-
   // ADR-030 §9.5. Skills and agents because a plugin's contributions come and
   // go with it; connectors because a plugin may declare one.
   it("refreshes everything an extension contributes when its state changes", () => {
