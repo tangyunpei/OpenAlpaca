@@ -209,11 +209,11 @@ below for what shipped). The design's `ARTS[]` fixture shape is:
 | `Copy log path`                                                         | ✅ **GAP-14, closed** — `GET /v1/status.log_path` = `state/logs/daemon.log` when the CLI wrote one, else `null` (the button is inert with the reason). The CLI rotates it at 16 MB, keeping three generations                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | **Storage** — `uploads` / `produced`                                    | ✅ `GET /v1/status.upload_bytes` / `.produced_bytes` — §4.8's two numbers, never one: agent output is informational and never charged against the upload cap                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | session-log sweep line                                                  | ✅ `GET /v1/status.sessions.last_sweep` (§5.4's boot pass — bytes freed, sessions evicted, `over_cap_after`) and `.dropped_records`. Not in the design: the caps are invisible until they bite, so the panel says what the last pass did                                                                                                                                                                                                                                                                                                                                                                                          |
-| `Today: {{ spend }} of $5.00 cap · 15 runs · 41k tokens`                | ⚠️ spend from `GET /v1/orchestrator/config.daily_cost_usd` (GAP-08a, resolved `7dbb988`); tokens from `GET /v1/llm/usage/daily?date=` summed client-side (no other source); run count from `GET /v1/tasks?limit=…` filtered client-side; **the cap is not served, by design — no daily budget (N4)** — **GAP-08c**                                                                                                                                                                                                                                                                                                                |
+| `Today: {{ spend }} of $5.00 cap · 15 runs · 41k tokens`                | ✅ **GAP-08c, closed (T50)** — spend and tokens from `GET /v1/usage/summary?window=today`; run count from `GET /v1/tasks?limit=…` filtered client-side **on the summary's UTC `date`**, so all three are one day. There is no `of $5.00 cap` denominator to draw: spend is not capped daily by design (N4), and the card names the two caps that are — per workflow and per agent turn                                                                                                                                                                                                                                            |
 | **Models & keys** — provider rows                                       | ✅ `GET /v1/settings/llm` (full `LlmConfig`), `GET /v1/settings/llm/status` (`key_health()`), `GET /v1/settings/llm/providers/usage` → `ProviderUsageSummary[] { provider, total_cost_usd, total_tokens, total_requests, health, external_usage? }`                                                                                                                                                                                                                                                                                                                                                                               | ⚠️ `health` is hardcoded `"healthy"` in `get_provider_usage`                                                                                         |
 | model chips per provider                                                | ✅ `GET /v1/models`, `POST /v1/models/refresh`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |                                                                                                                                                      |
 | `key added 12 Jul`                                                      | ⚠️ present inside the `GET /v1/settings/llm` config payload; verify the field survives redaction before relying on it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `41k tok today` per provider                                            | ⚠️ `ProviderUsageSummary.total_tokens` is **lifetime**, not today; per-day-per-provider requires client math over `/v1/llm/usage?limit=` (`LlmCallLog { timestamp, agent_id, task_id, provider, model, key_id, input_tokens, output_tokens, cost_usd, status, latency_ms, error_message }`) — **GAP-08c**                                                                                                                                                                                                                                                                                                                         |
+| `41k tok today` per provider                                            | ✅ **GAP-08c, closed (T50)** — `GET /v1/usage/summary.by_provider[] { provider, usd, calls, tokens }`, grouped out of that UTC day's `llm_call_log` rows. `ProviderUsageSummary.total_tokens` on `/v1/settings/llm/providers/usage` is still lifetime and is no longer shown as "today"                                                                                                                                                                                                                                                                                                                                           |
 | `Add provider` / key CRUD                                               | ✅ `PUT /v1/settings/llm` (upsert), `DELETE /v1/settings/llm/keys/{provider}/{key_id}`, `PUT .../keys/reorder`, `PUT .../keys/priority`, `POST .../validate`, `GET .../credentials`, `POST .../credentials/rescan`, `GET .../cli-backends`                                                                                                                                                                                                                                                                                                                                                                                        |                                                                                                                                                      |
 | provider on/off toggle                                                  | ✅ `PUT /v1/settings/llm/providers/{provider}/enabled` `{ enabled }` → `200 { id, enabled, loaded, warning }`; `404 PROVIDER_NOT_FOUND`, `409 PROVIDER_IS_DEFAULT` when it serves the default model, `409 DEFAULT_MODEL_UNRESOLVED` when the default model places nowhere. Writes `llm.toml` through the one atomic writer, then unloads or reloads the provider live                                                                                                                                                                                                                                                             |
 | **Connectors** rows                                                     | ✅ **GAP-17 detail half, closed (T49)** — `GET /v1/connectors` → `[{ id, name, status, configured, source, registered, messages_7d }]`. `name` is the connector's own (`ConnectorFactory::display_name`), `source` is the attribution token `messages_7d` was grouped by, `registered` is whether the manager holds a spawned handle                                                                                                                                                                                                                                                                                              | MCP servers and plugin-declared connectors still do not appear — a plugin that declares one and never registers it is the client-side `unwired` join |
@@ -609,7 +609,8 @@ f64` from one grouped `cost_for_tasks` query per page (`0.0` for a task with no
 2. **Today's spend — RESOLVED (`7dbb988`, Phase 0, GAP-08a).**
    `GET /v1/orchestrator/config.daily_cost_usd` now sums today's UTC `llm_usage_daily`
    rows via `query_daily_usage`, replacing the hardcoded `0.0` below.
-3. **The cap and a real summary rollup — still open, renamed GAP-08c.** See below.
+3. **The cap and a real summary rollup — RESOLVED (Phase 8 item 7, GAP-08c).**
+   `GET /v1/usage/summary?window=today`. See below.
 
 **Proposal (implemented for 1 and 2):**
 
@@ -624,32 +625,51 @@ GET /v1/llm/usage?task_id=b41c8e02&limit=200   → LlmCallLog[]
 
 ### GAP-08c — No usage-summary rollup or served cost cap
 
-**UI needs:** `41k tok today` per provider (today, not lifetime), and a served spend
-cap so the design's progress bar has a denominator. Per **N4** (settled — no daily
-budget, only per-workflow/per-turn caps), there is **no** `daily_*` cap to serve; the
-summary's `caps` object carries the per-workflow and per-turn `max_cost` values instead,
-and today's total ships as an unbounded figure.
+> **Closed in Phase 8 (item 7, T50).** `GET /v1/usage/summary?window=today` serves today's total, its per-provider breakdown and the two caps that actually bound spend. Per **N4** there is no daily budget and none is coming, so the total ships with no denominator and the design's progress bar stays undrawn _by decision_ — which is what the panel now says.
 
-**Why nothing fits:** `ProviderUsageSummary.total_tokens` is `all_provider_usage()`,
-lifetime since boot, not a per-day figure — there is no per-day-per-provider rollup, and
-`execution.max_cost` / `orchestrator.costs.*` live in config with no route (the only
-daemon-config route, `/v1/daemon/config/providers`, returns web-search settings only).
+**UI needs:** `41k tok today` per provider (today, not lifetime), and a spend cap so
+the design's progress bar has a denominator.
 
-**Proposal:**
+**What shipped:**
 
 ```
 GET /v1/usage/summary?window=today
 → 200 {
-  "date": "2026-08-31",              # authoritative UTC date — client's local
-                                      # `todayIsoDate()` can disagree by up to 12h
-  "total_cost_usd": 0.0184,
-  "by_provider": [ { "provider": "anthropic", "cost_usd": 0.0184, "tokens": 41125, "requests": 71 } ],
+  "date": "2026-09-08",              # authoritative UTC date — the client's local
+                                     # `todayIsoDate()` can disagree by up to 12h
+  "total_usd": 0.0184,
+  "by_provider": [ { "provider": "anthropic", "usd": 0.0184, "calls": 71, "tokens": 41125 } ],
   "caps": { "workflow_max_cost_usd": 5.0, "agent_max_cost_usd": 1.0 }
 }
+400 UNKNOWN_WINDOW    # any window but `today`; absent means `today`
 ```
 
-`by_provider` is computed from today's `llm_call_log` rows, not the lifetime
-`all_provider_usage()`. Plan reference: `tasks/api-fix-plan.md` §Phase 8 item 7.
+- `date` is the daemon's UTC day and every figure is that day's. The GUI's Today
+  card filters its run count by this date too, so all three numbers describe one
+  day — before T50 spend was UTC and runs were the browser's local day.
+- `total_usd` is the `llm_usage_daily` rollup for that date
+  (`cost_for_utc_date`); `by_provider` is that date's `llm_call_log` rows grouped
+  once (`LlmUsageRepository::provider_usage_since`), **not** the lifetime
+  `CostTracker::all_provider_usage()` the Models panel showed under a "today"
+  heading. They are two writers, so a call the rollup's best-effort upsert missed
+  can leave them a fraction apart; both are the daemon's own numbers for the same
+  day.
+- `tokens` rides on each row because the design's per-provider figure is a token
+  count and the call log already holds the columns — cost and calls alone would
+  have left that half of the gap open.
+- `caps` is **N4 on the wire**: the per-workflow (`lead_agent_defaults.max_cost`,
+  $5) and per-turn (`agent_defaults.max_cost`, $1) limits, named as such. There
+  is no `daily_*` key and no daily budget — one would be a new enforcement point
+  in the LLM router, not a label — and a route test serialises the response and
+  fails on the substring, because what has to be prevented here is a _field_, not
+  a line of prose.
+- `UNKNOWN_WINDOW` is deliberately the same code word `GET /v1/agent-templates`
+  answers (T48): one unknown-window refusal across the API.
+
+The panel copy changed with it: "Spend is not capped daily by design — the caps
+are $5.00 per workflow and $1.00 per agent turn", built from the served `caps`.
+
+Plan reference: `tasks/api-fix-plan.md` §Phase 8 item 7.
 
 ---
 
@@ -1366,35 +1386,35 @@ local-first threat model, ship the `path` variant only.
 Gaps 01, 07, 08.1, 08.2 and 16 shipped in Phase 0 (`88e8a3b`, `298bad3`, `a827dcf`,
 `7dbb988`, `26b3eaf`) and are removed from this table; see their now-**RESOLVED**
 sections above. GAP-08's remaining piece (the cap and a real usage-summary rollup)
-continues below as GAP-08c. **GAP-22 closed in C7** (the six `plugin_*` variants were
+continued as GAP-08c, **closed in Phase 8 item 7** by
+`GET /v1/usage/summary?window=today` — its row is struck below too. **GAP-22 closed in C7** (the six `plugin_*` variants were
 deleted, and their replacements carry `ts`/`instance_id`), **GAP-19 became GAP-24**
 (widened to both extension kinds), and **GAP-18 closed in both halves** —
 `GET /v1/tools` took the tool one and `GET /v1/skills` the skill one. **GAP-15
 closed** with `PUT /v1/settings/llm/providers/{provider}/enabled`, which writes
 the bit and then unloads or reloads the provider — its row is struck below too;
-seventeen remain.
+sixteen remain.
 
-| #   | Gap                                         | Blocks                                 | Fix size                         |
-| --- | ------------------------------------------- | -------------------------------------- | -------------------------------- |
-| 08c | no usage-summary rollup; no served cost cap | spend cap; per-provider "today" tokens | **S**                            |
-| 11  | content route is header-auth only           | image/html preview                     | **S** (query token)              |
-| 14  | uptime / schema / log path                  | Connection panel                       | **S**                            |
-| 06  | no `rerun` / `start` action                 | Re-run, Start now                      | **S**                            |
-| 02  | no steer endpoint                           | Steer button                           | **S–M**                          |
-| 03  | no follow-up API                            | Queue follow-up                        | **M**                            |
-| 21  | no conversation rename/delete               | Conversations rows                     | **S**                            |
-| 13  | per-chat model override is global           | model picker                           | **M**                            |
-| 20  | no template run counts / enabled            | Agents section                         | **M**                            |
-| 17  | no `Connect service` add flow               | Connectors section's Add button        | **M**                            |
-| 24  | no extension install / uninstall            | Add extension                          | **M**                            |
-| 10  | event log has no `task_id`                  | per-run event log                      | **M** (migration)                |
-| 23  | messages not linked to runs/artifacts       | transcript recap cards                 | **M** (migration)                |
-| 09  | no subagent timeline                        | **Parallel work swimlanes**            | **L** (migration + events)       |
-| 04  | no artifact list / attribution              | **entire Library view**                | **L** (migration + routes)       |
-| 05  | no artifact versions / diff                 | History + Diff tabs                    | **L** (migration + routes)       |
-| 12  | no pin state                                | ★ Pin                                  | **XS** — do it in `localStorage` |
+| #   | Gap                                   | Blocks                          | Fix size                         |
+| --- | ------------------------------------- | ------------------------------- | -------------------------------- |
+| 11  | content route is header-auth only     | image/html preview              | **S** (query token)              |
+| 14  | uptime / schema / log path            | Connection panel                | **S**                            |
+| 06  | no `rerun` / `start` action           | Re-run, Start now               | **S**                            |
+| 02  | no steer endpoint                     | Steer button                    | **S–M**                          |
+| 03  | no follow-up API                      | Queue follow-up                 | **M**                            |
+| 21  | no conversation rename/delete         | Conversations rows              | **S**                            |
+| 13  | per-chat model override is global     | model picker                    | **M**                            |
+| 20  | no template run counts / enabled      | Agents section                  | **M**                            |
+| 17  | no `Connect service` add flow         | Connectors section's Add button | **M**                            |
+| 24  | no extension install / uninstall      | Add extension                   | **M**                            |
+| 10  | event log has no `task_id`            | per-run event log               | **M** (migration)                |
+| 23  | messages not linked to runs/artifacts | transcript recap cards          | **M** (migration)                |
+| 09  | no subagent timeline                  | **Parallel work swimlanes**     | **L** (migration + events)       |
+| 04  | no artifact list / attribution        | **entire Library view**         | **L** (migration + routes)       |
+| 05  | no artifact versions / diff           | History + Diff tabs             | **L** (migration + routes)       |
+| 12  | no pin state                          | ★ Pin                           | **XS** — do it in `localStorage` |
 
-**Recommended order:** the XS/S column first (08c, 11, 14, 06, 02, 21) unblocks roughly two-thirds of the design for a handful of one-file changes. Then
+**Recommended order:** the XS/S column first (11, 14, 06, 02, 21) unblocks roughly two-thirds of the design for a handful of one-file changes. Then
 04 + 05 + 09 as one "run observability + artifacts" milestone, since they share the
 same storage work and are what the Work and Library views are actually built around.
 Ship the UI with those three surfaces feature-flagged/empty-stated until then.
