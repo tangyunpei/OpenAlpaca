@@ -383,12 +383,16 @@ Notes:
 
 ### `store`
 
-Manage the content store. Today it holds one verb: re-basing a project you
-moved on disk.
+Manage the content store: re-base a project you moved on disk, or purge one you
+are done with.
 
 ```bash
 openalpaca store rebase /old/path/my-project /new/path/my-project --dry-run
 openalpaca store rebase /old/path/my-project /new/path/my-project
+
+openalpaca store purge /path/my-project          # prints the plan, deletes nothing
+openalpaca store purge /path/my-project -y       # prints the same plan, then carries it out
+openalpaca store purge --all --dry-run           # every project root on record
 ```
 
 Notes:
@@ -398,6 +402,37 @@ Notes:
 - If `<old>/.openalpaca` still exists, the directory is moved too, after the transaction. In the usual case you moved the whole project with `mv` already, so only the rows are behind and nothing on disk is touched.
 - The old path is resolved the way a chat turn's project is (up to the nearest `.openalpaca`/`.git`), falling back to the path itself when the old directory is gone. The new path is taken literally after canonicalization — a destination is where you say it is, or the call is refused. Absolute paths only.
 - The GUI offers the same re-base from Settings → Connection when the project you choose has a store that records a different path.
+
+`purge` notes:
+- **`--dry-run` is what happens anyway.** Without `-y` the command prints the plan and deletes nothing; `-y` prints the same plan and then carries it out. `<project>` and `--all` are mutually exclusive, and one of them is required — a destructive verb never guesses which project you meant. The daemon defaults the same way, so a direct `POST /v1/workspaces/purge` with no `dry_run` field is also a dry run.
+- **What goes:** this project's conversations (`session` rows, their messages, tool-call index rows and queued follow-ups) together with each conversation's log directory under `~/.openalpaca/sessions/`; its runs (`task` rows with their subagent spans, run events, dispatch decisions and LLM call log); and the uploads copied into `<project>/.openalpaca/uploads/`, rows and bytes. Rows go in one transaction per project, then the files.
+- **What stays, and is named in the plan rather than left out of it:** `artifacts/` and every produced file record (never garbage-collected), your workspace memories, `skills/` and `config/`, the store's own `.layout` / `README.md` / `.gitignore`, and any directory inside `<project>/.openalpaca/` that OpenAlpaca did not create. Conversations with no project belong to the home store and are never touched — `--all` says how many there are and leaves them to `openalpaca sessions delete`.
+- The plan is printed in the retention classes of the README seeded into every store root, so the reason for each verdict is on the line beside it:
+
+```text
+Would purge /Users/me/code/my-project
+  delete  sessions/                       3 conversations, 41 messages, 12 tool calls, 0 follow-ups — their logs live in the home store's sessions/
+                                          (size-capped, optional age sweep)
+  delete  runs (database)                 2 runs, 5 subagent spans, 18 run events
+                                          (never swept — removed only when you ask)
+  delete  uploads/                        4 uploads copied into this project
+                                          (swept: an upload attached to no message is deleted once past the grace period)
+    keep  artifacts/                      9 files produced by runs in this project
+                                          (never garbage-collected)
+    keep  memory/                         3 workspace memories, and the reserved memory/ directory
+                                          (yours — never swept)
+    keep  skills/, config/                reserved; not created until used
+                                          (yours — never swept)
+    keep  .layout, README.md, .gitignore  this store's own markers
+                                          (store metadata — never swept)
+    keep  notes-of-my-own                 not created by OpenAlpaca
+                                          (the store never deletes what it did not create)
+
+Nothing was deleted. Re-run with -y to carry this out.
+```
+
+- The daemon refuses rather than guesses, the same way the re-base does: nothing of yours recorded under the path is a `404`, and so is a root holding rows that belong to another owner; a run there that is still running or paused — or a conversation with a run in flight — is a `409` `WORKSPACE_BUSY`, and with `--all` one busy root refuses the whole call rather than purging the others; a path resolving to the home store is a `409` `WORKSPACE_IS_HOME` (the home store is not a project, and a factory reset is deleting `~/.openalpaca/state/`, a separate deliberate act); a relative path is a `400`.
+- A purge is not reversible and there is no undo. Back up `<project>/.openalpaca` first if you might want the transcripts again.
 
 ### `chat`
 
