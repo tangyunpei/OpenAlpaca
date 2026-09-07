@@ -37,6 +37,8 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
+use openalpaca_core::bus::EventBus;
+use openalpaca_core::events::SystemEvent;
 use openalpaca_storage::{
     ArtifactError, ArtifactKind, ArtifactOrigin, ArtifactQuery, ArtifactRecord, ArtifactStore,
     ArtifactVersionRow, Database, TaskRepository,
@@ -353,6 +355,13 @@ pub(crate) fn get_artifact(db: &Database, owner_id: &str, id: &str) -> Response 
 /// `404` for a row this owner cannot see or a version that does not exist,
 /// `410` `ARTIFACT_GONE` when the bytes are missing — which is also what
 /// stamps `missing_since` on the row.
+///
+/// A read is also where a **hand edit** is noticed (§4.8): if the bytes on
+/// disk are not the ones the row describes, the store records them as a version
+/// with `author_agent_id = NULL` and this announces it — an `ArtifactWritten`
+/// with a null `agent_id`, which is the honest attribution for a version
+/// OpenAlpaca did not write. Announcing is not part of reading, so a context
+/// with no bus reads exactly the same.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn artifact_content(
     db: &Database,
@@ -362,6 +371,7 @@ pub(crate) async fn artifact_content(
     query_token: Option<&str>,
     id: &str,
     version: Option<u32>,
+    bus: Option<&EventBus>,
 ) -> Response {
     if !content_token_ok(headers, query_token, expected_token) {
         return invalid_token();
@@ -370,11 +380,44 @@ pub(crate) async fn artifact_content(
         Ok(record) => record,
         Err(response) => return response,
     };
-    let path = match ArtifactStore::new(db).resolve_content(id, version) {
-        Ok(path) => path,
+    let (path, edit) = match ArtifactStore::new(db).resolve_content_with_edit(id, version) {
+        Ok(found) => found,
         Err(e) => return store_error(&e),
     };
+    if let Some(edited) = edit {
+        announce_user_edit(bus, &edited);
+    }
     content_response(&path, &record.mime_type, &record.name).await
+}
+
+/// One `ArtifactWritten` for a version nobody in OpenAlpaca wrote (§4.8).
+///
+/// `agent_id` is `None` **by construction**, not copied from the record: the
+/// row's `agent_id` is whoever wrote the version this edit replaced, and
+/// reporting them as the author of a hand edit is exactly the attribution the
+/// null `author_agent_id` exists to avoid.
+pub(crate) fn announce_user_edit(bus: Option<&EventBus>, record: &ArtifactRecord) {
+    let Some(bus) = bus else {
+        tracing::debug!(
+            artifact_id = %record.id,
+            "a hand edit was recorded with no event bus in reach — not announced"
+        );
+        return;
+    };
+    bus.publish(SystemEvent::ArtifactWritten {
+        artifact_id: record.id.clone(),
+        task_id: record.task_id.clone(),
+        agent_id: None,
+        name: record.name.clone(),
+        kind: record
+            .kind
+            .unwrap_or_else(|| ArtifactKind::for_mime(&record.mime_type))
+            .as_str()
+            .to_string(),
+        version: record.version,
+        path: record.storage_path.clone(),
+        timestamp: chrono::Utc::now(),
+    });
 }
 
 /// `GET /v1/artifacts/{id}/versions` — newest first.
@@ -487,6 +530,7 @@ pub async fn get_artifact_content_handler(
         params.token.as_deref(),
         &id,
         params.version,
+        Some(&state.gateway.bus),
     )
     .await
 }
@@ -505,6 +549,7 @@ pub async fn get_artifact_version_content_handler(
         params.token.as_deref(),
         &id,
         Some(version),
+        Some(&state.gateway.bus),
     )
     .await
 }

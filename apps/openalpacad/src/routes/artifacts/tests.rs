@@ -212,6 +212,7 @@ async fn a_query_token_is_accepted_on_the_artifact_content_route() {
             Some(TOKEN),
             &row.id,
             None,
+            None,
         )
         .await,
     )
@@ -229,7 +230,7 @@ async fn a_bearer_header_is_accepted_on_the_artifact_content_route() {
     let row = f.put(OWNER, "Notes", "hello\n", None);
 
     let (status, _, bytes) = split_bytes(
-        artifact_content(&f.db, OWNER, TOKEN, &bearer(TOKEN), None, &row.id, None).await,
+        artifact_content(&f.db, OWNER, TOKEN, &bearer(TOKEN), None, &row.id, None, None).await,
     )
     .await;
 
@@ -248,7 +249,7 @@ async fn a_wrong_or_missing_token_is_a_401_on_the_artifact_content_route() {
         (bearer("wrong"), None),
     ] {
         let response =
-            artifact_content(&f.db, OWNER, TOKEN, &headers, query, &row.id, None).await;
+            artifact_content(&f.db, OWNER, TOKEN, &headers, query, &row.id, None, None).await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
         // The same plain-text body `/v1/chat/stream` answers with.
@@ -306,7 +307,7 @@ async fn an_html_artifact_is_served_nosniff_and_sandboxed() {
     );
     let row = ArtifactStore::new(&f.db).put(new).expect("put").0;
 
-    let response = artifact_content(&f.db, OWNER, TOKEN, &bearer(TOKEN), None, &row.id, None).await;
+    let response = artifact_content(&f.db, OWNER, TOKEN, &bearer(TOKEN), None, &row.id, None, None).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         header(&response, "content-type").as_deref(),
@@ -330,7 +331,7 @@ async fn a_markdown_artifact_is_nosniff_but_not_sandboxed() {
     let f = Fixture::new();
     let row = f.put(OWNER, "Notes", "hello\n", None);
 
-    let response = artifact_content(&f.db, OWNER, TOKEN, &bearer(TOKEN), None, &row.id, None).await;
+    let response = artifact_content(&f.db, OWNER, TOKEN, &bearer(TOKEN), None, &row.id, None, None).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         header(&response, "content-type").as_deref(),
@@ -399,6 +400,7 @@ async fn another_owners_artifact_is_a_404_on_every_route() {
             None,
             &row.id,
             None,
+            None,
         )
         .await,
     )
@@ -425,7 +427,7 @@ async fn deleted_bytes_are_a_410_and_stamp_missing_since() {
     std::fs::remove_file(&row.storage_path).expect("delete the head file");
 
     let (status, body) = split(
-        artifact_content(&f.db, OWNER, TOKEN, &bearer(TOKEN), None, &row.id, None).await,
+        artifact_content(&f.db, OWNER, TOKEN, &bearer(TOKEN), None, &row.id, None, None).await,
     )
     .await;
     assert_eq!(status, StatusCode::GONE);
@@ -776,12 +778,12 @@ async fn a_version_selects_the_superseded_bytes() {
     f.put_again(OWNER, "Notes", "one\ntwo\n", None);
 
     let (_, _, head) =
-        split_bytes(artifact_content(&f.db, OWNER, TOKEN, &bearer(TOKEN), None, &row.id, None).await)
+        split_bytes(artifact_content(&f.db, OWNER, TOKEN, &bearer(TOKEN), None, &row.id, None, None).await)
             .await;
     assert_eq!(head, b"one\ntwo\n");
 
     let (status, referrer, bytes) = split_bytes(
-        artifact_content(&f.db, OWNER, TOKEN, &bearer(TOKEN), None, &row.id, Some(1)).await,
+        artifact_content(&f.db, OWNER, TOKEN, &bearer(TOKEN), None, &row.id, Some(1), None).await,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -795,11 +797,84 @@ async fn an_unknown_version_is_a_404() {
     let row = f.put(OWNER, "Notes", "one\n", None);
 
     let (status, body) = split(
-        artifact_content(&f.db, OWNER, TOKEN, &bearer(TOKEN), None, &row.id, Some(9)).await,
+        artifact_content(&f.db, OWNER, TOKEN, &bearer(TOKEN), None, &row.id, Some(9), None).await,
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(error_code(&body), "ARTIFACT_VERSION_NOT_FOUND");
+}
+
+/// §4.8's hand edit, from the route's side: reading a head whose bytes are not
+/// the ones the row describes serves the bytes, records the version, and says
+/// so on the bus with a **null** `agent_id` — not the agent that wrote the
+/// version this edit replaced.
+#[tokio::test]
+async fn reading_a_hand_edited_head_serves_it_and_announces_a_version_nobody_wrote() {
+    let f = Fixture::new();
+    f.task("task-1", "A run");
+    let row = f.put(OWNER, "Notes", "one\n", Some("task-1"));
+    assert_eq!(row.agent_id.as_deref(), None);
+
+    std::fs::write(&row.storage_path, "edited by hand\n").expect("hand edit");
+
+    let bus = EventBus::new(16);
+    let mut rx = bus.subscribe();
+    let (status, _, bytes) = split_bytes(
+        artifact_content(
+            &f.db,
+            OWNER,
+            TOKEN,
+            &bearer(TOKEN),
+            None,
+            &row.id,
+            None,
+            Some(&bus),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, b"edited by hand\n");
+
+    match rx.try_recv().expect("an ArtifactWritten") {
+        SystemEvent::ArtifactWritten {
+            artifact_id,
+            agent_id,
+            version,
+            task_id,
+            name,
+            ..
+        } => {
+            assert_eq!(artifact_id, row.id);
+            assert_eq!(agent_id, None, "nobody in OpenAlpaca wrote it");
+            assert_eq!(version, 2);
+            assert_eq!(task_id.as_deref(), Some("task-1"));
+            assert_eq!(name, "01-notes.md");
+        }
+        other => panic!("expected ArtifactWritten, got {other:?}"),
+    }
+
+    // Recorded once: the second read finds the bytes the row now describes.
+    let _ = artifact_content(
+        &f.db,
+        OWNER,
+        TOKEN,
+        &bearer(TOKEN),
+        None,
+        &row.id,
+        None,
+        Some(&bus),
+    )
+    .await;
+    assert!(rx.try_recv().is_err(), "nothing left to announce");
+
+    let versions = ArtifactStore::new(&f.db).versions(&row.id).expect("versions");
+    assert_eq!(versions.len(), 2);
+    assert_eq!(versions[0].author_agent_id, None);
+    assert_eq!(
+        versions[0].note.as_deref(),
+        Some(openalpaca_storage::USER_EDIT_NOTE)
+    );
 }
 
 // ============================================================================
