@@ -113,6 +113,64 @@ impl Fixture {
             })
             .unwrap();
     }
+
+    /// A `task` bound to a workspace, in a given state — the other three
+    /// members of §4.8's one transaction start here.
+    fn task_in(&self, id: &str, workspace: &str, status: &str) {
+        self.db
+            .with_connection(|conn| {
+                conn.execute(
+                    "INSERT INTO task (id, title, created_by, source_lane, workspace_id, status)
+                     VALUES (?1, ?1, 'test', 'test', ?2, ?3)",
+                    rusqlite::params![id, workspace, status],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    fn session(&self, id: &str, workspace: &str) {
+        self.db
+            .with_connection(|conn| {
+                conn.execute(
+                    "INSERT INTO session (id, lane_key, source, workspace_id)
+                     VALUES (?1, ?1, 'gui', ?2)",
+                    rusqlite::params![id, workspace],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    fn memory(&self, content: &str, scope_id: &str) {
+        self.db
+            .with_connection(|conn| {
+                conn.execute(
+                    "INSERT INTO memory
+                        (owner_id, kind, scope, scope_id, source, content, content_hash)
+                     VALUES (?1, 'fact', 'workspace', ?2, 'test', ?3, ?3)",
+                    rusqlite::params![OWNER, scope_id, content],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// `(sessions, tasks, memories)` still naming `root`.
+    fn members_at(&self, root: &str) -> (i64, i64, i64) {
+        self.db
+            .with_connection(|conn| {
+                let one = |sql: &str| -> Result<i64> {
+                    Ok(conn.query_row(sql, rusqlite::params![root], |r| r.get(0))?)
+                };
+                Ok((
+                    one("SELECT COUNT(*) FROM session WHERE workspace_id = ?1")?,
+                    one("SELECT COUNT(*) FROM task WHERE workspace_id = ?1")?,
+                    one("SELECT COUNT(*) FROM memory WHERE scope = 'workspace' AND scope_id = ?1")?,
+                ))
+            })
+            .unwrap()
+    }
 }
 
 const OWNER: &str = "owner-1";
@@ -1219,7 +1277,10 @@ fn rebase_project_rewrites_only_rows_under_the_old_root() {
     let old = f.project_root().to_string_lossy().to_string();
     let new_root = "/tmp/moved-project";
     let moved = f.store().rebase_project(&old, new_root).unwrap();
-    assert_eq!(moved, 1, "only the rows under the old root move");
+    assert_eq!(
+        moved.file_assets, 1,
+        "only the rows under the old root move"
+    );
 
     let mine_after = f.store().get(&mine.id, OWNER).unwrap().unwrap();
     assert_eq!(mine_after.project_root.as_deref(), Some(new_root));
@@ -1243,6 +1304,135 @@ fn rebase_project_rewrites_only_rows_under_the_old_root() {
     let home_after = f.store().get(&homely.id, OWNER).unwrap().unwrap();
     assert!(home_after.project_root.is_none());
     assert_eq!(home_after.storage_path, homely.storage_path);
+}
+
+#[test]
+fn rebase_project_moves_all_four_members_together() {
+    let f = Fixture::new();
+    let old = f.project_root().to_string_lossy().to_string();
+    let new_root = "/tmp/moved-project";
+
+    let scope = f.scope();
+    let mut produced = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"a");
+    produced.created = at(1);
+    f.store().put(produced).unwrap();
+    // The other origin: an upload placed in the project store moves with it.
+    let upload_path = f.artifacts_root().join("loose/2026-09-01/99-uploaded.md");
+    f.foreign_row("upload-1", "loose/2026-09-01/99-uploaded.md", &upload_path);
+
+    f.session("session-1", &old);
+    f.task_in("task-1", &old, "completed");
+    f.task_in("task-2", &old, "queued");
+    f.memory("a workspace fact", &old);
+    // Bystanders under another root.
+    f.session("session-2", "/elsewhere");
+    f.memory("someone else's fact", "/elsewhere");
+
+    let counts = f.store().rebase_project(&old, new_root).unwrap();
+    assert_eq!(
+        counts,
+        RebaseCounts {
+            file_assets: 2,
+            sessions: 1,
+            tasks: 2,
+            memories: 1,
+        }
+    );
+
+    assert_eq!(f.members_at(&old), (0, 0, 0), "nothing is left behind");
+    assert_eq!(f.members_at(new_root), (1, 2, 1));
+    assert_eq!(
+        f.members_at("/elsewhere"),
+        (1, 0, 1),
+        "bystanders untouched"
+    );
+
+    let moved_upload = f.store().get("upload-1", OWNER).unwrap().unwrap();
+    assert_eq!(moved_upload.project_root.as_deref(), Some(new_root));
+    assert_eq!(
+        moved_upload.storage_path,
+        format!("{new_root}/.openalpaca/artifacts/loose/2026-09-01/99-uploaded.md")
+    );
+}
+
+#[test]
+fn a_failing_member_rolls_the_whole_rebase_back() {
+    let f = Fixture::new();
+    let old = f.project_root().to_string_lossy().to_string();
+    let new_root = "/tmp/already-a-project";
+
+    let scope = f.scope();
+    let mut produced = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"a");
+    produced.created = at(1);
+    let (produced, _) = f.store().put(produced).unwrap();
+    f.session("session-1", &old);
+    f.task_in("task-1", &old, "completed");
+    f.memory("the same fact", &old);
+
+    // The collision: `idx_memory_content_hash` is
+    // (owner_id, scope, scope_id, content_hash), so re-keying this memory onto
+    // a root that already holds the same content violates it. That is the
+    // failure the one transaction exists for — two projects' memories must not
+    // silently merge, and the other three members must not move without it.
+    f.memory("the same fact", new_root);
+
+    let err = f.store().rebase_project(&old, new_root).unwrap_err();
+    assert!(
+        err.to_string().to_lowercase().contains("unique"),
+        "expected the unique-index violation, got: {err}"
+    );
+
+    assert_eq!(
+        f.store()
+            .get(&produced.id, OWNER)
+            .unwrap()
+            .unwrap()
+            .project_root
+            .as_deref(),
+        Some(old.as_str()),
+        "the artifact row rolled back with the rest"
+    );
+    assert_eq!(f.members_at(&old), (1, 1, 1));
+    assert_eq!(f.members_at(new_root), (0, 0, 1), "only its own memory");
+}
+
+#[test]
+fn workspace_rows_counts_the_members_and_the_runs_in_flight() {
+    let f = Fixture::new();
+    let root = f.project_root().to_string_lossy().to_string();
+    assert_eq!(
+        f.store().workspace_rows(&root).unwrap(),
+        WorkspaceRows::default()
+    );
+    assert!(f.store().workspace_rows(&root).unwrap().counts.is_empty());
+
+    let scope = f.scope();
+    let mut produced = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"a");
+    produced.created = at(1);
+    f.store().put(produced).unwrap();
+    f.session("session-1", &root);
+    f.task_in("done", &root, "completed");
+    f.task_in("queued", &root, "queued");
+    f.memory("a fact", &root);
+
+    let rows = f.store().workspace_rows(&root).unwrap();
+    assert_eq!(
+        rows.counts,
+        RebaseCounts {
+            file_assets: 1,
+            sessions: 1,
+            tasks: 2,
+            memories: 1,
+        }
+    );
+    assert_eq!(
+        rows.active_tasks, 0,
+        "a queued run has resolved nothing yet — its row moves with the rest"
+    );
+
+    f.task_in("live", &root, "running");
+    f.task_in("held", &root, "paused");
+    assert_eq!(f.store().workspace_rows(&root).unwrap().active_tasks, 2);
 }
 
 // ============================================================================
@@ -1312,7 +1502,13 @@ impl Drop for RotateCrashGuard {
 fn hand_edited(body: &str) -> (Fixture, ArtifactRecord) {
     let f = Fixture::new();
     let scope = f.scope();
-    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"one\ntwo\n");
+    let mut new = NewArtifact::new(
+        OWNER,
+        &scope,
+        ArtifactKind::Markdown,
+        "Notes",
+        b"one\ntwo\n",
+    );
     new.created = at(1);
     let (record, _) = f.store().put(new).unwrap();
     fs::write(&record.storage_path, body).unwrap();
@@ -1345,7 +1541,10 @@ fn a_read_records_a_hand_edited_head_as_a_version_authored_by_nobody() {
 
     // v1's row points at the slot its bytes would have been rotated into.
     // Nothing is there, and saying so is the truth about a file edited in place.
-    assert_eq!(rows[1].rel_path, "loose/2026-09-01/.versions/01-notes/v1.md");
+    assert_eq!(
+        rows[1].rel_path,
+        "loose/2026-09-01/.versions/01-notes/v1.md"
+    );
     let err = f.store().resolve_content(&v1.id, Some(1)).unwrap_err();
     assert_eq!(
         err.downcast_ref::<ArtifactError>().unwrap().code(),
@@ -1425,7 +1624,10 @@ fn a_missing_head_is_never_rotated() {
     fs::write(&record.storage_path, "restored by hand\n").unwrap();
     let report = f.store().verify(Some(&root)).unwrap();
     assert!(report.user_edits.is_empty());
-    assert_eq!(f.store().get(&record.id, OWNER).unwrap().unwrap().version, 1);
+    assert_eq!(
+        f.store().get(&record.id, OWNER).unwrap().unwrap().version,
+        1
+    );
     assert_eq!(f.store().versions(&record.id).unwrap().len(), 1);
 }
 
@@ -1507,7 +1709,10 @@ fn a_put_after_a_recorded_hand_edit_supersedes_it() {
     // v2 — the hand edit — kept its bytes: the put rotated them into the slot.
     let v2 = f.store().resolve_content(&v1.id, Some(2)).unwrap();
     assert_eq!(fs::read_to_string(v2).unwrap(), "mine\n");
-    assert_eq!((rows[0].added_lines, rows[0].removed_lines), (Some(1), Some(1)));
+    assert_eq!(
+        (rows[0].added_lines, rows[0].removed_lines),
+        (Some(1), Some(1))
+    );
 }
 
 // ============================================================================

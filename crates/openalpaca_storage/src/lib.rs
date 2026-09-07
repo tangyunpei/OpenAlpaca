@@ -19,7 +19,7 @@ pub(crate) mod test_util;
 
 pub use artifacts::{
     ArtifactDiff, ArtifactError, ArtifactQuery, ArtifactRecord, ArtifactStore, ArtifactVersionRow,
-    NewArtifact, USER_EDIT_NOTE, VerifyReport,
+    NewArtifact, RebaseCounts, USER_EDIT_NOTE, VerifyReport, WorkspaceRows,
 };
 pub use database::Database;
 pub use models::{Agent, EventLog, Memory, MemoryRole};

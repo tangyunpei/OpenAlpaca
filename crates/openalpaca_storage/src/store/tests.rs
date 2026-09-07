@@ -328,7 +328,52 @@ fn layout_lines_this_module_does_not_own_are_preserved() {
     ensure_store(&scope).unwrap();
 
     let text = fs::read_to_string(root.join(".layout")).unwrap();
-    assert_eq!(text, "1\nproject_id=abc\n");
+    let recorded = project.canonicalize().unwrap();
+    assert_eq!(
+        text,
+        format!("1\nproject_id=abc\nproject_root={}\n", recorded.display()),
+        "line 1 repaired, the foreign line kept, the recorded root added"
+    );
+}
+
+#[test]
+fn a_project_store_records_its_own_root_once() {
+    let tmp = tempdir().unwrap();
+    let project = tmp.path().canonicalize().unwrap();
+    let scope = StoreScope::Project(project.clone());
+    let root = ensure_store(&scope).unwrap();
+
+    assert_eq!(
+        recorded_project_root(&root).unwrap().as_deref(),
+        Some(project.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        recorded_project_root(&tmp.path().join("nowhere")).unwrap(),
+        None,
+        "a directory with no marker records nothing"
+    );
+
+    // The whole point: `ensure_store` runs on every content_dir call, and a
+    // line that healed itself to the current path would erase the difference a
+    // moved project is recognised by.
+    set_recorded_project_root(&root, "/somewhere/else").unwrap();
+    ensure_store(&scope).unwrap();
+    content_dir(&scope, ContentKind::Artifacts).unwrap();
+    assert_eq!(
+        recorded_project_root(&root).unwrap().as_deref(),
+        Some("/somewhere/else")
+    );
+
+    // And the rewrite keeps the rest of the marker intact.
+    assert_eq!(layout_version(&root).unwrap(), Some(LAYOUT_VERSION));
+}
+
+#[test]
+fn the_home_root_records_no_project_root() {
+    let tmp = tempdir().unwrap();
+    let _guard = HomeStoreGuard::set(&tmp.path().canonicalize().unwrap());
+    let root = ensure_store(&StoreScope::Home).unwrap();
+    assert_eq!(recorded_project_root(&root).unwrap(), None);
 }
 
 #[test]

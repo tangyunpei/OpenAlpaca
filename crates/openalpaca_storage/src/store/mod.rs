@@ -49,6 +49,7 @@ const LAYOUT_FILE: &str = ".layout";
 const README_FILE: &str = "README.md";
 const GITIGNORE_FILE: &str = ".gitignore";
 const INSTALL_ID_KEY: &str = "install_id";
+const PROJECT_ROOT_KEY: &str = "project_root";
 
 // ============================================================================
 // Roots
@@ -379,15 +380,54 @@ pub fn layout_version(root: &Path) -> Result<Option<u32>> {
 
 /// The install id recorded on line 2 of the home root's `.layout`, if present.
 pub fn install_id(root: &Path) -> Result<Option<String>> {
+    Ok(layout_text(root)?.as_deref().and_then(read_install_id))
+}
+
+/// The project root a **project store** recorded for itself when it was first
+/// seeded — §4.8's "Project moved" made answerable.
+///
+/// `root` is the store directory (`<project>/.openalpaca`). The value is the
+/// canonical path of the project the store belonged to *then*, so a store whose
+/// directory has since been moved reports the old path and a re-base has
+/// something exact to offer. `None` means no store, no marker, or a store
+/// seeded before this key existed — all of which read as "nothing to say", not
+/// as "not moved by this much".
+pub fn recorded_project_root(root: &Path) -> Result<Option<String>> {
+    Ok(layout_text(root)?
+        .as_deref()
+        .and_then(|text| read_layout_value(text, PROJECT_ROOT_KEY)))
+}
+
+/// Rewrite a project store's recorded root — the one thing that may, because a
+/// re-base is precisely the statement that the store now lives somewhere else.
+///
+/// Writes the whole marker atomically, preserving every other line.
+pub fn set_recorded_project_root(root: &Path, project_root: &str) -> Result<()> {
     let path = root.join(LAYOUT_FILE);
-    let text = match fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            return Err(e).with_context(|| format!("Failed to read {}", path.display()));
-        }
-    };
-    Ok(read_install_id(&text))
+    let text = layout_text(root)?.unwrap_or_else(|| format!("{LAYOUT_VERSION}\n"));
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let line = format!("{PROJECT_ROOT_KEY}={project_root}");
+    match lines
+        .iter_mut()
+        .skip(1)
+        .find(|l| l.trim().starts_with(&format!("{PROJECT_ROOT_KEY}=")))
+    {
+        Some(existing) => *existing = line,
+        None => lines.push(line),
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    write_atomic(&path, &out)
+}
+
+/// `<root>/.layout`'s contents, or `None` when the root carries no marker.
+fn layout_text(root: &Path) -> Result<Option<String>> {
+    let path = root.join(LAYOUT_FILE);
+    match fs::read_to_string(&path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("Failed to read {}", path.display())),
+    }
 }
 
 // ============================================================================
@@ -447,8 +487,15 @@ fn write_atomic(path: &Path, contents: &str) -> Result<()> {
 
 /// Writes `.layout` when absent; repairs an unreadable version line; on the home
 /// root, appends `install_id=<uuid>` exactly once if an existing marker predates
-/// it. Any other line already there is carried through untouched — a project
-/// root's `project_id=` is not this function's to drop.
+/// it, and on a project root `project_root=<canonical path>` on the same terms.
+/// Any other line already there is carried through untouched.
+///
+/// **`project_root=` is written once and never rewritten**, which is what makes
+/// it the record of where this store *was* (§4.8's "Project moved"): `ensure_store`
+/// runs on every `content_dir` call, so a line that healed itself to the current
+/// path would erase the very difference a moved project is recognised by. The
+/// one thing that rewrites it is a re-base, through
+/// [`set_recorded_project_root`].
 fn ensure_layout(root: &Path, is_home: bool) -> Result<()> {
     let path = root.join(LAYOUT_FILE);
     let existing = match fs::read_to_string(&path) {
@@ -457,10 +504,23 @@ fn ensure_layout(root: &Path, is_home: bool) -> Result<()> {
         Err(e) => return Err(e).with_context(|| format!("Failed to read {}", path.display())),
     };
 
+    // The address this store would record for itself, resolved the way every
+    // stored `project_root` is (canonical, home root folded to `None`).
+    let recorded = match is_home {
+        true => None,
+        false => {
+            let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+            project_root_at(&canonical)?
+        }
+    };
+
     let Some(text) = existing else {
         let mut fresh = format!("{LAYOUT_VERSION}\n");
         if is_home {
             fresh.push_str(&format!("{INSTALL_ID_KEY}={}\n", uuid::Uuid::new_v4()));
+        }
+        if let Some(project_root) = &recorded {
+            fresh.push_str(&format!("{PROJECT_ROOT_KEY}={project_root}\n"));
         }
         return write_atomic(&path, &fresh);
     };
@@ -491,6 +551,17 @@ fn ensure_layout(root: &Path, is_home: bool) -> Result<()> {
         changed = true;
     }
 
+    // Likewise the recorded root. A store that predates this key adopts its
+    // *current* path — nothing recorded where it used to be, so the honest
+    // answer for a project moved before this shipped is "not moved", not a
+    // guess.
+    if let Some(project_root) = &recorded
+        && read_layout_value(&text, PROJECT_ROOT_KEY).is_none()
+    {
+        lines.push(format!("{PROJECT_ROOT_KEY}={project_root}"));
+        changed = true;
+    }
+
     if !changed {
         return Ok(());
     }
@@ -500,10 +571,16 @@ fn ensure_layout(root: &Path, is_home: bool) -> Result<()> {
 }
 
 fn read_install_id(layout: &str) -> Option<String> {
+    read_layout_value(layout, INSTALL_ID_KEY)
+}
+
+/// One `key=value` line of a `.layout` marker, from line 2 onwards (line 1 is
+/// the version).
+fn read_layout_value(layout: &str, key: &str) -> Option<String> {
     layout
         .lines()
         .skip(1)
-        .find_map(|line| line.trim().strip_prefix(&format!("{INSTALL_ID_KEY}=")))
+        .find_map(|line| line.trim().strip_prefix(&format!("{key}=")))
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
 }

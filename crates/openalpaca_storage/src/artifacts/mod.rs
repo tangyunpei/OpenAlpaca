@@ -450,6 +450,40 @@ pub struct ArtifactVersionRow {
     pub created_at: String,
 }
 
+/// How many rows each member of §4.8's one transaction carried — the same four
+/// counts whether they were moved ([`ArtifactStore::rebase_project`]) or merely
+/// counted ([`ArtifactStore::workspace_rows`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RebaseCounts {
+    /// `file_assets` rows, **both** origins.
+    pub file_assets: usize,
+    /// `session.workspace_id` (migration 039).
+    pub sessions: usize,
+    /// `task.workspace_id` (migration 036).
+    pub tasks: usize,
+    /// `memory.scope_id` where `scope = 'workspace'`.
+    pub memories: usize,
+}
+
+impl RebaseCounts {
+    /// Does any row in the system name this root?
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// What [`ArtifactStore::workspace_rows`] found under one root.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorkspaceRows {
+    pub counts: RebaseCounts,
+    /// Runs under this root that are `running` or `paused`. Both hold live
+    /// in-process state — a loop, a steering inbox, a resolved store — that a
+    /// row rewrite cannot reach, so a rebase waits for them. A `queued` run
+    /// does not count: it has not resolved anything yet, and its row moves with
+    /// the rest.
+    pub active_tasks: usize,
+}
+
 /// What one [`ArtifactStore::verify`] pass found.
 #[derive(Debug, Clone, Default)]
 pub struct VerifyReport {
@@ -1076,16 +1110,35 @@ impl<'a> ArtifactStore<'a> {
         })
     }
 
-    /// Re-base every row addressed under `old_root` onto `new_root` — §4.8's
-    /// "Project moved", in one statement.
+    /// Re-base everything addressed under `old_root` onto `new_root` — §4.8's
+    /// "Project moved", as **one transaction** over its four members.
+    ///
+    /// A project's path is its identity in four places, all of them holding the
+    /// same canonical-path string, so all four move together or none does:
+    ///
+    /// | Member | Column |
+    /// |---|---|
+    /// | `file_assets` (**both** origins — an upload placed in a project store moved with it) | `project_root`, and the `storage_path` prefix |
+    /// | `session` (039) | `workspace_id` |
+    /// | `task` (036) | `workspace_id` |
+    /// | `memory` (`memory/workspace.rs`: the id *is* the canonical root) | `scope_id`, where `scope = 'workspace'` |
     ///
     /// `rel_path` is deliberately untouched: it is the address, and it did not
-    /// change. Only `project_root` and the resolved `storage_path` prefix move.
-    /// Widening the same transaction to `session.workspace_id`,
-    /// `task.workspace_id` and the memory scope key is Phase 8 item 11.
-    pub fn rebase_project(&self, old_root: &str, new_root: &str) -> Result<usize> {
+    /// change. Only the root prefix does.
+    ///
+    /// This lives on `ArtifactStore` because §4.8 puts it here — the artifact
+    /// address is the member with the most to lose from a half-applied move —
+    /// but the other three are not artifact rows and are updated by their own
+    /// statements, not through their repositories: a transaction is the whole
+    /// point, and each repository call would open its own.
+    ///
+    /// Rows only. Moving the store *directory*, when the caller is asking for a
+    /// move rather than recording one that already happened, is
+    /// [`crate::store::migrate::move_project_store`].
+    pub fn rebase_project(&self, old_root: &str, new_root: &str) -> Result<RebaseCounts> {
         self.db.with_connection(|conn| {
-            let changed = conn.execute(
+            let tx = conn.unchecked_transaction()?;
+            let file_assets = tx.execute(
                 "UPDATE file_assets
                     SET project_root = ?2,
                         storage_path = CASE
@@ -1096,7 +1149,67 @@ impl<'a> ArtifactStore<'a> {
                   WHERE project_root = ?1",
                 rusqlite::params![old_root, new_root],
             )?;
-            Ok(changed)
+            let sessions = tx.execute(
+                "UPDATE session SET workspace_id = ?2, updated_at = datetime('now')
+                  WHERE workspace_id = ?1",
+                rusqlite::params![old_root, new_root],
+            )?;
+            let tasks = tx.execute(
+                "UPDATE task SET workspace_id = ?2, updated_at = datetime('now')
+                  WHERE workspace_id = ?1",
+                rusqlite::params![old_root, new_root],
+            )?;
+            // The memory repository has no re-key path of its own, so this is
+            // the statement. `idx_memory_content_hash` is
+            // (owner_id, scope, scope_id, content_hash): re-keying onto a
+            // scope that already holds the same content would violate it, and
+            // that is exactly when the whole transaction must roll back rather
+            // than merge two projects' memories.
+            let memories = tx.execute(
+                "UPDATE memory SET scope_id = ?2, updated_at = datetime('now')
+                  WHERE scope = 'workspace' AND scope_id = ?1",
+                rusqlite::params![old_root, new_root],
+            )?;
+            tx.commit()?;
+            Ok(RebaseCounts {
+                file_assets,
+                sessions,
+                tasks,
+                memories,
+            })
+        })
+    }
+
+    /// What is recorded under `root` right now — the same four members
+    /// [`Self::rebase_project`] moves, plus the runs that are still in flight
+    /// there.
+    ///
+    /// The preflight of `PATCH /v1/workspaces` and the body of its `--dry-run`:
+    /// a rebase onto a root that already has rows would merge two projects, and
+    /// one out from under a running task would rewrite the row without moving
+    /// the process.
+    pub fn workspace_rows(&self, root: &str) -> Result<WorkspaceRows> {
+        self.db.with_connection(|conn| {
+            let count = |sql: &str| -> Result<usize> {
+                Ok(
+                    conn.query_row(sql, rusqlite::params![root], |row| row.get::<_, i64>(0))?
+                        as usize,
+                )
+            };
+            Ok(WorkspaceRows {
+                counts: RebaseCounts {
+                    file_assets: count("SELECT COUNT(*) FROM file_assets WHERE project_root = ?1")?,
+                    sessions: count("SELECT COUNT(*) FROM session WHERE workspace_id = ?1")?,
+                    tasks: count("SELECT COUNT(*) FROM task WHERE workspace_id = ?1")?,
+                    memories: count(
+                        "SELECT COUNT(*) FROM memory WHERE scope = 'workspace' AND scope_id = ?1",
+                    )?,
+                },
+                active_tasks: count(
+                    "SELECT COUNT(*) FROM task
+                      WHERE workspace_id = ?1 AND status IN ('running', 'paused')",
+                )?,
+            })
         })
     }
 
@@ -1329,10 +1442,7 @@ fn rotate_user_edit(conn: &Connection, record: &ArtifactRecord) -> Result<Option
         // request over it would turn a permission problem into an outage.
         Err(e) => {
             if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!(
-                    "Cannot check {} for a hand edit: {e}",
-                    head.display()
-                );
+                tracing::warn!("Cannot check {} for a hand edit: {e}", head.display());
             }
             return Ok(None);
         }
