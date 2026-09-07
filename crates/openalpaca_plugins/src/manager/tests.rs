@@ -2380,6 +2380,59 @@ mod install_tests {
         assert!(entry.installed_at.is_some());
     }
 
+    /// **The order, not just the outcome** (D7). An entry may survive an
+    /// earlier install of the same name with `approved = true` (§5.1 keeps an
+    /// orphan's on purpose), and the tree arriving now is not the tree that was
+    /// approved — so the decision is dropped **before** the rename into place.
+    ///
+    /// The store here is readable but unwritable: the writer's own lock file
+    /// cannot be opened, so `reset_consent` fails while `load_table` still
+    /// succeeds. With the reset after the commit, this would leave
+    /// `plugins/echo-test` on disk under an entry still reading `approved =
+    /// true` — and the next `reconcile_dir` would spawn it. The filesystem is
+    /// the recorder: an absent directory is the proof the reset ran first.
+    #[tokio::test]
+    async fn a_consent_reset_that_fails_leaves_no_installed_tree() {
+        let h = Harness::new();
+        let source = h.source("echo-test", "0.1.0", "");
+        h.manager
+            .permission_gate
+            .approve("echo-test", &["notes".to_string()])
+            .expect("a decision survives from an earlier install");
+        let lock = h.root.join(".permissions.toml.lock");
+        let _ = std::fs::remove_file(&lock);
+        std::fs::create_dir_all(&lock).unwrap();
+
+        let error = h.manager.install_from_path(&source).await.unwrap_err();
+
+        assert!(
+            matches!(
+                error,
+                InstallError::Extension(ExtensionError::WriteFailed(_))
+            ),
+            "the store write is what failed: {error:?}"
+        );
+        assert!(
+            !h.root.join("echo-test").exists(),
+            "an unreviewed tree must never land while the entry still reads approved"
+        );
+        assert_eq!(
+            h.manager
+                .permission_gate
+                .load_table()
+                .unwrap()
+                .approved("echo-test"),
+            Some(true),
+            "the refused install changed nothing at all"
+        );
+        assert!(
+            std::fs::read_dir(h.root.join(crate::install::STAGING_DIR))
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(true),
+            "and it left no staging copy behind"
+        );
+    }
+
     #[tokio::test]
     async fn installing_over_an_existing_plugin_is_refused() {
         let h = Harness::new();

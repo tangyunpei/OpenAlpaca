@@ -1860,11 +1860,14 @@ impl PluginManager {
     /// `Unapproved{NeverSeen}` without spawning anything. Approving is the
     /// single action that starts it.
     ///
-    /// Order: parse the manifest → refuse a collision → stage the copy →
-    /// rename it into place → write the entry → load. The manifest is read
-    /// **before** the copy, so a source that could never load leaves nothing
-    /// behind, and the copy is staged, so a crash can never leave a partial
-    /// `plugins/<name>` for the next boot scan to treat as real.
+    /// Order: parse the manifest → refuse a collision → **drop a surviving
+    /// consent decision** → stage the copy → rename it into place → write the
+    /// entry → load. The manifest is read **before** the copy, so a source that
+    /// could never load leaves nothing behind; the copy is staged, so a crash
+    /// can never leave a partial `plugins/<name>` for the next boot scan to
+    /// treat as real; and the consent reset is **before** the rename, so no
+    /// window exists in which an unreviewed tree sits under an `approved =
+    /// true` entry.
     pub async fn install_from_path(&self, source: &Path) -> Result<InstallOutcome, InstallError> {
         let (name, manifest) = install::inspect_source(source, &self.plugin_dir)?;
         let ext = ExtensionId::plugin(name.clone());
@@ -1882,18 +1885,28 @@ impl PluginManager {
                 )));
             }
 
-            let staged = install::stage(source, &self.plugin_dir, &name)?;
-            staged.commit(&dest)?;
-
             // An entry may survive from an earlier install of the same name —
             // §5.1 keeps an orphan's disposition and consent on purpose. The
             // tree that arrives now is not the tree the owner approved, so the
             // decision does not carry over.
+            //
+            // **Before the tree lands, and that ordering is the invariant.**
+            // The other way round, a `reset_consent` that fails — a read-only
+            // store, a lock nobody can take — or a crash in that window leaves
+            // `plugins/<name>` holding an unreviewed tree under an entry still
+            // reading `approved = true`, which the next `reconcile_dir` spawns.
+            // Dropping the decision first is free: the directory it refers to
+            // is currently absent, so a copy that then fails costs the owner a
+            // consent decision for a plugin that is not there.
             if table.approved(&name).is_some() {
                 self.permission_gate
                     .reset_consent(&name)
                     .map_err(store_error)?;
             }
+
+            let staged = install::stage(source, &self.plugin_dir, &name)?;
+            staged.commit(&dest)?;
+
             self.record_provenance(&name, source)
         };
 
