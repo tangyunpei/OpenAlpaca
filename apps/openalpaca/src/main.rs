@@ -12,6 +12,7 @@
 //! - llm: Manage LLM settings, keys, and usage
 //! - chat: Chat with the Orchestrator
 //! - sessions: List the conversations a lane holds
+//! - store: Manage the content store (rebase a moved project)
 
 mod chat_stream;
 mod client;
@@ -65,6 +66,9 @@ enum Commands {
 
     /// Manage extensions — MCP servers and plugins (list, info, enable, disable, reload, approve, deny, remove)
     Ext(commands::ext::ExtArgs),
+
+    /// Manage the content store (rebase a moved project)
+    Store(commands::store::StoreArgs),
 }
 
 #[tokio::main]
@@ -83,5 +87,6 @@ async fn main() -> Result<()> {
         Commands::Sessions(args) => commands::sessions::run(args).await,
         Commands::Plugin(args) => commands::plugin::run(args).await,
         Commands::Ext(args) => commands::ext::run(args).await,
+        Commands::Store(args) => commands::store::run(args).await,
     }
 }

@@ -365,6 +365,24 @@ Notes:
 - `--workspace <path>` narrows to one project. The path is resolved the same way a turn's project is — up to the nearest `.openalpaca`/`.git` — so `--workspace .` works from anywhere inside a repository. A directory under no such marker is an error, not a filter that matches nothing.
 - An empty result says which kind of empty it is: no conversations at all, or none in the project that was filtered for.
 
+### `store`
+
+Manage the content store. Today it holds one verb: re-basing a project you
+moved on disk.
+
+```bash
+openalpaca store rebase /old/path/my-project /new/path/my-project --dry-run
+openalpaca store rebase /old/path/my-project /new/path/my-project
+```
+
+Notes:
+- A project's path is its identity in four places — its artifacts, its conversations, its runs and its workspace memories — so moving the directory strands all four at once. `rebase` moves them together in one database transaction: either every member lands on the new path or none does.
+- `--dry-run` changes nothing and reports what is recorded under each root, whether a store directory stands at either, and which refusal the real call would hit.
+- The daemon refuses rather than guesses: nothing recorded under the old path is a `404`; a run under it that is still running or paused is refused until it finishes (rewriting the row would not move the process); a new path that already has a store recorded against it is refused rather than merged with the old one; and two store directories — one at each root — are refused rather than chosen between.
+- If `<old>/.openalpaca` still exists, the directory is moved too, after the transaction. In the usual case you moved the whole project with `mv` already, so only the rows are behind and nothing on disk is touched.
+- Both paths are resolved the way a chat turn's project is (up to the nearest `.openalpaca`/`.git`), falling back to the path itself when the old directory is gone. Absolute paths only.
+- The GUI offers the same re-base from Settings → Connection when the project you choose has a store that records a different path.
+
 ### `chat`
 
 Interactive or one-shot chat through daemon orchestrator.

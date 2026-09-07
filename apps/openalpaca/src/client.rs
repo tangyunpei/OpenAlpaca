@@ -110,6 +110,18 @@ impl DaemonClient {
         Ok(resp.json().await?)
     }
 
+    /// PATCH with JSON body and JSON response.
+    pub async fn patch<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self.http.patch(&url).json(body).send().await?;
+        let resp = check_response(resp).await?;
+        Ok(resp.json().await?)
+    }
+
     /// DELETE with JSON response.
     pub async fn delete_req<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);

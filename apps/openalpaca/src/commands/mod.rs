@@ -16,5 +16,6 @@ pub mod sessions;
 mod llm_keys;
 mod llm_status;
 pub mod status;
+pub mod store;
 pub mod tail;
 pub mod tasks;
