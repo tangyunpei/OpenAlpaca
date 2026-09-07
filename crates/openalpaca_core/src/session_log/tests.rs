@@ -2048,7 +2048,7 @@ fn a_replay_rebuilds_the_rounds_and_their_results() {
 
     assert_eq!(plan.rounds, 2);
     assert_eq!(plan.tool_results, 2);
-    assert!(!plan.dropped_incomplete_round);
+    assert_eq!(plan.dropped_incomplete_rounds, 0);
     assert_eq!(plan.from_seq, Some(2), "the first round record");
     assert_eq!(plan.to_seq, Some(6), "the last result it consumed");
 
@@ -2142,13 +2142,121 @@ fn an_incomplete_final_round_is_dropped() {
     let plan = replay::rebuild(&root.join("s1"), "t1", 4).unwrap();
 
     assert_eq!(plan.rounds, 1, "only the complete round is replayed");
-    assert!(plan.dropped_incomplete_round);
+    assert_eq!(plan.dropped_incomplete_rounds, 1);
     assert_eq!(plan.messages.len(), 2);
     assert!(
         plan.messages.iter().all(|m| m.tool_call_id.as_deref() != Some("tu-2")),
         "half a round is no round: {:?}",
         plan.messages
     );
+}
+
+/// **R67.** A resumed run appends to the *same* log under the *same* id, so
+/// the round the first crash tore is an **interior** incomplete round by the
+/// time a second resume reads the log. Truncating the history there threw away
+/// every round the first resume completed — the precise failure this feature
+/// exists to prevent, on the normal path, because every successful resume
+/// leaves a torn round behind for the next one.
+///
+/// A resumed log is a sequence of incarnations separated by `resume` records:
+/// the `resume` record closes the torn round before it, so the rebuild keeps
+/// what came earlier and drops only the rounds nothing ever answered.
+#[test]
+fn two_resumes_in_a_row_replay_the_first_resumes_rounds() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_records(
+        root,
+        "s1",
+        &[
+            // Incarnation 1: one complete round, then the crash's torn one.
+            ("round", "t1", round_record(1, "one", &[("tu-1", "file_read", serde_json::json!({}))])),
+            ("tool_result", "t1", tool_result_record("tu-1", "file_read", true, "ok")),
+            ("round", "t1", round_record(2, "two", &[("tu-2", "shell_execute", serde_json::json!({}))])),
+            // Resume #1 re-entered the run under the same id, in this log.
+            (
+                "resume",
+                "t1",
+                serde_json::json!({"from_seq": 1, "to_seq": 2, "rounds": 1}),
+            ),
+            // Incarnation 2: two complete rounds of real work…
+            ("round", "t1", round_record(3, "three", &[("tu-3", "file_read", serde_json::json!({}))])),
+            ("tool_result", "t1", tool_result_record("tu-3", "file_read", true, "ok")),
+            ("round", "t1", round_record(4, "four", &[("tu-4", "artifact_write", serde_json::json!({}))])),
+            ("tool_result", "t1", tool_result_record("tu-4", "artifact_write", true, "wrote report.md")),
+            // …and its own torn round, the one this replay must re-do.
+            ("round", "t1", round_record(5, "five", &[("tu-5", "shell_execute", serde_json::json!({}))])),
+        ],
+    );
+
+    let plan = replay::rebuild(&root.join("s1"), "t1", 4).unwrap();
+
+    let texts: Vec<&str> = plan
+        .messages
+        .iter()
+        .filter(|m| m.role == openalpaca_llm::Role::Assistant)
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(
+        texts,
+        vec!["one", "three", "four"],
+        "the first resume's own rounds must survive the second resume"
+    );
+    assert_eq!(plan.rounds, 3);
+    assert_eq!(plan.tool_results, 3);
+    assert_eq!(
+        plan.dropped_incomplete_rounds, 2,
+        "both tears are counted, so the gap is stated rather than inferred"
+    );
+    assert_eq!(plan.from_seq, Some(1));
+    assert_eq!(plan.to_seq, Some(8), "the last result it consumed");
+    // Provider validity survives: no assistant `tool_use` is left unanswered.
+    assert!(
+        plan.messages
+            .iter()
+            .filter_map(|m| m.tool_calls.as_ref())
+            .flatten()
+            .all(|call| plan
+                .messages
+                .iter()
+                .any(|m| m.tool_call_id.as_deref() == Some(call.id.as_str()))),
+        "every replayed call keeps its result: {:?}",
+        plan.messages
+    );
+}
+
+/// The same root cause from the other side: the session-log writer drops
+/// records under backpressure (`sessions.dropped_records`), so one missing
+/// `tool_result` in the middle of a long run leaves that round permanently
+/// incomplete. It must cost that round, not every round after it — and if it
+/// is the *first* round, a log full of work must not rebuild to nothing.
+#[test]
+fn a_round_whose_result_never_reached_the_log_costs_only_that_round() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_records(
+        root,
+        "s1",
+        &[
+            // The dropped record is round 1's result.
+            ("round", "t1", round_record(1, "one", &[("tu-1", "file_read", serde_json::json!({}))])),
+            ("round", "t1", round_record(2, "two", &[("tu-2", "file_read", serde_json::json!({}))])),
+            ("tool_result", "t1", tool_result_record("tu-2", "file_read", true, "ok")),
+            ("round", "t1", round_record(3, "three", &[("tu-3", "file_read", serde_json::json!({}))])),
+            ("tool_result", "t1", tool_result_record("tu-3", "file_read", true, "ok")),
+        ],
+    );
+
+    let plan = replay::rebuild(&root.join("s1"), "t1", 4).unwrap();
+
+    let texts: Vec<&str> = plan
+        .messages
+        .iter()
+        .filter(|m| m.role == openalpaca_llm::Role::Assistant)
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(texts, vec!["two", "three"]);
+    assert_eq!(plan.dropped_incomplete_rounds, 1);
 }
 
 /// The T55 hand-off note, honoured: `preserved_from_seq` is the last seq

@@ -471,7 +471,7 @@ pub async fn run_lead_agent(
             tool_results = plan.tool_results,
             from_seq = ?plan.from_seq,
             to_seq = ?plan.to_seq,
-            dropped_incomplete_round = plan.dropped_incomplete_round,
+            dropped_incomplete_rounds = plan.dropped_incomplete_rounds,
             "Resuming an interrupted run over its replayed history"
         );
         // The `resume` record names the slice of the log this run was primed
@@ -489,7 +489,7 @@ pub async fn run_lead_agent(
                         "tool_results": plan.tool_results,
                         "compacted_from_seq": plan.compacted_from_seq,
                         "compacted_rounds_dropped": plan.compacted_rounds_dropped,
-                        "dropped_incomplete_round": plan.dropped_incomplete_round,
+                        "dropped_incomplete_rounds": plan.dropped_incomplete_rounds,
                         "spills_referenced": plan.spills_referenced,
                         "missing_spills": plan.missing_spills,
                         "interjection": if history.inline_note.is_some() {

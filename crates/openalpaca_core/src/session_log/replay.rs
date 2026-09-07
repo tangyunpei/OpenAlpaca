@@ -13,12 +13,16 @@
 //!   come back as *messages*, never as dispatches. `rebuild` takes a directory
 //!   and a task id and touches no registry, no sandbox and no network —
 //!   pinned by `rebuilding_executes_no_tool`.
-//! * **The last round is complete or it is not replayed.** §5.6c: "stop at the
+//! * **A round is complete or it is not replayed.** §5.6c: "stop at the
 //!   last *complete* round (all its results present — the model re-does at
 //!   most one round)". A crash between a `tool_call` and its `tool_result` is
 //!   exactly a round whose results are missing, and half a round is not a
 //!   round: an assistant message holding a `tool_use` with no answering
-//!   `tool_result` is a malformed request to every provider.
+//!   `tool_result` is a malformed request to every provider. Such a round is
+//!   dropped **where it stands**, not by truncating the history at it — a
+//!   resumed run appends to the same log under the same id, so an earlier
+//!   incarnation's tear sits in the middle of it (R67), closed by the `resume`
+//!   record that followed. What was dropped is counted, never implied.
 //! * **A compaction is honoured, not undone.** Replaying every round of a log
 //!   whose live loop had already compacted would re-inflate the context that
 //!   compaction shrank. The newest `compaction` record's `preserved_from_seq`
@@ -66,9 +70,12 @@ pub struct ReplayPlan {
     pub compacted_from_seq: Option<u64>,
     /// Rounds dropped ahead of the compaction boundary and its retained tail.
     pub compacted_rounds_dropped: usize,
-    /// Whether the run's final round was incomplete and therefore dropped —
-    /// the one round the model re-does.
-    pub dropped_incomplete_round: bool,
+    /// Incomplete rounds dropped: the crash's own torn round (the one the
+    /// model re-does), plus any earlier incarnation's tear and any round a
+    /// dropped `tool_result` record left permanently half-answered. Counted
+    /// rather than flagged so the `resume` record **states** the gap instead
+    /// of leaving it to be inferred from a round count (R67).
+    pub dropped_incomplete_rounds: usize,
     /// `tool_result`s whose payload lives in `results/`.
     pub spills_referenced: usize,
     /// …of which the file is gone (the sweep took it): the preview is
@@ -214,6 +221,13 @@ pub fn rebuild(session_dir: &Path, task_id: &str, tail_keep: usize) -> io::Resul
                         compaction = Some((record.seq, preserved));
                     }
                 }
+                // R67: a `resume` record is a round boundary. Everything
+                // before it belongs to an incarnation that has already ended,
+                // so its last round can never be answered now — and the
+                // results that follow belong to the run that re-entered here.
+                // Clearing the slots keeps a later result from ever attaching
+                // to a closed incarnation's call.
+                "resume" => slots.clear(),
                 _ => {}
             }
         }
@@ -222,13 +236,21 @@ pub fn rebuild(session_dir: &Path, task_id: &str, tail_keep: usize) -> io::Resul
         }
     }
 
-    // §5.6c: stop at the last complete round. The first incomplete one ends
-    // the replay — everything after it belongs to a round the model never
-    // finished, and re-doing one round is the documented cost.
-    if let Some(cut) = rounds.iter().position(|r| !r.complete()) {
-        rounds.truncate(cut);
-        plan.dropped_incomplete_round = true;
-    }
+    // §5.6c: only a **complete** round is replayed — an assistant message
+    // holding a `tool_use` with no answering `tool_result` is a malformed
+    // request to every provider.
+    //
+    // Each round is dropped where it stands rather than truncating the history
+    // at the first one (R67). Truncating is right exactly once: a resumed run
+    // appends to *this* log under *this* id, so the round the last crash tore
+    // is an interior incomplete round the moment a second resume reads it, and
+    // cutting there would throw away every round the resumed run completed —
+    // then tell the model not to repeat side effects it can no longer see. A
+    // round is self-contained (its assistant message and its partial results
+    // leave together), so dropping in place keeps the provider invariant.
+    let before = rounds.len();
+    rounds.retain(Round::complete);
+    plan.dropped_incomplete_rounds = before - rounds.len();
 
     // The compaction boundary, plus the tail compaction kept (T41's hand-off:
     // `preserved_from_seq` is not that tail's boundary).
