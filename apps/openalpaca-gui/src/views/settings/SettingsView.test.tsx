@@ -598,6 +598,25 @@ describe("SettingsView (§2.5, §5.4)", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows a destination refusal in the picker, naming the root the daemon named", () => {
+    useProjectStore.setState({ path: "/Users/dev/mono/sub/proj" });
+    workspace.moved = {
+      from: "/Users/dev/openalpaca",
+      to: "/Users/dev/mono/sub/proj",
+      rows: { artifacts: 1, sessions: 0, tasks: 0, memories: 0 },
+      activeTasks: 0,
+    };
+    workspace.rebaseError = new Error(
+      "/Users/dev/mono/sub/proj is inside the project rooted at /Users/dev/mono, " +
+        "so re-basing onto it would move everything onto /Users/dev/mono instead.",
+    );
+    render(<SettingsView />);
+
+    expect(
+      screen.getByText(/is inside the project rooted at \/Users\/dev\/mono/),
+    ).toBeInTheDocument();
+  });
+
   it("says it is checking rather than showing a project as settled", () => {
     useProjectStore.setState({ path: "/Users/dev/openalpaca" });
     workspace.pending = true;

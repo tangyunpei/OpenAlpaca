@@ -333,7 +333,13 @@ function ProjectCard() {
  * Every state is stated rather than hidden: checking, a lookup that failed, a
  * project that has not moved (nothing at all), the offer, and a refusal with
  * the daemon's own reason — `WORKSPACE_BUSY` while a run is in flight,
- * `WORKSPACE_EXISTS` when the new root already has a history of its own.
+ * `WORKSPACE_EXISTS` when the new root already has a history of its own,
+ * `WORKSPACE_NOT_A_ROOT` when the path chosen here sits inside another
+ * project's root (the daemon names that root, and this shows what it said),
+ * `WORKSPACE_IS_HOME` when it resolves to the home store, and
+ * `WORKSPACE_NOT_FOUND` when the rows there belong to another owner. The
+ * daemon's sentence is rendered verbatim: it is the only thing that knows
+ * which root it resolved.
  */
 function MovedProjectOffer({ path }: { path: string | null }) {
   const { moved, pending, error } = useMovedProject(path);

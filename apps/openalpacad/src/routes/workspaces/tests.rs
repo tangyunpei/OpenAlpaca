@@ -399,6 +399,42 @@ async fn re_basing_rows_another_owner_holds_is_a_404() {
 }
 
 #[tokio::test]
+async fn a_destination_inside_another_project_is_a_422() {
+    let f = Fixture::new();
+    let old = f.project("old-project");
+    f.artifact(&old, "Notes");
+
+    // A monorepo with its own marker, and a fresh directory inside it.
+    let mono = f.bare_dir("mono");
+    std::fs::create_dir_all(std::path::Path::new(&mono).join(".git")).expect("marker");
+    let inside = std::path::Path::new(&mono).join("sub").join("proj");
+    std::fs::create_dir_all(&inside).expect("destination");
+    let inside = inside.to_string_lossy().into_owned();
+
+    let (status, body) = f.patch(&old, &inside).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(error_code(&body), "WORKSPACE_NOT_A_ROOT");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains(&mono), "the ancestor is named: {message}");
+
+    // Nothing moved, and `/mono/.openalpaca` was not created on the way past.
+    let (_, old_body) = f.get(Some(&old)).await;
+    assert_eq!(old_body["rows"]["artifacts"], 1);
+    assert!(
+        !std::path::Path::new(&mono)
+            .join(store::STORE_DIR_NAME)
+            .exists()
+    );
+
+    // A destination that is a root of its own is taken as given.
+    let sibling = f.bare_dir("sibling");
+    std::fs::create_dir_all(std::path::Path::new(&sibling).join(".git")).expect("marker");
+    let (status, body) = f.patch(&old, &sibling).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["new_path"], sibling);
+}
+
+#[tokio::test]
 async fn re_basing_a_root_onto_itself_is_a_400() {
     let f = Fixture::new();
     let root = f.project("project");

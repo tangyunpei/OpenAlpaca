@@ -13,12 +13,14 @@
 //! identity is cheap only if re-basing is **one transaction**, which is what
 //! `ArtifactStore::rebase_project` is.
 //!
-//! **Both paths are resolved the way a turn's `x-workspace-path` is** (R22,
-//! `request_project_root`): up to the nearest `.git`/`.openalpaca`, falling
-//! back to the path itself when there is no marker to walk to — which is the
-//! usual state of a root a project has already been moved *out of*. The
-//! resolved values are what comes back, so a caller can see what was answered
-//! about rather than assume.
+//! **A root a project came *from* is resolved the way a turn's
+//! `x-workspace-path` is** (R22, `request_project_root`): up to the nearest
+//! `.git`/`.openalpaca`, falling back to the path itself when there is no
+//! marker to walk to — which is the usual state of a root a project has already
+//! been moved *out of*. A re-base **destination** is taken literally instead
+//! (`resolve_destination`): walking it up would re-address a history onto a
+//! directory nobody named. The resolved values are what comes back, so a caller
+//! can see what was answered about rather than assume.
 //!
 //! The `GET` exists because the picker cannot honestly offer a re-base without
 //! it: it is the only way to learn that the store at a chosen path records a
@@ -29,8 +31,9 @@
 //! refuses rather than guesses: `404` when no row of the caller's names the old
 //! root (or a row there belongs to somebody else), `409` when rows already name
 //! the new one (two projects must not merge silently), `409` while a run under
-//! the old root is in flight, `409` when either root is the home store, and
-//! `409` when the store directory itself cannot be moved.
+//! the old root is in flight, `409` when either root is the home store, `409`
+//! when the store directory itself cannot be moved, and `422` when the
+//! destination sits inside another project's root.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -67,16 +70,12 @@ pub struct RebaseRequest {
 
 // ── Path resolution ──────────────────────────────────────────────
 
-/// The canonical root string the four members hold, for a path a client named.
+/// A client's path, canonicalized and nothing more — no marker walk.
 ///
 /// A relative path is refused rather than resolved: it would be read against
-/// the *daemon's* working directory, which is the bug ruling R22 fixed. An
-/// absolute path is resolved through the same walk a turn's `x-workspace-path`
-/// takes, and when that finds no marker — a project directory that has already
-/// been moved away, leaving nothing behind — the canonical path itself stands,
-/// because that is still exactly what the rows recorded.
+/// the *daemon's* working directory, which is the bug ruling R22 fixed.
 #[allow(clippy::result_large_err)]
-fn resolve_root(input: &str) -> Result<String, Response> {
+fn canonical_path(input: &str) -> Result<String, Response> {
     let trimmed = input.trim();
     if trimmed.is_empty() || !Path::new(trimmed).is_absolute() {
         return Err(api_error(
@@ -84,9 +83,6 @@ fn resolve_root(input: &str) -> Result<String, Response> {
             "INVALID_PATH",
             format!("a workspace path must be absolute, got '{input}'"),
         ));
-    }
-    if let Some(root) = request_project_root(Some(trimmed)) {
-        return Ok(root);
     }
     let path = Path::new(trimmed);
     let canonical = path.canonicalize();
@@ -98,6 +94,51 @@ fn resolve_root(input: &str) -> Result<String, Response> {
         true => text.to_string(),
         false => without_slash.to_string(),
     })
+}
+
+/// The canonical root string the four members hold, for a path a client named
+/// as somewhere a project **is or was**.
+///
+/// Resolved through the same walk a turn's `x-workspace-path` takes (R22), and
+/// when that finds no marker — a project directory that has already been moved
+/// away, leaving nothing behind — the canonical path itself stands, because
+/// that is still exactly what the rows recorded.
+#[allow(clippy::result_large_err)]
+fn resolve_root(input: &str) -> Result<String, Response> {
+    let literal = canonical_path(input)?;
+    Ok(request_project_root(Some(&literal)).unwrap_or(literal))
+}
+
+/// The re-base **destination**, taken literally.
+///
+/// The marker walk is right for a root a project came *from* and wrong for one
+/// it is going to: a fresh directory inside another repository resolves to
+/// *that* repository's root, so `rebase /old/proj /mono/sub/proj` with
+/// `/mono/.git` present would silently re-address a whole history onto `/mono`
+/// and then rename `/old/proj/.openalpaca` to `/mono/.openalpaca`. Echoing the
+/// resolved value back is mitigation, not prevention.
+///
+/// So the destination is canonicalized and then checked: a path that resolves
+/// to an **ancestor** is `422 WORKSPACE_NOT_A_ROOT`, naming the ancestor, and
+/// the caller decides which of the two roots they meant. A destination that
+/// resolves to itself — its own `.git`, its own `.openalpaca` (the P-12 shape,
+/// where the store is already there), or no marker anywhere — is taken as
+/// given.
+#[allow(clippy::result_large_err)]
+fn resolve_destination(input: &str) -> Result<String, Response> {
+    let literal = canonical_path(input)?;
+    match request_project_root(Some(&literal)) {
+        Some(ancestor) if ancestor != literal => Err(api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "WORKSPACE_NOT_A_ROOT",
+            format!(
+                "{literal} is inside the project rooted at {ancestor}, so re-basing onto it \
+                 would move everything onto {ancestor} instead. Re-base onto {ancestor} if that \
+                 is what you meant, or give {literal} a project marker of its own first"
+            ),
+        )),
+        _ => Ok(literal),
+    }
 }
 
 /// The home store is not a project and never becomes one (R24, and the fold in
@@ -226,7 +267,7 @@ pub(crate) fn rebase_workspace(db: &Database, owner_id: &str, request: RebaseReq
         Ok(root) => root,
         Err(response) => return response,
     };
-    let new_root = match resolve_root(&request.new_path) {
+    let new_root = match resolve_destination(&request.new_path) {
         Ok(root) => root,
         Err(response) => return response,
     };

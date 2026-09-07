@@ -11,9 +11,11 @@
 //! written: how many rows of each kind name the old root, and what would happen
 //! to the store directory.
 //!
-//! Paths are taken as given (absolute, please) and resolved by the daemon the
-//! same way a chat turn's workspace path is, because the daemon is the one that
-//! recorded them.
+//! Paths are taken as given (absolute, please). The daemon resolves the *old*
+//! one the same way a chat turn's workspace path is resolved, because that is
+//! how the rows were recorded; the *new* one it takes literally, and refuses a
+//! destination that sits inside another project's root rather than quietly
+//! re-basing onto that root instead.
 //!
 //! Deliberately not a re-implementation of the transaction: everything below is
 //! `GET`/`PATCH /v1/workspaces`. The daemon owns the refusals, and the CLI
@@ -121,7 +123,7 @@ async fn rebase(old: &str, new: &str, dry_run: bool) -> Result<()> {
     if dry_run {
         let from: WorkspaceView = client.get(&workspace_query(old)).await?;
         let to: WorkspaceView = client.get(&workspace_query(new)).await?;
-        print_plan(&from, &to);
+        print_plan(new, &from, &to);
         return Ok(());
     }
 
@@ -148,13 +150,27 @@ async fn rebase(old: &str, new: &str, dry_run: bool) -> Result<()> {
     Ok(())
 }
 
+/// The ancestor a destination would be walked up to, when the daemon resolved
+/// it to something other than the path that was asked about.
+///
+/// The `PATCH` takes its destination literally and answers `422`
+/// `WORKSPACE_NOT_A_ROOT` for exactly this, so the dry run says so first. The
+/// comparison is against the *resolved* answer the `GET` echoed back, which is
+/// the only thing here that knows the daemon's own view of the path.
+fn destination_ancestor<'a>(requested: &str, resolved: &'a str) -> Option<&'a str> {
+    let requested = std::fs::canonicalize(requested.trim())
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| requested.trim().trim_end_matches('/').to_string());
+    (requested.trim_end_matches('/') != resolved).then_some(resolved)
+}
+
 /// The `--dry-run` body: what is there, and what the re-base would do about it.
 ///
 /// It reports rather than refuses — a dry run that exits non-zero on a
 /// condition the real call would also refuse tells the caller nothing the real
 /// call would not — except for the one case where there is simply nothing to
 /// re-base, which is a mistyped path far more often than it is a no-op.
-fn print_plan(from: &WorkspaceView, to: &WorkspaceView) {
+fn print_plan(requested_new: &str, from: &WorkspaceView, to: &WorkspaceView) {
     println!(
         "{} {} → {}",
         "Would re-base".bold(),
@@ -163,6 +179,16 @@ fn print_plan(from: &WorkspaceView, to: &WorkspaceView) {
     );
     println!("  {}", from.rows.describe());
 
+    if let Some(ancestor) = destination_ancestor(requested_new, &to.path) {
+        println!(
+            "  {}",
+            format!(
+                "the destination is inside the project rooted at {ancestor}; the re-base would \
+                 be refused (a destination must be a project root of its own)"
+            )
+            .yellow()
+        );
+    }
     // Advisory: this reads *this* process's home root, which is the daemon's on
     // the machine they share. The daemon is what actually refuses.
     for (label, view) in [("the old path", from), ("the new path", to)] {
@@ -258,6 +284,20 @@ mod tests {
             workspace_query("/Users/me/my project"),
             "/v1/workspaces?path=%2FUsers%2Fme%2Fmy%20project"
         );
+    }
+
+    #[test]
+    fn a_destination_the_daemon_resolved_elsewhere_names_the_ancestor() {
+        // The daemon answered about `/mono` for a request about `/mono/sub`:
+        // that is the 422 the real call would give.
+        assert_eq!(
+            destination_ancestor("/mono/sub/proj", "/mono"),
+            Some("/mono")
+        );
+        // A destination the daemon took as given is not flagged, trailing
+        // separator and all.
+        assert_eq!(destination_ancestor("/new/proj", "/new/proj"), None);
+        assert_eq!(destination_ancestor("/new/proj/", "/new/proj"), None);
     }
 
     #[test]
