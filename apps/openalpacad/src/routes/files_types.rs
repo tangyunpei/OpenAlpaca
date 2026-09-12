@@ -61,12 +61,21 @@ pub struct FileOpenResponse {
 /// `(storage_path, file_id, filename, stage)`.
 ///
 /// `stage` is the Phase 3 item 6 decision, taken by [`open_asset_for_user`] from
-/// the row's `origin` and passed down rather than re-derived: an **upload** is
-/// stored under a content-addressed name with no usable extension, so it must
-/// be copied to `$TMPDIR/openalpaca-open/<id>-<name>` before the system opener
-/// can pick an application; a **produced** artifact already lives at a real
-/// path with a real extension (§4.2's grammar), so it opens in place — no copy,
-/// and "Open" reveals the file the user actually has.
+/// the row's `origin` and passed down rather than re-derived.
+///
+/// An **upload** is copied to `$TMPDIR/openalpaca-open/<id>-<name>` first. Two
+/// reasons, both still true after D2 gave uploads a real placement
+/// (`<store>/uploads/<date>/NN-<slug>.<ext>`, `openalpaca_storage::uploads`):
+/// the stored name is the store's own, so opening it in place would hand the
+/// user `03-quarterly-report.pdf` instead of the name they uploaded — and a row
+/// written before D2 is still a content-addressed blob under `state/assets/`
+/// with no extension at all until the boot `rehome` pass moves it, which the
+/// system opener cannot pick an application for. The staged copy restores the
+/// original filename in both cases.
+///
+/// A **produced** artifact already lives at a real path under its own name
+/// (§4.2's grammar), so it opens in place — no copy, and "Open" reveals the file
+/// the user actually has.
 pub(super) type OpenFileFn = fn(&str, &str, &str, bool) -> Result<(), String>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
