@@ -1485,6 +1485,11 @@ impl<'a> ArtifactStore<'a> {
     pub fn rebase_project(&self, old_root: &str, new_root: &str) -> Result<RebaseCounts> {
         self.db.with_connection(|conn| {
             let tx = conn.unchecked_transaction()?;
+            // `missing_since` is cleared with the address it described: the
+            // mark says "nothing is at `storage_path`", and `storage_path` is
+            // exactly what this statement rewrites. No stat pass inside the
+            // transaction (R32) — the read path is the authority on absence and
+            // re-stamps on the next head read if the bytes are still away.
             let file_assets = tx.execute(
                 "UPDATE file_assets
                     SET project_root = ?2,
@@ -1492,6 +1497,7 @@ impl<'a> ArtifactStore<'a> {
                             WHEN substr(storage_path, 1, length(?1)) = ?1
                             THEN ?2 || substr(storage_path, length(?1) + 1)
                             ELSE storage_path END,
+                        missing_since = NULL,
                         updated_at = datetime('now')
                   WHERE project_root = ?1",
                 rusqlite::params![old_root, new_root],
@@ -1719,9 +1725,22 @@ impl<'a> ArtifactStore<'a> {
                         "SELECT COUNT(*) FROM event_log
                           WHERE task_id IN (SELECT id FROM task WHERE workspace_id = ?1)",
                     )?,
+                    // The one statement that cannot be copied verbatim from
+                    // `purge_project`: there the attachment rows of this
+                    // project's messages have already cascaded away, so the
+                    // surviving links are simply whatever
+                    // `conversation_message_attachments` still holds. Nothing
+                    // has been deleted here, so the same set is named the long
+                    // way — linked from a message this purge will *not* take.
                     uploads: count(
                         "SELECT COUNT(*) FROM file_assets
-                          WHERE origin = 'upload' AND project_root = ?1",
+                          WHERE origin = 'upload' AND project_root = ?1
+                            AND id NOT IN (
+                                SELECT a.file_id FROM conversation_message_attachments a
+                                  JOIN conversation_messages m ON m.id = a.message_id
+                                 WHERE m.session_id IS NULL
+                                    OR m.session_id NOT IN
+                                       (SELECT id FROM session WHERE workspace_id = ?1))",
                     )?,
                 },
                 kept: PurgeKept {
@@ -1745,11 +1764,12 @@ impl<'a> ArtifactStore<'a> {
     /// |---|---|
     /// | `session` (`workspace_id`), its `conversation_messages`, `tool_execution_log` and `lane_followups` rows | the transcript is the thing being purged |
     /// | `task` (`workspace_id`), its `subagent_span`, `event_log`, `dispatch_decisions` and `llm_call_log` rows | the run history of this project |
-    /// | `file_assets` where `origin = 'upload'` and `project_root` is this root | copies of what was handed to a turn |
+    /// | `file_assets` where `origin = 'upload'`, `project_root` is this root and no message still links it | copies of what was handed to a turn |
     ///
     /// | Stays | Because |
     /// |---|---|
     /// | `file_assets` where `origin = 'produced'` | produced artifacts are never garbage-collected (§4.5) |
+    /// | an upload row a surviving message still attaches | dedup is store-blind, so the row can be another project's attachment |
     /// | `memory` scoped to this workspace | the user's, not the store's |
     ///
     /// `task.session_id` on a run *outside* this root is nulled rather than
@@ -1785,17 +1805,6 @@ impl<'a> ArtifactStore<'a> {
                     .collect::<rusqlite::Result<Vec<String>>>()?;
                 ids
             };
-            let upload_paths: Vec<String> = {
-                let mut stmt = tx.prepare(
-                    "SELECT storage_path FROM file_assets
-                      WHERE origin = 'upload' AND project_root = ?1",
-                )?;
-                let paths = stmt
-                    .query_map(rusqlite::params![root], |row| row.get::<_, String>(0))?
-                    .collect::<rusqlite::Result<Vec<String>>>()?;
-                paths
-            };
-
             // Every statement below binds the same one parameter.
             let bind = rusqlite::params![root];
 
@@ -1851,10 +1860,26 @@ impl<'a> ArtifactStore<'a> {
             )?;
             let tasks = tx.execute("DELETE FROM task WHERE workspace_id = ?1", bind)?;
 
-            let uploads = tx.execute(
-                "DELETE FROM file_assets WHERE origin = 'upload' AND project_root = ?1",
-                bind,
-            )?;
+            // Uploads last, and only the ones nothing still links. Dedup is
+            // store-blind (`UploadStore::put` matches on sha + owner across
+            // every store), so one row can be the attachment of a message in
+            // another project's transcript. The messages of *this* project are
+            // already gone above and their attachment rows cascaded with them,
+            // so a surviving `conversation_message_attachments` row names a
+            // surviving transcript — and the store never deletes what another
+            // reader still names. `upload_paths` is read from the same filtered
+            // set so the caller unlinks exactly the blobs whose rows went.
+            const UNLINKED: &str = "origin = 'upload' AND project_root = ?1
+                 AND id NOT IN (SELECT file_id FROM conversation_message_attachments)";
+            let upload_paths: Vec<String> = {
+                let mut stmt =
+                    tx.prepare(&format!("SELECT storage_path FROM file_assets WHERE {UNLINKED}"))?;
+                let paths = stmt
+                    .query_map(bind, |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<String>>>()?;
+                paths
+            };
+            let uploads = tx.execute(&format!("DELETE FROM file_assets WHERE {UNLINKED}"), bind)?;
 
             tx.commit()?;
             Ok(PurgeOutcome {

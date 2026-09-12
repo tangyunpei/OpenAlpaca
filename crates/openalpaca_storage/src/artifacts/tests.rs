@@ -1449,6 +1449,44 @@ fn rebase_project_moves_all_four_members_together() {
     );
 }
 
+/// I8: the mark says "nothing is at `storage_path`", and the re-base is what
+/// rewrites `storage_path` — so it clears the mark with the address it
+/// described. Otherwise a project moved by hand and then re-based stays hidden
+/// from the Library for good.
+#[test]
+fn rebase_project_clears_the_missing_mark_it_re_addresses() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"body");
+    new.created = at(1);
+    let (record, _) = f.store().put(new).unwrap();
+
+    // The project is moved by hand; opening the artifact in the Library stamps
+    // the row on the way to `ARTIFACT_GONE`.
+    fs::remove_file(&record.storage_path).unwrap();
+    assert!(f.store().resolve_content(&record.id, None).is_err());
+    assert!(f.store().get(&record.id, OWNER).unwrap().unwrap().missing());
+    assert_eq!(
+        f.store().list(&ArtifactQuery::new(OWNER)).unwrap().1,
+        0,
+        "a marked row is hidden from the default query"
+    );
+
+    let old = f.project_root().to_string_lossy().to_string();
+    f.store().rebase_project(&old, "/tmp/moved-project").unwrap();
+
+    let after = f.store().get(&record.id, OWNER).unwrap().unwrap();
+    assert!(
+        !after.missing(),
+        "the mark described the old address and went with it"
+    );
+    assert_eq!(
+        f.store().list(&ArtifactQuery::new(OWNER)).unwrap().1,
+        1,
+        "the row is back in the Library"
+    );
+}
+
 #[test]
 fn a_failing_member_rolls_the_whole_rebase_back() {
     let f = Fixture::new();
@@ -1743,6 +1781,77 @@ fn purge_project_takes_the_conversations_the_runs_and_the_uploads() {
         count("SELECT COUNT(*) FROM task WHERE id = 'task-loose' AND session_id IS NULL"),
         1
     );
+}
+
+/// Upload dedup is store-blind (`UploadStore::put` matches on sha + owner
+/// across every store), so one row can be the attachment of a message in
+/// another project's transcript. The purge must leave that row — the store
+/// never deletes what another reader still names.
+#[test]
+fn a_purge_keeps_an_upload_a_surviving_message_still_links() {
+    let f = Fixture::new();
+    let root = f.project_root().to_string_lossy().to_string();
+    seed_for_purge(&f, &root);
+
+    let mine = f.artifacts_root().join("loose/2026-09-01/98-mine.md");
+    f.foreign_row("upload-mine", "loose/2026-09-01/98-mine.md", &mine);
+    let shared = f.artifacts_root().join("loose/2026-09-01/99-shared.md");
+    f.foreign_row("upload-shared", "loose/2026-09-01/99-shared.md", &shared);
+    f.db
+        .with_connection(|conn| {
+            let here: i64 = conn.query_row(
+                "SELECT id FROM conversation_messages WHERE session_id = 'session-1'",
+                [],
+                |r| r.get(0),
+            )?;
+            let elsewhere: i64 = conn.query_row(
+                "SELECT id FROM conversation_messages WHERE session_id = 'session-2'",
+                [],
+                |r| r.get(0),
+            )?;
+            for (message, file) in [
+                (here, "upload-mine"),
+                (here, "upload-shared"),
+                (elsewhere, "upload-shared"),
+            ] {
+                conn.execute(
+                    "INSERT INTO conversation_message_attachments (message_id, file_id)
+                     VALUES (?1, ?2)",
+                    rusqlite::params![message, file],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    let plan = f.store().purge_plan(&root).unwrap();
+    let outcome = f.store().purge_project(&root).unwrap();
+    assert_eq!(
+        plan.counts, outcome.counts,
+        "the dry run and the real call must agree"
+    );
+    assert_eq!(
+        outcome.counts.uploads, 1,
+        "only the row this project's transcript alone named"
+    );
+    assert_eq!(
+        outcome.upload_paths,
+        vec![mine.to_string_lossy().to_string()],
+        "the caller unlinks exactly the blobs whose rows went"
+    );
+
+    let surviving: Vec<String> = f
+        .db
+        .with_connection(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT id FROM file_assets WHERE origin = 'upload' ORDER BY id")?;
+            let ids = stmt
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            Ok(ids)
+        })
+        .unwrap();
+    assert_eq!(surviving, vec!["upload-shared".to_string()]);
 }
 
 #[test]
