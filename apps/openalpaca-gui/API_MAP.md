@@ -815,7 +815,7 @@ invocation is not a workflow, so there is no run to attribute one to.
 
 ### GAP-11 — Artifact content cannot be rendered by the browser — **CLOSED (Phase 3, T27)**
 
-> **Closed in Phase 3.** The three content routes moved out of the auth middleware and check `?token=` inline, exactly as this section proposed. Image previews are `<img src={artifactContentUrl(id)}>`; `tauri.conf.json`'s `img-src` gained `blob:` and the loopback origins. **HTML previews stay deferred** — rendering agent markup is a security review, so HTML and SVG are shown as source.
+> **Closed in Phase 3.** The three content routes moved out of the auth middleware and check `?token=` inline, exactly as this section proposed. Image previews are `<img src={artifactContentUrl(id)}>`; `tauri.conf.json`'s `img-src` gained `blob:` and the loopback origins. **HTML previews stay deferred** — rendering agent markup is a security review, so HTML and SVG are shown as source: `views/library/preview.ts` plans markup as `kind: "code"`, and nothing passes `kind: "html"` to `ArtifactPreview`, so the sanitizing `HtmlPreview` component exists with no caller that can reach it.
 
 **UI needs:** the Library `Preview` tab renders images (`screenshot-settings-drawer.png`,
 `1440 × 900`) and HTML (`weekly-report.html`) inline.
