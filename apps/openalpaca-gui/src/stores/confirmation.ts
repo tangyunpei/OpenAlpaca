@@ -24,9 +24,9 @@ export interface PendingToolConfirmation {
   /** The tool the daemon is waiting on. */
   toolName: string;
   /**
-   * The run holding it. `agent_status`'s `agent_id → current_task_id` is the
-   * only mapping available; `null` when it has not arrived yet rather than
-   * being guessed.
+   * The run holding it — the `task_id` the confirmation frame carries, with
+   * `agent_status`'s `agent_id → current_task_id` as the fallback for a frame
+   * that has none. `null` when neither answers, rather than a guess.
    */
   runId: string | null;
   /** `resolve("approved")`. */

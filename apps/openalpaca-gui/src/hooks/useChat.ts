@@ -42,7 +42,7 @@ import {
   type ChatStreamState,
   type SendChatOptions,
 } from "@/lib/chat-stream";
-import { daemonEvents } from "@/lib/events";
+import { daemonEvents, type ServerEvent } from "@/lib/events";
 import { qk } from "@/lib/query-keys";
 
 /**
@@ -50,14 +50,41 @@ import { qk } from "@/lib/query-keys";
  * default lane and echo the key back, so this stays the one-round-trip path
  * for the chat view itself; `GET /v1/me` (GAP-16, closed) is there for a
  * caller that needs the default lane before it has any chat history to ask.
+ *
+ * `enabled` is there for the transcript's two-call tail read: the second call
+ * has no offset to ask for until the first has answered with a `total`, and a
+ * query that cannot be formed yet must not be issued.
  */
 export function useChatHistory(
   query: ChatHistoryQuery = {},
+  options: { enabled?: boolean } = {},
 ): UseQueryResult<ChatHistoryResponse> {
   return useQuery({
     queryKey: qk.chat.history(query),
     queryFn: ({ signal }) => getChatHistory(query, signal),
+    enabled: options.enabled ?? true,
   });
+}
+
+/** The daemon-wide frame a pending confirmation arrives on. */
+export type ToolConfirmationEvent = Extract<
+  ServerEvent,
+  { type: "tool_confirmation_requested" }
+>;
+
+export interface ChatStreamOptions {
+  /**
+   * Whether a confirmation arriving on the **daemon-wide** socket belongs to
+   * this view.
+   *
+   * `/v1/events` forwards every frame to every client with no lane filter, and
+   * a confirmation accepted here blocks the composer and arms Enter-approve —
+   * so answering one raised by a scheduled skill, a connector or a wake turn
+   * would widen a foreign agent's run from this window. Omitted, every frame
+   * is accepted, which is the pre-filter behaviour and is what a caller with
+   * no lane of its own should get.
+   */
+  accepts?: (event: ToolConfirmationEvent, streamId: string | null) => boolean;
 }
 
 export interface ChatStreamController {
@@ -76,13 +103,23 @@ export interface ChatStreamController {
  * Drives one chat stream at a time — matching the design, which has a single
  * composer and a single in-flight assistant turn.
  */
-export function useChatStream(): ChatStreamController {
+export function useChatStream(
+  options: ChatStreamOptions = {},
+): ChatStreamController {
   const [state, dispatch] = useReducer(
     chatStreamReducer,
     initialChatStreamState,
   );
   const handleRef = useRef<ChatStreamHandle | null>(null);
   const client = useQueryClient();
+
+  // The WS subscription is opened once and never re-subscribes, so both of the
+  // things its filter needs — the caller's predicate and this stream's own id —
+  // are read through refs refreshed on every render.
+  const acceptsRef = useRef(options.accepts);
+  acceptsRef.current = options.accepts;
+  const streamIdRef = useRef(state.streamId);
+  streamIdRef.current = state.streamId;
 
   useEffect(
     () => () => {
@@ -94,11 +131,17 @@ export function useChatStream(): ChatStreamController {
 
   // The same confirmation arrives on the WS with more context. The reducer
   // dedupes by `request_id`, so subscribing here only adds robustness for the
-  // case where the SSE frame was dropped.
+  // case where the SSE frame was dropped — but the socket carries *every*
+  // lane's confirmations, so what is robustness for this stream's own frame is
+  // a foreign run's prompt for anything else, and `accepts` is what tells them
+  // apart.
   useEffect(
     () =>
       daemonEvents.onEvent((event) => {
         if (event.type !== "tool_confirmation_requested") return;
+        const accepts = acceptsRef.current;
+        if (accepts !== undefined && !accepts(event, streamIdRef.current))
+          return;
         dispatch({
           type: "confirmation",
           request: {

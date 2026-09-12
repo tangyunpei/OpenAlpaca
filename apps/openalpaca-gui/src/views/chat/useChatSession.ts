@@ -30,12 +30,24 @@
  *     still built here from the delegation this client started plus the
  *     `task_status` frames it saw: the status, duration and summary it prints
  *     are on those frames and on no stored message.
- *   * The blocked run is resolved through `agent_status`
- *     (`agent_id → current_task_id`) — the only real mapping available. When
- *     that mapping is unknown it stays `null` rather than being guessed.
+ *   * The blocked run is the `task_id` the confirmation frame carries, with
+ *     `agent_status`'s `agent_id → current_task_id` as the fallback for a
+ *     frame that has none. When neither answers it stays `null` rather than
+ *     being guessed.
+ *
+ * Three rules keep this window honest about *whose* conversation it is showing:
+ *   * the transcript is the conversation's **tail**, read in two calls, because
+ *     `GET /v1/chat/history` pages oldest-first (R78);
+ *   * everything session-local — reports, artifacts, steers, resolutions, the
+ *     finished SSE turn — is cleared when the daemon reports a different
+ *     conversation, so nothing follows the user out of one and into the next;
+ *   * `/v1/events` is daemon-wide, so run and confirmation frames are filtered
+ *     on the lane they name. A confirmation from another lane must never block
+ *     this composer: answering one with `Always allow` would widen a foreign
+ *     agent's run.
  */
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   executedResolutionNote,
@@ -79,7 +91,17 @@ const AGENT_EVENTS = ["agent_status"] as const;
 const CONFIRM_EVENTS = ["tool_confirmation_requested"] as const;
 const TOOL_EVENTS = ["tool_executed"] as const;
 const ARTIFACT_EVENTS = ["artifact_written"] as const;
+const SESSION_EVENTS = ["session_changed"] as const;
 
+/**
+ * How many messages one read of `GET /v1/chat/history` asks for.
+ *
+ * It is a **window**, not a bound on the conversation: the route pages
+ * `ORDER BY created_at ASC` with `limit`/`offset`, so asking without an offset
+ * returns the conversation's *opening*. Two rows land per turn, nothing prunes
+ * or rotates a session by size, and ~50 turns therefore push every recent turn
+ * out of a head page — which is what the transcript is built from.
+ */
 const HISTORY_LIMIT = 100;
 
 interface StartedRun {
@@ -91,6 +113,13 @@ interface ConfirmationMeta {
   at: string;
   agentId: string | null;
   agentName: string | null;
+  /**
+   * The run the daemon is blocked on, straight off the frame. `null` for a
+   * confirmation raised outside a workflow — the main loop's own — and for a
+   * daemon too old to carry it, in which case the `agent_status` map is the
+   * fallback.
+   */
+  taskId: string | null;
 }
 
 interface AgentRecord {
@@ -169,15 +198,75 @@ export function useChatSession(): ChatSession {
   // asks the daemon for the lane's active session, which is the state R48
   // needs in order to open a new conversation when the project changes.
   const selectedSessionId = useSessionSelection((s) => s.selectedId);
-  const history = useChatHistory({
-    limit: HISTORY_LIMIT,
-    ...(selectedSessionId === null ? {} : { sessionId: selectedSessionId }),
+  const sessionArg =
+    selectedSessionId === null ? {} : { sessionId: selectedSessionId };
+
+  /**
+   * The transcript is the conversation's **tail**, in two calls (ruling R78).
+   *
+   * `GET /v1/chat/history` pages oldest-first, so one call with no offset is
+   * the conversation's opening — for a long-lived conversation, turns 1–50,
+   * for ever, with the recent ones never shown and the previous turn vanishing
+   * as the next starts (`showsLiveTurn` retires a row only when the fetched
+   * page contains it). This mirrors what the CLI's `chat --resume` does with
+   * the same route: the first call is the length probe, and once `total` is
+   * known the second asks for the last page of it. The route contract is
+   * unchanged — no new parameter, no new meaning for `offset` — and the extra
+   * round trip happens only on a conversation long enough to need it.
+   */
+  const historyProbe = useChatHistory({ limit: HISTORY_LIMIT, ...sessionArg });
+  const tailOffset = Math.max(
+    0,
+    (historyProbe.data?.total ?? 0) - HISTORY_LIMIT,
+  );
+  const historyTail = useChatHistory(
+    { limit: HISTORY_LIMIT, offset: tailOffset, ...sessionArg },
+    { enabled: tailOffset > 0 },
+  );
+  // Until the tail lands the probe *is* the tail, because a conversation
+  // shorter than one page has only one page.
+  const history =
+    tailOffset > 0 && historyTail.data !== undefined
+      ? historyTail
+      : historyProbe;
+
+  /**
+   * The lane's confirmations, and nobody else's.
+   *
+   * `/v1/events` forwards every frame to every client, so a confirmation from
+   * a scheduled skill, a connector or a wake turn used to block this composer
+   * and arm Enter-approve — and an `entire_tool` answer from here would widen
+   * that foreign run for the rest of its session. Three things make a frame
+   * this view's, in the order they are trusted: it is this stream's own
+   * (`stream_id`), it belongs to a run this lane started (`task_id`), or its
+   * lane is this one. A `lane_key: null` frame is **kept**: `SandboxPolicy`
+   * carries a lane only on the main-loop policy, so every confirmation raised
+   * inside a workflow — this lane's own included — arrives with none, and
+   * dropping those would leave the GUI's background runs unanswerable.
+   */
+  const laneKeyRef = useRef<string | null>(null);
+  /** Runs this client started, so a `task_status` frame can be reported. */
+  const started = useRef(new Map<string, StartedRun>());
+  /** `agent_id → { name, current_task_id }` — the only run mapping on the wire. */
+  const agents = useRef(new Map<string, AgentRecord>());
+
+  const stream = useChatStream({
+    accepts: (event, streamId) => {
+      if (event.stream_id !== null && event.stream_id === streamId) return true;
+      if (event.task_id !== null && started.current.has(event.task_id))
+        return true;
+      return event.lane_key === null || event.lane_key === laneKeyRef.current;
+    },
   });
-  const stream = useChatStream();
   const activeTasks = useTasks({ status: "active" });
 
   /** The lane this session is on — `null` until its first turn has a key. */
   const laneKey = history.data?.lane_key ?? stream.state.laneKey;
+  laneKeyRef.current = laneKey;
+
+  /** A frame from another lane is another lane's business. */
+  const foreignLane = (frameLane: string | null): boolean =>
+    laneKey !== null && frameLane !== null && frameLane !== laneKey;
 
   const followupQueue = useFollowups(laneKey);
   const { mutateAsync: queueFollowup } = useQueueFollowup();
@@ -208,11 +297,6 @@ export function useChatSession(): ChatSession {
     Record<string, ConfirmationMeta>
   >({});
 
-  /** Runs this client started, so a `task_status` frame can be reported. */
-  const started = useRef(new Map<string, StartedRun>());
-  /** `agent_id → { name, current_task_id }` — the only run mapping on the wire. */
-  const agents = useRef(new Map<string, AgentRecord>());
-
   useServerEvent(AGENT_EVENTS, (event) => {
     if (event.type !== "agent_status") return;
     agents.current.set(event.agent_id, {
@@ -221,8 +305,22 @@ export function useChatSession(): ChatSession {
     });
   });
 
+  /** Add one run report, once — the same run must not card twice. */
+  const pushReport = useCallback((report: RunReportData) => {
+    setReports((current) =>
+      current.some((entry) => entry.taskId === report.taskId)
+        ? current
+        : [...current, report],
+    );
+  }, []);
+
   useServerEvent(RUN_EVENTS, (event) => {
     if (event.type === "workflow_started") {
+      // The frame carries its lane and the socket carries every lane's, so a
+      // run started by a scheduled skill or a connector is dropped here rather
+      // than entering `started` — which is also what keeps its `task_status`
+      // and `artifact_written` frames out of this transcript.
+      if (foreignLane(event.lane_key)) return;
       started.current.set(event.task_id, {
         title: event.title,
         startedAt: event.ts,
@@ -239,22 +337,47 @@ export function useChatSession(): ChatSession {
     started.current.delete(event.task_id);
 
     const title = event.title !== "" ? event.title : origin.title;
-    setReports((current) =>
-      current.some((report) => report.taskId === event.task_id)
-        ? current
-        : [
-            ...current,
-            {
-              taskId: event.task_id,
-              title: title === "" ? "Background workflow" : title,
-              status: reportStatus(event.status),
-              startedAt: origin.startedAt,
-              endedAt: event.ts,
-              summary: event.outcome_summary ?? event.result_summary,
-              artifactCount: event.artifact_count ?? 0,
-            },
-          ],
-    );
+    pushReport({
+      taskId: event.task_id,
+      title: title === "" ? "Background workflow" : title,
+      status: reportStatus(event.status),
+      startedAt: origin.startedAt,
+      endedAt: event.ts,
+      summary: event.outcome_summary ?? event.result_summary,
+      artifactCount: event.artifact_count ?? 0,
+    });
+  });
+
+  /**
+   * A run the daemon never got to finish (§5.6b).
+   *
+   * The boot sweep marks a run interrupted and announces it on
+   * `session_changed{status: "interrupted", task_id}` — not on `task_status`,
+   * which is why the `interrupted` card the report model has drawn since Phase
+   * 7 was unreachable from this view. The reachable case is a daemon that
+   * restarts under a window that stayed open: `started` still holds the run, so
+   * the card lands in the conversation that launched it and nowhere else.
+   */
+  useServerEvent(SESSION_EVENTS, (event) => {
+    if (event.type !== "session_changed") return;
+    if (event.status !== "interrupted" || event.task_id === null) return;
+    if (foreignLane(event.lane_key)) return;
+
+    const origin = started.current.get(event.task_id);
+    if (origin === undefined) return;
+    started.current.delete(event.task_id);
+
+    pushReport({
+      taskId: event.task_id,
+      title: origin.title === "" ? "Background workflow" : origin.title,
+      status: "interrupted",
+      startedAt: origin.startedAt,
+      endedAt: event.ts,
+      // The sweep reports no outcome — there is none — and the card's own copy
+      // says what interrupted means.
+      summary: null,
+      artifactCount: 0,
+    });
   });
 
   /**
@@ -262,6 +385,14 @@ export function useChatSession(): ChatSession {
    * loose artifact (no run — the main loop wrote it for this conversation) and
    * one from a workflow this lane started. A foreign run's file belongs to that
    * run's lane, and lands in the Library either way.
+   *
+   * The run-linked half is exact now that `started` holds only this lane's
+   * runs. The loose half cannot be: `ArtifactWritten` carries no `lane_key`
+   * (`crates/openalpaca_api/src/events/mod.rs`), so a loose artifact written
+   * for another lane's main loop is indistinguishable from one written for
+   * this conversation, and it is shown. That is the honest side of the trade —
+   * a file that exists, attributed a little too widely — and it closes the day
+   * the frame carries a lane.
    */
   useServerEvent(ARTIFACT_EVENTS, (event) => {
     if (event.type !== "artifact_written") return;
@@ -299,6 +430,7 @@ export function useChatSession(): ChatSession {
               at: event.ts,
               agentId: event.agent_id,
               agentName: agent?.name ?? event.agent_id,
+              taskId: event.task_id,
             },
           },
     );
@@ -363,12 +495,63 @@ export function useChatSession(): ChatSession {
 
   const firstConfirmation = confirmations[0] ?? null;
 
+  /**
+   * The run the daemon is blocked on.
+   *
+   * The frame says so directly — `task_id` — and that is the answer whenever
+   * it is there: it is the daemon's own, it cannot be stale, and it is right
+   * for a subagent whose `agent_status` has not arrived. The
+   * `agent_id → current_task_id` map is the fallback for the frames that carry
+   * no run, and `null` rather than a guess when neither answers.
+   */
   const blockedRunId = useMemo(() => {
     if (firstConfirmation === null) return null;
     const meta = confirmationMeta[firstConfirmation.requestId];
-    if (meta?.agentId == null) return null;
+    if (meta === undefined) return null;
+    if (meta.taskId !== null) return meta.taskId;
+    if (meta.agentId === null) return null;
     return agents.current.get(meta.agentId)?.taskId ?? null;
   }, [firstConfirmation, confirmationMeta]);
+
+  /**
+   * Everything session-local goes when the conversation does.
+   *
+   * One `useChatSession` instance spans every conversation — `ViewBoundary`
+   * resets on the *view*, not the session — so the run reports, artifact and
+   * steer cards, resolutions and the finished SSE turn used to follow the user
+   * out of one conversation and into the next, where they rendered under a
+   * transcript they had nothing to do with. The transient half self-healed on
+   * the next send; the cards never did.
+   *
+   * The trigger is the conversation the daemon *reported* (`session_id` on the
+   * history it answered), not the sidebar's pin: an unpinned window is on
+   * whatever the lane's active session is, and R48 can replace that under it.
+   *
+   * A change while a turn is in flight is that turn's own doing — R48 archives
+   * and reopens mid-turn — so the id is adopted and nothing is cleared;
+   * clearing would close the `EventSource` the user is watching.
+   */
+  const shownSession = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    if (history.data === undefined) return;
+    const reported = history.data.session_id;
+    if (shownSession.current === undefined) {
+      shownSession.current = reported;
+      return;
+    }
+    if (shownSession.current === reported) return;
+    shownSession.current = reported;
+    if (stream.active) return;
+
+    setPending(null);
+    setReports([]);
+    setArtifacts([]);
+    setResolutions([]);
+    setSteers([]);
+    setConfirmationMeta({});
+    started.current.clear();
+    stream.reset();
+  }, [history.data, stream.active, stream.reset]);
 
   const items = useMemo(
     () =>
@@ -625,8 +808,11 @@ export function useChatSession(): ChatSession {
 
   return {
     items,
-    historyLoading: history.isLoading,
-    historyError: history.error,
+    // Both calls are the transcript: the probe is the only one on a short
+    // conversation, and on a long one the tail is what is rendered.
+    historyLoading:
+      historyProbe.isLoading || (tailOffset > 0 && historyTail.isLoading),
+    historyError: historyProbe.error ?? historyTail.error,
     laneKey,
     sessionId: history.data?.session_id ?? null,
 

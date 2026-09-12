@@ -16,10 +16,11 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useGlobalKeys } from "@/components/shell";
 import { resetConnection } from "@/lib/connection";
+import { daemonEvents, type ServerEvent } from "@/lib/events";
 import { QueryProvider } from "@/lib/query-provider";
 import { useConfirmationStore } from "@/stores/confirmation";
 import { useProjectStore } from "@/stores/project";
@@ -78,8 +79,14 @@ function json(payload: unknown): Response {
   return new Response(JSON.stringify(payload), { status: 200 });
 }
 
-/** What `GET /v1/chat/history` answers; swapped per test to seed a transcript. */
-let historyReply: () => Response;
+/**
+ * What `GET /v1/chat/history` answers; swapped per test to seed a transcript.
+ *
+ * It takes the request URL because the route **pages** (`limit`/`offset` over
+ * an oldest-first list), and reading the transcript's tail is two calls: a
+ * probe for `total`, then the last page of it.
+ */
+let historyReply: (url: string) => Response;
 /** What `POST /v1/tasks/{id}/steer` answers; swapped per test to refuse. */
 let steerReply: () => Response;
 /** What `GET /v1/lanes/{lane}/followups` answers — the lane's pending queue. */
@@ -161,7 +168,7 @@ function installFetch() {
       return reply;
     }
     if (url.includes("/v1/chat/history")) {
-      return historyReply();
+      return historyReply(url);
     }
     if (url.includes("/v1/chat/confirmations/")) {
       return new Response("", { status: 200 });
@@ -202,6 +209,35 @@ function installFetch() {
     });
   });
   vi.stubGlobal("fetch", fetchMock);
+}
+
+/**
+ * The daemon's WS firehose, doubled at `daemonEvents.onEvent`.
+ *
+ * `/v1/events` carries every lane's frames to every client, so the frames this
+ * view *rejects* are as much a part of its contract as the ones it acts on —
+ * and nothing else in the app can push one.
+ */
+let eventListeners: Array<(event: ServerEvent) => void> = [];
+
+function emitServerEvent(frame: Record<string, unknown>): void {
+  const event = {
+    ts: "2026-09-05T13:40:00Z",
+    instance_id: "7f3a1122",
+    _id: eventListeners.length + 1,
+    ...frame,
+  } as ServerEvent;
+  for (const listener of [...eventListeners]) listener(event);
+}
+
+function installEventBus() {
+  eventListeners = [];
+  vi.spyOn(daemonEvents, "onEvent").mockImplementation((listener) => {
+    eventListeners.push(listener);
+    return () => {
+      eventListeners = eventListeners.filter((entry) => entry !== listener);
+    };
+  });
 }
 
 const initialUi = useUiStore.getState();
@@ -316,6 +352,11 @@ beforeEach(() => {
   useSessionSelection.setState({ selectedId: null });
   vi.stubGlobal("EventSource", FakeEventSource);
   installFetch();
+  installEventBus();
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 describe("ChatView — streaming lifecycle (§3.11, API_MAP §4.1)", () => {
@@ -1271,6 +1312,66 @@ describe("ChatView — the conversation sidebar (§5.7)", () => {
     expect(send?.body).not.toHaveProperty("session_id");
   });
 
+  /**
+   * A **deleted** conversation is the case the archive rule cannot see: it
+   * releases the pin on a row the list shows as no longer active and
+   * deliberately leaves an *absent* row pinned, because absent is "a later
+   * page". A delete from another window makes the row absent for good, so the
+   * pin outlives the conversation and every send answers `SESSION_NOT_FOUND`.
+   * The frame is what tells the two apart.
+   */
+  it("releases a pin on a conversation deleted from another window", async () => {
+    seedSessions([
+      sessionRow({ id: "sess-live", title: "Connector audit" }),
+      sessionRow({ id: "sess-old", title: "Docs pass", status: "archived" }),
+    ]);
+    renderChat();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Docs pass/ }));
+    await waitFor(() =>
+      expect(useSessionSelection.getState().selectedId).toBe("sess-old"),
+    );
+
+    await act(async () => {
+      emitServerEvent({
+        type: "session_changed",
+        session_id: "sess-old",
+        lane_key: "user:gui",
+        status: "deleted",
+        task_id: null,
+      });
+    });
+
+    await waitFor(() =>
+      expect(useSessionSelection.getState().selectedId).toBeNull(),
+    );
+  });
+
+  it("keeps the pin when another conversation is the one deleted", async () => {
+    seedSessions([
+      sessionRow({ id: "sess-live", title: "Connector audit" }),
+      sessionRow({ id: "sess-old", title: "Docs pass", status: "archived" }),
+    ]);
+    renderChat();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Docs pass/ }));
+    await waitFor(() =>
+      expect(useSessionSelection.getState().selectedId).toBe("sess-old"),
+    );
+
+    await act(async () => {
+      emitServerEvent({
+        type: "session_changed",
+        session_id: "sess-live",
+        lane_key: "user:gui",
+        status: "deleted",
+        task_id: null,
+      });
+    });
+
+    expect(useSessionSelection.getState().selectedId).toBe("sess-old");
+  });
+
   it("resumes an archived conversation by activating it", async () => {
     seedSessions([
       sessionRow({ id: "sess-old", title: "Docs pass", status: "archived" }),
@@ -1572,5 +1673,374 @@ describe("ChatView — the conversation sidebar (§5.7)", () => {
     expect(
       await screen.findByText(/This conversation was archived/),
     ).toBeInTheDocument();
+  });
+});
+
+/**
+ * C2/R78: the transcript is the conversation's tail.
+ *
+ * `GET /v1/chat/history` pages `ORDER BY created_at ASC`, so one call with no
+ * offset is the conversation's *opening*. Two rows land per turn and nothing
+ * prunes a session by size, so ~50 turns push every recent turn out of the
+ * window the transcript was built from — for ever, and with no in-app way back.
+ */
+describe("ChatView — the transcript is the tail, not the head (C2)", () => {
+  /** A conversation of `total` alternating rows, served one page at a time. */
+  function seedLongConversation(total: number): void {
+    const all = Array.from({ length: total }, (_unused, index) => ({
+      id: index + 1,
+      lane_key: "user:gui",
+      role: index % 2 === 0 ? "user" : "assistant",
+      content: `message ${index}`,
+      created_at: "2026-09-05T13:35:00Z",
+      artifacts: [],
+      task_id: null,
+    }));
+    historyReply = (url) => {
+      const query = new URL(url).searchParams;
+      const limit = Number(query.get("limit") ?? 50);
+      const offset = Number(query.get("offset") ?? 0);
+      return json({
+        messages: all.slice(offset, offset + limit),
+        total,
+        lane_key: "user:gui",
+        session_id: "sess-long",
+      });
+    };
+  }
+
+  it("asks for the last page once the probe has answered with a total", async () => {
+    seedLongConversation(250);
+    renderChat();
+
+    // 250 rows, a 100-row window: the tail starts at 150.
+    await waitFor(() =>
+      expect(
+        requests.some(
+          (request) =>
+            request.url.includes("/v1/chat/history") &&
+            request.url.includes("offset=150"),
+        ),
+      ).toBe(true),
+    );
+
+    expect(await screen.findByText("message 249")).toBeInTheDocument();
+    expect(screen.getByText("message 150")).toBeInTheDocument();
+    // The opening is off the window, which is the whole point.
+    expect(screen.queryByText("message 149")).toBeNull();
+    expect(screen.queryByText("message 0")).toBeNull();
+  });
+
+  it("makes one call for a conversation that fits in a page", async () => {
+    seedLongConversation(3);
+    renderChat();
+
+    expect(await screen.findByText("message 2")).toBeInTheDocument();
+    expect(
+      requests.filter((request) => request.url.includes("/v1/chat/history")),
+    ).toHaveLength(1);
+    expect(requests.some((request) => request.url.includes("offset="))).toBe(
+      false,
+    );
+  });
+});
+
+/**
+ * I5: one `useChatSession` spans every conversation — `ViewBoundary` resets on
+ * the *view* — so without an explicit reset the previous conversation's last
+ * exchange and its session-local cards render under the next one's transcript.
+ */
+describe("ChatView — switching conversations (I5)", () => {
+  it("clears the previous conversation's turn and cards", async () => {
+    sessionRows = [
+      sessionRow({ id: "sess-a", title: "Audit" }),
+      sessionRow({ id: "sess-b", title: "Docs", status: "archived" }),
+    ];
+    historyReply = () =>
+      json({
+        messages: [],
+        total: 0,
+        lane_key: "user:gui",
+        session_id: "sess-a",
+      });
+    renderChat();
+
+    const source = await sendMessage("audit the connectors");
+    await act(async () => {
+      source.emit("done", {
+        content: "Three connectors are stale.",
+        model: "claude-sonnet-4-6",
+        duration_ms: 1200,
+      });
+    });
+    expect(screen.getByText("audit the connectors")).toBeInTheDocument();
+    expect(screen.getByText("Three connectors are stale.")).toBeInTheDocument();
+
+    // The daemon now answers for a different conversation: an empty one.
+    historyReply = () =>
+      json({
+        messages: [],
+        total: 0,
+        lane_key: "user:gui",
+        session_id: "sess-b",
+      });
+    fireEvent.click(screen.getByRole("button", { name: "New chat" }));
+
+    await waitFor(() =>
+      expect(screen.queryByText("audit the connectors")).toBeNull(),
+    );
+    expect(screen.queryByText("Three connectors are stale.")).toBeNull();
+  });
+});
+
+/**
+ * I6: `/v1/events` forwards every frame to every client with no lane filter,
+ * and GUI chat is only one lane — scheduled skills, wake turns and connectors
+ * all run on their own. A foreign run's card in this transcript is noise; a
+ * foreign run's *confirmation* is worse, because answering it from here (and
+ * `Always allow` especially) widens that run.
+ */
+describe("ChatView — frames from another lane (I6)", () => {
+  /**
+   * The lane is only known once the daemon has answered — `GET
+   * /v1/chat/history` echoes `lane_key` — and a filter cannot compare against
+   * a lane it does not have yet, so every case here waits for that answer
+   * before pushing a frame.
+   */
+  async function renderOnLane(): Promise<void> {
+    historyReply = () =>
+      json({
+        messages: [
+          {
+            id: 1,
+            lane_key: "user:gui",
+            role: "user",
+            content: "earlier turn",
+            created_at: "2026-09-05T13:00:00Z",
+            artifacts: [],
+            task_id: null,
+          },
+        ],
+        total: 1,
+        lane_key: "user:gui",
+        session_id: "sess-1",
+      });
+    renderChat();
+    await screen.findByText("earlier turn");
+  }
+
+  it("reports no card for a workflow another lane started", async () => {
+    await renderOnLane();
+
+    await act(async () => {
+      emitServerEvent({
+        type: "workflow_started",
+        task_id: "run-foreign",
+        lane_key: "user:scheduled",
+        title: "Nightly connector sweep",
+      });
+      emitServerEvent({
+        type: "task_status",
+        task_id: "run-foreign",
+        title: "Nightly connector sweep",
+        status: "completed",
+        progress_current: null,
+        progress_total: null,
+        result_summary: "swept",
+      });
+    });
+
+    expect(screen.queryByText("Nightly connector sweep")).toBeNull();
+  });
+
+  it("still reports a workflow this lane started", async () => {
+    await renderOnLane();
+
+    await act(async () => {
+      emitServerEvent({
+        type: "workflow_started",
+        task_id: "run-mine",
+        lane_key: "user:gui",
+        title: "Connector audit",
+      });
+      emitServerEvent({
+        type: "task_status",
+        task_id: "run-mine",
+        title: "Connector audit",
+        status: "completed",
+        progress_current: null,
+        progress_total: null,
+        result_summary: "done",
+      });
+    });
+
+    expect(await screen.findByText("Connector audit")).toBeInTheDocument();
+  });
+
+  /**
+   * The window has to be *takeable*: `chat-stream.ts` accepts a WS confirmation
+   * whenever the stream is not terminal, which is true of a freshly mounted
+   * GUI that has sent nothing — so this is the state the bug was reachable in,
+   * and the one the filter has to hold.
+   */
+  it("leaves the composer unblocked for another lane's confirmation", async () => {
+    await renderOnLane();
+
+    await act(async () => {
+      emitServerEvent({
+        type: "tool_confirmation_requested",
+        request_id: "req-foreign",
+        agent_id: "agent-9",
+        tool_name: "shell_execute",
+        tool_arguments: { command: "rm -rf /" },
+        stream_id: null,
+        lane_key: "user:telegram",
+        task_id: "run-foreign",
+      });
+    });
+
+    expect(screen.getByLabelText("Message")).toBeInTheDocument();
+    expect(screen.queryByText(/Confirmation required/)).toBeNull();
+    expect(useConfirmationStore.getState().pending).toBeNull();
+  });
+
+  /**
+   * `SandboxPolicy.lane_key` is set only on the main-loop policy, so every
+   * confirmation raised *inside* a workflow — this lane's own included —
+   * arrives with `lane_key: null`. Dropping those would leave the GUI's own
+   * background runs unanswerable, which is why the filter keeps them.
+   */
+  it("accepts a lane-less confirmation, which is what a workflow raises", async () => {
+    await renderOnLane();
+
+    await act(async () => {
+      emitServerEvent({
+        type: "tool_confirmation_requested",
+        request_id: "req-workflow",
+        agent_id: "agent-1",
+        tool_name: "file_write",
+        tool_arguments: { path: "notes.md" },
+        stream_id: null,
+        lane_key: null,
+        task_id: "run-1",
+      });
+    });
+
+    expect(
+      await screen.findByText("Confirmation required · file_write"),
+    ).toBeInTheDocument();
+  });
+});
+
+/**
+ * The minor behind `blockedRunId`: the frame carries `task_id`, and the view
+ * read `agent_status`'s `agent_id → current_task_id` instead — a map that may
+ * never arrive for a subagent, and that can be a round behind.
+ */
+describe("ChatView — the run a confirmation blocks", () => {
+  it("takes the run off the frame rather than the agent map", async () => {
+    renderChat();
+    await screen.findByLabelText("Message");
+
+    await act(async () => {
+      emitServerEvent({
+        type: "tool_confirmation_requested",
+        request_id: "req-task",
+        agent_id: "agent-unknown",
+        tool_name: "file_write",
+        tool_arguments: { path: "notes.md" },
+        stream_id: null,
+        lane_key: null,
+        task_id: "run-from-frame",
+      });
+    });
+
+    await waitFor(() =>
+      expect(useConfirmationStore.getState().pending?.runId).toBe(
+        "run-from-frame",
+      ),
+    );
+  });
+
+  it("falls back to the agent map when the frame names no run", async () => {
+    renderChat();
+    await screen.findByLabelText("Message");
+
+    await act(async () => {
+      emitServerEvent({
+        type: "agent_status",
+        agent_id: "agent-1",
+        name: "lead",
+        status: "busy",
+        current_task_id: "run-from-map",
+        agent_instance_id: "inst-1",
+        template_id: "lead_agent",
+      });
+      emitServerEvent({
+        type: "tool_confirmation_requested",
+        request_id: "req-map",
+        agent_id: "agent-1",
+        tool_name: "file_write",
+        tool_arguments: { path: "notes.md" },
+        stream_id: null,
+        lane_key: null,
+        task_id: null,
+      });
+    });
+
+    await waitFor(() =>
+      expect(useConfirmationStore.getState().pending?.runId).toBe(
+        "run-from-map",
+      ),
+    );
+  });
+});
+
+/**
+ * §5.6b: the boot sweep marks a run interrupted and announces it on
+ * `session_changed`, which this view did not subscribe to — so the transcript's
+ * "Run interrupted" card could never be drawn. The reachable case is a daemon
+ * that restarts under a window that stayed open.
+ */
+describe("ChatView — a run the daemon never finished (§5.6b)", () => {
+  it("cards a run this lane started that the sweep found interrupted", async () => {
+    renderChat();
+    await screen.findByLabelText("Message");
+
+    await act(async () => {
+      emitServerEvent({
+        type: "workflow_started",
+        task_id: "run-1",
+        lane_key: "user:gui",
+        title: "Connector audit",
+      });
+      emitServerEvent({
+        type: "session_changed",
+        session_id: "sess-1",
+        lane_key: "user:gui",
+        status: "interrupted",
+        task_id: "run-1",
+      });
+    });
+
+    expect(await screen.findByText("Connector audit")).toBeInTheDocument();
+    expect(screen.getByText(/interrupted/i)).toBeInTheDocument();
+  });
+
+  it("cards nothing for a run this lane never started", async () => {
+    renderChat();
+    await screen.findByLabelText("Message");
+
+    await act(async () => {
+      emitServerEvent({
+        type: "session_changed",
+        session_id: "sess-1",
+        lane_key: "user:gui",
+        status: "interrupted",
+        task_id: "run-foreign",
+      });
+    });
+
+    expect(screen.queryByText(/interrupted/i)).toBeNull();
   });
 });
