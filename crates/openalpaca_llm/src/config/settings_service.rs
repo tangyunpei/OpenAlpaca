@@ -100,6 +100,15 @@ pub enum SetProviderEnabledError {
     Persist(String),
 }
 
+/// So [`LlmSettingsService::persist_only`]'s own failures — the lock, the read,
+/// the render, the write — reach this type unchanged while the closure inside
+/// the lock returns refusals of its own.
+impl From<String> for SetProviderEnabledError {
+    fn from(message: String) -> Self {
+        Self::Persist(message)
+    }
+}
+
 impl LlmSettingsService {
     pub fn new(router: Arc<LlmRouter>, config_path: PathBuf) -> Result<Self, String> {
         let encryptor = KeyEncryptor::from_env()?;
@@ -648,7 +657,7 @@ impl LlmSettingsService {
     /// router holds no live copy of it, so there is nothing here to move.
     pub fn update_orchestrator_config(&self, req: UpdateOrchestratorRequest) -> Result<(), String> {
         let model = req.model.clone();
-        self.persist_only(|config| {
+        self.persist_only(|config| -> Result<(), String> {
             let orch =
                 config
                     .orchestrator
@@ -662,6 +671,7 @@ impl LlmSettingsService {
             } else {
                 Some(req.fallback_models)
             };
+            Ok(())
         })?;
 
         self.router.set_default_model(model);
@@ -679,7 +689,7 @@ impl LlmSettingsService {
         api_key: Option<String>,
         timeout_secs: Option<u64>,
     ) -> Result<WebSearchConfig, String> {
-        let config = self.persist_only(|config| {
+        let config = self.persist_only(|config| -> Result<(), String> {
             let ws = config.web_search.get_or_insert_with(Default::default);
             if let Some(key) = api_key {
                 ws.api_key = key;
@@ -687,6 +697,7 @@ impl LlmSettingsService {
             if let Some(timeout) = timeout_secs {
                 ws.timeout_secs = timeout;
             }
+            Ok(())
         })?;
 
         Ok(config.web_search.unwrap_or_default())
@@ -728,7 +739,10 @@ impl LlmSettingsService {
     where
         F: FnOnce(&mut LlmRouterConfig),
     {
-        let config = self.persist_only(mutate)?;
+        let config = self.persist_only(|config| -> Result<(), String> {
+            mutate(config);
+            Ok(())
+        })?;
 
         // Build a new KeyPool from the updated config and hot-reload it via
         // ArcSwap — registering the provider if it is not in the router yet.
@@ -760,20 +774,30 @@ impl LlmSettingsService {
     /// owner's file must not reshuffle itself on every toggle.
     ///
     /// Returns the mutated config, which the caller usually needs anyway.
-    fn persist_only<F>(&self, mutate: F) -> Result<LlmRouterConfig, String>
+    ///
+    /// **The closure is fallible, and that is the point of it being a closure.**
+    /// A caller whose write has a precondition on the document — the R61
+    /// default-model refusal below — evaluates it *inside* here, against the
+    /// same read the mutation is about to change, rather than against a read of
+    /// its own taken before the lock. Errors of this function's own (the lock,
+    /// the read, the render, the write) arrive as `String` and are converted
+    /// with `E::from`, so `E = String` for the callers that cannot refuse.
+    fn persist_only<F, E>(&self, mutate: F) -> Result<LlmRouterConfig, E>
     where
-        F: FnOnce(&mut LlmRouterConfig),
+        F: FnOnce(&mut LlmRouterConfig) -> Result<(), E>,
+        E: From<String>,
     {
         // D4: the whole read-modify-write is under the config write lock, and
         // the injected writer must not take it again.
-        let _lock = crate::keys::key_encryption::acquire_config_write_lock(&self.config_path)?;
+        let _lock = crate::keys::key_encryption::acquire_config_write_lock(&self.config_path)
+            .map_err(E::from)?;
 
-        let mut config =
-            read_config(&self.config_path).map_err(|e| format!("Failed to read config: {e}"))?;
-        mutate(&mut config);
+        let mut config = read_config(&self.config_path)
+            .map_err(|e| E::from(format!("Failed to read config: {e}")))?;
+        mutate(&mut config)?;
 
-        let rendered = render_config(&config).map_err(|e| e.to_string())?;
-        (self.config_writer)(&self.config_path, &rendered)?;
+        let rendered = render_config(&config).map_err(|e| E::from(e.to_string()))?;
+        (self.config_writer)(&self.config_path, &rendered).map_err(E::from)?;
 
         Ok(config)
     }
@@ -795,40 +819,44 @@ impl LlmSettingsService {
             .filter(|pt| ProviderType::all().contains(pt))
             .ok_or_else(|| SetProviderEnabledError::UnknownProvider(provider.to_string()))?;
 
-        let current = read_config(&self.config_path)
-            .map_err(|e| SetProviderEnabledError::Persist(format!("Failed to read config: {e}")))?;
-
-        // Turning off the provider that serves the default model would leave
-        // every request with nowhere to go, so it is refused rather than done
-        // and reported — and so is *any* disable while the default model
-        // resolves to nothing, because then no provider can be shown not to be
-        // the one that was going to answer (R61).
-        if !enabled {
-            let (model, owner) = self.default_model_provider(&current);
-            match owner {
-                Some(owner) if owner == provider_type => {
-                    return Err(SetProviderEnabledError::IsDefaultProvider {
-                        provider: provider.to_string(),
-                        model,
-                    });
+        let config = self.persist_only(|config| -> Result<(), SetProviderEnabledError> {
+            // Turning off the provider that serves the default model would
+            // leave every request with nowhere to go, so it is refused rather
+            // than done and reported — and so is *any* disable while the
+            // default model resolves to nothing, because then no provider can
+            // be shown not to be the one that was going to answer (R61).
+            //
+            // **Inside the write lock, against the document the write is about
+            // to change.** Evaluated before the lock, the check read a config
+            // another writer could still replace — and
+            // `update_orchestrator_config` is the writer that replaces exactly
+            // the field it reads, from the same GUI screen. The interleaving
+            // that got through: this read sees a default model owned by someone
+            // else, the other writer points the default at *this* provider, and
+            // then this write disables it.
+            if !enabled {
+                let (model, owner) = self.default_model_provider(config);
+                match owner {
+                    Some(owner) if owner == provider_type => {
+                        return Err(SetProviderEnabledError::IsDefaultProvider {
+                            provider: provider.to_string(),
+                            model,
+                        });
+                    }
+                    None => {
+                        return Err(SetProviderEnabledError::DefaultModelUnresolved {
+                            provider: provider.to_string(),
+                            model,
+                        });
+                    }
+                    Some(_) => {}
                 }
-                None => {
-                    return Err(SetProviderEnabledError::DefaultModelUnresolved {
-                        provider: provider.to_string(),
-                        model,
-                    });
-                }
-                Some(_) => {}
             }
-        }
 
-        let name = provider.to_string();
-        let config = self
-            .persist_only(|config| {
-                let providers = config.providers.get_or_insert_with(HashMap::new);
-                providers.entry(name).or_default().enabled = Some(enabled);
-            })
-            .map_err(SetProviderEnabledError::Persist)?;
+            let providers = config.providers.get_or_insert_with(HashMap::new);
+            providers.entry(provider.to_string()).or_default().enabled = Some(enabled);
+            Ok(())
+        })?;
 
         let mut outcome = ProviderEnabledOutcome {
             id: provider.to_string(),

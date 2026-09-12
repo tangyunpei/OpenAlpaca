@@ -533,3 +533,98 @@ context = 8192
         "{err:?}"
     );
 }
+
+/// **The R61 refusal is evaluated inside the write lock** (review item E8).
+///
+/// Two `llm.toml` writers sit on the same GUI screen, and one of them —
+/// `update_orchestrator_config` — writes the very field this refusal reads.
+/// Evaluated *before* the lock, the guard answered about a document that had
+/// already been replaced by the time the write landed, and the disable it let
+/// through is the outcome R61 exists to prevent: a default model served by a
+/// provider nobody loaded.
+///
+/// Staging the race needs a second **process**: the lock is POSIX `fcntl`, which
+/// is per process, so a competing lock taken in this one would not contend at
+/// all. The helper holds the lock while the default model moves under the
+/// disable that is waiting for it. No `python3` on PATH means the race cannot be
+/// staged, and the test says so rather than passing quietly.
+#[tokio::test]
+async fn the_default_model_refusal_is_read_under_the_write_lock() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+
+    // The fixture's default model is anthropic's, so disabling openai is
+    // legitimate at the moment the disable starts.
+    let h = Arc::new(Harness::new());
+    h.register_stub(ProviderType::Anthropic);
+    h.register_stub(ProviderType::OpenAI);
+
+    let mut lock_name = h.path.file_name().unwrap().to_os_string();
+    lock_name.push(".lock");
+    let lock_path = h.path.with_file_name(lock_name);
+
+    let helper = Command::new("python3")
+        .arg("-c")
+        .arg(
+            "import fcntl, sys\n\
+             f = open(sys.argv[1], 'a')\n\
+             fcntl.lockf(f, fcntl.LOCK_EX)\n\
+             print('locked', flush=True)\n\
+             sys.stdin.readline()\n",
+        )
+        .arg(&lock_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn();
+    let Ok(mut helper) = helper else {
+        eprintln!("no python3 on PATH: the two-writer race cannot be staged");
+        return;
+    };
+
+    let mut out = BufReader::new(helper.stdout.take().unwrap());
+    let mut line = String::new();
+    out.read_line(&mut line).unwrap();
+    assert_eq!(line.trim(), "locked", "the helper did not take the lock");
+
+    let (started, has_started) = std::sync::mpsc::channel();
+    let disabler = {
+        let h = Arc::clone(&h);
+        // Its own thread and its own runtime: the call blocks on the helper's
+        // lock, and must not block the test's runtime doing it.
+        std::thread::spawn(move || {
+            started.send(()).unwrap();
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(h.service.set_provider_enabled("openai", false))
+        })
+    };
+
+    // Once it has started, the read the bug performed before the lock has
+    // already happened — and it saw the anthropic default.
+    has_started.recv().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // The other writer points the default model at openai, then lets go.
+    std::fs::write(&h.path, hand_authored_with("gpt-5.2")).unwrap();
+    helper.stdin.take().unwrap().write_all(b"\n").unwrap();
+    helper.wait().unwrap();
+
+    let err = disabler
+        .join()
+        .unwrap()
+        .expect_err("the provider now serving the default model was disabled");
+    assert!(
+        matches!(&err, SetProviderEnabledError::IsDefaultProvider { model, .. } if model == "gpt-5.2"),
+        "{err:?}"
+    );
+    assert!(
+        h.writes.lock().unwrap().is_empty(),
+        "a refused disable still wrote"
+    );
+    assert!(
+        h.router.configured_providers().contains(&ProviderType::OpenAI),
+        "and nothing was unloaded"
+    );
+}
