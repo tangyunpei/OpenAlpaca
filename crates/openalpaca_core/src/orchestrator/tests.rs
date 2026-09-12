@@ -3333,6 +3333,193 @@ async fn an_explicit_slash_for_a_withheld_skill_returns_the_named_error_as_ok() 
     assert!(reply.contains("github"), "{reply}");
 }
 
+/// §5.4's one threshold is configuration, and a skill-invocation loop is an
+/// agentic loop like any other. It used to keep `LoopConfig`'s compiled 32 KiB
+/// fallback whatever `[orchestrator.sessions] tool_result_inline_bytes` said,
+/// while the lead agent, its subagents and the main loop all read the knob — so
+/// the one bound on what a tool result costs the context did not reach the skill
+/// path.
+#[tokio::test]
+async fn a_skill_loop_honours_the_configured_inline_threshold() {
+    use crate::tools::registry::BuiltInTool;
+    use openalpaca_llm::{
+        ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider,
+        ToolCall as LlmToolCall, Usage,
+    };
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const RESULT_BYTES: usize = 8 * 1024;
+    const INLINE_BYTES: usize = 1024;
+
+    struct BigOutputTool;
+    #[async_trait]
+    impl BuiltInTool for BigOutputTool {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+            Ok("q".repeat(RESULT_BYTES))
+        }
+    }
+
+    /// Calls `dump` once, then answers — and keeps every request, so the tool
+    /// result the model was handed can be measured.
+    struct DumpThenAnswer {
+        calls: AtomicUsize,
+        seen: Arc<Mutex<Vec<ChatRequest>>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for DumpThenAnswer {
+        fn name(&self) -> &str {
+            "dump-then-answer"
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            if let Ok(mut guard) = self.seen.lock() {
+                guard.push(request);
+            }
+            let first = self.calls.fetch_add(1, Ordering::SeqCst) == 0;
+            Ok(ChatResponse {
+                content: if first {
+                    "Dumping.".to_string()
+                } else {
+                    r#"{"status":"ok","answer":"done"}"#.to_string()
+                },
+                tool_calls: if first {
+                    vec![LlmToolCall {
+                        id: "tc_dump".to_string(),
+                        name: "dump".to_string(),
+                        arguments: serde_json::json!({}),
+                    }]
+                } else {
+                    vec![]
+                },
+                model: "claude-sonnet-4-5-20250929".to_string(),
+                usage: Usage::default(),
+                finish_reason: if first {
+                    FinishReason::ToolUse
+                } else {
+                    FinishReason::Stop
+                },
+                thinking: None,
+                parts: None,
+            })
+        }
+    }
+
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "dump".to_string(),
+                description: "Dump".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(Arc::new(BigOutputTool)),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    let registry = Arc::new(registry);
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let skill_dir = tmp.path().join("dumper");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        r#"---
+name: "Dumper"
+description: "Dumps a lot"
+invoke:
+  slash: "/dump"
+  mode: "auto"
+tools:
+  allow:
+    - dump
+---
+
+## Instructions
+
+Dump.
+"#,
+    )
+    .unwrap();
+    let catalog = skill_catalog::SkillCatalog::new();
+    catalog.scan_directory(tmp.path(), crate::middleware::skill::SkillScope::Project);
+    catalog.set_availability_oracle(registry.clone());
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let router = openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(DumpThenAnswer {
+            calls: AtomicUsize::new(0),
+            seen: seen.clone(),
+        }),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    );
+
+    let mut config = DaemonConfig::default();
+    config.orchestrator.sessions.tool_result_inline_bytes = INLINE_BYTES;
+    let bus = EventBus::default();
+    let gate = make_security_gate_with_registry(&bus, registry.clone());
+    let orch = Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        bus.clone(),
+        SystemPersona::default(),
+        Some(Arc::new(router)),
+        LoopConfig::default(),
+        gate,
+        registry,
+        None,
+        None,
+        Arc::new(catalog),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(config)),
+    );
+
+    let ctx = orch.build_context("test:cli", "dump it");
+    let scope = crate::memory::scope_context::MemoryScopeContext::new(None);
+    orch.handle_skill_invocation(
+        Uuid::new_v4(),
+        "cli",
+        "Dumper",
+        "dump it",
+        "test:cli",
+        &ctx,
+        None,
+        &scope,
+        None,
+        false,
+        None,
+    )
+    .await
+    .expect("the skill runs");
+
+    let requests = seen.lock().unwrap();
+    assert_eq!(requests.len(), 2, "one tool round, then the answer");
+    let handed = requests[1]
+        .messages
+        .iter()
+        .find(|m| m.content.starts_with("qqq"))
+        .map(|m| m.content.clone())
+        .expect("the tool result reached the model");
+    assert!(
+        handed.len() < 2 * INLINE_BYTES,
+        "the skill loop cut the result at the configured threshold, not at the \
+         compiled 32 KiB default: {} bytes",
+        handed.len()
+    );
+    assert!(handed.len() < RESULT_BYTES);
+}
+
 /// The **invocation site** itself refuses, not only the `/slash` tier that
 /// short-circuits before it (design §6.2 #10). This is the security boundary;
 /// the tier above it is presentation.

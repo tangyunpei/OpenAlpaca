@@ -255,31 +255,37 @@ fn model_visible_result(
     ok: bool,
     spill_ref: Option<&str>,
 ) -> String {
+    // An `Err`'s head **and** tail, because a compiler or test failure is at
+    // the tail — §5.4: an error "stays inline but switches to head+tail". That
+    // is a rule about the *model's* copy, and it holds whether or not the log
+    // spilled the full bytes behind it.
+    if !ok {
+        return head_tail_tool_result(result_text.to_string(), config.tool_result_inline_bytes);
+    }
     match spill_ref {
         Some(rel) => spill_stub(result_text.len(), &spill_preview(result_text), rel),
-        // An `Err`'s head **and** tail, because a compiler or test failure is
-        // at the tail.
-        None if !ok => {
-            head_tail_tool_result(result_text.to_string(), config.tool_result_inline_bytes)
-        }
         None => truncate_tool_result_to(result_text.to_string(), config.tool_result_inline_bytes),
     }
 }
 
 /// Decide whether a tool result spills, and reserve its reference if so.
 ///
-/// Three conditions, all from §5.4: it must be over
-/// `tool_result_inline_bytes`; it must be an `Ok` result (an `Err` "stays
-/// inline but switches to head+tail" — the diagnosis is at both ends and is
-/// small); and there must be a session log, since `results/` is a session's
-/// directory and a loop without one has nowhere to put the bytes.
+/// Two conditions, both from §5.4: it must be over `tool_result_inline_bytes`,
+/// and there must be a session log, since `results/` is a session's directory
+/// and a loop without one has nowhere to put the bytes.
+///
+/// **An `Err` spills too.** §5.4's "stays inline but switches to head+tail" is
+/// about the model's copy ([`model_visible_result`] honours it), not about what
+/// the log keeps: an un-spilled large error left the record with a 2 KB head cut
+/// by the envelope cap while the model had seen head **and** tail, so the log —
+/// and with it §5.6c's replay of a resumed run — held strictly less than the
+/// model was given.
 fn spill_plan(
     config: &LoopConfig,
     call: &ToolCall,
     result_text: &str,
-    ok: bool,
 ) -> Option<(String, String)> {
-    if !ok || result_text.len() <= config.tool_result_inline_bytes {
+    if result_text.len() <= config.tool_result_inline_bytes {
         return None;
     }
     let log = config.session_log.as_ref()?;
@@ -1114,7 +1120,7 @@ async fn run_agentic_loop_core(
                         // copy is built on this path and the loop can never
                         // wait for the writer, so the emitter reserves the
                         // name and the writer honours it.
-                        let spill = spill_plan(config, tc, result_text, ok);
+                        let spill = spill_plan(config, tc, result_text);
                         // The reference, not the payload: the stub needs the
                         // name two lines below and the bytes belong to the
                         // record, which is about to take ownership of them.
@@ -1138,6 +1144,20 @@ async fn run_agentic_loop_core(
                             // the preview once the file is on disk; sending
                             // the bytes twice is exactly what §5.4 forbids.
                             map.insert("result".into(), Value::Null);
+                            // An `Err` carries the same text a second time in
+                            // `error`, which is what the index row's
+                            // `error_message` is read from. Left whole it would
+                            // push the envelope past its 64 KB cap — tripping
+                            // the "needs a spill" warning at the site that just
+                            // spilled — so it keeps the same 2 KB head the
+                            // preview does, and the whole text stays in the
+                            // file the record names.
+                            if !ok {
+                                map.insert(
+                                    "error".into(),
+                                    Value::from(spill_preview(result_text)),
+                                );
+                            }
                         }
                         let emitted = log_spill_event(config, task_id, agent_id, record, spill);
                         // What the model is handed. The spill's stub above the

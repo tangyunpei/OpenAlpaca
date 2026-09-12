@@ -316,7 +316,7 @@ impl Orchestrator {
         let connector_summaries: Arc<Vec<ConnectorSummary>> =
             Arc::new(connector_summaries_vec);
 
-        let (tools_for_loop, policy_opt, config_for_loop);
+        let (tools_for_loop, policy_opt, mut config_for_loop);
         if !tool_defs.is_empty() {
             let tool_names_log: Vec<&str> =
                 tool_defs.iter().map(|d| d.name.as_str()).collect();
@@ -381,6 +381,22 @@ impl Orchestrator {
             policy_opt = None;
             config_for_loop = self.loop_config.clone();
         }
+        // §5.4's one threshold, the same one the lead agent
+        // (`runner/lead_agent/mod.rs`), its subagents
+        // (`runner/lead_agent/tools.rs`) and the main loop
+        // (`query_handler/simple_query_handler.rs`) all set from the daemon
+        // config. A skill-invocation loop is an agentic loop like any other —
+        // without this it kept `LoopConfig`'s compiled 32 KiB fallback whatever
+        // `[orchestrator.sessions] tool_result_inline_bytes` said, so the one
+        // knob that bounds what a tool result costs the context did not reach
+        // the skill path at all. Set after both arms because both build their
+        // config from `self.loop_config`.
+        config_for_loop.tool_result_inline_bytes = self
+            .daemon_config
+            .load()
+            .orchestrator
+            .sessions
+            .tool_result_inline_bytes;
 
         // ── Route system-prompt + message-list assembly through the layered
         // compose engine (Phase 5 Commit 1 — Skill Invocation migration).

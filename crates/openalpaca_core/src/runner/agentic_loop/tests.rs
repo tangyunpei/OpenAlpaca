@@ -2833,6 +2833,186 @@ async fn a_result_over_the_inline_threshold_spills_and_the_model_gets_the_stub()
     assert_eq!(preview.chars().count(), crate::session_log::PREVIEW_CHARS);
 }
 
+/// The same, for an `Err`: a large error result spills too, so the log keeps
+/// the whole diagnosis in `results/` while the **model** still gets §5.4's
+/// head+tail inline. Before this, a large error left the record holding the
+/// 2 KB head the envelope cap had cut while the model had seen both ends — so
+/// §5.6c's replay handed a resumed run strictly less than the live run saw.
+#[tokio::test]
+async fn a_large_err_result_spills_while_the_model_keeps_head_and_tail() {
+    use crate::bus::EventBus;
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+    use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+    use crate::tools::ToolRegistry;
+    use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+
+    /// 40 KB of diagnosis: over the inline threshold, under the 64 KB envelope.
+    const RESULT_BYTES: usize = 40 * 1024;
+
+    struct FailingTool;
+    #[async_trait]
+    impl BuiltInTool for FailingTool {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+            // A head and a tail a reader can tell apart.
+            Err(format!("HEAD{}TAIL", "e".repeat(RESULT_BYTES)))
+        }
+    }
+
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "build".to_string(),
+                description: "Build".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(Arc::new(FailingTool)),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+    let policy = SandboxPolicy {
+        agent_id: "research_agent::a1".to_string(),
+        allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
+        denied_capabilities: vec![],
+        require_confirmation_for: vec![],
+        max_tool_calls: None,
+        max_tool_runtime_secs: 60,
+        stream_id: None,
+        lane_key: None,
+        confirmation_timeout_secs: None,
+        auto_approve: false,
+    };
+
+    let provider = Arc::new(MockRouterProvider::new(vec![
+        Ok(ChatResponse {
+            content: "Building.".to_string(),
+            tool_calls: vec![openalpaca_llm::ToolCall {
+                id: "tc_err".to_string(),
+                name: "build".to_string(),
+                arguments: serde_json::json!({}),
+            }],
+            model: "claude-sonnet-4-20250514".to_string(),
+            usage: Usage::default(),
+            finish_reason: FinishReason::ToolUse,
+            thinking: None,
+            parts: None,
+        }),
+        Ok(ChatResponse {
+            content: "It failed.".to_string(),
+            tool_calls: vec![],
+            model: "claude-sonnet-4-20250514".to_string(),
+            usage: Usage::default(),
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        }),
+    ]));
+    let router = LlmRouter::single_provider(
+        provider.clone(),
+        ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&db_dir.path().join("t.db")).unwrap();
+    let service = SessionLogService::new(
+        dir.path().to_path_buf(),
+        Some(db.clone()),
+        SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-big-err");
+
+    let config = LoopConfig {
+        model: Some("claude-sonnet-4-20250514".to_string()),
+        enable_caching: false,
+        session_log: Some(handle.clone()),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop_routed(
+        &router,
+        vec![ChatMessage::user("build it")],
+        vec![],
+        &config,
+        Some(&sandbox),
+        "research_agent::a1",
+        Some(&policy),
+        Some("task-err"),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+    assert!(handle.flush().await);
+
+    let session_dir = dir.path().join("sess-big-err");
+    let records = read_records(&session_dir).unwrap();
+    let logged = records
+        .iter()
+        .find(|r| r.kind == "tool_result")
+        .expect("the failure is narrated");
+    assert_eq!(logged.data["ok"], false);
+    let rel = logged.data["result"]["spill"]["rel"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a large error spills: {logged:?}"));
+    assert_eq!(logged.data["result_ref"], format!("file:{rel}"));
+
+    // The whole diagnosis is on disk — both ends of it.
+    let spilled = std::fs::read_to_string(session_dir.join(rel)).unwrap();
+    assert!(spilled.contains("HEAD") && spilled.contains("TAIL"));
+    assert!(spilled.len() > RESULT_BYTES);
+    assert!(
+        serde_json::to_string(&logged.data).unwrap().len()
+            <= crate::session_log::ENVELOPE_DATA_CAP_BYTES,
+        "and the record does not trip the envelope cap it used to be cut by"
+    );
+    assert!(
+        logged.data.get("_truncated").is_none(),
+        "nothing was cut inline: {}",
+        logged.data
+    );
+
+    // The model's copy is unchanged: §5.4's head+tail, no stub, no reference.
+    let seen = provider.tool_results_seen();
+    assert_eq!(seen.len(), 1, "one tool result reached the backend: {seen:?}");
+    assert!(seen[0].contains("HEAD"), "the head is in front of the model");
+    assert!(seen[0].contains("TAIL"), "and so is the tail");
+    assert!(
+        !seen[0].contains("result_ref"),
+        "an error is not handed a stub: {}",
+        &seen[0][..80.min(seen[0].len())]
+    );
+
+    // The index row keeps a readable error and points at the same file.
+    let (error_message, result_ref): (String, String) = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT error_message, result_ref FROM tool_execution_log",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(result_ref, format!("file:{rel}"));
+    assert!(error_message.starts_with("[tool_error]") || error_message.contains("HEAD"));
+    assert!(
+        error_message.chars().count() <= crate::session_log::PREVIEW_CHARS,
+        "the audit row keeps a head, not a second copy"
+    );
+}
+
 /// A record the session log **dropped** must not leave the model holding a
 /// reference to a file that will never exist.
 ///
@@ -2876,8 +3056,7 @@ async fn a_dropped_spill_record_leaves_the_model_an_inline_head_not_a_reference(
     };
     let result_text = "z".repeat(8 * 1024);
 
-    let spill =
-        spill_plan(&config, &call, &result_text, true).expect("a big Ok result plans a spill");
+    let spill = spill_plan(&config, &call, &result_text).expect("a big result plans a spill");
     let rel = spill.0.clone();
     let emitted = log_spill_event(&config, None, "a1", serde_json::json!({}), Some(spill));
     assert!(!emitted, "a full channel drops the record instead of writing it");
