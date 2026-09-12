@@ -441,6 +441,60 @@ drain_timeout_secs = 7
     assert_eq!(config.extensions.drain_timeout_secs, 7);
 }
 
+/// A `log_retention_days` the owner set to something other than its inert
+/// default warns at boot (R85): the key is parsed, clamped and served by
+/// `GET /v1/status`, and no age sweep reads it — so a silent load would let the
+/// number pass for a bound.
+#[tracing_test::traced_test]
+#[test]
+fn a_configured_log_retention_warns_that_no_age_sweep_exists() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("daemon.toml");
+    std::fs::write(
+        &path,
+        r#"
+[orchestrator.sessions]
+log_retention_days = 90
+"#,
+    )
+    .unwrap();
+
+    let config = load_daemon_config(&path);
+    // Served as set — the value is honest about itself, not ignored.
+    assert_eq!(config.orchestrator.sessions.log_retention_days, 90);
+    assert!(
+        logs_contain("no age sweep exists yet"),
+        "a configured retention loaded silently"
+    );
+    assert!(logs_contain("owner decision T12"));
+}
+
+/// The inert default does not warn, and neither does a file that never mentions
+/// the key — a warn on every boot would be noise, not information.
+#[tracing_test::traced_test]
+#[test]
+fn the_default_log_retention_is_silent() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("daemon.toml");
+    std::fs::write(
+        &path,
+        r#"
+[orchestrator.sessions]
+log_retention_days = 0
+log_max_total_bytes = 1073741824
+"#,
+    )
+    .unwrap();
+
+    let config = load_daemon_config(&path);
+    assert_eq!(config.orchestrator.sessions.log_retention_days, 0);
+    assert_eq!(
+        config.orchestrator.sessions.log_max_total_bytes,
+        1024 * 1024 * 1024
+    );
+    assert!(!logs_contain("no age sweep exists yet"));
+}
+
 // ── Artifact store: [execution.artifacts] (plan §4.6) ──
 
 fn assert_artifacts_is_default(artifacts: &crate::daemon_config::ArtifactsConfig) {

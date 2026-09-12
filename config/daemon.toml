@@ -129,8 +129,12 @@ log_max_session_bytes = 268435456
 # Across all sessions; archived sessions are evicted oldest-touched first and
 # an active session's log is never evicted.
 log_max_total_bytes = 2147483648
-# Age-based sweep of archived session logs, in days. 0 disables it: size is
-# for disk, age is for exposure, and the two are deliberately separate.
+# Age-based sweep of archived session logs, in days. Reserved: no age sweep
+# exists yet (owner decision T12), so only the two byte caps above are
+# enforced. GET /v1/status reports whatever is set here, the daemon warns at
+# boot when it is non-zero, and nothing expires anything by age. The intent it
+# records: size is for disk, age is for exposure, and the two are deliberately
+# separate.
 log_retention_days = 0
 # A tool result larger than this is written once to the session's results/ and
 # the model is handed a stub naming it — `read_result` pages the rest. Below it

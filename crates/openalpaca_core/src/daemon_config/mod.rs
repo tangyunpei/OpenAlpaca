@@ -89,13 +89,41 @@ fn warn_on_removed_keys(value: &toml::Value) {
     }
 }
 
+/// Warn about keys this daemon **parses and serves but does not act on**, when
+/// the owner has set one to something other than its inert default.
+///
+/// The neighbouring probe covers a key that was removed; this one covers a key
+/// that was never wired up. The failure mode is the same and worse: the value is
+/// accepted, clamped and reported by `GET /v1/status`, so
+/// `log_retention_days = 90` reads back as 90 while nothing expires anything by
+/// age (plan §5.4's age pass was not built — owner decision T12). A warn at boot
+/// is what keeps the number from being mistaken for a bound.
+fn warn_on_inert_keys(value: &toml::Value) {
+    let days = value
+        .get("orchestrator")
+        .and_then(|o| o.get("sessions"))
+        .and_then(|s| s.get("log_retention_days"))
+        .and_then(|d| d.as_integer());
+    let inert = i64::from(SessionsConfig::default().log_retention_days);
+    if let Some(days) = days.filter(|d| *d != inert) {
+        tracing::warn!(
+            "`orchestrator.sessions.log_retention_days = {days}` is configured but no age sweep \
+             exists yet — owner decision T12. Only the byte-cap sweep runs \
+             (`log_max_session_bytes`, `log_max_total_bytes`); the value is reported by \
+             `GET /v1/status` and expires nothing."
+        );
+    }
+}
+
 /// Load daemon config from a TOML file. Returns defaults if file is missing or unparseable.
 pub fn load_daemon_config(path: &Path) -> DaemonConfig {
     match std::fs::read_to_string(path) {
-        // Parsed through `toml::Value` so the removed-key probe above can see
-        // the raw document; `DaemonConfig` itself would swallow the key.
+        // Parsed through `toml::Value` so the two probes above can see the raw
+        // document; `DaemonConfig` itself would swallow the removed key, and
+        // report the inert one as though it had been set by the defaults.
         Ok(content) => match toml::from_str::<toml::Value>(&content).and_then(|value| {
             warn_on_removed_keys(&value);
+            warn_on_inert_keys(&value);
             value.try_into::<DaemonConfig>()
         }) {
             Ok(mut config) => {

@@ -28,9 +28,15 @@ pub struct SessionsConfig {
     /// an active session's log is never evicted. Read by the boot sweep.
     #[serde(default = "default_log_max_total_bytes")]
     pub log_max_total_bytes: u64,
-    /// Age-based sweep of archived session logs. `0` disables it — the
-    /// default, pending owner decision T12; it is not an oversight, and the
-    /// sweep machinery ships regardless of the value (P-21).
+    /// Age-based sweep of archived session logs, in days — **reserved, with no
+    /// consumer yet**.
+    ///
+    /// The key is parsed, clamped by `validate()` and served by
+    /// `GET /v1/status`; nothing reads it to expire anything. Only the two byte
+    /// caps above are enforced, so setting this to `90` bounds nothing today:
+    /// plan §5.4's age pass was not built, and whether it should be (and at
+    /// what default) is owner decision T12. `load_daemon_config` warns at boot
+    /// when the value is non-default, so the key cannot read as working.
     #[serde(default = "default_log_retention_days")]
     pub log_retention_days: u32,
     /// The one threshold two consumers share (§5.4, P-16/C-2): a tool result
