@@ -19,7 +19,7 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use chrono::Utc;
@@ -41,7 +41,8 @@ use openalpaca_storage::{
     TaskRepository, TaskStatus,
 };
 
-use super::{api_error, tasks_types::*};
+use super::chat_types::is_lane_owned_by;
+use super::{api_error, request_project_root, tasks_types::*, workspace_header};
 use crate::AppState;
 
 // ── Handlers ──────────────────────────────────────────────────────
@@ -50,13 +51,41 @@ use crate::AppState;
 pub async fn create_task_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CreateTaskRequest>,
-) -> impl IntoResponse {
+) -> Response {
+    create_task(
+        &state.db,
+        &state.gateway.shared_context,
+        &state.gateway.lane_manager,
+        &state.gateway.bus,
+        &state.local_user_id,
+        request,
+    )
+}
+
+/// `POST /v1/tasks`, as a `Response` — split out from the handler so the
+/// ownership rules are provable without an `AppState`.
+///
+/// **Owner-scoped on both columns (ruling R79).** The row this parks is what
+/// `start` / `rerun` / `resume` / `steer` later dispatch as *a user*, so the two
+/// identity columns are not the client's to choose: `created_by` is the local
+/// user whatever the body says, and a `source_lane` the caller does not own is
+/// `404 LANE_NOT_FOUND` — never `403`, which would confirm the lane exists
+/// (R40's line, the same one `POST /v1/lanes/{lane}/followups` draws, R42).
+fn create_task(
+    db: &Database,
+    ctx: &SharedContext,
+    lanes: &openalpaca_core::lane::LaneManager,
+    bus: &EventBus,
+    owner_id: &str,
+    request: CreateTaskRequest,
+) -> Response {
     // Input validation
     if request.title.is_empty() || request.title.len() > 500 {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "Title must be 1-500 characters" })),
-        );
+        )
+            .into_response();
     }
     if let Some(ref desc) = request.description
         && desc.len() > 10_000
@@ -64,7 +93,11 @@ pub async fn create_task_handler(
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "Description must be at most 10000 characters" })),
-        );
+        )
+            .into_response();
+    }
+    if !is_lane_owned_by(&request.source_lane, owner_id) {
+        return api_error(StatusCode::NOT_FOUND, "LANE_NOT_FOUND", "No such lane");
     }
 
     let task_id = Uuid::new_v4().to_string();
@@ -79,7 +112,9 @@ pub async fn create_task_handler(
         progress_current: None,
         progress_total: None,
         result_summary: None,
-        created_by: request.created_by.clone(),
+        // R79: the local user, not the body's `created_by`. Every owner-scoped
+        // verb reads this column.
+        created_by: owner_id.to_string(),
         source_lane: request.source_lane.clone(),
         created_at: now,
         updated_at: now,
@@ -104,29 +139,27 @@ pub async fn create_task_handler(
     };
 
     // 1. Persist to DB
-    let repo = TaskRepository::new(&state.db);
+    let repo = TaskRepository::new(db);
     if let Err(e) = repo.create(&task) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
-        );
+        )
+            .into_response();
     }
 
     // 2. Register in-memory
-    state
-        .gateway
-        .shared_context
-        .task_registry
+    ctx.task_registry
         .register(task_id.clone(), request.title.clone());
 
     // 3. Create task lane
-    state.gateway.lane_manager.create_task_lane(&task_id);
+    lanes.create_task_lane(&task_id);
 
     // 4. Emit event
-    let _ = state.gateway.bus.publish(SystemEvent::TaskCreated {
+    let _ = bus.publish(SystemEvent::TaskCreated {
         task_id: task_id.clone(),
         title: request.title,
-        created_by: request.created_by,
+        created_by: task.created_by,
         timestamp: now,
     });
 
@@ -137,6 +170,7 @@ pub async fn create_task_handler(
             "status": "queued"
         })),
     )
+        .into_response()
 }
 
 /// GET /v1/tasks
@@ -145,7 +179,14 @@ pub async fn list_tasks_handler(
     Query(query): Query<ListTasksQuery>,
 ) -> impl IntoResponse {
     let repo = TaskRepository::new(&state.db);
-    let limit = query.limit.unwrap_or(50);
+    // Clamped (D13): an oversized page is not just a big response — the grouped
+    // cost query below binds one SQLite parameter per row, so a page of 1 000
+    // asked for more than the 999-variable limit and every `cost_usd` came back
+    // zero through `unwrap_or_default`. Smaller page, honest numbers.
+    let limit = super::page_limit(
+        query.limit.map(|n| i64::try_from(n).unwrap_or(i64::MAX)),
+        DEFAULT_TASK_PAGE,
+    ) as usize;
 
     let tasks = if let Some(ref created_by) = query.created_by {
         repo.list_by_creator(created_by, limit)
@@ -180,7 +221,13 @@ pub async fn list_tasks_handler(
             let task_ids: Vec<String> = tasks.iter().map(|t| t.id.clone()).collect();
             let costs = LlmUsageRepository::new(&state.db)
                 .cost_for_tasks(&task_ids)
-                .unwrap_or_default();
+                .unwrap_or_else(|e| {
+                    // The same stance as the subagent counts below: a read
+                    // failure costs the numbers, not the page — but it is said
+                    // out loud rather than rendering every run as free.
+                    tracing::warn!("Failed to read costs for task list: {e}");
+                    Default::default()
+                });
             let subagent_counts = SubagentSpanRepository::new(&state.db)
                 .counts_for_tasks(&task_ids)
                 .unwrap_or_else(|e| {
@@ -495,6 +542,9 @@ fn unknown_action(action: &str) -> (StatusCode, Json<serde_json::Value>) {
 // (R40): reading a run and cancelling it are not scoped, but a verb that puts
 // work into the daemon *as this user* is.
 
+/// The default page of `GET /v1/tasks`. Bounded at [`super::MAX_PAGE_LIMIT`].
+const DEFAULT_TASK_PAGE: i64 = 50;
+
 /// The action word the route intercepts before [`apply_task_action`].
 const START_ACTION: &str = "start";
 
@@ -502,13 +552,26 @@ const START_ACTION: &str = "start";
 /// [`apply_task_action`] has refused it — see [`task_action_handler`].
 const RESUME_ACTION: &str = "resume";
 
-/// `Ok(())` when `id` names a run this owner started; the refusal otherwise.
+/// `Ok(())` when `id` names a run this owner started **on a lane this owner
+/// owns**; the refusal otherwise.
+///
+/// Both columns, because a launch is an injecting write on two identities
+/// (ruling R79): `created_by` says whose run it is, `source_lane` says which
+/// conversation the dispatch will post its completion report into and which
+/// lane's follow-up queue a leftover steering message re-enters. A row created
+/// by this user but parked on somebody else's lane is therefore not startable
+/// here either — the `POST /v1/tasks` that created it now refuses that
+/// combination outright, and this is what holds for rows written before it did.
 ///
 /// A run this caller cannot see gets the same `404` a missing one does — never
 /// a `403`, which would confirm that the id belongs to somebody.
 fn owned_run(db: &Database, owner_id: &str, id: &str) -> Result<(), Response> {
     match TaskRepository::new(db).get(id) {
-        Ok(Some(task)) if task.created_by == owner_id => Ok(()),
+        Ok(Some(task))
+            if task.created_by == owner_id && is_lane_owned_by(&task.source_lane, owner_id) =>
+        {
+            Ok(())
+        }
         Ok(_) => Err(api_error(
             StatusCode::NOT_FOUND,
             "NOT_FOUND",
@@ -785,6 +848,7 @@ fn steer_task(
     owner_id: &str,
     id: &str,
     request: SteerTaskRequest,
+    header_workspace: Option<String>,
 ) -> Response {
     // The rollback switch governs the whole rail, so it answers before the
     // route looks at the request or the row: with steering off there is no
@@ -804,6 +868,19 @@ fn steer_task(
             StatusCode::BAD_REQUEST,
             "EMPTY_MESSAGE",
             "message must not be empty",
+        );
+    }
+    // The project is a header, never a body field: the body's version was
+    // stored unresolved, while `x-workspace-path` goes through the single
+    // resolver (R22) like every other route's. Refused rather than ignored, so a
+    // client that sends it learns its project was not taken.
+    if request.workspace_path.is_some() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "WORKSPACE_PATH_IN_BODY",
+            "workspace_path is not a body field — send the project as the x-workspace-path \
+             header, the way every other route takes it. Omit it and this message inherits the \
+             run's own project.",
         );
     }
 
@@ -844,7 +921,10 @@ fn steer_task(
             global_id: owner_id.to_string(),
         },
         scope: Scope::Global,
-        workspace_path: request.workspace_path.or_else(|| task.workspace_id.clone()),
+        // The header's resolved root, else the run's own project — so a message
+        // that outlives the workflow and re-enters as an `unprocessed_steering`
+        // follow-up is scoped where the steer was aimed.
+        workspace_path: header_workspace.or_else(|| task.workspace_id.clone()),
         received_at: Utc::now(),
         origin: SteeringOrigin::User,
     };
@@ -890,8 +970,13 @@ fn steer_task(
 pub async fn steer_task_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(request): Json<SteerTaskRequest>,
 ) -> Response {
+    // The same two steps the sibling injecting route takes: read the header,
+    // resolve it to a project root (R22). `None` is "this request names no
+    // project", which `steer_task` reads as the run's own.
+    let header_workspace = request_project_root(workspace_header(&headers).as_deref());
     steer_task(
         &state.db,
         &state.gateway.shared_context,
@@ -900,6 +985,7 @@ pub async fn steer_task_handler(
         &state.local_user_id,
         &id,
         request,
+        header_workspace,
     )
 }
 
@@ -1593,6 +1679,7 @@ mod tests {
             STEER_OWNER,
             "task-1",
             steer_request("  focus on the tests  "),
+            None,
         ))
         .await;
 
@@ -1629,10 +1716,12 @@ mod tests {
         assert_eq!(steered, 1, "exactly one WorkflowSteered");
     }
 
-    /// The optional `workspace_path` defaults to the run's own project, so an
-    /// `unprocessed_steering` leftover re-enters scoped where the run was.
+    /// The project comes from the request's **header**, resolved like every
+    /// other route's, and defaults to the run's own — so an
+    /// `unprocessed_steering` leftover re-enters scoped where the steer was
+    /// aimed.
     #[tokio::test]
-    async fn the_message_inherits_the_runs_project_unless_the_caller_names_one() {
+    async fn the_message_takes_the_headers_project_and_otherwise_the_runs() {
         let (_dir, db) = steer_db(Some("/Users/dev/openalpaca"));
         let (shared, bus, inbox) = steerable(16);
 
@@ -1644,10 +1733,12 @@ mod tests {
             STEER_OWNER,
             "task-1",
             steer_request("inherit"),
+            None,
         );
         assert_eq!(
             inbox.drain_all()[0].workspace_path.as_deref(),
             Some("/Users/dev/openalpaca"),
+            "no header: the run's own project",
         );
 
         let _ = steer_task(
@@ -1657,14 +1748,50 @@ mod tests {
             &RoutingConfig::default(),
             STEER_OWNER,
             "task-1",
-            SteerTaskRequest {
-                message: "override".to_string(),
-                workspace_path: Some("/tmp/other".to_string()),
-            },
+            steer_request("from the window"),
+            Some("/tmp/other".to_string()),
         );
         assert_eq!(
             inbox.drain_all()[0].workspace_path.as_deref(),
             Some("/tmp/other"),
+        );
+    }
+
+    /// D12: `workspace_path` in the body was stored **unresolved** — a
+    /// subdirectory or a path under no marker went straight onto the message and
+    /// from there into a follow-up's `workspace_id`. Refused, not ignored.
+    #[tokio::test]
+    async fn a_body_workspace_path_is_refused_and_nothing_is_queued() {
+        let (_dir, db) = steer_db(Some("/Users/dev/openalpaca"));
+        let (shared, bus, inbox) = steerable(16);
+
+        let (status, body) = split(steer_task(
+            &db,
+            &shared,
+            &bus,
+            &RoutingConfig::default(),
+            STEER_OWNER,
+            "task-1",
+            SteerTaskRequest {
+                message: "override".to_string(),
+                workspace_path: Some("/Users/dev/openalpaca/src".to_string()),
+            },
+            None,
+        ))
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "WORKSPACE_PATH_IN_BODY");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("x-workspace-path"),
+            "the refusal names the header to use instead",
+        );
+        assert!(
+            inbox.drain_all().is_empty(),
+            "refused before anything was queued",
         );
     }
 
@@ -1694,6 +1821,7 @@ mod tests {
             STEER_OWNER,
             "task-1",
             steer_request("one more"),
+            None,
         ))
         .await;
 
@@ -1720,6 +1848,7 @@ mod tests {
             STEER_OWNER,
             "task-1",
             steer_request("too early"),
+            None,
         ))
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
@@ -1736,6 +1865,7 @@ mod tests {
             STEER_OWNER,
             "task-1",
             steer_request("too late"),
+            None,
         ))
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
@@ -1756,6 +1886,7 @@ mod tests {
         let (status, body) = split(steer_task(
             &db, &shared, &bus, &routing, STEER_OWNER, "task-1",
             steer_request("go"),
+            None,
         ))
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
@@ -1766,6 +1897,7 @@ mod tests {
         let (status, _) = split(steer_task(
             &db, &shared, &bus, &routing, STEER_OWNER, "no-such-task",
             steer_request("go"),
+            None,
         ))
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
@@ -1786,6 +1918,7 @@ mod tests {
             STEER_OWNER,
             "no-such-task",
             steer_request("go"),
+            None,
         ))
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
@@ -1799,6 +1932,7 @@ mod tests {
             "someone-else",
             "task-1",
             steer_request("go"),
+            None,
         ))
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
@@ -1826,6 +1960,7 @@ mod tests {
                 STEER_OWNER,
                 "task-1",
                 steer_request(message),
+                None,
             ))
             .await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -1919,6 +2054,7 @@ mod tests {
             STEER_OWNER,
             "task-1",
             steer_request("go"),
+            None,
         ))
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -1934,6 +2070,7 @@ mod tests {
             "someone-else",
             "task-1",
             steer_request("go"),
+            None,
         ))
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
@@ -1956,6 +2093,7 @@ mod tests {
             STEER_OWNER,
             "task-1",
             steer_request("too late"),
+            None,
         ))
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
@@ -2046,6 +2184,92 @@ mod tests {
                 openalpaca_core::daemon_config::DaemonConfig::default(),
             )),
         )
+    }
+
+    // ── POST /v1/tasks (ruling R79) ──────────────────────────────────
+
+    /// The two identity columns are the daemon's, not the body's: a client that
+    /// names somebody else as the creator gets a row it can actually operate,
+    /// attributed to itself.
+    #[tokio::test]
+    async fn creating_a_run_stores_the_local_user_whatever_the_body_claims() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::open(&dir.path().join("test.db")).expect("open db");
+        let ctx = SharedContext::new();
+        let lanes = openalpaca_core::lane::LaneManager::new();
+        let bus = EventBus::default();
+        let mut rx = bus.subscribe();
+
+        let (status, body) = split(create_task(
+            &db,
+            &ctx,
+            &lanes,
+            &bus,
+            LAUNCH_OWNER,
+            CreateTaskRequest {
+                title: "Ship it".to_string(),
+                description: None,
+                priority: None,
+                created_by: "someone-else".to_string(),
+                source_lane: "user-1:gui".to_string(),
+            },
+        ))
+        .await;
+
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let id = body["task_id"].as_str().expect("an id").to_string();
+        let stored = TaskRepository::new(&db)
+            .get(&id)
+            .unwrap()
+            .expect("the row");
+        assert_eq!(stored.created_by, LAUNCH_OWNER);
+        assert_eq!(stored.source_lane, "user-1:gui");
+
+        // The event says the same thing the row does.
+        let mut announced = 0;
+        while let Ok(event) = rx.try_recv() {
+            if let SystemEvent::TaskCreated { created_by, .. } = event {
+                assert_eq!(created_by, LAUNCH_OWNER);
+                announced += 1;
+            }
+        }
+        assert_eq!(announced, 1);
+    }
+
+    /// A run launched onto a lane posts its report into that conversation, so
+    /// naming somebody else's lane is `404` — never `403`, which would confirm
+    /// the lane exists (R40's line).
+    #[tokio::test]
+    async fn creating_a_run_on_a_foreign_lane_is_a_404() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::open(&dir.path().join("test.db")).expect("open db");
+        let ctx = SharedContext::new();
+        let lanes = openalpaca_core::lane::LaneManager::new();
+        let bus = EventBus::default();
+
+        for lane in ["someone-else:gui", "user-10:gui", "user-1", ""] {
+            let (status, body) = split(create_task(
+                &db,
+                &ctx,
+                &lanes,
+                &bus,
+                LAUNCH_OWNER,
+                CreateTaskRequest {
+                    title: "Ship it".to_string(),
+                    description: None,
+                    priority: None,
+                    created_by: LAUNCH_OWNER.to_string(),
+                    source_lane: lane.to_string(),
+                },
+            ))
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "lane {lane:?}");
+            assert_eq!(body["error"]["code"], "LANE_NOT_FOUND");
+        }
+        assert!(
+            TaskRepository::new(&db).list_recent(10).unwrap().is_empty(),
+            "nothing was parked",
+        );
     }
 
     /// A temp database holding one run owned by [`LAUNCH_OWNER`].
@@ -2142,6 +2366,41 @@ mod tests {
             "a foreign run must not read differently from a missing one",
         );
         assert_eq!(TaskRepository::new(&db).list_recent(10).unwrap().len(), 1);
+    }
+
+    /// R79's second half: `start` / `rerun` / `resume` re-check the **lane**,
+    /// not just the creator. A row created by this user but parked on somebody
+    /// else's lane would dispatch a lead agent that posts its completion report
+    /// into that conversation — so it reads as a run that does not exist.
+    #[tokio::test]
+    async fn launching_a_run_parked_on_a_foreign_lane_is_a_404() {
+        let (_dir, db) = launch_db(TaskStatus::Completed, Some("write the changelog"));
+        let orchestrator = launch_orchestrator(&db, true);
+        // The row is this owner's, and its lane is not.
+        db.with_connection(|conn| {
+            conn.execute(
+                "UPDATE task SET source_lane = 'someone-else:gui' WHERE id = 'task-1'",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect("re-park the row");
+
+        let (code, body) = split(rerun_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "NOT_FOUND");
+
+        let (code, _) = split(start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+
+        let (code, _) = split(resume_task(&orchestrator, &db, LAUNCH_OWNER, "task-1").await).await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+
+        assert_eq!(
+            TaskRepository::new(&db).list_recent(10).unwrap().len(),
+            1,
+            "nothing was dispatched",
+        );
     }
 
     /// Every template that could lead a run is busy — capacity, not a bug, so

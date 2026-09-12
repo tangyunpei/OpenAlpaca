@@ -32,6 +32,7 @@ interface Recorded {
   url: string;
   method: string;
   body: unknown;
+  headers: Headers;
 }
 
 let requests: Recorded[] = [];
@@ -63,6 +64,7 @@ beforeEach(() => {
         url: String(input),
         method: init?.method ?? "GET",
         body: typeof init?.body === "string" ? JSON.parse(init.body) : null,
+        headers: new Headers(init?.headers),
       });
       return reply();
     }),
@@ -96,12 +98,20 @@ describe("steerTask", () => {
     );
   });
 
-  it("sends the project only when the caller names one", async () => {
-    await steerTask("task-1", "go", "/Users/dev/openalpaca");
-    expect(requests[0]?.body).toEqual({
-      message: "go",
-      workspace_path: "/Users/dev/openalpaca",
-    });
+  /**
+   * D12: the project is a header, never a body field — the daemon resolves
+   * `x-workspace-path` through the one resolver every route shares (R22) and
+   * refuses a body `workspace_path` outright.
+   */
+  it("sends the project as the header, only when the caller names one", async () => {
+    await steerTask("task-1", "go", "/Users/dev/项目");
+    expect(requests[0]?.body).toEqual({ message: "go" });
+    expect(requests[0]?.headers.get("x-workspace-path")).toBe(
+      "/Users/dev/%E9%A1%B9%E7%9B%AE",
+    );
+
+    await steerTask("task-1", "go");
+    expect(requests[1]?.headers.has("x-workspace-path")).toBe(false);
   });
 
   it("surfaces the daemon's code on the thrown ApiError", async () => {

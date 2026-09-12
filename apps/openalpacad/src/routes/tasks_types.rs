@@ -11,7 +11,16 @@ pub struct CreateTaskRequest {
     pub description: Option<String>,
     #[serde(default)]
     pub priority: Option<i32>,
+    /// **Ignored** (ruling R79): the stored `created_by` is always the local
+    /// user. It is the column every owner-scoped verb reads — `start`, `rerun`,
+    /// `resume` and `steer` all refuse a run this caller did not create — so a
+    /// client-supplied value would let one request mint a row nobody can
+    /// operate, or one attributed to somebody else. Kept on the wire because
+    /// removing a required field breaks every existing caller for nothing.
     pub created_by: String,
+    /// The lane the run belongs to, and the lane the caller must own: a run
+    /// launched onto a lane posts its report into that conversation, so naming
+    /// someone else's is `404 LANE_NOT_FOUND` (R79, R40's line — never `403`).
     pub source_lane: String,
 }
 
@@ -59,9 +68,20 @@ pub struct RerunTaskResponse {
 #[derive(Debug, Deserialize)]
 pub struct SteerTaskRequest {
     pub message: String,
-    /// The project this interjection belongs to. Omitted, it is the run's own
-    /// `workspace_id`, so a message that outlives the workflow and re-enters as
-    /// an `unprocessed_steering` follow-up is scoped to the same project.
+    /// **Refused** when present (`400 WORKSPACE_PATH_IN_BODY`). The project a
+    /// request carries is the `x-workspace-path` header, resolved through the
+    /// one resolver every route shares (R22) — the sibling injecting route,
+    /// `POST /v1/lanes/{lane}/followups`, already takes it that way and has no
+    /// body field at all. Taken from the body it was stored **unresolved**: a
+    /// subdirectory, a relative path or a path under no project marker went
+    /// straight onto the steering message and from there into an
+    /// `unprocessed_steering` follow-up, which is a `workspace_id` the daemon
+    /// never agreed to.
+    ///
+    /// Kept on the wire so a client that still sends it is told, rather than
+    /// having it silently ignored. Omitted — the ordinary case — the message
+    /// takes the header's project, or the run's own `workspace_id` when the
+    /// request carries no header.
     #[serde(default)]
     pub workspace_path: Option<String>,
 }

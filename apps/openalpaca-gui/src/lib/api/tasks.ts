@@ -1,6 +1,7 @@
 /** `/v1/tasks*`. */
 
 import { apiFetch, ApiError } from "../http";
+import { workspaceHeader } from "../workspace-header";
 import type {
   CreateTaskRequest,
   CreateTaskResponse,
@@ -243,6 +244,11 @@ export interface SteerResult {
  * uses the run's own project, so a message the workflow never drained re-enters
  * as a follow-up scoped where the run was.
  *
+ * The project rides in `x-workspace-path`, never in the body: one resolver for
+ * every route that takes a project from a client (R22), and the daemon now
+ * refuses a body `workspace_path` with `400 WORKSPACE_PATH_IN_BODY` rather than
+ * storing an unresolved path.
+ *
  * Throws `ApiError` with the daemon's code: `STEERING_INBOX_FULL` /
  * `TASK_NOT_STEERABLE` (409), `STEERING_DISABLED` (503), `EMPTY_MESSAGE` (400),
  * `NOT_FOUND` (404). Render them through {@link steerErrorMessage}.
@@ -256,12 +262,10 @@ export async function steerTask(
     `/v1/tasks/${encodeURIComponent(id)}/steer`,
     {
       method: "POST",
-      body: {
-        message,
-        ...(workspacePath === undefined
-          ? {}
-          : { workspace_path: workspacePath }),
-      },
+      body: { message },
+      ...(workspacePath === undefined
+        ? {}
+        : { headers: workspaceHeader(workspacePath) }),
     },
   );
 }
