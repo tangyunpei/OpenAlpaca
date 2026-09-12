@@ -26,7 +26,12 @@
  * writes the bit and leaves the router with nothing (`loaded: false`). The
  * switch still moves — the file says on — so the row carries the daemon's
  * `warning` beneath it, because a switch that says on beside a provider that
- * cannot answer is the silent degradation the rules reject.
+ * cannot answer is the silent degradation the rules reject. That `warning`
+ * arrives on the toggle's own response and on nothing else, so after a reload
+ * the same provider had nothing but the word `active` beside it; the row now
+ * reads the catalogue instead — enabled, `GET /v1/models` answered, and not a
+ * model from this provider in it is "on, but no models loaded", every time the
+ * page is drawn.
  */
 
 import { useState } from "react";
@@ -96,7 +101,18 @@ export function ModelsSection() {
     updateOrchestrator.mutate(
       {
         model: modelId,
-        fallback_models: orchestrator.data?.fallback_models ?? [],
+        // `PUT /v1/orchestrator/config` requires the whole pair, and an
+        // omitted chain is an *erased* chain (`[]` → `None` on the daemon).
+        // `GET /v1/orchestrator/config` is the one read here that touches the
+        // DB under the single mutex, so it can still be in flight while the
+        // chips — drawn off `GET /v1/models` — are already clickable. The
+        // same field rides on `GET /v1/settings/llm`, off the same file read,
+        // and a chip cannot exist without it, so the second source is the one
+        // that makes the `?? []` tail unreachable rather than destructive.
+        fallback_models:
+          orchestrator.data?.fallback_models ??
+          llm.data?.orchestrator.fallback_models ??
+          [],
       },
       {
         onSuccess: () => {
@@ -131,11 +147,25 @@ export function ModelsSection() {
             const today = (usage.data?.by_provider ?? []).find(
               (row) => row.provider === provider,
             );
+            // The file says on and the catalogue has arrived carrying nothing
+            // for this provider: the router holds no model from it, whatever
+            // the bit says. Only once `models.data` is defined — an empty
+            // catalogue that has not loaded yet would otherwise accuse every
+            // provider of the same thing.
+            const unloaded =
+              info.enabled &&
+              models.data !== undefined &&
+              providerModels.length === 0;
             return (
               <ListRow
                 key={provider}
                 name={provider}
-                tags={<Tag value={info.enabled ? "active" : "off"} />}
+                tags={
+                  <Tag
+                    value={info.enabled ? (unloaded ? "on" : "active") : "off"}
+                    {...(unloaded ? { tone: "warn" as const } : {})}
+                  />
+                }
                 description={
                   <>
                     {`${info.keys.length} ${
@@ -144,6 +174,11 @@ export function ModelsSection() {
                     {notLoaded[provider] !== undefined && (
                       <span className="mt-[3px] block text-red-ink">
                         On, but not loaded — {notLoaded[provider]}
+                      </span>
+                    )}
+                    {unloaded && notLoaded[provider] === undefined && (
+                      <span className="mt-[3px] block text-amber-ink">
+                        On, but no models loaded
                       </span>
                     )}
                   </>

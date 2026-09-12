@@ -54,7 +54,16 @@ function renderSection(id: SettingsSectionId) {
   }
 }
 
-/** `undefined` where the list has not loaded — never `0`. */
+/**
+ * `undefined` where the list has not loaded — never `0`.
+ *
+ * Every count but one is the length of a list the daemon serves whole. The
+ * conversations list is **paged** (`GET /v1/sessions` answers one page plus a
+ * `total`), so its length is the page size, not the number of conversations:
+ * a lane with 90 of them read `50` beside Conversations. The envelope's
+ * `total` is the answer to the question the numeral asks, and the section
+ * itself says how much of it is on screen.
+ */
 function useSectionCounts(): Partial<Record<SettingsSectionId, number>> {
   const llm = useLlmSettings();
   const connectors = useConnectors();
@@ -72,7 +81,7 @@ function useSectionCounts(): Partial<Record<SettingsSectionId, number>> {
     tools: tools.data?.length,
     extensions: extensions.data?.length,
     agents: templates.data?.length,
-    conversations: sessions.data?.sessions.length,
+    conversations: sessions.data?.total,
   };
 }
 

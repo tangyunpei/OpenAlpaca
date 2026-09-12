@@ -25,19 +25,35 @@ const state = vi.hoisted(() => ({
     loaded: boolean;
     warning: string | null;
   } | null,
+  /** `GET /v1/models` — the catalogue the chips are drawn from. */
+  models: [] as Array<Record<string, unknown>>,
+  /** `GET /v1/settings/llm`'s `orchestrator` half, off the same file read. */
+  llmOrchestrator: { model: "claude-haiku-4-5", fallback_models: [] } as {
+    model: string;
+    fallback_models: string[];
+  },
+  /**
+   * `GET /v1/orchestrator/config` — `undefined` is the cold cache the model
+   * picker can be clicked through, because it is the one read here that goes
+   * to the DB under the single mutex.
+   */
+  orchestrator: undefined as
+    { model: string; fallback_models: string[] } | undefined,
+  /** Every `PUT /v1/orchestrator/config` body the section sent. */
+  writes: [] as Array<{ model: string; fallback_models: string[] }>,
 }));
 
 vi.mock("@/hooks/useSettings", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/hooks/useSettings")>()),
   useLlmSettings: () => ({
     data: {
-      orchestrator: { model: "claude-haiku-4-5", fallback_models: [] },
+      orchestrator: state.llmOrchestrator,
       providers: state.providers,
     },
     isPending: false,
     error: null,
   }),
-  useModels: () => ({ data: [], isPending: false, error: null }),
+  useModels: () => ({ data: state.models, isPending: false, error: null }),
   useProviderUsage: () => ({ data: [], isPending: false, error: null }),
   useSetProviderEnabled: () => ({
     isPending: false,
@@ -87,11 +103,16 @@ vi.mock("@/hooks/useUsage", async (importOriginal) => ({
 vi.mock("@/hooks/useOrchestrator", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/hooks/useOrchestrator")>()),
   useOrchestratorConfig: () => ({
-    data: { model: "claude-haiku-4-5", fallback_models: [] },
+    data: state.orchestrator,
     isPending: false,
     error: null,
   }),
-  useUpdateOrchestratorConfig: () => ({ isPending: false, mutate: vi.fn() }),
+  useUpdateOrchestratorConfig: () => ({
+    isPending: false,
+    mutate: (input: { model: string; fallback_models: string[] }) => {
+      state.writes.push(input);
+    },
+  }),
 }));
 
 const provider = (enabled: boolean) => ({
@@ -105,6 +126,16 @@ beforeEach(() => {
   state.calls = [];
   state.fail = null;
   state.result = null;
+  state.models = [];
+  state.llmOrchestrator = {
+    model: "claude-haiku-4-5",
+    fallback_models: ["claude-sonnet-4-6"],
+  };
+  state.orchestrator = {
+    model: "claude-haiku-4-5",
+    fallback_models: ["claude-sonnet-4-6"],
+  };
+  state.writes = [];
   useUiStore.setState({ toast: null });
 });
 
@@ -188,6 +219,116 @@ describe("the provider switch", () => {
     expect(
       screen.queryByText(/Provider enable\/disable not yet available/),
     ).toBeNull();
+  });
+});
+
+/**
+ * Picking a model writes the whole `[orchestrator]` pair, so a `fallback_models`
+ * this section did not have is a `fallback_models` the daemon erases
+ * (`[]` → `None`). The chips come from `GET /v1/models`; the chain from
+ * `GET /v1/orchestrator/config`, the one read here that goes to the DB under
+ * the single mutex — so the row can be clickable while that one is still cold.
+ */
+describe("picking a chat model", () => {
+  const catalogue = [
+    {
+      id: "claude-haiku-4-5",
+      provider: "anthropic",
+      context_window: 200000,
+      input_price_per_million: 1,
+      output_price_per_million: 5,
+    },
+    {
+      id: "claude-sonnet-4-6",
+      provider: "anthropic",
+      context_window: 200000,
+      input_price_per_million: 3,
+      output_price_per_million: 15,
+    },
+  ];
+
+  it("keeps the configured chain when the orchestrator query is cold", async () => {
+    state.models = catalogue;
+    state.orchestrator = undefined;
+    render(<ModelsSection />);
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "claude-sonnet-4-6" }),
+    );
+
+    expect(state.writes).toEqual([
+      {
+        model: "claude-sonnet-4-6",
+        fallback_models: ["claude-sonnet-4-6"],
+      },
+    ]);
+  });
+
+  it("prefers the orchestrator's own chain when it has loaded", async () => {
+    state.models = catalogue;
+    state.orchestrator = {
+      model: "claude-haiku-4-5",
+      fallback_models: ["a", "b"],
+    };
+    render(<ModelsSection />);
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "claude-sonnet-4-6" }),
+    );
+
+    expect(state.writes[0]?.fallback_models).toEqual(["a", "b"]);
+  });
+});
+
+/**
+ * The daemon's `warning` rides on the toggle's response and on nothing else, so
+ * after a reload an enabled-but-unloaded provider had only the word `active`
+ * beside it. The catalogue is the durable evidence.
+ */
+describe("an enabled provider the router loaded nothing from", () => {
+  it("says so instead of reading active", () => {
+    state.providers = { anthropic: provider(true) };
+    state.models = [];
+    render(<ModelsSection />);
+
+    expect(screen.getByText("On, but no models loaded")).toBeInTheDocument();
+    expect(screen.queryByText("active")).toBeNull();
+    expect(screen.getByText("on")).toBeInTheDocument();
+  });
+
+  it("reads active once a model of its own is in the catalogue", () => {
+    state.providers = { anthropic: provider(true) };
+    state.models = [
+      {
+        id: "claude-haiku-4-5",
+        provider: "anthropic",
+        context_window: 200000,
+        input_price_per_million: 1,
+        output_price_per_million: 5,
+      },
+    ];
+    render(<ModelsSection />);
+
+    expect(screen.queryByText("On, but no models loaded")).toBeNull();
+    expect(screen.getByText("active")).toBeInTheDocument();
+  });
+
+  it("accuses nobody while the catalogue is still loading", () => {
+    state.providers = { anthropic: provider(true) };
+    state.models = undefined as unknown as Array<Record<string, unknown>>;
+    render(<ModelsSection />);
+
+    expect(screen.queryByText("On, but no models loaded")).toBeNull();
+    expect(screen.getByText("active")).toBeInTheDocument();
+  });
+
+  it("leaves a provider that is off alone", () => {
+    state.providers = { ollama: provider(false) };
+    state.models = [];
+    render(<ModelsSection />);
+
+    expect(screen.queryByText("On, but no models loaded")).toBeNull();
+    expect(screen.getByText("off")).toBeInTheDocument();
   });
 });
 

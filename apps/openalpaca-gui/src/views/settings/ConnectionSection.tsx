@@ -340,6 +340,13 @@ function ProjectCard() {
  * `WORKSPACE_NOT_FOUND` when the rows there belong to another owner. The
  * daemon's sentence is rendered verbatim: it is the only thing that knows
  * which root it resolved.
+ *
+ * `WORKSPACE_BUSY` is the one refusal this card can see coming, because
+ * `GET /v1/workspaces` already counts the runs in flight under the old root.
+ * The copy used to say a re-base "waits until they finish"; it does not — the
+ * daemon answers `409` and changes nothing — so the sentence says that, and
+ * the button is disabled while the count is above zero rather than offering a
+ * press that is already known to be refused.
  */
 function MovedProjectOffer({ path }: { path: string | null }) {
   const { moved, pending, error } = useMovedProject(path);
@@ -371,6 +378,9 @@ function MovedProjectOffer({ path }: { path: string | null }) {
 
   const { artifacts, sessions, tasks, memories } = moved.rows;
   const failure = rebase.error;
+  // The daemon refuses a re-base while anything under the old root is still
+  // running (`409 WORKSPACE_BUSY`), and this card already has the count.
+  const busy = moved.activeTasks > 0;
 
   return (
     <div className="mt-[12px] rounded-2xl border border-amber-line bg-amber-surface px-[13px] py-[11px]">
@@ -383,8 +393,8 @@ function MovedProjectOffer({ path }: { path: string | null }) {
 
       {moved.activeTasks > 0 && (
         <p className="mt-[6px] mb-0 text-base leading-[1.6] text-secondary">
-          {moved.activeTasks} run(s) there are still in flight — a re-base waits
-          until they finish.
+          {moved.activeTasks} run(s) there are still in flight — a re-base is
+          refused while a run is in flight; retry once it finishes.
         </p>
       )}
 
@@ -427,7 +437,11 @@ function MovedProjectOffer({ path }: { path: string | null }) {
             </Button>
           </>
         ) : (
-          <Button variant="outlineRaised" onClick={() => setConfirming(true)}>
+          <Button
+            variant="outlineRaised"
+            disabled={busy}
+            onClick={() => setConfirming(true)}
+          >
             Re-base to this path
           </Button>
         )}

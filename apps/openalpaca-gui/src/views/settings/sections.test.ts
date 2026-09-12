@@ -17,9 +17,6 @@ describe("Settings sections (§5.4)", () => {
   });
 
   it("keeps the design's copy verbatim", () => {
-    expect(sectionMeta("connection").blurb).toBe(
-      "Daemon status, endpoint and today's spend against the cap.",
-    );
     expect(sectionMeta("models").blurb).toBe(
       "Providers the router can reach, in priority order. Pick a model to make it the chat default.",
     );
@@ -32,12 +29,31 @@ describe("Settings sections (§5.4)", () => {
     expect(sectionMeta("agents").blurb).toBe(
       "Templates the orchestrator spawns from.",
     );
-    expect(sectionMeta("conversations").blurb).toBe(
-      "Stored lanes. Memory compaction runs weekly.",
-    );
     expect(sectionMeta("events").blurb).toBe(
       "Everything the daemon emitted, newest first.",
     );
+  });
+
+  /**
+   * N4: there is no daily budget, so "today's spend against the cap" pointed
+   * at a ceiling nothing measures today's figure against. The two caps that do
+   * exist are per workflow and per agent turn — the same pair `capsNote` prints
+   * under the panel's own spend tile.
+   */
+  it("names the two caps that exist rather than a daily one that does not", () => {
+    const blurb = sectionMeta("connection").blurb;
+    expect(blurb).toMatch(/per workflow and per agent turn/);
+    expect(blurb).not.toMatch(/against the cap/);
+  });
+
+  /**
+   * The rows are conversations (one lane holds many) and nothing in the daemon
+   * runs a weekly memory compaction.
+   */
+  it("describes Conversations as an inventory, with no compaction promise", () => {
+    const blurb = sectionMeta("conversations").blurb;
+    expect(blurb).toBe("Stored conversations across every lane.");
+    expect(blurb).not.toMatch(/compaction/i);
   });
 
   it("corrects the one factually wrong blurb — plugins are not WASM", () => {

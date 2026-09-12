@@ -441,9 +441,36 @@ describe("extensionErrorCopy (§8's flat envelope)", () => {
     }
   });
 
+  /**
+   * The one refusal that arrives as a sentence. `PluginManager::set_plugin_config`
+   * answers `PermissionDenied("config key '<k>' of plugin '<p>' is declared
+   * sensitive; …")`, which `plugin_error_status` turns into a `400`. Repeating
+   * that verbatim leaves the owner with a refusal and no next step, so the copy
+   * names the key and where to write the reference by hand.
+   */
+  it("turns the sensitive-key 400 into the hand-edit path, naming the key", () => {
+    const copy = extensionErrorCopy(
+      "config key 'api_key' of plugin 'vault' is declared sensitive; " +
+        "store it as a secret reference, not in the plugin's TOML",
+    );
+
+    expect(copy).toMatch(/^api_key is a secret this plugin declares/);
+    expect(copy).toMatch(/nothing was written/);
+    expect(copy).toMatch(
+      /~\/\.openalpaca\/plugins\/\.config\/vault\.toml by hand/,
+    );
+    expect(copy).toMatch(/then Reload/);
+    // It must not repeat the daemon's own sentence, which ends in a shrug.
+    expect(copy).not.toMatch(/declared sensitive;/);
+  });
+
   it("passes anything it does not recognise through verbatim", () => {
     expect(extensionErrorCopy("Request failed with status 500")).toBe(
       "Request failed with status 500",
     );
+    // Shaped like the sensitive refusal but not it: still verbatim.
+    expect(
+      extensionErrorCopy("config key 'api_key' of plugin 'vault' is unknown"),
+    ).toBe("config key 'api_key' of plugin 'vault' is unknown");
   });
 });

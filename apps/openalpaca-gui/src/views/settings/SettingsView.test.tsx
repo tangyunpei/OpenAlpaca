@@ -299,29 +299,36 @@ vi.mock("@/hooks/useAgents", async (importOriginal) => ({
   useAgentInstances: () => query([]),
 }));
 
+/**
+ * `GET /v1/sessions` is the one **paged** list in Settings, so its envelope is
+ * mutable here: `total` is what the lane holds, `sessions` what one page of it
+ * carries, and the two differ exactly when the section has to say so.
+ */
+const sessionsPage = vi.hoisted(() => ({
+  rows: [] as Array<Record<string, unknown>>,
+  total: 1,
+}));
+
 vi.mock("@/hooks/useSessions", () => ({
   useSessions: () =>
-    query({
-      sessions: [
-        {
-          id: "c1",
-          lane_key: "local:gui",
-          source: "gui",
-          title: "Connector audit",
-          workspace_id: null,
-          status: "archived",
-          message_count: 142,
-          last_message_at: "2026-08-29T10:00:00Z",
-          created_at: "2026-08-01T10:00:00Z",
-          updated_at: "2026-08-29T10:00:00Z",
-          ended_at: "2026-08-29T10:05:00Z",
-          active_task_count: 0,
-          interrupted_task_count: 0,
-        },
-      ],
-      total: 1,
-    }),
+    query({ sessions: sessionsPage.rows, total: sessionsPage.total }),
 }));
+
+const CONVERSATION = {
+  id: "c1",
+  lane_key: "local:gui",
+  source: "gui",
+  title: "Connector audit",
+  workspace_id: null,
+  status: "archived",
+  message_count: 142,
+  last_message_at: "2026-08-29T10:00:00Z",
+  created_at: "2026-08-01T10:00:00Z",
+  updated_at: "2026-08-29T10:00:00Z",
+  ended_at: "2026-08-29T10:05:00Z",
+  active_task_count: 0,
+  interrupted_task_count: 0,
+};
 
 vi.mock("@/hooks/useEventHistory", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/hooks/useEventHistory")>()),
@@ -349,6 +356,8 @@ beforeEach(() => {
   workspace.error = null;
   workspace.rebaseError = null;
   workspace.rebase.mockReset();
+  sessionsPage.rows = [CONVERSATION];
+  sessionsPage.total = 1;
   localStorage.clear();
 });
 
@@ -460,6 +469,29 @@ describe("SettingsView (§2.5, §5.4)", () => {
     await open("Conversations");
     expect(screen.getByText("142 messages · 29 Aug")).toBeInTheDocument();
     expect(screen.getByText("archived")).toBeInTheDocument();
+    // One page that *is* the whole list says nothing about paging.
+    expect(screen.queryByText(/Showing /)).toBeNull();
+  });
+
+  /**
+   * `GET /v1/sessions` pages. The nav numeral used to be the page's length, so
+   * a lane holding 142 conversations read `50` — the page size, dressed as a
+   * count — and the list ended at the fiftieth row with nothing to say it had.
+   */
+  it("counts every conversation, not the page, and says how much is on screen", async () => {
+    sessionsPage.rows = Array.from({ length: 50 }, (_unused, index) => ({
+      ...CONVERSATION,
+      id: `c${index}`,
+    }));
+    sessionsPage.total = 142;
+    render(<SettingsView />);
+
+    expect(
+      screen.getByRole("navigation", { name: "Settings sections" }),
+    ).toHaveTextContent("Conversations142");
+
+    await open("Conversations");
+    expect(screen.getByText("Showing 50 of 142.")).toBeInTheDocument();
   });
 
   it("categorises real event types onto the design's log tags", async () => {
@@ -566,6 +598,11 @@ describe("SettingsView (§2.5, §5.4)", () => {
     });
   });
 
+  /**
+   * The daemon answers `409 WORKSPACE_BUSY` and changes nothing — it does not
+   * queue the re-base behind the run — so the card must neither promise a wait
+   * nor offer a press that is already known to be refused.
+   */
   it("says a run is still in flight rather than offering a re-base that would be refused", () => {
     useProjectStore.setState({ path: "/Users/dev/moved" });
     workspace.moved = {
@@ -579,6 +616,26 @@ describe("SettingsView (§2.5, §5.4)", () => {
     expect(
       screen.getByText(/2 run\(s\) there are still in flight/),
     ).toBeInTheDocument();
+    expect(screen.getByText(/refused while a run is in flight/)).toBeVisible();
+    expect(screen.queryByText(/waits until they finish/)).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Re-base to this path" }),
+    ).toBeDisabled();
+  });
+
+  it("offers the press again once nothing is in flight", () => {
+    useProjectStore.setState({ path: "/Users/dev/moved" });
+    workspace.moved = {
+      from: "/Users/dev/openalpaca",
+      to: "/Users/dev/moved",
+      rows: { artifacts: 1, sessions: 0, tasks: 1, memories: 0 },
+      activeTasks: 0,
+    };
+    render(<SettingsView />);
+
+    expect(
+      screen.getByRole("button", { name: "Re-base to this path" }),
+    ).toBeEnabled();
   });
 
   it("shows the daemon's own refusal instead of a generic failure", () => {

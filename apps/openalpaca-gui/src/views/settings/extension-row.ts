@@ -344,12 +344,41 @@ export function orderExtensions(
 }
 
 /**
+ * The one refusal that is a sentence rather than a word.
+ *
+ * `POST /v1/extensions/plugin/{id}/config` answers `400` for a key the
+ * manifest declares `sensitive` (`PluginError::PermissionDenied`, design §8
+ * X-29), and its message names both the key and the plugin. The Configure form
+ * cannot know which keys those are — `ExtensionRow` carries
+ * `missing_config_keys` and no sensitivity flag; only the install-time
+ * `ManifestSummary` has `sensitive_config_keys` — so the daemon's refusal is
+ * the first and only place this window learns it, and it has to be turned into
+ * an instruction rather than repeated verbatim.
+ */
+const SENSITIVE_CONFIG =
+  /^config key '([^']*)' of plugin '([^']*)' is declared sensitive/;
+
+/**
  * The flat `{"error": "<word>"}` envelope (§8, R20) as row copy.
  *
  * `parseErrorPayload` hands the word through as the message, so this is the
  * one place that knows what each word means to a person.
  */
 export function extensionErrorCopy(message: string): string {
+  const sensitive = SENSITIVE_CONFIG.exec(message.trim());
+  if (sensitive !== null) {
+    const [, key, plugin] = sensitive;
+    // The manual's own path (CLI_Manual `plugin config`): the TOML holds
+    // non-sensitive values, and a secret is a reference written by hand —
+    // which store a reference names is still an owner decision (T9), so this
+    // says where to write it and claims nothing about where it is kept.
+    return (
+      `${key} is a secret this plugin declares, so it is never typed here and ` +
+      `nothing was written. Put a reference to it in ` +
+      `~/.openalpaca/plugins/.config/${plugin}.toml by hand — the plaintext ` +
+      `values live there, secrets never do — then Reload.`
+    );
+  }
   switch (message.trim()) {
     case "not_loaded":
       return "Nothing is loaded to reload — turn it on instead.";

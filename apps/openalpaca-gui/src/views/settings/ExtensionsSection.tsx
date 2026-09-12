@@ -407,6 +407,16 @@ function rowDetail({
  * Setting the last missing key starts the plugin without a second call: the
  * daemon invokes the `enable` verb itself when the row is `Failed{NeedsConfig}`
  * with the bit set and consent recorded (§8).
+ *
+ * A field is offered for **every** missing key, including one the manifest
+ * declares `sensitive`, which the daemon always refuses (`400`, design §8
+ * X-29). That is not a choice: `ExtensionRow` carries `missing_config_keys` and
+ * no sensitivity flag — only the install-time `ManifestSummary` has
+ * `sensitive_config_keys` — so this form cannot tell the two apart, and
+ * omitting a required key would hide the reason the plugin will not start.
+ * What it must not do is leave the refusal as a shrug, so
+ * `extensionErrorCopy` turns that `400` into the hand-edit path the manual
+ * names.
  */
 function ConfigForm({
   keys,

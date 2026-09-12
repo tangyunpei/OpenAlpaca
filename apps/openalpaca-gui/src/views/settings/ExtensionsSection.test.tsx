@@ -27,6 +27,10 @@ const state = vi.hoisted(() => ({
   declared: [] as unknown[],
   uninstalled: [] as Array<{ kind: string; id: string; keepData: boolean }>,
   fail: null as string | null,
+  /** Every `POST …/config` the Configure form sent. */
+  configWrites: [] as Array<{ id: string; key: string; value: string }>,
+  /** The daemon's refusal sentence for the next config write, if any. */
+  configFail: null as string | null,
 }));
 
 /** A mutation double that records its input and calls the caller back. */
@@ -79,7 +83,21 @@ vi.mock("@/hooks/useExtensions", async (importOriginal) => ({
       else options?.onSuccess?.();
     },
   }),
-  useSetExtensionConfig: () => ({ isPending: false, mutate: vi.fn() }),
+  useSetExtensionConfig: () => ({
+    isPending: false,
+    mutate: (
+      input: { id: string; key: string; value: string },
+      options?: {
+        onSuccess?: () => void;
+        onError?: (error: Error) => void;
+      },
+    ) => {
+      state.configWrites.push(input);
+      if (state.configFail !== null)
+        options?.onError?.(new Error(state.configFail));
+      else options?.onSuccess?.();
+    },
+  }),
   useInstallPlugin: recorder<string, { extension: ExtensionRow }>(
     (path) => state.installed.push(path),
     (path) => ({ extension: extensionRow({ id: basename(path) }) }),
@@ -149,6 +167,8 @@ beforeEach(() => {
   state.declared = [];
   state.uninstalled = [];
   state.fail = null;
+  state.configWrites = [];
+  state.configFail = null;
   useUiStore.setState({ toast: null, settingsSectionId: "extensions" });
 });
 
@@ -456,5 +476,46 @@ describe("ExtensionsSection (ADR-030 §9.2)", () => {
     expect(
       screen.getByRole("menuitem", { name: "Uninstall…" }),
     ).toBeInTheDocument();
+  });
+  /**
+   * The Configure form offers a field for every missing key, including one the
+   * manifest declares `sensitive` — the row carries no sensitivity flag, so it
+   * cannot tell them apart — and the daemon always refuses that one with a
+   * `400` whose sentence names the key. Left verbatim it is a dead end; the row
+   * has to say what to do instead, and nothing must have been written.
+   */
+  it("renders the sensitive-key refusal as the hand-edit path it needs", async () => {
+    state.rows = [
+      extensionRow({
+        kind: "plugin",
+        id: "vault",
+        state: "failed",
+        reason: "needs_config",
+        actionable: true,
+        missing_config_keys: ["api_key"],
+      }),
+    ];
+    state.configFail =
+      "config key 'api_key' of plugin 'vault' is declared sensitive; " +
+      "store it as a secret reference, not in the plugin's TOML";
+    render(<ExtensionsSection />);
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: "Configure" }));
+    await user.type(screen.getByLabelText("api_key"), "sk-live-1");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(state.configWrites).toEqual([
+      { id: "vault", key: "api_key", value: "sk-live-1" },
+    ]);
+    expect(
+      screen.getByText(/api_key is a secret this plugin declares/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /~\/\.openalpaca\/plugins\/\.config\/vault\.toml by hand/,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/declared sensitive;/)).toBeNull();
   });
 });

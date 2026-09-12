@@ -182,10 +182,16 @@ export interface ListCardProps {
   /** The design's add bar; omit for a section with no add action. */
   addLabel?: string;
   onAdd?: () => void;
+  /**
+   * A closing line under the rows, for a list that is one **page** of a longer
+   * one. Omit it on a list the daemon serves whole: a footer on a complete list
+   * would send the reader looking for rows that do not exist.
+   */
+  footer?: string;
   children: React.ReactNode;
 }
 
-export function ListCard({ addLabel, onAdd, children }: ListCardProps) {
+export function ListCard({ addLabel, onAdd, footer, children }: ListCardProps) {
   return (
     <div className="overflow-hidden rounded-3xl border border-line bg-raised">
       {addLabel !== undefined && (
@@ -196,6 +202,11 @@ export function ListCard({ addLabel, onAdd, children }: ListCardProps) {
         </div>
       )}
       {children}
+      {footer !== undefined && (
+        <p className="m-0 border-t border-line-hair-2 bg-sunken px-[14px] py-[9px] text-base text-secondary">
+          {footer}
+        </p>
+      )}
     </div>
   );
 }

@@ -1,12 +1,24 @@
 /**
  * The eight Settings sections (DESIGN_SPEC §5.4).
  *
- * The blurbs are the design's own copy, verbatim, with **one** correction the
- * spec itself calls for: the design writes "Loaded WASM plugins and what each
- * contributes", but OpenAlpaca's plugins are out-of-process child programs
- * speaking JSON-RPC 2.0 over stdio (CLAUDE.md, `crates/openalpaca_plugins`) —
- * there is no WASM anywhere in the system. Shipping that sentence would teach
- * the user something false about their own machine.
+ * The blurbs are the design's own copy, verbatim, with **three** corrections
+ * the system itself calls for. A blurb is the first sentence a user reads about
+ * a section, so one describing a mechanism the daemon does not have teaches
+ * them something false about their own machine:
+ *
+ *   1. the design writes "Loaded WASM plugins and what each contributes", but
+ *      OpenAlpaca's plugins are out-of-process child programs speaking
+ *      JSON-RPC 2.0 over stdio (CLAUDE.md, `crates/openalpaca_plugins`) —
+ *      there is no WASM anywhere in the system;
+ *   2. Connection said "today's spend against the cap". There is no daily
+ *      budget and none is to be added (N4): the caps are per workflow and per
+ *      agent turn, which is what the panel's own note names, so the blurb says
+ *      that instead of pointing at a ceiling today's figure is not measured
+ *      against;
+ *   3. Conversations said "Stored lanes. Memory compaction runs weekly." The
+ *      rows are conversations, not lanes — one lane holds many — and nothing
+ *      in the daemon runs a weekly compaction: `GET /v1/sessions` is an
+ *      inventory across every lane and that is all this section shows.
  *
  * Two ids changed with ADR-030 §9.1 and still count eight: `skills` → `tools`
  * (the design's "Skills" rows are tools) and `plugins` → `extensions` (MCP
@@ -38,7 +50,8 @@ export const SETTINGS_SECTIONS: readonly SettingsSectionMeta[] = [
   {
     id: "connection",
     label: "Connection",
-    blurb: "Daemon status, endpoint and today's spend against the cap.",
+    blurb:
+      "Daemon status, endpoint and today's spend; caps are per workflow and per agent turn.",
   },
   {
     id: "models",
@@ -80,7 +93,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSectionMeta[] = [
   {
     id: "conversations",
     label: "Conversations",
-    blurb: "Stored lanes. Memory compaction runs weekly.",
+    blurb: "Stored conversations across every lane.",
   },
   {
     id: "events",

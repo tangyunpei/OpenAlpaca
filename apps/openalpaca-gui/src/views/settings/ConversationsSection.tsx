@@ -11,6 +11,12 @@
  * one on screen — GAP-21 closed there, not here. This list stays a list on
  * purpose: a delete button beside a Telegram thread in a settings inventory is
  * a different, and worse, affordance than one beside the transcript it removes.
+ *
+ * One page, and it says so. The route pages (`limit`/`offset` with a `total`
+ * in the envelope) and this asks for 50; a lane with more than that used to
+ * end at the fiftieth row with nothing to say it had. The footer names both
+ * numbers, so a missing conversation reads as "further down the list" rather
+ * than as "gone".
  */
 
 import { Tag } from "@/components/ui";
@@ -19,12 +25,22 @@ import { useSessions } from "@/hooks/useSessions";
 import { ListCard, ListRow, ListState } from "./primitives";
 import { shortDate } from "./format";
 
+/** What one read of `GET /v1/sessions` asks for. */
+const PAGE = 50;
+
 export function ConversationsSection() {
-  const sessions = useSessions({ limit: 50 });
+  const sessions = useSessions({ limit: PAGE });
   const rows = sessions.data?.sessions ?? [];
+  const total = sessions.data?.total;
 
   return (
-    <ListCard>
+    <ListCard
+      footer={
+        total !== undefined && total > rows.length
+          ? `Showing ${rows.length} of ${total}.`
+          : undefined
+      }
+    >
       <ListState
         pending={sessions.isPending}
         error={sessions.error}
