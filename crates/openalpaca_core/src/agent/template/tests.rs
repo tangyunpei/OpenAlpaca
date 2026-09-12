@@ -291,3 +291,48 @@ fn test_to_subagent_non_orchestration_denies_coordination_tools() {
         "non-orchestration agents must not get coordination tools"
     );
 }
+
+/// R84: the spill stub tells the model to page a large tool result with
+/// `read_result`, so every **shipped** template grants the capability — an agent
+/// told to page with a tool the gate refuses is worse than the head-only cut the
+/// spill replaced. The ambient append above (`workspace_read`/`workspace_write`)
+/// is deliberately *not* where this lives: owner decision T15 is untouched, and
+/// a user's own template stays the user's to write.
+#[test]
+fn every_shipped_template_grants_read_result() {
+    use crate::security::capabilities::{Allowlist, CapabilityManager};
+
+    let agents = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/agents");
+    let mut seen = 0;
+    for entry in std::fs::read_dir(&agents).expect("the shipped templates are in the checkout") {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let body = std::fs::read_to_string(&path).unwrap();
+        let doc = parse_agent_markdown(&body)
+            .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
+        assert!(
+            doc.frontmatter.capabilities.iter().any(|c| c == "read_result"),
+            "{} must grant read_result",
+            path.display()
+        );
+
+        // And the grant is what the gate reads: resolved allowlist, not the raw
+        // frontmatter list.
+        let agent = doc.to_subagent("a1", "task-1");
+        assert!(
+            CapabilityManager::check_agent_capability(
+                &agent.id,
+                "read_result",
+                &Allowlist::from_agent_constraints(&agent.constraints),
+                &agent.constraints.denied_capabilities,
+            )
+            .is_ok(),
+            "{} resolves read_result into its allowlist",
+            path.display()
+        );
+        seen += 1;
+    }
+    assert!(seen >= 9, "every shipped template was checked, not {seen}");
+}

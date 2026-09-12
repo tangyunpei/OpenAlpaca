@@ -165,6 +165,21 @@ pub async fn run_lead_agent(
     {
         tools.push(tool.definition.clone());
     }
+    // `read_result` (R84) — the same per-template grant, for the same reason:
+    // the lead's surface is assembled here, so a capability its template
+    // declares reaches the model only if this listing offers it. The spill stub
+    // the lead sees names `read_result`; without this the lead was told to page
+    // with a tool that was not on its surface, and a large result was a 2 KiB
+    // preview with no way back to the bytes. Gated on the template so it stays a
+    // grant (owner decision T15 — the ambient set — is untouched).
+    if lead_agent
+        .capabilities
+        .iter()
+        .any(|c| c.name == "read_result")
+        && let Some(tool) = tool_registry.get("read_result")
+    {
+        tools.push(tool.definition.clone());
+    }
     // Extension tools (MCP-bridged `<server>__<tool>` + plugin-provided
     // `<plugin>::<tool>`) join the lead surface by default, less those whose
     // extension is not enabled — same policy as the main loop (tool/skill

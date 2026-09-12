@@ -11,6 +11,7 @@ capabilities:
   - "memory_read"
   - "workspace_read"
   - "workspace_write"
+  - "read_result"
 denied_capabilities:
   - "web_access"
 temperature: 0.3

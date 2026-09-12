@@ -7,6 +7,7 @@ capabilities:
   - "artifact_write"
   - "workspace_read"
   - "workspace_write"
+  - "read_result"
 denied_capabilities:
   - "shell_execute"
   - "web_access"

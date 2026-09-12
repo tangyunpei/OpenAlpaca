@@ -7,6 +7,7 @@ capabilities:
   - "file_read"
   - "memory_read"
   - "workspace_read"
+  - "read_result"
 denied_capabilities:
   - "file_write"
   - "shell_execute"

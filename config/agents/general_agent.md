@@ -13,6 +13,7 @@ capabilities:
   - "workspace_read"
   - "workspace_write"
   - "messaging"
+  - "read_result"
 denied_capabilities:
   - "persona_write"
 temperature: 0.4
