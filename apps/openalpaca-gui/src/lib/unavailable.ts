@@ -55,7 +55,11 @@ export const GAPS: Record<GapId, GapDescriptor> = {
   // pins, the content routes take `?token=` inline so an `<img>` can load them,
   // and `PUT …/pin` made the pin server state. HTML/SVG previews are *shown as
   // source* by choice, not by absence — rendering agent markup in the webview
-  // is a security review, not a missing route, so it is not a gap.
+  // is a security review, not a missing route, so it is not a gap. What that
+  // choice looks like in the code (API_MAP GAP-11, 4ae49d2): markup is planned
+  // as `kind: "code"` (`views/library/preview.ts`) and nothing anywhere passes
+  // `kind: "html"`, so `MediaPreview.tsx`'s sanitizing `HtmlPreview` is live
+  // code with no reachable caller — not a renderer waiting on a route.
   // GAP-06 (no way to re-run or to start a queued run) closed with Phase 5,
   // and not in the shape §3 proposed: `start` is `POST /v1/tasks/{id}/action
   // { action: "start" }` and keeps the run's id (D5), but `rerun` is its own

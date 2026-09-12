@@ -1,5 +1,5 @@
 /**
- * Chat: history, streaming send, confirmations, feedback.
+ * Chat: history, streaming send, confirmations.
  *
  * The streaming hook owns the SSE state machine. Two rules from API_MAP §4.1
  * are load-bearing and easy to lose in a refactor:
@@ -7,6 +7,12 @@
  *      sleeps only 100 ms before the first frame);
  *   2. treat `done.content` as the truth — the bridge silently drops deltas for
  *      a lagged client.
+ *
+ * There are no feedback or clear-history hooks here. The daemon serves those
+ * four routes and `lib/api/chat.ts` is their client, but this window draws no
+ * control for either — no thumb on a message, no "clear this lane" — and the
+ * GUI manual documents none, so wrapper hooks with no caller were deleted
+ * rather than kept as a surface nothing reaches.
  */
 
 import {
@@ -19,20 +25,12 @@ import {
 import { useCallback, useEffect, useReducer, useRef } from "react";
 
 import {
-  clearChatHistory,
-  deleteMessageFeedback,
   getChatHistory,
-  getMessageFeedback,
   respondToConfirmation,
-  setMessageFeedback,
   type ChatHistoryQuery,
   type RespondToConfirmationInput,
 } from "@/lib/api/chat";
-import type {
-  ChatHistoryResponse,
-  FeedbackResponse,
-  FeedbackValue,
-} from "@/lib/api/types";
+import type { ChatHistoryResponse } from "@/lib/api/types";
 import {
   chatStreamReducer,
   initialChatStreamState,
@@ -59,67 +57,6 @@ export function useChatHistory(
   return useQuery({
     queryKey: qk.chat.history(query),
     queryFn: ({ signal }) => getChatHistory(query, signal),
-  });
-}
-
-export function useClearChatHistory(): UseMutationResult<
-  { deleted: number },
-  Error,
-  string | undefined
-> {
-  const client = useQueryClient();
-  return useMutation({
-    mutationFn: (laneKey?: string) => clearChatHistory(laneKey),
-    onSuccess: () => {
-      void client.invalidateQueries({ queryKey: qk.chat.all() });
-      void client.invalidateQueries({ queryKey: qk.sessions.all() });
-    },
-  });
-}
-
-export function useMessageFeedback(
-  messageId: number,
-): UseQueryResult<FeedbackResponse | null> {
-  return useQuery({
-    queryKey: qk.chat.feedback(messageId),
-    queryFn: () => getMessageFeedback(messageId),
-  });
-}
-
-export interface SetFeedbackInput {
-  messageId: number;
-  feedback: FeedbackValue;
-  comment?: string;
-}
-
-export function useSetMessageFeedback(): UseMutationResult<
-  FeedbackResponse,
-  Error,
-  SetFeedbackInput
-> {
-  const client = useQueryClient();
-  return useMutation({
-    mutationFn: (input: SetFeedbackInput) =>
-      setMessageFeedback(input.messageId, input.feedback, input.comment),
-    onSuccess: (_data, input) => {
-      void client.invalidateQueries({
-        queryKey: qk.chat.feedback(input.messageId),
-      });
-    },
-  });
-}
-
-export function useDeleteMessageFeedback(): UseMutationResult<
-  void,
-  Error,
-  number
-> {
-  const client = useQueryClient();
-  return useMutation({
-    mutationFn: (messageId: number) => deleteMessageFeedback(messageId),
-    onSuccess: (_data, messageId) => {
-      void client.invalidateQueries({ queryKey: qk.chat.feedback(messageId) });
-    },
   });
 }
 
