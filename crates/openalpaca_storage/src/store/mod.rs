@@ -286,12 +286,18 @@ pub fn store_root(scope: &StoreScope) -> Result<PathBuf> {
 ///
 /// On the home root, `.layout` line 2 carries `install_id=<uuid-v4>`, written
 /// once and never rewritten.
+///
+/// Which metadata is seeded follows the **resolved root**, not the scope
+/// variant: `Project($HOME)`'s store root *is* `~/.openalpaca`, and so is a
+/// project whose `.openalpaca` is a symlink to it. Seeding those from the
+/// project branch put a `.gitignore` in the home root and a README describing a
+/// project store — the same fold `resolves_to_the_home_store` applies upstream.
 pub fn ensure_store(scope: &StoreScope) -> Result<PathBuf> {
     let root = store_root(scope)?;
     fs::create_dir_all(&root)
         .with_context(|| format!("Failed to create store root: {}", root.display()))?;
 
-    let is_home = matches!(scope, StoreScope::Home);
+    let is_home = is_the_home_root(&root);
 
     let readme = root.join(README_FILE);
     if !readme.exists() {
@@ -307,6 +313,19 @@ pub fn ensure_store(scope: &StoreScope) -> Result<PathBuf> {
 
     ensure_layout(&root, is_home)?;
     Ok(root)
+}
+
+/// Whether a store root *is* the home root — canonicalized, so a symlinked
+/// `<project>/.openalpaca` answers for the store it reaches, the same rule
+/// [`project_root_at`] addresses rows by. Paths that cannot be canonicalized
+/// (nothing there yet) are compared as written; with no home directory to
+/// compare against the answer is `false`, which leaves the root alone.
+fn is_the_home_root(root: &Path) -> bool {
+    let Ok(home) = home_root() else {
+        return false;
+    };
+    let resolve = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    resolve(root) == resolve(&home)
 }
 
 /// Top-level names inside a store root that this store did not create, sorted.

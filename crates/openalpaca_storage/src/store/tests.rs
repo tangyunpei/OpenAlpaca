@@ -282,6 +282,44 @@ fn ensure_store_seeds_a_project_root() {
     );
 }
 
+/// `walk_up_for_marker` counts `.openalpaca` as a project marker, so a path
+/// under `$HOME` with no closer marker resolves to `$HOME` — whose "project
+/// store" is the home root itself. Seeded from the project branch, that put a
+/// `.gitignore` in the home root and a README describing a project store. The
+/// metadata follows the resolved root, not the scope variant.
+#[test]
+fn ensure_store_on_a_project_that_is_the_home_root_seeds_the_home_metadata() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let _guard = HomeStoreGuard::set(&home.join(".openalpaca"));
+
+    // `Project($HOME)` — the shape a CWD under `$HOME` with no marker resolves
+    // to. Its store root is `$HOME/.openalpaca`, which *is* the home root.
+    let root = ensure_store(&StoreScope::Project(home.clone())).unwrap();
+    assert_eq!(root, home.join(".openalpaca"));
+
+    assert!(
+        !root.join(".gitignore").exists(),
+        "no project .gitignore is written into the home root"
+    );
+    let readme = fs::read_to_string(root.join("README.md")).unwrap();
+    assert!(
+        readme.contains("Retention class") && !readme.contains("project store"),
+        "the home README is the one seeded"
+    );
+    assert!(
+        install_id(&root).unwrap().is_some(),
+        "and the home root's install id with it"
+    );
+
+    // A real project under the home directory — one with a root of its own — is
+    // untouched by the fold.
+    let inner = home.join("work");
+    let inner_root = ensure_store(&StoreScope::Project(inner.clone())).unwrap();
+    assert_eq!(inner_root, inner.join(".openalpaca"));
+    assert!(inner_root.join(".gitignore").exists());
+}
+
 #[test]
 fn unknown_entries_names_only_what_the_store_did_not_create() {
     let tmp = tempdir().unwrap();
