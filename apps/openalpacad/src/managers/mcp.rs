@@ -149,6 +149,12 @@ pub struct McpDeclaration {
     pub transport: String,
     #[serde(default)]
     pub command: Option<String>,
+    /// The child's arguments. One that **looks like a credential** is refused
+    /// with `422 secret_literal_refused` pointing at `env_from` (R82): a flag
+    /// whose name trips the secret heuristic, with its value in the next entry
+    /// or glued on with `=`, or a bare `NAME=value` pair. The reason is
+    /// [`Self::env`]'s — `args = ["--api-key", "sk-…"]` puts the token in
+    /// `config/mcp.toml` in the clear and in its five rotated copies.
     #[serde(default)]
     pub args: Vec<String>,
     /// Literal `KEY = "value"` entries. A key that **looks like a secret** is
@@ -166,6 +172,11 @@ pub struct McpDeclaration {
     pub env_from: BTreeMap<String, String>,
     #[serde(default)]
     pub cwd: Option<String>,
+    /// The http endpoint. A url that **carries a credential** is refused with
+    /// `422 secret_literal_refused` pointing at `bearer_env` (R82): userinfo
+    /// (`https://user:token@host`), or a query parameter whose name or value
+    /// trips the secret heuristic. Same rule as [`Self::env`] and
+    /// [`Self::extra_headers`], for the same reason.
     #[serde(default)]
     pub url: Option<String>,
     /// `auth = { bearer_env = "..." }` — the env var holding the token. The
@@ -257,6 +268,18 @@ impl McpDeclaration {
                     )
                 })?;
                 table["command"] = toml_edit::value(command);
+                // R82: `env` is not the only place a stdio credential reaches
+                // the file — `args = ["--api-key", "sk-…"]` writes it just as
+                // plainly, into the same five rotated backups.
+                if let Some(arg) = args_carry_a_credential(&self.args) {
+                    return Err(DeclarationError::SecretLiteral(format!(
+                        "the argument '{arg}' looks like a secret, and this route does not write \
+                         secrets into config/mcp.toml in the clear — the value would also land in \
+                         every rotated copy under state/backups/. Put it in the daemon's \
+                         environment and name the variable: env_from = {{ {arg} = \
+                         \"<HOST_VAR>\" }}, and let the server read it from there"
+                    )));
+                }
                 if !self.args.is_empty() {
                     table["args"] = toml_edit::value(string_array(&self.args));
                 }
@@ -285,6 +308,19 @@ impl McpDeclaration {
                         "an http server needs a 'url' to connect to".to_string(),
                     )
                 })?;
+                // R82: the url is the http twin of the stdio `args` case — a
+                // token in the userinfo or in a query parameter is written as
+                // plainly as a header would have been, and `auth.bearer_env` is
+                // the indirection that already exists for it.
+                if let Some(part) = url_carries_a_credential(&url) {
+                    return Err(DeclarationError::SecretLiteral(format!(
+                        "the url's {part} carries a credential, and this route does not write \
+                         secrets into config/mcp.toml in the clear — the value would also land in \
+                         every rotated copy under state/backups/. Put it in the daemon's \
+                         environment and name the variable: auth = {{ bearer_env = \
+                         \"<HOST_VAR>\" }}"
+                    )));
+                }
                 table["url"] = toml_edit::value(url);
 
                 let auth = match (self.bearer_env, self.api_key_header, self.api_key_env) {
@@ -377,6 +413,61 @@ fn looks_like_a_secret(key: &str) -> bool {
     const MARKERS: [&str; 5] = ["TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL"];
     let upper = key.to_ascii_uppercase();
     MARKERS.iter().any(|marker| upper.contains(marker))
+}
+
+/// Does this stdio `args` list hand the daemon a credential to write down?
+/// (R82.)
+///
+/// The `env` rule is a **name** test, and an argument list offers the same
+/// shape: the name is the flag (`--api-key`) and the value is either glued to it
+/// (`--api-key=sk-…`) or the next entry. So [`looks_like_a_secret`] runs over
+/// the flag name, and over both halves of a `NAME=value` pair. A bare
+/// positional value is deliberately **not** tested: it has no name to judge, and
+/// the marker test over values alone would refuse every file path that happens
+/// to contain "keys".
+///
+/// Returns the offending argument, for the refusal to name. Like the `env` and
+/// header rules, it governs only what the **daemon writes**: a hand-authored
+/// `mcp.toml` may still carry literal args, and the parser reads them unchanged.
+fn args_carry_a_credential(args: &[String]) -> Option<String> {
+    args.iter().find_map(|arg| {
+        let named = arg.trim_start_matches('-');
+        match named.split_once('=') {
+            Some((name, value)) => (looks_like_a_secret(name) || looks_like_a_secret(value))
+                .then(|| name.to_string()),
+            None => (arg.starts_with('-') && looks_like_a_secret(named))
+                .then(|| named.to_string()),
+        }
+    })
+}
+
+/// Does this http `url` carry a credential? (R82.)
+///
+/// Two places it can. The authority's **userinfo** —
+/// `https://user:token@host` — is a credential by construction and has no other
+/// purpose. A **query parameter** whose name or value trips
+/// [`looks_like_a_secret`] (`?api_key=…`) is the other, and is how several
+/// hosted MCP endpoints hand out access. Both land in `config/mcp.toml` and in
+/// its five rotated backups, which is exactly what R65 refuses for `env` and
+/// headers.
+///
+/// Returns a description of the offending part, for the refusal to name.
+fn url_carries_a_credential(url: &str) -> Option<String> {
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    if after_scheme[..authority_end].contains('@') {
+        return Some("userinfo".to_string());
+    }
+    let query = after_scheme[authority_end..]
+        .split_once('?')
+        .map(|(_, query)| query.split('#').next().unwrap_or(query))?;
+    query.split('&').find_map(|pair| {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        (looks_like_a_secret(name) || looks_like_a_secret(value))
+            .then(|| format!("query parameter '{name}'"))
+    })
 }
 
 /// Does this `extra_headers` entry carry a credential? (R65a.)

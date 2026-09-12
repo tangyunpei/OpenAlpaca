@@ -2707,3 +2707,166 @@ fn an_extra_headers_from_that_resolves_lands_in_the_request_headers() {
         Some("openalpaca")
     );
 }
+
+// ============================================================================
+// R82 — the same rule on stdio `args` and on the http `url`
+// ============================================================================
+
+/// `env` was not the only way a stdio credential reached the file:
+/// `args = ["--api-key", "sk-…"]` wrote it just as plainly, into
+/// `config/mcp.toml` and the five rotated copies behind it. The flag is the
+/// name, so the `env` heuristic applies to it unchanged.
+#[tokio::test]
+async fn a_credential_shaped_argument_is_refused_before_the_writer_sees_it() {
+    let h = Harness::new(1);
+    h.write_config("");
+    h.supervisor.reconcile_all().await;
+
+    let cases: [Vec<&str>; 5] = [
+        // The value in the next entry…
+        vec!["--api-key", "sk-live-abc"],
+        // …glued on with an `=`…
+        vec!["--token=ghp_abc"],
+        // …a short flag…
+        vec!["-secret", "abc"],
+        // …an environment-style pair…
+        vec!["PASSWORD=hunter2"],
+        // …and one among ordinary arguments.
+        vec!["serve", "--port", "8080", "--client-credential", "abc"],
+    ];
+    for args in cases {
+        let error = h
+            .supervisor
+            .add_server(McpDeclaration {
+                name: "srv".to_string(),
+                transport: "stdio".to_string(),
+                command: Some("/bin/true".to_string()),
+                args: args.iter().map(|a| a.to_string()).collect(),
+                ..McpDeclaration::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.code(),
+            "secret_literal_refused",
+            "for args {args:?}"
+        );
+        assert!(
+            error.to_string().contains("env_from"),
+            "the refusal points at the shape that works: {error}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(&h.config_path).unwrap(),
+        "",
+        "nothing was written"
+    );
+}
+
+/// Ordinary arguments are still written as literals — the rule is about
+/// secrets, not about arguments. A positional path is left alone even when it
+/// contains one of the markers, because there is no name beside it to judge.
+#[tokio::test]
+async fn ordinary_arguments_are_still_written() {
+    let h = Harness::new(1);
+    h.write_config("");
+    h.supervisor.reconcile_all().await;
+
+    h.supervisor
+        .add_server(McpDeclaration {
+            name: "srv".to_string(),
+            transport: "stdio".to_string(),
+            command: Some("/bin/true".to_string()),
+            args: vec![
+                "serve".to_string(),
+                "--port".to_string(),
+                "8080".to_string(),
+                "/srv/keys/server.js".to_string(),
+            ],
+            enabled: false,
+            ..McpDeclaration::default()
+        })
+        .await
+        .expect("add");
+
+    let parsed = McpConfig::load(&h.config_path).expect("the result parses");
+    match &parsed.servers["srv"] {
+        McpServerConfig::Stdio { args, .. } => assert_eq!(
+            args,
+            &vec![
+                "serve".to_string(),
+                "--port".to_string(),
+                "8080".to_string(),
+                "/srv/keys/server.js".to_string(),
+            ]
+        ),
+        other => panic!("expected a stdio block, got {other:?}"),
+    }
+}
+
+/// The http twin: userinfo and a credential-shaped query parameter are the two
+/// places a token hides in a url, and both end up in the file verbatim.
+#[tokio::test]
+async fn a_url_carrying_a_credential_is_refused_before_the_writer_sees_it() {
+    let h = Harness::new(1);
+    h.write_config("");
+    h.supervisor.reconcile_all().await;
+
+    let cases = [
+        "https://user:token@example.com/mcp",
+        "https://ghp_abc@example.com/mcp",
+        "https://example.com/mcp?token=ghp_abc",
+        "https://example.com/mcp?team=acme&api_key=abc",
+        "https://example.com/mcp?auth=secret-abc#frag",
+    ];
+    for url in cases {
+        let error = h
+            .supervisor
+            .add_server(McpDeclaration {
+                name: "remote".to_string(),
+                transport: "http".to_string(),
+                url: Some(url.to_string()),
+                ..McpDeclaration::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), "secret_literal_refused", "for url '{url}'");
+        assert!(
+            error.to_string().contains("bearer_env"),
+            "the refusal points at the shape that works: {error}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(&h.config_path).unwrap(),
+        "",
+        "nothing was written"
+    );
+}
+
+/// A url with no credential in it is written unchanged — including a query
+/// string, and including an `@` that is not in the authority.
+#[tokio::test]
+async fn an_ordinary_url_is_still_written() {
+    let h = Harness::new(1);
+    h.write_config("");
+    h.supervisor.reconcile_all().await;
+
+    h.supervisor
+        .add_server(McpDeclaration {
+            name: "remote".to_string(),
+            transport: "http".to_string(),
+            url: Some("https://example.com/mcp/@acme?team=acme&v=2".to_string()),
+            enabled: false,
+            ..McpDeclaration::default()
+        })
+        .await
+        .expect("add");
+
+    let parsed = McpConfig::load(&h.config_path).expect("the result parses");
+    match &parsed.servers["remote"] {
+        McpServerConfig::Http { url, .. } => {
+            assert_eq!(url.as_str(), "https://example.com/mcp/@acme?team=acme&v=2")
+        }
+        other => panic!("expected an http block, got {other:?}"),
+    }
+}
