@@ -1570,13 +1570,13 @@ Left section nav (220px) + a 660px-max body. Eight sections, each with a label, 
 
 Blurbs (verbatim from the design — reuse them):
 
-- Connection: "Daemon status, endpoint and today's spend against the cap."
+- Connection: "Daemon status, endpoint and today's spend against the cap." _(one correction: there is no daily budget and none is coming — **N4** — so today's figure has no cap to be "against"; the two caps the daemon enforces are per workflow and per agent turn, which is what the panel's own note prints. Shipped copy: "Daemon status, endpoint and today's spend; caps are per workflow and per agent turn.")_
 - Models & keys: "Providers the router can reach, in priority order. Pick a model to make it the chat default."
 - Connectors: "External services the agents may read and write."
 - Tools: "Capabilities the agents can invoke, and whether each asks first." _(the design calls this section "Skills"; its rows are **tools** — ADR-030 §9.1, and `GET /v1/tools` is what serves them)_
 - Extensions: "Loaded WASM plugins and what each contributes." _(two corrections: the real system uses out-of-process JSON-RPC plugins, not WASM; and the section covers **MCP servers and plugins together**, because both carry the same one-bit ENABLE toggle — ADR-030 §1, §9.2. Shipped copy: "MCP servers and out-of-process plugins the daemon speaks JSON-RPC to, and what each contributes.")_
 - Agents: "Templates the orchestrator spawns from."
-- Conversations: "Stored lanes. Memory compaction runs weekly."
+- Conversations: "Stored lanes. Memory compaction runs weekly." _(two corrections: the rows are **conversations**, not lanes — one lane holds many, and `GET /v1/sessions` is what serves them; and nothing in the daemon runs a weekly memory compaction. Shipped copy: "Stored conversations across every lane.")_
 - Event log: "Everything the daemon emitted, newest first."
 
 ### 5.5 Overlays
