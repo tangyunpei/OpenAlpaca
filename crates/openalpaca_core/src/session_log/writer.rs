@@ -883,7 +883,7 @@ fn string_field(data: &Value, key: &str) -> String {
 
 // ── The open live segment ───────────────────────────────────────────
 
-struct OpenLog {
+pub(super) struct OpenLog {
     dir: PathBuf,
     path: PathBuf,
     file: BufWriter<File>,
@@ -904,7 +904,7 @@ struct Trimmed {
 impl OpenLog {
     /// Create the session directory (this is the first write — P-22), repair
     /// a torn tail, and resume the seq.
-    fn open(dir: &Path) -> io::Result<Self> {
+    pub(super) fn open(dir: &Path) -> io::Result<Self> {
         fs::create_dir_all(dir)?;
         #[cfg(unix)]
         {
@@ -939,11 +939,32 @@ impl OpenLog {
     /// Append one record. §5.4's durability policy lives here: a `write`
     /// syscall after every record, `sync_data` only at the declared
     /// boundaries (the timer in [`run`] covers the rest).
-    fn write(&mut self, record: &Record) -> io::Result<u64> {
+    ///
+    /// A failed append is **realigned** before the error propagates
+    /// ([`realign`](Self::realign)). A `write_all`/`flush` that stops partway
+    /// — ENOSPC, EDQUOT, EIO, a write limit, and the 8 KiB buffer is bypassed
+    /// outright by a 64 KB envelope — otherwise leaves half a line in the
+    /// middle of the live segment, and §5.4 makes the first unparseable line
+    /// end-of-log for every reader (the events route, §5.6's recovery, the
+    /// trim's reference scan), so the whole rest of the session goes unread.
+    /// `repair_tail` cannot help: it only truncates *after* the last parseable
+    /// line, and at reopen there are valid records past the tear.
+    pub(super) fn write(&mut self, record: &Record) -> io::Result<u64> {
         let seq = self.next_seq;
         let line = record.to_line(seq);
-        self.file.write_all(line.as_bytes())?;
-        self.file.flush()?;
+        let mut appended = self.file.write_all(line.as_bytes());
+        if appended.is_ok() {
+            appended = self.file.flush();
+        }
+        if let Err(e) = appended {
+            if let Err(cut) = self.realign() {
+                tracing::error!(
+                    path = %self.path.display(),
+                    "A partial session log record could not be cut back off: {cut}"
+                );
+            }
+            return Err(e);
+        }
         self.next_seq += 1;
         self.bytes += line.len() as u64;
         if self.first_seq.is_none() {
@@ -956,6 +977,27 @@ impl OpenLog {
             self.dirty = true;
         }
         Ok(seq)
+    }
+
+    /// Cut a partly written record back off the live segment.
+    ///
+    /// `bytes` is the file's length after the last **committed** record, so
+    /// that is exactly what the file is truncated to, on a freshly opened
+    /// append handle. The stale writer is taken apart with
+    /// [`BufWriter::into_parts`] rather than dropped, because `Drop` would
+    /// flush the very bytes this is removing. The record is lost either way —
+    /// what this buys is a log the next record continues, instead of one every
+    /// reader stops at.
+    pub(super) fn realign(&mut self) -> io::Result<()> {
+        let reopened = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        let stale = std::mem::replace(&mut self.file, BufWriter::new(reopened));
+        // Discards the buffer instead of flushing it.
+        let (_stale_file, _unwritten) = stale.into_parts();
+        self.file.get_ref().set_len(self.bytes)?;
+        Ok(())
     }
 
     fn sync(&mut self) -> io::Result<()> {

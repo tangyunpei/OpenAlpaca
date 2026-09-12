@@ -1206,6 +1206,52 @@ async fn a_trim_drops_the_snapshots_the_dropped_segment_referenced() {
     }
 }
 
+/// A failed append must not leave half a line in the middle of the live
+/// segment. §5.4 makes the first unparseable line end-of-log for every reader,
+/// and `repair_tail` only truncates *after* the last parseable line — so a torn
+/// record mid-file hides every record written after it, for the life of the
+/// session. The realignment helper is driven directly: inducing a partial write
+/// needs a filesystem fault, and the helper is the whole of the fix.
+#[test]
+fn realigning_cuts_a_torn_record_off_the_live_segment() {
+    use std::io::Write as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let session = dir.path().join("sess-torn");
+    let live = session.join(LIVE_SEGMENT);
+    let mut log = super::writer::OpenLog::open(&session).unwrap();
+    log.write(&Record::new(RecordType::UserMsg).with_data(serde_json::json!({"msg": 1})))
+        .unwrap();
+    let committed = fs::metadata(&live).unwrap().len();
+
+    // What a write that stopped partway leaves behind.
+    let mut raw = fs::OpenOptions::new().append(true).open(&live).unwrap();
+    raw.write_all(br#"{"v":1,"seq":2,"ts":"2026-09-11T00:00:00Z","type":"round","data":{"ro"#)
+        .unwrap();
+    raw.flush().unwrap();
+    drop(raw);
+    assert!(fs::metadata(&live).unwrap().len() > committed);
+
+    log.realign().unwrap();
+    assert_eq!(
+        fs::metadata(&live).unwrap().len(),
+        committed,
+        "the file is back to the length after the last committed record"
+    );
+
+    // And the next record continues the log rather than sitting behind a tear.
+    log.write(&Record::new(RecordType::AssistantMsg).with_data(serde_json::json!({"msg": 2})))
+        .unwrap();
+    let rows = lines(&live);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows[1]["seq"], 2);
+    assert_eq!(
+        read_records(&session).unwrap().len(),
+        2,
+        "a reader sees both records, not just the one before the tear"
+    );
+}
+
 // ── Lifecycle ───────────────────────────────────────────────────────
 
 /// An idle writer closes its file and exits; the next emit transparently
@@ -2044,6 +2090,54 @@ fn the_boot_sweep_leaves_names_it_did_not_create_alone() {
     // Only the names this store writes are ever removed — and `a` is
     // archived, so under R54 that now includes its live segment.
     assert!(!root.join("a").join(LIVE_SEGMENT).exists());
+}
+
+/// §1.3 rule 3, one level up: a *directory* under `sessions/` that holds none
+/// of this store's narrative is not a session, and the sweep must not empty it.
+/// Every directory used to be read as a session, so a person's `notes/` gave up
+/// whatever it happened to keep under `results/` or `snapshots/` the moment the
+/// root went over its cap.
+#[test]
+fn the_boot_sweep_leaves_a_directory_that_is_not_a_session_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_session(root, "a", 4, 1_000);
+    age(root, "a", 9_000);
+
+    // No live segment and no rotated one — but the two payload directory names
+    // the sweep does empty inside a real session, and a large file in one.
+    let notes = root.join("notes");
+    fs::create_dir_all(notes.join(RESULTS_DIR)).unwrap();
+    fs::create_dir_all(notes.join(SNAPSHOTS_DIR)).unwrap();
+    fs::write(notes.join(RESULTS_DIR).join("big.txt"), "x".repeat(40_000)).unwrap();
+    fs::write(
+        notes.join(SNAPSHOTS_DIR).join("000001-draft_md"),
+        "x".repeat(1_000),
+    )
+    .unwrap();
+
+    let active = std::collections::HashSet::new();
+    let report = sweep::enforce_total_cap(root, 1, &active, None).unwrap();
+
+    assert!(
+        notes.join(RESULTS_DIR).join("big.txt").exists(),
+        "a directory with no session log in it is not a session to evict from"
+    );
+    assert!(
+        notes.join(SNAPSHOTS_DIR).join("000001-draft_md").exists(),
+        "nor are its images candidates"
+    );
+    assert_eq!(report.sessions_visited, 1, "only `a` is a session");
+    // Its bytes are still counted — it is taking the disk the cap is about —
+    // and that is why the cap cannot be met.
+    assert_eq!(report.bytes_before, 47_000);
+    assert_eq!(report.bytes_freed, 6_000, "exactly the session's own files");
+    assert_eq!(report.bytes_after, 41_000);
+    assert!(report.over_cap_after, "bytes it may not touch keep it over");
+    assert!(
+        !root.join("a").join(LIVE_SEGMENT).exists(),
+        "and the real session still gave up everything it owns"
+    );
 }
 
 /// §5.7's `snapshots/` is bounded by the same global cap as §5.4's `results/`

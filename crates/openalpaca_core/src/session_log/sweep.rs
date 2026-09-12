@@ -27,11 +27,17 @@
 //! **What it never touches**: an **active** session — that is where the line
 //! is drawn, not between a live segment and a rotated one — and any name at
 //! the sessions root that this store did not create. A stray *file* at the
-//! root is counted (it is taking the disk the cap is about) and left alone; a
-//! *directory* is read as a session, and only the names this store writes
-//! inside one — `log.jsonl`, `log.<first>-<last>.jsonl`, `results/*`,
-//! `snapshots/*` — are ever candidates, so an unrelated directory loses
-//! nothing.
+//! root is counted (it is taking the disk the cap is about) and left alone, and
+//! so is a *directory* that is not a session directory: what makes one is
+//! holding this store's narrative, a `log.jsonl` or a `log.<first>-<last>.jsonl`
+//! segment (an active session's directory is a session directory whatever is in
+//! it). A directory without one is foreign — it might be anything a person put
+//! under `sessions/` — so its bytes are counted and nothing inside it is a
+//! candidate, which is what keeps the sweep from emptying somebody's `notes/`
+//! because it happens to hold a `results/` subdirectory. Inside a real session
+//! directory, only the names this store writes — `log.jsonl`,
+//! `log.<first>-<last>.jsonl`, `results/*`, `snapshots/*` — are ever
+//! candidates, so an unrelated `cache/` beside them loses nothing either.
 //!
 //! **Its only record is the deletions themselves**, so a crash between two of
 //! them leaves a partially swept root and the next boot simply continues: the
@@ -215,6 +221,7 @@ fn scan(root: &Path, active: &HashSet<String>) -> io::Result<(Vec<SessionDir>, u
         .collect();
     let mut out = Vec::new();
     let mut foreign = 0;
+    let mut foreign_dirs = 0usize;
     for entry in fs::read_dir(root)? {
         let Ok(entry) = entry else { continue };
         let path = entry.path();
@@ -227,9 +234,45 @@ fn scan(root: &Path, active: &HashSet<String>) -> io::Result<(Vec<SessionDir>, u
         }
         let name = entry.file_name().to_string_lossy().into_owned();
         let is_protected = protected.contains(&name);
+        // §1.3 rule 3 again, one level up: a directory this store did not
+        // write is not a session, whatever it holds. Without this, a person's
+        // `notes/` under `sessions/` gave up its `results/`, `snapshots/` and
+        // anything named `log.jsonl` inside it the moment the root went over
+        // its cap. Its bytes still count towards the total.
+        if !is_protected && !holds_a_session_log(&path) {
+            foreign += walk(&path).0;
+            foreign_dirs += 1;
+            continue;
+        }
         out.push(scan_session(&path, name, is_protected));
     }
+    if foreign_dirs > 0 {
+        tracing::debug!(
+            root = %root.display(),
+            foreign_dirs,
+            "Session log sweep skipped directories with no session log in them"
+        );
+    }
     Ok((out, foreign))
+}
+
+/// Whether `dir` holds this store's narrative — the live segment, or a rotated
+/// one — which is what makes it a session directory rather than a name that
+/// happens to sit under `sessions/`.
+fn holds_a_session_log(dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        if entry.path().is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == LIVE_SEGMENT || segment_range(&name).is_some() {
+            return true;
+        }
+    }
+    false
 }
 
 fn scan_session(dir: &Path, id: String, protected: bool) -> SessionDir {
