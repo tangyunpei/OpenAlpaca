@@ -78,6 +78,62 @@ enum ServerEvent {
         #[allow(dead_code)]
         instance_id: String,
     },
+    /// A queued follow-up was cancelled before it ran (GAP-03).
+    FollowupCancelled {
+        lane_key: String,
+        followup_id: i64,
+        ts: DateTime<Utc>,
+        #[allow(dead_code)]
+        instance_id: String,
+    },
+    /// An extension's observed state changed — T5, E5, `mark_failed`, T5-deny,
+    /// T5-gone and the tool-list refresh (ADR-030).
+    ExtensionStateChanged {
+        kind: String,
+        id: String,
+        state: String,
+        #[allow(dead_code)]
+        generation: u64,
+        /// Only a server-driven `tools/list_changed` refresh sets it.
+        #[serde(default)]
+        tools_changed: bool,
+        ts: DateTime<Utc>,
+        #[allow(dead_code)]
+        instance_id: String,
+    },
+    /// S4 moments 1 and 2 — a capability was withheld from a caller.
+    ExtensionCapabilityWithheld {
+        kind: String,
+        id: String,
+        subject: String,
+        moment: String,
+        state: String,
+        #[allow(dead_code)]
+        scope: String,
+        stale: bool,
+        ts: DateTime<Utc>,
+        #[allow(dead_code)]
+        instance_id: String,
+    },
+    /// S4 moment 3 — T1 step 3's dependent scan, one per transition.
+    ExtensionCapabilityWithdrawn {
+        kind: String,
+        id: String,
+        state: String,
+        cause: String,
+        capabilities: Vec<String>,
+        tools: Vec<String>,
+        affected_templates: Vec<String>,
+        affected_skills: Vec<String>,
+        /// The cron-scheduled subset — the half that fires unattended, so it is
+        /// named separately rather than folded into the skills count.
+        affected_cron_skills: Vec<String>,
+        #[allow(dead_code)]
+        notice_lane: String,
+        ts: DateTime<Utc>,
+        #[allow(dead_code)]
+        instance_id: String,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -256,6 +312,112 @@ fn print_event(event: &ServerEvent) {
                 tint
             );
         }
+        ServerEvent::FollowupCancelled {
+            lane_key,
+            followup_id,
+            ts,
+            ..
+        } => {
+            let time = ts.format("%H:%M:%S").to_string();
+            println!(
+                "{} 🗑 {} {} {}",
+                time.dimmed(),
+                "follow-up".magenta(),
+                lane_key.bold(),
+                format!("[cancelled #{followup_id}]").cyan()
+            );
+        }
+        ServerEvent::ExtensionStateChanged {
+            kind,
+            id,
+            state,
+            tools_changed,
+            ts,
+            ..
+        } => {
+            let time = ts.format("%H:%M:%S").to_string();
+            let what = if *tools_changed {
+                format!("[{state} · tools changed]")
+            } else {
+                format!("[{state}]")
+            };
+            // The states the owner has to act on read differently from the ones
+            // that are just the switch moving.
+            let tint = match state.as_str() {
+                "failed" | "unapproved" | "orphaned" | "removed" => what.yellow(),
+                _ => what.cyan(),
+            };
+            println!(
+                "{} 🧩 {} {} {}",
+                time.dimmed(),
+                "extension".blue(),
+                format!("{kind}/{id}").bold(),
+                tint
+            );
+        }
+        ServerEvent::ExtensionCapabilityWithheld {
+            kind,
+            id,
+            subject,
+            moment,
+            state,
+            stale,
+            ts,
+            ..
+        } => {
+            let time = ts.format("%H:%M:%S").to_string();
+            let stale_note = if *stale { " — stale handle" } else { "" };
+            println!(
+                "{} 🚫 {} {} {}{}",
+                time.dimmed(),
+                "withheld".yellow(),
+                subject.bold(),
+                format!("[{kind}/{id} {state} · {moment}]").cyan(),
+                stale_note.dimmed()
+            );
+        }
+        ServerEvent::ExtensionCapabilityWithdrawn {
+            kind,
+            id,
+            state,
+            cause,
+            capabilities,
+            tools,
+            affected_templates,
+            affected_skills,
+            affected_cron_skills,
+            ts,
+            ..
+        } => {
+            let time = ts.format("%H:%M:%S").to_string();
+            let lost = format!(
+                "[{cause} · {state} · {} tools, {} capabilities]",
+                tools.len(),
+                capabilities.len()
+            );
+            // The dependents are the half a person acts on, and a scheduled
+            // skill is the one that fails with nobody watching.
+            let mut affected = format!(
+                "→ {} templates, {} skills",
+                affected_templates.len(),
+                affected_skills.len()
+            );
+            if !affected_cron_skills.is_empty() {
+                affected.push_str(&format!(
+                    " ({} scheduled: {})",
+                    affected_cron_skills.len(),
+                    affected_cron_skills.join(", ")
+                ));
+            }
+            println!(
+                "{} 🧹 {} {} {} {}",
+                time.dimmed(),
+                "withdrawn".yellow(),
+                format!("{kind}/{id}").bold(),
+                lost.cyan(),
+                affected.dimmed()
+            );
+        }
         ServerEvent::Unknown => {
             println!("{} unknown event", "?".dimmed());
         }
@@ -430,6 +592,202 @@ mod tests {
             }
             other => panic!("Expected SessionChanged, got {other:?}"),
         }
+        print_event(&event);
+    }
+
+    /// GAP-03 — a cancelled follow-up has its own arm.
+    #[test]
+    fn a_cancelled_followup_deserializes_into_its_own_variant() {
+        let frame = r#"{
+            "type": "followup_cancelled",
+            "lane_key": "user1:gui",
+            "followup_id": 7,
+            "ts": "2026-09-05T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#;
+        let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
+        match &event {
+            ServerEvent::FollowupCancelled {
+                lane_key,
+                followup_id,
+                ..
+            } => {
+                assert_eq!(lane_key, "user1:gui");
+                assert_eq!(*followup_id, 7);
+            }
+            other => panic!("Expected FollowupCancelled, got {other:?}"),
+        }
+        print_event(&event);
+    }
+
+    /// ADR-030 — the extension family. A state change names the extension and
+    /// the word the row now reads, instead of printing "unknown event".
+    #[test]
+    fn an_extension_state_change_deserializes_into_its_own_variant() {
+        let frame = r#"{
+            "type": "extension_state_changed",
+            "kind": "plugin",
+            "id": "notion",
+            "state": "failed",
+            "generation": 3,
+            "tools_changed": false,
+            "ts": "2026-09-05T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#;
+        let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
+        match &event {
+            ServerEvent::ExtensionStateChanged {
+                kind,
+                id,
+                state,
+                generation,
+                tools_changed,
+                ..
+            } => {
+                assert_eq!(kind, "plugin");
+                assert_eq!(id, "notion");
+                assert_eq!(state, "failed");
+                assert_eq!(*generation, 3);
+                assert!(!*tools_changed);
+            }
+            other => panic!("Expected ExtensionStateChanged, got {other:?}"),
+        }
+        print_event(&event);
+    }
+
+    /// `tools_changed` is defaulted on the wire, so a frame without it still
+    /// deserializes — and the refresh case renders its own note.
+    #[test]
+    fn an_extension_state_change_tolerates_a_missing_tools_changed() {
+        let frame = r#"{
+            "type": "extension_state_changed",
+            "kind": "mcp",
+            "id": "github",
+            "state": "enabled",
+            "generation": 1,
+            "ts": "2026-09-05T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#;
+        let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
+        assert!(matches!(
+            event,
+            ServerEvent::ExtensionStateChanged {
+                tools_changed: false,
+                ..
+            }
+        ));
+        print_event(&event);
+
+        let refreshed = serde_json::from_str::<ServerEvent>(
+            r#"{
+            "type": "extension_state_changed",
+            "kind": "mcp",
+            "id": "github",
+            "state": "enabled",
+            "generation": 1,
+            "tools_changed": true,
+            "ts": "2026-09-05T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#,
+        )
+        .unwrap();
+        print_event(&refreshed);
+    }
+
+    /// S4 moments 1 and 2 — the withholding names the subject and the moment.
+    #[test]
+    fn a_withheld_capability_deserializes_into_its_own_variant() {
+        let frame = r#"{
+            "type": "extension_capability_withheld",
+            "kind": "mcp",
+            "id": "github",
+            "subject": "github__create_issue",
+            "moment": "attempted_use",
+            "state": "disabled",
+            "scope": "task-1",
+            "stale": true,
+            "ts": "2026-09-05T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#;
+        let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
+        match &event {
+            ServerEvent::ExtensionCapabilityWithheld {
+                subject,
+                moment,
+                state,
+                stale,
+                ..
+            } => {
+                assert_eq!(subject, "github__create_issue");
+                assert_eq!(moment, "attempted_use");
+                assert_eq!(state, "disabled");
+                assert!(*stale);
+            }
+            other => panic!("Expected ExtensionCapabilityWithheld, got {other:?}"),
+        }
+        print_event(&event);
+    }
+
+    /// S4 moment 3 — T1 step 3's scan, with the scheduled subset named: that is
+    /// the half that fails with nobody watching.
+    #[test]
+    fn a_withdrawn_capability_deserializes_into_its_own_variant() {
+        let frame = r#"{
+            "type": "extension_capability_withdrawn",
+            "kind": "plugin",
+            "id": "notion",
+            "state": "disabling",
+            "cause": "disable",
+            "capabilities": ["net_read"],
+            "tools": ["notion::search", "notion::append"],
+            "affected_templates": ["reader"],
+            "affected_skills": ["digest", "weekly"],
+            "affected_cron_skills": ["weekly"],
+            "notice_lane": "owner:gui",
+            "ts": "2026-09-05T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#;
+        let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
+        match &event {
+            ServerEvent::ExtensionCapabilityWithdrawn {
+                cause,
+                state,
+                tools,
+                affected_skills,
+                affected_cron_skills,
+                ..
+            } => {
+                assert_eq!(cause, "disable");
+                assert_eq!(state, "disabling");
+                assert_eq!(tools.len(), 2);
+                assert_eq!(affected_skills.len(), 2);
+                assert_eq!(affected_cron_skills, &vec!["weekly".to_string()]);
+            }
+            other => panic!("Expected ExtensionCapabilityWithdrawn, got {other:?}"),
+        }
+        print_event(&event);
+    }
+
+    /// The empty scan: a transition that took nothing away still prints, and
+    /// the cron note is absent rather than empty.
+    #[test]
+    fn a_withdrawn_capability_tolerates_empty_dependents() {
+        let frame = r#"{
+            "type": "extension_capability_withdrawn",
+            "kind": "mcp",
+            "id": "github",
+            "state": "disabled",
+            "cause": "reload",
+            "capabilities": [],
+            "tools": [],
+            "affected_templates": [],
+            "affected_skills": [],
+            "affected_cron_skills": [],
+            "notice_lane": "owner:gui",
+            "ts": "2026-09-05T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#;
+        let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
         print_event(&event);
     }
 
