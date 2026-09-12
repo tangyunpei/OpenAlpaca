@@ -101,6 +101,12 @@ fn test_migrate_lane_on_link() {
         .update_conversation_map_lane_key("telegram", "999", old_lane)
         .unwrap();
 
+    // A promise made on the old lane, still queued.
+    let followups = crate::repository::FollowupRepository::new(&db);
+    followups
+        .queue(old_lane, "followup", "and the logs", "{}", None, None)
+        .unwrap();
+
     // Run migration
     identity_repo
         .migrate_lane_on_link("tg123", "global1", "telegram", "999")
@@ -125,6 +131,16 @@ fn test_migrate_lane_on_link() {
         })
         .unwrap();
     assert_eq!(lane_key, Some(new_lane.to_string()));
+
+    // The follow-up is delivered on a lane, so it moves with it: left behind it
+    // would fire a turn onto a lane key nothing answers any more.
+    assert!(
+        followups.list_queued_by_lane(old_lane).unwrap().is_empty(),
+        "nothing is left queued on the old lane"
+    );
+    let moved = followups.list_queued_by_lane(new_lane).unwrap();
+    assert_eq!(moved.len(), 1);
+    assert_eq!(moved[0].content, "and the logs");
 }
 
 #[test]

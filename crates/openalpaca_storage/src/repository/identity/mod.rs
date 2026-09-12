@@ -375,8 +375,8 @@ impl<'a> IdentityRepository<'a> {
     }
 
     /// Migrate all lane data from old provider-keyed lane to new global-user-keyed lane.
-    /// Called after a successful /link to ensure messages, tasks, and preferences
-    /// follow the canonical identity.
+    /// Called after a successful /link to ensure messages, tasks, sessions,
+    /// preferences and queued follow-ups follow the canonical identity.
     pub fn migrate_lane_on_link(
         &self,
         provider_user_id: &str,
@@ -451,7 +451,15 @@ impl<'a> IdentityRepository<'a> {
                 rusqlite::params![new_lane, Utc::now().to_rfc3339(), old_lane],
             )?;
 
-            // 6. Recompute each moved session's stats from its own messages.
+            // 6. Move the queued follow-ups. A follow-up is addressed to the
+            // lane it will be delivered on, so one left behind would fire a
+            // turn onto a lane key nothing answers any more.
+            tx.execute(
+                "UPDATE lane_followups SET lane_key = ?1 WHERE lane_key = ?2",
+                rusqlite::params![new_lane, old_lane],
+            )?;
+
+            // 7. Recompute each moved session's stats from its own messages.
             tx.execute(
                 "UPDATE session SET
                    message_count = (SELECT COUNT(*) FROM conversation_messages m
