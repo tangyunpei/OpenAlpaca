@@ -1791,6 +1791,55 @@ describe("ChatView — switching conversations (I5)", () => {
     );
     expect(screen.queryByText("Three connectors are stale.")).toBeNull();
   });
+
+  /**
+   * A lane that has never held a turn answers `session_id: null`, and the first
+   * turn gives it one. That is the same conversation acquiring an identity, not
+   * a switch away from one — the turn that just ran is *in* it — so nothing is
+   * cleared.
+   */
+  it("keeps the first turn when the lane's conversation gets its id", async () => {
+    historyReply = () =>
+      json({
+        messages: [],
+        total: 0,
+        lane_key: "user:gui",
+        session_id: null,
+      });
+    const client = renderChat();
+
+    const source = await sendMessage("first message on this lane");
+    await act(async () => {
+      source.emit("done", {
+        content: "Answered.",
+        model: "claude-sonnet-4-6",
+        duration_ms: 900,
+      });
+    });
+
+    const before = requests.filter((request) =>
+      request.url.includes("/v1/chat/history"),
+    ).length;
+    historyReply = () =>
+      json({
+        messages: [],
+        total: 0,
+        lane_key: "user:gui",
+        session_id: "sess-first",
+      });
+    await act(async () => {
+      await client.invalidateQueries();
+    });
+    await waitFor(() =>
+      expect(
+        requests.filter((request) => request.url.includes("/v1/chat/history"))
+          .length,
+      ).toBeGreaterThan(before),
+    );
+
+    expect(screen.getByText("first message on this lane")).toBeInTheDocument();
+    expect(screen.getByText("Answered.")).toBeInTheDocument();
+  });
 });
 
 /**

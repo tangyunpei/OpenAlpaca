@@ -540,8 +540,13 @@ export function useChatSession(): ChatSession {
       return;
     }
     if (shownSession.current === reported) return;
+    const previous = shownSession.current;
     shownSession.current = reported;
     if (stream.active) return;
+    // `null → id` is a lane's first conversation acquiring an identity, not a
+    // switch away from one: the turn that just ran is *in* that conversation,
+    // and its cards belong under it.
+    if (previous === null) return;
 
     setPending(null);
     setReports([]);
