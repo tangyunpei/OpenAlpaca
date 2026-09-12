@@ -31,12 +31,14 @@ export function encodeWorkspacePath(path: string): string {
 /**
  * The header pair a request carries for `path`, ready to spread into `headers`.
  *
- * `null`/`undefined` is "this window has no project", which sends no header at
- * all rather than an empty one.
+ * `null`, `undefined` and `""` are all "this window has no project", which sends
+ * no header at all rather than an empty one — the daemon reads a missing header
+ * and an empty one the same way, and the senders that took a truthy check before
+ * this existed behaved exactly so.
  */
 export function workspaceHeader(
   path: string | null | undefined,
 ): Record<string, string> | undefined {
-  if (path === null || path === undefined) return undefined;
+  if (!path) return undefined;
   return { "x-workspace-path": encodeWorkspacePath(path) };
 }

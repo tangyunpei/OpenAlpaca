@@ -38,6 +38,8 @@ describe("encodeWorkspacePath", () => {
     });
     expect(workspaceHeader(null)).toBeUndefined();
     expect(workspaceHeader(undefined)).toBeUndefined();
+    // An empty path is the same signal, not an empty header.
+    expect(workspaceHeader("")).toBeUndefined();
   });
 
   it("produces a value fetch can actually send", () => {
