@@ -4,6 +4,13 @@
 Usage:
   python3 scripts/gen_api_docs.py
   python3 scripts/gen_api_docs.py --check
+  python3 scripts/tests/test_gen_api_docs.py   # parser regression tests
+
+Parsing rule: every scan for a Rust delimiter (brace, paren, top-level comma)
+runs over a comment- and literal-masked copy of the source produced by
+`mask_rust_noncode`. Prose is not code — an apostrophe in a doc comment is not
+a char literal, a `//` inside a string literal is not a comment, and a comma in
+a doc comment is not a variant separator.
 """
 
 from __future__ import annotations
@@ -32,9 +39,116 @@ MIGRATIONS_MOD = MIGRATIONS_DIR / "mod.rs"
 
 METHOD_ORDER = {"GET": 0, "POST": 1, "PUT": 2, "DELETE": 3, "PATCH": 4}
 
+RAW_STRING_PREFIX = re.compile(r'b?r(#*)"')
+
 
 def read_text(path: pathlib.Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def mask_rust_noncode(text: str, *, mask_literals: bool = True) -> str:
+    """Return a copy of `text` with everything that is not code blanked out.
+
+    Comments (`//`, `///`, `//!`, `/* */` including nested ones) lose every
+    character, markers included; unless `mask_literals=False`, so do the insides
+    of string, raw-string and char literals (the delimiters stay). Newlines are
+    preserved and nothing changes length, so offsets, line numbers and slices
+    taken from the masked copy line up with the original.
+
+    Delimiter scanning must always run over this copy. A lone `'` is a lifetime
+    or a label (`&'a str`, `'outer:`), not the start of a literal, so quote
+    pairing is decided here once rather than re-guessed by each scanner.
+    """
+    out = list(text)
+    n = len(text)
+    i = 0
+
+    def blank(start: int, end: int) -> None:
+        for k in range(max(start, 0), min(end, n)):
+            if out[k] != "\n":
+                out[k] = " "
+
+    while i < n:
+        ch = text[i]
+
+        # line comment
+        if ch == "/" and i + 1 < n and text[i + 1] == "/":
+            end = text.find("\n", i)
+            end = n if end == -1 else end
+            blank(i, end)
+            i = end
+            continue
+
+        # block comment (Rust allows nesting)
+        if ch == "/" and i + 1 < n and text[i + 1] == "*":
+            depth = 1
+            j = i + 2
+            while j < n and depth > 0:
+                if text[j] == "/" and j + 1 < n and text[j + 1] == "*":
+                    depth += 1
+                    j += 2
+                elif text[j] == "*" and j + 1 < n and text[j + 1] == "/":
+                    depth -= 1
+                    j += 2
+                else:
+                    j += 1
+            blank(i, j)
+            i = j
+            continue
+
+        # raw string: r"..", r#".."#, br#".."#
+        if ch in "rb" and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")):
+            m = RAW_STRING_PREFIX.match(text, i)
+            if m:
+                terminator = '"' + m.group(1)
+                close = text.find(terminator, m.end())
+                if close == -1:
+                    content_end, end = n, n
+                else:
+                    content_end, end = close, close + len(terminator)
+                if mask_literals:
+                    blank(m.end(), content_end)
+                i = end
+                continue
+
+        # string literal (also covers the b".." byte-string prefix)
+        if ch == '"':
+            j = i + 1
+            while j < n:
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == '"':
+                    break
+                j += 1
+            if mask_literals:
+                blank(i + 1, j)
+            i = min(j + 1, n)
+            continue
+
+        if ch == "'":
+            # escaped char literal: '\n', '\'', '\u{1f600}'
+            if i + 1 < n and text[i + 1] == "\\":
+                j = i + 3
+                while j < n and text[j] != "'":
+                    j += 1
+                if mask_literals:
+                    blank(i + 1, j)
+                i = min(j + 1, n)
+                continue
+            # plain char literal: 'a', '"', '{'
+            if i + 2 < n and text[i + 2] == "'":
+                if mask_literals:
+                    blank(i + 1, i + 2)
+                i += 3
+                continue
+            # lifetime or loop label — carries no delimiter meaning
+            i += 1
+            continue
+
+        i += 1
+
+    return "".join(out)
 
 
 def rel(path: pathlib.Path) -> str:
@@ -45,7 +159,14 @@ def ensure_parent(path: pathlib.Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
-def split_top_level(value: str, sep: str = ",") -> list[str]:
+def split_top_level(value: str, sep: str = ",", *, quotes: bool = True) -> list[str]:
+    """Split `value` on `sep` at bracket depth zero.
+
+    `quotes=True` tracks quoting inline, which is what the SQL column lists need
+    (`DEFAULT 'queued'` must not split). Pass `quotes=False` for Rust code that
+    `mask_rust_noncode` already masked: there a lone `'` is a lifetime tick, and
+    treating it as an opening quote swallows the rest of the body.
+    """
     out: list[str] = []
     cur: list[str] = []
     depth = 0
@@ -54,6 +175,18 @@ def split_top_level(value: str, sep: str = ",") -> list[str]:
     escape = False
 
     for ch in value:
+        if not quotes:
+            if ch in "([{<":
+                depth += 1
+            elif ch in ")]}>":
+                depth = max(0, depth - 1)
+            elif ch == sep and depth == 0:
+                out.append("".join(cur).strip())
+                cur = []
+                continue
+            cur.append(ch)
+            continue
+
         if escape:
             cur.append(ch)
             escape = False
@@ -99,35 +232,20 @@ def split_top_level(value: str, sep: str = ",") -> list[str]:
     return out
 
 
-def extract_brace_block(text: str, open_brace_index: int) -> tuple[str, int]:
+def extract_brace_block(text: str, open_brace_index: int, scan: str | None = None) -> tuple[str, int]:
+    """Return `(body, close_index)` for the brace block opening at the index.
+
+    Braces are counted in `scan`, which must be a masked copy of `text` (same
+    length, see `mask_rust_noncode`); the body is sliced out of `text`. Pass the
+    masked copy as both to get a masked body — what every identifier-only parse
+    below wants, since a doc comment can hold any delimiter at all.
+    """
+    code = scan if scan is not None else mask_rust_noncode(text)
     depth = 0
     i = open_brace_index
-    in_single = False
-    in_double = False
-    escape = False
 
-    while i < len(text):
-        ch = text[i]
-        if escape:
-            escape = False
-            i += 1
-            continue
-        if ch == "\\":
-            escape = True
-            i += 1
-            continue
-        if ch == "'" and not in_double:
-            in_single = not in_single
-            i += 1
-            continue
-        if ch == '"' and not in_single:
-            in_double = not in_double
-            i += 1
-            continue
-        if in_single or in_double:
-            i += 1
-            continue
-
+    while i < len(code):
+        ch = code[i]
         if ch == "{":
             depth += 1
         elif ch == "}":
@@ -252,9 +370,10 @@ def parse_route_modules() -> tuple[dict[str, HandlerMeta], dict[str, TypeDef]]:
         if path.name == "mod.rs":
             continue
         text = read_text(path)
+        code = mask_rust_noncode(text)
         module = path.stem
 
-        for m in re.finditer(r"pub\s+async\s+fn\s+([A-Za-z0-9_]+)\s*\((.*?)\)\s*->", text, re.S):
+        for m in re.finditer(r"pub\s+async\s+fn\s+([A-Za-z0-9_]+)\s*\((.*?)\)\s*->", code, re.S):
             fn_name = m.group(1)
             params = m.group(2)
             json_types = extract_wrapped_types(params, "Json")
@@ -266,10 +385,10 @@ def parse_route_modules() -> tuple[dict[str, HandlerMeta], dict[str, TypeDef]]:
                 query_types=query_types,
             )
 
-        type_defs.update(parse_type_defs_from_file(path, module))
+        type_defs.update(parse_type_defs(text, path, module))
 
     # router-local handlers
-    router_text = read_text(ROUTER_FILE)
+    router_text = mask_rust_noncode(read_text(ROUTER_FILE))
     for m in re.finditer(r"async\s+fn\s+([A-Za-z0-9_]+)\s*\((.*?)\)\s*->", router_text, re.S):
         fn_name = m.group(1)
         params = m.group(2)
@@ -286,24 +405,35 @@ def parse_route_modules() -> tuple[dict[str, HandlerMeta], dict[str, TypeDef]]:
 
 
 def parse_type_defs_from_file(path: pathlib.Path, module: str) -> dict[str, TypeDef]:
-    text = read_text(path)
+    return parse_type_defs(read_text(path), path, module)
+
+
+def parse_type_defs(text: str, path: pathlib.Path, module: str) -> dict[str, TypeDef]:
+    """Public struct/enum definitions in one file, fields and variants included.
+
+    Everything here reads the masked copy: a declaration quoted inside a doc
+    comment is not a declaration, and an apostrophe in one ("the agent's id")
+    used to open a phantom char literal that ate the closing brace — dropping
+    the struct from the generated docs with no error at all.
+    """
+    code = mask_rust_noncode(text)
     out: dict[str, TypeDef] = {}
 
-    for m in re.finditer(r"pub\s+(struct|enum)\s+([A-Za-z0-9_]+)", text):
+    for m in re.finditer(r"pub\s+(struct|enum)\s+([A-Za-z0-9_]+)", code):
         kind = m.group(1)
         name = m.group(2)
 
-        brace = text.find("{", m.end())
+        brace = code.find("{", m.end())
         if brace == -1:
             continue
 
         # ensure there is no ';' before '{' (tuple/unit structs are skipped)
-        semi = text.find(";", m.end(), brace)
+        semi = code.find(";", m.end(), brace)
         if semi != -1:
             continue
 
         try:
-            body, _ = extract_brace_block(text, brace)
+            body, _ = extract_brace_block(code, brace, scan=code)
         except ValueError:
             continue
 
@@ -383,39 +513,21 @@ def parse_router_endpoints(handler_meta: dict[str, HandlerMeta]) -> list[Endpoin
 
 
 def extract_route_calls(text: str) -> list[str]:
+    """The argument text of every `.route(...)` call, parens balanced on the
+    masked copy so a comment inside the chain cannot unbalance them. The slices
+    come from the original text, because the route path is a string literal."""
+    code = mask_rust_noncode(text)
     out: list[str] = []
     needle = ".route("
     i = 0
     while True:
-        start = text.find(needle, i)
+        start = code.find(needle, i)
         if start == -1:
             break
         j = start + len(needle)
         depth = 1
-        in_single = False
-        in_double = False
-        escape = False
-        while j < len(text) and depth > 0:
-            ch = text[j]
-            if escape:
-                escape = False
-                j += 1
-                continue
-            if ch == "\\":
-                escape = True
-                j += 1
-                continue
-            if ch == "'" and not in_double:
-                in_single = not in_single
-                j += 1
-                continue
-            if ch == '"' and not in_single:
-                in_double = not in_double
-                j += 1
-                continue
-            if in_single or in_double:
-                j += 1
-                continue
+        while j < len(code) and depth > 0:
+            ch = code[j]
             if ch == "(":
                 depth += 1
             elif ch == ")":
@@ -515,7 +627,9 @@ def parse_crate_overview_lines(text: str) -> list[str]:
 def parse_crate_modules(text: str, src_dir: pathlib.Path) -> list[CrateModule]:
     modules: list[CrateModule] = []
     pending_cfg: str | None = None
-    for line in text.splitlines():
+    # comments masked (a commented-out `pub mod` is not a module); literals kept,
+    # because the `#[cfg(feature = "…")]` string is rendered as-is.
+    for line in mask_rust_noncode(text, mask_literals=False).splitlines():
         s = line.strip()
         if s.startswith("#[cfg"):
             pending_cfg = s
@@ -539,7 +653,7 @@ def parse_crate_modules(text: str, src_dir: pathlib.Path) -> list[CrateModule]:
 
 def parse_crate_reexports(text: str) -> list[str]:
     out: list[str] = []
-    for m in re.finditer(r"pub\s+use\s+[^;]+;", text, re.S):
+    for m in re.finditer(r"pub\s+use\s+[^;]+;", mask_rust_noncode(text), re.S):
         item = " ".join(m.group(0).split())
         out.append(item)
     return out
@@ -572,10 +686,15 @@ def parse_cli_sources() -> dict[str, object]:
 
 
 def parse_cli_top_commands(text: str) -> list[tuple[str, str, str]]:
-    m = re.search(r"enum\s+Commands\s*\{(.*?)\n\}", text, re.S)
+    code = mask_rust_noncode(text)
+    m = re.search(r"enum\s+Commands\s*\{", code)
     if not m:
         return []
-    body = m.group(1)
+    try:
+        # body from `text`, not from `code`: the purpose column is doc-comment prose.
+        body, _ = extract_brace_block(text, m.end() - 1, scan=code)
+    except ValueError:
+        return []
     out: list[tuple[str, str, str]] = []
     pattern = re.compile(
         r"///\s*(.+?)\n\s*([A-Za-z0-9_]+)\s*\(\s*commands::([a-z0-9_]+)::",
@@ -591,14 +710,16 @@ def parse_cli_top_commands(text: str) -> list[tuple[str, str, str]]:
 
 
 def parse_subcommand_enums(text: str) -> list[dict[str, object]]:
+    code = mask_rust_noncode(text)
     enums: list[dict[str, object]] = []
-    for m in re.finditer(r"#\[derive\(Subcommand\)\]\s*pub\s+enum\s+([A-Za-z0-9_]+)\s*\{", text, re.S):
+    for m in re.finditer(r"#\[derive\(Subcommand\)\]\s*pub\s+enum\s+([A-Za-z0-9_]+)\s*\{", code, re.S):
         enum_name = m.group(1)
-        brace = text.find("{", m.end() - 1)
+        brace = code.find("{", m.end() - 1)
         if brace == -1:
             continue
         try:
-            body, _ = extract_brace_block(text, brace)
+            # masked body: variants and field names are code, the help text is not.
+            body, _ = extract_brace_block(code, brace, scan=code)
         except ValueError:
             continue
         variants = parse_enum_variants(body)
@@ -607,7 +728,14 @@ def parse_subcommand_enums(text: str) -> list[dict[str, object]]:
 
 
 def parse_enum_variants(body: str) -> list[dict[str, object]]:
-    entries = split_top_level(body)
+    """Variant names and struct-field names of one enum body.
+
+    `body` comes masked, so the split sees only real separators: a comma in a
+    variant's clap help text used to start a new entry and invent a variant out
+    of the words after it, and a plain `//` line used to shadow the variant that
+    followed it.
+    """
+    entries = split_top_level(body, quotes=False)
     out: list[dict[str, object]] = []
     for entry in entries:
         if not entry:
@@ -615,7 +743,7 @@ def parse_enum_variants(body: str) -> list[dict[str, object]]:
         cleaned_lines = []
         for line in entry.splitlines():
             s = line.strip()
-            if not s or s.startswith("///") or s.startswith("#["):
+            if not s or s.startswith("//") or s.startswith("#["):
                 continue
             cleaned_lines.append(s)
         if not cleaned_lines:
@@ -629,7 +757,7 @@ def parse_enum_variants(body: str) -> list[dict[str, object]]:
         field_names: list[str] = []
         if "{" in merged and "}" in merged:
             block = merged.split("{", 1)[1].rsplit("}", 1)[0]
-            for field in split_top_level(block):
+            for field in split_top_level(block, quotes=False):
                 fm = re.match(r"([A-Za-z0-9_]+)\s*:", field.strip())
                 if fm:
                     field_names.append(fm.group(1))
@@ -646,7 +774,9 @@ def parse_enum_variants(body: str) -> list[dict[str, object]]:
 
 def parse_clap_flags(text: str) -> list[str]:
     flags: set[str] = set()
-    for m in re.finditer(r"#\[arg\((.*?)\)\]\s*([A-Za-z0-9_]+)\s*:", text, re.S):
+    # literals stay: the flag name is `long = "…"`, the short is a char literal.
+    code = mask_rust_noncode(text, mask_literals=False)
+    for m in re.finditer(r"#\[arg\((.*?)\)\]\s*([A-Za-z0-9_]+)\s*:", code, re.S):
         attrs = m.group(1)
         field = m.group(2)
 
@@ -663,6 +793,65 @@ def parse_clap_flags(text: str) -> list[str]:
     return sorted(flags)
 
 
+GUI_DOC_BLOCK = re.compile(r"/\*\*.*?\*/", re.S)
+GUI_DOC_ENDPOINT = re.compile(r"\b(GET|POST|PUT|DELETE|PATCH)\s+(/v1/[^\s`*]+)")
+GUI_EXPORTED_FN = re.compile(r"export\s+async\s+function\s+([A-Za-z0-9_]+)")
+
+
+def gui_module_header_doc(text: str) -> str:
+    """The module's own header doc block — the first one standing above the
+    imports. A doc block that follows them belongs to a type or a function."""
+    block = GUI_DOC_BLOCK.search(text)
+    if not block:
+        return ""
+    stmt = re.search(r"^(?:import|export)\b", text, re.M)
+    first_stmt = stmt.start() if stmt else len(text)
+    return block.group(0) if block.end() <= first_stmt else ""
+
+
+def gui_preceding_doc(text: str, pos: int) -> str:
+    """The doc block immediately above `pos`, or an empty string."""
+    head = text[:pos].rstrip()
+    if not head.endswith("*/"):
+        return ""
+    start = head.rfind("/**")
+    return head[start:] if start != -1 else ""
+
+
+def gui_first_endpoint(doc: str) -> tuple[str, str] | None:
+    m = GUI_DOC_ENDPOINT.search(doc)
+    if not m:
+        return None
+    path = m.group(2).split("?", 1)[0].split("#", 1)[0].rstrip("`.,;:)\"'")
+    if not path.startswith("/v1/"):
+        return None
+    return m.group(1), path
+
+
+def parse_gui_endpoints(text: str) -> list[tuple[str, str]]:
+    """The daemon endpoint each exported wrapper of one GUI api module calls.
+
+    These modules document the route in the doc comment above the wrapper —
+    ``/** `GET /v1/tools` — the tool catalog. */`` — so that block is where the
+    method and path are read from, falling back to the module header when the
+    wrapper's own block names none (tools.ts). Earlier revisions matched the
+    method only immediately after `/**`, which the backtick convention broke:
+    the table rendered empty for every module. A path keeps only what the router
+    registers — the query string of an example (`?path=`) is dropped — and a
+    wrapper built on another wrapper (telemetry's `getRunEventLog`) contributes
+    no row, because it calls no route of its own.
+    """
+    header = gui_module_header_doc(text)
+    out: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for m in GUI_EXPORTED_FN.finditer(text):
+        hit = gui_first_endpoint(gui_preceding_doc(text, m.start())) or gui_first_endpoint(header)
+        if hit and hit not in seen:
+            seen.add(hit)
+            out.append(hit)
+    return out
+
+
 def parse_gui_sources() -> dict[str, object]:
     modules: list[dict[str, object]] = []
     source_paths: set[pathlib.Path] = set()
@@ -670,10 +859,7 @@ def parse_gui_sources() -> dict[str, object]:
     for path in sorted(GUI_API_DIR.glob("*.ts")):
         text = read_text(path)
         funcs = re.findall(r"export\s+async\s+function\s+([A-Za-z0-9_]+)", text)
-        endpoints = [
-            (m.group(1), m.group(2))
-            for m in re.finditer(r"/\*\*\s*(GET|POST|PUT|DELETE)\s+(/v1/[^\s*]+)", text)
-        ]
+        endpoints = parse_gui_endpoints(text)
         modules.append(
             {
                 "name": path.name,
@@ -704,7 +890,8 @@ def parse_gui_sources() -> dict[str, object]:
 
 
 def parse_migrations() -> list[MigrationItem]:
-    text = read_text(MIGRATIONS_MOD)
+    # literals stay: the name and the SQL file are string literals in the registry.
+    text = mask_rust_noncode(read_text(MIGRATIONS_MOD), mask_literals=False)
     items: list[MigrationItem] = []
     for block in re.findall(r"Migration\s*\{(.*?)\}", text, re.S):
         vm = re.search(r"version:\s*(\d+)", block)
@@ -1214,6 +1401,12 @@ def generate_openalpaca_gui_doc(gui_info: dict[str, object]) -> str:
         "- SSE chat stream uses query token: `/v1/chat/stream/{stream_id}?token=...`.",
         "",
         "## Endpoints",
+        "",
+        "- One row per exported wrapper, read from the route named in its doc comment",
+        "  (the module header when the wrapper names none). Paths are spelled as the",
+        "  client documents them, so a path parameter can differ from the router's",
+        "  (`{id}` for `{message_id}`) and a `{kind}` segment can arrive already filled",
+        "  in (`/v1/extensions/plugin/{id}`); query strings are dropped.",
         "",
         markdown_table(["Method", "Path", "Module", "Source"], endpoint_rows),
         "",

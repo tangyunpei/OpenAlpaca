@@ -19,11 +19,10 @@ pub struct TasksArgs {
     pub command: TasksCommands,
 }
 
-/// **No commas in the doc comments below** — including the `//` ones.
-/// `scripts/gen_api_docs.py` splits a `Subcommand` enum body on top-level
-/// commas *before* it strips comment lines, so a comma inside one invents a
-/// variant out of the words that follow it (`when` and `so`, in two drafts of
-/// `Resume`'s help). Semicolons and dashes are safe.
+/// The help text below may hold commas, apostrophes and `//` lines again:
+/// `scripts/gen_api_docs.py` blanks comment text before it splits a
+/// `Subcommand` enum body, so prose no longer invents or shadows a variant.
+/// Covered by `scripts/tests/test_gen_api_docs.py`.
 #[derive(Subcommand)]
 pub enum TasksCommands {
     /// List tasks

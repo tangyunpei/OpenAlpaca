@@ -446,16 +446,6 @@
 |---|---|
 | `title` | `Option<String>` |
 | `workspace_path` | `Option<String>` |
-| `limit` | `Option<i64>` |
-| `offset` | `Option<i64>` |
-| `before_id` | `Option<i64>` |
-| `messages` | `Vec<super::chat_types::ConversationMessageView>` |
-| `total` | `i64` |
-| `db` | `&'a Database` |
-| `bus` | `&'a EventBus` |
-| `ctx` | `&'a SharedContext` |
-| `owner` | `&'a str` |
-| `sessions_root` | `Option<std::path::PathBuf>` |
 
 ### `sessions::SessionEventsQuery`
 
