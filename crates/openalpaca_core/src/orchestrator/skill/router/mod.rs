@@ -102,6 +102,17 @@ impl SkillRouter {
                 continue;
             }
 
+            // Skip skills the ENABLE axis has made unrunnable — **any** one of
+            // their required capabilities wholly withheld, or (legacy branch)
+            // every allowed name owned by a withdrawn extension. The same
+            // predicate invocation refuses on (design §6.2 #12, §10 case 3):
+            // without this a `mode: auto` skill whose only capability went with
+            // a disabled server still auto-selects at score >= 0.65 and runs
+            // toolless. Nothing is announced here — nothing was attempted.
+            if !catalog.is_satisfiable(fm) {
+                continue;
+            }
+
             // Intent match: any routing.intent phrase is a case-insensitive substring of query
             let intent_match = fm
                 .routing

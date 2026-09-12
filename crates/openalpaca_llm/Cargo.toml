@@ -28,7 +28,6 @@ base64.workspace = true
 rand.workspace = true
 uuid.workspace = true
 keyring.workspace = true
-directories.workspace = true
 file-lock.workspace = true
 
 # Streaming support

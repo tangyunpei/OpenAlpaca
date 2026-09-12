@@ -75,6 +75,26 @@ impl DaemonClient {
         Ok(resp.json().await?)
     }
 
+    /// POST with JSON body, per-request headers, and JSON response.
+    ///
+    /// The one caller is chat: `x-workspace-path` is header-only on
+    /// `POST /v1/chat`, and it must not become a default header on the client
+    /// — every other route would then receive a project it never asked for.
+    pub async fn post_with_headers<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+        headers: &[(&str, String)],
+    ) -> Result<T> {
+        let url = format!("{}{}", self.base_url, path);
+        let mut request = self.http.post(&url).json(body);
+        for (name, value) in headers {
+            request = request.header(*name, value);
+        }
+        let resp = check_response(request.send().await?).await?;
+        Ok(resp.json().await?)
+    }
+
     /// POST returning raw Response.
     pub async fn post_raw<B: Serialize>(&self, path: &str, body: &B) -> Result<Response> {
         let url = format!("{}{}", self.base_url, path);
@@ -90,12 +110,36 @@ impl DaemonClient {
         Ok(resp.json().await?)
     }
 
+    /// PATCH with JSON body and JSON response.
+    pub async fn patch<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self.http.patch(&url).json(body).send().await?;
+        let resp = check_response(resp).await?;
+        Ok(resp.json().await?)
+    }
+
     /// DELETE with JSON response.
     pub async fn delete_req<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self.http.delete(&url).send().await?;
         let resp = check_response(resp).await?;
         Ok(resp.json().await?)
+    }
+
+    /// DELETE against a route that answers `204 No Content`.
+    ///
+    /// [`Self::delete_req`] deserializes the body, and a 204 has none — calling
+    /// it against one fails *after* the row is gone, which reads as a delete
+    /// that did not happen.
+    pub async fn delete_no_content(&self, path: &str) -> Result<()> {
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self.http.delete(&url).send().await?;
+        check_response(resp).await?;
+        Ok(())
     }
 
     /// GET for SSE streams (token passed as query parameter, not header).
@@ -143,15 +187,105 @@ async fn check_response(resp: Response) -> Result<Response> {
 
     let status = resp.status();
     let body: serde_json::Value = resp.json().await.unwrap_or_default();
+    bail!("{}", render_error(status.as_u16(), &body));
+}
 
-    // Try daemon's structured error format: { "error": { "message": "..." } }
+/// What a refusal reads as on the terminal.
+///
+/// The daemon's canonical body is `{"error":{"code":…,"message":…}}`
+/// (`routes::api_error`) and **both halves are load-bearing**: the sentence is
+/// what a person reads, the code is the word the manuals and the routes name a
+/// refusal by — `WORKSPACE_BUSY`, `SESSION_LANE_MISMATCH`, `WORKSPACE_NOT_A_ROOT`
+/// — and the thing to search for. Printing only the sentence left a caller with
+/// no way to tie what it read to what the manual documents, so the code is
+/// printed beside it, in the same `code: message` shape the flat bodies below
+/// already used.
+fn render_error(status: u16, body: &serde_json::Value) -> String {
+    // The structured format: { "error": { "code": "...", "message": "..." } }.
+    // The code is optional in what this prints, not in what the daemon sends —
+    // a body that carries only a message still renders as the sentence alone.
     if let Some(msg) = body["error"]["message"].as_str() {
-        bail!("{} (HTTP {})", msg, status.as_u16());
+        return match body["error"]["code"].as_str() {
+            Some(code) if !code.is_empty() => format!("{code}: {msg} (HTTP {status})"),
+            _ => format!("{msg} (HTTP {status})"),
+        };
     }
-    // Try flat format: { "error": "..." }
+    // The flat format: { "error": "..." }, optionally with a sibling
+    // { "message": "..." }. The extension family answers a refusal as a word a
+    // client branches on plus a sentence a person reads (GAP-24), and dropping
+    // the sentence left `invalid_manifest` as the whole of what an operator was
+    // told about a plugin that could not be installed.
     if let Some(msg) = body["error"].as_str() {
-        bail!("{} (HTTP {})", msg, status.as_u16());
+        return match body["message"].as_str() {
+            Some(detail) => format!("{msg}: {detail} (HTTP {status})"),
+            None => format!("{msg} (HTTP {status})"),
+        };
     }
 
-    bail!("Request failed (HTTP {})", status.as_u16());
+    format!("Request failed (HTTP {status})")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_error;
+    use serde_json::json;
+
+    /// The canonical envelope every new route answers with. The code is what
+    /// `docs/CLI_Manual.md` and the route comments call the refusal by, so it
+    /// is printed, not dropped.
+    #[test]
+    fn a_structured_refusal_prints_its_code_beside_the_sentence() {
+        let rendered = render_error(
+            409,
+            &json!({"error": {
+                "code": "WORKSPACE_BUSY",
+                "message": "2 run(s) under /repo are queued, running or paused",
+            }}),
+        );
+        assert_eq!(
+            rendered,
+            "WORKSPACE_BUSY: 2 run(s) under /repo are queued, running or paused (HTTP 409)"
+        );
+    }
+
+    /// One of the ~30 older `{"error":{"message":…}}` sites, and a code sent as
+    /// an empty string: the sentence alone, never a bare `: ` with nothing
+    /// before it.
+    #[test]
+    fn a_refusal_with_no_code_is_still_its_sentence() {
+        assert_eq!(
+            render_error(404, &json!({"error": {"message": "no such run"}})),
+            "no such run (HTTP 404)"
+        );
+        assert_eq!(
+            render_error(404, &json!({"error": {"code": "", "message": "no such run"}})),
+            "no such run (HTTP 404)"
+        );
+    }
+
+    /// The flat shape the extension routes answer with, both halves and one.
+    #[test]
+    fn a_flat_refusal_keeps_the_word_and_the_sentence() {
+        assert_eq!(
+            render_error(
+                422,
+                &json!({"error": "invalid_manifest", "message": "plugin.toml names no entry point"}),
+            ),
+            "invalid_manifest: plugin.toml names no entry point (HTTP 422)"
+        );
+        assert_eq!(
+            render_error(422, &json!({"error": "invalid_manifest"})),
+            "invalid_manifest (HTTP 422)"
+        );
+    }
+
+    /// A body that is not JSON at all deserializes to `null`; the status is
+    /// then the whole of what is known, and saying so beats inventing a reason.
+    #[test]
+    fn a_bodyless_failure_says_only_what_it_knows() {
+        assert_eq!(
+            render_error(500, &serde_json::Value::Null),
+            "Request failed (HTTP 500)"
+        );
+    }
 }

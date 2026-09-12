@@ -28,4 +28,5 @@ rmcp = { version = "0.16", features = ["client", "transport-child-process", "tra
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
+# `io-util` powers the in-process duplex stub server used by the seal tests.
+tokio = { workspace = true, features = ["test-util", "io-util"] }

@@ -94,6 +94,7 @@ pub async fn command_handler(
                     workspace_path,
                     stream_id: None,
                     lane_override: None,
+                    model_override: None,
                 })
                 .await;
 

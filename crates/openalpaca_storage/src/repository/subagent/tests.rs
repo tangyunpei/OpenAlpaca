@@ -49,6 +49,9 @@ fn make_task(id: &str) -> Task {
         outcome_json: None,
         outcome_kind: None,
         artifact_count: 0,
+        workspace_id: None,
+        source_task_id: None,
+        session_id: None,
     }
 }
 

@@ -1,0 +1,630 @@
+//! GAP-15's two halves: the write (`persist_only`, routed through whatever
+//! atomic writer the host injected) and the hot path (`deregister_provider` on
+//! disable, re-register + `refresh_models` on enable).
+//!
+//! This crate compiles with **no provider features** under
+//! `cargo test -p openalpaca_llm`, so nothing here may depend on a real
+//! Anthropic/OpenAI/Ollama provider existing. The router is driven with a stub
+//! provider through the public `register_provider`, and the enable half's
+//! *registration* is proved in `openalpacad`, which does compile them.
+
+use super::*;
+
+use crate::keys::key_encryption::KeyEncryptor;
+use crate::routing::cost_tracker::CostTracker;
+use crate::routing::model_registry::ModelRegistry;
+use crate::{ChatRequest, ChatResponse, LlmProvider, error::LlmError};
+use std::path::Path;
+use std::sync::Mutex;
+
+/// A hand-authored `llm.toml` carrying an encrypted secret — the bytes that
+/// must survive every rewrite verbatim.
+const SECRET: &str = "enc:v1:YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXo=";
+
+fn hand_authored() -> String {
+    hand_authored_with(DEFAULT_MODEL)
+}
+
+/// The default model the fixture names. Anthropic's, and one the compiled
+/// registry knows — so the 409 guard resolves it on the first rung.
+const DEFAULT_MODEL: &str = "claude-haiku-4-5-20251001";
+
+fn hand_authored_with(model: &str) -> String {
+    format!(
+        r#"[orchestrator]
+model = "{model}"
+
+[providers.anthropic]
+enabled = true
+strategy = "round_robin"
+
+[[providers.anthropic.keys]]
+id = "key_one"
+secret_encrypted = "{SECRET}"
+priority = "primary"
+
+[providers.openai]
+enabled = true
+base_url = "https://api.openai.com/v1"
+strategy = "round_robin"
+"#
+    )
+}
+
+/// The stub the router registers, so `deregister_provider` has something real
+/// to remove without any provider feature being compiled in.
+struct StubProvider;
+
+#[async_trait::async_trait]
+impl LlmProvider for StubProvider {
+    fn name(&self) -> &str {
+        "stub"
+    }
+    fn supports_tools(&self) -> bool {
+        false
+    }
+    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        Err(LlmError::NotConfigured)
+    }
+}
+
+struct Harness {
+    _dir: tempfile::TempDir,
+    path: PathBuf,
+    service: LlmSettingsService,
+    router: Arc<LlmRouter>,
+    /// Every `(path, contents)` the injected writer was handed.
+    writes: Arc<Mutex<Vec<(PathBuf, String)>>>,
+    /// Flipped to make the next write fail, for the write-first proof.
+    fail: Arc<Mutex<bool>>,
+}
+
+impl Harness {
+    fn new() -> Self {
+        Self::with_default_model(DEFAULT_MODEL)
+    }
+
+    /// A fixture whose `[orchestrator] model` is `model` — the input to the
+    /// 409 guard's resolution ladder.
+    fn with_default_model(model: &str) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("llm.toml");
+        std::fs::write(&path, hand_authored_with(model)).unwrap();
+
+        let router = Arc::new(LlmRouter::new(
+            HashMap::new(),
+            ModelRegistry::with_defaults(),
+            HashMap::new(),
+            Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+            model.to_string(),
+        ));
+
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let fail = Arc::new(Mutex::new(false));
+        let (seen, failing) = (writes.clone(), fail.clone());
+
+        let encryptor = KeyEncryptor::load_or_generate_at(dir.path()).unwrap();
+        let service = LlmSettingsService::for_tests(router.clone(), path.clone(), encryptor)
+            .with_config_writer(Arc::new(move |p: &Path, contents: &str| {
+                if *failing.lock().unwrap() {
+                    return Err("disk is full".to_string());
+                }
+                seen.lock()
+                    .unwrap()
+                    .push((p.to_path_buf(), contents.to_string()));
+                std::fs::write(p, contents).map_err(|e| e.to_string())
+            }));
+
+        Self {
+            _dir: dir,
+            path,
+            service,
+            router,
+            writes,
+            fail,
+        }
+    }
+
+    /// Register a stub under `provider_type` so the router has a live entry.
+    fn register_stub(&self, provider_type: ProviderType) {
+        self.router.register_provider(
+            provider_type,
+            Arc::new(StubProvider),
+            KeyPool::new(vec![], SelectionStrategy::RoundRobin),
+        );
+    }
+
+    fn text(&self) -> String {
+        std::fs::read_to_string(&self.path).unwrap()
+    }
+}
+
+// ── The write ───────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn the_write_goes_through_the_injected_atomic_writer() {
+    let h = Harness::new();
+
+    h.service.set_provider_enabled("openai", false).await.unwrap();
+
+    let writes = h.writes.lock().unwrap();
+    assert_eq!(writes.len(), 1, "one write per toggle");
+    assert_eq!(writes[0].0, h.path, "the writer is handed llm.toml itself");
+    assert!(
+        writes[0].1.contains("[providers.openai]"),
+        "the writer is handed the whole rendered document"
+    );
+    drop(writes);
+    assert!(h.text().contains("enabled = false"));
+}
+
+#[tokio::test]
+async fn a_disable_enable_cycle_changes_only_the_enabled_key() {
+    let h = Harness::new();
+
+    // The encrypted secret survives the very first rewrite, which is the one
+    // that normalises a hand-authored file into the serialiser's own layout.
+    h.service.set_provider_enabled("openai", false).await.unwrap();
+    let off = h.text();
+    assert!(off.contains(SECRET), "the encrypted key is copied verbatim");
+
+    h.service.set_provider_enabled("openai", true).await.unwrap();
+    let on = h.text();
+    assert!(on.contains(SECRET));
+
+    let changed: Vec<(&str, &str)> = off
+        .lines()
+        .zip(on.lines())
+        .filter(|(a, b)| a != b)
+        .collect();
+    assert_eq!(
+        off.lines().count(),
+        on.lines().count(),
+        "the document may not grow or shrink:\n--- off\n{off}\n--- on\n{on}"
+    );
+    assert_eq!(
+        changed,
+        vec![("enabled = false", "enabled = true")],
+        "exactly one key may move:\n--- off\n{off}\n--- on\n{on}"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_write_leaves_the_router_untouched() {
+    let h = Harness::new();
+    h.register_stub(ProviderType::OpenAI);
+    *h.fail.lock().unwrap() = true;
+
+    let err = h
+        .service
+        .set_provider_enabled("openai", false)
+        .await
+        .expect_err("a refused write is not a toggle");
+    assert!(matches!(err, SetProviderEnabledError::Persist(_)), "{err:?}");
+
+    assert_eq!(h.text(), hand_authored(), "the file is byte-identical");
+    assert!(
+        h.router.configured_providers().contains(&ProviderType::OpenAI),
+        "write-first: the provider is still loaded"
+    );
+    assert!(
+        h.router
+            .model_registry()
+            .resolve_provider("gpt-5.2")
+            .is_some(),
+        "and its models are still registered"
+    );
+}
+
+// ── The refusals ────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn an_unknown_provider_is_refused_before_anything_is_written() {
+    let h = Harness::new();
+
+    let err = h
+        .service
+        .set_provider_enabled("groq", false)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, SetProviderEnabledError::UnknownProvider(name) if name == "groq"),
+        "{err:?}"
+    );
+    assert!(h.writes.lock().unwrap().is_empty());
+    assert_eq!(h.text(), hand_authored());
+}
+
+#[tokio::test]
+async fn the_default_models_provider_cannot_be_disabled() {
+    let h = Harness::new();
+    h.register_stub(ProviderType::Anthropic);
+
+    // `[orchestrator] model` is a Claude model, so Anthropic is the default's
+    // provider and the switch must refuse rather than strand the daemon.
+    let err = h
+        .service
+        .set_provider_enabled("anthropic", false)
+        .await
+        .unwrap_err();
+    match &err {
+        SetProviderEnabledError::IsDefaultProvider { provider, model } => {
+            assert_eq!(provider, "anthropic");
+            assert_eq!(model, "claude-haiku-4-5-20251001");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    assert!(h.writes.lock().unwrap().is_empty());
+    assert!(h.router.configured_providers().contains(&ProviderType::Anthropic));
+
+    // Enabling it is never refused — the guard is about turning the default off.
+    h.service
+        .set_provider_enabled("anthropic", true)
+        .await
+        .unwrap();
+}
+
+// ── The hot path ────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_disable_unloads_the_provider_and_strips_its_models() {
+    let h = Harness::new();
+    h.register_stub(ProviderType::OpenAI);
+    assert!(
+        h.router
+            .model_registry()
+            .resolve_provider("gpt-5.2")
+            .is_some()
+    );
+
+    let outcome = h.service.set_provider_enabled("openai", false).await.unwrap();
+
+    assert_eq!(outcome.id, "openai");
+    assert!(!outcome.enabled);
+    assert!(
+        outcome.removed_models.iter().any(|m| m == "gpt-5.2"),
+        "the stripped models are reported: {:?}",
+        outcome.removed_models
+    );
+    assert!(
+        !h.router.configured_providers().contains(&ProviderType::OpenAI),
+        "the provider is unloaded, so new calls fall through to the chain"
+    );
+    assert!(
+        h.router
+            .model_registry()
+            .resolve_provider("gpt-5.2")
+            .is_none()
+    );
+    // Anthropic is untouched.
+    assert!(
+        h.router
+            .model_registry()
+            .resolve_provider("claude-sonnet-4-6")
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn an_enable_restores_the_catalogue_the_disable_stripped() {
+    let h = Harness::new();
+    h.register_stub(ProviderType::OpenAI);
+    h.service.set_provider_enabled("openai", false).await.unwrap();
+    assert!(
+        h.router
+            .model_registry()
+            .resolve_provider("gpt-5.2")
+            .is_none()
+    );
+
+    let outcome = h.service.set_provider_enabled("openai", true).await.unwrap();
+
+    assert!(outcome.enabled);
+    assert!(
+        outcome.restored_models > 0,
+        "re-enabling puts the provider's catalogue back"
+    );
+    assert!(
+        h.router
+            .model_registry()
+            .resolve_provider("gpt-5.2")
+            .is_some(),
+        "otherwise the model picker stays empty until the daemon restarts"
+    );
+    // No provider feature is compiled in here, so registration itself cannot
+    // succeed — and that is reported rather than swallowed or 500'd.
+    assert!(outcome.warning.is_some(), "{outcome:?}");
+    assert!(h.text().contains("enabled = true"));
+}
+
+// ── One writer for llm.toml ─────────────────────────────────────────────────
+
+/// Review finding #3. `update_orchestrator_config` read → mutated → wrote the
+/// whole document with a plain `fs::write`, taking neither `llm.toml.lock` nor
+/// a backup slot. Overlapping a toggle, it wrote back the pre-toggle `enabled`
+/// value: the file then said `enabled = true` while the router had the provider
+/// unloaded, and the two disagreed until restart. The two writers sit on the
+/// same GUI screen — the model picker calls one, the switch beside it the
+/// other — and the 409's own remedy copy tells the owner to run them back to
+/// back.
+#[tokio::test]
+async fn an_orchestrator_write_goes_through_the_same_locked_writer_as_a_toggle() {
+    let h = Harness::new();
+    h.service.set_provider_enabled("openai", false).await.unwrap();
+
+    h.service
+        .update_orchestrator_config(UpdateOrchestratorRequest {
+            model: "claude-sonnet-4-6".to_string(),
+            fallback_models: vec![],
+        })
+        .unwrap();
+
+    assert_eq!(
+        h.writes.lock().unwrap().len(),
+        2,
+        "both writes are the injected one — the lock and the backup ring are not optional"
+    );
+    let text = h.text();
+    assert!(
+        text.contains("enabled = false"),
+        "the toggle's bit survived the orchestrator write:\n{text}"
+    );
+    assert!(text.contains(r#"model = "claude-sonnet-4-6""#), "{text}");
+    assert!(text.contains(SECRET), "and the encrypted key is still verbatim");
+}
+
+/// R62. Taking the lock put the orchestrator write behind the watcher's dedup
+/// ring, and step 3 of the watcher tick — `router.set_default_model` — was its
+/// only caller in the workspace. The ring then swallowed the event the write
+/// raised, so the model an owner picked in the GUI reached the file and nothing
+/// else: `GET /v1/orchestrator/config` read the new id off disk while the
+/// router kept answering on the old one until restart.
+///
+/// Every `persist_only` caller applies its own hot-path effect synchronously
+/// after the write, the way the provider toggle does, and the ring is left to
+/// matter only for **external** edits.
+#[tokio::test]
+async fn an_orchestrator_write_moves_the_routers_default_model_at_once() {
+    let h = Harness::new();
+    assert_eq!(h.router.default_model(), DEFAULT_MODEL);
+
+    h.service
+        .update_orchestrator_config(UpdateOrchestratorRequest {
+            model: "claude-sonnet-4-6".to_string(),
+            fallback_models: vec![],
+        })
+        .unwrap();
+
+    assert_eq!(
+        h.router.default_model(),
+        "claude-sonnet-4-6",
+        "the write is the hot path's trigger, not the watcher"
+    );
+}
+
+/// …and a write that never landed must not move it. The order is write-first
+/// for the same reason the toggle's is: a refused write leaves the router
+/// exactly as it was, so the file and the router cannot disagree.
+#[tokio::test]
+async fn a_failed_orchestrator_write_leaves_the_default_model_alone() {
+    let h = Harness::new();
+    *h.fail.lock().unwrap() = true;
+
+    let err = h
+        .service
+        .update_orchestrator_config(UpdateOrchestratorRequest {
+            model: "claude-sonnet-4-6".to_string(),
+            fallback_models: vec![],
+        })
+        .expect_err("the writer was told to fail");
+
+    assert!(err.contains("disk is full"), "{err}");
+    assert_eq!(h.router.default_model(), DEFAULT_MODEL);
+}
+
+/// The daemon's other `llm.toml` writer, `PUT /v1/daemon/config/providers/
+/// web-search`, had the same exposure and now takes the same lock.
+#[tokio::test]
+async fn a_web_search_write_goes_through_the_locked_writer_too() {
+    let h = Harness::new();
+    h.service.set_provider_enabled("openai", false).await.unwrap();
+
+    let updated = h
+        .service
+        .update_web_search_config(Some("brave-key".to_string()), Some(9))
+        .unwrap();
+
+    assert_eq!(updated.api_key, "brave-key");
+    assert_eq!(updated.timeout_secs, 9);
+    assert_eq!(h.writes.lock().unwrap().len(), 2);
+    let text = h.text();
+    assert!(text.contains("enabled = false"), "{text}");
+    assert!(text.contains("timeout_secs = 9"), "{text}");
+}
+
+// ── R61: the 409 guard fails closed ─────────────────────────────────────────
+
+/// Review finding #5. The guard used to allow the disable when it could not
+/// place the default model at all — and that is not exotic territory: the
+/// compiled registry contains **no** Ollama entries, and Ollama discovery needs
+/// a non-empty key pool, so a local-first owner whose default is an Ollama
+/// model not declared in `[models]` got no protection whatever. The daemon
+/// would be left with a default model no enabled provider can serve.
+#[tokio::test]
+async fn a_default_model_that_places_nowhere_refuses_every_disable() {
+    let h = Harness::with_default_model("my-local-thing");
+    h.register_stub(ProviderType::OpenAI);
+
+    let err = h
+        .service
+        .set_provider_enabled("openai", false)
+        .await
+        .expect_err("with nothing to answer with, nothing may be turned off");
+    match &err {
+        SetProviderEnabledError::DefaultModelUnresolved { provider, model } => {
+            assert_eq!(provider, "openai");
+            assert_eq!(model, "my-local-thing", "the refusal names what to fix");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    assert!(h.writes.lock().unwrap().is_empty(), "nothing was written");
+    assert!(
+        h.router.configured_providers().contains(&ProviderType::OpenAI),
+        "and nothing was unloaded"
+    );
+}
+
+/// The ladder's third rung. A model id the registry has never seen and
+/// `[models]` does not declare can still say whose it is, and then the guard
+/// protects the right provider and lets the other one go.
+#[tokio::test]
+async fn the_default_models_provider_can_be_read_off_the_model_id() {
+    let h = Harness::with_default_model("claude-experimental-9");
+    h.register_stub(ProviderType::Anthropic);
+    h.register_stub(ProviderType::OpenAI);
+
+    let err = h
+        .service
+        .set_provider_enabled("anthropic", false)
+        .await
+        .unwrap_err();
+    match &err {
+        SetProviderEnabledError::IsDefaultProvider { provider, model } => {
+            assert_eq!(provider, "anthropic");
+            assert_eq!(model, "claude-experimental-9");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // …and the disable that is not in the way is still allowed: the guard
+    // fails closed on "nobody", not on "somebody else".
+    let outcome = h.service.set_provider_enabled("openai", false).await.unwrap();
+    assert!(!outcome.enabled);
+    assert!(!h.router.configured_providers().contains(&ProviderType::OpenAI));
+}
+
+/// The `[models]` rung, between the registry and the id's own shape.
+#[tokio::test]
+async fn the_default_models_provider_can_come_from_the_models_table() {
+    let h = Harness::with_default_model("house-model");
+    std::fs::write(
+        &h.path,
+        format!(
+            "{}
+[models.\"house-model\"]
+provider = \"openai\"
+context = 8192
+",
+            hand_authored_with("house-model")
+        ),
+    )
+    .unwrap();
+    h.register_stub(ProviderType::OpenAI);
+
+    let err = h
+        .service
+        .set_provider_enabled("openai", false)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, SetProviderEnabledError::IsDefaultProvider { model, .. } if model == "house-model"),
+        "{err:?}"
+    );
+}
+
+/// **The R61 refusal is evaluated inside the write lock** (review item E8).
+///
+/// Two `llm.toml` writers sit on the same GUI screen, and one of them —
+/// `update_orchestrator_config` — writes the very field this refusal reads.
+/// Evaluated *before* the lock, the guard answered about a document that had
+/// already been replaced by the time the write landed, and the disable it let
+/// through is the outcome R61 exists to prevent: a default model served by a
+/// provider nobody loaded.
+///
+/// Staging the race needs a second **process**: the lock is POSIX `fcntl`, which
+/// is per process, so a competing lock taken in this one would not contend at
+/// all. The helper holds the lock while the default model moves under the
+/// disable that is waiting for it. No `python3` on PATH means the race cannot be
+/// staged, and the test says so rather than passing quietly.
+#[tokio::test]
+async fn the_default_model_refusal_is_read_under_the_write_lock() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+
+    // The fixture's default model is anthropic's, so disabling openai is
+    // legitimate at the moment the disable starts.
+    let h = Arc::new(Harness::new());
+    h.register_stub(ProviderType::Anthropic);
+    h.register_stub(ProviderType::OpenAI);
+
+    let mut lock_name = h.path.file_name().unwrap().to_os_string();
+    lock_name.push(".lock");
+    let lock_path = h.path.with_file_name(lock_name);
+
+    let helper = Command::new("python3")
+        .arg("-c")
+        .arg(
+            "import fcntl, sys\n\
+             f = open(sys.argv[1], 'a')\n\
+             fcntl.lockf(f, fcntl.LOCK_EX)\n\
+             print('locked', flush=True)\n\
+             sys.stdin.readline()\n",
+        )
+        .arg(&lock_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn();
+    let Ok(mut helper) = helper else {
+        eprintln!("no python3 on PATH: the two-writer race cannot be staged");
+        return;
+    };
+
+    let mut out = BufReader::new(helper.stdout.take().unwrap());
+    let mut line = String::new();
+    out.read_line(&mut line).unwrap();
+    assert_eq!(line.trim(), "locked", "the helper did not take the lock");
+
+    let (started, has_started) = std::sync::mpsc::channel();
+    let disabler = {
+        let h = Arc::clone(&h);
+        // Its own thread and its own runtime: the call blocks on the helper's
+        // lock, and must not block the test's runtime doing it.
+        std::thread::spawn(move || {
+            started.send(()).unwrap();
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(h.service.set_provider_enabled("openai", false))
+        })
+    };
+
+    // Once it has started, the read the bug performed before the lock has
+    // already happened — and it saw the anthropic default.
+    has_started.recv().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // The other writer points the default model at openai, then lets go.
+    std::fs::write(&h.path, hand_authored_with("gpt-5.2")).unwrap();
+    helper.stdin.take().unwrap().write_all(b"\n").unwrap();
+    helper.wait().unwrap();
+
+    let err = disabler
+        .join()
+        .unwrap()
+        .expect_err("the provider now serving the default model was disabled");
+    assert!(
+        matches!(&err, SetProviderEnabledError::IsDefaultProvider { model, .. } if model == "gpt-5.2"),
+        "{err:?}"
+    );
+    assert!(
+        h.writes.lock().unwrap().is_empty(),
+        "a refused disable still wrote"
+    );
+    assert!(
+        h.router.configured_providers().contains(&ProviderType::OpenAI),
+        "and nothing was unloaded"
+    );
+}

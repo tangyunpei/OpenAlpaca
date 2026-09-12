@@ -1,0 +1,604 @@
+//! Artifact endpoints — the read surface over `ArtifactStore` (plan §4.9).
+//!
+//! ```text
+//! GET /v1/artifacts?task_id=&kind=&origin=&project_root=&pinned=&q=
+//!                  &include_missing=&limit=&offset=  -> { artifacts, total }
+//! GET /v1/artifacts/{id}                             -> Artifact | 404
+//! GET /v1/artifacts/{id}/content[?version=N]         -> bytes | 401 | 404 | 410
+//! GET /v1/artifacts/{id}/versions                    -> { versions }
+//! GET /v1/artifacts/{id}/versions/{n}/content        -> bytes
+//! GET /v1/artifacts/{id}/diff?from=1&to=2            -> ArtifactDiff | 409
+//! PUT /v1/artifacts/{id}/pin  {"pinned":true}        -> { id, pinned }
+//! ```
+//!
+//! Three rules run through the whole file.
+//!
+//! **Every route is owner-scoped, and a row belonging to someone else is a
+//! `404`** — never a `403`, exactly as `routes/files.rs` already answers. The
+//! two `ArtifactStore` calls that take no `owner_id` (`resolve_content`,
+//! `set_pinned`) are therefore preceded by an owner-scoped `get`.
+//!
+//! **The envelope is Phase 0's shared `api_error`** (`{"error":{"code",
+//! "message"}}`), and the `code` is [`ArtifactError::code`] verbatim, so
+//! `ARTIFACT_GONE`/`NOT_DIFFABLE` reach the client unrenamed.
+//!
+//! **The content route authenticates inline** (GAP-11): it lives outside the
+//! bearer middleware so a webview `<img src>`/`<iframe src>`, which cannot set
+//! a header, can carry the token in the query string. Authorization is not
+//! weakened — the owner check below is what it always was; only authentication
+//! moved.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use axum::{
+    Json,
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+};
+use openalpaca_core::bus::EventBus;
+use openalpaca_core::events::SystemEvent;
+use openalpaca_storage::{
+    ArtifactError, ArtifactKind, ArtifactOrigin, ArtifactQuery, ArtifactRecord, ArtifactStore,
+    ArtifactVersionRow, Database, TaskRepository,
+};
+use serde::Deserialize;
+
+use super::{api_error, content_response, content_token_ok, invalid_token};
+use crate::AppState;
+
+// ── Query and body types ─────────────────────────────────────────
+
+/// `GET /v1/artifacts` — the query string of §4.9, one field per filter.
+#[derive(Debug, Default, Deserialize)]
+pub struct ListArtifactsParams {
+    pub task_id: Option<String>,
+    /// An `ArtifactKind` spelling; anything else is a `400`, never a silent
+    /// "no filter" that would answer with rows the caller did not ask for.
+    pub kind: Option<String>,
+    pub origin: Option<String>,
+    /// `?project_root=` with an empty value selects the home store — the same
+    /// `COALESCE(project_root, '')` the store matches on.
+    pub project_root: Option<String>,
+    pub pinned: Option<bool>,
+    pub q: Option<String>,
+    #[serde(default)]
+    pub include_missing: bool,
+    /// Clamped to [`MAX_LIST_LIMIT`] (R26); non-positive means the default
+    /// page size the store applies when no limit is given.
+    pub limit: Option<i64>,
+    /// Negative is a `400`, not a silent first page.
+    pub offset: Option<i64>,
+}
+
+/// `?token=` (GAP-11) and `?version=N` on the content route.
+#[derive(Debug, Default, Deserialize)]
+pub struct ContentParams {
+    pub token: Option<String>,
+    pub version: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DiffParams {
+    pub from: u32,
+    pub to: u32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PinRequest {
+    pub pinned: bool,
+}
+
+// ── Paging bounds (R26) ──────────────────────────────────────────
+
+/// The largest page `GET /v1/artifacts` will build, whatever `?limit=` asks
+/// for. The list route costs one page query, one `COUNT(*)` and one title
+/// lookup, all on the connection every other subsystem shares, so the page is
+/// bounded rather than left to the caller.
+pub(crate) const MAX_LIST_LIMIT: i64 = 500;
+
+/// `?limit=`, resolved against the two bounds.
+///
+/// A non-positive value is `None` — the store's `DEFAULT_LIST_LIMIT`, never
+/// SQLite's "no limit". Anything above [`MAX_LIST_LIMIT`] is *clamped* rather
+/// than refused: the caller gets a smaller page and an exact `total`, which is
+/// how it learns there is more to fetch.
+fn page_limit(requested: Option<i64>) -> Option<i64> {
+    requested.filter(|n| *n > 0).map(|n| n.min(MAX_LIST_LIMIT))
+}
+
+// ── Status mapping ───────────────────────────────────────────────
+
+/// The §4.9 status codes. Nothing below this line decides one.
+fn artifact_error_status(error: &ArtifactError) -> StatusCode {
+    match error {
+        ArtifactError::NotFound { .. } | ArtifactError::VersionNotFound { .. } => {
+            StatusCode::NOT_FOUND
+        }
+        ArtifactError::Gone { .. } => StatusCode::GONE,
+        // All three are a well-formed request the store refuses on the state of
+        // the address: an image is not diffable, a version above the diff cap
+        // will not be read, and a name held by a file no row describes is not
+        // writable. `NameTaken` reaches no route today — the artifact surface
+        // is read-only, and `artifact_write` is a tool — but the mapping
+        // belongs here rather than at whichever route first writes.
+        ArtifactError::NotDiffable { .. }
+        | ArtifactError::DiffTooLarge { .. }
+        | ArtifactError::NameTaken { .. } => StatusCode::CONFLICT,
+    }
+}
+
+/// Render a store failure. A typed [`ArtifactError`] keeps its own code; any
+/// other `anyhow` error is a database failure by elimination.
+fn store_error(error: &anyhow::Error) -> Response {
+    match error.downcast_ref::<ArtifactError>() {
+        Some(e) => api_error(artifact_error_status(e), e.code(), e.to_string()),
+        None => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DB_ERROR",
+            error.to_string(),
+        ),
+    }
+}
+
+/// The one shape a row this owner cannot see takes.
+fn not_found(id: &str) -> Response {
+    api_error(
+        StatusCode::NOT_FOUND,
+        "ARTIFACT_NOT_FOUND",
+        format!("artifact {id} not found"),
+    )
+}
+
+/// The owner-scoped head record, or the `404` that stands in for every reason
+/// it is not visible.
+///
+/// The `Err` arm is the finished `Response` a handler returns unchanged, which
+/// is the point — boxing an `axum::Response` here only to unbox it at five call
+/// sites would buy nothing, so `result_large_err` is silenced deliberately.
+#[allow(clippy::result_large_err)]
+fn visible(db: &Database, owner_id: &str, id: &str) -> Result<ArtifactRecord, Response> {
+    match ArtifactStore::new(db).get(id, owner_id) {
+        Ok(Some(record)) => Ok(record),
+        Ok(None) => Err(not_found(id)),
+        Err(e) => Err(store_error(&e)),
+    }
+}
+
+// ── Serialisation (§4.9) ─────────────────────────────────────────
+
+/// One `Artifact`: the client's type (`unbacked.ts:39-56`) plus the additive
+/// `origin`, `pinned`, `missing`, `path`, `project_root` and `rel_path`.
+///
+/// `kind` is the stored snake_case spelling; a row whose column is NULL — one
+/// that predates migration 036, or an upload written before R25 taught the
+/// upload writer to classify one — is projected from its own `mime_type`
+/// ([`ArtifactKind::for_mime`]), so this field is never `null` on the wire and
+/// the client's non-nullable `ArtifactKind` holds. `metadata` is
+/// `metadata_json` *parsed* and stripped of the store's own head stamp
+/// (`ArtifactRecord::metadata`), so a client never has to `JSON.parse` a string
+/// field and never reads bookkeeping no writer put there.
+fn artifact_json(record: &ArtifactRecord, task_title: Option<&str>) -> serde_json::Value {
+    serde_json::json!({
+        "id": record.id,
+        "name": record.name,
+        "kind": record
+            .kind
+            .unwrap_or_else(|| ArtifactKind::for_mime(&record.mime_type))
+            .as_str(),
+        "mime_type": record.mime_type,
+        "size_bytes": record.size_bytes,
+        "task_id": record.task_id,
+        "task_title": task_title,
+        "agent_id": record.agent_id,
+        "agent_template_id": record.agent_template_id,
+        "version": record.version,
+        "version_count": record.version_count,
+        "summary": record.summary,
+        "metadata": record.metadata(),
+        "created_at": record.created_at,
+        "updated_at": record.updated_at,
+        // Additive — the client type compiles unchanged against these.
+        "origin": record.origin.as_str(),
+        "pinned": record.pinned,
+        "missing": record.missing(),
+        "path": record.storage_path,
+        "project_root": record.project_root,
+        "rel_path": record.rel_path,
+    })
+}
+
+/// One `ArtifactVersion` (`unbacked.ts:62-70`). `note` is coalesced from `NULL`
+/// to `""`: the client types it as `string`, and "no note" is an empty note.
+fn version_json(row: &ArtifactVersionRow) -> serde_json::Value {
+    serde_json::json!({
+        "version": row.version,
+        "note": row.note.clone().unwrap_or_default(),
+        "author_agent_id": row.author_agent_id,
+        "created_at": row.created_at,
+        "size_bytes": row.size_bytes,
+        "added_lines": row.added_lines,
+        "removed_lines": row.removed_lines,
+    })
+}
+
+/// `task.title` for each distinct `task_id` on the page — **one** lookup for
+/// the whole page (R26), whatever the page size.
+///
+/// [`TaskRepository::titles_for`] reads two columns; the `get`-per-row this
+/// replaced materialized a whole `Task` (`state_json` and `outcome_json`
+/// included) and took the global connection mutex once per row, to produce one
+/// short string each. A missing entry covers both a loose artifact and a run
+/// whose task row is gone, and a failed lookup degrades to no titles rather
+/// than to no page.
+fn task_titles(db: &Database, records: &[ArtifactRecord]) -> HashMap<String, String> {
+    let ids: Vec<String> = records
+        .iter()
+        .filter_map(|r| r.task_id.clone())
+        .collect::<HashSet<String>>()
+        .into_iter()
+        .collect();
+
+    match TaskRepository::new(db).titles_for(&ids) {
+        Ok(titles) => titles,
+        Err(e) => {
+            tracing::warn!("failed to load task titles for an artifact page: {e}");
+            HashMap::new()
+        }
+    }
+}
+
+// ── The routes ───────────────────────────────────────────────────
+
+/// `GET /v1/artifacts` — one page plus the unpaged total (§7: a paginated list
+/// is an envelope, never a bare array).
+///
+/// The page is at most [`MAX_LIST_LIMIT`] rows and costs three queries no
+/// matter how many: the page, the `COUNT(*)`, and one `titles_for` lookup.
+pub(crate) fn list_artifacts(
+    db: &Database,
+    owner_id: &str,
+    params: ListArtifactsParams,
+) -> Response {
+    let mut query = ArtifactQuery::new(owner_id);
+
+    if let Some(kind) = params.kind.as_deref() {
+        match ArtifactKind::parse(kind) {
+            Some(k) => query.kind = Some(k),
+            None => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_KIND",
+                    format!("unknown artifact kind '{kind}'"),
+                );
+            }
+        }
+    }
+    if let Some(origin) = params.origin.as_deref() {
+        // `ArtifactOrigin::parse` folds anything unknown to `Upload` — right
+        // for reading a column, wrong for a filter, where it would answer with
+        // uploads for `?origin=generated`.
+        match origin {
+            "upload" => query.origin = Some(ArtifactOrigin::Upload),
+            "produced" => query.origin = Some(ArtifactOrigin::Produced),
+            _ => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_ORIGIN",
+                    format!("unknown artifact origin '{origin}'"),
+                );
+            }
+        }
+    }
+
+    query.task_id = params.task_id;
+    query.project_root = params.project_root;
+    query.pinned = params.pinned;
+    query.q = params.q;
+    query.include_missing = params.include_missing;
+    query.limit = page_limit(params.limit);
+    // A negative offset is a request nobody can serve — refusing it beats
+    // silently answering with the first page, which is a different question.
+    let offset = params.offset.unwrap_or(0);
+    if offset < 0 {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_OFFSET",
+            format!("offset must not be negative, got {offset}"),
+        );
+    }
+    query.offset = offset;
+
+    let (records, total) = match ArtifactStore::new(db).list(&query) {
+        Ok(page) => page,
+        Err(e) => return store_error(&e),
+    };
+
+    let titles = task_titles(db, &records);
+    let artifacts: Vec<serde_json::Value> = records
+        .iter()
+        .map(|record| {
+            let title = record
+                .task_id
+                .as_deref()
+                .and_then(|id| titles.get(id))
+                .map(String::as_str);
+            artifact_json(record, title)
+        })
+        .collect();
+
+    Json(serde_json::json!({ "artifacts": artifacts, "total": total })).into_response()
+}
+
+/// `GET /v1/artifacts/{id}`.
+pub(crate) fn get_artifact(db: &Database, owner_id: &str, id: &str) -> Response {
+    let record = match visible(db, owner_id, id) {
+        Ok(record) => record,
+        Err(response) => return response,
+    };
+    let titles = task_titles(db, std::slice::from_ref(&record));
+    let title = record
+        .task_id
+        .as_deref()
+        .and_then(|id| titles.get(id))
+        .map(String::as_str);
+    Json(artifact_json(&record, title)).into_response()
+}
+
+/// `GET /v1/artifacts/{id}/content` and `…/versions/{n}/content` — the same
+/// body, differing only in where `version` came from.
+///
+/// Authenticates inline (GAP-11), then answers exactly as the store does:
+/// `404` for a row this owner cannot see or a version that does not exist,
+/// `410` `ARTIFACT_GONE` when the bytes are missing — which is also what
+/// stamps `missing_since` on the row.
+///
+/// A read is also where a **hand edit** is noticed (§4.8): if the bytes on
+/// disk are not the ones the row describes, the store records them as a version
+/// with `author_agent_id = NULL` and this announces it — an `ArtifactWritten`
+/// with a null `agent_id`, which is the honest attribution for a version
+/// OpenAlpaca did not write. Announcing is not part of reading, so a context
+/// with no bus reads exactly the same.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn artifact_content(
+    db: &Database,
+    owner_id: &str,
+    expected_token: &str,
+    headers: &HeaderMap,
+    query_token: Option<&str>,
+    id: &str,
+    version: Option<u32>,
+    bus: Option<&EventBus>,
+) -> Response {
+    if !content_token_ok(headers, query_token, expected_token) {
+        return invalid_token();
+    }
+    let record = match visible(db, owner_id, id) {
+        Ok(record) => record,
+        Err(response) => return response,
+    };
+    // R32: the check hashes the head when its stamp says the bytes moved, so
+    // the whole resolution goes on a blocking thread — the hash itself runs
+    // between the store's two short locked sections, never inside one.
+    let owned_db = db.clone();
+    let owned_id = id.to_string();
+    let resolved = tokio::task::spawn_blocking(move || {
+        ArtifactStore::new(&owned_db).resolve_content_with_edit(&owned_id, version)
+    })
+    .await;
+    let (path, edit) = match resolved {
+        Ok(Ok(found)) => found,
+        Ok(Err(e)) => return store_error(&e),
+        // The blocking task panicked or was cancelled: neither is a store
+        // failure, so it does not go through `store_error`'s `DB_ERROR`.
+        Err(e) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "CONTENT_FAILED",
+                format!("the content task did not finish: {e}"),
+            );
+        }
+    };
+    if let Some(edited) = edit {
+        announce_user_edit(bus, &edited);
+    }
+    content_response(&path, &record.mime_type, &record.name).await
+}
+
+/// One `ArtifactWritten` for a version nobody in OpenAlpaca wrote (§4.8).
+///
+/// `agent_id` is `None` **by construction**, not copied from the record: the
+/// row's `agent_id` is whoever wrote the version this edit replaced, and
+/// reporting them as the author of a hand edit is exactly the attribution the
+/// null `author_agent_id` exists to avoid.
+pub(crate) fn announce_user_edit(bus: Option<&EventBus>, record: &ArtifactRecord) {
+    let Some(bus) = bus else {
+        tracing::debug!(
+            artifact_id = %record.id,
+            "a hand edit was recorded with no event bus in reach — not announced"
+        );
+        return;
+    };
+    bus.publish(SystemEvent::ArtifactWritten {
+        artifact_id: record.id.clone(),
+        task_id: record.task_id.clone(),
+        agent_id: None,
+        name: record.name.clone(),
+        kind: record
+            .kind
+            .unwrap_or_else(|| ArtifactKind::for_mime(&record.mime_type))
+            .as_str()
+            .to_string(),
+        version: record.version,
+        path: record.storage_path.clone(),
+        timestamp: chrono::Utc::now(),
+    });
+}
+
+/// `GET /v1/artifacts/{id}/versions` — newest first.
+pub(crate) fn list_artifact_versions(db: &Database, owner_id: &str, id: &str) -> Response {
+    if let Err(response) = visible(db, owner_id, id) {
+        return response;
+    }
+    match ArtifactStore::new(db).versions(id) {
+        Ok(rows) => {
+            let versions: Vec<serde_json::Value> = rows.iter().map(version_json).collect();
+            Json(serde_json::json!({ "versions": versions })).into_response()
+        }
+        Err(e) => store_error(&e),
+    }
+}
+
+/// `GET /v1/artifacts/{id}/diff?from=&to=` — the unified patch between two
+/// versions, with the `+`/`-` totals the store counted from the same diff.
+///
+/// An image or a binary answers `409` `NOT_DIFFABLE`, and that answer is
+/// final; a version above `MAX_DIFF_BYTES` (8 MiB) is `409` `DIFF_TOO_LARGE`
+/// and the version list's stored counts are its summary; a version whose bytes
+/// are gone is `410`, as reading it is — and, exactly as reading it does, that
+/// resolution stamps `missing_since` when the *head* is what is missing.
+///
+/// R32: only the path resolution touches the database. The two reads and the
+/// diff run on a blocking thread, because they are unbounded in the artifact's
+/// size and `Database::with_connection` holds the daemon's one connection for
+/// its whole closure — the same reason `artifact_content` reads its bytes
+/// outside `resolve_content`. The patch is decoded lossily, so an invalid byte
+/// in a nominally-text artifact reaches the UI as U+FFFD.
+pub(crate) async fn artifact_diff(
+    db: &Database,
+    owner_id: &str,
+    id: &str,
+    from: u32,
+    to: u32,
+) -> Response {
+    if let Err(response) = visible(db, owner_id, id) {
+        return response;
+    }
+    let (from_path, to_path) = match ArtifactStore::new(db).diff_paths(id, from, to) {
+        Ok(paths) => paths,
+        Err(e) => return store_error(&e),
+    };
+    let owned_id = id.to_string();
+    let rendered = tokio::task::spawn_blocking(move || {
+        ArtifactStore::diff_files(&owned_id, from, &from_path, to, &to_path)
+    })
+    .await;
+    match rendered {
+        Ok(Ok(diff)) => Json(serde_json::json!({
+            "from": diff.from,
+            "to": diff.to,
+            "added_lines": diff.added_lines,
+            "removed_lines": diff.removed_lines,
+            "format": diff.format,
+            "patch": diff.patch,
+        }))
+        .into_response(),
+        Ok(Err(e)) => store_error(&e),
+        // The blocking task panicked or was cancelled: neither is a store
+        // failure, so it does not go through `store_error`'s `DB_ERROR`.
+        Err(e) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DIFF_FAILED",
+            format!("the diff task did not finish: {e}"),
+        ),
+    }
+}
+
+/// `PUT /v1/artifacts/{id}/pin` (GAP-12).
+pub(crate) fn pin_artifact(db: &Database, owner_id: &str, id: &str, pinned: bool) -> Response {
+    if let Err(response) = visible(db, owner_id, id) {
+        return response;
+    }
+    match ArtifactStore::new(db).set_pinned(id, pinned) {
+        Ok(()) => Json(serde_json::json!({ "id": id, "pinned": pinned })).into_response(),
+        Err(e) => store_error(&e),
+    }
+}
+
+// ── Handlers ─────────────────────────────────────────────────────
+
+pub async fn list_artifacts_handler(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ListArtifactsParams>,
+) -> Response {
+    list_artifacts(&state.db, &state.local_user_id, params)
+}
+
+pub async fn get_artifact_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    get_artifact(&state.db, &state.local_user_id, &id)
+}
+
+pub async fn get_artifact_content_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(params): Query<ContentParams>,
+    headers: HeaderMap,
+) -> Response {
+    artifact_content(
+        &state.db,
+        &state.local_user_id,
+        &state.token,
+        &headers,
+        params.token.as_deref(),
+        &id,
+        params.version,
+        Some(&state.gateway.bus),
+    )
+    .await
+}
+
+pub async fn get_artifact_version_content_handler(
+    State(state): State<Arc<AppState>>,
+    Path((id, version)): Path<(String, u32)>,
+    Query(params): Query<super::TokenParams>,
+    headers: HeaderMap,
+) -> Response {
+    artifact_content(
+        &state.db,
+        &state.local_user_id,
+        &state.token,
+        &headers,
+        params.token.as_deref(),
+        &id,
+        Some(version),
+        Some(&state.gateway.bus),
+    )
+    .await
+}
+
+pub async fn list_artifact_versions_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    list_artifact_versions(&state.db, &state.local_user_id, &id)
+}
+
+pub async fn get_artifact_diff_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(params): Query<DiffParams>,
+) -> Response {
+    artifact_diff(
+        &state.db,
+        &state.local_user_id,
+        &id,
+        params.from,
+        params.to,
+    )
+    .await
+}
+
+pub async fn pin_artifact_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<PinRequest>,
+) -> Response {
+    pin_artifact(&state.db, &state.local_user_id, &id, body.pinned)
+}
+
+#[cfg(test)]
+mod tests;

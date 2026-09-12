@@ -1,4 +1,4 @@
-use openalpaca_llm::{ChatMessage, ContentPart, Role};
+use openalpaca_llm::{ChatMessage, ContentPart, Role, ToolDefinition};
 
 /// Estimate tokens for a single content part.
 fn estimate_part_tokens(part: &ContentPart) -> u32 {
@@ -19,6 +19,28 @@ fn estimate_part_tokens(part: &ContentPart) -> u32 {
             .map_or(500, |t| (t.len() / 4) as u32),
         ContentPart::FileRef { .. } => 50,
     }
+}
+
+/// Estimate tokens for a tool surface using the 1 token ≈ 4 bytes heuristic
+/// over each tool's description, JSON parameter schema, and input examples.
+///
+/// This is the single source of truth for the "tools" section cost: the
+/// agentic loop's Router-retry tool-token estimate and every
+/// `register_section("tools", …)` surface builder (lead agent, main-loop
+/// simple-query handler, skill invocation) call this rather than pricing
+/// tools at a flat per-tool constant, which under-counts non-trivial schemas.
+pub(crate) fn estimate_tools_tokens(tools: &[ToolDefinition]) -> usize {
+    let tool_bytes: usize = tools
+        .iter()
+        .map(|t| {
+            let base = t.description.len() + t.parameters.to_string().len();
+            let examples = t.input_examples.as_ref().map_or(0, |ex| {
+                ex.iter().map(|e| e.to_string().len()).sum()
+            });
+            base + examples
+        })
+        .sum();
+    tool_bytes / 4
 }
 
 /// Estimate tokens in a message list using the 1 token ≈ 4 bytes heuristic.
@@ -242,6 +264,95 @@ mod tests {
     #[test]
     fn test_estimate_empty_messages_returns_zero() {
         assert_eq!(estimate_messages_tokens(&[]), 0);
+    }
+
+    /// A4's byte-based tools estimate must be one function shared by the
+    /// agentic loop and every `register_section("tools", …)` surface builder
+    /// (`runner/lead_agent/mod.rs`, `simple_query_handler.rs`,
+    /// `orchestrator/skill/invocation.rs`). A flat `tools.len() * 200` guess
+    /// under-counts non-trivial schemas — this test's independent oracle
+    /// (the formula duplicated here, not by calling the function under test)
+    /// proves `estimate_tools_tokens` matches it and diverges sharply from
+    /// the old flat constant for a realistic tool surface.
+    #[test]
+    fn test_estimate_tools_tokens_matches_byte_formula_not_flat_200() {
+        use openalpaca_llm::ToolDefinition;
+
+        let tools = vec![
+            ToolDefinition {
+                name: "file_read".to_string(),
+                description: "Read the contents of a file from the workspace filesystem, \
+                    optionally restricted to a byte range. Returns UTF-8 text or an error \
+                    if the file does not exist or is not valid UTF-8."
+                    .to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Workspace-relative path"},
+                        "start_byte": {"type": "integer", "description": "Optional start offset"},
+                        "end_byte": {"type": "integer", "description": "Optional end offset"}
+                    },
+                    "required": ["path"]
+                }),
+                strict: None,
+                input_examples: Some(vec![serde_json::json!({"path": "notes/todo.md"})]),
+            },
+            ToolDefinition {
+                name: "web_search".to_string(),
+                description: "Search the web for up-to-date information and return a list of \
+                    ranked results with titles, URLs, and short snippets."
+                    .to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "The search query"},
+                        "max_results": {"type": "integer", "description": "Cap on result count"}
+                    },
+                    "required": ["query"]
+                }),
+                strict: None,
+                input_examples: None,
+            },
+        ];
+
+        // Independent oracle: the same "(description + parameters +
+        // input_examples bytes) / 4" formula the loop uses, written out
+        // separately here rather than by calling `estimate_tools_tokens`.
+        let expected_bytes: usize = tools
+            .iter()
+            .map(|t| {
+                let base = t.description.len() + t.parameters.to_string().len();
+                let examples = t.input_examples.as_ref().map_or(0, |ex| {
+                    ex.iter().map(|e| e.to_string().len()).sum()
+                });
+                base + examples
+            })
+            .sum();
+        let expected = expected_bytes / 4;
+
+        assert_eq!(estimate_tools_tokens(&tools), expected);
+
+        // Regression guard: the old flat guess must not coincide with the
+        // byte-based estimate for this realistic, non-trivial tool surface.
+        let flat_200 = tools.len() * 200;
+        assert_ne!(
+            estimate_tools_tokens(&tools),
+            flat_200,
+            "byte estimate should diverge from the flat 200-per-tool guess"
+        );
+
+        // And registering it on a real budget must carry the exact same
+        // number through — no re-derivation, no drift.
+        use crate::context_budget::ContextBudgetManager;
+        use crate::daemon_config::ContextBudgetConfig;
+        let mut budget = ContextBudgetManager::new(200_000, &ContextBudgetConfig::default());
+        budget.register_section("tools", estimate_tools_tokens(&tools));
+        let tools_section = budget
+            .section_breakdown()
+            .into_iter()
+            .find(|(name, _)| *name == "tools")
+            .map(|(_, tokens)| tokens);
+        assert_eq!(tools_section, Some(expected));
     }
 
     #[test]

@@ -107,10 +107,37 @@ pub(super) fn build_llm_router(
     }
 }
 
+/// `llm.toml`'s hook into the one atomic writer for hand-edited config
+/// (plan §1.4, P-11).
+///
+/// It lives in `openalpaca_core`, which sits above `openalpaca_llm`, so the
+/// settings service takes it by injection rather than naming it. Everything
+/// `mcp.toml` and `.permissions.toml` get — tmp → fsync → rotate → rename, five
+/// versions kept under `state/backups/` — `llm.toml` now gets too. The lock is
+/// the caller's: `persist_only` holds `llm.toml.lock` across the whole
+/// read-modify-write.
+///
+/// It is also where the daemon records what it wrote (R58a). The file watcher
+/// sees the daemon's own write exactly as it sees a hand edit; without the
+/// hash in `hashes` it would re-run the whole reload one poll interval later
+/// and put a just-disabled provider's `[models]` rows back. The hash goes in
+/// **before** the bytes land, so the watcher can never observe the new file
+/// without it.
+pub(crate) fn atomic_config_writer(
+    hashes: crate::hot_reload::ConfigHashes,
+) -> openalpaca_llm::ConfigWriter {
+    Arc::new(move |path: &Path, contents: &str| {
+        crate::hot_reload::record_own_config_write(&hashes, contents);
+        openalpaca_core::config_io::atomic_write_with_backup(path, contents)
+            .map_err(|e| e.to_string())
+    })
+}
+
 pub(super) async fn build_llm_settings_service(
     llm_router: &Option<Arc<openalpaca_llm::LlmRouter>>,
     llm_config_path: &Path,
     secret_store: &Arc<dyn openalpaca_llm::SecretStore>,
+    llm_config_hashes: &crate::hot_reload::ConfigHashes,
 ) -> Option<Arc<openalpaca_llm::LlmSettingsService>> {
     let service = if let Some(router) = llm_router {
         match openalpaca_llm::LlmSettingsService::new_with_secret_store(
@@ -120,7 +147,9 @@ pub(super) async fn build_llm_settings_service(
         ) {
             Ok(service) => {
                 info!("LLM settings service initialized");
-                Some(Arc::new(service))
+                Some(Arc::new(service.with_config_writer(atomic_config_writer(
+                    llm_config_hashes.clone(),
+                ))))
             }
             Err(e) => {
                 warn!("Failed to init LLM settings service: {e}");

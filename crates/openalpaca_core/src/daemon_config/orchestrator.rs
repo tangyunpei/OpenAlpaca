@@ -8,6 +8,93 @@ pub struct OrchestratorConfig {
     pub costs: CostsConfig,
     pub prompt_budgets: PromptBudgetsConfig,
     pub routing: RoutingConfig,
+    pub sessions: SessionsConfig,
+}
+
+/// Session event log limits (`[orchestrator.sessions]`, plan §5.4).
+///
+/// The log is bounded, not unbounded history: a trim loses loop-interior
+/// detail (rounds, tool payloads) but never the conversation, which lives in
+/// SQLite.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionsConfig {
+    /// Per session, counting `log.jsonl` segments **plus** `results/` and
+    /// `snapshots/`. On exceed the writer drops whole oldest segments (never
+    /// the live one) and writes a `log_trimmed` record naming the dropped seq
+    /// range.
+    #[serde(default = "default_log_max_session_bytes")]
+    pub log_max_session_bytes: u64,
+    /// Across all sessions, evicting oldest-touched archived sessions first;
+    /// an active session's log is never evicted. Read by the boot sweep.
+    #[serde(default = "default_log_max_total_bytes")]
+    pub log_max_total_bytes: u64,
+    /// Age-based sweep of archived session logs, in days — **reserved, with no
+    /// consumer yet**.
+    ///
+    /// The key is parsed, clamped by `validate()` and served by
+    /// `GET /v1/status`; nothing reads it to expire anything. Only the two byte
+    /// caps above are enforced, so setting this to `90` bounds nothing today:
+    /// plan §5.4's age pass was not built, and whether it should be (and at
+    /// what default) is owner decision T12. `load_daemon_config` warns at boot
+    /// when the value is non-default, so the key cannot read as working.
+    #[serde(default = "default_log_retention_days")]
+    pub log_retention_days: u32,
+    /// The one threshold two consumers share (§5.4, P-16/C-2): a tool result
+    /// larger than this is written once to the session's `results/` and the
+    /// **model** is handed a stub naming it, instead of a head-only cut that
+    /// destroyed the tail. Below it the result travels inline, unchanged.
+    ///
+    /// Only sessions can spill, so a loop with no session log falls back to
+    /// the head-only cut at this same size — one number, never two.
+    #[serde(default = "default_tool_result_inline_bytes")]
+    pub tool_result_inline_bytes: usize,
+    /// §5.7's pre-edit images: the largest file `file_write` will copy into
+    /// the session's `snapshots/` before overwriting it.
+    ///
+    /// It is a **refusal** threshold, not a skip: a snapshot the session
+    /// cannot afford means the write does not happen, because silently
+    /// overwriting a file whose only copy this was is the outcome the tier
+    /// exists to prevent. Default 10 MB — deliberately the same number as
+    /// `file_write`'s own content bound (`MAX_FILE_WRITE_SIZE`,
+    /// `tools/builtins/file_ops.rs`), so this tier costs nothing in
+    /// reachability: no overwrite `file_write` could already produce is
+    /// refused purely because S3 was added (Task 56 fix round 1, Important
+    /// #2 / R68). Lower it only with that coupling in mind — a smaller value
+    /// reopens the band of existing files `file_write` refuses to touch at
+    /// all.
+    #[serde(default = "default_snapshot_max_bytes")]
+    pub snapshot_max_bytes: u64,
+}
+
+fn default_log_max_session_bytes() -> u64 {
+    256 * 1024 * 1024
+}
+fn default_log_max_total_bytes() -> u64 {
+    2 * 1024 * 1024 * 1024
+}
+fn default_log_retention_days() -> u32 {
+    0
+}
+fn default_tool_result_inline_bytes() -> usize {
+    32 * 1024
+}
+fn default_snapshot_max_bytes() -> u64 {
+    // `file_write`'s own content bound (`MAX_FILE_WRITE_SIZE`,
+    // `tools/builtins/file_ops.rs`) — kept equal on purpose, see the field
+    // doc comment above.
+    10 * 1024 * 1024
+}
+
+impl Default for SessionsConfig {
+    fn default() -> Self {
+        Self {
+            log_max_session_bytes: default_log_max_session_bytes(),
+            log_max_total_bytes: default_log_max_total_bytes(),
+            log_retention_days: default_log_retention_days(),
+            tool_result_inline_bytes: default_tool_result_inline_bytes(),
+            snapshot_max_bytes: default_snapshot_max_bytes(),
+        }
+    }
 }
 
 /// Routing V2 configuration (`[orchestrator.routing]`).
@@ -43,9 +130,9 @@ pub struct RoutingConfig {
     pub main_loop_max_tools_per_round: usize,
     /// Main-loop tool surface: "core_union" (default — core set ∪
     /// keyword-suggested tools ∪ MCP/plugin extension tools ∪ `invoke_skill`)
-    /// or "full" (entire registry — escape hatch). Both subtract
-    /// `execution.skill_defaults.global_tool_deny` from the extension/full
-    /// portion — the deny list is the opt-out for installed MCP/plugin tools.
+    /// or "full" (entire registry — escape hatch). Both drop the tools of an
+    /// extension that is not `Enabled`; there is no per-tool opt-out — the
+    /// ENABLE axis is one toggle per MCP server and per plugin.
     #[serde(default = "default_tool_selection")]
     pub tool_selection: String,
     /// Global kill switch for cron-scheduled skills (`invoke.cron` /
@@ -54,6 +141,18 @@ pub struct RoutingConfig {
     /// are ignored.
     #[serde(default = "default_scheduled_skills_enabled")]
     pub scheduled_skills_enabled: bool,
+    /// **Experimental (§5.6c, S2): replay resume.** With this on,
+    /// `POST /v1/tasks/{id}/action {"action":"resume"}` re-enters an
+    /// `interrupted` run under its own id, rebuilding the loop's history from
+    /// the session log and continuing it with a synthetic interjection.
+    ///
+    /// Off by default, and deliberately so: the plan calls S2 its one
+    /// speculative piece, `rerun` is the trusted fallback, and a replay that
+    /// gets the history wrong hands the model a false account of its own
+    /// work. Everything the feature needs is built and tested; what is not
+    /// yet earned is the default.
+    #[serde(default = "default_resume_enabled")]
+    pub resume_enabled: bool,
 }
 
 fn default_steering_enabled() -> bool {
@@ -80,6 +179,9 @@ fn default_tool_selection() -> String {
 fn default_scheduled_skills_enabled() -> bool {
     true
 }
+fn default_resume_enabled() -> bool {
+    false
+}
 
 impl Default for RoutingConfig {
     fn default() -> Self {
@@ -92,6 +194,7 @@ impl Default for RoutingConfig {
             main_loop_max_tools_per_round: default_main_loop_max_tools_per_round(),
             tool_selection: default_tool_selection(),
             scheduled_skills_enabled: default_scheduled_skills_enabled(),
+            resume_enabled: default_resume_enabled(),
         }
     }
 }

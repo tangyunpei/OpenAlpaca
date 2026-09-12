@@ -43,8 +43,8 @@ enabled, `check_subagent_status`, `wait_for_subagents`, plus
 `post_update` + `queue_followup` under steering) + workspace tools +
 `memory_search`, unioned with the same extension set as the main loop —
 every installed MCP-bridged (`<server>__<tool>`) and plugin-provided
-(`<plugin>::<tool>`) tool minus `execution.skill_defaults.global_tool_deny`
-— and a per-request `invoke_skill` instance, so the lead can run catalog
+(`<plugin>::<tool>`) tool whose extension is enabled — and a per-request
+`invoke_skill` instance, so the lead can run catalog
 skills and connected integrations itself or delegate them. The lead's
 `SandboxPolicy` allowlist is extended from the final tool definitions at
 run time (template denials still win); subagents stay template-scoped —
@@ -95,13 +95,13 @@ captured):
 
 **Tool surface** (`tools/builtins/main_loop.rs::main_loop_tool_set`):
 the base picks (keyword-suggested tools under
-`tool_selection = "core_union"`, or the whole registry minus the global
-deny list under `"full"`) unioned with a per-request set —
+`tool_selection = "core_union"`, or the whole registry under `"full"`)
+unioned with a per-request set —
 `start_workflow`, `task_status`, `memory_store` + `memory_forget`
 (DB-gated), the globally-registered `memory_search` definition, every
-installed extension tool (MCP-bridged `<server>__<tool>` and
-plugin-provided `<plugin>::<tool>`, minus
-`execution.skill_defaults.global_tool_deny` — the opt-out), and
+installed extension tool whose extension is enabled (MCP-bridged
+`<server>__<tool>` and plugin-provided `<plugin>::<tool>`; a disabled
+server or plugin contributes nothing on either surface), and
 `invoke_skill` (catalog-skill invocation through the nested-skill
 executor; present when an LLM router is configured). So installed
 MCP/plugin tools and `invoke_skill` are on the DEFAULT surface, not just

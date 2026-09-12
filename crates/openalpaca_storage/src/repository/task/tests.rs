@@ -27,6 +27,9 @@ fn make_task(id: &str, title: &str) -> Task {
         outcome_json: None,
         outcome_kind: None,
         artifact_count: 0,
+        workspace_id: None,
+        source_task_id: None,
+        session_id: None,
     }
 }
 
@@ -305,8 +308,11 @@ fn test_set_outcome_updates_existing() {
     );
 }
 
+/// §5.6b — the boot sweep stops lying. A run the previous incarnation left
+/// non-terminal becomes `interrupted`, not `failed` with a fabricated message:
+/// nothing failed, the daemon went away.
 #[test]
-fn test_fail_all_non_terminal_sweeps_only_live_rows() {
+fn interrupt_all_non_terminal_sweeps_only_live_rows() {
     let db = setup_db();
     let repo = TaskRepository::new(&db);
 
@@ -327,27 +333,44 @@ fn test_fail_all_non_terminal_sweeps_only_live_rows() {
     let mut with_summary = make_task("running-with-summary", "has summary");
     with_summary.status = TaskStatus::Running;
     with_summary.result_summary = Some("partial progress".to_string());
+    with_summary.session_id = Some("sess-1".to_string());
     repo.create(&with_summary).unwrap();
 
-    let swept = repo
-        .fail_all_non_terminal("daemon restarted — task orphaned")
+    // The recovery pass needs the rows *before* they are flipped: it reads
+    // each one's session log for undrained steering.
+    let live = repo.list_non_terminal().unwrap();
+    let mut ids: Vec<&str> = live.iter().map(|r| r.id.as_str()).collect();
+    ids.sort();
+    assert_eq!(ids, ["paused", "queued", "running", "running-with-summary"]);
+    let carried = live
+        .iter()
+        .find(|r| r.id == "running-with-summary")
         .unwrap();
+    assert_eq!(carried.session_id.as_deref(), Some("sess-1"));
+    assert_eq!(carried.lane_key, "cli");
+
+    let swept = repo.interrupt_all_non_terminal("interrupted by instance i-7").unwrap();
     assert_eq!(swept, 4, "queued + running + paused + running-with-summary");
 
-    // Non-terminal rows flipped to Failed with the reason + completed_at.
+    // Non-terminal rows flipped to Interrupted with the detail + completed_at.
     for id in ["queued", "running", "paused"] {
         let task = repo.get(id).unwrap().unwrap();
-        assert_eq!(task.status, TaskStatus::Failed, "task {id}");
+        assert_eq!(task.status, TaskStatus::Interrupted, "task {id}");
         assert_eq!(
             task.result_summary.as_deref(),
-            Some("daemon restarted — task orphaned"),
+            Some("interrupted by instance i-7"),
+            "task {id}"
+        );
+        assert_eq!(
+            task.outcome_kind,
+            Some(OutcomeKind::Interrupted),
             "task {id}"
         );
         assert!(task.completed_at.is_some(), "task {id}");
     }
     // Existing summary preserved.
     let task = repo.get("running-with-summary").unwrap().unwrap();
-    assert_eq!(task.status, TaskStatus::Failed);
+    assert_eq!(task.status, TaskStatus::Interrupted);
     assert_eq!(task.result_summary.as_deref(), Some("partial progress"));
 
     // Terminal rows untouched.
@@ -361,6 +384,302 @@ fn test_fail_all_non_terminal_sweeps_only_live_rows() {
         assert!(task.result_summary.is_none(), "terminal task {id}");
     }
 
-    // Idempotent: a second sweep finds nothing.
-    assert_eq!(repo.fail_all_non_terminal("again").unwrap(), 0);
+    // Idempotent: a second sweep finds nothing, and neither does the listing
+    // the recovery pass drives off — `interrupted` is terminal.
+    assert_eq!(repo.interrupt_all_non_terminal("again").unwrap(), 0);
+    assert!(repo.list_non_terminal().unwrap().is_empty());
+}
+
+/// `interrupted` is terminal: a new incarnation cannot re-enter the loop that
+/// was running, so the row is finished. That is what makes `rerun` the restart
+/// verb and `start` refuse (R43).
+#[test]
+fn interrupted_is_terminal_and_round_trips_as_a_status() {
+    assert!(TaskStatus::Interrupted.is_terminal());
+    assert_eq!(TaskStatus::Interrupted.as_str(), "interrupted");
+    assert_eq!(
+        "interrupted".parse::<TaskStatus>().unwrap(),
+        TaskStatus::Interrupted
+    );
+    assert_eq!(
+        serde_json::to_string(&TaskStatus::Interrupted).unwrap(),
+        "\"interrupted\""
+    );
+    assert_eq!(OutcomeKind::Interrupted.as_str(), "interrupted");
+    assert_eq!(
+        "interrupted".parse::<OutcomeKind>().unwrap(),
+        OutcomeKind::Interrupted
+    );
+}
+
+/// Migration 036's `task.workspace_id` — the project a run belonged to, so a
+/// rerun and the Library can filter by project. It is the *request's*
+/// workspace root (never the daemon CWD, ruling R22), and `NULL` for every
+/// turn that arrived without one.
+#[test]
+fn workspace_id_round_trips_and_defaults_to_none() {
+    let db = setup_db();
+    let repo = TaskRepository::new(&db);
+
+    let mut in_project = make_task("t-project", "Ship the release");
+    in_project.workspace_id = Some("/Users/dev/openalpaca".to_string());
+    repo.create(&in_project).unwrap();
+    repo.create(&make_task("t-loose", "Answer a Telegram question"))
+        .unwrap();
+
+    assert_eq!(
+        repo.get("t-project").unwrap().unwrap().workspace_id.as_deref(),
+        Some("/Users/dev/openalpaca")
+    );
+    assert_eq!(repo.get("t-loose").unwrap().unwrap().workspace_id, None);
+
+    // Every list path reads the same column, so a Library filter sees it too.
+    let listed = repo.list_by_creator("user1", 10).unwrap();
+    let project_row = listed.iter().find(|t| t.id == "t-project").unwrap();
+    assert_eq!(
+        project_row.workspace_id.as_deref(),
+        Some("/Users/dev/openalpaca")
+    );
+    let recent = repo.list_recent(10).unwrap();
+    assert_eq!(
+        recent.iter().find(|t| t.id == "t-loose").unwrap().workspace_id,
+        None
+    );
+}
+
+/// Migration 037's `task.source_task_id` — the provenance link a re-run writes
+/// from the new row back to the one it copied (GAP-06). `NULL` on every row
+/// that was not born of a re-run, which is nearly all of them.
+#[test]
+fn source_task_id_round_trips_and_defaults_to_none() {
+    let db = setup_db();
+    let repo = TaskRepository::new(&db);
+
+    repo.create(&make_task("t-original", "Ship the release"))
+        .unwrap();
+    let mut copy = make_task("t-copy", "Ship the release");
+    copy.source_task_id = Some("t-original".to_string());
+    repo.create(&copy).unwrap();
+
+    assert_eq!(repo.get("t-original").unwrap().unwrap().source_task_id, None);
+    assert_eq!(
+        repo.get("t-copy")
+            .unwrap()
+            .unwrap()
+            .source_task_id
+            .as_deref(),
+        Some("t-original")
+    );
+
+    // Every list path reads the same column, so a client that lists runs can
+    // see which one a row came from without a second request.
+    let listed = repo.list_recent(10).unwrap();
+    let copy = listed.iter().find(|t| t.id == "t-copy").unwrap();
+    assert_eq!(copy.source_task_id.as_deref(), Some("t-original"));
+}
+
+// ============================================================================
+// upsert_queued — D5's `start` keeps the task id
+// ============================================================================
+
+/// The plan's acknowledged "least clean" code, isolated here so it has exactly
+/// one caller and one test: `start` re-launches a stored row **under its own
+/// id**, so the dispatcher's persist step cannot be a plain `INSERT`.
+#[test]
+fn upsert_queued_creates_a_row_that_does_not_exist_yet() {
+    let db = setup_db();
+    let repo = TaskRepository::new(&db);
+
+    let mut task = make_task("t1", "Ship the release");
+    task.description = Some("do the thing".to_string());
+    repo.upsert_queued(&task).unwrap();
+
+    let stored = repo.get("t1").unwrap().unwrap();
+    assert_eq!(stored.title, "Ship the release");
+    assert_eq!(stored.description.as_deref(), Some("do the thing"));
+    assert_eq!(stored.status, TaskStatus::Queued);
+}
+
+/// Re-launching an existing row resets it to a fresh queued run: the previous
+/// attempt's outcome, summary, progress and state are cleared, because leaving
+/// them would describe a run that is no longer the one this row names. The
+/// row's identity — its id, its creation time and its priority — survives.
+#[test]
+fn upsert_queued_relaunches_an_existing_row_in_place() {
+    let db = setup_db();
+    let repo = TaskRepository::new(&db);
+
+    let mut original = make_task("t1", "Ship the release");
+    original.priority = 7;
+    original.description = Some("first attempt".to_string());
+    repo.create(&original).unwrap();
+    repo.update_state("t1", r#"{"objective":"old"}"#, 0).unwrap();
+    repo.set_result("t1", "cancelled halfway").unwrap();
+    repo.set_outcome("t1", r#"{"summary":"partial"}"#, OutcomeKind::Mixed, 2)
+        .unwrap();
+    repo.update_status("t1", TaskStatus::Cancelled).unwrap();
+    let created_at = repo.get("t1").unwrap().unwrap().created_at;
+
+    let mut relaunch = make_task("t1", "Ship the release");
+    relaunch.description = Some("second attempt".to_string());
+    relaunch.workspace_id = Some("/Users/dev/openalpaca".to_string());
+    repo.upsert_queued(&relaunch).unwrap();
+
+    let stored = repo.get("t1").unwrap().unwrap();
+    assert_eq!(stored.status, TaskStatus::Queued);
+    assert_eq!(stored.description.as_deref(), Some("second attempt"));
+    assert_eq!(
+        stored.workspace_id.as_deref(),
+        Some("/Users/dev/openalpaca")
+    );
+    assert!(stored.result_summary.is_none(), "the old summary is gone");
+    assert!(stored.outcome_json.is_none(), "the old outcome is gone");
+    assert!(stored.outcome_kind.is_none());
+    assert_eq!(stored.artifact_count, 0);
+    assert!(stored.completed_at.is_none(), "it has not finished again");
+    assert!(stored.state_json.is_none());
+    assert_eq!(
+        stored.state_version, 0,
+        "the dispatcher's state init writes against version 0"
+    );
+
+    // Identity is not re-minted: same row, same age, same priority.
+    assert_eq!(stored.created_at, created_at);
+    assert_eq!(stored.priority, 7);
+
+    // And exactly one row still answers to the id.
+    assert_eq!(repo.list_recent(10).unwrap().len(), 1);
+}
+
+/// §5.6c's `resume` is the first verb to re-launch a row that **did** run.
+/// The final outcome's artifact list is built from `state_json`
+/// (`TaskState::collect_artifacts` walks the steps' pointers), not from a
+/// query over the run's assets — so clearing it here would make a run that
+/// wrote three files before it crashed finish claiming only what it produced
+/// after the resume. The accumulators survive; everything that describes a
+/// run that has *stopped* still goes.
+#[test]
+fn upsert_queued_preserving_state_keeps_what_the_crashed_half_accumulated() {
+    let db = setup_db();
+    let repo = TaskRepository::new(&db);
+
+    let mut original = make_task("t1", "Ship the release");
+    original.priority = 7;
+    original.description = Some("first attempt".to_string());
+    repo.create(&original).unwrap();
+    repo.update_state("t1", r#"{"objective":"half done"}"#, 0)
+        .unwrap();
+    repo.set_result("t1", "interrupted — the daemon restarted")
+        .unwrap();
+    repo.set_outcome("t1", r#"{"summary":"partial"}"#, OutcomeKind::Mixed, 3)
+        .unwrap();
+    repo.update_status("t1", TaskStatus::Interrupted).unwrap();
+    let version = repo.get("t1").unwrap().unwrap().state_version;
+
+    let mut relaunch = make_task("t1", "Ship the release");
+    relaunch.description = Some("first attempt".to_string());
+    repo.upsert_queued_preserving_state(&relaunch).unwrap();
+
+    let stored = repo.get("t1").unwrap().unwrap();
+    // The run is live again…
+    assert_eq!(stored.status, TaskStatus::Queued);
+    assert!(stored.completed_at.is_none(), "it has not finished again");
+    assert!(
+        stored.result_summary.is_none(),
+        "the crash's summary does not describe the run that is now running"
+    );
+    // …over everything the crashed half accumulated.
+    assert_eq!(
+        stored.state_json.as_deref(),
+        Some(r#"{"objective":"half done"}"#),
+        "the outcome's artifact list is built from this"
+    );
+    assert_eq!(
+        stored.state_version, version,
+        "a preserved state keeps the version its next writer must match"
+    );
+    assert_eq!(stored.artifact_count, 3);
+    assert_eq!(stored.outcome_json.as_deref(), Some(r#"{"summary":"partial"}"#));
+    assert_eq!(stored.outcome_kind, Some(OutcomeKind::Mixed));
+    assert_eq!(stored.priority, 7, "identity is not re-minted");
+    assert_eq!(repo.list_recent(10).unwrap().len(), 1);
+
+    // And `upsert_queued` still resets: the two verbs are different verbs.
+    repo.upsert_queued(&relaunch).unwrap();
+    let reset = repo.get("t1").unwrap().unwrap();
+    assert!(reset.state_json.is_none());
+    assert_eq!(reset.artifact_count, 0);
+}
+
+/// Idempotent in the sense the dispatcher needs: calling it twice leaves one
+/// queued row, not two rows or an error.
+#[test]
+fn upsert_queued_is_idempotent() {
+    let db = setup_db();
+    let repo = TaskRepository::new(&db);
+
+    let task = make_task("t1", "Ship the release");
+    repo.upsert_queued(&task).unwrap();
+    repo.upsert_queued(&task).unwrap();
+
+    assert_eq!(repo.list_recent(10).unwrap().len(), 1);
+    assert_eq!(repo.get("t1").unwrap().unwrap().status, TaskStatus::Queued);
+}
+
+// ============================================================================
+// titles_for — the artifact list's join (R26)
+// ============================================================================
+
+#[test]
+fn titles_for_returns_one_entry_per_known_id() {
+    let db = setup_db();
+    let repo = TaskRepository::new(&db);
+    for (id, title) in [("t1", "Run one"), ("t2", "Run two"), ("t3", "Run three")] {
+        repo.create(&make_task(id, title)).unwrap();
+    }
+
+    let ids = ["t1".to_string(), "t3".to_string(), "gone".to_string()];
+    let titles = repo.titles_for(&ids).unwrap();
+
+    assert_eq!(titles.len(), 2, "a task that no longer exists is absent");
+    assert_eq!(titles.get("t1").map(String::as_str), Some("Run one"));
+    assert_eq!(titles.get("t3").map(String::as_str), Some("Run three"));
+    assert!(!titles.contains_key("gone"));
+    // t2 was not asked for.
+    assert!(!titles.contains_key("t2"));
+}
+
+#[test]
+fn titles_for_an_empty_slice_is_an_empty_map() {
+    let db = setup_db();
+    assert!(TaskRepository::new(&db).titles_for(&[]).unwrap().is_empty());
+}
+
+/// More ids than one `IN (…)` may carry: the helper chunks rather than
+/// building a statement with thousands of placeholders (SQLite's variable
+/// limit) or falling back to one query per id.
+#[test]
+fn titles_for_chunks_past_the_in_limit() {
+    let db = setup_db();
+    let count = 1_200;
+    db.with_connection(|conn| {
+        let tx = conn.unchecked_transaction()?;
+        for n in 0..count {
+            tx.execute(
+                "INSERT INTO task (id, title, created_by, source_lane)
+                 VALUES (?1, ?2, 'user1', 'cli')",
+                [format!("t{n:05}"), format!("Run {n}")],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    })
+    .unwrap();
+
+    let ids: Vec<String> = (0..count).map(|n| format!("t{n:05}")).collect();
+    let titles = TaskRepository::new(&db).titles_for(&ids).unwrap();
+
+    assert_eq!(titles.len(), count);
+    assert_eq!(titles.get("t00000").map(String::as_str), Some("Run 0"));
+    assert_eq!(titles.get("t01199").map(String::as_str), Some("Run 1199"));
 }

@@ -1,0 +1,2834 @@
+use super::*;
+use crate::FileAssetRepository;
+use crate::store::tests::HomeStoreGuard;
+use std::path::Path;
+use tempfile::{TempDir, tempdir};
+
+// ============================================================================
+// Fixture
+// ============================================================================
+
+/// A whole world: a temp home root (via `OPENALPACA_HOME_STORE`), a temp
+/// project root, and a temp database. Nothing here ever touches a real root.
+struct Fixture {
+    _home: TempDir,
+    _env: HomeStoreGuard,
+    _db_dir: TempDir,
+    project: TempDir,
+    db: Database,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let home = tempdir().unwrap();
+        let env = HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+        let project = tempdir().unwrap();
+        let db_dir = tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+        Self {
+            _home: home,
+            _env: env,
+            _db_dir: db_dir,
+            project,
+            db,
+        }
+    }
+
+    fn store(&self) -> ArtifactStore<'_> {
+        ArtifactStore::new(&self.db)
+    }
+
+    /// The canonical project root — canonical because `project_root` is the
+    /// canonical-path string everywhere (§4.8) and macOS's `/var` is a symlink.
+    fn project_root(&self) -> PathBuf {
+        self.project.path().canonicalize().unwrap()
+    }
+
+    fn scope(&self) -> StoreScope {
+        StoreScope::Project(self.project_root())
+    }
+
+    fn home_root(&self) -> PathBuf {
+        self._home.path().canonicalize().unwrap()
+    }
+
+    /// `<project>/.openalpaca/artifacts` — the root `rel_path` is relative to.
+    fn artifacts_root(&self) -> PathBuf {
+        self.project_root().join(".openalpaca").join("artifacts")
+    }
+
+    /// A `file_assets` row written by neither `ArtifactStore` nor this owner's
+    /// produced history — an **upload**, the table's other writer — addressing
+    /// `rel` in this project's store. `dir_rows` never sees it (it filters on
+    /// `origin = 'produced'`), so it is exactly the foreign claim R33 must not
+    /// reclaim.
+    fn foreign_row(&self, id: &str, rel: &str, storage_path: &Path) {
+        let root = self.project_root().to_string_lossy().to_string();
+        self.db
+            .with_connection(|conn| {
+                conn.execute(
+                    "INSERT INTO file_assets
+                        (id, owner_id, sha256, filename, mime_type, size_bytes, storage_path,
+                         status, origin, project_root, rel_path)
+                     VALUES (?1, ?2, 'sha', 'notes.md', 'text/markdown', 0, ?3, 'ready',
+                             'upload', ?4, ?5)",
+                    rusqlite::params![
+                        id,
+                        OWNER,
+                        storage_path.to_string_lossy(),
+                        root,
+                        rel
+                    ],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// An `artifact_versions` row pointing at `rel` — a version's bytes, which
+    /// are as referenced as a head's.
+    fn version_row(&self, artifact_id: &str, version: u32, rel: &str) {
+        self.db
+            .with_connection(|conn| {
+                conn.execute(
+                    "INSERT INTO artifact_versions
+                        (artifact_id, version, rel_path, sha256, size_bytes)
+                     VALUES (?1, ?2, ?3, 'sha', 0)",
+                    rusqlite::params![artifact_id, version, rel],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// A `task` row, so `file_assets.task_id`'s foreign key is satisfiable.
+    fn task(&self, id: &str, title: &str) {
+        self.db
+            .with_connection(|conn| {
+                conn.execute(
+                    "INSERT INTO task (id, title, created_by, source_lane) VALUES (?1, ?2, 'test', 'test')",
+                    rusqlite::params![id, title],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// A `task` bound to a workspace, in a given state — the other three
+    /// members of §4.8's one transaction start here.
+    fn task_in(&self, id: &str, workspace: &str, status: &str) {
+        self.db
+            .with_connection(|conn| {
+                conn.execute(
+                    "INSERT INTO task (id, title, created_by, source_lane, workspace_id, status)
+                     VALUES (?1, ?1, 'test', 'test', ?2, ?3)",
+                    rusqlite::params![id, workspace, status],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    fn session(&self, id: &str, workspace: &str) {
+        self.db
+            .with_connection(|conn| {
+                conn.execute(
+                    "INSERT INTO session (id, lane_key, source, workspace_id)
+                     VALUES (?1, ?1, 'gui', ?2)",
+                    rusqlite::params![id, workspace],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    fn memory(&self, content: &str, scope_id: &str) {
+        self.memory_owned(content, scope_id, OWNER);
+    }
+
+    fn memory_owned(&self, content: &str, scope_id: &str, owner: &str) {
+        self.db
+            .with_connection(|conn| {
+                conn.execute(
+                    "INSERT INTO memory
+                        (owner_id, kind, scope, scope_id, source, content, content_hash)
+                     VALUES (?1, 'fact', 'workspace', ?2, 'test', ?3, ?3)",
+                    rusqlite::params![owner, scope_id, content],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// `(sessions, tasks, memories)` still naming `root`.
+    fn members_at(&self, root: &str) -> (i64, i64, i64) {
+        self.db
+            .with_connection(|conn| {
+                let one = |sql: &str| -> Result<i64> {
+                    Ok(conn.query_row(sql, rusqlite::params![root], |r| r.get(0))?)
+                };
+                Ok((
+                    one("SELECT COUNT(*) FROM session WHERE workspace_id = ?1")?,
+                    one("SELECT COUNT(*) FROM task WHERE workspace_id = ?1")?,
+                    one("SELECT COUNT(*) FROM memory WHERE scope = 'workspace' AND scope_id = ?1")?,
+                ))
+            })
+            .unwrap()
+    }
+}
+
+const OWNER: &str = "owner-1";
+
+fn at(day: u32) -> DateTime<Utc> {
+    use chrono::TimeZone;
+    Utc.with_ymd_and_hms(2026, 9, day, 12, 0, 0).unwrap()
+}
+
+/// Restores the crash hook even if the test panics mid-assertion.
+struct CrashGuard;
+
+impl CrashGuard {
+    fn after(step: WriteStep) -> Self {
+        crash_after(step);
+        Self
+    }
+}
+
+impl Drop for CrashGuard {
+    fn drop(&mut self) {
+        clear_crash();
+    }
+}
+
+// ============================================================================
+// put — placement and the clean head
+// ============================================================================
+
+#[test]
+fn put_creates_the_head_at_the_clean_path() {
+    let f = Fixture::new();
+    f.task("3f2a1b7c-0000-4000-8000-000000000000", "Connector audit");
+    let scope = f.scope();
+
+    let mut new = NewArtifact::new(
+        OWNER,
+        &scope,
+        ArtifactKind::Markdown,
+        "Connector audit findings",
+        b"a\nb\nc\n",
+    );
+    new.task_id = Some("3f2a1b7c-0000-4000-8000-000000000000");
+    new.task_title = Some("Connector audit");
+    new.created = at(1);
+    new.agent_id = Some("review_agent::a1b2c3d4");
+    new.agent_template_id = Some("review_agent");
+    new.summary = Some("3 findings");
+
+    let (record, created) = f.store().put(new).unwrap();
+
+    assert!(created, "the first put creates");
+    assert_eq!(record.version, 1);
+    assert_eq!(record.version_count, 1);
+    assert_eq!(record.origin, ArtifactOrigin::Produced);
+    assert_eq!(record.kind, Some(ArtifactKind::Markdown));
+    assert_eq!(record.name, "01-connector-audit-findings.md");
+    assert_eq!(
+        record.rel_path.as_deref(),
+        Some("2026-09-01-connector-audit-3f2a1b7c/01-connector-audit-findings.md")
+    );
+    assert_eq!(
+        record.project_root.as_deref(),
+        Some(f.project_root().to_string_lossy().as_ref())
+    );
+    assert_eq!(record.size_bytes, 6);
+    assert!(!record.missing());
+    assert!(!record.pinned);
+
+    let head = f
+        .artifacts_root()
+        .join("2026-09-01-connector-audit-3f2a1b7c/01-connector-audit-findings.md");
+    assert_eq!(fs::read_to_string(&head).unwrap(), "a\nb\nc\n");
+    assert_eq!(record.storage_path, head.to_string_lossy());
+    assert!(
+        !head.parent().unwrap().join(".versions").exists(),
+        "a first put must not create .versions/"
+    );
+    assert_no_tmp_leftovers(head.parent().unwrap());
+}
+
+#[test]
+fn a_taskless_put_lands_under_loose_date() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(
+        OWNER,
+        &scope,
+        ArtifactKind::Html,
+        "Weekly report",
+        b"<p>hi</p>",
+    );
+    new.created = at(1);
+
+    let (record, _) = f.store().put(new).unwrap();
+
+    assert_eq!(
+        record.rel_path.as_deref(),
+        Some("loose/2026-09-01/01-weekly-report.html")
+    );
+    assert!(record.task_id.is_none());
+    assert!(
+        f.artifacts_root()
+            .join("loose/2026-09-01/01-weekly-report.html")
+            .exists()
+    );
+}
+
+#[test]
+fn the_home_scope_records_a_null_project_root() {
+    let f = Fixture::new();
+    let scope = StoreScope::Home;
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"x");
+    new.created = at(1);
+
+    let (record, _) = f.store().put(new).unwrap();
+
+    assert!(
+        record.project_root.is_none(),
+        "the home root is the baseline"
+    );
+    let head = f.home_root().join("artifacts/loose/2026-09-01/01-notes.md");
+    assert!(head.exists(), "missing {}", head.display());
+    assert_eq!(record.storage_path, head.to_string_lossy());
+}
+
+// ============================================================================
+// put — the version rotate (Verify: put→put leaves head clean + v1 in .versions/)
+// ============================================================================
+
+#[test]
+fn a_second_put_leaves_the_head_clean_and_v1_in_versions() {
+    let f = Fixture::new();
+    let scope = f.scope();
+
+    let mut first = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"a\nb\nc\n");
+    first.created = at(1);
+    let (v1, created_first) = f.store().put(first).unwrap();
+    assert!(created_first);
+
+    let mut second = NewArtifact::new(
+        OWNER,
+        &scope,
+        ArtifactKind::Markdown,
+        "Notes",
+        b"a\nb\nc\nd\n",
+    );
+    second.created = at(1);
+    second.note = Some("added d");
+    let (v2, created_second) = f.store().put(second).unwrap();
+
+    assert!(
+        !created_second,
+        "the second put supersedes, it does not create"
+    );
+    assert_eq!(v1.id, v2.id, "the address is the identity");
+    assert_eq!(v2.version, 2);
+    assert_eq!(v2.version_count, 2);
+
+    let head = f.artifacts_root().join("loose/2026-09-01/01-notes.md");
+    assert_eq!(fs::read_to_string(&head).unwrap(), "a\nb\nc\nd\n");
+
+    let v1_file = f
+        .artifacts_root()
+        .join("loose/2026-09-01/.versions/01-notes/v1.md");
+    assert_eq!(fs::read_to_string(&v1_file).unwrap(), "a\nb\nc\n");
+
+    // The head is never duplicated into .versions/.
+    let version_dir = f
+        .artifacts_root()
+        .join("loose/2026-09-01/.versions/01-notes");
+    let names: Vec<String> = fs::read_dir(&version_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    assert_eq!(names, vec!["v1.md".to_string()]);
+
+    let rows = f.store().versions(&v2.id).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].version, 2, "newest first");
+    assert_eq!(rows[0].rel_path, "loose/2026-09-01/01-notes.md");
+    assert_eq!(rows[0].note.as_deref(), Some("added d"));
+    assert_eq!(rows[0].added_lines, Some(1));
+    assert_eq!(rows[0].removed_lines, Some(0));
+    assert_eq!(rows[1].version, 1);
+    assert_eq!(
+        rows[1].rel_path,
+        "loose/2026-09-01/.versions/01-notes/v1.md"
+    );
+    assert_eq!(rows[1].added_lines, None, "NULL on v1");
+}
+
+#[test]
+fn the_sequence_is_assigned_once_and_retained_across_versions() {
+    let f = Fixture::new();
+    let scope = f.scope();
+
+    let mut a = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Alpha", b"1");
+    a.created = at(1);
+    let (a1, _) = f.store().put(a).unwrap();
+    assert_eq!(a1.name, "01-alpha.md");
+
+    let mut b = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Beta", b"1");
+    b.created = at(1);
+    let (b1, _) = f.store().put(b).unwrap();
+    assert_eq!(b1.name, "02-beta.md");
+
+    // Alpha again: the same NN-, not a fresh 03-.
+    let mut a2 = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Alpha", b"2");
+    a2.created = at(1);
+    let (a2, created) = f.store().put(a2).unwrap();
+    assert!(!created);
+    assert_eq!(a2.id, a1.id);
+    assert_eq!(a2.name, "01-alpha.md");
+    assert_eq!(a2.version, 2);
+
+    // Beta again keeps 02-.
+    let mut b2 = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Beta", b"2");
+    b2.created = at(1);
+    let (b2, _) = f.store().put(b2).unwrap();
+    assert_eq!(b2.name, "02-beta.md");
+    assert_eq!(b2.id, b1.id);
+}
+
+#[test]
+fn a_different_extension_is_a_different_artifact() {
+    let f = Fixture::new();
+    let scope = f.scope();
+
+    let mut md = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"1");
+    md.created = at(1);
+    let (md, _) = f.store().put(md).unwrap();
+
+    let mut txt = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"1");
+    txt.created = at(1);
+    txt.name_hint = Some("notes.txt");
+    let (txt, created) = f.store().put(txt).unwrap();
+
+    assert!(created);
+    assert_ne!(md.id, txt.id);
+    assert_eq!(md.name, "01-notes.md");
+    assert_eq!(txt.name, "02-notes.txt");
+}
+
+#[test]
+fn put_refuses_to_supersede_another_owners_artifact() {
+    let f = Fixture::new();
+    let scope = f.scope();
+
+    let mut mine = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"1");
+    mine.created = at(1);
+    f.store().put(mine).unwrap();
+
+    let mut theirs = NewArtifact::new("owner-2", &scope, ArtifactKind::Markdown, "Notes", b"2");
+    theirs.created = at(1);
+    let err = f.store().put(theirs).unwrap_err();
+    assert!(err.to_string().contains("owner"), "unexpected error: {err}");
+}
+
+// ============================================================================
+// put — the head reservation and the address rule (R24)
+// ============================================================================
+
+/// R33. The row is the commit, so bytes at the head address that no row
+/// references are an *uncommitted write* — what a create leaves behind when the
+/// process dies between the final rename and `tx.commit()`, which the in-process
+/// `Drop` guard cannot cover. The next put reclaims them and continues, instead
+/// of refusing that address for good.
+#[test]
+fn a_row_less_head_left_by_a_crashed_create_is_reclaimed() {
+    let f = Fixture::new();
+    let scope = f.scope();
+
+    // What the daemon would find after a power loss: the bytes of a create
+    // that got as far as step 4 and never committed a row.
+    let day_dir = f.artifacts_root().join("loose/2026-09-01");
+    fs::create_dir_all(&day_dir).unwrap();
+    let orphan = day_dir.join("01-notes.md");
+    fs::write(&orphan, b"bytes with no row").unwrap();
+
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"hello");
+    new.created = at(1);
+    let (record, created) = f.store().put(new).unwrap();
+
+    assert!(created);
+    assert_eq!(record.name, "01-notes.md");
+    assert_eq!(
+        fs::read_to_string(&orphan).unwrap(),
+        "hello",
+        "the new bytes are the head"
+    );
+    assert_eq!(
+        f.store().list(&ArtifactQuery::new(OWNER)).unwrap().1,
+        1,
+        "exactly one row describes the address"
+    );
+    assert!(
+        !day_dir.join(".versions/01-notes/v0.md").exists(),
+        "the orphan was garbage, not a version"
+    );
+    assert_no_tmp_leftovers(&day_dir);
+}
+
+/// The cheaper half of the same crash: a create that died right after
+/// `create_new` leaves an empty reservation and no row. Same rule, same
+/// recovery.
+#[test]
+fn an_empty_reservation_left_by_a_crashed_create_is_reclaimed() {
+    let f = Fixture::new();
+    let scope = f.scope();
+
+    let day_dir = f.artifacts_root().join("loose/2026-09-01");
+    fs::create_dir_all(&day_dir).unwrap();
+    fs::write(day_dir.join("01-notes.md"), b"").unwrap();
+
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"hello");
+    new.created = at(1);
+    let (record, created) = f.store().put(new).unwrap();
+
+    assert!(created);
+    assert_eq!(fs::read_to_string(&record.storage_path).unwrap(), "hello");
+}
+
+/// The other half of R33: a file a row *does* reference is not this store's to
+/// reclaim. `dir_rows` only sees produced heads, so an upload — the other
+/// writer of `file_assets` — addressing the same `project_root` + `rel_path` is
+/// a genuine collision, and the write refuses rather than destroying it.
+#[test]
+fn a_head_another_row_describes_is_never_overwritten() {
+    let f = Fixture::new();
+    let scope = f.scope();
+
+    let day_dir = f.artifacts_root().join("loose/2026-09-01");
+    fs::create_dir_all(&day_dir).unwrap();
+    let taken = day_dir.join("01-notes.md");
+    fs::write(&taken, b"bytes another row describes").unwrap();
+    f.foreign_row("upload-1", "loose/2026-09-01/01-notes.md", &taken);
+
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"hello");
+    new.created = at(1);
+    let err = f.store().put(new).unwrap_err();
+
+    assert_eq!(
+        err.downcast_ref::<ArtifactError>()
+            .unwrap_or_else(|| panic!("not an ArtifactError: {err}"))
+            .code(),
+        "ARTIFACT_NAME_TAKEN"
+    );
+    assert_eq!(
+        fs::read(&taken).unwrap(),
+        b"bytes another row describes",
+        "the file must be left exactly as it was"
+    );
+    let produced = ArtifactQuery {
+        origin: Some(ArtifactOrigin::Produced),
+        ..ArtifactQuery::new(OWNER)
+    };
+    assert_eq!(
+        f.store().list(&produced).unwrap().1,
+        0,
+        "and no produced row was written"
+    );
+    assert_no_tmp_leftovers(&day_dir);
+}
+
+/// A version row references bytes just as a head row does — the `.versions/`
+/// side of the same rule. A file some artifact's history still points at is
+/// never reclaimed.
+#[test]
+fn a_head_a_version_row_still_points_at_is_never_overwritten() {
+    let f = Fixture::new();
+    let scope = f.scope();
+
+    let mut first = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Alpha", b"a\n");
+    first.created = at(1);
+    let (alpha, _) = f.store().put(first).unwrap();
+
+    // Beta's address, claimed by a version row of Alpha's history.
+    let day_dir = f.artifacts_root().join("loose/2026-09-01");
+    let taken = day_dir.join("02-beta.md");
+    fs::write(&taken, b"a version's bytes").unwrap();
+    f.version_row(&alpha.id, 9, "loose/2026-09-01/02-beta.md");
+
+    let mut second = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Beta", b"b\n");
+    second.created = at(1);
+    let err = f.store().put(second).unwrap_err();
+
+    assert_eq!(
+        err.downcast_ref::<ArtifactError>()
+            .unwrap_or_else(|| panic!("not an ArtifactError: {err}"))
+            .code(),
+        "ARTIFACT_NAME_TAKEN"
+    );
+    assert_eq!(fs::read(&taken).unwrap(), b"a version's bytes");
+}
+
+/// R33 is about the crash the process does not survive; inside the process the
+/// `Drop` guard is still what answers. A create that dies *after* the final
+/// rename — the head already holding the new bytes — leaves neither the bytes
+/// nor a row, because no row describes them either way.
+#[test]
+fn a_crash_after_the_head_rename_on_a_create_leaves_nothing() {
+    let f = Fixture::new();
+    let scope = f.scope();
+
+    {
+        let _crash = CrashGuard::after(WriteStep::HeadRenamed);
+        let mut doomed = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"a\n");
+        doomed.created = at(1);
+        f.store().put(doomed).unwrap_err();
+    }
+
+    let day_dir = f.artifacts_root().join("loose/2026-09-01");
+    assert!(
+        !day_dir.join("01-notes.md").exists(),
+        "the reservation took the uncommitted bytes with it"
+    );
+    assert_eq!(f.store().list(&ArtifactQuery::new(OWNER)).unwrap().1, 0);
+    assert_no_tmp_leftovers(&day_dir);
+
+    let mut retry = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"b\n");
+    retry.created = at(1);
+    let (record, created) = f.store().put(retry).unwrap();
+    assert!(created);
+    assert_eq!(fs::read_to_string(&record.storage_path).unwrap(), "b\n");
+}
+
+/// The reservation must not outlive the call that made it. A create that fails
+/// after claiming the name leaves nothing behind — otherwise the very next
+/// attempt at the same address would meet its own orphan and refuse it.
+#[test]
+fn a_create_that_fails_releases_the_name_it_reserved() {
+    let f = Fixture::new();
+    let scope = f.scope();
+
+    {
+        let _crash = CrashGuard::after(WriteStep::TmpWritten);
+        let mut doomed = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"a\n");
+        doomed.created = at(1);
+        f.store().put(doomed).unwrap_err();
+    }
+
+    let dir = f.artifacts_root().join("loose/2026-09-01");
+    assert!(
+        !dir.join("01-notes.md").exists(),
+        "the reservation was removed with the failed write"
+    );
+    assert_no_tmp_leftovers(&dir);
+
+    let mut retry = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"a\n");
+    retry.created = at(1);
+    let (record, created) = f.store().put(retry).unwrap();
+    assert!(created);
+    assert_eq!(record.name, "01-notes.md");
+    assert_eq!(fs::read_to_string(&record.storage_path).unwrap(), "a\n");
+}
+
+/// Placement identity *is* address identity. A `<project>/.openalpaca`
+/// symlinked at another store — the home store here — puts both scopes' bytes
+/// in one directory, so they must share one sequence space; keying the address
+/// off the path the caller named would restart it at `01` and hand two
+/// different artifacts the same name. `confine_to_root` cannot catch that: the
+/// symlink is *at* the root it canonicalizes, not under it.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_store_root_cannot_open_a_second_sequence_space() {
+    let f = Fixture::new();
+    std::os::unix::fs::symlink(f.home_root(), f.project_root().join(".openalpaca")).unwrap();
+
+    let home_scope = StoreScope::Home;
+    let mut first = NewArtifact::new(OWNER, &home_scope, ArtifactKind::Markdown, "Alpha", b"hello");
+    first.created = at(1);
+    let (home, _) = f.store().put(first).unwrap();
+
+    let project_scope = f.scope();
+    let mut second = NewArtifact::new(
+        OWNER,
+        &project_scope,
+        ArtifactKind::Markdown,
+        "Beta",
+        b"other bytes",
+    );
+    second.created = at(1);
+    let (project, _) = f.store().put(second).unwrap();
+
+    assert!(
+        home.storage_path.ends_with("/01-alpha.md"),
+        "{}",
+        home.storage_path
+    );
+    assert!(
+        project.storage_path.ends_with("/02-beta.md"),
+        "the second write shares the first's sequence space: {}",
+        project.storage_path
+    );
+    assert_eq!(fs::read_to_string(&home.storage_path).unwrap(), "hello");
+    assert_eq!(
+        fs::read_to_string(&project.storage_path).unwrap(),
+        "other bytes"
+    );
+
+    // One directory, one address space: the row records the store the bytes
+    // reached, not the path the caller named.
+    assert!(
+        project.project_root.is_none(),
+        "the bytes reached the home store: {:?}",
+        project.project_root
+    );
+}
+
+// ============================================================================
+// put — crash injection between the write-protocol steps
+// ============================================================================
+
+/// The bytes of every version of a two-put artifact, wherever the protocol may
+/// have parked them. Asserts nothing is ever *partial*.
+fn assert_nothing_is_truncated(dir: &Path, old: &str, new: &str) {
+    let head = dir.join("01-notes.md");
+    let rotated = dir.join(".versions/01-notes/v1.md");
+    for (label, path) in [("head", &head), ("v1", &rotated)] {
+        if path.exists() {
+            let body = fs::read_to_string(path).unwrap();
+            assert!(
+                body == old || body == new,
+                "{label} at {} is neither the whole old nor the whole new content: {body:?}",
+                path.display()
+            );
+        }
+    }
+    assert!(
+        head.exists() || rotated.exists(),
+        "both the head and its rotated version are gone — the old bytes were destroyed"
+    );
+}
+
+/// The protocol's `.<stem>.tmp` must never outlive the call that created it —
+/// on the success path *and* on every error or crash path.
+fn assert_no_tmp_leftovers(dir: &Path) {
+    let leftovers: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .filter(|n| n.ends_with(".tmp"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "tmp leftovers in {}: {leftovers:?}",
+        dir.display()
+    );
+}
+
+/// Runs one crash injection against an artifact that already has v1, and
+/// returns the run directory plus the post-crash record.
+fn crash_during_second_put(step: WriteStep) -> (Fixture, PathBuf, String) {
+    let f = Fixture::new();
+    let scope = f.scope();
+
+    let mut first = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"old\n");
+    first.created = at(1);
+    let (v1, _) = f.store().put(first).unwrap();
+
+    {
+        let _crash = CrashGuard::after(step);
+        let mut second = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"new\n");
+        second.created = at(1);
+        let err = f.store().put(second).unwrap_err();
+        assert!(
+            err.to_string().contains("simulated crash"),
+            "expected the injected failure, got: {err}"
+        );
+    }
+
+    let dir = f.artifacts_root().join("loose/2026-09-01");
+    (f, dir, v1.id)
+}
+
+#[test]
+fn a_crash_after_the_tmp_write_leaves_the_head_fully_old() {
+    let (f, dir, id) = crash_during_second_put(WriteStep::TmpWritten);
+    assert_nothing_is_truncated(&dir, "old\n", "new\n");
+    assert_no_tmp_leftovers(&dir);
+    assert_eq!(
+        fs::read_to_string(dir.join("01-notes.md")).unwrap(),
+        "old\n"
+    );
+    assert!(!dir.join(".versions").exists());
+    let record = f.store().get(&id, OWNER).unwrap().unwrap();
+    assert_eq!(record.version, 1, "the transaction rolled back");
+    assert_eq!(record.version_count, 1);
+    assert_eq!(f.store().versions(&id).unwrap().len(), 1);
+}
+
+#[test]
+fn a_crash_after_the_fsync_leaves_the_head_fully_old() {
+    let (f, dir, id) = crash_during_second_put(WriteStep::Fsynced);
+    assert_nothing_is_truncated(&dir, "old\n", "new\n");
+    assert_no_tmp_leftovers(&dir);
+    assert_eq!(
+        fs::read_to_string(dir.join("01-notes.md")).unwrap(),
+        "old\n"
+    );
+    let record = f.store().get(&id, OWNER).unwrap().unwrap();
+    assert_eq!(record.version, 1);
+}
+
+#[test]
+fn a_crash_after_the_rotate_keeps_the_old_bytes_whole_under_versions() {
+    let (f, dir, id) = crash_during_second_put(WriteStep::Rotated);
+    assert_nothing_is_truncated(&dir, "old\n", "new\n");
+    assert_no_tmp_leftovers(&dir);
+    // The specified protocol renames the head away before renaming the tmp in,
+    // so this is the one window where the head path itself is absent — the old
+    // bytes are whole and addressable at the rotated path.
+    assert!(!dir.join("01-notes.md").exists());
+    assert_eq!(
+        fs::read_to_string(dir.join(".versions/01-notes/v1.md")).unwrap(),
+        "old\n"
+    );
+    let record = f.store().get(&id, OWNER).unwrap().unwrap();
+    assert_eq!(record.version, 1, "the transaction rolled back");
+    assert_eq!(f.store().versions(&id).unwrap().len(), 1);
+}
+
+#[test]
+fn a_crash_after_the_head_rename_leaves_the_head_fully_new() {
+    let (f, dir, id) = crash_during_second_put(WriteStep::HeadRenamed);
+    assert_nothing_is_truncated(&dir, "old\n", "new\n");
+    assert_no_tmp_leftovers(&dir);
+    assert_eq!(
+        fs::read_to_string(dir.join("01-notes.md")).unwrap(),
+        "new\n"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join(".versions/01-notes/v1.md")).unwrap(),
+        "old\n"
+    );
+    let record = f.store().get(&id, OWNER).unwrap().unwrap();
+    assert_eq!(record.version, 1, "the transaction rolled back");
+}
+
+#[test]
+fn a_put_after_a_crash_still_succeeds() {
+    let (f, dir, id) = crash_during_second_put(WriteStep::Rotated);
+    let scope = f.scope();
+    let mut retry = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"new\n");
+    retry.created = at(1);
+    let (record, created) = f.store().put(retry).unwrap();
+    assert!(!created);
+    assert_eq!(record.id, id);
+    assert_eq!(record.version, 2);
+    assert_eq!(
+        fs::read_to_string(dir.join("01-notes.md")).unwrap(),
+        "new\n"
+    );
+
+    // The interrupted attempt had already rotated v1's bytes to disk; the
+    // recovering put must point v1's row at where they actually are, not leave
+    // it claiming the head path it no longer owns.
+    let rows = f.store().versions(&id).unwrap();
+    let v1 = rows.iter().find(|r| r.version == 1).unwrap();
+    assert_eq!(v1.rel_path, "loose/2026-09-01/.versions/01-notes/v1.md");
+    let path = f.store().resolve_content(&id, Some(1)).unwrap();
+    assert_eq!(fs::read_to_string(path).unwrap(), "old\n");
+    assert_no_tmp_leftovers(&dir);
+}
+
+#[test]
+fn a_put_after_an_interrupted_head_rename_keeps_v1_and_records_the_orphan() {
+    // The crash at `HeadRenamed` leaves the *uncommitted* new bytes at the head
+    // and the true, committed v1 at `.versions/01-notes/v1.md` (the row rolled
+    // back to v1 with sha("old\n")). The head therefore holds bytes v1's row
+    // does not describe, which is §4.8's hand edit however it got there: the
+    // recovering put records it as the version nobody wrote *before* writing
+    // its own, exactly as a read of the same state does. v1's only copy is
+    // never rotated over.
+    let (f, dir, id) = crash_during_second_put(WriteStep::HeadRenamed);
+    let v1_sha = f.store().versions(&id).unwrap()[0].sha256.clone();
+    assert_eq!(v1_sha, sha256_hex(b"old\n"), "the row still describes v1");
+
+    let scope = f.scope();
+    let mut retry = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"newer\n");
+    retry.created = at(1);
+    let (record, created) = f.store().put(retry).unwrap();
+    assert!(!created);
+    assert_eq!(record.id, id);
+    assert_eq!(record.version, 3, "the orphan is v2, this write is v3");
+
+    assert_eq!(
+        fs::read_to_string(dir.join("01-notes.md")).unwrap(),
+        "newer\n",
+        "the head is the newest content"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join(".versions/01-notes/v1.md")).unwrap(),
+        "old\n",
+        "v1's committed bytes must survive the recovering put"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join(".versions/01-notes/v2.md")).unwrap(),
+        "new\n",
+        "the orphaned head is kept under the version that now describes it"
+    );
+    let mut on_disk: Vec<String> = fs::read_dir(dir.join(".versions/01-notes"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    on_disk.sort();
+    assert_eq!(on_disk, vec!["v1.md".to_string(), "v2.md".to_string()]);
+
+    let rows = f.store().versions(&id).unwrap();
+    assert_eq!(rows.len(), 3);
+    let v1 = rows.iter().find(|r| r.version == 1).unwrap();
+    assert_eq!(v1.rel_path, "loose/2026-09-01/.versions/01-notes/v1.md");
+    assert_eq!(
+        v1.sha256, v1_sha,
+        "v1's row sha still describes v1's own bytes"
+    );
+    let v2 = rows.iter().find(|r| r.version == 2).unwrap();
+    assert_eq!(v2.author_agent_id, None, "nobody committed to those bytes");
+    assert_eq!(v2.sha256, sha256_hex(b"new\n"));
+    let path = f.store().resolve_content(&id, Some(1)).unwrap();
+    assert_eq!(
+        fs::read_to_string(path).unwrap(),
+        "old\n",
+        "resolve_content(v1) serves v1's bytes, not another version's"
+    );
+    assert_no_tmp_leftovers(&dir);
+}
+
+#[test]
+fn an_interrupted_head_rename_leaves_v1_readable_and_records_the_orphaned_head() {
+    // The same interrupted state, read rather than written. The head holds
+    // bytes no completed write left there, so its hash does not match v1's row
+    // — §4.8's hand-edit rotation, which repairs v1's row (it was claiming the
+    // head path) and preserves the orphaned bytes as v2 rather than letting the
+    // next put discard them. Nothing on disk is destroyed either way.
+    let (f, dir, id) = crash_during_second_put(WriteStep::HeadRenamed);
+
+    let root = f.project_root().to_string_lossy().to_string();
+    let report = f.store().verify(Some(&root)).unwrap();
+    assert_eq!(
+        report.missing, 0,
+        "the head is present, so nothing is marked missing"
+    );
+    assert_eq!(report.user_edits.len(), 1, "the orphaned head is recorded");
+    assert_eq!(report.user_edits[0].version, 2);
+
+    let record = f.store().get(&id, OWNER).unwrap().unwrap();
+    assert!(!record.missing());
+    assert_eq!(record.version, 2);
+    assert_eq!(record.sha256, sha256_hex(b"new\n"));
+
+    let head = f.store().resolve_content(&id, None).unwrap();
+    assert_eq!(head, dir.join("01-notes.md"));
+    assert_eq!(fs::read_to_string(&head).unwrap(), "new\n");
+
+    // v1's row now points where v1's bytes actually are, so reading it serves
+    // them instead of another version's.
+    let v1 = f.store().resolve_content(&id, Some(1)).unwrap();
+    assert_eq!(v1, dir.join(".versions/01-notes/v1.md"));
+    assert_eq!(fs::read_to_string(&v1).unwrap(), "old\n");
+
+    let rows = f.store().versions(&id).unwrap();
+    let v2 = rows.iter().find(|r| r.version == 2).unwrap();
+    assert_eq!(v2.author_agent_id, None);
+    assert_eq!(v2.note.as_deref(), Some(USER_EDIT_NOTE));
+    // The previous version's bytes survived, so the counts are real.
+    assert_eq!((v2.added_lines, v2.removed_lines), (Some(1), Some(1)));
+    assert_eq!(
+        rows.iter().find(|r| r.version == 1).unwrap().sha256,
+        sha256_hex(b"old\n")
+    );
+    assert_no_tmp_leftovers(&dir);
+}
+
+// ============================================================================
+// put — pruning
+// ============================================================================
+
+#[test]
+fn pruning_keeps_the_head_and_the_newest_versions() {
+    let f = Fixture::new();
+    let scope = f.scope();
+
+    for n in 1..=5u32 {
+        let body = format!("v{n}\n");
+        let mut new = NewArtifact::new(
+            OWNER,
+            &scope,
+            ArtifactKind::Markdown,
+            "Notes",
+            body.as_bytes(),
+        );
+        new.created = at(1);
+        new.max_versions = Some(3);
+        f.store().put(new).unwrap();
+    }
+
+    let dir = f.artifacts_root().join("loose/2026-09-01");
+    assert_eq!(fs::read_to_string(dir.join("01-notes.md")).unwrap(), "v5\n");
+
+    let id = f
+        .store()
+        .list(&ArtifactQuery::new(OWNER))
+        .unwrap()
+        .0
+        .remove(0)
+        .id;
+    let versions = f.store().versions(&id).unwrap();
+    let kept: Vec<u32> = versions.iter().map(|v| v.version).collect();
+    assert_eq!(kept, vec![5, 4, 3], "head plus the newest two");
+
+    let record = f.store().get(&id, OWNER).unwrap().unwrap();
+    assert_eq!(record.version_count, 3);
+
+    let mut on_disk: Vec<String> = fs::read_dir(dir.join(".versions/01-notes"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    on_disk.sort();
+    assert_eq!(
+        on_disk,
+        vec!["v3.md".to_string(), "v4.md".to_string()],
+        "the pruned version files are deleted with their rows"
+    );
+}
+
+/// C1: the head is removed by hand, then the same address is put again. v(N-1)'s
+/// row must stop naming the head path, or the prune that closes the put deletes
+/// the bytes the put just committed.
+#[test]
+fn a_put_over_a_removed_head_keeps_the_new_head_through_the_prune() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut first = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"v1\n");
+    first.created = at(1);
+    first.max_versions = Some(1);
+    let (v1, _) = f.store().put(first).unwrap();
+
+    fs::remove_file(&v1.storage_path).unwrap();
+
+    let mut second = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"v2\n");
+    second.created = at(1);
+    second.max_versions = Some(1);
+    let (v2, _) = f.store().put(second).unwrap();
+    assert_eq!(v2.id, v1.id, "the same artifact was superseded");
+
+    assert_eq!(
+        fs::read_to_string(&v2.storage_path).unwrap(),
+        "v2\n",
+        "the prune unlinked v1's empty version slot, not the live head"
+    );
+    assert_eq!(
+        fs::read_to_string(f.store().resolve_content(&v2.id, None).unwrap()).unwrap(),
+        "v2\n"
+    );
+}
+
+#[test]
+fn a_put_over_a_removed_head_repoints_the_previous_version_row() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut first = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"v1\n");
+    first.created = at(1);
+    first.max_versions = Some(3);
+    let (v1, _) = f.store().put(first).unwrap();
+
+    fs::remove_file(&v1.storage_path).unwrap();
+
+    let mut second = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"v2\n");
+    second.created = at(1);
+    second.max_versions = Some(3);
+    let (v2, _) = f.store().put(second).unwrap();
+
+    let versions = f.store().versions(&v2.id).unwrap();
+    let one = versions
+        .iter()
+        .find(|v| v.version == 1)
+        .expect("v1's row survives");
+    assert_eq!(
+        one.rel_path, "loose/2026-09-01/.versions/01-notes/v1.md",
+        "v1's row names its own (empty) version slot, never the head"
+    );
+    let two = versions.iter().find(|v| v.version == 2).unwrap();
+    assert_eq!(two.rel_path, "loose/2026-09-01/01-notes.md");
+
+    // v1's bytes really are gone — the row says so instead of serving v2's.
+    let err = f.store().resolve_content(&v2.id, Some(1)).unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<ArtifactError>().unwrap().code(),
+        "ARTIFACT_GONE"
+    );
+
+    // Three more puts cross keep = 3, the path the default config takes.
+    for n in 3..=5u32 {
+        let body = format!("v{n}\n");
+        let mut new = NewArtifact::new(
+            OWNER,
+            &scope,
+            ArtifactKind::Markdown,
+            "Notes",
+            body.as_bytes(),
+        );
+        new.created = at(1);
+        new.max_versions = Some(3);
+        f.store().put(new).unwrap();
+    }
+    let head = f.store().get(&v2.id, OWNER).unwrap().unwrap();
+    assert_eq!(fs::read_to_string(&head.storage_path).unwrap(), "v5\n");
+}
+
+// ============================================================================
+// The produced row and the upload machinery (Verify: sweep + quota)
+// ============================================================================
+
+#[test]
+fn a_produced_row_is_invisible_to_the_sweep_and_the_quota() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"body");
+    new.created = at(1);
+    let (record, _) = f.store().put(new).unwrap();
+
+    // Age the row well past any grace period.
+    f.db.with_connection(|conn| {
+        conn.execute(
+            "UPDATE file_assets SET created_at = datetime('now', '-30 hours') WHERE id = ?1",
+            rusqlite::params![record.id],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let repo = FileAssetRepository::new(&f.db);
+    assert!(repo.list_orphaned(24).unwrap().is_empty());
+    assert!(repo.list_orphaned(25).unwrap().is_empty());
+    assert_eq!(
+        repo.total_storage_bytes().unwrap(),
+        0,
+        "produced bytes never count against the upload quota"
+    );
+}
+
+// ============================================================================
+// resolve_content
+// ============================================================================
+
+#[test]
+fn resolve_content_returns_the_head_and_an_older_version() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut first = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"old\n");
+    first.created = at(1);
+    let (v1, _) = f.store().put(first).unwrap();
+    let mut second = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"new\n");
+    second.created = at(1);
+    f.store().put(second).unwrap();
+
+    let head = f.store().resolve_content(&v1.id, None).unwrap();
+    assert_eq!(fs::read_to_string(&head).unwrap(), "new\n");
+    let head_by_number = f.store().resolve_content(&v1.id, Some(2)).unwrap();
+    assert_eq!(head_by_number, head);
+    let old = f.store().resolve_content(&v1.id, Some(1)).unwrap();
+    assert_eq!(fs::read_to_string(&old).unwrap(), "old\n");
+}
+
+#[test]
+fn resolve_content_on_a_deleted_file_marks_missing_and_returns_artifact_gone() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"body");
+    new.created = at(1);
+    let (record, _) = f.store().put(new).unwrap();
+    assert!(!record.missing());
+
+    fs::remove_file(&record.storage_path).unwrap();
+
+    let err = f.store().resolve_content(&record.id, None).unwrap_err();
+    let typed = err
+        .downcast_ref::<ArtifactError>()
+        .unwrap_or_else(|| panic!("not an ArtifactError: {err}"));
+    assert_eq!(typed.code(), "ARTIFACT_GONE");
+    assert!(matches!(typed, ArtifactError::Gone { id, .. } if *id == record.id));
+
+    let after = f.store().get(&record.id, OWNER).unwrap().unwrap();
+    assert!(after.missing(), "missing_since is stamped");
+}
+
+#[test]
+fn resolve_content_rejects_an_unknown_id_and_an_unknown_version() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"body");
+    new.created = at(1);
+    let (record, _) = f.store().put(new).unwrap();
+
+    let err = f.store().resolve_content("nope", None).unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<ArtifactError>().unwrap().code(),
+        "ARTIFACT_NOT_FOUND"
+    );
+
+    let err = f.store().resolve_content(&record.id, Some(9)).unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<ArtifactError>().unwrap().code(),
+        "ARTIFACT_VERSION_NOT_FOUND"
+    );
+}
+
+// ============================================================================
+// get / list
+// ============================================================================
+
+#[test]
+fn get_is_owner_scoped() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"body");
+    new.created = at(1);
+    let (record, _) = f.store().put(new).unwrap();
+
+    assert!(f.store().get(&record.id, OWNER).unwrap().is_some());
+    assert!(f.store().get(&record.id, "owner-2").unwrap().is_none());
+    assert!(f.store().get("nope", OWNER).unwrap().is_none());
+}
+
+#[test]
+fn list_filters_and_totals() {
+    let f = Fixture::new();
+    f.task("aaaaaaaa-0000-4000-8000-000000000000", "First run");
+    let scope = f.scope();
+
+    let mut a = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Alpha", b"a");
+    a.created = at(1);
+    a.task_id = Some("aaaaaaaa-0000-4000-8000-000000000000");
+    a.task_title = Some("First run");
+    a.summary = Some("three findings");
+    f.store().put(a).unwrap();
+
+    let mut b = NewArtifact::new(OWNER, &scope, ArtifactKind::Table, "Beta", b"b");
+    b.created = at(1);
+    f.store().put(b).unwrap();
+
+    let mut c = NewArtifact::new("owner-2", &scope, ArtifactKind::Markdown, "Gamma", b"c");
+    c.created = at(1);
+    f.store().put(c).unwrap();
+
+    let store = f.store();
+
+    let (rows, total) = store.list(&ArtifactQuery::new(OWNER)).unwrap();
+    assert_eq!(total, 2, "other owners are invisible");
+    assert_eq!(rows.len(), 2);
+
+    let mut q = ArtifactQuery::new(OWNER);
+    q.kind = Some(ArtifactKind::Table);
+    let (rows, total) = store.list(&q).unwrap();
+    assert_eq!(total, 1);
+    assert_eq!(rows[0].name, "01-beta.csv");
+
+    let mut q = ArtifactQuery::new(OWNER);
+    q.task_id = Some("aaaaaaaa-0000-4000-8000-000000000000".to_string());
+    let (rows, total) = store.list(&q).unwrap();
+    assert_eq!(total, 1);
+    assert_eq!(rows[0].name, "01-alpha.md");
+
+    let mut q = ArtifactQuery::new(OWNER);
+    q.origin = Some(ArtifactOrigin::Upload);
+    assert_eq!(store.list(&q).unwrap().1, 0);
+
+    let mut q = ArtifactQuery::new(OWNER);
+    q.project_root = Some(f.project_root().to_string_lossy().to_string());
+    assert_eq!(store.list(&q).unwrap().1, 2);
+    let mut q = ArtifactQuery::new(OWNER);
+    q.project_root = Some(String::new());
+    assert_eq!(store.list(&q).unwrap().1, 0, "'' selects the home store");
+
+    let mut q = ArtifactQuery::new(OWNER);
+    q.q = Some("findings".to_string());
+    let (rows, total) = store.list(&q).unwrap();
+    assert_eq!(total, 1);
+    assert_eq!(rows[0].name, "01-alpha.md");
+
+    let mut q = ArtifactQuery::new(OWNER);
+    q.q = Some("beta".to_string());
+    assert_eq!(store.list(&q).unwrap().1, 1);
+
+    // A LIKE metacharacter is matched literally, not as a wildcard.
+    let mut q = ArtifactQuery::new(OWNER);
+    q.q = Some("%".to_string());
+    assert_eq!(store.list(&q).unwrap().1, 0);
+
+    // limit/offset page but never change the total.
+    let mut q = ArtifactQuery::new(OWNER);
+    q.limit = Some(1);
+    let (rows, total) = store.list(&q).unwrap();
+    assert_eq!((rows.len(), total), (1, 2));
+    q.offset = 1;
+    let (rows, total) = store.list(&q).unwrap();
+    assert_eq!((rows.len(), total), (1, 2));
+    q.offset = 2;
+    let (rows, total) = store.list(&q).unwrap();
+    assert_eq!((rows.len(), total), (0, 2));
+}
+
+#[test]
+fn list_hides_missing_rows_unless_asked() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"body");
+    new.created = at(1);
+    let (record, _) = f.store().put(new).unwrap();
+    fs::remove_file(&record.storage_path).unwrap();
+    f.store().resolve_content(&record.id, None).unwrap_err();
+
+    let store = f.store();
+    assert_eq!(store.list(&ArtifactQuery::new(OWNER)).unwrap().1, 0);
+
+    let mut q = ArtifactQuery::new(OWNER);
+    q.include_missing = true;
+    let (rows, total) = store.list(&q).unwrap();
+    assert_eq!(total, 1);
+    assert!(rows[0].missing());
+}
+
+#[test]
+fn list_filters_by_pinned() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut a = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Alpha", b"a");
+    a.created = at(1);
+    let (a, _) = f.store().put(a).unwrap();
+    let mut b = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Beta", b"b");
+    b.created = at(1);
+    f.store().put(b).unwrap();
+
+    f.store().set_pinned(&a.id, true).unwrap();
+
+    let mut q = ArtifactQuery::new(OWNER);
+    q.pinned = Some(true);
+    let (rows, total) = f.store().list(&q).unwrap();
+    assert_eq!(total, 1);
+    assert_eq!(rows[0].id, a.id);
+    assert!(rows[0].pinned);
+}
+
+// ============================================================================
+// set_pinned
+// ============================================================================
+
+#[test]
+fn set_pinned_round_trips_and_rejects_an_unknown_id() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"body");
+    new.created = at(1);
+    let (record, _) = f.store().put(new).unwrap();
+
+    f.store().set_pinned(&record.id, true).unwrap();
+    assert!(f.store().get(&record.id, OWNER).unwrap().unwrap().pinned);
+    f.store().set_pinned(&record.id, false).unwrap();
+    assert!(!f.store().get(&record.id, OWNER).unwrap().unwrap().pinned);
+
+    let err = f.store().set_pinned("nope", true).unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<ArtifactError>().unwrap().code(),
+        "ARTIFACT_NOT_FOUND"
+    );
+}
+
+// ============================================================================
+// rebase_project
+// ============================================================================
+
+#[test]
+fn rebase_project_rewrites_only_rows_under_the_old_root() {
+    let f = Fixture::new();
+    let other = tempdir().unwrap();
+    let other_root = other.path().canonicalize().unwrap();
+
+    let scope = f.scope();
+    let mut mine = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"a");
+    mine.created = at(1);
+    let (mine, _) = f.store().put(mine).unwrap();
+
+    let other_scope = StoreScope::Project(other_root.clone());
+    let mut theirs = NewArtifact::new(OWNER, &other_scope, ArtifactKind::Markdown, "Notes", b"b");
+    theirs.created = at(1);
+    let (theirs, _) = f.store().put(theirs).unwrap();
+
+    let home_scope = StoreScope::Home;
+    let mut homely = NewArtifact::new(OWNER, &home_scope, ArtifactKind::Markdown, "Notes", b"c");
+    homely.created = at(1);
+    let (homely, _) = f.store().put(homely).unwrap();
+
+    let old = f.project_root().to_string_lossy().to_string();
+    let new_root = "/tmp/moved-project";
+    let moved = f.store().rebase_project(&old, new_root).unwrap();
+    assert_eq!(
+        moved.file_assets, 1,
+        "only the rows under the old root move"
+    );
+
+    let mine_after = f.store().get(&mine.id, OWNER).unwrap().unwrap();
+    assert_eq!(mine_after.project_root.as_deref(), Some(new_root));
+    assert_eq!(
+        mine_after.storage_path,
+        format!("{new_root}/.openalpaca/artifacts/loose/2026-09-01/01-notes.md")
+    );
+    assert_eq!(
+        mine_after.rel_path.as_deref(),
+        Some("loose/2026-09-01/01-notes.md"),
+        "the relative address is untouched — that is the point"
+    );
+
+    let theirs_after = f.store().get(&theirs.id, OWNER).unwrap().unwrap();
+    assert_eq!(
+        theirs_after.project_root.as_deref(),
+        Some(other_root.to_string_lossy().as_ref())
+    );
+    assert_eq!(theirs_after.storage_path, theirs.storage_path);
+
+    let home_after = f.store().get(&homely.id, OWNER).unwrap().unwrap();
+    assert!(home_after.project_root.is_none());
+    assert_eq!(home_after.storage_path, homely.storage_path);
+}
+
+#[test]
+fn rebase_project_moves_all_four_members_together() {
+    let f = Fixture::new();
+    let old = f.project_root().to_string_lossy().to_string();
+    let new_root = "/tmp/moved-project";
+
+    let scope = f.scope();
+    let mut produced = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"a");
+    produced.created = at(1);
+    f.store().put(produced).unwrap();
+    // The other origin: an upload placed in the project store moves with it.
+    let upload_path = f.artifacts_root().join("loose/2026-09-01/99-uploaded.md");
+    f.foreign_row("upload-1", "loose/2026-09-01/99-uploaded.md", &upload_path);
+
+    f.session("session-1", &old);
+    f.task_in("task-1", &old, "completed");
+    f.task_in("task-2", &old, "queued");
+    f.memory("a workspace fact", &old);
+    // Bystanders under another root.
+    f.session("session-2", "/elsewhere");
+    f.memory("someone else's fact", "/elsewhere");
+
+    let counts = f.store().rebase_project(&old, new_root).unwrap();
+    assert_eq!(
+        counts,
+        RebaseCounts {
+            file_assets: 2,
+            sessions: 1,
+            tasks: 2,
+            memories: 1,
+        }
+    );
+
+    assert_eq!(f.members_at(&old), (0, 0, 0), "nothing is left behind");
+    assert_eq!(f.members_at(new_root), (1, 2, 1));
+    assert_eq!(
+        f.members_at("/elsewhere"),
+        (1, 0, 1),
+        "bystanders untouched"
+    );
+
+    let moved_upload = f.store().get("upload-1", OWNER).unwrap().unwrap();
+    assert_eq!(moved_upload.project_root.as_deref(), Some(new_root));
+    assert_eq!(
+        moved_upload.storage_path,
+        format!("{new_root}/.openalpaca/artifacts/loose/2026-09-01/99-uploaded.md")
+    );
+}
+
+/// I8: the mark says "nothing is at `storage_path`", and the re-base is what
+/// rewrites `storage_path` — so it clears the mark with the address it
+/// described. Otherwise a project moved by hand and then re-based stays hidden
+/// from the Library for good.
+#[test]
+fn rebase_project_clears_the_missing_mark_it_re_addresses() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"body");
+    new.created = at(1);
+    let (record, _) = f.store().put(new).unwrap();
+
+    // The project is moved by hand; opening the artifact in the Library stamps
+    // the row on the way to `ARTIFACT_GONE`.
+    fs::remove_file(&record.storage_path).unwrap();
+    assert!(f.store().resolve_content(&record.id, None).is_err());
+    assert!(f.store().get(&record.id, OWNER).unwrap().unwrap().missing());
+    assert_eq!(
+        f.store().list(&ArtifactQuery::new(OWNER)).unwrap().1,
+        0,
+        "a marked row is hidden from the default query"
+    );
+
+    let old = f.project_root().to_string_lossy().to_string();
+    f.store().rebase_project(&old, "/tmp/moved-project").unwrap();
+
+    let after = f.store().get(&record.id, OWNER).unwrap().unwrap();
+    assert!(
+        !after.missing(),
+        "the mark described the old address and went with it"
+    );
+    assert_eq!(
+        f.store().list(&ArtifactQuery::new(OWNER)).unwrap().1,
+        1,
+        "the row is back in the Library"
+    );
+}
+
+#[test]
+fn a_failing_member_rolls_the_whole_rebase_back() {
+    let f = Fixture::new();
+    let old = f.project_root().to_string_lossy().to_string();
+    let new_root = "/tmp/already-a-project";
+
+    let scope = f.scope();
+    let mut produced = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"a");
+    produced.created = at(1);
+    let (produced, _) = f.store().put(produced).unwrap();
+    f.session("session-1", &old);
+    f.task_in("task-1", &old, "completed");
+    f.memory("the same fact", &old);
+
+    // The collision: `idx_memory_content_hash` is
+    // (owner_id, scope, scope_id, content_hash), so re-keying this memory onto
+    // a root that already holds the same content violates it. That is the
+    // failure the one transaction exists for — two projects' memories must not
+    // silently merge, and the other three members must not move without it.
+    f.memory("the same fact", new_root);
+
+    let err = f.store().rebase_project(&old, new_root).unwrap_err();
+    assert!(
+        err.to_string().to_lowercase().contains("unique"),
+        "expected the unique-index violation, got: {err}"
+    );
+
+    assert_eq!(
+        f.store()
+            .get(&produced.id, OWNER)
+            .unwrap()
+            .unwrap()
+            .project_root
+            .as_deref(),
+        Some(old.as_str()),
+        "the artifact row rolled back with the rest"
+    );
+    assert_eq!(f.members_at(&old), (1, 1, 1));
+    assert_eq!(f.members_at(new_root), (0, 0, 1), "only its own memory");
+}
+
+#[test]
+fn workspace_rows_counts_the_members_and_the_runs_in_flight() {
+    let f = Fixture::new();
+    let root = f.project_root().to_string_lossy().to_string();
+    assert_eq!(
+        f.store().workspace_rows(&root, None).unwrap(),
+        WorkspaceRows::default()
+    );
+    assert!(
+        f.store()
+            .workspace_rows(&root, None)
+            .unwrap()
+            .counts
+            .is_empty()
+    );
+
+    let scope = f.scope();
+    let mut produced = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"a");
+    produced.created = at(1);
+    f.store().put(produced).unwrap();
+    f.session("session-1", &root);
+    f.task_in("done", &root, "completed");
+    f.task_in("queued", &root, "queued");
+    f.memory("a fact", &root);
+
+    let rows = f.store().workspace_rows(&root, None).unwrap();
+    assert_eq!(
+        rows.counts,
+        RebaseCounts {
+            file_assets: 1,
+            sessions: 1,
+            tasks: 2,
+            memories: 1,
+        }
+    );
+    assert_eq!(
+        rows.active_tasks, 0,
+        "a queued run has resolved nothing yet — its row moves with the rest"
+    );
+
+    f.task_in("live", &root, "running");
+    f.task_in("held", &root, "paused");
+    assert_eq!(
+        f.store().workspace_rows(&root, None).unwrap().active_tasks,
+        2
+    );
+}
+
+#[test]
+fn busy_tasks_counts_queued_running_and_paused_but_not_a_finished_run() {
+    let f = Fixture::new();
+    let root = f.project_root().to_string_lossy().to_string();
+    let other = "/some-other-root";
+
+    assert_eq!(f.store().busy_tasks(&root).unwrap(), 0);
+
+    f.task_in("done", &root, "completed");
+    f.task_in("failed", &root, "failed");
+    assert_eq!(
+        f.store().busy_tasks(&root).unwrap(),
+        0,
+        "a finished run is not busy, whichever way it finished"
+    );
+
+    // Unlike `active_tasks`, a queued run counts here — it already named this
+    // root and is about to resolve the store the moment it starts.
+    f.task_in("queued", &root, "queued");
+    assert_eq!(f.store().busy_tasks(&root).unwrap(), 1);
+
+    f.task_in("live", &root, "running");
+    f.task_in("held", &root, "paused");
+    f.task_in("elsewhere", other, "running");
+    assert_eq!(
+        f.store().busy_tasks(&root).unwrap(),
+        3,
+        "a run under another root is not this root's business"
+    );
+}
+
+#[test]
+fn workspace_rows_scopes_the_two_members_that_have_an_owner() {
+    let f = Fixture::new();
+    let root = f.project_root().to_string_lossy().to_string();
+    let scope = f.scope();
+
+    let mut mine = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Mine", b"a");
+    mine.created = at(1);
+    f.store().put(mine).unwrap();
+    let mut theirs = NewArtifact::new("owner-2", &scope, ArtifactKind::Markdown, "Theirs", b"b");
+    theirs.created = at(1);
+    f.store().put(theirs).unwrap();
+    f.memory("mine", &root);
+    f.memory_owned("theirs", &root, "owner-2");
+    f.session("session-1", &root);
+    f.task_in("task-1", &root, "completed");
+
+    let all = f.store().workspace_rows(&root, None).unwrap();
+    assert_eq!(all.counts.file_assets, 2);
+    assert_eq!(all.counts.memories, 2);
+    assert_eq!(all.other_owners, 0, "an unscoped count leaves nobody out");
+
+    let mine = f.store().workspace_rows(&root, Some(OWNER)).unwrap();
+    assert_eq!(mine.counts.file_assets, 1);
+    assert_eq!(mine.counts.memories, 1);
+    assert_eq!(
+        mine.other_owners, 2,
+        "one artifact and one memory belong to somebody else"
+    );
+    // `session` and `task` carry no owner, so their counts are the root's
+    // either way — which is why the route refuses rather than half-scopes.
+    assert_eq!(mine.counts.sessions, 1);
+    assert_eq!(mine.counts.tasks, 1);
+
+    let nobody = f.store().workspace_rows(&root, Some("owner-3")).unwrap();
+    assert_eq!(nobody.counts.file_assets, 0);
+    assert_eq!(nobody.other_owners, 4);
+}
+
+// ============================================================================
+// purge_project
+// ============================================================================
+
+/// A run under `root` with one row of every table keyed off it, plus the
+/// bystanders that must survive: the same rows under another root, and a run
+/// with no workspace at all that was started from a purged conversation.
+fn seed_for_purge(f: &Fixture, root: &str) {
+    f.session("session-1", root);
+    f.session("session-2", "/elsewhere");
+    f.task_in("task-1", root, "completed");
+    f.task_in("task-2", "/elsewhere", "completed");
+    f.memory("a workspace fact", root);
+
+    f.db
+        .with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO conversation_messages (lane_key, role, content, session_id, task_id)
+                 VALUES ('session-1', 'user', 'hi', 'session-1', 'task-1')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO conversation_messages (lane_key, role, content, session_id)
+                 VALUES ('session-2', 'user', 'hi', 'session-2')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO tool_execution_log (agent_id, tool_name, success, duration_ms,
+                                                 session_id, task_id)
+                 VALUES ('a', 'read', 1, 3, 'session-1', 'task-1')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO lane_followups (lane_key, kind, content, principal_json, session_id)
+                 VALUES ('session-1', 'followup', 'later', '{}', 'session-1')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO subagent_span
+                    (id, task_id, template_id, agent_instance_id, label, started_at)
+                 VALUES ('span-1', 'task-1', 't', 'i', 'review', '2026-09-01T00:00:00Z')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO event_log (event_type, task_id) VALUES ('started', 'task-1')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO dispatch_decisions (request_id, task_id, mode, reason)
+                 VALUES ('r-1', 'task-1', 'lead', 'because')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO llm_call_log (task_id, provider, model)
+                 VALUES ('task-1', 'anthropic', 'sonnet')",
+                [],
+            )?;
+            // A run outside the root, started from a conversation inside it.
+            conn.execute(
+                "INSERT INTO task (id, title, created_by, source_lane, session_id)
+                 VALUES ('task-loose', 'loose', 'test', 'test', 'session-1')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn purge_project_takes_the_conversations_the_runs_and_the_uploads() {
+    let f = Fixture::new();
+    let root = f.project_root().to_string_lossy().to_string();
+    seed_for_purge(&f, &root);
+
+    // The two origins of `file_assets`: one goes, one stays.
+    let scope = f.scope();
+    let mut produced = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"a");
+    produced.created = at(1);
+    let (produced, _) = f.store().put(produced).unwrap();
+    let upload_path = f.artifacts_root().join("loose/2026-09-01/99-uploaded.md");
+    f.foreign_row("upload-1", "loose/2026-09-01/99-uploaded.md", &upload_path);
+
+    let plan = f.store().purge_plan(&root).unwrap();
+    let outcome = f.store().purge_project(&root).unwrap();
+    assert_eq!(
+        plan.counts, outcome.counts,
+        "the dry run and the real call must agree"
+    );
+    assert_eq!(
+        outcome.counts,
+        PurgeCounts {
+            sessions: 1,
+            messages: 1,
+            tool_calls: 1,
+            followups: 1,
+            tasks: 1,
+            spans: 1,
+            run_events: 1,
+            uploads: 1,
+        }
+    );
+    assert_eq!(outcome.session_ids, vec!["session-1".to_string()]);
+    assert_eq!(
+        outcome.upload_paths,
+        vec![upload_path.to_string_lossy().to_string()]
+    );
+
+    // The bystanders under the other root are all still there.
+    assert_eq!(f.members_at("/elsewhere"), (1, 1, 0));
+    let count = |sql: &str| -> i64 {
+        f.db.with_connection(|conn| Ok(conn.query_row(sql, [], |r| r.get(0))?))
+            .unwrap()
+    };
+    assert_eq!(count("SELECT COUNT(*) FROM conversation_messages"), 1);
+    assert_eq!(count("SELECT COUNT(*) FROM tool_execution_log"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM lane_followups"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM subagent_span"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM event_log"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM dispatch_decisions"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM llm_call_log"), 0);
+
+    // The keeps, named in the plan and true in the table.
+    assert_eq!(plan.kept, PurgeKept { artifacts: 1, memories: 1 });
+    assert!(f.store().get(&produced.id, OWNER).unwrap().is_some());
+    assert_eq!(
+        count("SELECT COUNT(*) FROM memory WHERE scope = 'workspace'"),
+        1
+    );
+
+    // The run outside the root keeps its row and loses the link, exactly as
+    // `delete_session` does it.
+    assert_eq!(
+        count("SELECT COUNT(*) FROM task WHERE id = 'task-loose' AND session_id IS NULL"),
+        1
+    );
+}
+
+/// Upload dedup is store-blind (`UploadStore::put` matches on sha + owner
+/// across every store), so one row can be the attachment of a message in
+/// another project's transcript. The purge must leave that row — the store
+/// never deletes what another reader still names.
+#[test]
+fn a_purge_keeps_an_upload_a_surviving_message_still_links() {
+    let f = Fixture::new();
+    let root = f.project_root().to_string_lossy().to_string();
+    seed_for_purge(&f, &root);
+
+    let mine = f.artifacts_root().join("loose/2026-09-01/98-mine.md");
+    f.foreign_row("upload-mine", "loose/2026-09-01/98-mine.md", &mine);
+    let shared = f.artifacts_root().join("loose/2026-09-01/99-shared.md");
+    f.foreign_row("upload-shared", "loose/2026-09-01/99-shared.md", &shared);
+    f.db
+        .with_connection(|conn| {
+            let here: i64 = conn.query_row(
+                "SELECT id FROM conversation_messages WHERE session_id = 'session-1'",
+                [],
+                |r| r.get(0),
+            )?;
+            let elsewhere: i64 = conn.query_row(
+                "SELECT id FROM conversation_messages WHERE session_id = 'session-2'",
+                [],
+                |r| r.get(0),
+            )?;
+            for (message, file) in [
+                (here, "upload-mine"),
+                (here, "upload-shared"),
+                (elsewhere, "upload-shared"),
+            ] {
+                conn.execute(
+                    "INSERT INTO conversation_message_attachments (message_id, file_id)
+                     VALUES (?1, ?2)",
+                    rusqlite::params![message, file],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    let plan = f.store().purge_plan(&root).unwrap();
+    let outcome = f.store().purge_project(&root).unwrap();
+    assert_eq!(
+        plan.counts, outcome.counts,
+        "the dry run and the real call must agree"
+    );
+    assert_eq!(
+        outcome.counts.uploads, 1,
+        "only the row this project's transcript alone named"
+    );
+    assert_eq!(
+        outcome.upload_paths,
+        vec![mine.to_string_lossy().to_string()],
+        "the caller unlinks exactly the blobs whose rows went"
+    );
+
+    let surviving: Vec<String> = f
+        .db
+        .with_connection(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT id FROM file_assets WHERE origin = 'upload' ORDER BY id")?;
+            let ids = stmt
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            Ok(ids)
+        })
+        .unwrap();
+    assert_eq!(surviving, vec!["upload-shared".to_string()]);
+}
+
+#[test]
+fn a_purged_run_leaves_the_turn_that_started_it_readable() {
+    // Migration 038 in as many words: `conversation_messages.task_id` is not a
+    // foreign key so that a purge cannot take the transcript with it.
+    let f = Fixture::new();
+    let root = f.project_root().to_string_lossy().to_string();
+    f.task_in("task-1", &root, "completed");
+    f.db
+        .with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO conversation_messages (lane_key, role, content, task_id)
+                 VALUES ('home-lane', 'assistant', 'done', 'task-1')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    f.store().purge_project(&root).unwrap();
+
+    let (content, task_id): (String, Option<String>) = f
+        .db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT content, task_id FROM conversation_messages",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(content, "done");
+    assert_eq!(
+        task_id.as_deref(),
+        Some("task-1"),
+        "the id dangles rather than being nulled or cascaded"
+    );
+}
+
+#[test]
+fn purging_a_root_nothing_names_changes_nothing() {
+    let f = Fixture::new();
+    let root = f.project_root().to_string_lossy().to_string();
+    seed_for_purge(&f, &root);
+
+    let outcome = f.store().purge_project("/nowhere").unwrap();
+    assert!(outcome.counts.is_empty());
+    assert!(outcome.session_ids.is_empty());
+    assert_eq!(f.members_at(&root), (1, 1, 1));
+}
+
+#[test]
+fn project_roots_lists_every_root_the_four_members_name() {
+    let f = Fixture::new();
+    let root = f.project_root().to_string_lossy().to_string();
+    f.session("session-1", &root);
+    f.task_in("task-1", "/b-root", "completed");
+    f.memory("a fact", "/a-root");
+    // The home scope is not a project and never appears, whether it is
+    // recorded as `NULL` or as `''` — nothing writes `''` today, but the two
+    // halves of a `--all` plan must still partition the table.
+    f.session("session-home", "");
+
+    assert_eq!(
+        f.store().project_roots().unwrap(),
+        vec!["/a-root".to_string(), "/b-root".to_string(), root]
+    );
+    assert_eq!(
+        f.store().home_scope_rows().unwrap().sessions,
+        1,
+        "the '' session is home scope, not a missing root"
+    );
+}
+
+#[test]
+fn the_home_scope_counts_what_a_project_purge_leaves_alone() {
+    let f = Fixture::new();
+    let scope = StoreScope::Home;
+    let mut homely = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"c");
+    homely.created = at(1);
+    f.store().put(homely).unwrap();
+    f.db
+        .with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO session (id, lane_key, source) VALUES ('s-home', 's-home', 'gui')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO file_assets
+                    (id, owner_id, sha256, filename, mime_type, size_bytes, storage_path, origin)
+                 VALUES ('u-home', 'owner-1', 'sha', 'n.txt', 'text/plain', 1, '/tmp/n', 'upload')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    assert_eq!(
+        f.store().home_scope_rows().unwrap(),
+        HomeScopeRows {
+            sessions: 1,
+            uploads: 1
+        },
+        "the produced home artifact is not an upload and is not counted"
+    );
+}
+
+// ============================================================================
+// verify
+// ============================================================================
+
+#[test]
+fn verify_counts_and_marks_the_missing_rows_under_a_root() {
+    let f = Fixture::new();
+    let scope = f.scope();
+
+    let mut a = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Alpha", b"a");
+    a.created = at(1);
+    let (a, _) = f.store().put(a).unwrap();
+    let mut b = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Beta", b"b");
+    b.created = at(1);
+    let (b, _) = f.store().put(b).unwrap();
+
+    let home_scope = StoreScope::Home;
+    let mut c = NewArtifact::new(OWNER, &home_scope, ArtifactKind::Markdown, "Gamma", b"c");
+    c.created = at(1);
+    let (c, _) = f.store().put(c).unwrap();
+
+    let root = f.project_root().to_string_lossy().to_string();
+    assert_eq!(f.store().verify(Some(&root)).unwrap().missing, 0);
+
+    fs::remove_file(&a.storage_path).unwrap();
+    fs::remove_file(&c.storage_path).unwrap();
+
+    assert_eq!(f.store().verify(Some(&root)).unwrap().missing, 1);
+    assert!(f.store().get(&a.id, OWNER).unwrap().unwrap().missing());
+    assert!(!f.store().get(&b.id, OWNER).unwrap().unwrap().missing());
+    assert!(
+        !f.store().get(&c.id, OWNER).unwrap().unwrap().missing(),
+        "the home row is outside the verified root"
+    );
+
+    // Idempotent: a second pass still reports the same count.
+    assert_eq!(f.store().verify(Some(&root)).unwrap().missing, 1);
+
+    // None sweeps every root.
+    assert_eq!(f.store().verify(None).unwrap().missing, 2);
+    assert!(f.store().get(&c.id, OWNER).unwrap().unwrap().missing());
+}
+
+// ============================================================================
+// The hand edit (§4.8) — user-edit detection as a version
+// ============================================================================
+
+/// Restores the rotation crash hook even if the test panics mid-assertion.
+struct RotateCrashGuard;
+
+impl RotateCrashGuard {
+    fn after(step: RotateStep) -> Self {
+        crash_rotate_after(step);
+        Self
+    }
+}
+
+impl Drop for RotateCrashGuard {
+    fn drop(&mut self) {
+        clear_rotate_crash();
+    }
+}
+
+/// One artifact at v1, with its head overwritten by hand.
+fn hand_edited(body: &str) -> (Fixture, ArtifactRecord) {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(
+        OWNER,
+        &scope,
+        ArtifactKind::Markdown,
+        "Notes",
+        b"one\ntwo\n",
+    );
+    new.created = at(1);
+    let (record, _) = f.store().put(new).unwrap();
+    fs::write(&record.storage_path, body).unwrap();
+    (f, record)
+}
+
+/// Restores the hash hook even if the test panics mid-assertion.
+struct HashHook;
+
+impl HashHook {
+    fn install(hook: impl Fn() + 'static) -> Self {
+        on_head_hash(Some(std::sync::Arc::new(hook)));
+        Self
+    }
+}
+
+impl Drop for HashHook {
+    fn drop(&mut self) {
+        on_head_hash(None);
+    }
+}
+
+#[test]
+fn an_unchanged_head_is_never_re_hashed() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(
+        OWNER,
+        &scope,
+        ArtifactKind::Markdown,
+        "Notes",
+        b"one\ntwo\n",
+    );
+    new.created = at(1);
+    let (record, _) = f.store().put(new).unwrap();
+
+    // The put stamped the head it had just written, so not even the first read
+    // pays for a hash — and no later one does either.
+    let before = head_hashes();
+    for _ in 0..3 {
+        f.store().resolve_content(&record.id, None).unwrap();
+    }
+    assert_eq!(
+        head_hashes(),
+        before,
+        "an unchanged head is never re-hashed"
+    );
+
+    // The changed path still rotates, hashing exactly once...
+    fs::write(&record.storage_path, "one\ntwo\nthree\n").unwrap();
+    let before = head_hashes();
+    let edit = f
+        .store()
+        .resolve_content_with_edit(&record.id, None)
+        .unwrap()
+        .1
+        .expect("the edit is recorded");
+    assert_eq!(edit.version, 2);
+    assert_eq!(edit.sha256, sha256_hex(b"one\ntwo\nthree\n"));
+    assert_eq!(head_hashes(), before + 1);
+
+    // ...and the rotation re-stamps, so the reads after it are free again.
+    let before = head_hashes();
+    f.store().resolve_content(&record.id, None).unwrap();
+    assert_eq!(head_hashes(), before);
+
+    // The stamp is the store's own bookkeeping: a client is served the
+    // writer's metadata, which here is none at all.
+    let stamped = f.store().get(&record.id, OWNER).unwrap().unwrap();
+    assert!(stamped.metadata_json.is_some(), "the stamp is on the row");
+    assert_eq!(stamped.metadata(), None, "and never on the wire");
+}
+
+#[test]
+fn a_head_stamp_rides_beside_the_writers_metadata() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"body\n");
+    new.created = at(1);
+    new.metadata_json = Some(r#"{"source":"web"}"#);
+    let (record, _) = f.store().put(new).unwrap();
+
+    let stored: serde_json::Value =
+        serde_json::from_str(record.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(stored["source"], "web");
+    assert!(stored.get(HEAD_STAMP_KEY).is_some());
+    assert_eq!(
+        record.metadata(),
+        Some(serde_json::json!({"source": "web"}))
+    );
+}
+
+#[test]
+fn the_head_is_hashed_with_the_connection_free() {
+    let (f, v1) = hand_edited("one\ntwo\nthree\n");
+    let db = f.db.clone();
+    let free = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = free.clone();
+
+    // R32: while the head is being hashed another thread must be able to take
+    // the connection. Inside `with_connection` — where this check used to run —
+    // the hand-off below never completes.
+    let _hook = HashHook::install(move || {
+        let db = db.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let taken = db.with_connection(|_| Ok(())).is_ok();
+            let _ = tx.send(taken);
+        });
+        if rx.recv_timeout(std::time::Duration::from_secs(5)) == Ok(true) {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+
+    let edit = f.store().resolve_content_with_edit(&v1.id, None).unwrap().1;
+    assert!(edit.is_some(), "the edit is still recorded");
+    assert!(
+        free.load(std::sync::atomic::Ordering::SeqCst),
+        "the connection was held while the head was hashed"
+    );
+}
+
+#[test]
+fn a_read_records_a_hand_edited_head_as_a_version_authored_by_nobody() {
+    let (f, v1) = hand_edited("one\ntwo\nthree\n");
+
+    let (path, edit) = f.store().resolve_content_with_edit(&v1.id, None).unwrap();
+    assert_eq!(path, PathBuf::from(&v1.storage_path));
+    let edit = edit.expect("the edit is reported so the daemon can announce it");
+    assert_eq!(edit.version, 2);
+    assert_eq!(edit.sha256, sha256_hex(b"one\ntwo\nthree\n"));
+    assert_eq!(edit.size_bytes, 14);
+    assert_eq!(edit.version_count, 2);
+    assert!(!edit.missing());
+
+    let rows = f.store().versions(&v1.id).unwrap();
+    assert_eq!(rows.len(), 2);
+    let v2 = &rows[0];
+    assert_eq!(v2.version, 2);
+    assert_eq!(v2.author_agent_id, None, "nobody in OpenAlpaca wrote it");
+    assert_eq!(v2.note.as_deref(), Some(USER_EDIT_NOTE));
+    assert_eq!(v2.rel_path, v1.rel_path.clone().unwrap());
+    // The bytes v2 replaced were overwritten in place, so there is nothing to
+    // count against — the same `NULL` a put records when v(N-1) is gone.
+    assert_eq!((v2.added_lines, v2.removed_lines), (None, None));
+
+    // v1's row points at the slot its bytes would have been rotated into.
+    // Nothing is there, and saying so is the truth about a file edited in place.
+    assert_eq!(
+        rows[1].rel_path,
+        "loose/2026-09-01/.versions/01-notes/v1.md"
+    );
+    let err = f.store().resolve_content(&v1.id, Some(1)).unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<ArtifactError>().unwrap().code(),
+        "ARTIFACT_GONE"
+    );
+}
+
+#[test]
+fn the_hand_edit_is_recorded_exactly_once() {
+    let (f, v1) = hand_edited("edited\n");
+
+    assert!(
+        f.store()
+            .resolve_content_with_edit(&v1.id, None)
+            .unwrap()
+            .1
+            .is_some()
+    );
+    // Every later read finds the bytes the row now describes.
+    for _ in 0..3 {
+        assert!(
+            f.store()
+                .resolve_content_with_edit(&v1.id, None)
+                .unwrap()
+                .1
+                .is_none()
+        );
+    }
+    let root = f.project_root().to_string_lossy().to_string();
+    assert!(f.store().verify(Some(&root)).unwrap().user_edits.is_empty());
+    assert_eq!(f.store().versions(&v1.id).unwrap().len(), 2);
+}
+
+#[test]
+fn verify_records_the_hand_edits_it_finds() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut a = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Alpha", b"a\n");
+    a.created = at(1);
+    let (a, _) = f.store().put(a).unwrap();
+    let mut b = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Beta", b"b\n");
+    b.created = at(1);
+    let (b, _) = f.store().put(b).unwrap();
+
+    fs::write(&a.storage_path, "a edited\n").unwrap();
+
+    let root = f.project_root().to_string_lossy().to_string();
+    let report = f.store().verify(Some(&root)).unwrap();
+    assert_eq!(report.missing, 0);
+    assert_eq!(report.user_edits.len(), 1);
+    assert_eq!(report.user_edits[0].id, a.id);
+    assert_eq!(report.user_edits[0].version, 2);
+
+    assert_eq!(f.store().get(&b.id, OWNER).unwrap().unwrap().version, 1);
+}
+
+#[test]
+fn a_missing_head_is_never_rotated() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"body\n");
+    new.created = at(1);
+    let (record, _) = f.store().put(new).unwrap();
+
+    // Absent bytes: the sweep marks the row and records no edit.
+    fs::remove_file(&record.storage_path).unwrap();
+    let root = f.project_root().to_string_lossy().to_string();
+    let report = f.store().verify(Some(&root)).unwrap();
+    assert_eq!(report.missing, 1);
+    assert!(report.user_edits.is_empty());
+    assert!(f.store().get(&record.id, OWNER).unwrap().unwrap().missing());
+
+    // The bytes come back, different — and the row is still `missing`, which
+    // only a put clears. A missing head is never rotated (§4.8): the version
+    // history of a row whose bytes went away and returned is the writer's to
+    // re-establish, not the reader's.
+    fs::write(&record.storage_path, "restored by hand\n").unwrap();
+    let report = f.store().verify(Some(&root)).unwrap();
+    assert!(report.user_edits.is_empty());
+    assert_eq!(
+        f.store().get(&record.id, OWNER).unwrap().unwrap().version,
+        1
+    );
+    assert_eq!(f.store().versions(&record.id).unwrap().len(), 1);
+}
+
+#[test]
+fn an_upload_is_never_rotated() {
+    let f = Fixture::new();
+    let dir = f.artifacts_root().join("loose/2026-09-01");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("01-notes.md");
+    fs::write(&path, "uploaded\n").unwrap();
+    f.foreign_row("upload-1", "loose/2026-09-01/01-notes.md", &path);
+
+    // `foreign_row` writes sha 'sha', which no bytes hash to — so the only
+    // thing keeping this row out of the rotation is its origin.
+    assert!(
+        f.store()
+            .resolve_content_with_edit("upload-1", None)
+            .unwrap()
+            .1
+            .is_none()
+    );
+    assert_eq!(f.store().versions("upload-1").unwrap().len(), 0);
+}
+
+#[test]
+fn a_crash_between_the_rotation_steps_records_nothing() {
+    for step in [RotateStep::PreviousRepointed, RotateStep::VersionInserted] {
+        let (f, v1) = hand_edited("edited\n");
+        {
+            let _crash = RotateCrashGuard::after(step);
+            let err = f
+                .store()
+                .resolve_content_with_edit(&v1.id, None)
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("simulated crash"),
+                "expected the injected failure at {step:?}, got: {err}"
+            );
+        }
+
+        // The transaction rolled back: the row, the version history and v1's
+        // own rel_path are all exactly as they were.
+        let after = f.store().get(&v1.id, OWNER).unwrap().unwrap();
+        assert_eq!(after.version, 1, "{step:?}");
+        assert_eq!(after.sha256, v1.sha256, "{step:?}");
+        assert_eq!(after.version_count, 1, "{step:?}");
+        let rows = f.store().versions(&v1.id).unwrap();
+        assert_eq!(rows.len(), 1, "{step:?}");
+        assert_eq!(rows[0].rel_path, v1.rel_path.clone().unwrap(), "{step:?}");
+
+        // And the next read records the edit exactly once.
+        let edit = f
+            .store()
+            .resolve_content_with_edit(&v1.id, None)
+            .unwrap()
+            .1
+            .expect("the retry records it");
+        assert_eq!(edit.version, 2, "{step:?}");
+        assert_eq!(f.store().versions(&v1.id).unwrap().len(), 2, "{step:?}");
+    }
+}
+
+#[test]
+fn a_put_onto_an_unnoticed_hand_edit_records_the_edit_first() {
+    // Nothing has read this artifact since it was edited by hand, so the agent
+    // is about to write over bytes no version row describes.
+    let (f, v1) = hand_edited("mine\n");
+
+    let scope = f.scope();
+    let mut third = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"theirs\n");
+    third.created = at(1);
+    third.agent_id = Some("writer::1");
+    let (record, created) = f.store().put(third).unwrap();
+    assert!(!created);
+    assert_eq!(
+        record.version, 3,
+        "the hand edit is v2 and the agent's write is v3"
+    );
+    assert_eq!(record.version_count, 3);
+
+    let rows = f.store().versions(&v1.id).unwrap();
+    assert_eq!(rows.len(), 3);
+
+    // v3 is the agent's, and its bytes are at the head.
+    assert_eq!(rows[0].version, 3);
+    assert_eq!(rows[0].author_agent_id.as_deref(), Some("writer::1"));
+    assert_eq!(rows[0].sha256, sha256_hex(b"theirs\n"));
+
+    // v2 is the hand edit, and every row's sha describes the bytes its
+    // rel_path points at — which is the whole point.
+    assert_eq!(rows[1].version, 2);
+    assert_eq!(rows[1].author_agent_id, None);
+    assert_eq!(rows[1].note.as_deref(), Some(USER_EDIT_NOTE));
+    assert_eq!(rows[1].sha256, sha256_hex(b"mine\n"));
+    let v2_path = f.store().resolve_content(&v1.id, Some(2)).unwrap();
+    assert_eq!(fs::read_to_string(v2_path).unwrap(), "mine\n");
+
+    // v1's bytes were overwritten in place by the hand edit; its row says so
+    // rather than claiming the user's bytes.
+    assert_eq!(rows[2].version, 1);
+    assert_eq!(rows[2].sha256, v1.sha256);
+    let err = f.store().resolve_content(&v1.id, Some(1)).unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<ArtifactError>().unwrap().code(),
+        "ARTIFACT_GONE"
+    );
+
+    // And the read that follows finds nothing left to record.
+    assert!(
+        f.store()
+            .resolve_content_with_edit(&v1.id, None)
+            .unwrap()
+            .1
+            .is_none()
+    );
+}
+
+#[test]
+fn a_crash_between_the_two_rotations_records_neither() {
+    let (f, v1) = hand_edited("mine\n");
+    let scope = f.scope();
+
+    {
+        let _crash = CrashGuard::after(WriteStep::UserEditRotated);
+        let mut third =
+            NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"theirs\n");
+        third.created = at(1);
+        let err = f.store().put(third).unwrap_err();
+        assert!(
+            err.to_string().contains("simulated crash"),
+            "expected the injected failure, got: {err}"
+        );
+    }
+
+    // Both rotations are in one transaction, so the abort leaves the store
+    // exactly as it was — the user's bytes still standing at the head.
+    let after = f.store().get(&v1.id, OWNER).unwrap().unwrap();
+    assert_eq!(after.version, 1);
+    assert_eq!(after.sha256, v1.sha256);
+    assert_eq!(after.version_count, 1);
+    let rows = f.store().versions(&v1.id).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].rel_path, v1.rel_path.clone().unwrap());
+    assert_eq!(fs::read_to_string(&after.storage_path).unwrap(), "mine\n");
+
+    // So the next read records the edit exactly once, as if nothing had tried.
+    let edit = f
+        .store()
+        .resolve_content_with_edit(&v1.id, None)
+        .unwrap()
+        .1
+        .expect("the retry records it");
+    assert_eq!(edit.version, 2);
+    assert_eq!(f.store().versions(&v1.id).unwrap().len(), 2);
+}
+
+#[test]
+fn a_put_after_a_recorded_hand_edit_supersedes_it() {
+    let (f, v1) = hand_edited("mine\n");
+    f.store().resolve_content(&v1.id, None).unwrap();
+
+    let scope = f.scope();
+    let mut third = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"theirs\n");
+    third.created = at(1);
+    third.agent_id = Some("writer::1");
+    let (record, created) = f.store().put(third).unwrap();
+    assert!(!created);
+    assert_eq!(record.version, 3);
+
+    let rows = f.store().versions(&v1.id).unwrap();
+    assert_eq!(rows[0].version, 3);
+    assert_eq!(rows[0].author_agent_id.as_deref(), Some("writer::1"));
+    // v2 — the hand edit — kept its bytes: the put rotated them into the slot.
+    let v2 = f.store().resolve_content(&v1.id, Some(2)).unwrap();
+    assert_eq!(fs::read_to_string(v2).unwrap(), "mine\n");
+    assert_eq!(
+        (rows[0].added_lines, rows[0].removed_lines),
+        (Some(1), Some(1))
+    );
+}
+
+// ============================================================================
+// diff
+// ============================================================================
+
+#[test]
+fn diff_rejects_the_non_text_kinds() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    // Distinct titles, because both kinds fall through to `.bin`: one title
+    // would make the second pair a *supersede* of the first artifact rather
+    // than a second artifact.
+    for (kind, title) in [
+        (ArtifactKind::Image, "Shot"),
+        (ArtifactKind::Binary, "Blob"),
+    ] {
+        let mut one = NewArtifact::new(OWNER, &scope, kind, title, b"a");
+        one.created = at(1);
+        let (record, _) = f.store().put(one).unwrap();
+        let mut two = NewArtifact::new(OWNER, &scope, kind, title, b"b");
+        two.created = at(1);
+        f.store().put(two).unwrap();
+
+        let err = f.store().diff(&record.id, 1, 2).unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<ArtifactError>().unwrap().code(),
+            "NOT_DIFFABLE",
+            "kind {kind:?} must not be diffable"
+        );
+    }
+}
+
+/// The `+`/`-` totals a human reading the patch would count: the two file
+/// header lines are consumed first, then `@@` hunk headers and the
+/// `\ No newline at end of file` hint are skipped. Content lines never reach
+/// column 0 — every one of them carries a `+`, `-` or space prefix — so no
+/// payload beginning with `@@` or `\` can be mistaken for a marker.
+fn patch_totals(patch: &str) -> (i64, i64) {
+    if patch.is_empty() {
+        return (0, 0);
+    }
+    let mut lines = patch.lines();
+    let from = lines.next().unwrap_or_default();
+    let to = lines.next().unwrap_or_default();
+    assert!(from.starts_with("--- "), "no `---` header line: {patch:?}");
+    assert!(to.starts_with("+++ "), "no `+++` header line: {patch:?}");
+
+    let mut added = 0i64;
+    let mut removed = 0i64;
+    for line in lines {
+        if line.starts_with("@@") || line.starts_with('\\') {
+            continue;
+        }
+        match line.as_bytes().first() {
+            Some(b'+') => added += 1,
+            Some(b'-') => removed += 1,
+            _ => {}
+        }
+    }
+    (added, removed)
+}
+
+/// Writes `bodies` in order to one address, returning the artifact id.
+fn versions_of(f: &Fixture, kind: ArtifactKind, bodies: &[&str]) -> String {
+    let scope = f.scope();
+    let mut id = String::new();
+    for body in bodies {
+        let mut new = NewArtifact::new(OWNER, &scope, kind, "Notes", body.as_bytes());
+        new.created = at(1);
+        let (record, _) = f.store().put(new).unwrap();
+        id = record.id;
+    }
+    id
+}
+
+#[test]
+fn diff_returns_a_unified_patch_between_two_versions() {
+    let f = Fixture::new();
+    let id = versions_of(
+        &f,
+        ArtifactKind::Markdown,
+        &["one\ntwo\nthree\n", "one\nthree\nfour\n"],
+    );
+
+    let diff = f.store().diff(&id, 1, 2).unwrap();
+
+    assert_eq!((diff.from, diff.to), (1, 2));
+    assert_eq!(diff.format, "unified");
+    assert!(
+        diff.patch.starts_with("--- v1\n+++ v2\n"),
+        "the header names the two versions: {:?}",
+        diff.patch
+    );
+    assert!(diff.patch.contains("-two\n"), "{:?}", diff.patch);
+    assert!(diff.patch.contains("+four\n"), "{:?}", diff.patch);
+    assert!(diff.patch.contains(" one\n"), "context is kept: {:?}", diff.patch);
+    assert_eq!((diff.added_lines, diff.removed_lines), (1, 1));
+    assert_eq!(
+        patch_totals(&diff.patch),
+        (diff.added_lines, diff.removed_lines),
+        "the reported counts are the patch's own totals"
+    );
+}
+
+/// The patch is directional: asking for `2 → 1` is the inverse edit, not the
+/// same one relabelled.
+#[test]
+fn diff_is_directional() {
+    let f = Fixture::new();
+    let id = versions_of(&f, ArtifactKind::Markdown, &["one\n", "one\ntwo\n"]);
+
+    let forward = f.store().diff(&id, 1, 2).unwrap();
+    assert_eq!((forward.added_lines, forward.removed_lines), (1, 0));
+    assert!(forward.patch.contains("+two\n"));
+
+    let backward = f.store().diff(&id, 2, 1).unwrap();
+    assert_eq!((backward.from, backward.to), (2, 1));
+    assert!(backward.patch.starts_with("--- v2\n+++ v1\n"));
+    assert_eq!((backward.added_lines, backward.removed_lines), (0, 1));
+    assert!(backward.patch.contains("-two\n"));
+    assert_eq!(patch_totals(&backward.patch), (0, 1));
+}
+
+/// Identical bytes are an empty patch and a zero pair — never an error, and
+/// never a patch a client would have to read as "no changes".
+#[test]
+fn diff_of_a_version_against_itself_is_empty() {
+    let f = Fixture::new();
+    let id = versions_of(&f, ArtifactKind::Markdown, &["one\ntwo\n", "one\ntwo\nthree\n"]);
+
+    let same = f.store().diff(&id, 2, 2).unwrap();
+    assert_eq!(same.patch, "");
+    assert_eq!((same.added_lines, same.removed_lines), (0, 0));
+}
+
+/// A patch over more than one context radius is several hunks, and the counts
+/// still sum over all of them.
+#[test]
+fn diff_spans_several_hunks() {
+    let f = Fixture::new();
+    let old: String = (1..=30).map(|n| format!("line {n}\n")).collect();
+    let new: String = (1..=30)
+        .map(|n| match n {
+            3 => "line 3 edited\n".to_string(),
+            27 => "line 27 edited\n".to_string(),
+            _ => format!("line {n}\n"),
+        })
+        .collect();
+    let id = versions_of(&f, ArtifactKind::Markdown, &[&old, &new]);
+
+    let diff = f.store().diff(&id, 1, 2).unwrap();
+    assert_eq!(
+        diff.patch.matches("@@").count(),
+        4,
+        "two hunks, two `@@` markers each: {:?}",
+        diff.patch
+    );
+    assert_eq!((diff.added_lines, diff.removed_lines), (2, 2));
+    assert_eq!(patch_totals(&diff.patch), (2, 2));
+}
+
+#[test]
+fn diff_still_validates_the_artifact_and_its_versions() {
+    let f = Fixture::new();
+    let id = versions_of(&f, ArtifactKind::Markdown, &["a\n", "a\nb\n"]);
+
+    let err = f.store().diff(&id, 1, 9).unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<ArtifactError>().unwrap().code(),
+        "ARTIFACT_VERSION_NOT_FOUND"
+    );
+    let err = f.store().diff("nope", 1, 2).unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<ArtifactError>().unwrap().code(),
+        "ARTIFACT_NOT_FOUND"
+    );
+}
+
+/// A version whose bytes were deleted is `ARTIFACT_GONE`, exactly as reading it
+/// through `resolve_content` is — the diff reads the same files.
+#[test]
+fn diff_reports_a_deleted_version_as_gone() {
+    let f = Fixture::new();
+    let id = versions_of(&f, ArtifactKind::Markdown, &["a\n", "a\nb\n"]);
+    fs::remove_file(
+        f.artifacts_root()
+            .join("loose/2026-09-01/.versions/01-notes/v1.md"),
+    )
+    .unwrap();
+
+    let err = f.store().diff(&id, 1, 2).unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<ArtifactError>().unwrap().code(),
+        "ARTIFACT_GONE"
+    );
+}
+
+/// R32. The patch is bounded by size before a byte is read: a version above
+/// `MAX_DIFF_BYTES` is `DIFF_TOO_LARGE`, not 8 MiB in memory and a Myers run
+/// over a million lines. The version rows' stored `added_lines`/`removed_lines`
+/// remain the answer for a file that big.
+///
+/// The 8 MiB is written straight to disk on purpose: `put` would have to carry
+/// the whole thing through memory to set up the same state, and the number is
+/// spelled here rather than read from the constant so that raising the cap
+/// cannot silently pass.
+#[test]
+fn a_version_over_the_diff_cap_is_diff_too_large() {
+    let f = Fixture::new();
+    let id = versions_of(&f, ArtifactKind::Markdown, &["one\n", "two\n"]);
+    let head = f.store().get(&id, OWNER).unwrap().unwrap().storage_path;
+    fs::write(&head, vec![b'x'; 8 * 1024 * 1024 + 1]).unwrap();
+
+    let err = f.store().diff(&id, 1, 2).unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<ArtifactError>()
+            .unwrap_or_else(|| panic!("not an ArtifactError: {err}"))
+            .code(),
+        "DIFF_TOO_LARGE"
+    );
+    assert!(
+        err.to_string().contains("version 2"),
+        "the refusal names the version that is too big: {err}"
+    );
+}
+
+/// One byte under the cap is an ordinary diff — the bound refuses what it says
+/// it refuses and nothing else.
+#[test]
+fn a_version_at_the_diff_cap_still_diffs() {
+    let f = Fixture::new();
+    let id = versions_of(&f, ArtifactKind::Markdown, &["one\n", "two\n"]);
+    let head = f.store().get(&id, OWNER).unwrap().unwrap().storage_path;
+    let mut body = vec![b'x'; 8 * 1024 * 1024 - 1];
+    body.push(b'\n');
+    fs::write(&head, &body).unwrap();
+
+    let diff = f.store().diff(&id, 1, 2).unwrap();
+    assert_eq!((diff.added_lines, diff.removed_lines), (1, 1));
+}
+
+// ============================================================================
+// line counting (the write-time added/removed pair)
+// ============================================================================
+
+#[test]
+fn line_counts_are_recorded_at_write_time() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut one = NewArtifact::new(
+        OWNER,
+        &scope,
+        ArtifactKind::Markdown,
+        "Notes",
+        b"one\ntwo\nthree\n",
+    );
+    one.created = at(1);
+    let (record, _) = f.store().put(one).unwrap();
+
+    let mut two = NewArtifact::new(
+        OWNER,
+        &scope,
+        ArtifactKind::Markdown,
+        "Notes",
+        b"one\nthree\nfour\nfive\n",
+    );
+    two.created = at(1);
+    f.store().put(two).unwrap();
+
+    let rows = f.store().versions(&record.id).unwrap();
+    assert_eq!(rows[0].added_lines, Some(2), "four, five");
+    assert_eq!(rows[0].removed_lines, Some(1), "two");
+    assert_eq!(rows[0].author_agent_id, None);
+    assert_eq!(rows[0].size_bytes, 20);
+}
+
+/// The stored pair and the patch are one computation: whatever a reader counts
+/// in the unified diff is what the version row already said.
+///
+/// A *moved* line proves it. Under a real line diff it is one delete and one
+/// insert — which is exactly what the patch shows — where the multiset tally
+/// this replaced called it neither.
+#[test]
+fn the_stored_line_counts_are_the_patch_totals() {
+    let f = Fixture::new();
+    let id = versions_of(&f, ArtifactKind::Markdown, &["a\nb\nc\n", "b\nc\na\n"]);
+
+    let rows = f.store().versions(&id).unwrap();
+    let diff = f.store().diff(&id, 1, 2).unwrap();
+
+    assert_eq!(
+        (diff.added_lines, diff.removed_lines),
+        (1, 1),
+        "the moved line is one add and one delete"
+    );
+    assert_eq!(rows[0].added_lines, Some(diff.added_lines));
+    assert_eq!(rows[0].removed_lines, Some(diff.removed_lines));
+    assert_eq!(
+        patch_totals(&diff.patch),
+        (diff.added_lines, diff.removed_lines)
+    );
+}
+
+/// The T23 re-review's Minor 8, as §4.8 leaves it. An interrupted put parks
+/// bytes at the head that no row describes; the recovering put now *records*
+/// them as the version nobody wrote before writing its own, so the counts are
+/// still taken against the bytes the rows claim — they are simply one more
+/// version than they used to be. Nothing is ever counted against a file no row
+/// describes.
+#[test]
+fn the_line_counts_are_taken_against_the_version_the_rows_describe() {
+    let f = Fixture::new();
+    let scope = f.scope();
+
+    let mut first = NewArtifact::new(
+        OWNER,
+        &scope,
+        ArtifactKind::Markdown,
+        "Notes",
+        b"alpha\nbeta\n",
+    );
+    first.created = at(1);
+    let (v1, _) = f.store().put(first).unwrap();
+
+    {
+        let _crash = CrashGuard::after(WriteStep::HeadRenamed);
+        let mut orphan =
+            NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"gamma\n");
+        orphan.created = at(1);
+        f.store().put(orphan).unwrap_err();
+    }
+    let dir = f.artifacts_root().join("loose/2026-09-01");
+    assert_eq!(
+        fs::read_to_string(dir.join("01-notes.md")).unwrap(),
+        "gamma\n",
+        "the orphaned head is what a naive count would read"
+    );
+
+    let mut retry = NewArtifact::new(
+        OWNER,
+        &scope,
+        ArtifactKind::Markdown,
+        "Notes",
+        b"alpha\nbeta\ndelta\n",
+    );
+    retry.created = at(1);
+    let (v3, _) = f.store().put(retry).unwrap();
+    assert_eq!(v3.version, 3, "the orphan became v2 and this is v3");
+
+    let rows = f.store().versions(&v1.id).unwrap();
+    assert_eq!(rows[0].version, 3);
+    assert_eq!(
+        (rows[0].added_lines, rows[0].removed_lines),
+        (Some(3), Some(1)),
+        "counted against v2 — the orphan, now a version with a row of its own"
+    );
+
+    // …and the patch over the pair the rows describe says the same thing.
+    let diff = f.store().diff(&v1.id, 2, 3).unwrap();
+    assert_eq!((diff.added_lines, diff.removed_lines), (3, 1));
+    assert_eq!(patch_totals(&diff.patch), (3, 1));
+
+    // v1's own bytes are still readable and still its own.
+    let path = f.store().resolve_content(&v1.id, Some(1)).unwrap();
+    assert_eq!(fs::read_to_string(path).unwrap(), "alpha\nbeta\n");
+}
+
+#[test]
+fn line_counts_are_absent_for_a_binary_kind() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut one = NewArtifact::new(OWNER, &scope, ArtifactKind::Binary, "Blob", &[0u8, 1, 2]);
+    one.created = at(1);
+    let (record, _) = f.store().put(one).unwrap();
+    let mut two = NewArtifact::new(OWNER, &scope, ArtifactKind::Binary, "Blob", &[0u8, 1, 2, 3]);
+    two.created = at(1);
+    f.store().put(two).unwrap();
+
+    let rows = f.store().versions(&record.id).unwrap();
+    assert_eq!(rows[0].version, 2);
+    assert_eq!(rows[0].added_lines, None);
+    assert_eq!(rows[0].removed_lines, None);
+}

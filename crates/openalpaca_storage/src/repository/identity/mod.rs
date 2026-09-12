@@ -375,8 +375,8 @@ impl<'a> IdentityRepository<'a> {
     }
 
     /// Migrate all lane data from old provider-keyed lane to new global-user-keyed lane.
-    /// Called after a successful /link to ensure messages, tasks, and preferences
-    /// follow the canonical identity.
+    /// Called after a successful /link to ensure messages, tasks, sessions,
+    /// preferences and queued follow-ups follow the canonical identity.
     pub fn migrate_lane_on_link(
         &self,
         provider_user_id: &str,
@@ -423,55 +423,53 @@ impl<'a> IdentityRepository<'a> {
                 rusqlite::params![old_lane],
             )?;
 
-            // 5. MERGE conversations table
-            let old_exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM conversations WHERE lane_key = ?1)",
-                rusqlite::params![old_lane],
-                |row| row.get(0),
-            )?;
-            let new_exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM conversations WHERE lane_key = ?1)",
+            // 5. MERGE sessions (migration 039). A lane now holds many
+            // sessions, so the old lane's conversations *move* rather than one
+            // of them being deleted: each is a transcript its messages still
+            // point at by `session_id`, and dropping the row would orphan them.
+            //
+            // The one thing that cannot move as-is is a second **active**
+            // session: `idx_session_active_lane` allows one per lane. When the
+            // destination already has a live conversation, the incoming ones
+            // join it archived — the lane the user is currently talking in
+            // keeps the floor.
+            let new_has_active: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session WHERE lane_key = ?1 AND status = 'active')",
                 rusqlite::params![new_lane],
                 |row| row.get(0),
             )?;
-
-            match (old_exists, new_exists) {
-                (true, false) => {
-                    // Only old exists: rename
-                    tx.execute(
-                        "UPDATE conversations SET lane_key = ?1 WHERE lane_key = ?2",
-                        rusqlite::params![new_lane, old_lane],
-                    )?;
-                }
-                (true, true) => {
-                    // Both exist: delete old (messages already moved in step 1)
-                    tx.execute(
-                        "DELETE FROM conversations WHERE lane_key = ?1",
-                        rusqlite::params![old_lane],
-                    )?;
-                }
-                _ => {
-                    // old doesn't exist: nothing to merge
-                }
-            }
-
-            // 6. Recompute conversations stats from actual messages
-            if old_exists || new_exists {
-                let msg_count: i64 = tx.query_row(
-                    "SELECT COUNT(*) FROM conversation_messages WHERE lane_key = ?1",
-                    rusqlite::params![new_lane],
-                    |row| row.get(0),
-                )?;
-                let last_msg_at: Option<String> = tx.query_row(
-                    "SELECT MAX(created_at) FROM conversation_messages WHERE lane_key = ?1",
-                    rusqlite::params![new_lane],
-                    |row| row.get(0),
-                )?;
+            if new_has_active {
                 tx.execute(
-                    "UPDATE conversations SET message_count = ?1, last_message_at = ?2, updated_at = ?3 WHERE lane_key = ?4",
-                    rusqlite::params![msg_count, last_msg_at, Utc::now().to_rfc3339(), new_lane],
+                    "UPDATE session SET status = 'archived', ended_at = datetime('now'),
+                     updated_at = datetime('now')
+                     WHERE lane_key = ?1 AND status = 'active'",
+                    rusqlite::params![old_lane],
                 )?;
             }
+            tx.execute(
+                "UPDATE session SET lane_key = ?1, updated_at = ?2 WHERE lane_key = ?3",
+                rusqlite::params![new_lane, Utc::now().to_rfc3339(), old_lane],
+            )?;
+
+            // 6. Move the queued follow-ups. A follow-up is addressed to the
+            // lane it will be delivered on, so one left behind would fire a
+            // turn onto a lane key nothing answers any more.
+            tx.execute(
+                "UPDATE lane_followups SET lane_key = ?1 WHERE lane_key = ?2",
+                rusqlite::params![new_lane, old_lane],
+            )?;
+
+            // 7. Recompute each moved session's stats from its own messages.
+            tx.execute(
+                "UPDATE session SET
+                   message_count = (SELECT COUNT(*) FROM conversation_messages m
+                                     WHERE m.session_id = session.id),
+                   last_message_at = (SELECT MAX(m.created_at) FROM conversation_messages m
+                                       WHERE m.session_id = session.id),
+                   updated_at = ?1
+                 WHERE lane_key = ?2",
+                rusqlite::params![Utc::now().to_rfc3339(), new_lane],
+            )?;
 
             tx.commit()?;
             Ok(())

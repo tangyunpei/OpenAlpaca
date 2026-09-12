@@ -6,8 +6,8 @@
 //!   only — its backend already lives in the shared registry).
 //! - **Extension tools** (tool/skill wiring, Chunk 2): every MCP-bridged
 //!   (`<server>__<tool>`) and plugin-provided (`<plugin>::<tool>`) tool in the
-//!   global registry, minus `execution.skill_defaults.global_tool_deny`
-//!   (definitions only — backends already live in the shared registry).
+//!   global registry whose extension is enabled (definitions only — backends
+//!   already live in the shared registry).
 //! - **`invoke_skill`** (when an LLM router is available): per-request
 //!   catalog-skill invocation via the nested-skill executor.
 //! - **Workflow-aware** (only when the lane has active workflows AND steering
@@ -171,18 +171,31 @@ pub fn main_loop_tool_set(
         definitions.push(search.definition.clone());
     }
 
+    // ── read_result (only where a spill can happen) ─────────────────────
+    // R84: the spill stub tells the model to page with `read_result`, so every
+    // surface that can produce a stub has to offer the tool — without it a large
+    // result shrank from base's 32 KiB head to a 2 KiB preview and a reference
+    // nothing could follow. Definition only: the backend is globally registered
+    // (`builtins::register_builtin_tools`), so the per-request clone carries it,
+    // and the main loop derives its allowlist from this same surface, which is
+    // what admits the call. With no session log nothing spills and the tool
+    // could only answer "this call has none" — the same reason the memory tools
+    // stay off without a database.
+    if shared_context.session_log().is_some()
+        && db.is_some()
+        && let Some(read_result) = global_registry.get("read_result")
+    {
+        definitions.push(read_result.definition.clone());
+    }
+
     // ── Extension tools (MCP-bridged + plugin-provided) ─────────────────
     // Part of the DEFAULT surface: every `<server>__<tool>` / `<plugin>::<tool>`
-    // in the global registry joins, minus the global tool deny list (the
-    // opt-out). Definitions only — their backends already live in the global
-    // registry, so the caller's per-request registry clone carries them.
-    let global_tool_deny = daemon_config
-        .load()
-        .execution
-        .skill_defaults
-        .global_tool_deny
-        .clone();
-    definitions.extend(global_registry.extension_tool_defs(&global_tool_deny));
+    // in the global registry joins, less those whose extension is not enabled
+    // (hygiene — the gate is what refuses). There is no per-tool opt-out; the
+    // ENABLE axis is one toggle per server / per plugin (design §1 S1, §11).
+    // Definitions only — their backends already live in the global registry,
+    // so the caller's per-request registry clone carries them.
+    definitions.extend(global_registry.extension_tool_defs());
 
     // ── invoke_skill (per-request; requires an LLM router to run skills) ─
     if let Some(router) = llm_router {
@@ -205,7 +218,11 @@ pub fn main_loop_tool_set(
     // ── Workflow-aware set (active workflows + steering only) ───────────
     let lane_has_workflows = !shared_context.workflows_for_lane(lane_key).is_empty();
     let steer_workflow = if lane_has_workflows && routing.steering_enabled {
-        let steer = Arc::new(SteerWorkflowTool::new(shared_context, bus.clone()));
+        let steer = Arc::new(SteerWorkflowTool::new(
+            shared_context,
+            bus.clone(),
+            db.clone(),
+        ));
         let steer_def = steer_workflow_tool_definition();
         definitions.push(steer_def.clone());
         instances.push((steer_def, steer.clone() as Arc<dyn BuiltInTool>));
@@ -396,6 +413,81 @@ mod tests {
         assert!(set.steer_workflow.is_none());
     }
 
+    /// R84: the spill stub names `read_result`, so the surface that can produce
+    /// one offers the tool — and the main loop's allowlist, derived from this
+    /// same surface, is what admits the call. Without a session log nothing
+    /// spills, so it stays off, like the memory tools without a database.
+    #[test]
+    fn read_result_joins_the_surface_when_a_session_log_is_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+        let sessions = tempfile::tempdir().unwrap();
+
+        // No session log service on the context yet.
+        let (shared, dispatcher, bus, registry) = setup();
+        for tool in super::super::builtin_tools(Some(db.clone()), None, None, None, None) {
+            if tool.definition.name == "read_result" {
+                registry.register(tool).unwrap();
+            }
+        }
+        assert!(
+            registry.get("read_result").is_some(),
+            "production registers it globally; the fixture mirrors that"
+        );
+        let set = build(
+            shared,
+            dispatcher,
+            bus,
+            &registry,
+            &routing(false),
+            Some(db.clone()),
+            "user1:cli",
+        );
+        assert!(
+            !names(&set.definitions).contains(&"read_result"),
+            "nothing can spill without a session log: {:?}",
+            names(&set.definitions)
+        );
+
+        // With one, as every daemon that resolved a store has.
+        let (shared, dispatcher, bus, registry) = setup();
+        for tool in super::super::builtin_tools(Some(db.clone()), None, None, None, None) {
+            if tool.definition.name == "read_result" {
+                registry.register(tool).unwrap();
+            }
+        }
+        shared.set_session_log(
+            crate::session_log::SessionLogService::new(
+                sessions.path().to_path_buf(),
+                Some(db.clone()),
+                crate::session_log::SessionLogLimits::default(),
+                "test".to_string(),
+            )
+            .into_arc(),
+        );
+        let set = build(
+            shared,
+            dispatcher,
+            bus,
+            &registry,
+            &routing(false),
+            Some(db),
+            "user1:cli",
+        );
+        assert!(
+            names(&set.definitions).contains(&"read_result"),
+            "the surface that emits the stub must offer the tool: {:?}",
+            names(&set.definitions)
+        );
+        // Definition only — the backend is already in the global registry.
+        assert!(
+            !set.instances
+                .iter()
+                .any(|(def, _)| def.name == "read_result"),
+            "no per-request instance is built for a globally registered backend"
+        );
+    }
+
     #[test]
     fn test_workflow_aware_set_requires_workflows_and_steering() {
         let (shared, dispatcher, bus, registry) = setup();
@@ -487,6 +579,7 @@ mod tests {
             client: Arc::new(openalpaca_mcp::McpClient::disconnected_for_tests("srv")),
             remote_name: "echo".to_string(),
             server_name: "srv".to_string(),
+            generation: 0,
         }
     }
 
@@ -526,14 +619,10 @@ mod tests {
     }
 
     #[test]
-    fn test_extension_tools_join_default_surface_minus_deny() {
+    fn test_extension_tools_join_default_surface() {
         let (shared, dispatcher, bus, registry) = setup();
         register_extension_tool(&registry, "srv__echo", mcp_backend());
         register_extension_tool(&registry, "plug::do", plugin_backend());
-        register_extension_tool(&registry, "srv__blocked", mcp_backend());
-
-        let mut cfg = DaemonConfig::default();
-        cfg.execution.skill_defaults.global_tool_deny = vec!["srv__blocked".to_string()];
 
         let set = build_with(
             shared,
@@ -543,16 +632,12 @@ mod tests {
             &routing(true),
             None,
             "user1:cli",
-            Arc::new(ArcSwap::from_pointee(cfg)),
+            Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
             None,
         );
         let names = names(&set.definitions);
         assert!(names.contains(&"srv__echo"), "MCP tool missing: {names:?}");
         assert!(names.contains(&"plug::do"), "plugin tool missing: {names:?}");
-        assert!(
-            !names.contains(&"srv__blocked"),
-            "denied tool must be excluded: {names:?}"
-        );
         // No router → no invoke_skill; extension tools have no per-request
         // instances (their backends live in the global registry).
         assert!(!names.contains(&"invoke_skill"));

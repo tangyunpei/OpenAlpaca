@@ -32,9 +32,7 @@ pub struct StepState {
 
 /// Constraints governing task execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskConstraints {
-    pub pipeline_sequential: bool,
-}
+pub struct TaskConstraints {}
 
 impl StepState {
     /// Add an artifact pointer for this step.
@@ -70,13 +68,28 @@ impl TaskState {
         TaskState {
             objective: objective.to_string(),
             steps,
-            constraints: TaskConstraints {
-                pipeline_sequential: true,
-            },
+            constraints: TaskConstraints {},
             workspace: TaskWorkspace::default(),
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// Hand a step to the agent instance now running it, keeping everything
+    /// the step accumulated (§5.6c's resume).
+    ///
+    /// A relaunch spawns a fresh instance, and a non-singleton template's
+    /// instance id carries a UUID — so without this the step would still name
+    /// the dead agent and [`Self::scan_workspace_artifacts`] would never match
+    /// what the *new* one writes. Callers claim the old instance's workspace
+    /// artifacts first; after that the identity is the only thing left to
+    /// change.
+    pub fn rebind_step_agent(&mut self, step_order: i32, agent_id: &str, agent_name: &str) {
+        if let Some(step) = self.steps.iter_mut().find(|s| s.step_order == step_order) {
+            step.agent_id = agent_id.to_string();
+            step.agent_name = agent_name.to_string();
+        }
+        self.updated_at = Utc::now();
     }
 
     /// Mark a step as running.

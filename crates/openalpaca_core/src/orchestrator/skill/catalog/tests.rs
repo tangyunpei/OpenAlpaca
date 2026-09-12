@@ -15,15 +15,15 @@ fn create_skill_dir(parent: &Path, name: &str, skill_md: &str) -> PathBuf {
 const REVIEW_SKILL: &str = r#"---
 name: "Code Review"
 description: "Review code for bugs and style issues"
-command: "review"
-trigger_patterns:
-  - "review.*code"
-  - "code review"
-tools_required:
-  - "file_read"
-auto_load: false
-read_when:
-  - "User asks for code review"
+invoke:
+  slash: "/review"
+routing:
+  intent:
+    - "review.*code"
+    - "code review"
+tools:
+  allow:
+    - "file_read"
 ---
 
 ## Instructions
@@ -34,11 +34,12 @@ Analyze the code for bugs and style.
 const EXPLAIN_SKILL: &str = r#"---
 name: "Explain Code"
 description: "Explain what code does"
-command: "explain-code"
-trigger_patterns:
-  - "explain.*code"
-  - "what does.*do"
-auto_load: false
+invoke:
+  slash: "/explain-code"
+routing:
+  intent:
+    - "explain.*code"
+    - "what does.*do"
 ---
 
 ## Instructions
@@ -83,7 +84,10 @@ fn test_get_by_name_fallback() {
     // Lookup by frontmatter name (fallback)
     let entry = catalog.get("Code Review").expect("should find by name");
     assert_eq!(entry.frontmatter.name, "Code Review");
-    assert_eq!(entry.frontmatter.command, Some("review".to_string()));
+    assert_eq!(
+        entry.frontmatter.effective_slash_command(),
+        Some("review".to_string())
+    );
 
     // Case insensitive
     let entry2 = catalog
@@ -285,7 +289,8 @@ fn test_multi_scope_project_overrides_user() {
         r#"---
 name: "Code Review (User)"
 description: "User-level code review"
-command: "review"
+invoke:
+  slash: "/review"
 ---
 "#,
     );
@@ -297,7 +302,8 @@ command: "review"
         r#"---
 name: "Code Review (Project)"
 description: "Project-level code review"
-command: "review"
+invoke:
+  slash: "/review"
 ---
 "#,
     );
@@ -433,7 +439,8 @@ fn test_slash_conflict_produces_validation_error() {
         r#"---
 name: "Skill A"
 description: "First skill"
-command: "review"
+invoke:
+  slash: "/review"
 ---
 "#,
     );
@@ -443,7 +450,8 @@ command: "review"
         r#"---
 name: "Skill B"
 description: "Second skill"
-command: "review"
+invoke:
+  slash: "/review"
 ---
 "#,
     );
@@ -483,8 +491,9 @@ async fn test_concurrent_catalog_reads() {
             r#"---
 name: "Skill {i}"
 description: "Skill number {i}"
-trigger_patterns:
-  - "query.*{i}"
+routing:
+  intent:
+    - "query.*{i}"
 ---
 
 ## Instructions
@@ -676,4 +685,73 @@ async fn test_plugin_skill_registration_lifecycle() {
         "get('plugtest') should return None after removal"
     );
     assert_eq!(catalog.count(), 0);
+}
+
+// ── GAP-24: an uninstall expires the withdrawal tombstones ───────────────
+
+struct UninstallStubExecutor;
+
+#[async_trait::async_trait]
+impl openalpaca_api::plugin_traits::PluginSkillExecutor for UninstallStubExecutor {
+    async fn invoke(
+        &self,
+        _query: &str,
+        _context: &serde_json::Value,
+        _tool_executor: &dyn openalpaca_api::plugin_traits::ToolCallbackExecutor,
+    ) -> Result<String, String> {
+        Ok(String::new())
+    }
+    fn plugin_id(&self) -> &str {
+        "notion"
+    }
+    fn skill_id(&self) -> &str {
+        "ntriage"
+    }
+}
+
+fn plugin_skill(catalog: &SkillCatalog, id: &str, slash: &str, plugin: &str) {
+    let mut frontmatter = SkillFrontmatter {
+        name: id.to_string(),
+        description: format!("{id} via {plugin}"),
+        ..Default::default()
+    };
+    frontmatter.invoke.slash = Some(slash.to_string());
+    catalog.register_plugin_skill(
+        id.to_string(),
+        frontmatter,
+        std::sync::Arc::new(UninstallStubExecutor),
+        plugin.to_string(),
+    );
+}
+
+/// T2 tombstones every skill it withdraws so `/slash` can say which plugin took
+/// it away (design §10 case 5(a)). Nothing expired those, because no uninstall
+/// path existed — so after the directory was gone the tombstone would answer
+/// for a plugin that no longer exists, for good.
+///
+/// GAP-24's uninstall clears them **by plugin**, which is what lets a re-install
+/// under the same directory name start clean.
+#[test]
+fn clearing_a_plugins_tombstones_leaves_every_other_plugins_alone() {
+    let catalog = SkillCatalog::new();
+    plugin_skill(&catalog, "ntriage", "/ntriage", "notion");
+    plugin_skill(&catalog, "npage", "/npage", "notion");
+    plugin_skill(&catalog, "lissue", "/lissue", "linear");
+
+    catalog.remove_plugin_skill("ntriage", "notion");
+    catalog.remove_plugin_skill("npage", "notion");
+    catalog.remove_plugin_skill("lissue", "linear");
+    assert!(catalog.tombstone("/ntriage").is_some());
+
+    let cleared = catalog.clear_plugin_tombstones("notion");
+
+    assert_eq!(cleared, 2, "both of notion's skills are expired");
+    assert!(catalog.tombstone("ntriage").is_none());
+    assert!(catalog.tombstone("/ntriage").is_none(), "the slash key too");
+    assert!(catalog.tombstone("npage").is_none());
+    assert!(
+        catalog.tombstone("lissue").is_some(),
+        "another plugin's tombstone is untouched"
+    );
+    assert_eq!(catalog.clear_plugin_tombstones("notion"), 0, "idempotent");
 }

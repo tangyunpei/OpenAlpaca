@@ -1,6 +1,6 @@
 use super::*;
 use async_trait::async_trait;
-use openalpaca_llm::{ChatResponse, LlmError, LlmRouter, ProviderType, Usage};
+use openalpaca_llm::{CallRecord, ChatResponse, LlmError, LlmRouter, ProviderType, Usage};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::orchestrator::skill::constraints::*;
@@ -312,7 +312,8 @@ async fn test_sandbox_execution() {
         SandboxManager::with_defaults(std::sync::Arc::new(registry), EventBus::default());
     let policy = SandboxPolicy {
         agent_id: "test_agent".to_string(),
-        allowed_capabilities: vec![],
+        // This test does not exercise the allow axis.
+        allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
         denied_capabilities: vec![],
         require_confirmation_for: vec![],
         max_tool_calls: None,
@@ -386,7 +387,8 @@ async fn test_sandbox_denied_tool() {
         SandboxManager::with_defaults(std::sync::Arc::new(registry), EventBus::default());
     let policy = SandboxPolicy {
         agent_id: "test_agent".to_string(),
-        allowed_capabilities: vec![],
+        // This test does not exercise the allow axis.
+        allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
         denied_capabilities: vec!["search".to_string()], // deny the tool
         require_confirmation_for: vec![],
         max_tool_calls: None,
@@ -565,7 +567,8 @@ async fn test_cancellation_during_tool_execution() {
         SandboxManager::with_defaults(std::sync::Arc::new(registry), EventBus::default());
     let policy = SandboxPolicy {
         agent_id: "test_agent".to_string(),
-        allowed_capabilities: vec![],
+        // This test does not exercise the allow axis.
+        allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
         denied_capabilities: vec![],
         require_confirmation_for: vec![],
         max_tool_calls: None,
@@ -890,12 +893,24 @@ async fn test_compaction_triggers_during_agentic_loop() {
         ChatMessage::system("You are a helpful assistant."),
         ChatMessage::user("Search for information repeatedly."),
     ];
+    // The compaction record is narrated into a real log, so P-14's fields are
+    // asserted on what the writer actually produced.
+    let dir = tempfile::tempdir().unwrap();
+    let service = crate::session_log::SessionLogService::new(
+        dir.path().to_path_buf(),
+        None,
+        crate::session_log::SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-compaction");
+
     let config = LoopConfig {
         max_rounds: 10,
         max_cost: 10.0,
         enable_caching: false,
         thinking: None,
         context_tail_keep: 2,
+        session_log: Some(handle.clone()),
         ..Default::default()
     };
 
@@ -930,6 +945,151 @@ async fn test_compaction_triggers_during_agentic_loop() {
         result.rounds_used
     );
     assert_eq!(result.tool_calls_made, 4);
+
+    // P-14: the compaction record names the boundary §5.4's replay rule is
+    // defined in terms of, and how much this run has dropped so far. The two
+    // fields that need a message→log-seq map are explicit nulls, not guesses.
+    assert!(handle.flush().await);
+    let records = crate::session_log::read_records(&dir.path().join("sess-compaction")).unwrap();
+    let compaction = records
+        .iter()
+        .find(|r| r.kind == "compaction")
+        .expect("the loop narrates its compaction");
+    let previous = records
+        .iter()
+        .rfind(|r| r.seq < compaction.seq)
+        .expect("a compaction is never the first record here");
+    assert_eq!(
+        compaction.data["preserved_from_seq"].as_u64(),
+        Some(previous.seq),
+        "the boundary is the last seq written before the compaction"
+    );
+    assert_eq!(
+        compaction.data["cumulative_dropped_tokens"].as_u64(),
+        Some(
+            (compaction.data["pre_tokens"].as_u64().unwrap())
+                .saturating_sub(compaction.data["post_tokens"].as_u64().unwrap())
+        ),
+        "the first compaction of a run has dropped exactly its own delta"
+    );
+    assert!(compaction.data["dropped_from_seq"].is_null());
+    assert!(compaction.data["summary_msg_id"].is_null());
+}
+
+/// P-14 again, on the field the single-compaction test cannot distinguish from
+/// "this compaction's delta": `cumulative_dropped_tokens` is what the **run**
+/// has dropped so far, so a second compaction reports the sum of both, not its
+/// own. Without this the accumulator could be a plain assignment and nothing
+/// would notice.
+#[tokio::test]
+async fn test_two_compactions_accumulate_dropped_tokens() {
+    use crate::context_budget::ContextBudgetManager;
+    use crate::daemon_config::ContextBudgetConfig;
+
+    // A tighter window than the single-compaction test's 800 so the trigger is
+    // crossed twice inside one run: each fat round adds ~200 tokens, and the
+    // tail the compactor keeps is immediately refilled.
+    let budget_config = ContextBudgetConfig::default();
+    let budget = ContextBudgetManager::new(600, &budget_config);
+
+    let make_fat_tool_response = |id: &str| ChatResponse {
+        content: "x".repeat(400),
+        tool_calls: vec![openalpaca_llm::ToolCall {
+            id: id.to_string(),
+            name: "search".to_string(),
+            arguments: serde_json::json!({"query": "a]".repeat(200)}),
+        }],
+        model: "mock-model".to_string(),
+        usage: Usage {
+            input_tokens: 50,
+            output_tokens: 50,
+            ..Default::default()
+        },
+        finish_reason: FinishReason::ToolUse,
+        thinking: None,
+        parts: None,
+    };
+
+    let provider = MockProvider::new(vec![
+        Ok(make_fat_tool_response("tc_a")),
+        Ok(make_fat_tool_response("tc_b")),
+        Ok(make_fat_tool_response("tc_c")),
+        Ok(make_fat_tool_response("tc_d")),
+        Ok(make_fat_tool_response("tc_e")),
+        Ok(make_fat_tool_response("tc_f")),
+        Ok(make_fat_tool_response("tc_g")),
+        Ok(make_fat_tool_response("tc_h")),
+        Ok(MockProvider::simple_response("Done.")),
+    ]);
+
+    let messages = vec![
+        ChatMessage::system("You are a helpful assistant."),
+        ChatMessage::user("Search for information repeatedly."),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let service = crate::session_log::SessionLogService::new(
+        dir.path().to_path_buf(),
+        None,
+        crate::session_log::SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-two-compactions");
+
+    let config = LoopConfig {
+        max_rounds: 12,
+        max_cost: 10.0,
+        enable_caching: false,
+        thinking: None,
+        context_tail_keep: 2,
+        session_log: Some(handle.clone()),
+        ..Default::default()
+    };
+
+    let _ = run_agentic_loop(
+        &provider,
+        messages,
+        vec![],
+        &config,
+        None,
+        "test_two_compactions",
+        None,
+        Some(&budget),
+        None,
+        None,
+    )
+    .await;
+
+    assert!(handle.flush().await);
+    let records =
+        crate::session_log::read_records(&dir.path().join("sess-two-compactions")).unwrap();
+    let compactions: Vec<_> = records.iter().filter(|r| r.kind == "compaction").collect();
+    assert!(
+        compactions.len() >= 2,
+        "this run must compact at least twice, got {}",
+        compactions.len()
+    );
+
+    let mut expected = 0u64;
+    for (i, record) in compactions.iter().enumerate() {
+        let delta = record.data["pre_tokens"]
+            .as_u64()
+            .unwrap()
+            .saturating_sub(record.data["post_tokens"].as_u64().unwrap());
+        expected += delta;
+        assert_eq!(
+            record.data["cumulative_dropped_tokens"].as_u64(),
+            Some(expected),
+            "compaction {i} reports the run's running total, not its own delta"
+        );
+    }
+    assert!(
+        expected
+            > compactions[0].data["pre_tokens"]
+                .as_u64()
+                .unwrap()
+                .saturating_sub(compactions[0].data["post_tokens"].as_u64().unwrap()),
+        "the total must exceed the first compaction's own delta"
+    );
 }
 
 #[test]
@@ -971,6 +1131,10 @@ struct MockRouterProvider {
     /// notice is not persisted into the conversation (i.e., the request
     /// never carries more than the original single system prompt).
     system_count_per_call: std::sync::Mutex<Vec<usize>>,
+    /// The content of every `Role::Tool` message the backend has been sent —
+    /// what the *model* actually sees of a tool result, which is not what the
+    /// session log records (§5.4: the log keeps the untruncated payload).
+    tool_results_seen: std::sync::Mutex<Vec<String>>,
 }
 
 impl MockRouterProvider {
@@ -980,7 +1144,17 @@ impl MockRouterProvider {
             call_count: AtomicUsize::new(0),
             notices: std::sync::Mutex::new(Vec::new()),
             system_count_per_call: std::sync::Mutex::new(Vec::new()),
+            tool_results_seen: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// The tool-result texts the model was given, newest call last.
+    #[allow(dead_code)]
+    fn tool_results_seen(&self) -> Vec<String> {
+        self.tool_results_seen
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// Snapshot the notices observed across all `chat()` calls so far.
@@ -1026,6 +1200,17 @@ impl LlmProvider for MockRouterProvider {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .push(system_count);
+        {
+            let mut seen = self
+                .tool_results_seen
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            for message in request.messages.iter() {
+                if matches!(message.role, openalpaca_llm::Role::Tool) {
+                    seen.push(message.content.clone());
+                }
+            }
+        }
         let idx = self.call_count.fetch_add(1, Ordering::SeqCst);
         if idx < self.responses.len() {
             self.responses[idx].clone()
@@ -1321,6 +1506,164 @@ async fn test_agentic_loop_routed_respects_max_rounds() {
 
     assert_eq!(result.finish_reason, LoopFinishReason::MaxRounds);
     assert_eq!(result.rounds_used, 3);
+}
+
+// ─── A5: main-loop cost lockout (bug-main-loop-cost-lockout.md, option 1) ──
+//
+// The main loop reuses a literal `"orchestrator"` agent id across every chat
+// turn and passes no `cost_accumulator` (a fresh zeroed `LoopCostAccumulator`
+// each turn). `LlmBackend::agent_cost()` for the Router backend returns the
+// cost tracker's *cumulative* total for that agent id, not this turn's
+// spend. Before the fix, `LoopState::new()` seeded `last_cost` at `0.0`, so
+// round 0's delta equaled the agent's entire lifetime spend — once that
+// crossed `max_cost` every fresh turn exited `CostExceeded` before its first
+// LLM call. These tests exercise the real routed loop (`LlmRouter` +
+// `CostTracker`, not just the local `LoopCostAccumulator`) to reproduce and
+// then guard against that mechanism.
+
+#[tokio::test]
+async fn main_loop_turn_with_prior_agent_spend_does_not_exit_cost_exceeded() {
+    // Seed the cost tracker's "orchestrator" bucket with prior cumulative
+    // spend well above the default $1 max_cost — as the main loop's fixed
+    // agent id would accumulate across earlier turns today — then run one
+    // fresh turn exactly as the main loop does (agent_id = "orchestrator",
+    // cost_accumulator = None). The turn must still make its LLM call
+    // instead of exiting CostExceeded at round 0.
+    let provider = Arc::new(MockRouterProvider::new(vec![Ok(ChatResponse {
+        content: "Hello there.".to_string(),
+        tool_calls: vec![],
+        model: "claude-sonnet-4-20250514".to_string(),
+        usage: Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            ..Default::default()
+        },
+        finish_reason: FinishReason::Stop,
+        thinking: None,
+        parts: None,
+    })]));
+
+    let router = LlmRouter::single_provider(
+        Arc::clone(&provider) as Arc<dyn LlmProvider>,
+        ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+
+    // Prior cumulative spend under the shared "orchestrator" bucket — well
+    // over the default $1.00 max_cost.
+    router
+        .cost_tracker
+        .record(&CallRecord {
+            agent_id: "orchestrator".to_string(),
+            task_id: None,
+            model: "claude-sonnet-4-20250514".to_string(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_usd: 5.00,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+        })
+        .await;
+
+    let messages = vec![ChatMessage::user("hello")];
+    let config = LoopConfig {
+        model: Some("claude-sonnet-4-20250514".to_string()),
+        enable_caching: false,
+        thinking: None,
+        ..Default::default() // max_cost defaults to $1.00
+    };
+
+    let result = run_agentic_loop_routed(
+        &router,
+        messages,
+        vec![],
+        &config,
+        None,           // sandbox
+        "orchestrator", // agent_id — matches the main loop's fixed id
+        None,           // sandbox_policy
+        None,           // task_id
+        None,           // context_budget
+        None,           // cancel_token
+        None,           // tool_context
+        None,           // cost_accumulator — matches the main loop's fresh accumulator each turn
+    )
+    .await;
+
+    assert_ne!(
+        result.finish_reason,
+        LoopFinishReason::CostExceeded,
+        "prior cumulative agent spend must not lock out a fresh turn"
+    );
+    assert!(
+        provider.call_count.load(Ordering::SeqCst) >= 1,
+        "expected at least one LLM call, got {}",
+        provider.call_count.load(Ordering::SeqCst)
+    );
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+    assert_eq!(result.final_content, "Hello there.");
+}
+
+#[tokio::test]
+async fn per_turn_cap_still_trips_within_one_turn() {
+    // Regression guard: baselining `last_cost` from prior cumulative spend
+    // must not defeat in-turn enforcement — a turn whose OWN rounds spend
+    // past max_cost still exits CostExceeded, same as before the fix.
+    let expensive_tool_use = ChatResponse {
+        content: "Using tool.".to_string(),
+        tool_calls: vec![openalpaca_llm::ToolCall {
+            id: "tc_1".to_string(),
+            name: "search".to_string(),
+            arguments: serde_json::json!({}),
+        }],
+        model: "claude-sonnet-4-20250514".to_string(),
+        usage: Usage {
+            input_tokens: 500_000,
+            output_tokens: 200_000,
+            ..Default::default()
+        },
+        finish_reason: FinishReason::ToolUse,
+        thinking: None,
+        parts: None,
+    };
+    let provider = Arc::new(MockRouterProvider::new(vec![Ok(expensive_tool_use)]));
+
+    let router = LlmRouter::single_provider(
+        Arc::clone(&provider) as Arc<dyn LlmProvider>,
+        ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+
+    let messages = vec![ChatMessage::user("expensive query")];
+    let config = LoopConfig {
+        max_cost: 1.00,
+        max_rounds: 5,
+        model: Some("claude-sonnet-4-20250514".to_string()),
+        enable_caching: false,
+        thinking: None,
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop_routed(
+        &router,
+        messages,
+        vec![],
+        &config,
+        None,           // sandbox
+        "orchestrator", // agent_id
+        None,           // sandbox_policy
+        None,           // task_id
+        None,           // context_budget
+        None,           // cancel_token
+        None,           // tool_context
+        None,           // cost_accumulator — same as production main-loop calls
+    )
+    .await;
+
+    assert_eq!(result.finish_reason, LoopFinishReason::CostExceeded);
+    assert_eq!(
+        result.rounds_used, 1,
+        "only round 0's LLM call should complete before the cap trips on round 1's cost check"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1695,6 +2038,7 @@ fn steering_msg(text: &str) -> SteeringMsg {
         scope: Scope::Global,
         workspace_path: None,
         received_at: chrono::Utc::now(),
+        origin: crate::runner::steering::SteeringOrigin::User,
     }
 }
 
@@ -2131,4 +2475,867 @@ async fn test_steering_cancel_during_llm_call_reappends_undelivered() {
     let leftover = inbox.drain_all();
     assert_eq!(leftover.len(), 1);
     assert_eq!(leftover[0].text, "mid-flight fix");
+}
+
+// ── Session event log (§5.5) ────────────────────────────────────────
+
+/// The loop's four emit points, on one run: a `round` per LLM response
+/// carrying the `tool_use` blocks verbatim, a `tool_call` before dispatch and
+/// a `tool_result` after it, and a `workflow_done` at the exit. Every record
+/// is stamped with the run's `task_id` and the loop's `span_id` (P-20), and
+/// the seq is gap-free across all of them.
+#[tokio::test]
+async fn the_loop_narrates_rounds_tools_and_its_exit_into_the_session_log() {
+    use crate::bus::EventBus;
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+    use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+    use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+    use crate::tools::ToolRegistry;
+
+    struct EchoTool;
+    #[async_trait]
+    impl BuiltInTool for EchoTool {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+            Ok("the search result".to_string())
+        }
+    }
+
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "search".to_string(),
+                description: "Search".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(Arc::new(EchoTool)),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+    let policy = SandboxPolicy {
+        agent_id: "research_agent::a1".to_string(),
+        allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
+        denied_capabilities: vec![],
+        require_confirmation_for: vec![],
+        max_tool_calls: None,
+        max_tool_runtime_secs: 60,
+        stream_id: None,
+        lane_key: None,
+        confirmation_timeout_secs: None,
+        auto_approve: false,
+    };
+
+    let provider = Arc::new(MockRouterProvider::new(vec![
+        Ok(ChatResponse {
+            content: "Searching.".to_string(),
+            tool_calls: vec![openalpaca_llm::ToolCall {
+                id: "tc_1".to_string(),
+                name: "search".to_string(),
+                arguments: serde_json::json!({"query": "kettle"}),
+            }],
+            model: "claude-sonnet-4-20250514".to_string(),
+            usage: Usage {
+                input_tokens: 20,
+                output_tokens: 15,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::ToolUse,
+            thinking: None,
+            parts: None,
+        }),
+        Ok(ChatResponse {
+            content: "All done.".to_string(),
+            tool_calls: vec![],
+            model: "claude-sonnet-4-20250514".to_string(),
+            usage: Usage {
+                input_tokens: 30,
+                output_tokens: 10,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        }),
+    ]));
+    let router = LlmRouter::single_provider(
+        provider,
+        ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&db_dir.path().join("t.db")).unwrap();
+    let service = SessionLogService::new(
+        dir.path().to_path_buf(),
+        Some(db.clone()),
+        SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-loop");
+
+    let config = LoopConfig {
+        model: Some("claude-sonnet-4-20250514".to_string()),
+        enable_caching: false,
+        session_log: Some(handle.clone()),
+        span_id: Some("lead::task-9".to_string()),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop_routed(
+        &router,
+        vec![ChatMessage::user("find the kettle")],
+        vec![],
+        &config,
+        Some(&sandbox),
+        "research_agent::a1",
+        Some(&policy),
+        Some("task-9"),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+    assert!(handle.flush().await);
+
+    let records = read_records(&dir.path().join("sess-loop")).unwrap();
+    let kinds: Vec<&str> = records.iter().map(|r| r.kind.as_str()).collect();
+    assert_eq!(
+        kinds,
+        vec!["round", "tool_call", "tool_result", "round", "workflow_done"],
+        "the loop narrates in dispatch order: {kinds:?}"
+    );
+    for (i, record) in records.iter().enumerate() {
+        assert_eq!(record.seq, (i + 1) as u64, "gap-free");
+        assert_eq!(record.task_id.as_deref(), Some("task-9"));
+        assert_eq!(record.span_id.as_deref(), Some("lead::task-9"));
+        assert_eq!(record.agent.as_deref(), Some("research_agent::a1"));
+    }
+
+    // The `tool_use` blocks are verbatim — id, name and the full input JSON —
+    // which is what makes replay-resume reconstructible (§5.4).
+    let round = &records[0];
+    assert_eq!(round.data["round"], 1);
+    assert_eq!(round.data["model"], "claude-sonnet-4-20250514");
+    assert_eq!(round.data["input_tokens"], 20);
+    assert_eq!(round.data["text"], "Searching.");
+    assert_eq!(round.data["tool_use"][0]["id"], "tc_1");
+    assert_eq!(round.data["tool_use"][0]["name"], "search");
+    assert_eq!(round.data["tool_use"][0]["input"]["query"], "kettle");
+
+    assert_eq!(records[1].data["tool_use_id"], "tc_1");
+    assert_eq!(records[1].data["input"]["query"], "kettle");
+    // A builtin belongs to no extension — `ext` is null, never invented.
+    assert!(records[1].data["ext"].is_null());
+    assert_eq!(records[2].data["tool_use_id"], "tc_1");
+    assert_eq!(records[2].data["ok"], true);
+    assert_eq!(records[2].data["result"], "the search result");
+
+    let done = records.last().unwrap();
+    assert_eq!(done.data["finish_reason"], "complete");
+    assert_eq!(done.data["rounds_used"], 2);
+    assert_eq!(done.data["tool_calls_made"], 1);
+
+    // The index row is the writer's, and points back at both records.
+    let (session_id, task, log_seq, result_ref): (String, String, i64, String) = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT session_id, task_id, log_seq, result_ref FROM tool_execution_log",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(session_id, "sess-loop");
+    assert_eq!(task, "task-9");
+    assert_eq!(log_seq, 2, "log_seq points at the tool_call record");
+    assert_eq!(result_ref, "log:3");
+}
+
+/// §5.4's "Spill, don't truncate", end to end through the loop: a result over
+/// `tool_result_inline_bytes` is written once to the session's `results/`, the
+/// record keeps the reference and a preview, and the **model** is handed the
+/// stub naming the reference — so the tail of a long result is reachable
+/// through `read_result` instead of destroyed.
+#[tokio::test]
+async fn a_result_over_the_inline_threshold_spills_and_the_model_gets_the_stub() {
+    use crate::bus::EventBus;
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+    use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+    use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+    use crate::tools::ToolRegistry;
+
+    /// 40 KB: over `MAX_TOOL_RESULT_SIZE` (32 KB), under the 64 KB envelope
+    /// cap — the band where the two bounds disagree.
+    const RESULT_BYTES: usize = 40 * 1024;
+
+    struct BigOutputTool;
+    #[async_trait]
+    impl BuiltInTool for BigOutputTool {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+            Ok("q".repeat(RESULT_BYTES))
+        }
+    }
+
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "dump".to_string(),
+                description: "Dump".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(Arc::new(BigOutputTool)),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+    let policy = SandboxPolicy {
+        agent_id: "research_agent::a1".to_string(),
+        allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
+        denied_capabilities: vec![],
+        require_confirmation_for: vec![],
+        max_tool_calls: None,
+        max_tool_runtime_secs: 60,
+        stream_id: None,
+        lane_key: None,
+        confirmation_timeout_secs: None,
+        auto_approve: false,
+    };
+
+    let provider = Arc::new(MockRouterProvider::new(vec![
+        Ok(ChatResponse {
+            content: "Dumping.".to_string(),
+            tool_calls: vec![openalpaca_llm::ToolCall {
+                id: "tc_big".to_string(),
+                name: "dump".to_string(),
+                arguments: serde_json::json!({}),
+            }],
+            model: "claude-sonnet-4-20250514".to_string(),
+            usage: Usage::default(),
+            finish_reason: FinishReason::ToolUse,
+            thinking: None,
+            parts: None,
+        }),
+        Ok(ChatResponse {
+            content: "Done.".to_string(),
+            tool_calls: vec![],
+            model: "claude-sonnet-4-20250514".to_string(),
+            usage: Usage::default(),
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        }),
+    ]));
+    let router = LlmRouter::single_provider(
+        provider.clone(),
+        ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&db_dir.path().join("t.db")).unwrap();
+    let service = SessionLogService::new(
+        dir.path().to_path_buf(),
+        Some(db.clone()),
+        SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-big-result");
+
+    let config = LoopConfig {
+        model: Some("claude-sonnet-4-20250514".to_string()),
+        enable_caching: false,
+        session_log: Some(handle.clone()),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop_routed(
+        &router,
+        vec![ChatMessage::user("dump it")],
+        vec![],
+        &config,
+        Some(&sandbox),
+        "research_agent::a1",
+        Some(&policy),
+        Some("task-big"),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+    assert!(handle.flush().await);
+
+    let session_dir = dir.path().join("sess-big-result");
+    let records = read_records(&session_dir).unwrap();
+    let logged = records
+        .iter()
+        .find(|r| r.kind == "tool_result")
+        .expect("the result is narrated");
+    let rel = logged.data["result"]["spill"]["rel"].as_str().unwrap();
+    assert_eq!(logged.data["result_ref"], format!("file:{rel}"));
+    assert_eq!(logged.data["result"]["spill"]["bytes"], RESULT_BYTES);
+
+    // One copy of the payload, in the file the record names.
+    let spilled = std::fs::read_to_string(session_dir.join(rel)).unwrap();
+    assert_eq!(spilled.len(), RESULT_BYTES, "the whole result is on disk");
+    assert!(
+        serde_json::to_string(&logged.data).unwrap().len()
+            <= crate::session_log::ENVELOPE_DATA_CAP_BYTES,
+        "a spilled record never trips the envelope cap"
+    );
+
+    // What the model was handed for the same call: §5.4's stub, verbatim.
+    let seen = provider.tool_results_seen();
+    assert_eq!(seen.len(), 1, "one tool result reached the backend: {seen:?}");
+    assert_eq!(
+        seen[0],
+        crate::session_log::spill_stub(
+            RESULT_BYTES,
+            &"q".repeat(crate::session_log::PREVIEW_CHARS),
+            rel,
+        ),
+        "the model sees the stub naming the reference, not a head-only cut"
+    );
+    assert!(seen[0].contains("use read_result to page"));
+
+    // The index row points at the same file and previews the same bytes.
+    let (preview, result_ref): (String, String) = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT result_preview, result_ref FROM tool_execution_log",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(result_ref, format!("file:{rel}"));
+    assert_eq!(preview.chars().count(), crate::session_log::PREVIEW_CHARS);
+}
+
+/// The same, for an `Err`: a large error result spills too, so the log keeps
+/// the whole diagnosis in `results/` while the **model** still gets §5.4's
+/// head+tail inline. Before this, a large error left the record holding the
+/// 2 KB head the envelope cap had cut while the model had seen both ends — so
+/// §5.6c's replay handed a resumed run strictly less than the live run saw.
+#[tokio::test]
+async fn a_large_err_result_spills_while_the_model_keeps_head_and_tail() {
+    use crate::bus::EventBus;
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+    use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+    use crate::tools::ToolRegistry;
+    use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+
+    /// 40 KB of diagnosis: over the inline threshold, under the 64 KB envelope.
+    const RESULT_BYTES: usize = 40 * 1024;
+
+    struct FailingTool;
+    #[async_trait]
+    impl BuiltInTool for FailingTool {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+            // A head and a tail a reader can tell apart.
+            Err(format!("HEAD{}TAIL", "e".repeat(RESULT_BYTES)))
+        }
+    }
+
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "build".to_string(),
+                description: "Build".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(Arc::new(FailingTool)),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+    let policy = SandboxPolicy {
+        agent_id: "research_agent::a1".to_string(),
+        allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
+        denied_capabilities: vec![],
+        require_confirmation_for: vec![],
+        max_tool_calls: None,
+        max_tool_runtime_secs: 60,
+        stream_id: None,
+        lane_key: None,
+        confirmation_timeout_secs: None,
+        auto_approve: false,
+    };
+
+    let provider = Arc::new(MockRouterProvider::new(vec![
+        Ok(ChatResponse {
+            content: "Building.".to_string(),
+            tool_calls: vec![openalpaca_llm::ToolCall {
+                id: "tc_err".to_string(),
+                name: "build".to_string(),
+                arguments: serde_json::json!({}),
+            }],
+            model: "claude-sonnet-4-20250514".to_string(),
+            usage: Usage::default(),
+            finish_reason: FinishReason::ToolUse,
+            thinking: None,
+            parts: None,
+        }),
+        Ok(ChatResponse {
+            content: "It failed.".to_string(),
+            tool_calls: vec![],
+            model: "claude-sonnet-4-20250514".to_string(),
+            usage: Usage::default(),
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        }),
+    ]));
+    let router = LlmRouter::single_provider(
+        provider.clone(),
+        ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&db_dir.path().join("t.db")).unwrap();
+    let service = SessionLogService::new(
+        dir.path().to_path_buf(),
+        Some(db.clone()),
+        SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-big-err");
+
+    let config = LoopConfig {
+        model: Some("claude-sonnet-4-20250514".to_string()),
+        enable_caching: false,
+        session_log: Some(handle.clone()),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop_routed(
+        &router,
+        vec![ChatMessage::user("build it")],
+        vec![],
+        &config,
+        Some(&sandbox),
+        "research_agent::a1",
+        Some(&policy),
+        Some("task-err"),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+    assert!(handle.flush().await);
+
+    let session_dir = dir.path().join("sess-big-err");
+    let records = read_records(&session_dir).unwrap();
+    let logged = records
+        .iter()
+        .find(|r| r.kind == "tool_result")
+        .expect("the failure is narrated");
+    assert_eq!(logged.data["ok"], false);
+    let rel = logged.data["result"]["spill"]["rel"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a large error spills: {logged:?}"));
+    assert_eq!(logged.data["result_ref"], format!("file:{rel}"));
+
+    // The whole diagnosis is on disk — both ends of it.
+    let spilled = std::fs::read_to_string(session_dir.join(rel)).unwrap();
+    assert!(spilled.contains("HEAD") && spilled.contains("TAIL"));
+    assert!(spilled.len() > RESULT_BYTES);
+    assert!(
+        serde_json::to_string(&logged.data).unwrap().len()
+            <= crate::session_log::ENVELOPE_DATA_CAP_BYTES,
+        "and the record does not trip the envelope cap it used to be cut by"
+    );
+    assert!(
+        logged.data.get("_truncated").is_none(),
+        "nothing was cut inline: {}",
+        logged.data
+    );
+
+    // The model's copy is unchanged: §5.4's head+tail, no stub, no reference.
+    let seen = provider.tool_results_seen();
+    assert_eq!(seen.len(), 1, "one tool result reached the backend: {seen:?}");
+    assert!(seen[0].contains("HEAD"), "the head is in front of the model");
+    assert!(seen[0].contains("TAIL"), "and so is the tail");
+    assert!(
+        !seen[0].contains("result_ref"),
+        "an error is not handed a stub: {}",
+        &seen[0][..80.min(seen[0].len())]
+    );
+
+    // The index row keeps a readable error and points at the same file.
+    let (error_message, result_ref): (String, String) = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT error_message, result_ref FROM tool_execution_log",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(result_ref, format!("file:{rel}"));
+    assert!(error_message.starts_with("[tool_error]") || error_message.contains("HEAD"));
+    assert!(
+        error_message.chars().count() <= crate::session_log::PREVIEW_CHARS,
+        "the audit row keeps a head, not a second copy"
+    );
+}
+
+/// A record the session log **dropped** must not leave the model holding a
+/// reference to a file that will never exist.
+///
+/// `emit` returns `false` precisely because a full channel drops the record
+/// (§5.5's accepted, counted loss) — and a dropped `tool_result` takes its
+/// `Spill{content}` with it, so nothing is ever written to `results/`. The
+/// model then gets the inline head, which is what T42 replaced, rather than
+/// 2 KB and a `result_ref` `read_result` can only refuse.
+#[tokio::test]
+async fn a_dropped_spill_record_leaves_the_model_an_inline_head_not_a_reference() {
+    use crate::session_log::{Record, RecordType, SessionLogLimits, SessionLogService};
+
+    let dir = tempfile::tempdir().unwrap();
+    let service = SessionLogService::new(
+        dir.path().to_path_buf(),
+        None,
+        SessionLogLimits {
+            channel_capacity: 2,
+            ..SessionLogLimits::default()
+        },
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-dropped");
+    // Nothing is awaited between these emits, so on a current-thread runtime
+    // the writer task is never polled and the channel stays full — §5.5's
+    // drop, deterministically.
+    for _ in 0..64 {
+        handle.emit(Record::new(RecordType::Round).with_data(serde_json::json!({})));
+    }
+    assert!(handle.dropped() > 0, "the channel is full");
+
+    let config = LoopConfig {
+        session_log: Some(handle.clone()),
+        tool_result_inline_bytes: 1024,
+        ..Default::default()
+    };
+    let call = ToolCall {
+        id: "tc_drop".to_string(),
+        name: "dump".to_string(),
+        arguments: serde_json::json!({}),
+    };
+    let result_text = "z".repeat(8 * 1024);
+
+    let spill = spill_plan(&config, &call, &result_text).expect("a big result plans a spill");
+    let rel = spill.0.clone();
+    let emitted = log_spill_event(&config, None, "a1", serde_json::json!({}), Some(spill));
+    assert!(!emitted, "a full channel drops the record instead of writing it");
+
+    let model_text =
+        model_visible_result(&config, &result_text, true, emitted.then_some(rel.as_str()));
+    assert!(
+        !model_text.contains("result_ref"),
+        "no reference to a file that will never exist: {model_text}"
+    );
+    assert!(!model_text.contains(&rel));
+    assert_eq!(
+        model_text,
+        truncate_tool_result_to(result_text.clone(), 1024),
+        "the model keeps the inline head instead"
+    );
+
+    // And nothing was written under `results/`: the bytes went with the record.
+    assert!(handle.flush().await);
+    assert!(!dir.path().join("sess-dropped").join("results").exists());
+}
+
+/// The same, end to end, for the other way a record is lost: a writer that
+/// **gave up** because it could not open its session directory. Its task
+/// returns, every handle sees a closed channel, and `emit` answers `false` —
+/// so the loop must hand the model a head, not a reference.
+#[tokio::test]
+async fn a_writer_that_gave_up_leaves_the_model_an_inline_head_not_a_reference() {
+    use crate::bus::EventBus;
+    use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+    use crate::session_log::{SessionLogLimits, SessionLogService};
+    use crate::tools::ToolRegistry;
+    use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend};
+
+    const RESULT_BYTES: usize = 40 * 1024;
+
+    struct BigOutputTool;
+    #[async_trait]
+    impl BuiltInTool for BigOutputTool {
+        async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+            Ok("q".repeat(RESULT_BYTES))
+        }
+    }
+
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "dump".to_string(),
+                description: "Dump".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(Arc::new(BigOutputTool)),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    let sandbox = SandboxManager::with_defaults(Arc::new(registry), EventBus::default());
+    let policy = SandboxPolicy {
+        agent_id: "research_agent::a1".to_string(),
+        allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
+        denied_capabilities: vec![],
+        require_confirmation_for: vec![],
+        max_tool_calls: None,
+        max_tool_runtime_secs: 60,
+        stream_id: None,
+        lane_key: None,
+        confirmation_timeout_secs: None,
+        auto_approve: false,
+    };
+
+    let provider = Arc::new(MockRouterProvider::new(vec![
+        Ok(ChatResponse {
+            content: "Dumping.".to_string(),
+            tool_calls: vec![openalpaca_llm::ToolCall {
+                id: "tc_big".to_string(),
+                name: "dump".to_string(),
+                arguments: serde_json::json!({}),
+            }],
+            model: "claude-sonnet-4-20250514".to_string(),
+            usage: Usage::default(),
+            finish_reason: FinishReason::ToolUse,
+            thinking: None,
+            parts: None,
+        }),
+        Ok(ChatResponse {
+            content: "Done.".to_string(),
+            tool_calls: vec![],
+            model: "claude-sonnet-4-20250514".to_string(),
+            usage: Usage::default(),
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        }),
+    ]));
+    let router = LlmRouter::single_provider(
+        provider.clone(),
+        ProviderType::Anthropic,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    // A file sits exactly where the session directory would go, so the
+    // writer's `create_dir_all` fails and it gives up for good.
+    std::fs::write(dir.path().join("sess-gone"), "not a directory").unwrap();
+    let service = SessionLogService::new(
+        dir.path().to_path_buf(),
+        None,
+        SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-gone");
+    handle.emit(crate::session_log::Record::new(
+        crate::session_log::RecordType::SessionStart,
+    ));
+    for _ in 0..200 {
+        if handle.is_closed() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(handle.is_closed(), "the writer gave up and its channel closed");
+
+    let config = LoopConfig {
+        model: Some("claude-sonnet-4-20250514".to_string()),
+        enable_caching: false,
+        session_log: Some(handle.clone()),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop_routed(
+        &router,
+        vec![ChatMessage::user("dump it")],
+        vec![],
+        &config,
+        Some(&sandbox),
+        "research_agent::a1",
+        Some(&policy),
+        Some("task-gone"),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+
+    let seen = provider.tool_results_seen();
+    assert_eq!(seen.len(), 1, "one tool result reached the backend: {seen:?}");
+    assert!(
+        !seen[0].contains("result_ref"),
+        "a lost record must not leave a reference behind: {}",
+        &seen[0][..seen[0].len().min(200)]
+    );
+    assert_eq!(
+        seen[0],
+        truncate_tool_result_to("q".repeat(RESULT_BYTES), config.tool_result_inline_bytes),
+        "the model gets the inline head — the behaviour the spill replaced"
+    );
+}
+
+/// §5.4: "`Err` results stay inline but switch to head+tail (compiler/test
+/// errors sit at the tail)." A failing `cargo test` whose assertion is in the
+/// last hundred bytes must still reach the model.
+#[test]
+fn an_error_result_keeps_its_head_and_its_tail() {
+    let limit = 1024;
+    let text = format!(
+        "{}{}{}",
+        "HEAD-MARKER",
+        "m".repeat(8 * 1024),
+        "TAIL-ASSERTION-FAILED"
+    );
+    let cut = head_tail_tool_result(text.clone(), limit);
+
+    assert!(cut.len() < text.len());
+    assert!(cut.starts_with("HEAD-MARKER"), "the head survives: {}", &cut[..40]);
+    assert!(
+        cut.ends_with("TAIL-ASSERTION-FAILED"),
+        "the tail survives — that is the point"
+    );
+    assert!(cut.contains("the tail follows"), "the elision is named");
+
+    // Under the bound nothing is touched.
+    assert_eq!(head_tail_tool_result("small".to_string(), limit), "small");
+}
+
+/// A loop with no session log writes nothing and behaves identically — the
+/// `None` default every non-session caller relies on.
+#[tokio::test]
+async fn a_loop_without_a_session_log_is_unchanged() {
+    let provider = MockProvider::new(vec![Ok(MockProvider::simple_response("Hi."))]);
+    let config = LoopConfig::default();
+    assert!(config.session_log.is_none());
+    let result = run_agentic_loop(
+        &provider,
+        vec![ChatMessage::user("hello")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+}
+
+/// A drain is one line naming the request ids it delivered — the other half
+/// of `push_steering`'s `steering` record, and what tells a reader an
+/// interjection actually reached the model.
+#[tokio::test]
+async fn a_steering_drain_is_narrated_with_its_request_ids() {
+    use crate::runner::steering::{SteeringInbox, SteeringMsg};
+    use crate::security::policy::{Principal, Scope};
+    use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+
+    let inbox = Arc::new(SteeringInbox::default());
+    let request_id = uuid::Uuid::new_v4();
+    inbox
+        .push(SteeringMsg {
+            text: "focus on the tests".to_string(),
+            request_id,
+            principal: Principal::System,
+            scope: Scope::Global,
+            workspace_path: None,
+            received_at: chrono::Utc::now(),
+            origin: crate::runner::steering::SteeringOrigin::User,
+        })
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let service = SessionLogService::new(
+        dir.path().to_path_buf(),
+        None,
+        SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-steer");
+    let config = LoopConfig {
+        enable_caching: false,
+        steering: Some(Arc::clone(&inbox)),
+        session_log: Some(handle.clone()),
+        ..Default::default()
+    };
+
+    let provider = MockProvider::new(vec![Ok(MockProvider::simple_response("Understood."))]);
+    let result = run_agentic_loop(
+        &provider,
+        vec![ChatMessage::user("start")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+    assert!(handle.flush().await);
+
+    let records = read_records(&dir.path().join("sess-steer")).unwrap();
+    let drained = records
+        .iter()
+        .find(|r| r.kind == "steering_drained")
+        .expect("the drain is narrated");
+    assert_eq!(drained.data["at"], "round_boundary");
+    assert_eq!(drained.data["count"], 1);
+    assert_eq!(drained.data["request_ids"][0], request_id.to_string());
+    // A main-loop turn carries no task_id — that absence is the signal.
+    assert!(drained.task_id.is_none());
 }

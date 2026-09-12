@@ -34,6 +34,7 @@ fn entry_status_from_db(status: TaskStatus) -> TaskEntryStatus {
         TaskStatus::Failed => TaskEntryStatus::Failed,
         TaskStatus::Cancelled => TaskEntryStatus::Cancelled,
         TaskStatus::Paused => TaskEntryStatus::Paused,
+        TaskStatus::Interrupted => TaskEntryStatus::Interrupted,
     }
 }
 
@@ -45,6 +46,7 @@ fn db_status_from_entry(status: TaskEntryStatus) -> TaskStatus {
         TaskEntryStatus::Failed => TaskStatus::Failed,
         TaskEntryStatus::Cancelled => TaskStatus::Cancelled,
         TaskEntryStatus::Paused => TaskStatus::Paused,
+        TaskEntryStatus::Interrupted => TaskStatus::Interrupted,
     }
 }
 
@@ -66,15 +68,17 @@ pub fn apply_task_action(
     action: &str,
 ) -> Result<TaskEntryStatus, TaskActionError> {
     // Resolve current state: in-memory registry first, DB fallback.
-    let current = match shared_context.task_registry.get(task_id) {
-        Some(entry) => entry.status,
+    // The title travels with it so the TaskUpdated event below can carry a
+    // real title even for DB-only tasks resurrected after a restart (GAP-07).
+    let (current, title) = match shared_context.task_registry.get(task_id) {
+        Some(entry) => (entry.status, entry.title),
         None => match db {
             Some(db) => {
                 let task = TaskRepository::new(db)
                     .get(task_id)
                     .map_err(|e| TaskActionError::Db(e.to_string()))?
                     .ok_or(TaskActionError::NotFound)?;
-                entry_status_from_db(task.status)
+                (entry_status_from_db(task.status), task.title)
             }
             None => return Err(TaskActionError::NotFound),
         },
@@ -145,6 +149,7 @@ pub fn apply_task_action(
             TaskEntryStatus::Failed => TaskLaneStatus::Failed,
             TaskEntryStatus::Cancelled => TaskLaneStatus::Cancelled,
             TaskEntryStatus::Paused => TaskLaneStatus::Paused,
+            TaskEntryStatus::Interrupted => TaskLaneStatus::Interrupted,
         };
         lane.set_status(lane_status);
     }
@@ -152,6 +157,7 @@ pub fn apply_task_action(
     // Emit TaskUpdated event
     bus.publish(SystemEvent::TaskUpdated {
         task_id: task_id.to_string(),
+        title,
         status: new_status.as_str().to_string(),
         progress_current: None,
         progress_total: None,
@@ -366,7 +372,7 @@ impl Orchestrator {
         lane_key: &str,
         workspace_path: Option<String>,
     ) -> Result<String, String> {
-        use crate::runner::steering::{SteeringMsg, SteeringPushError, push_steering};
+        use crate::runner::steering::{SteeringMsg, SteeringOrigin, SteeringPushError, push_steering};
 
         let text = text.trim();
         if text.is_empty() {
@@ -390,8 +396,16 @@ impl Orchestrator {
                     scope: scope.clone(),
                     workspace_path,
                     received_at: Utc::now(),
+                    origin: SteeringOrigin::User,
                 };
-                match push_steering(&self.shared_context, &self.bus, task_id, lane_key, msg) {
+                match push_steering(
+                    &self.shared_context,
+                    &self.bus,
+                    task_id,
+                    lane_key,
+                    msg,
+                    self.db.as_ref(),
+                ) {
                     Ok(depth) => Ok(format!(
                         "Steering message queued for \"{}\" ({}). {} message{} waiting — the workflow picks it up at its next round.",
                         title,
@@ -456,6 +470,9 @@ mod tests {
             outcome_json: None,
             outcome_kind: None,
             artifact_count: 0,
+            workspace_id: None,
+            source_task_id: None,
+            session_id: None,
         }
     }
 

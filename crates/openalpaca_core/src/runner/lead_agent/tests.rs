@@ -1,4 +1,5 @@
 use super::*;
+use crate::memory::scope_context::MemoryScopeContext;
 
 #[test]
 fn test_lead_agent_registry_contains_coordination_tools() {
@@ -57,7 +58,7 @@ fn test_lead_agent_registry_contains_coordination_tools() {
         tracker.clone(),
         0,
         DEFAULT_MAX_CONCURRENT_SUBAGENTS,
-        None,
+        MemoryScopeContext::global_only(),
         None,
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
@@ -367,7 +368,7 @@ fn test_batch_spawn_tool_hidden_when_disabled() {
         tracker.clone(),
         0,
         DEFAULT_MAX_CONCURRENT_SUBAGENTS,
-        None,
+        MemoryScopeContext::global_only(),
         None,
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
@@ -423,7 +424,7 @@ fn test_batch_spawn_tool_present_when_enabled() {
         tracker.clone(),
         0,
         DEFAULT_MAX_CONCURRENT_SUBAGENTS,
-        None,
+        MemoryScopeContext::global_only(),
         None,
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
@@ -478,7 +479,7 @@ async fn test_batch_spawn_empty_array_error() {
         tracker,
         0,
         DEFAULT_MAX_CONCURRENT_SUBAGENTS,
-        None, // workspace_id
+        MemoryScopeContext::global_only(), // workspace
         None, // confirmation_broker
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
@@ -518,7 +519,7 @@ async fn test_batch_spawn_exceeds_max_error() {
         tracker,
         0,
         DEFAULT_MAX_CONCURRENT_SUBAGENTS,
-        None, // workspace_id
+        MemoryScopeContext::global_only(), // workspace
         None, // confirmation_broker
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
@@ -842,6 +843,7 @@ fn wait_steering_msg(text: &str) -> crate::runner::steering::SteeringMsg {
         scope: crate::security::policy::Scope::Global,
         workspace_path: None,
         received_at: chrono::Utc::now(),
+        origin: crate::runner::steering::SteeringOrigin::User,
     }
 }
 
@@ -1027,7 +1029,7 @@ async fn test_spawn_subagent_executes_plugin_backed_template() {
         tracker.clone(),
         0,
         DEFAULT_MAX_CONCURRENT_SUBAGENTS,
-        None,
+        MemoryScopeContext::global_only(),
         None,
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
@@ -1254,6 +1256,7 @@ fn mcp_backend() -> crate::tools::registry::ToolBackend {
         client: Arc::new(openalpaca_mcp::McpClient::disconnected_for_tests("srv")),
         remote_name: "echo".to_string(),
         server_name: "srv".to_string(),
+        generation: 0,
     }
 }
 
@@ -1292,14 +1295,17 @@ async fn run_lead_for_test(
         "user-1:cli",
         "cli",
         &daemon_config,
+        MemoryScopeContext::global_only(),
         None,
         None,
         None,
+        "lead::task-1",
         "",
         None,
         skill_catalog,
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
     )
     .await
 }
@@ -1315,17 +1321,13 @@ async fn test_lead_loop_request_carries_extension_defs_and_invoke_skill() {
             calls: std::sync::atomic::AtomicUsize::new(0),
         })),
     );
-    register_extension_tool(&registry, "srv__blocked", mcp_backend());
-
-    let mut cfg = DaemonConfig::default();
-    cfg.execution.skill_defaults.global_tool_deny = vec!["srv__blocked".to_string()];
 
     let provider = ScriptedProvider::new(vec![scripted_response("done", vec![])]);
     let result = run_lead_for_test(
         provider.clone(),
         registry,
         Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
-        Arc::new(ArcSwap::from_pointee(cfg)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
         EventBus::default(),
     )
     .await;
@@ -1348,11 +1350,6 @@ async fn test_lead_loop_request_carries_extension_defs_and_invoke_skill() {
             "round-1 request missing {expected}: {names:?}"
         );
     }
-    assert!(
-        !names.iter().any(|n| n == "srv__blocked"),
-        "denied extension tool leaked into lead surface: {names:?}"
-    );
-
     // The system prompt carries the skills/integrations guidance suffix.
     let messages = provider.seen_messages.lock().unwrap();
     let system = &messages[0][0];
@@ -1424,7 +1421,7 @@ async fn test_lead_executes_extension_tool_through_sandbox() {
 
 #[test]
 fn test_plain_subagent_does_not_inherit_extension_tools() {
-    use crate::security::capabilities::CapabilityManager;
+    use crate::security::capabilities::{Allowlist, CapabilityManager};
 
     // A non-orchestration worker template with its own declared capability.
     let agent = crate::test_util::make_agent("researcher", vec!["research"]);
@@ -1434,24 +1431,22 @@ fn test_plain_subagent_does_not_inherit_extension_tools() {
     // Its allowlist is template-scoped: declared capability + workspace only.
     let allowed = &subagent.constraints.allowed_capabilities;
     assert!(allowed.iter().any(|c| c == "research"));
+    let allowlist = Allowlist::from_agent_constraints(&subagent.constraints);
+    let denied = &subagent.constraints.denied_capabilities;
     for blanket in ["invoke_skill", "srv__echo", "plug::do", "spawn_subagent"] {
         assert!(
             !allowed.iter().any(|c| c == blanket),
             "worker allowlist must not carry the lead's blanket grant: {allowed:?}"
         );
         assert!(
-            CapabilityManager::check_agent_capability(
-                &subagent.id,
-                blanket,
-                &subagent.constraints
-            )
-            .is_err(),
+            CapabilityManager::check_agent_capability(&subagent.id, blanket, &allowlist, denied)
+                .is_err(),
             "worker sandbox must deny undeclared tool {blanket}"
         );
     }
     // Declared tools still pass.
     assert!(
-        CapabilityManager::check_agent_capability("researcher-1", "research", &subagent.constraints)
+        CapabilityManager::check_agent_capability("researcher-1", "research", &allowlist, denied)
             .is_ok()
     );
 }
@@ -1515,4 +1510,385 @@ async fn test_invoke_skill_through_lead_path_runs_fixture_skill() {
         }
     }
     assert!(completed, "missing SkillCompleted event for the nested skill");
+}
+
+// ── Session event log (§5.5) ────────────────────────────────────────
+
+/// A subagent lane opens and closes in the run's transcript, beside the 037
+/// span writes. The records carry the span id as `span_id`, so `?span_id=` on
+/// the reader is a pure filter over one globally ordered log (P-20) — never a
+/// per-agent file.
+#[tokio::test]
+async fn a_subagent_lane_is_narrated_into_the_runs_session_log() {
+    use crate::agent::template::{AgentSource, AgentTemplateFrontmatter};
+    use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+
+    let executor = Arc::new(CompletingPluginExecutor {
+        instructions: std::sync::Mutex::new(None),
+    });
+    let template = AgentTemplate {
+        frontmatter: AgentTemplateFrontmatter {
+            id: "plugin_researcher".to_string(),
+            name: "Plugin Researcher".to_string(),
+            description: "Plugin-backed research agent".to_string(),
+            icon: None,
+            singleton: false,
+            capabilities: vec![],
+            denied_capabilities: vec![],
+            temperature: 0.5,
+            verbosity: "normal".to_string(),
+            model: None,
+            fallback_models: vec![],
+            max_tool_calls: None,
+            timeout_seconds: None,
+            max_cost_per_task: None,
+            max_rounds: None,
+            require_confirmation_for: vec![],
+        },
+        body: String::new(),
+        sections: HashMap::new(),
+        source: AgentSource::Plugin {
+            plugin_id: "test_plugin".to_string(),
+            executor: executor.clone(),
+        },
+    };
+
+    let shared_context = Arc::new(SharedContext::new());
+    assert!(shared_context.agent_registry.register_template(template));
+
+    let dir = tempfile::tempdir().unwrap();
+    let service = SessionLogService::new(
+        dir.path().to_path_buf(),
+        None,
+        SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-lead");
+    // The dispatcher registers the run's handle here; the spawn tool reads it
+    // back by task id, exactly as it reads the steering inbox.
+    shared_context.register_task_session_log("task-1", handle.clone());
+
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn_tool = SpawnSubagentTool::new(
+        Arc::new(openalpaca_llm::LlmRouter::new(
+            std::collections::HashMap::new(),
+            openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
+            std::collections::HashMap::new(),
+            Arc::new(openalpaca_llm::CostTracker::new(
+                openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
+            )),
+            "test-model".to_string(),
+        )),
+        Arc::new(ToolRegistry::default()),
+        shared_context,
+        EventBus::default(),
+        None,
+        "task-1".to_string(),
+        "user-1".to_string(),
+        "test-lead".to_string(),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        None,
+        tracker.clone(),
+        0,
+        DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+        MemoryScopeContext::global_only(),
+        None,
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+    );
+
+    spawn_tool
+        .execute(&serde_json::json!({
+            "agent_id": "plugin_researcher",
+            "objective": "Summarize the design doc"
+        }))
+        .await
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !tracker.all_done() {
+        assert!(tokio::time::Instant::now() < deadline, "subagent never finished");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(handle.flush().await);
+
+    let records = read_records(&dir.path().join("sess-lead")).unwrap();
+    let kinds: Vec<&str> = records.iter().map(|r| r.kind.as_str()).collect();
+    assert_eq!(kinds, vec!["subagent_open", "subagent_close"], "{kinds:?}");
+
+    let open = &records[0];
+    assert_eq!(open.task_id.as_deref(), Some("task-1"));
+    assert_eq!(open.data["template"], "plugin_researcher");
+    assert_eq!(open.data["role"], "subagent");
+    assert!(open.data["objective"]
+        .as_str()
+        .unwrap()
+        .contains("Summarize the design doc"));
+    // P-17: a plugin-backed lane names the extension that ran it.
+    assert_eq!(open.data["plugin_id"], "test_plugin");
+
+    let close = &records[1];
+    assert_eq!(close.data["state"], "done");
+    assert_eq!(close.data["output_preview"], "plugin result");
+    // Both halves name the same 037 span, which is the whole filter.
+    assert_eq!(open.span_id, close.span_id);
+    assert_eq!(open.span_id.as_deref(), open.data["span_id"].as_str());
+}
+
+// ── §5.6c: the resumed run's first request ────────────────────────────
+
+/// A `ReplayPlan` holding one complete round, as `session_log::replay`
+/// rebuilds one.
+fn replayed_round() -> crate::session_log::replay::ReplayPlan {
+    crate::session_log::replay::ReplayPlan {
+        messages: vec![
+            openalpaca_llm::ChatMessage {
+                role: openalpaca_llm::Role::Assistant,
+                content: "reading the file".to_string(),
+                parts: None,
+                tool_calls: Some(vec![openalpaca_llm::ToolCall {
+                    id: "tu-1".to_string(),
+                    name: "file_read".to_string(),
+                    arguments: serde_json::json!({"path": "a.rs"}),
+                }]),
+                tool_call_id: None,
+            },
+            openalpaca_llm::ChatMessage::tool_result("tu-1", "fn main() {}"),
+        ],
+        rounds: 1,
+        tool_results: 1,
+        from_seq: Some(1),
+        to_seq: Some(2),
+        last_ts: Some(
+            chrono::DateTime::parse_from_rfc3339("2026-09-06T10:00:01Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        ),
+        ..Default::default()
+    }
+}
+
+/// The whole shape of a resume, in one request: the persona and the objective
+/// are composed fresh, the run's own rounds sit behind them in the order the
+/// log recorded them, and the synthetic interjection arrives **through the
+/// steering rail** — so the model reads it as the `<user_interjection>` its
+/// prompt already teaches it to obey, not as a second objective.
+#[tokio::test]
+async fn a_resumed_run_is_primed_with_its_replayed_rounds_and_the_interjection() {
+    let provider = ScriptedProvider::new(vec![scripted_response("carrying on", vec![])]);
+    let config = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
+    let inbox = Arc::new(crate::runner::steering::SteeringInbox::new(8));
+    let note = crate::session_log::replay::resume_interjection(
+        chrono::DateTime::parse_from_rfc3339("2026-09-06T10:00:01Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+    );
+    inbox
+        .push(crate::runner::steering::SteeringMsg {
+            text: note.clone(),
+            request_id: uuid::Uuid::new_v4(),
+            principal: crate::security::policy::Principal::System,
+            scope: crate::security::policy::Scope::Global,
+            workspace_path: None,
+            received_at: chrono::Utc::now(),
+            origin: crate::runner::steering::SteeringOrigin::Daemon,
+        })
+        .unwrap();
+
+    let tmp = tempfile::tempdir().unwrap();
+    run_lead_agent(
+        &lead_subagent(),
+        "do the thing",
+        scripted_router(provider.clone()),
+        Arc::new(ToolRegistry::default()),
+        Arc::new(SharedContext::new()),
+        EventBus::default(),
+        None,
+        None,
+        "task-1",
+        "user-1",
+        "user-1:cli",
+        "cli",
+        &config,
+        MemoryScopeContext::global_only(),
+        None,
+        Some(inbox),
+        None,
+        "lead::task-1",
+        "",
+        None,
+        fixture_skill_catalog(&tmp),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        Some(crate::session_log::replay::ResumeHistory {
+            plan: replayed_round(),
+            inline_note: None,
+        }),
+    )
+    .await;
+
+    let messages = provider.seen_messages.lock().unwrap();
+    let first = &messages[0];
+    assert_eq!(first[0].role, openalpaca_llm::Role::System, "persona, fresh");
+    assert_eq!(
+        first[1].content, "do the thing",
+        "the objective from the row, not from the log"
+    );
+    // The replayed round, verbatim — the assistant's `tool_use` and the
+    // result that answered it.
+    assert_eq!(first[2].role, openalpaca_llm::Role::Assistant);
+    assert_eq!(first[2].content, "reading the file");
+    assert_eq!(
+        first[2].tool_calls.as_ref().unwrap()[0].name,
+        "file_read",
+        "the recorded call is described, never dispatched"
+    );
+    assert_eq!(first[3].role, openalpaca_llm::Role::Tool);
+    assert_eq!(first[3].content, "fn main() {}");
+    // …and the rail's note last, as the daemon's own narration: a
+    // `<system_note>`, never a `<user_interjection>` the user never wrote.
+    let last = first.last().unwrap();
+    assert_eq!(last.role, openalpaca_llm::Role::User);
+    assert!(
+        last.content.starts_with(crate::runner::steering::SYSTEM_NOTE_PREFIX),
+        "the rail wraps it as a system note: {}",
+        last.content
+    );
+    assert!(
+        !last.content.contains("user_interjection"),
+        "daemon-authored text is never attributed to the user: {}",
+        last.content
+    );
+    assert!(last.content.contains("This run was interrupted at 2026-09-06T10:00:01"));
+    assert!(last.content.contains("Do not repeat side-effecting tool calls already recorded."));
+}
+
+/// With steering off there is no rail, so the same text has to arrive on the
+/// same channel by the only other route: the rebuilt history's last message,
+/// wrapped identically — the same `<system_note>`, so the model cannot tell
+/// which path carried it.
+#[tokio::test]
+async fn with_no_steering_rail_the_resume_note_is_still_an_interjection() {
+    let provider = ScriptedProvider::new(vec![scripted_response("carrying on", vec![])]);
+    let config = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
+    let note = crate::session_log::replay::resume_interjection(chrono::Utc::now());
+
+    let tmp = tempfile::tempdir().unwrap();
+    run_lead_agent(
+        &lead_subagent(),
+        "do the thing",
+        scripted_router(provider.clone()),
+        Arc::new(ToolRegistry::default()),
+        Arc::new(SharedContext::new()),
+        EventBus::default(),
+        None,
+        None,
+        "task-1",
+        "user-1",
+        "user-1:cli",
+        "cli",
+        &config,
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        fixture_skill_catalog(&tmp),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        Some(crate::session_log::replay::ResumeHistory {
+            plan: replayed_round(),
+            inline_note: Some(note),
+        }),
+    )
+    .await;
+
+    let messages = provider.seen_messages.lock().unwrap();
+    let last = messages[0].last().unwrap();
+    assert!(
+        last.content.starts_with(crate::runner::steering::SYSTEM_NOTE_PREFIX),
+        "{}",
+        last.content
+    );
+    assert!(last.content.contains("Do not repeat side-effecting tool calls already recorded."));
+}
+
+/// What the rebuild had to leave out belongs in the **log** as well as in the
+/// model's context: the `resume` record names the trim (`trimmed_from_seq`
+/// plus its reason) and the rounds no result ever answered, so a later reader
+/// of the transcript sees the seam and the gap rather than inferring both
+/// from a round count.
+#[tokio::test]
+async fn the_resume_record_names_the_trim_and_the_rounds_it_dropped() {
+    use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+
+    let provider = ScriptedProvider::new(vec![scripted_response("carrying on", vec![])]);
+    let config = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
+    let dir = tempfile::tempdir().unwrap();
+    let service = SessionLogService::new(
+        dir.path().to_path_buf(),
+        None,
+        SessionLogLimits::default(),
+        "test".to_string(),
+    );
+    let handle = service.handle_for("sess-resume");
+
+    let plan = crate::session_log::replay::ReplayPlan {
+        trimmed_from_seq: Some(40),
+        trim_reason: Some("the session log's oldest segments were removed".to_string()),
+        dropped_incomplete_rounds: 2,
+        ..replayed_round()
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    run_lead_agent(
+        &lead_subagent(),
+        "do the thing",
+        scripted_router(provider.clone()),
+        Arc::new(ToolRegistry::default()),
+        Arc::new(SharedContext::new()),
+        EventBus::default(),
+        None,
+        None,
+        "task-1",
+        "user-1",
+        "user-1:cli",
+        "cli",
+        &config,
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        Some(handle.clone()),
+        "lead::task-1",
+        "",
+        None,
+        fixture_skill_catalog(&tmp),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        Some(crate::session_log::replay::ResumeHistory {
+            plan,
+            inline_note: None,
+        }),
+    )
+    .await;
+    assert!(handle.flush().await);
+
+    let records = read_records(&dir.path().join("sess-resume")).unwrap();
+    let resume = records
+        .iter()
+        .find(|r| r.kind == "resume")
+        .expect("the resume record names the slice this run was primed from");
+    assert_eq!(resume.task_id.as_deref(), Some("task-1"));
+    assert_eq!(resume.data["trimmed_from_seq"], 40);
+    assert!(
+        resume.data["trimmed_reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("oldest segments")),
+        "{}",
+        resume.data
+    );
+    assert_eq!(resume.data["dropped_incomplete_rounds"], 2);
 }

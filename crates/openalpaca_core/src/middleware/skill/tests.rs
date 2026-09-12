@@ -3,15 +3,15 @@ use super::*;
 const VALID_SKILL: &str = r#"---
 name: "Code Review"
 description: "Review code for bugs, style issues, and improvements"
-command: "review"
-trigger_patterns:
-  - "review.*code"
-  - "code review"
-tools_required:
-  - "file_read"
-auto_load: false
-read_when:
-  - "User asks for code review"
+invoke:
+  slash: "/review"
+routing:
+  intent:
+    - "review.*code"
+    - "code review"
+tools:
+  allow:
+    - "file_read"
 ---
 
 ## Instructions
@@ -41,20 +41,11 @@ fn test_parse_skill_frontmatter_only() {
         fm.description,
         "Review code for bugs, style issues, and improvements"
     );
-    // Legacy command field is populated
-    assert_eq!(fm.command, Some("review".to_string()));
-    // Legacy compat: command -> invoke.slash
     assert_eq!(fm.invoke.slash, Some("/review".to_string()));
-    // effective_slash_command should return "review"
+    // effective_slash_command strips the "/" prefix
     assert_eq!(fm.effective_slash_command(), Some("review".to_string()));
-    // Legacy trigger_patterns are populated
-    assert_eq!(fm.trigger_patterns, vec!["review.*code", "code review"]);
-    // Legacy compat: trigger_patterns -> routing.intent
     assert_eq!(fm.routing.intent, vec!["review.*code", "code review"]);
-    // Legacy tools_required -> tools.allow
-    assert_eq!(fm.tools_required, vec!["file_read"]);
     assert_eq!(fm.tools.allow, vec!["file_read"]);
-    assert!(!fm.auto_load);
 }
 
 #[test]
@@ -73,10 +64,9 @@ fn test_parse_minimal_skill() {
     let doc = parse_skill_markdown(MINIMAL_SKILL).expect("minimal skill should parse");
     assert_eq!(doc.frontmatter.name, "Minimal");
     assert_eq!(doc.frontmatter.description, "A minimal skill");
-    assert_eq!(doc.frontmatter.command, None);
-    assert!(doc.frontmatter.trigger_patterns.is_empty());
-    assert!(doc.frontmatter.tools_required.is_empty());
-    assert!(!doc.frontmatter.auto_load);
+    assert_eq!(doc.frontmatter.invoke.slash, None);
+    assert!(doc.frontmatter.routing.intent.is_empty());
+    assert!(doc.frontmatter.tools.allow.is_empty());
     assert!(doc.body.is_empty());
     assert!(doc.sections.is_empty());
 }
@@ -107,15 +97,6 @@ fn test_parse_unterminated_frontmatter() {
     let input = "---\nname: \"test\"\ndescription: \"test\"\n";
     let err = parse_skill_frontmatter(input).expect_err("unterminated should fail");
     assert_eq!(err, SkillParseError::UnterminatedFrontmatter);
-}
-
-#[test]
-fn test_auto_load_true() {
-    let input = "---\nname: \"test\"\ndescription: \"test\"\nauto_load: true\n---\n";
-    let fm = parse_skill_frontmatter(input).expect("should parse");
-    assert!(fm.auto_load);
-    // Legacy compat: auto_load=true -> invoke.mode="auto"
-    assert_eq!(fm.invoke.mode, "auto");
 }
 
 #[test]
@@ -201,14 +182,14 @@ fn test_unquoted_frontmatter_values() {
     let input = r#"---
 name: My Skill
 description: A skill without quotes
-command: my-skill
-auto_load: false
+invoke:
+  slash: /my-skill
 ---
 "#;
     let fm = parse_skill_frontmatter(input).expect("unquoted values should parse");
     assert_eq!(fm.name, "My Skill");
     assert_eq!(fm.description, "A skill without quotes");
-    assert_eq!(fm.command, Some("my-skill".to_string()));
+    assert_eq!(fm.effective_slash_command(), Some("my-skill".to_string()));
 }
 
 #[test]
@@ -256,40 +237,6 @@ Do something advanced.
     assert_eq!(fm.permissions.level, "readwrite");
     assert_eq!(fm.output.format, Some("markdown".to_string()));
     assert_eq!(fm.effective_slash_command(), Some("advanced".to_string()));
-}
-
-#[test]
-fn test_legacy_compat_auto_load_sets_invoke_mode() {
-    let input = "---\nname: test\ndescription: test\nauto_load: true\n---\n";
-    let fm = parse_skill_frontmatter(input).expect("should parse");
-    assert_eq!(fm.invoke.mode, "auto");
-}
-
-#[test]
-fn test_legacy_compat_does_not_override_new_fields() {
-    let input = r#"---
-name: test
-description: test
-command: old-cmd
-invoke:
-  slash: "/new-cmd"
-trigger_patterns:
-  - "old pattern"
-routing:
-  intent:
-    - "new pattern"
-tools_required:
-  - "old_tool"
-tools:
-  allow:
-    - "new_tool"
----
-"#;
-    let fm = parse_skill_frontmatter(input).expect("should parse");
-    // New fields should NOT be overridden by legacy
-    assert_eq!(fm.invoke.slash, Some("/new-cmd".to_string()));
-    assert_eq!(fm.routing.intent, vec!["new pattern"]);
-    assert_eq!(fm.tools.allow, vec!["new_tool"]);
 }
 
 #[test]

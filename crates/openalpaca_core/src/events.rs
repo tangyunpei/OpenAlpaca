@@ -27,6 +27,10 @@ pub enum SystemEvent {
     /// A task was updated (status change, progress update)
     TaskUpdated {
         task_id: String,
+        /// The task's title. Empty for post-restart DB-only tasks whose
+        /// in-memory registry entry (and thus title) was lost (GAP-07).
+        #[serde(default)]
+        title: String,
         status: String,
         progress_current: Option<i32>,
         progress_total: Option<i32>,
@@ -35,6 +39,10 @@ pub enum SystemEvent {
     /// A task completed successfully
     TaskCompleted {
         task_id: String,
+        /// The task's title. Empty for post-restart DB-only tasks whose
+        /// in-memory registry entry (and thus title) was lost (GAP-07).
+        #[serde(default)]
+        title: String,
         result_summary: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         outcome_kind: Option<String>,
@@ -48,6 +56,10 @@ pub enum SystemEvent {
     /// A task failed
     TaskFailed {
         task_id: String,
+        /// The task's title. Empty for post-restart DB-only tasks whose
+        /// in-memory registry entry (and thus title) was lost (GAP-07).
+        #[serde(default)]
+        title: String,
         error: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         outcome_kind: Option<String>,
@@ -69,6 +81,10 @@ pub enum SystemEvent {
         instance_id: String,
         /// The template this instance was spawned from (e.g. "code_agent").
         template_id: String,
+        /// The agent's human-readable display name (e.g. "Code Agent").
+        /// Empty when the instance could not be resolved (GAP-07).
+        #[serde(default)]
+        name: String,
         /// Lifecycle status string.
         status: String,
         current_task_id: Option<String>,
@@ -85,6 +101,9 @@ pub enum SystemEvent {
         agent_id: String,
         tool_name: String,
         reason: String,
+        /// The run this happened inside (GAP-10), or `None` outside one — a
+        /// main-loop turn, a skill invocation, a scheduled sweep.
+        task_id: Option<String>,
         timestamp: DateTime<Utc>,
     },
     /// A tool was executed by an agent
@@ -93,6 +112,20 @@ pub enum SystemEvent {
         tool_name: String,
         success: bool,
         duration_ms: u64,
+        /// The run this happened inside (GAP-10), or `None` outside one.
+        task_id: Option<String>,
+        /// The session whose event log is indexing this call (§5.4), or
+        /// `None` for a call no transcript is carrying. The daemon's audit
+        /// insert is unconditional either way (R51); this and `tool_use_id`
+        /// are what let the session writer merge its `log_seq` and previews
+        /// onto the row the daemon wrote, instead of adding a second one.
+        /// Not carried on the wire: `ServerEvent` is unchanged, because a WS
+        /// subscriber has no use for it.
+        session_id: Option<String>,
+        /// The provider's id for this call (`toolu_…`), which is what pairs
+        /// the audit row with the session log's `tool_call`/`tool_result`
+        /// records. Also not carried on the wire.
+        tool_use_id: Option<String>,
         timestamp: DateTime<Utc>,
     },
     /// An LLM call completed
@@ -102,6 +135,8 @@ pub enum SystemEvent {
         input_tokens: u32,
         output_tokens: u32,
         cost_usd: f64,
+        /// The run this happened inside (GAP-10), or `None` outside one.
+        task_id: Option<String>,
         timestamp: DateTime<Utc>,
     },
     /// An agent was denied access to a model
@@ -165,26 +200,6 @@ pub enum SystemEvent {
         user_populated: bool,
         timestamp: DateTime<Utc>,
     },
-    /// A DAG node started execution
-    DagNodeStarted {
-        task_id: String,
-        node_id: String,
-        node_title: String,
-        agent_id: String,
-        timestamp: DateTime<Utc>,
-    },
-    /// A DAG node completed execution (success or failure)
-    DagNodeCompleted {
-        task_id: String,
-        node_id: String,
-        node_title: String,
-        agent_id: String,
-        success: bool,
-        duration_ms: u64,
-        /// First 200 chars of the node's output (for quick preview)
-        output_preview: Option<String>,
-        timestamp: DateTime<Utc>,
-    },
     /// An agent configuration was created, updated, or deleted
     AgentConfigChanged {
         agent_id: String,
@@ -228,6 +243,8 @@ pub enum SystemEvent {
         tool_name: String,
         consecutive_failures: usize,
         reset_after_secs: u64,
+        /// The run whose call tripped it (GAP-10), or `None` outside one.
+        task_id: Option<String>,
         timestamp: DateTime<Utc>,
     },
     /// Dispatch decision record (Routing V2 tool path). Historical rows may
@@ -251,8 +268,6 @@ pub enum SystemEvent {
         /// "task_ops" | "steered" | "skill_command" | "bootstrap" |
         /// "forced_simple_query" | "social_fast_path" | "main_loop"
         mode: String,
-        planner_ms: u64,
-        dispatch_ms: u64,
         ack_ms: u64,
         fallback_reason: Option<String>,
         auto_promotion_reason: Option<String>,
@@ -326,6 +341,9 @@ pub enum SystemEvent {
         stream_id: Option<String>,
         /// Lane key for routing to connectors (e.g. "telegram:12345")
         lane_key: Option<String>,
+        /// The run that is waiting on this prompt (GAP-10), or `None` outside
+        /// one — the same attribution §4.4's derived `blocked` lane uses.
+        task_id: Option<String>,
         timestamp: DateTime<Utc>,
     },
     /// Context budget was computed for a request (Phase A observability)
@@ -394,6 +412,164 @@ pub enum SystemEvent {
         followup_id: i64,
         /// "followup" | "unprocessed_steering"
         kind: String,
+        timestamp: DateTime<Utc>,
+    },
+    /// A session's lifecycle changed (migration 039, §5.7): created,
+    /// activated, archived or deleted — or one of its runs was found
+    /// interrupted at boot (§5.6b).
+    ///
+    /// Published by the `/v1/sessions` routes, by the follow-up claim that
+    /// re-homes a lane, and by the boot sweep, so a second window's sidebar
+    /// does not keep showing a conversation that is no longer the live one —
+    /// or an "N interrupted" badge that has just become true.
+    SessionChanged {
+        session_id: String,
+        lane_key: String,
+        /// "active" | "archived" | "deleted" | "interrupted"
+        ///
+        /// The first three are the session row's own lifecycle. `interrupted`
+        /// is **not** a session state — the `session` table's CHECK allows
+        /// only `active`/`archived` — it is a session-visible fact about one
+        /// of its runs, named by `task_id`, which is why it rides this variant
+        /// rather than a second one.
+        status: String,
+        /// The run the change is about. `Some` only for `interrupted`; every
+        /// lifecycle transition is about the session itself.
+        task_id: Option<String>,
+        timestamp: DateTime<Utc>,
+    },
+    /// A queued follow-up item was cancelled before it ran (GAP-03).
+    ///
+    /// Published by `DELETE /v1/lanes/{lane_key}/followups/{id}` only when the
+    /// cancel won its CAS against the autostart claim — a losing cancel
+    /// changed no row and has nothing to announce.
+    FollowupCancelled {
+        lane_key: String,
+        followup_id: i64,
+        timestamp: DateTime<Utc>,
+    },
+    /// An agent wrote a **produced** artifact — `artifact_write`, or the
+    /// `workspace_write(entry_type = "artifact")` spill (plan §4.9).
+    ///
+    /// Published by the builtin itself, after a successful
+    /// `ArtifactStore::put`, from the [`EventBus`](crate::bus::EventBus) the
+    /// per-call [`ToolContext`](crate::tools::registry::ToolContext) carries.
+    /// Never fired for uploads ([`openalpaca_storage::UploadStore`]): an upload
+    /// has no agent and no version to announce.
+    ArtifactWritten {
+        artifact_id: String,
+        /// The run that produced it, when the turn had one.
+        task_id: Option<String>,
+        agent_id: Option<String>,
+        /// The head file's own name (`01-quarterly-report.md`), from the
+        /// record — not the model-supplied `name` argument.
+        name: String,
+        /// The snake_case `ArtifactKind` spelling.
+        kind: String,
+        version: u32,
+        /// The head file's absolute path (`ArtifactRecord::storage_path`).
+        path: String,
+        timestamp: DateTime<Utc>,
+    },
+    /// One subagent lane of a run opened or closed (plan Phase 4, GAP-09).
+    ///
+    /// Fired twice per span at minimum: once on `open` with `state = running`,
+    /// and once on every close. The payload is the `subagent_span` row itself,
+    /// so a client can render a lane from the frame without a refetch — and
+    /// `started_at`/`ended_at` are the row's own RFC 3339 strings rather than
+    /// re-formatted times, so the socket and `GET /v1/tasks/{id}/timeline`
+    /// can never disagree by a millisecond.
+    ///
+    /// `state` is never `"blocked"`: that one is derived at read time from the
+    /// confirmation broker's pending requests, which is live process state and
+    /// has no transition to announce.
+    SubagentSpan {
+        task_id: String,
+        /// The span id — the spawn's `node_id`.
+        span_id: String,
+        /// The lane label, unique within the run (`review·3`).
+        label: String,
+        template_id: String,
+        agent_instance_id: String,
+        /// `"running"` | `"done"` | `"failed"` | `"cancelled"`.
+        state: String,
+        detail: Option<String>,
+        started_at: String,
+        ended_at: Option<String>,
+        duration_ms: Option<i64>,
+        output_preview: Option<String>,
+        timestamp: DateTime<Utc>,
+    },
+    /// An extension's observed state changed — T5, E5, `mark_failed`, T5-deny,
+    /// T5-gone and §3.7's tool-list refresh (extension design ADR-030).
+    ///
+    /// Declared here, in C1, because the plugin supervisor publishes it and
+    /// `openalpaca_plugins` cannot see a variant the daemon crate would add.
+    ExtensionStateChanged {
+        extension: crate::tools::extensions::ExtensionId,
+        /// The record's new state word, or `"removed"` when the declaration is
+        /// gone and the row simply disappears.
+        state: String,
+        /// The load the change belongs to, so the event log stays unambiguous
+        /// when a late crash notice arrives after a newer load's events.
+        generation: u64,
+        /// Set only by a server-driven `tools/list_changed` refresh.
+        #[serde(default)]
+        tools_changed: bool,
+        timestamp: DateTime<Utc>,
+    },
+    /// **S4 moment 1 and 2** — a capability was withheld from a caller
+    /// (extension design §7.1, §7.2, §6.2 #13).
+    ///
+    /// Published by [`ExtensionLedger`](crate::tools::extensions::ExtensionLedger)
+    /// itself, beside the `warn!`, and governed by the same 10-minute dedup
+    /// (§7.4): the **announcement** is deduped, never the error.
+    ExtensionCapabilityWithheld {
+        extension: crate::tools::extensions::ExtensionId,
+        /// The tool name (`AttemptedUse`), the capability or allowed tool name
+        /// (`SurfaceAssembly`) or the skill id (`ScheduledSkip`) the
+        /// withholding is about.
+        subject: String,
+        moment: crate::tools::extensions::Moment,
+        /// The record's state word at the moment of the refusal, or
+        /// `"unrecorded"` when there is no record (design §6.2a).
+        state: String,
+        /// The dedup `ScopeKey`: `task_id` → `request_id` → `agent_id` →
+        /// `"global"`, or the **skill id** for `ScheduledSkip`, which is exempt
+        /// from dedup (design §7.4, §6.2 #13).
+        scope: String,
+        agent_id: Option<String>,
+        task_id: Option<String>,
+        /// The caller held a *previous load*'s handle (design §3.0 Fact 3).
+        stale: bool,
+        timestamp: DateTime<Utc>,
+    },
+    /// **S4 moment 3** — the transition the owner is looking at: T1 step 3's
+    /// dependent scan (extension design §3.2 T1, §7.3).
+    ///
+    /// One per transition, never deduped. `cause` — not the transient state —
+    /// is what the `warn!` and the owner notice are worded from.
+    ExtensionCapabilityWithdrawn {
+        extension: crate::tools::extensions::ExtensionId,
+        /// `Disabling` on the route / watcher / deny / reload paths,
+        /// `Failed{Crashed,..}` from the reaper and the residue exits, `Enabled`
+        /// from §3.7's server-driven list change.
+        state: crate::tools::extensions::ExtensionState,
+        cause: crate::tools::extensions::WithdrawalCause,
+        /// The withdrawn set — T1 step 1's and T2 step 1's tombstones.
+        capabilities: Vec<String>,
+        /// The withdrawn tool **names**, which the legacy `tools.allow` scan
+        /// matches on.
+        tools: Vec<String>,
+        affected_templates: Vec<String>,
+        /// Skills now unsatisfiable — at least one required capability wholly
+        /// withheld, or (legacy `tools.allow`) every allowed name withdrawn.
+        affected_skills: Vec<String>,
+        /// The subset of `affected_skills` that carry `invoke.cron`. The owner
+        /// notice fires only when this is non-empty (design §7.3).
+        affected_cron_skills: Vec<String>,
+        /// The daemon's default lane, `{local_user_id}:gui`.
+        notice_lane: String,
         timestamp: DateTime<Utc>,
     },
 }

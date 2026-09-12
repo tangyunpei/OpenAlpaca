@@ -529,6 +529,8 @@ fn test_confirmation_intercept_broker_roundtrip() {
         tool_arguments: serde_json::json!({"cmd": "ls"}),
         stream_id: None,
         lane_key: Some("global1:imessage".to_string()),
+        task_id: None,
+        agent_instance_id: None,
         timestamp: chrono::Utc::now(),
     });
 

@@ -1,8 +1,7 @@
 use async_trait::async_trait;
 use openalpaca_core::{
-    gateway::{HandleResult, MessageHandler, ResolvedAttachment},
+    gateway::{HandleRequest, HandleResult, MessageHandler, ResolvedAttachment},
     orchestrator::Orchestrator,
-    security::policy::{Principal, Scope},
 };
 use std::sync::Arc;
 use uuid::Uuid;
@@ -50,61 +49,24 @@ impl OrchestratorHandler {
 
 #[async_trait]
 impl MessageHandler for OrchestratorHandler {
-    async fn handle(
-        &self,
-        request_id: Uuid,
-        source: String,
-        content: String,
-        principal: Principal,
-        scope: Scope,
-        lane_key: String,
-        workspace_path: Option<String>,
-        stream_id: Option<String>,
-    ) -> Result<HandleResult, String> {
-        let result = self
-            .orchestrator
-            .handle_message(
-                request_id,
-                source,
-                content,
-                principal,
-                scope,
-                lane_key,
-                workspace_path,
-                stream_id,
-            )
-            .await;
+    async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
+        let request_id = request.request_id;
+        let result = self.orchestrator.handle_message(request).await;
 
         self.build_result(request_id, result, Vec::new())
     }
 
     async fn handle_with_attachments(
         &self,
-        request_id: Uuid,
-        source: String,
-        content: String,
+        request: HandleRequest,
         attachments: Vec<ResolvedAttachment>,
-        principal: Principal,
-        scope: Scope,
-        lane_key: String,
-        workspace_path: Option<String>,
-        stream_id: Option<String>,
     ) -> Result<HandleResult, String> {
+        let request_id = request.request_id;
         let attachment_ids: Vec<String> = attachments.iter().map(|a| a.file_id.clone()).collect();
 
         let result = self
             .orchestrator
-            .handle_message_with_attachments(
-                request_id,
-                source,
-                content,
-                attachments,
-                principal,
-                scope,
-                lane_key,
-                workspace_path,
-                stream_id,
-            )
+            .handle_message_with_attachments(request, attachments)
             .await;
 
         // Only report attachments as used when the handler succeeded.

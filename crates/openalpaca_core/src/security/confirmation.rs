@@ -12,13 +12,21 @@ use dashmap::{DashMap, DashSet};
 use tokio::sync::oneshot;
 
 /// A confirmation request describing the tool call awaiting approval.
+#[derive(Debug, Clone)]
 pub struct ConfirmationRequest {
     pub request_id: String,
+    /// The agent **template** id, as reported in capability violations.
     pub agent_id: String,
     pub tool_name: String,
     pub tool_arguments: serde_json::Value,
     pub stream_id: Option<String>,
     pub lane_key: Option<String>,
+    /// The run this call belongs to, when it has one. Read by the run
+    /// timeline: a lane is `blocked` exactly while a request naming it is
+    /// pending (plan Phase 4, GAP-09).
+    pub task_id: Option<String>,
+    /// The runtime agent instance whose lane is waiting.
+    pub agent_instance_id: Option<String>,
     pub timestamp: DateTime<Utc>,
 }
 
@@ -36,8 +44,11 @@ pub struct ConfirmationResponse {
 ///
 /// Each pending confirmation is a oneshot channel: the sandbox awaits the
 /// receiver, and the user's interface sends via `respond()`.
+/// Each pending confirmation keeps the request beside its sender so a reader
+/// can ask *what* is waiting, not merely how many things are — the run
+/// timeline derives its `blocked` lanes from exactly this (GAP-09).
 pub struct ConfirmationBroker {
-    pending: DashMap<String, oneshot::Sender<ConfirmationResponse>>,
+    pending: DashMap<String, (ConfirmationRequest, oneshot::Sender<ConfirmationResponse>)>,
 }
 
 impl ConfirmationBroker {
@@ -50,14 +61,14 @@ impl ConfirmationBroker {
     /// Register a confirmation request. Returns receiver the caller awaits.
     pub fn request(&self, req: &ConfirmationRequest) -> oneshot::Receiver<ConfirmationResponse> {
         let (tx, rx) = oneshot::channel();
-        self.pending.insert(req.request_id.clone(), tx);
+        self.pending.insert(req.request_id.clone(), (req.clone(), tx));
         rx
     }
 
     /// Deliver user's response to a pending request.
     pub fn respond(&self, request_id: &str, response: ConfirmationResponse) -> Result<(), String> {
         match self.pending.remove(request_id) {
-            Some((_, tx)) => tx.send(response).map_err(|_| "receiver dropped".into()),
+            Some((_, (_, tx))) => tx.send(response).map_err(|_| "receiver dropped".into()),
             None => Err(format!("No pending confirmation: {request_id}")),
         }
     }
@@ -75,6 +86,19 @@ impl ConfirmationBroker {
     /// List all pending request IDs (for testing / diagnostics).
     pub fn pending_keys(&self) -> Vec<String> {
         self.pending.iter().map(|r| r.key().clone()).collect()
+    }
+
+    /// Snapshot of every request currently awaiting an answer.
+    ///
+    /// A snapshot, not a live view: a request answered a microsecond later is
+    /// still in the returned list. That is the right trade for the timeline —
+    /// a lane briefly drawn as blocked corrects itself on the next read, while
+    /// holding the map open across a render would block `respond`.
+    pub fn pending_requests(&self) -> Vec<ConfirmationRequest> {
+        self.pending
+            .iter()
+            .map(|entry| entry.value().0.clone())
+            .collect()
     }
 }
 
@@ -177,8 +201,63 @@ mod tests {
             tool_arguments: serde_json::json!({"path": "/tmp/test"}),
             stream_id: None,
             lane_key: None,
+            task_id: None,
+            agent_instance_id: None,
             timestamp: Utc::now(),
         }
+    }
+
+    fn make_request_for(id: &str, task_id: &str, instance: &str) -> ConfirmationRequest {
+        ConfirmationRequest {
+            task_id: Some(task_id.to_string()),
+            agent_instance_id: Some(instance.to_string()),
+            ..make_request(id)
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_requests_name_the_run_and_lane_that_are_waiting() {
+        let broker = ConfirmationBroker::new();
+        let _rx1 = broker.request(&make_request_for("r1", "task-1", "review_agent::a"));
+        let _rx2 = broker.request(&make_request_for("r2", "task-2", "writing_agent::b"));
+
+        let pending = broker.pending_requests();
+        assert_eq!(pending.len(), 2);
+        let mine: Vec<&ConfirmationRequest> = pending
+            .iter()
+            .filter(|r| r.task_id.as_deref() == Some("task-1"))
+            .collect();
+        assert_eq!(mine.len(), 1);
+        assert_eq!(
+            mine[0].agent_instance_id.as_deref(),
+            Some("review_agent::a")
+        );
+        assert_eq!(mine[0].tool_name, "file_write");
+    }
+
+    #[tokio::test]
+    async fn an_answered_request_is_no_longer_pending() {
+        let broker = ConfirmationBroker::new();
+        let rx = broker.request(&make_request_for("r1", "task-1", "review_agent::a"));
+        broker
+            .respond(
+                "r1",
+                ConfirmationResponse {
+                    approved: true,
+                    approval_scope: None,
+                },
+            )
+            .unwrap();
+        assert!(rx.await.unwrap().approved);
+        assert!(broker.pending_requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_request_is_no_longer_pending() {
+        let broker = ConfirmationBroker::new();
+        let _rx = broker.request(&make_request_for("r1", "task-1", "review_agent::a"));
+        broker.cancel("r1");
+        assert!(broker.pending_requests().is_empty());
     }
 
     #[tokio::test]

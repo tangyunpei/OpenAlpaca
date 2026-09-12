@@ -3,7 +3,9 @@
 //! Provides a high-level API for managing API keys with encryption,
 //! config persistence, and hot-reload via ArcSwap.
 
-use crate::config::{KeyConfig, LlmRouterConfig, ProviderConfig, read_config, write_config};
+use crate::config::{
+    KeyConfig, LlmRouterConfig, ProviderConfig, WebSearchConfig, read_config, render_config,
+};
 use crate::keys::key_encryption::KeyEncryptor;
 use crate::keys::key_pool::{
     ApiKey, KeyHealthStatus, KeyPool, KeyStatus, ProviderType,
@@ -12,7 +14,7 @@ use crate::keys::key_pool::{
 use crate::keys::secret_store::SecretStore;
 use crate::routing::router::LlmRouter;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub use super::settings_types::{
@@ -21,6 +23,26 @@ pub use super::settings_types::{
     SetKeyPriorityRequest, UpdateOrchestratorRequest, ValidateKeyRequest,
 };
 
+/// How this service puts `llm.toml` on disk.
+///
+/// The one atomic writer for hand-edited config (plan §1.4, P-11) lives in
+/// `openalpaca_core`, which sits *above* this crate in the dependency graph, so
+/// the host injects it here rather than this crate reaching up for it. The
+/// daemon passes `openalpaca_core::config_io::atomic_write_with_backup`; the
+/// default is the plain write this service always did, which is what a test or
+/// a caller with no core dependency gets.
+///
+/// Called with `<config_path>.lock` already held — `file_lock` locks per
+/// descriptor, so a writer that took the lock again would deadlock.
+pub type ConfigWriter = Arc<dyn Fn(&Path, &str) -> Result<(), String> + Send + Sync>;
+
+fn default_config_writer() -> ConfigWriter {
+    Arc::new(|path: &Path, contents: &str| {
+        std::fs::write(path, contents)
+            .map_err(|e| format!("Failed to write {}: {e}", path.display()))
+    })
+}
+
 /// High-level service for managing LLM settings.
 /// Decouples route handlers from domain logic.
 pub struct LlmSettingsService {
@@ -28,11 +50,68 @@ pub struct LlmSettingsService {
     config_path: PathBuf,
     encryptor: KeyEncryptor,
     secret_store: Arc<dyn SecretStore>,
+    config_writer: ConfigWriter,
+}
+
+/// What a provider toggle did (GAP-15).
+#[derive(Debug, Clone)]
+pub struct ProviderEnabledOutcome {
+    pub id: String,
+    pub enabled: bool,
+    /// Whether the router holds the provider now — asked of the router after
+    /// the hot path, not derived from `enabled`. A disable is never loaded;
+    /// an enable is loaded unless registration failed, which is the case
+    /// `warning` explains (R60).
+    pub loaded: bool,
+    /// Model ids `deregister_provider` stripped from the registry. Empty on an
+    /// enable.
+    pub removed_models: Vec<String>,
+    /// Catalogue entries an enable put back after an earlier disable stripped
+    /// them. Zero on a disable.
+    pub restored_models: usize,
+    /// Set when the file was written but the router could not load the
+    /// provider — no usable key, or the provider is not compiled in. The
+    /// disposition is still the owner's, and a restart would reach the same
+    /// state, so this is reported rather than turned into a failure.
+    pub warning: Option<String>,
+}
+
+/// Why a provider toggle did not happen. Every variant except `Reload` leaves
+/// both the file and the router exactly as they were.
+#[derive(Debug, thiserror::Error)]
+pub enum SetProviderEnabledError {
+    #[error("unknown provider '{0}'")]
+    UnknownProvider(String),
+    #[error(
+        "'{provider}' serves the default model '{model}'; choose a different default model first"
+    )]
+    IsDefaultProvider { provider: String, model: String },
+    /// The default model resolves to no provider at all, so no provider can be
+    /// shown *not* to be the one that was going to answer. Fails closed: every
+    /// disable is refused until the default names a model this daemon can
+    /// place (R61).
+    #[error(
+        "the default model '{model}' does not name any provider this daemon knows, \
+         so '{provider}' cannot be shown to be safe to turn off; set a default model \
+         the daemon can place first"
+    )]
+    DefaultModelUnresolved { provider: String, model: String },
+    #[error("{0}")]
+    Persist(String),
+}
+
+/// So [`LlmSettingsService::persist_only`]'s own failures — the lock, the read,
+/// the render, the write — reach this type unchanged while the closure inside
+/// the lock returns refusals of its own.
+impl From<String> for SetProviderEnabledError {
+    fn from(message: String) -> Self {
+        Self::Persist(message)
+    }
 }
 
 impl LlmSettingsService {
     pub fn new(router: Arc<LlmRouter>, config_path: PathBuf) -> Result<Self, String> {
-        let encryptor = KeyEncryptor::load_or_generate()?;
+        let encryptor = KeyEncryptor::from_env()?;
         let secret_store: Arc<dyn SecretStore> =
             Arc::new(crate::keys::secret_store::MemorySecretStore::new());
         Ok(Self {
@@ -40,6 +119,7 @@ impl LlmSettingsService {
             config_path,
             encryptor,
             secret_store,
+            config_writer: default_config_writer(),
         })
     }
 
@@ -48,13 +128,33 @@ impl LlmSettingsService {
         config_path: PathBuf,
         secret_store: Arc<dyn SecretStore>,
     ) -> Result<Self, String> {
-        let encryptor = KeyEncryptor::load_or_generate()?;
+        let encryptor = KeyEncryptor::from_env()?;
         Ok(Self {
             router,
             config_path,
             encryptor,
             secret_store,
+            config_writer: default_config_writer(),
         })
+    }
+
+    /// Route every `llm.toml` write through `writer` — the daemon's hook for
+    /// the one atomic writer (see [`ConfigWriter`]).
+    #[must_use]
+    pub fn with_config_writer(mut self, writer: ConfigWriter) -> Self {
+        self.config_writer = writer;
+        self
+    }
+
+    #[cfg(test)]
+    fn for_tests(router: Arc<LlmRouter>, config_path: PathBuf, encryptor: KeyEncryptor) -> Self {
+        Self {
+            router,
+            config_path,
+            encryptor,
+            secret_store: Arc::new(crate::keys::secret_store::MemorySecretStore::new()),
+            config_writer: default_config_writer(),
+        }
     }
 
     /// Get current LLM settings with masked keys.
@@ -531,30 +631,76 @@ impl LlmSettingsService {
         Ok((model, fallback_models))
     }
 
-    /// Update orchestrator config (model + fallback_models).
-    /// Takes effect on next restart (no hot-reload of orchestrator model).
+    /// Update orchestrator config (model + fallback_models), and point the
+    /// router at the new default model.
+    ///
+    /// Through [`Self::persist_only`] like every other `llm.toml` write: this
+    /// one used to read → mutate → write the whole document with a plain
+    /// `fs::write`, so overlapping a provider toggle it wrote the pre-toggle
+    /// `enabled` value back and the file and the router disagreed until
+    /// restart. The two sit on the same GUI screen.
+    ///
+    /// **The hot path belongs here, not to the watcher** (R62). Taking the lock
+    /// also put this write behind the daemon's dedup ring, which swallows the
+    /// filesystem event the daemon itself raised — and the watcher tick was the
+    /// only caller of `set_default_model` in the workspace, so the picked model
+    /// reached the file and nothing else: the GUI read the new id off disk
+    /// while the router kept answering on the old one until restart. Every
+    /// `persist_only` caller applies its own effect synchronously after the
+    /// write, the way the provider toggle does; the ring is then left to matter
+    /// only for **external** edits.
+    ///
+    /// Write-first, like the toggle: a refused write returns with the router
+    /// untouched, so the file and the router cannot disagree.
+    ///
+    /// `fallback_models` is still read from the file on the next start — the
+    /// router holds no live copy of it, so there is nothing here to move.
     pub fn update_orchestrator_config(&self, req: UpdateOrchestratorRequest) -> Result<(), String> {
-        let mut config =
-            read_config(&self.config_path).map_err(|e| format!("Failed to read config: {e}"))?;
+        let model = req.model.clone();
+        self.persist_only(|config| -> Result<(), String> {
+            let orch =
+                config
+                    .orchestrator
+                    .get_or_insert_with(|| crate::config::OrchestratorLlmConfig {
+                        model: "claude-sonnet-4-5-20250929".to_string(),
+                        fallback_models: None,
+                    });
+            orch.model = req.model;
+            orch.fallback_models = if req.fallback_models.is_empty() {
+                None
+            } else {
+                Some(req.fallback_models)
+            };
+            Ok(())
+        })?;
 
-        let orch =
-            config
-                .orchestrator
-                .get_or_insert_with(|| crate::config::OrchestratorLlmConfig {
-                    model: "claude-sonnet-4-5-20250929".to_string(),
-                    fallback_models: None,
-                });
-        orch.model = req.model;
-        orch.fallback_models = if req.fallback_models.is_empty() {
-            None
-        } else {
-            Some(req.fallback_models)
-        };
-
-        write_config(&self.config_path, &config)
-            .map_err(|e| format!("Failed to write config: {e}"))?;
+        self.router.set_default_model(model);
 
         Ok(())
+    }
+
+    /// Patch `[web_search]` and return it as it now stands.
+    ///
+    /// `PUT /v1/daemon/config/providers/web-search`'s half of the same
+    /// correction: the daemon's other `llm.toml` writer, on the same lock and
+    /// the same backup ring. `None` leaves a field as it was.
+    pub fn update_web_search_config(
+        &self,
+        api_key: Option<String>,
+        timeout_secs: Option<u64>,
+    ) -> Result<WebSearchConfig, String> {
+        let config = self.persist_only(|config| -> Result<(), String> {
+            let ws = config.web_search.get_or_insert_with(Default::default);
+            if let Some(key) = api_key {
+                ws.api_key = key;
+            }
+            if let Some(timeout) = timeout_secs {
+                ws.timeout_secs = timeout;
+            }
+            Ok(())
+        })?;
+
+        Ok(config.web_search.unwrap_or_default())
     }
 
     /// Build a KeyPool from config file for a specific provider.
@@ -593,24 +739,14 @@ impl LlmSettingsService {
     where
         F: FnOnce(&mut LlmRouterConfig),
     {
-        // D4: Acquire config write lock
-        let _lock = crate::keys::key_encryption::acquire_config_write_lock()?;
+        let config = self.persist_only(|config| -> Result<(), String> {
+            mutate(config);
+            Ok(())
+        })?;
 
-        // 1. Read current config
-        let mut config =
-            read_config(&self.config_path).map_err(|e| format!("Failed to read config: {e}"))?;
-
-        // 2. Apply mutation
-        mutate(&mut config);
-
-        // 3. Write to disk
-        write_config(&self.config_path, &config)
-            .map_err(|e| format!("Failed to write config: {e}"))?;
-
-        // 4. Build new KeyPool from updated config
+        // Build a new KeyPool from the updated config and hot-reload it via
+        // ArcSwap — registering the provider if it is not in the router yet.
         let new_pool = self.build_key_pool_from_config(&config, &provider_type)?;
-
-        // 5. Hot-reload via ArcSwap — register provider if not yet in router
         if !self.router.reload_keys(&provider_type, new_pool) {
             tracing::info!(
                 "Provider {:?} not in router, registering now",
@@ -622,6 +758,186 @@ impl LlmSettingsService {
         Ok(())
     }
 
+    /// Internal: read → mutate → write, with no router reload.
+    ///
+    /// The write half of [`Self::persist_and_reload`], split out because a
+    /// provider toggle's hot path is not a key-pool reload (GAP-15) — and
+    /// because the two must stay ordered write-first: a refused write returns
+    /// here with the router untouched.
+    ///
+    /// The bytes go out through the injected [`ConfigWriter`] — the daemon's is
+    /// the one atomic writer (§1.4, P-11), so `llm.toml` gets the same
+    /// tmp → fsync → rotate → rename and five-version backup as `mcp.toml`.
+    /// The document is rendered through `toml::Value`, whose tables are
+    /// ordered, so a rewrite that changes one key changes one key: the
+    /// serialiser's own `HashMap` order is not stable between reads, and an
+    /// owner's file must not reshuffle itself on every toggle.
+    ///
+    /// Returns the mutated config, which the caller usually needs anyway.
+    ///
+    /// **The closure is fallible, and that is the point of it being a closure.**
+    /// A caller whose write has a precondition on the document — the R61
+    /// default-model refusal below — evaluates it *inside* here, against the
+    /// same read the mutation is about to change, rather than against a read of
+    /// its own taken before the lock. Errors of this function's own (the lock,
+    /// the read, the render, the write) arrive as `String` and are converted
+    /// with `E::from`, so `E = String` for the callers that cannot refuse.
+    fn persist_only<F, E>(&self, mutate: F) -> Result<LlmRouterConfig, E>
+    where
+        F: FnOnce(&mut LlmRouterConfig) -> Result<(), E>,
+        E: From<String>,
+    {
+        // D4: the whole read-modify-write is under the config write lock, and
+        // the injected writer must not take it again.
+        let _lock = crate::keys::key_encryption::acquire_config_write_lock(&self.config_path)
+            .map_err(E::from)?;
+
+        let mut config = read_config(&self.config_path)
+            .map_err(|e| E::from(format!("Failed to read config: {e}")))?;
+        mutate(&mut config)?;
+
+        let rendered = render_config(&config).map_err(|e| E::from(e.to_string()))?;
+        (self.config_writer)(&self.config_path, &rendered).map_err(E::from)?;
+
+        Ok(config)
+    }
+
+    /// Turn one provider on or off (GAP-15).
+    ///
+    /// Write-first: `llm.toml` is the disposition, so it lands before the
+    /// router is touched and a refused write changes nothing. Then the hot
+    /// path — a disable unloads the provider and strips its models, so
+    /// in-flight calls finish and new ones fall through to the fallback chain
+    /// (or fail as unconfigured); an enable re-registers it, puts back the
+    /// catalogue the disable stripped, and refreshes from the provider's API.
+    pub async fn set_provider_enabled(
+        &self,
+        provider: &str,
+        enabled: bool,
+    ) -> Result<ProviderEnabledOutcome, SetProviderEnabledError> {
+        let provider_type = parse_provider_type(provider)
+            .filter(|pt| ProviderType::all().contains(pt))
+            .ok_or_else(|| SetProviderEnabledError::UnknownProvider(provider.to_string()))?;
+
+        let config = self.persist_only(|config| -> Result<(), SetProviderEnabledError> {
+            // Turning off the provider that serves the default model would
+            // leave every request with nowhere to go, so it is refused rather
+            // than done and reported — and so is *any* disable while the
+            // default model resolves to nothing, because then no provider can
+            // be shown not to be the one that was going to answer (R61).
+            //
+            // **Inside the write lock, against the document the write is about
+            // to change.** Evaluated before the lock, the check read a config
+            // another writer could still replace — and
+            // `update_orchestrator_config` is the writer that replaces exactly
+            // the field it reads, from the same GUI screen. The interleaving
+            // that got through: this read sees a default model owned by someone
+            // else, the other writer points the default at *this* provider, and
+            // then this write disables it.
+            if !enabled {
+                let (model, owner) = self.default_model_provider(config);
+                match owner {
+                    Some(owner) if owner == provider_type => {
+                        return Err(SetProviderEnabledError::IsDefaultProvider {
+                            provider: provider.to_string(),
+                            model,
+                        });
+                    }
+                    None => {
+                        return Err(SetProviderEnabledError::DefaultModelUnresolved {
+                            provider: provider.to_string(),
+                            model,
+                        });
+                    }
+                    Some(_) => {}
+                }
+            }
+
+            let providers = config.providers.get_or_insert_with(HashMap::new);
+            providers.entry(provider.to_string()).or_default().enabled = Some(enabled);
+            Ok(())
+        })?;
+
+        let mut outcome = ProviderEnabledOutcome {
+            id: provider.to_string(),
+            enabled,
+            loaded: false,
+            removed_models: Vec::new(),
+            restored_models: 0,
+            warning: None,
+        };
+
+        if enabled {
+            // `deregister_provider` took the catalogue with it, and
+            // `refresh_models` can only mark entries that still exist — so the
+            // defaults (and the config's own `[models]` rows) go back first,
+            // or the model picker stays empty until the daemon restarts.
+            outcome.restored_models = self
+                .router
+                .model_registry()
+                .restore_defaults_for_provider(&provider_type);
+            if let Some(models) = config.models.as_ref() {
+                let disabled = crate::config::disabled_providers(&config);
+                self.router
+                    .model_registry()
+                    .reload_from_config(models, &disabled);
+            }
+            if let Err(e) = self.register_provider_from_config(&config, provider_type.clone())
+            {
+                tracing::warn!(provider = %provider, error = %e, "provider enabled in config but not loaded");
+                outcome.warning = Some(e);
+            } else {
+                self.router.refresh_models().await;
+            }
+        } else {
+            outcome.removed_models = self.router.deregister_provider(&provider_type);
+            tracing::info!(
+                provider = %provider,
+                models = outcome.removed_models.len(),
+                "provider disabled and unloaded"
+            );
+        }
+
+        // Asked of the router rather than inferred: this is the one field that
+        // distinguishes "on and serving" from "on and inert".
+        outcome.loaded = self.router.has_provider(&provider_type);
+
+        Ok(outcome)
+    }
+
+    /// The default model, and the provider that serves it as far as anything
+    /// can say.
+    ///
+    /// Three rungs, in order: the live `ModelRegistry`; the config's own
+    /// `[models]` table, for a model the registry has never seen (a disabled
+    /// provider's rows are no longer in the registry, so this rung carries
+    /// them); and finally what the model id itself says
+    /// ([`provider_hint_for_model`]).
+    ///
+    /// `None` for the provider means the default model places nowhere, which
+    /// the caller treats as a refusal rather than as permission (R61).
+    fn default_model_provider(&self, config: &LlmRouterConfig) -> (String, Option<ProviderType>) {
+        let model = config
+            .orchestrator
+            .as_ref()
+            .map(|o| o.model.clone())
+            .unwrap_or_else(|| self.router.default_model());
+
+        let provider = self
+            .router
+            .model_registry()
+            .resolve_provider(&model)
+            .or_else(|| {
+                config
+                    .models
+                    .as_ref()
+                    .and_then(|models| models.get(&model))
+                    .and_then(|entry| parse_provider_type(&entry.provider))
+            })
+            .or_else(|| provider_hint_for_model(&model));
+        (model, provider)
+    }
+
     /// Build and register a provider that wasn't in the router at startup.
     #[allow(unused_variables)]
     fn register_provider_from_config(
@@ -630,11 +946,14 @@ impl LlmSettingsService {
         provider_type: ProviderType,
     ) -> Result<(), String> {
         let api_keys = self.build_api_keys_from_config(config, &provider_type)?;
-        let first_key = api_keys
-            .first()
-            .ok_or_else(|| format!("No keys for {:?}, cannot register provider", provider_type))?
-            .secret
-            .clone();
+        // Ollama is keyless — the boot builder registers it with no key at all
+        // — so the demand for one belongs to the arms that need it, not here.
+        let first_key = api_keys.first().map(|k| k.secret.clone());
+        let require_key = || {
+            first_key
+                .clone()
+                .ok_or_else(|| format!("No keys for {:?}, cannot register provider", provider_type))
+        };
 
         let pool = self.build_key_pool_from_config(config, &provider_type)?;
 
@@ -659,7 +978,9 @@ impl LlmSettingsService {
                     .map(|d| d.default_max_tokens);
                 Some(Arc::new(
                     crate::providers::anthropic::AnthropicProvider::new(
-                        first_key, model, max_tokens,
+                        require_key()?,
+                        model,
+                        max_tokens,
                     ),
                 ))
             }
@@ -674,7 +995,10 @@ impl LlmSettingsService {
                     .get("openai")
                     .map(|d| d.default_max_tokens);
                 Some(Arc::new(crate::providers::openai::OpenAiProvider::new(
-                    first_key, model, base_url, max_tokens,
+                    require_key()?,
+                    model,
+                    base_url,
+                    max_tokens,
                 )))
             }
             #[cfg(feature = "ollama")]
@@ -789,6 +1113,34 @@ impl LlmSettingsService {
     }
 }
 
+/// The last rung of the default model's provider ladder: what the id itself
+/// says.
+///
+/// Only the two shapes that are unambiguous — an explicit `provider/model` or
+/// `provider:model` prefix, and the vendors' own naming conventions. It is
+/// deliberately narrow: a wrong guess here would let a disable through that
+/// strands the daemon, and a `None` only ever *refuses* one (R61).
+fn provider_hint_for_model(model: &str) -> Option<ProviderType> {
+    if let Some((prefix, rest)) = model.split_once(['/', ':'])
+        && !rest.is_empty()
+        && let Some(provider) = parse_provider_type(prefix)
+    {
+        return Some(provider);
+    }
+
+    let id = model.to_ascii_lowercase();
+    if id.starts_with("claude") {
+        return Some(ProviderType::Anthropic);
+    }
+    if id.starts_with("gpt") || id.starts_with("chatgpt") || id.starts_with("o1")
+        || id.starts_with("o3")
+        || id.starts_with("o4")
+    {
+        return Some(ProviderType::OpenAI);
+    }
+    None
+}
+
 fn parse_provider_type(name: &str) -> Option<ProviderType> {
     match name {
         "anthropic" => Some(ProviderType::Anthropic),
@@ -802,3 +1154,6 @@ fn parse_provider_type(name: &str) -> Option<ProviderType> {
 }
 
 pub use super::key_pool_builder::build_key_pool_from_provider_config;
+
+#[cfg(test)]
+mod tests;

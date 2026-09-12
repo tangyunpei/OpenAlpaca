@@ -3,7 +3,7 @@
 mod commands;
 mod completer;
 
-use crate::chat_stream::{self, StreamOptions, StreamResult, UsageInfo};
+use crate::chat_stream::{self, ChatTarget, StreamOptions, StreamResult, UsageInfo};
 use crate::client::DaemonClient;
 use colored::Colorize;
 use completer::ReplHelper;
@@ -12,13 +12,17 @@ use std::io::Write;
 const MAX_HISTORY_ENTRIES: usize = 1000;
 
 fn history_path() -> anyhow::Result<std::path::PathBuf> {
-    let dir = openalpaca_storage::discovery::ensure_app_dir()?;
+    // Machine state, not something the user edits — it lives under state/.
+    let dir = openalpaca_storage::store::state_dir()?;
     Ok(dir.join("repl_history"))
 }
 
 pub struct ReplSession {
     client: DaemonClient,
     context: ReplContext,
+    /// Where every turn of this REPL goes: the CLI's project, and the
+    /// conversation `--resume`/`--session` named, if any.
+    target: ChatTarget,
 }
 
 pub struct ReplContext {
@@ -52,7 +56,7 @@ impl SessionUsage {
 }
 
 impl ReplSession {
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new(target: ChatTarget) -> anyhow::Result<Self> {
         let client = DaemonClient::connect()?;
         Ok(Self {
             client,
@@ -60,6 +64,7 @@ impl ReplSession {
                 session_usage: SessionUsage::new(),
                 verbose: false,
             },
+            target,
         })
     }
 
@@ -168,11 +173,11 @@ impl ReplSession {
         };
 
         // Phase 1: send_chat (POST) with retry-once
-        let send_result = match chat_stream::send_chat(&self.client, content).await {
+        let send_result = match chat_stream::send_chat(&self.client, content, &self.target).await {
             Ok(resp) => Ok(resp),
             Err(e) if Self::should_reconnect(&e) => {
                 if self.try_reconnect() {
-                    chat_stream::send_chat(&self.client, content).await
+                    chat_stream::send_chat(&self.client, content, &self.target).await
                 } else {
                     Err(e)
                 }

@@ -13,11 +13,28 @@ max_rounds = 18
 max_tool_runtime_secs = 300
 max_tools_per_round = 3
 
+[execution.artifacts]
+# Largest single artifact body `artifact_write` (and the
+# `workspace_write(entry_type = "artifact")` spill) will accept, in bytes.
+# Default 10485760 (10 MB) — file_write's cap, not the 50 MB upload cap:
+# this content comes out of a context window.
+# max_artifact_bytes = 10485760
+# Versions kept per artifact under `.versions/`. On write, the oldest
+# superseded version beyond this bound is pruned; the head is never pruned.
+# max_versions_per_artifact = 20
+
 [execution.context]
 autocompact_buffer_ratio = 0.165
 compaction_target_ratio = 0.50
 # compaction_model = "claude-haiku-4-5-20251001"
 min_recent_messages = 4
+
+[extensions]
+# How long a disable, reload or shutdown waits for an extension's in-flight tool
+# calls (a plugin's out-of-process skill and agent runs included) to finish
+# before it is torn down anyway. New calls are already refused by then; on
+# expiry the supervisor warns with the straggler count and proceeds.
+# drain_timeout_secs = 10
 
 [orchestrator.costs]
 extract_every_n_turns = 5
@@ -75,9 +92,10 @@ main_loop_max_tools_per_round = 4
 # Main-loop tool surface: "core_union" (keyword-suggested tools + the
 # core set: start_workflow, task_status, memory tools, and — on lanes
 # with active workflows — steer_workflow/queue_followup; plus invoke_skill
-# and every installed MCP/plugin tool minus
-# execution.skill_defaults.global_tool_deny, the opt-out) or "full"
-# (entire registry minus the global tool deny list; escape hatch).
+# and every installed MCP/plugin tool whose extension is enabled) or
+# "full" (the entire registry; escape hatch). Both modes drop the tools of
+# a disabled extension; there is no per-tool opt-out — disable the server
+# or plugin itself (`openalpaca ext disable <kind> <id>`).
 tool_selection = "core_union"
 # Global kill switch for cron-scheduled skills. Skills whose frontmatter sets
 # invoke.cron (or invoke.mode = "scheduled" with a cron expression) are
@@ -86,6 +104,49 @@ tool_selection = "core_union"
 # the local user's "scheduled" lane. Set false to disable all skill cron
 # jobs without editing the skills themselves.
 scheduled_skills_enabled = true
+# EXPERIMENTAL (§5.6c, S2) — replay resume, off by default.
+# With this on, `POST /v1/tasks/{id}/action {"action":"resume"}` re-enters an
+# `interrupted` run under its own id: the loop's history is rebuilt from that
+# run's session-log records (its rounds and their tool results, honouring the
+# newest compaction boundary) and continued with a synthetic
+# `<user_interjection>` telling the model not to repeat side-effecting calls
+# it already made. Nothing recorded is re-executed — a replay re-primes
+# context. Leave it off unless you are exercising it: `rerun` (a new id, a
+# clean start) is the trusted way to run an interrupted goal again, and a
+# replay that misreads a torn log hands the model a false account of its own
+# work. `resume` on a *paused* run is unaffected by this flag.
+resume_enabled = false
+
+# Session event log (~/.openalpaca/sessions/<id>/log.jsonl): the append-only
+# per-turn narrative — rounds, tool calls and their payloads, steering drains,
+# compaction, subagent spans. The conversation itself lives in SQLite, so a
+# trim here loses loop-interior detail, never the transcript.
+[orchestrator.sessions]
+# Per session, counting the log segments plus the results/ spill directory and
+# the snapshots/ pre-edit images. On exceed, whole oldest segments are dropped
+# (never the live one) and a `log_trimmed` record names the seq range that went.
+log_max_session_bytes = 268435456
+# Across all sessions; archived sessions are evicted oldest-touched first and
+# an active session's log is never evicted.
+log_max_total_bytes = 2147483648
+# Age-based sweep of archived session logs, in days. Reserved: no age sweep
+# exists yet (owner decision T12), so only the two byte caps above are
+# enforced. GET /v1/status reports whatever is set here, the daemon warns at
+# boot when it is non-zero, and nothing expires anything by age. The intent it
+# records: size is for disk, age is for exposure, and the two are deliberately
+# separate.
+log_retention_days = 0
+# A tool result larger than this is written once to the session's results/ and
+# the model is handed a stub naming it — `read_result` pages the rest. Below it
+# the result travels inline unchanged.
+tool_result_inline_bytes = 32768
+# Before file_write overwrites an existing workspace file, its pre-edit bytes
+# are copied into the session's snapshots/. A target larger than this is not
+# imaged and the write is refused rather than performed without one. Kept
+# equal to file_write's own 10 MB content limit on purpose: lowering this
+# reopens a band of existing files file_write would otherwise refuse to
+# touch at all, purely because this tier exists.
+snapshot_max_bytes = 10485760
 
 [security]
 max_input_length = 32768

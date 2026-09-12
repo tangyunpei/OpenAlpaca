@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Top-level MCP configuration parsed from `config/mcp.toml`.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -43,15 +43,40 @@ fn default_max_reconnect() -> u32 { 3 }
 fn default_reconnect_backoff() -> u64 { 100 }
 fn default_enabled() -> bool { true }
 
-#[derive(Debug, Clone, Deserialize)]
+/// One `[servers.<name>]` block.
+///
+/// `Serialize` exists for exactly one reader: the `config_fingerprint`
+/// preimage of extension design §3.3 E2 (`super::fingerprint`), which hashes a
+/// canonical rendering of the *parsed* block so that a comment, a blank line or
+/// a key-order edit changes nothing while a value edit does. The writer does
+/// not use it — that is a surgical `toml_edit` assignment (§2.1).
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "transport", rename_all = "snake_case")]
 pub enum McpServerConfig {
     Stdio {
         command: String,
         #[serde(default)]
         args: Vec<String>,
+        /// Literal values, written into the child's environment as they stand.
         #[serde(default)]
         env: HashMap<String, String>,
+        /// **Name indirection**: `env_from = { GITHUB_TOKEN = "GH_PAT" }` sets
+        /// `GITHUB_TOKEN` in the child's environment to the value the *daemon's*
+        /// `GH_PAT` holds, resolved at spawn (`build_client_config`). It is the
+        /// stdio counterpart of `bearer_env`, and it is what
+        /// `POST /v1/extensions/mcp` writes: a secret the daemon put into a
+        /// config file in the clear is a decision nobody has taken, and it
+        /// would then propagate into every rotated copy under `state/backups/`.
+        /// A missing host variable is a start failure naming it, never an
+        /// empty value.
+        ///
+        /// `skip_serializing_if` keeps the §3.3 E2 fingerprint preimage of
+        /// every block that does not use it byte-identical to what it was
+        /// before this field existed. The names themselves are *not* masked —
+        /// they are not secrets, and changing which variable a server reads is
+        /// a real change to what the server is.
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        env_from: HashMap<String, String>,
         #[serde(default)]
         cwd: Option<PathBuf>,
         #[serde(default)]
@@ -65,8 +90,26 @@ pub enum McpServerConfig {
         url: url::Url,
         #[serde(default)]
         auth: Option<HttpAuthConfig>,
+        /// Literal header values, sent as they stand.
         #[serde(default)]
         extra_headers: HashMap<String, String>,
+        /// **Name indirection**: `extra_headers_from = { Authorization =
+        /// "GH_PAT" }` sends `Authorization` with the value the *daemon's*
+        /// `GH_PAT` holds, resolved at connect (`build_client_config`). It is
+        /// the header counterpart of `env_from`, and it is what
+        /// `POST /v1/extensions/mcp` writes for an auth-bearing header: a
+        /// header is where an http server's credential actually travels, and a
+        /// secret the daemon put into a config file in the clear would then
+        /// propagate into every rotated copy under `state/backups/`. A missing
+        /// host variable is a start failure naming it, never an empty header.
+        ///
+        /// `skip_serializing_if` keeps the §3.3 E2 fingerprint preimage of
+        /// every block that does not use it byte-identical to what it was
+        /// before this field existed. The names themselves are *not* masked —
+        /// they are not secrets, and changing which variable a header reads is
+        /// a real change to what the server sends.
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        extra_headers_from: HashMap<String, String>,
         #[serde(default)]
         connect_timeout_secs: Option<u64>,
         #[serde(default)]
@@ -105,7 +148,10 @@ impl McpServerConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// `Serialize` for the same single reader as [`McpServerConfig`] — the
+/// fingerprint preimage, where the auth *kind* is structure and the literal
+/// `bearer` value is masked before it is hashed.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum HttpAuthConfig {
     BearerEnv { bearer_env: String },
@@ -135,7 +181,19 @@ impl McpConfig {
             return Err(LoadError::NotFound(path.to_path_buf()));
         }
         let text = std::fs::read_to_string(path)?;
-        let config: McpConfig = toml::from_str(&text)?;
+        Self::parse(&text)
+    }
+
+    /// Parse and validate MCP config from TOML text.
+    ///
+    /// Split out of [`Self::load`] so the atomic writer can re-parse its own
+    /// rendered output with **the reader's own parser** before the rename
+    /// (extension design §2.1): a `toml_edit` index-assignment can synthesize a
+    /// structurally valid table this type rejects — `enabled` assigned into a
+    /// `[servers.<n>]` block that no longer exists produces a table with no
+    /// `transport` tag — and that must abort the write, not land.
+    pub fn parse(text: &str) -> Result<Self, LoadError> {
+        let config: McpConfig = toml::from_str(text)?;
         for name in config.servers.keys() {
             if !is_valid_server_name(name) {
                 return Err(LoadError::InvalidServerName(name.clone()));
@@ -145,7 +203,12 @@ impl McpConfig {
     }
 }
 
-fn is_valid_server_name(s: &str) -> bool {
+/// `^[a-zA-Z][a-zA-Z0-9_-]{0,30}$` — the block name `McpConfig::parse` accepts.
+///
+/// Public because `POST /v1/extensions/mcp` refuses a bad name with a `400`
+/// that says so, rather than letting the writer's mandatory re-parse turn it
+/// into an indistinguishable write failure (GAP-24).
+pub fn is_valid_server_name(s: &str) -> bool {
     if s.len() > 31 { return false; }
     let mut chars = s.chars();
     let first = match chars.next() {

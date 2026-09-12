@@ -7,22 +7,39 @@
 
 use axum::{
     Json,
-    body::Body,
-    extract::{Multipart, Path, State},
-    http::{HeaderMap, StatusCode, header},
+    extract::{Multipart, Path, Query, State},
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
-use openalpaca_storage::{FileAsset, FileAssetRepository, FileAssetStatus};
-use sha2::{Digest, Sha256};
+use chrono::Utc;
+use openalpaca_storage::store::StoreScope;
+use openalpaca_storage::{FileAssetRepository, NewUpload, UploadError, UploadStore};
+use std::path::PathBuf;
 use std::sync::Arc;
-use tokio_util::io::ReaderStream;
 
 use super::files_types::*;
 use crate::AppState;
 
+/// The store an upload's bytes belong to (D2).
+///
+/// The request's project when the client named one — resolved through
+/// `MemoryScopeContext::for_request`, the same single resolver `/v1/chat` and
+/// `/v1/status` use, never a second reading of the header — and the home store
+/// otherwise. "Otherwise" covers every client that chose no project, a path
+/// under no project marker, and `$HOME` itself, which is not a project. It also
+/// covers every connector attachment, which reaches `UploadStore` without ever
+/// passing through here and always takes [`StoreScope::Home`].
+fn upload_scope(headers: &HeaderMap) -> StoreScope {
+    match super::request_project_root(super::workspace_header(headers).as_deref()) {
+        Some(root) => StoreScope::Project(PathBuf::from(root)),
+        None => StoreScope::Home,
+    }
+}
+
 /// POST /v1/files/upload — Multipart file upload
 pub async fn upload_file_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
     let config = state.daemon_config.load();
@@ -162,96 +179,56 @@ pub async fn upload_file_handler(
         }
     }
 
-    // Compute SHA-256
-    let mut hasher = Sha256::new();
-    hasher.update(&data);
-    let sha256 = format!("{:x}", hasher.finalize());
-
-    let repo = FileAssetRepository::new(&state.db);
-
-    // Dedup: check if file with same hash already exists and is owned by this user
-    if let Ok(Some(existing)) = repo.get_by_sha256(&sha256)
-        && existing.owner_id == state.local_user_id
-    {
-        return Json(FileUploadResponse {
-            id: existing.id,
-            filename: existing.filename,
-            mime_type: existing.mime_type,
-            size_bytes: existing.size_bytes,
-            status: existing.status.as_str().to_string(),
+    // One writer: hashing, the owner-scoped sha256 dedup, placement and the row
+    // all live in `UploadStore`, which the connector attachment path shares —
+    // so upload placement can never mean two different things (D2). The bytes
+    // land at `<store>/uploads/<YYYY-MM-DD>/NN-<slug>.<ext>`.
+    //
+    // It writes files and talks to SQLite, so it runs on the blocking pool.
+    let scope = upload_scope(&headers);
+    let writer_state = state.clone();
+    let owner_id = state.local_user_id.clone();
+    let write_name = filename.clone();
+    let write_mime = content_type.clone();
+    let stored = tokio::task::spawn_blocking(move || {
+        UploadStore::new(&writer_state.db).put(NewUpload {
+            owner_id: &owner_id,
+            filename: &write_name,
+            mime_type: &write_mime,
+            data: &data,
+            scope: &scope,
+            created: Utc::now(),
         })
-        .into_response();
-    }
-    // Same content but different owner — fall through to create a new record
+    })
+    .await;
 
-    // Compute storage path
-    let storage_path = match openalpaca_storage::paths::asset_storage_path(&sha256) {
-        Ok(p) => p,
+    let stored = match stored {
+        Ok(Ok(stored)) => stored,
+        Ok(Err(e)) => {
+            // The writer's typed failures carry the codes this route has always
+            // returned; anything else is an I/O failure by elimination.
+            let code = e
+                .downcast_ref::<UploadError>()
+                .map_or("IO_ERROR", UploadError::code);
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, code, &e.to_string())
+                .into_response();
+        }
         Err(e) => {
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "PATH_ERROR",
-                &format!("Failed to compute storage path: {e}"),
+                "IO_ERROR",
+                &format!("Upload task failed: {e}"),
             )
             .into_response();
         }
     };
 
-    // Create parent directories and write file (async to avoid blocking executor)
-    if let Some(parent) = storage_path.parent()
-        && let Err(e) = tokio::fs::create_dir_all(parent).await
-    {
-        return error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "IO_ERROR",
-            &format!("Failed to create storage directory: {e}"),
-        )
-        .into_response();
-    }
-    if let Err(e) = tokio::fs::write(&storage_path, &data).await {
-        return error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "IO_ERROR",
-            &format!("Failed to write file: {e}"),
-        )
-        .into_response();
-    }
-
-    // Insert into database
-    let id = uuid::Uuid::new_v4().to_string();
-    let asset = FileAsset {
-        id: id.clone(),
-        owner_id: state.local_user_id.clone(),
-        sha256,
-        filename: filename.clone(),
-        mime_type: content_type.clone(),
-        size_bytes: data.len() as i64,
-        storage_path: storage_path.to_string_lossy().to_string(),
-        status: FileAssetStatus::Uploaded,
-        extracted_text: None,
-        extract_error: None,
-        metadata_json: None,
-        created_at: String::new(),
-        updated_at: String::new(),
-    };
-
-    if let Err(e) = repo.insert(&asset) {
-        // Clean up written file on DB error
-        let _ = tokio::fs::remove_file(&storage_path).await;
-        return error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "DB_ERROR",
-            &format!("Failed to insert file record: {e}"),
-        )
-        .into_response();
-    }
-
     Json(FileUploadResponse {
-        id,
-        filename,
-        mime_type: content_type,
-        size_bytes: data.len() as i64,
-        status: "uploaded".to_string(),
+        id: stored.asset.id,
+        filename: stored.asset.filename,
+        mime_type: stored.asset.mime_type,
+        size_bytes: stored.asset.size_bytes,
+        status: stored.asset.status.as_str().to_string(),
     })
     .into_response()
 }
@@ -283,15 +260,28 @@ pub async fn get_file_metadata_handler(
     }
 }
 
-/// GET /v1/files/{id}/content — Stream file content
-pub async fn get_file_content_handler(
-    Path(id): Path<String>,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    let repo = FileAssetRepository::new(&state.db);
-    let asset = match repo.get_by_id(&id) {
+/// `GET /v1/files/{id}/content` — stream file content.
+///
+/// GAP-11: this route left the bearer middleware, so it validates the token
+/// itself — as `?token=` or as `Authorization: Bearer` — and only then does the
+/// owner check it always did. The 401 body is the plain text
+/// `/v1/chat/stream` answers with; the 404 envelope is unchanged.
+pub(crate) async fn file_content(
+    db: &openalpaca_storage::Database,
+    owner_id: &str,
+    expected_token: &str,
+    headers: &HeaderMap,
+    query_token: Option<&str>,
+    id: &str,
+) -> axum::response::Response {
+    if !super::content_token_ok(headers, query_token, expected_token) {
+        return super::invalid_token();
+    }
+
+    let repo = FileAssetRepository::new(db);
+    let asset = match repo.get_by_id(id) {
         Ok(Some(a)) => {
-            if a.owner_id != state.local_user_id {
+            if a.owner_id != owner_id {
                 tracing::debug!(file_id = %id, owner = %a.owner_id, "File owner mismatch — returning 404");
                 return error_response(StatusCode::NOT_FOUND, "NOT_FOUND", "File not found")
                     .into_response();
@@ -312,36 +302,29 @@ pub async fn get_file_content_handler(
         }
     };
 
-    let file = match tokio::fs::File::open(&asset.storage_path).await {
-        Ok(f) => f,
-        Err(e) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "IO_ERROR",
-                &format!("Failed to open file: {e}"),
-            )
-            .into_response();
-        }
-    };
+    super::content_response(
+        std::path::Path::new(&asset.storage_path),
+        &asset.mime_type,
+        &asset.filename,
+    )
+    .await
+}
 
-    let stream = ReaderStream::new(file);
-    let body = Body::from_stream(stream);
-
-    let mut headers = HeaderMap::new();
-    if let Ok(ct) = asset.mime_type.parse() {
-        headers.insert(header::CONTENT_TYPE, ct);
-    }
-    // Sanitize filename to prevent Content-Disposition header injection
-    let safe_filename: String = asset
-        .filename
-        .chars()
-        .filter(|c| *c != '"' && *c != '\\' && *c != '\r' && *c != '\n')
-        .collect();
-    if let Ok(cd) = format!("inline; filename=\"{}\"", safe_filename).parse() {
-        headers.insert(header::CONTENT_DISPOSITION, cd);
-    }
-
-    (headers, body).into_response()
+pub async fn get_file_content_handler(
+    Path(id): Path<String>,
+    Query(params): Query<super::TokenParams>,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    file_content(
+        &state.db,
+        &state.local_user_id,
+        &state.token,
+        &headers,
+        params.token.as_deref(),
+        &id,
+    )
+    .await
 }
 
 /// POST /v1/files/{id}/open — Open file with system default app
@@ -365,7 +348,7 @@ pub async fn open_file_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openalpaca_storage::Database;
+    use openalpaca_storage::{Database, FileAsset, FileAssetStatus};
     use tempfile::TempDir;
 
     // Real file signatures to exercise infer-based MIME detection.
@@ -491,12 +474,27 @@ mod tests {
         assert!(result.is_ok(), "PPT (CFB container) should be allowed");
     }
 
-    fn open_ok(_path: &str, _file_id: &str, _filename: &str) -> Result<(), String> {
+    fn open_ok(_path: &str, _file_id: &str, _filename: &str, _stage: bool) -> Result<(), String> {
         Ok(())
     }
 
-    fn open_fail(_path: &str, _file_id: &str, _filename: &str) -> Result<(), String> {
+    fn open_fail(_path: &str, _file_id: &str, _filename: &str, _stage: bool) -> Result<(), String> {
         Err("open failed".to_string())
+    }
+
+    /// Reports the staging decision back through the result: `Ok` only when the
+    /// caller asked to open the stored path directly (Phase 3 item 6).
+    fn open_only_if_direct(
+        _path: &str,
+        _file_id: &str,
+        _filename: &str,
+        stage: bool,
+    ) -> Result<(), String> {
+        if stage {
+            Err("staged".to_string())
+        } else {
+            Ok(())
+        }
     }
 
     fn test_db() -> (TempDir, Database) {
@@ -577,6 +575,54 @@ mod tests {
         );
     }
 
+    // --- Phase 3 item 6: which rows still go through `$TMPDIR` staging ---
+
+    /// A **produced** artifact already lives at a real path with a real
+    /// extension (§4.2's grammar), so `/open` hands the system opener that path
+    /// directly — no copy, and "Open" acts on the file the user actually has.
+    #[tokio::test]
+    async fn test_open_asset_for_a_produced_artifact_skips_staging() {
+        use openalpaca_storage::store::StoreScope;
+        use openalpaca_storage::{ArtifactKind, ArtifactStore, NewArtifact};
+
+        let home = tempfile::tempdir().expect("home root");
+        let _guard =
+            crate::test_util::HomeStoreGuard::set(&home.path().canonicalize().expect("canonical"));
+        let project = tempfile::tempdir().expect("project root");
+        let (_dir, db) = test_db();
+
+        let scope = StoreScope::Project(project.path().canonicalize().expect("canonical"));
+        let row = ArtifactStore::new(&db)
+            .put(NewArtifact::new(
+                "user1",
+                &scope,
+                ArtifactKind::Markdown,
+                "Notes",
+                b"hello\n".as_slice(),
+            ))
+            .expect("put artifact")
+            .0;
+
+        open_asset_for_user(&db, &row.id, "user1", open_only_if_direct)
+            .await
+            .expect("a produced artifact must open its own path");
+    }
+
+    /// An **upload** keeps the staging copy: it is stored under a
+    /// content-addressed name, so the opener has no extension to dispatch on.
+    #[tokio::test]
+    async fn test_open_asset_for_an_upload_still_stages() {
+        let (_dir, db) = test_db();
+        let repo = FileAssetRepository::new(&db);
+        repo.insert(&sample_asset("f4", "user1"))
+            .expect("insert asset");
+
+        let err = open_asset_for_user(&db, "f4", "user1", open_only_if_direct)
+            .await
+            .expect_err("an upload must still be staged");
+        assert_eq!(err, OpenFileApiError::OpenFailed("staged".to_string()));
+    }
+
     #[tokio::test]
     async fn test_open_file_error_response_not_found_uses_404() {
         let response = open_file_error_response(OpenFileApiError::NotFound);
@@ -597,6 +643,84 @@ mod tests {
             .expect("read response body");
         let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("parse json");
         assert_eq!(payload["error"]["code"], "OPEN_FAILED");
+    }
+
+    // --- D2: which store an upload lands in ---
+    //
+    // The placement itself is `UploadStore`'s, tested in
+    // `openalpaca_storage::uploads`. What belongs to the route is the one thing
+    // it decides: the scope, read from `x-workspace-path` through the single
+    // resolver.
+
+    fn headers_with(path: Option<&str>) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        if let Some(path) = path {
+            headers.insert("x-workspace-path", path.parse().unwrap());
+        }
+        headers
+    }
+
+    #[test]
+    fn upload_scope_is_the_project_the_request_names() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let root = tmp.path().canonicalize().expect("canonicalize");
+        let _guard = crate::test_util::HomeStoreGuard::set(&root.join("home").join(".openalpaca"));
+
+        let project = root.join("checkout");
+        std::fs::create_dir(&project).expect("create project");
+        std::fs::create_dir(project.join(".git")).expect("create marker");
+        let nested = project.join("crates").join("core");
+        std::fs::create_dir_all(&nested).expect("create nested");
+
+        // A path *inside* the project resolves up to the project root — the same
+        // marker walk a chat turn does, so an upload lands where that turn's
+        // artifacts would.
+        assert_eq!(
+            upload_scope(&headers_with(nested.to_str())),
+            StoreScope::Project(project)
+        );
+    }
+
+    #[test]
+    fn upload_scope_without_a_header_is_the_home_store() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let root = tmp.path().canonicalize().expect("canonicalize");
+        let _guard = crate::test_util::HomeStoreGuard::set(&root.join("home").join(".openalpaca"));
+
+        // No header at all — every client that chose no project, and the shape
+        // every connector attachment reaches the writer with.
+        assert_eq!(upload_scope(&headers_with(None)), StoreScope::Home);
+    }
+
+    #[test]
+    fn upload_scope_for_a_path_under_no_marker_is_the_home_store() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let root = tmp.path().canonicalize().expect("canonicalize");
+        let _guard = crate::test_util::HomeStoreGuard::set(&root.join("home").join(".openalpaca"));
+
+        let loose = root.join("Downloads");
+        std::fs::create_dir(&loose).expect("create dir");
+        assert_eq!(upload_scope(&headers_with(loose.to_str())), StoreScope::Home);
+    }
+
+    /// `$HOME` is not a project: a header pointing anywhere under it with no
+    /// closer marker resolves to `$HOME`, whose "project store" *is* the home
+    /// store. It must fold to `Home`, or a stray header would claim the whole
+    /// home directory as a project.
+    #[test]
+    fn upload_scope_for_a_path_resolving_to_the_home_store_is_the_home_store() {
+        let tmp = tempfile::tempdir().expect("create tempdir");
+        let home = tmp.path().canonicalize().expect("canonicalize").join("home");
+        std::fs::create_dir(&home).expect("create home");
+        std::fs::create_dir(home.join(".openalpaca")).expect("create store");
+        let _guard = crate::test_util::HomeStoreGuard::set(&home.join(".openalpaca"));
+
+        let documents = home.join("Documents");
+        std::fs::create_dir(&documents).expect("create dir");
+        assert_eq!(
+            upload_scope(&headers_with(documents.to_str())),
+            StoreScope::Home
+        );
     }
 
     #[test]

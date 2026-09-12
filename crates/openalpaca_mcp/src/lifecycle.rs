@@ -15,6 +15,37 @@ pub(crate) enum ConnectionState {
     Failed { reason: McpError },
 }
 
+/// Public, owned snapshot of a client's [`ConnectionState`].
+///
+/// `ConnectionState` is crate-private (it carries a live [`McpError`] and an
+/// [`Instant`]); this is the shape callers outside the crate can read via
+/// [`crate::McpClient::connection_state`] — enough to render *why* a client is
+/// down without exposing the internal enum.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionSnapshot {
+    Connecting,
+    Connected,
+    Reconnecting { attempt: u32 },
+    Disconnected,
+    Failed { reason: String },
+}
+
+impl From<&ConnectionState> for ConnectionSnapshot {
+    fn from(state: &ConnectionState) -> Self {
+        match state {
+            ConnectionState::Connecting => Self::Connecting,
+            ConnectionState::Connected => Self::Connected,
+            ConnectionState::Reconnecting { attempt, .. } => {
+                Self::Reconnecting { attempt: *attempt }
+            }
+            ConnectionState::Disconnected => Self::Disconnected,
+            ConnectionState::Failed { reason } => Self::Failed {
+                reason: reason.to_string(),
+            },
+        }
+    }
+}
+
 /// Compute the backoff duration for a given attempt number.
 ///
 /// Exponential: `base * 2^(attempt-1)`, capped at `max`.

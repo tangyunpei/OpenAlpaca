@@ -39,7 +39,7 @@
 - Go fix failing CI tests without being told how
 
 ## Task Management
-1. **Plan First**: Write plan to `tasks/todo.md` with checkable items
+1. **Plan First**: Write plan to `tasks/todo.md` with checkable items (`tasks/api-fix-plan.md` is the standing plan; `tasks/todo.md` tracks the active chunk and its review)
 2. **Verify Plan**: Check in before starting implementation
 3. **Track Progress**: Mark items complete as you go
 4. **Explain Changes**: High-level summary at each step
@@ -50,6 +50,30 @@
 - **Simplicity First**: Make every change as simple as possible. Impact minimal code.
 - **No Laziness**: Find root causes. No temporary fixes. Senior developer standards.
 - **Minimal Impact**: Changes should only touch what's necessary. Avoid introducing bugs. 
+
+## Current Work — read first (as of 2026-09-11, branch `feat/ui-rework`)
+
+**The plan and the design are implemented.** `tasks/api-fix-plan.md` Phases 0–8 all landed on `feat/ui-rework` (`2656a55..ab31299`), and the extension enable/disable design's C1–C8 landed with them between Phases 1 and 2 (`5c105b8..97740a5`; C1 is `e92d76e`, C8's purge `eff30cb`). Migration head is **041**. The GUI still ships no mock data, and the honest-"unavailable" registry is down to **2** entries (`apps/openalpaca-gui/src/lib/unavailable.ts`, `GapId = "GAP-17" | "GAP-20"`): adding a connector, and the per-template enable toggle — both narrowed to the half nothing serves, not whole surfaces. One planned item was deliberately never built (Phase 0 item 6 / GAP-22, under owner decision T14; C7 deleted the six `plugin_*` variants it would have amended). **What remains: the owner decisions — plan §0's T1–T19 and design §13 Q5–Q14, each a recommendation, none applied — and merging this branch.** Documents of record:
+
+| Document | Role |
+|---|---|
+| `tasks/api-fix-plan.md` (rev 3.4 — **implemented; the record of what shipped**) | Phases 0–8, migrations 035–041 (§11 ledger). Each `### Phase N` heading carries the commit range it landed in and the deviations recorded while building it; §0 holds every settled decision (D1–D5, N1–N5), the four implementer pre-checks and the pending owner decisions T1–T19; §12 holds the residue the whole-branch review refuted — read it before re-raising any of those four. |
+| `tasks/extension-enable-design.md` (rev 16 — **implemented, C1–C8**) | Design of record for per-extension enable/disable (N5, ADR-030): commits C1–C8 in §12, all landed (`5c105b8..97740a5`); rev 16 records the corrections and residue observed while building them. Read it before touching the ledger, the supervisors, the gate or the extension routes — never the plan's one-paragraph summary. |
+| `tasks/research/claude-code-design-lessons.md` (rev 4) | Claude Code prior-art study; its §6 tensions are the pending owner decisions. |
+| `tasks/gui-api-requirements.md` | The 23-gap brief the plan answered — now the record of where each gap closed; `lib/unavailable.ts` is the live list of what is still unserved (2). |
+| `tasks/bug-main-loop-cost-lockout.md` | Confirmed bug, **fixed** in plan Phase 0 A5 (`5fca02a`): `LoopState.last_cost` is baselined from `agent_cost()` before round 0 (`runner/agentic_loop/mod.rs:418`), so the $1 cap is per turn again. No daily budget was added (N4). |
+| `tasks/lessons.md` | Correction log. Read at session start; append after any correction. |
+| Obsidian KB `~/Valuts/Main/Projects/OpenAlpaca/` (owner's machine) | Architecture notes 01–09, `10-decision-log.md` (ADR-001…038), `11-roadmap-and-open-questions.md`, `12-working-conventions.md`. Mirror every ADR-level decision there in the same session; cite `path.rs:line`. |
+
+Settled rules — do not reopen or "improve":
+- **Tool governance is two axes.** ALLOW is per-agent (template `capabilities`, skills' `requires_capabilities`); ENABLE is one toggle per MCP server and per plugin. Builtins are never toggled. Disabled = unloaded (child killed, connection dropped, no reconnect). A withheld capability refuses the call and warns in the log/chat; silent degradation is rejected. (S1–S4, design §1.)
+- **Cost cap is per-workflow ($5 lead) and per-turn ($1 agent); there is no daily budget** and none is to be added (N4). The main-loop cost lockout was a bug, not a budget, and it is fixed (A5). Whether subagent spend should count against the lead's $5 is owner decision T13 — pending; today it does not.
+- **Everything lives under `~/.openalpaca/`** (D1, landed — `crates/openalpaca_storage/src/store/mod.rs`; `OPENALPACA_HOME_STORE` overrides the root, absolute paths only, empty/relative rejected): `state/` holds the DB (+ `-wal`/`-shm`), discovery, lock, master key, interim assets, backups, and logs; `config/` and `plugins/` sit beside it; content dirs (`artifacts/`, `uploads/`, `sessions/`, …) complete the root, and a project store (`<project>/.openalpaca/`) has the same content shape — `content_dir(scope, kind)` is `root/<kind>` in both. **`state/` is the machine's; everything else at the root is the human's**, and a new content kind exists only when it is added to `ContentKind`. First boot of the rebuilt binaries moves the legacy `~/Library/Application Support/OpenAlpaca` contents into place (idempotent, resumable, **not reversible** — `store/migrate.rs`); a still-running old daemon blocks the move, and a database found at both roots refuses to start until one is moved aside.
+- **Owner decisions pending** — the plan's §0 table, rows **T1–T19** (added during execution: T16 scoping the unscoped task read/action routes, T17 `.trash/` retention, T18 a CLI turn from another project switching the shared `{owner}:gui` lane's session under R48, T19 `[web_search] api_key` stored in the clear); design twins at §13 Q5–Q14. Each carries a recommendation, none is applied, and the shipped code is the "no change" answer. A "default" that adds an enforcement point, widens a component's job, or reverses a row of an accepted design is a decision — present it, never adopt it silently.
+- **The known bugs are all fixed.** A empty allowlist = allow-all (now `Allowlist::Only`, Phase 0 A0 + design C5), B `deny_plugin` never unloads (A1/C3), C redundant `enable_plugin` leaks the provider handle (A2/C3), D a disabled MCP client respawns its child (the `closed` seal + `McpError::Closed`, A3/C2), and the main-loop cost lockout (A5). Don't re-audit them; read the plan item or the design section if you need the shape.
+- **Prior art first.** For anything Claude Code also has (MCP lifecycle, plugins, permissions, sessions/home layout, tool-result spill, context budget, cost), read its docs and the local `~/.claude/` (shape only — never print values) before proposing a mechanism.
+
+Keep this file current: when a plan phase or design commit lands, update the affected rows below (data directory, routes, migrations, extension surface) in the same commit.
 
 ## Build & Development
 
@@ -71,16 +95,21 @@ cargo test -p openalpaca_storage
 cargo run -p openalpacad         # start daemon
 cargo run -p openalpaca          # CLI (use -- <subcommand> for args)
 
-# GUI (Tauri + SvelteKit frontend)
+# GUI (Tauri + React frontend)
 cd apps/openalpaca-gui
 bun install                      # install JS deps
 bun run tauri dev                # dev mode (hot-reload frontend + Rust rebuild)
 bun run dev                      # frontend-only dev server
-bun run build                    # production frontend build
+bun run check                    # tsc --noEmit on both tsconfigs (CI gate)
+bun run test                     # vitest (CI gate)
+bun run format:check             # prettier (CI gate) — `bun run format` fixes
+bun run build                    # production frontend build (CI gate)
 bun run prepare:sidecar:dev      # bundle the daemon as a Tauri sidecar (or :release)
 ```
 
-Toolchain: Rust 1.93.0 (edition 2024, resolver v3). Pinned in `rust-toolchain.toml`.
+Toolchain: Rust 1.93.0 (edition 2024, resolver v3), pinned in `rust-toolchain.toml`. Frontend: TypeScript 7.0.2, React 19.2, Tailwind 4.3, Vite 7, Vitest 4, Bun.
+
+CI (`.github/workflows/ci.yml`): `cargo build|test --workspace --exclude openalpaca_gui`, `cargo clippy --workspace --exclude openalpaca_gui --all-targets`, then the four `bun run` gates above. Browser preview: `.claude/launch.json` defines `openalpaca-gui` (Vite on :1420) — use it rather than starting the dev server by hand. `docs/api/` is generated by `python3 scripts/gen_api_docs.py` (`--check` reports drift) — never hand-edit it.
 
 ## Architecture
 
@@ -90,7 +119,7 @@ Toolchain: Rust 1.93.0 (edition 2024, resolver v3). Pinned in `rust-toolchain.to
 apps/
   openalpacad/          # Daemon binary — axum HTTP/WS server, manages all services
   openalpaca/           # CLI binary — clap, connects to daemon via discovery.json
-  openalpaca-gui/       # Tauri v2 desktop app — SvelteKit + Tailwind frontend
+  openalpaca-gui/       # Tauri v2 desktop app — React 19 + TypeScript + Tailwind v4 frontend
 crates/
   openalpaca_core/      # Orchestrator, agents, tools, runtime, bus, security, prompt composition
   openalpaca_llm/       # LLM router, providers (Anthropic/OpenAI/Ollama), key management
@@ -131,7 +160,7 @@ openalpaca_gui          ← openalpaca_api, openalpaca_storage
 
 ### Execution Topology
 
-The orchestrator dispatches workflows via `TaskDispatcher`. **Lead agent** (`dispatcher/lead_agent.rs`) is the only topology: a single orchestrating agent, spawned from an agent template with the `orchestration` capability (`config/agents/lead_agent.md`), delegates autonomously via `spawn_subagent` / `spawn_subagents_batch` (1–8 per call) / `wait_for_subagents` — batch spawning plus interruptible waiting is the parallel-work story. The lead's own surface also carries the installed MCP/plugin extension tools (minus `global_tool_deny`) and a per-request `invoke_skill`, so it can run integrations and catalog skills directly or delegate; subagents stay template-scoped (only their declared capabilities). The legacy planner ladder, sequential pipeline, and DAG executor (and their `orchestrator.routing.mode = "planner"` rollback switch) were deleted in Routing V2 Phase 5.
+The orchestrator dispatches workflows via `TaskDispatcher`. **Lead agent** (`dispatcher/lead_agent.rs`) is the only topology: a single orchestrating agent, spawned from an agent template with the `orchestration` capability (`config/agents/lead_agent.md`), delegates autonomously via `spawn_subagent` / `spawn_subagents_batch` (1–8 per call) / `wait_for_subagents` — batch spawning plus interruptible waiting is the parallel-work story. The lead's own surface also carries the installed MCP/plugin extension tools of every **enabled** extension and a per-request `invoke_skill`, so it can run integrations and catalog skills directly or delegate; subagents stay template-scoped (only their declared capabilities). The legacy planner ladder, sequential pipeline, and DAG executor (and their `orchestrator.routing.mode = "planner"` rollback switch) were deleted in Routing V2 Phase 5.
 
 ### Message Routing (Routing V2)
 
@@ -149,8 +178,9 @@ Mid-workflow steering (gated on `steering_enabled`, default on): each running le
 
 Two mechanisms extend the tool surface:
 
-- **MCP servers** (`config/mcp.toml`): the daemon connects out to declared MCP servers at boot (`openalpaca_mcp` crate, stdio or streamable-HTTP transports) and registers their tools in the tool registry as `<server>__<tool>`. Each imported tool provides a capability equal to its namespaced name, so agent templates select MCP tools by listing `<server>__<tool>` in `capabilities` (skills: `requires_capabilities`). Installed MCP/plugin tools are on the main loop's DEFAULT surface (both `tool_selection` modes); `execution.skill_defaults.global_tool_deny` is the opt-out. Tools only — MCP resources/prompts are stubbed (not implemented), and serving MCP is a non-goal. Per-server failures are logged, never fatal.
-- **Plugins** (`~/Library/Application Support/OpenAlpaca/plugins/`): out-of-process child programs speaking JSON-RPC 2.0 over stdio, declared by a `plugin.toml` manifest, gated by a first-load approval flow (`.permissions.toml`). Plugin tools register as `<plugin>::<tool>`; plugins can also contribute skills and agent templates. Plugin-contributed skills (`SkillSource::Plugin`) are invokable like file-based skills (slash command or router selection): the orchestrator delegates to the plugin's `PluginSkillExecutor` out-of-process, proxying tool callbacks through the sandboxed execute path (`orchestrator/skill/invocation.rs`). Plugin-contributed agent templates (`AgentSource::Plugin`) execute through the lead-agent subagent spawn path: `runner/plugin_agent.rs` drives the plugin's external reasoning loop (spawn → step polls, 50-iteration cap) and proxies its tool requests through the sandboxed execute path. Connector and LLM-provider plugin bridges exist in code but are not yet wired into `ConnectorManager`/`LlmRouter` — treat those plugin types as non-functional. Managed via `GET/POST /v1/plugins/...` routes and `openalpaca plugin ...` CLI commands.
+- **MCP servers** (`config/mcp.toml`): the daemon connects out to declared MCP servers at boot (`openalpaca_mcp` crate, stdio or streamable-HTTP transports) and registers their tools in the tool registry as `<server>__<tool>`. Each imported tool provides a capability equal to its namespaced name, so agent templates select MCP tools by listing `<server>__<tool>` in `capabilities` (skills: `requires_capabilities`). Installed MCP/plugin tools are on the main loop's DEFAULT surface (both `tool_selection` modes), less those of an extension that is not `Enabled`. **There is no per-tool opt-out:** the old per-tool deny key under `execution.skill_defaults` was purged in C8 (design §11.1) — a boot-time `WARN` in `load_daemon_config` (`daemon_config/mod.rs`) is all that remains, for a hand-edited `daemon.toml` still carrying it. Tools only — MCP resources/prompts are stubbed (not implemented), and serving MCP is a non-goal. Per-server failures are logged, never fatal.
+- **Plugins** (`~/.openalpaca/plugins/`): out-of-process child programs speaking JSON-RPC 2.0 over stdio, declared by a `plugin.toml` manifest, gated by a first-load approval flow (one `.permissions.toml` at the plugins root for all plugins; per-plugin config at `<root>/.config/<plugin>.toml`, per-plugin durable state at `<root>/.data/<plugin>/`, which survives an update; an uninstall *moves* the directory to `<root>/.trash/<plugin>-<ts>/` and never deletes what the owner dropped in). Management is the extension surface — `GET /v1/extensions`, `POST /v1/extensions/plugin` (install), `PUT|DELETE /v1/extensions/plugin/{id}` (update, uninstall/remove), the verb and config routes below, and `openalpaca ext …` / `openalpaca plugin …`. Plugin tools register as `<plugin>::<tool>`; plugins can also contribute skills and agent templates. Plugin-contributed skills (`SkillSource::Plugin`) are invokable like file-based skills (slash command or router selection): the orchestrator delegates to the plugin's `PluginSkillExecutor` out-of-process, proxying tool callbacks through the sandboxed execute path (`orchestrator/skill/invocation.rs`). Plugin-contributed agent templates (`AgentSource::Plugin`) execute through the lead-agent subagent spawn path: `runner/plugin_agent.rs` drives the plugin's external reasoning loop (spawn → step polls, 50-iteration cap) and proxies its tool requests through the sandboxed execute path. Connector and LLM-provider plugin bridges exist in code but are not yet wired into `ConnectorManager`/`LlmRouter` — treat those plugin types as non-functional.
+- **Extension enable/disable is live** (N5, ADR-030 — design C1–C8): one ledger (`crates/openalpaca_core/src/tools/extensions/`) holds every extension's state; two supervisors own the lifecycles (`apps/openalpacad/src/managers/mcp/` for MCP, `crates/openalpaca_plugins/src/manager.rs` for plugins); the gate refuses a tool whose extension is not `Enabled` and announces the withholding instead of degrading silently. Routes (all of them, `apps/openalpacad/src/router.rs:332-364`): `GET /v1/extensions` (the list — there is no per-extension GET), `POST /v1/extensions/{kind}/{id}/{verb}` (`enable|disable|reload|approve|deny`), `GET|POST /v1/extensions/{kind}/{id}/config` (the GET redacts), `POST /v1/extensions/{kind}` (install), `POST /v1/extensions/plugin/validate` (dry run), `PUT|DELETE /v1/extensions/{kind}/{id}` (update, uninstall/orphan-row removal), plus the read-only catalogs `GET /v1/tools` and `GET /v1/skills` (+ `/v1/skills/health`). The `/v1/plugins*` routes and the `plugin_*` events are **gone** (C7); the event family is `extension_state_changed` / `extension_capability_withheld` / `extension_capability_withdrawn`. These routes use the design's flat `{"error":"<word>"}` envelope, not the shared `api_error` one (plan §7's single exception). CLI: `openalpaca ext list|info|enable|disable|reload|approve|deny|remove|install|update|uninstall|mcp add|mcp remove`, with `openalpaca plugin …` kept as the plugin-shaped shortcut over the same routes. GUI: Settings → Extensions and Settings → Tools.
 
 ## Key Patterns
 
@@ -194,23 +224,23 @@ Two mechanisms extend the tool surface:
 
 ### Storage
 
-Single SQLite connection wrapped in `Arc<Mutex<Connection>>`. WAL mode, `busy_timeout=5000ms`. Schema managed via numbered migrations (currently 34). Memory search is hybrid: FTS5 full-text + sqlite-vec 768-dim KNN with cascading scope (workspace → global).
+Single SQLite connection wrapped in `Arc<Mutex<Connection>>`. WAL mode, `busy_timeout=5000ms`. Schema managed via numbered migrations (**head 041** — `crates/openalpaca_storage/src/migrations/mod.rs`, asserted at `database/tests.rs:11`; the next one is 042). 041 (`041_execution_log_timestamp_indexes.sql`, ruling R80) gives `tool_execution_log` and `skill_execution_log` a `timestamp`-leading index apiece, and the two "today" counts behind `GET /v1/tools` / `GET /v1/skills` name them with `INDEXED BY` — without the hint the planner keeps 030's grouping index and scans. Memory search is hybrid: FTS5 full-text + sqlite-vec 768-dim KNN with cascading scope (workspace → global).
 
-Data directory: `~/Library/Application Support/OpenAlpaca/` (macOS). DB: `openalpaca.db`, lock: `openalpacad.lock`, discovery: `discovery.json`.
+Data directory: `~/.openalpaca/` (all platforms — `store::home_root()`, overridable with `OPENALPACA_HOME_STORE`; absolute paths only). `state/` holds `openalpaca.db` (+ `-wal`/`-shm`), `discovery.json`, `openalpacad.lock`, `.master_key`, `backups/`, `logs/` (`daemon.log`, `gui.log`) and the interim `assets/`; `config/` holds the runtime config the GUI- and CLI-managed daemons are started with; `plugins/` (dropped plugin dirs + `.permissions.toml`, `.config/<name>.toml`, `.data/<name>/`), `artifacts/`, `uploads/` and `sessions/` sit at the root, with `memory/`, `skills/`, `scratch/`, `cache/` reserved and uncreated. A project store is `<project>/.openalpaca/` and holds content only — `artifacts/` (heads committable, `.versions/` git-ignored), `uploads/`, and the rest reserved; session logs always live in the home store, never in a project. Each root is self-describing: `ensure_store()` seeds a `README.md` with a retention class per entry plus `.layout` (version, and `install_id` on the home root). First boot of the rebuilt binaries moves the legacy `~/Library/Application Support/OpenAlpaca` (macOS) / `~/.local/share/openalpaca` (Linux) contents here — back it up first; a still-running old daemon blocks the move, both roots holding a database refuses to start until one is moved aside, and leftovers in the old directory produce a boot warning (`crates/openalpaca_storage/src/store/migrate.rs`).
 
 ## Configuration
 
 | File | Purpose |
 |---|---|
-| `config/daemon.toml` | Execution limits, lead-agent defaults, context compaction, orchestrator cost caps, memory/prompt budgets, routing (`[orchestrator.routing]`: `steering_enabled`, `steering_inbox_cap`, `max_workflows_per_lane`, `followup_autostart`, `main_loop_max_rounds`, `main_loop_max_tools_per_round`, `tool_selection`), server config (chat streams, embedding indexer), telemetry, upload governance, security |
+| `config/daemon.toml` | Execution limits, lead-agent defaults, context compaction, orchestrator cost caps, memory/prompt budgets, routing (`[orchestrator.routing]`: `steering_enabled`, `steering_inbox_cap`, `max_workflows_per_lane`, `followup_autostart`, `main_loop_max_rounds`, `main_loop_max_tools_per_round`, `tool_selection`, `scheduled_skills_enabled`, `resume_enabled`), session limits (`[orchestrator.sessions]`: `log_max_session_bytes`, `log_max_total_bytes`, `log_retention_days` — **reserved and inert** (R85): only the two byte caps above sweep anything; the key is parsed, clamped, served by `GET /v1/status` and warned about at boot when it is non-default, and whether an age pass is ever built is owner decision T12 — `tool_result_inline_bytes`, `snapshot_max_bytes`), the artifact store (`[execution.artifacts]`: `max_artifact_bytes`, `max_versions_per_artifact`), `[extensions] drain_timeout_secs`, server config (chat streams, embedding indexer), telemetry, upload governance, security |
 | `config/llm.toml` | Provider credentials (AES-256-GCM encrypted), model registry with pricing, embedding config, fallback chains — generated on first daemon start, not checked in |
-| `config/mcp.toml` | MCP server declarations (`[servers.<name>]`, stdio/http transports) + connect/request timeouts and reconnect defaults |
+| `config/mcp.toml` | MCP server declarations (`[servers.<name>]`, stdio/http transports) + connect/request timeouts and reconnect defaults; `enabled` is the server's ENABLE bit, written by the toggle |
 | `config/agents/*.md` | Agent templates — YAML frontmatter (id, capabilities, model, limits) + markdown persona |
 | `config/orchestrator/templates/*_temp.md` | Tracked templates for the persona docs (SOUL, USER, IDENTITY, BOOTSTRAP) |
 | `config/orchestrator/SOUL.md` etc. | Live persona docs — generated at first run from the templates; USER.md is auto-extracted from conversations |
 | `config/skills/*/SKILL.md` | Skill definitions with trigger patterns (routing intents/keywords) and required tools; `invoke.cron` schedules the skill via the wake scheduler (`apps/openalpacad/src/scheduled_skills.rs`, kill switch `[orchestrator.routing] scheduled_skills_enabled`) |
 
-Config dir resolution: `OPENALPACA_CONFIG_DIR` env var → walk up from exe looking for `config/llm.toml` → walk up from CWD → fallback `./config`.
+Config dir resolution (`resolve_config_base_dir`, `apps/openalpacad/src/bootstrap/config.rs:14-61`): `OPENALPACA_CONFIG_DIR` when it **exists** (a value pointing at a missing directory is warned about and ignored — the GUI and CLI therefore create it with `store::ensure_runtime_config_dir()` before spawning, and it is `~/.openalpaca/config`) → walk up from `current_exe()`'s parent for a `config/llm.toml` → walk up from CWD for the same sentinel → fallback `$CWD/config` with a warning. Dev runs from the repo checkout still resolve `./config` through the exe/CWD walk-up — the root move does not change that.
 
 LLM secret resolution order: `secret_env` (env var) > `secret_ref` (OS keychain) > `secret_encrypted` (AES-256-GCM local).
 
@@ -239,6 +269,10 @@ LLM secret resolution order: `secret_env` (env var) > `secret_ref` (OS keychain)
 | Model registry | `crates/openalpaca_llm/src/routing/model_registry/` |
 | Cost tracking | `crates/openalpaca_llm/src/routing/cost_tracker/` |
 | Database | `crates/openalpaca_storage/src/database/` |
+| Store / path resolution (root layout, boot-time mover) | `crates/openalpaca_storage/src/store/` (`mod.rs`: roots, `ContentKind`, README/`.layout` seeding; `artifact.rs`: the path grammar — `slugify`, `confine_to_root`, `upload_dir`; `migrate.rs`: the legacy-root mover) |
+| Artifact store (the one writer for produced rows) | `crates/openalpaca_storage/src/artifacts/` (`ArtifactStore::put`, versions, diffs) + `crates/openalpaca_storage/src/uploads/` (the single upload writer, `rehome/` for the D2 move); routes: `apps/openalpacad/src/routes/artifacts.rs`; tool: `crates/openalpaca_core/src/tools/builtins/artifact_write.rs` |
+| Session log (JSONL per session, spill, replay) | `crates/openalpaca_core/src/session_log/` (`writer.rs` incl. the `results/` spill, `reader.rs`, `record.rs`, `recovery.rs`, `replay.rs`, `sweep.rs`); paging builtin: `tools/builtins/read_result.rs`; routes: `apps/openalpacad/src/routes/sessions.rs` |
+| Workspace / project routes (re-base, purge) | `apps/openalpacad/src/routes/workspaces.rs` (`PATCH /v1/workspaces`, `POST /v1/workspaces/purge`); CLI: `apps/openalpaca/src/commands/store.rs` |
 | Migrations | `crates/openalpaca_storage/src/migrations/` |
 | Repositories | `crates/openalpaca_storage/src/repository/` |
 | Memory (hybrid search) | `crates/openalpaca_storage/src/repository/memory/` |
@@ -251,11 +285,12 @@ LLM secret resolution order: `secret_env` (env var) > `secret_ref` (OS keychain)
 | Agent definitions | `crates/openalpaca_core/src/agent/` |
 | Daemon routes | `apps/openalpacad/src/routes/` |
 | CLI commands | `apps/openalpaca/src/commands/` |
-| GUI (Tauri) | `apps/openalpaca-gui/src-tauri/` (Rust) + `apps/openalpaca-gui/src/` (SvelteKit) |
+| GUI (Tauri) | `apps/openalpaca-gui/src-tauri/` (Rust) + `apps/openalpaca-gui/src/` (React: `views/`, `components/`, `stores/`, daemon client `lib/api/`, gap registry `lib/unavailable.ts` — **2** entries now, `GapId = "GAP-17" \| "GAP-20"`); specs: `DESIGN_SPEC.md`, `API_MAP.md` |
+| Extension ledger + gate (ADR-030) | `crates/openalpaca_core/src/tools/extensions/` (ledger, states, scan); supervisors: `apps/openalpacad/src/managers/mcp/`, `crates/openalpaca_plugins/src/manager.rs`; routes: `apps/openalpacad/src/routes/extensions.rs` + `routes/tools.rs`; CLI: `apps/openalpaca/src/commands/ext.rs`; GUI: `apps/openalpaca-gui/src/views/settings/ExtensionsSection.tsx`, `ToolsSection.tsx` |
 | Wake/scheduler | `crates/openalpaca_wake/src/` |
 | Connectors | `crates/openalpaca_connectors/src/` |
 
-User-facing manuals live in `docs/` (`CLI_Manual.md`, `Daemon_Manual.md`, `GUI_Manual.md`, `Installation_Manual.md`, `QuickStart_Manual.md`, `Skill_Template_Reference.md`).
+User-facing manuals live in `docs/` (`CLI_Manual.md`, `Daemon_Manual.md`, `GUI_Manual.md`, `Installation_Manual.md`, `QuickStart_Manual.md`, `Skill_Template_Reference.md`). `docs/tools/DESIGN.md` and `TECHNICAL.md` describe the tool system but date from 2026-07-19 — verify against the code before citing them.
 
 ## Feature Flags
 
@@ -269,3 +304,12 @@ User-facing manuals live in `docs/` (`CLI_Manual.md`, `Daemon_Manual.md`, `GUI_M
 - `discord` — gates `twilight-gateway`/`twilight-http`/`twilight-model` + `reqwest`/`rustls`
 
 The daemon (`openalpacad`) enables all provider features (`anthropic`, `openai`, `ollama`, `local-embeddings`) and all three connector features.
+
+## Gotchas
+
+- `.gitignore`'s `# Markdown Documentation (Except Manuals)` block blanket-ignores `*.md`. A new doc is invisible to git until whitelisted with a `!path` line — in that block, or in the `# UI rework reference docs` block near the end of the file; confirm with `git check-ignore -q <file>` (exit 0 = still ignored) before calling it committed. Cite the blocks by those comment headers, never by line number: the numbers have moved twice.
+- `SystemEvent` and `ServerEvent` are matched exhaustively with no catch-all: a new variant needs an arm in `apps/openalpacad/src/event_bridge.rs:30` (system) or `apps/openalpacad/src/events/persistence.rs:12` (server) in the same commit.
+- Oversized tool results: a loop **with** a session log spills the whole result to `sessions/<id>/results/` and hands the model a stub — the first 2 KB plus `result_ref=file:results/…` — which the scoped `read_result` builtin pages back in; a loop **without** one — any caller that leaves `LoopConfig.session_log` at `None`, which is every non-session caller — falls back to an inline cut at the same threshold — one number, `[orchestrator.sessions] tool_result_inline_bytes`, default 32 KB (`MAX_TOOL_RESULT_SIZE`, `crates/openalpaca_core/src/runner/agentic_loop/tool_helpers.rs:4`). An `Err` result stays inline but cuts head+tail, so a compiler or test failure keeps the assertion at the end (`head_tail_tool_result`). `read_result` is offered wherever a spill can happen (R84): on the main loop's per-request surface when this daemon has a session log **and** a database (`tools/builtins/main_loop.rs`), on the lead's hand-assembled surface when the lead's own template grants it (`runner/lead_agent/mod.rs`, the `artifact_write` shape), and all nine shipped `config/agents/*.md` templates grant the capability. It is still a **grant, not ambient** — the constructor-appended set is untouched (owner decision T15 pending), so an agent whose template does not name `read_result` is refused it and reads a stub it cannot follow.
+- `config/llm.toml` is seeded on first daemon start and is absent from a fresh checkout: without provider keys nothing can call a model, so the live steer eval and plan pre-check (d) need them.
+- macOS BSD `sed`: no `\b`, and `-i` needs `''`. Use `perl -pi -e` or a Python script for regex edits, and assert each anchor matches exactly once.
+- Commit style: conventional prefixes (`docs:`, `docs(lessons):`, `fix:`, `feat:`); substantial commits end with a line naming what was verified; design docs carry a `rev N` status line and a revision log — bump both on every edit.

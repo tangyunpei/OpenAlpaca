@@ -1,0 +1,601 @@
+# openalpacad HTTP API
+
+> Generated from source by `python3 scripts/gen_api_docs.py`.
+
+## Overview
+
+- Router source: `apps/openalpacad/src/router.rs`.
+- Total documented method/path endpoints: 103.
+- Includes public, bearer-protected, WebSocket, and SSE routes.
+
+## Auth
+
+- `none`: public endpoints (`/`, `/v1/health`).
+- `bearer`: `Authorization: Bearer <token>` from discovery metadata.
+- `query_token`: token via query string for streaming (`/v1/events`, `/v1/chat/stream/{stream_id}`).
+- `bearer_or_query_token`: content routes validate the token inline and accept either form, so a webview `<img src>`/`<iframe src>` can load bytes (GAP-11).
+
+## Endpoints
+
+| Method | Path | Auth | Handler | JSON Body | Query | Source |
+|---|---|---|---|---|---|---|
+| GET | `/` | `none` | `root_handler` | - | - | `apps/openalpacad/src/router.rs` |
+| GET | `/v1/agent-instances` | `bearer` | `list_instances_handler` | - | - | `apps/openalpacad/src/routes/agents.rs` |
+| GET | `/v1/agent-templates` | `bearer` | `list_templates_handler` | - | `ListTemplatesQuery` | `apps/openalpacad/src/routes/agents.rs` |
+| POST | `/v1/agent-templates` | `bearer` | `create_template_handler` | `CreateTemplateRequest` | - | `apps/openalpacad/src/routes/agents.rs` |
+| GET | `/v1/agent-templates/{id}` | `bearer` | `get_template_handler` | - | - | `apps/openalpacad/src/routes/agents.rs` |
+| PUT | `/v1/agent-templates/{id}` | `bearer` | `update_template_handler` | `UpdateTemplateRequest` | - | `apps/openalpacad/src/routes/agents.rs` |
+| DELETE | `/v1/agent-templates/{id}` | `bearer` | `delete_template_handler` | - | - | `apps/openalpacad/src/routes/agents.rs` |
+| GET | `/v1/agents` | `bearer` | `list_agents_handler` | - | `ListAgentsQuery` | `apps/openalpacad/src/routes/agents.rs` |
+| POST | `/v1/agents` | `bearer` | `create_agent_handler` | `CreateAgentRequest` | - | `apps/openalpacad/src/routes/agents.rs` |
+| POST | `/v1/agents/from-toml` | `bearer` | `create_agent_from_toml_handler` | `CreateAgentFromTomlRequest` | - | `apps/openalpacad/src/routes/agents.rs` |
+| GET | `/v1/agents/{id}` | `bearer` | `get_agent_handler` | - | - | `apps/openalpacad/src/routes/agents.rs` |
+| DELETE | `/v1/agents/{id}` | `bearer` | `delete_agent_handler` | - | - | `apps/openalpacad/src/routes/agents.rs` |
+| POST | `/v1/agents/{id}/action` | `bearer` | `agent_action_handler` | `AgentActionRequest` | - | `apps/openalpacad/src/routes/agents.rs` |
+| GET | `/v1/agents/{id}/config` | `bearer` | `get_agent_config_handler` | - | - | `apps/openalpacad/src/routes/agents.rs` |
+| PUT | `/v1/agents/{id}/config` | `bearer` | `update_agent_config_handler` | `UpdateAgentConfigRequest` | - | `apps/openalpacad/src/routes/agents.rs` |
+| GET | `/v1/artifacts` | `bearer` | `list_artifacts_handler` | - | `artifacts::ListArtifactsParams` | `apps/openalpacad/src/routes/artifacts.rs` |
+| GET | `/v1/artifacts/{id}` | `bearer` | `get_artifact_handler` | - | - | `apps/openalpacad/src/routes/artifacts.rs` |
+| GET | `/v1/artifacts/{id}/content` | `bearer_or_query_token` | `get_artifact_content_handler` | - | `artifacts::ContentParams` | `apps/openalpacad/src/routes/artifacts.rs` |
+| GET | `/v1/artifacts/{id}/diff` | `bearer` | `get_artifact_diff_handler` | - | `artifacts::DiffParams` | `apps/openalpacad/src/routes/artifacts.rs` |
+| PUT | `/v1/artifacts/{id}/pin` | `bearer` | `pin_artifact_handler` | `artifacts::PinRequest` | - | `apps/openalpacad/src/routes/artifacts.rs` |
+| GET | `/v1/artifacts/{id}/versions` | `bearer` | `list_artifact_versions_handler` | - | - | `apps/openalpacad/src/routes/artifacts.rs` |
+| GET | `/v1/artifacts/{id}/versions/{n}/content` | `bearer_or_query_token` | `get_artifact_version_content_handler` | - | `super::TokenParams` | `apps/openalpacad/src/routes/artifacts.rs` |
+| POST | `/v1/auth/link` | `bearer` | `generate_link_token_handler` | - | - | `apps/openalpacad/src/routes/auth.rs` |
+| POST | `/v1/chat` | `bearer` | `send_chat_handler` | `ChatSendRequest` | - | `apps/openalpacad/src/routes/chat.rs` |
+| POST | `/v1/chat/confirmations/{request_id}` | `bearer` | `confirm_tool` | `ConfirmationBody` | - | `apps/openalpacad/src/routes/chat.rs` |
+| GET | `/v1/chat/history` | `bearer` | `get_chat_history_handler` | - | `HistoryQuery` | `apps/openalpacad/src/routes/chat.rs` |
+| DELETE | `/v1/chat/history` | `bearer` | `delete_chat_history_handler` | - | `DeleteHistoryQuery` | `apps/openalpacad/src/routes/chat.rs` |
+| GET | `/v1/chat/messages/{message_id}/feedback` | `bearer` | `get_feedback_handler` | - | - | `apps/openalpacad/src/routes/chat.rs` |
+| PUT | `/v1/chat/messages/{message_id}/feedback` | `bearer` | `upsert_feedback_handler` | `FeedbackRequest` | - | `apps/openalpacad/src/routes/chat.rs` |
+| DELETE | `/v1/chat/messages/{message_id}/feedback` | `bearer` | `delete_feedback_handler` | - | - | `apps/openalpacad/src/routes/chat.rs` |
+| GET | `/v1/chat/stream/{stream_id}` | `query_token` | `chat_stream_handler` | - | `HashMap<String, String>` | `apps/openalpacad/src/routes/chat.rs` |
+| POST | `/v1/command` | `bearer` | `command_handler` | `command::CommandRequest` | - | `apps/openalpacad/src/routes/command.rs` |
+| GET | `/v1/connectors` | `bearer` | `list_connectors_handler` | - | - | `apps/openalpacad/src/routes/connectors.rs` |
+| POST | `/v1/connectors/{id}/action` | `bearer` | `connector_action_handler` | `connectors::ConnectorActionBody` | - | `apps/openalpacad/src/routes/connectors.rs` |
+| POST | `/v1/connectors/{id}/config` | `bearer` | `connector_config_handler` | `connectors::ConnectorConfigBody` | - | `apps/openalpacad/src/routes/connectors.rs` |
+| GET | `/v1/connectors/{id}/settings` | `bearer` | `connector_settings_handler` | - | - | `apps/openalpacad/src/routes/connectors.rs` |
+| PUT | `/v1/connectors/{id}/settings` | `bearer` | `update_connector_settings_handler` | `connectors::ConnectorSettingsBody` | - | `apps/openalpacad/src/routes/connectors.rs` |
+| GET | `/v1/daemon/config/providers` | `bearer` | `get_daemon_providers` | - | - | `apps/openalpacad/src/routes/settings.rs` |
+| PUT | `/v1/daemon/config/providers/web-search` | `bearer` | `update_web_search_config` | `UpdateWebSearchRequest` | - | `apps/openalpacad/src/routes/settings.rs` |
+| GET | `/v1/events` | `query_token` | `events_handler` | - | `HashMap<String, String>` | `apps/openalpacad/src/routes/events.rs` |
+| GET | `/v1/events/history` | `bearer` | `events_history_handler` | - | `events_history::HistoryParams` | `apps/openalpacad/src/routes/events_history.rs` |
+| GET | `/v1/extensions` | `bearer` | `list_extensions_handler` | - | `extensions::ListQuery` | `apps/openalpacad/src/routes/extensions.rs` |
+| POST | `/v1/extensions/plugin/validate` | `bearer` | `validate_plugin_handler` | `serde_json::Value` | - | `apps/openalpacad/src/routes/extensions.rs` |
+| POST | `/v1/extensions/{kind}` | `bearer` | `install_extension_handler` | `serde_json::Value` | - | `apps/openalpacad/src/routes/extensions.rs` |
+| PUT | `/v1/extensions/{kind}/{id}` | `bearer` | `update_extension_handler` | `serde_json::Value` | - | `apps/openalpacad/src/routes/extensions.rs` |
+| DELETE | `/v1/extensions/{kind}/{id}` | `bearer` | `delete_extension_handler` | - | `extensions::DeleteQuery` | `apps/openalpacad/src/routes/extensions.rs` |
+| GET | `/v1/extensions/{kind}/{id}/config` | `bearer` | `get_extension_config_handler` | - | - | `apps/openalpacad/src/routes/extensions.rs` |
+| POST | `/v1/extensions/{kind}/{id}/config` | `bearer` | `set_extension_config_handler` | `extensions::SetConfigRequest` | - | `apps/openalpacad/src/routes/extensions.rs` |
+| POST | `/v1/extensions/{kind}/{id}/{verb}` | `bearer` | `extension_action_handler` | - | - | `apps/openalpacad/src/routes/extensions.rs` |
+| POST | `/v1/files/upload` | `bearer` | `upload_file_handler` | - | - | `apps/openalpacad/src/routes/files.rs` |
+| GET | `/v1/files/{id}` | `bearer` | `get_file_metadata_handler` | - | - | `apps/openalpacad/src/routes/files.rs` |
+| GET | `/v1/files/{id}/content` | `bearer_or_query_token` | `get_file_content_handler` | - | `super::TokenParams` | `apps/openalpacad/src/routes/files.rs` |
+| POST | `/v1/files/{id}/open` | `bearer` | `open_file_handler` | - | - | `apps/openalpacad/src/routes/files.rs` |
+| GET | `/v1/health` | `none` | `health_handler` | - | - | `apps/openalpacad/src/router.rs` |
+| GET | `/v1/lanes/{lane_key}/followups` | `bearer` | `list_followups_handler` | - | - | `apps/openalpacad/src/routes/followups.rs` |
+| POST | `/v1/lanes/{lane_key}/followups` | `bearer` | `queue_followup_handler` | `followups::QueueFollowupRequest` | - | `apps/openalpacad/src/routes/followups.rs` |
+| DELETE | `/v1/lanes/{lane_key}/followups/{id}` | `bearer` | `cancel_followup_handler` | - | - | `apps/openalpacad/src/routes/followups.rs` |
+| GET | `/v1/llm/usage` | `bearer` | `get_llm_usage` | - | `LlmUsageQuery` | `apps/openalpacad/src/routes/settings.rs` |
+| GET | `/v1/llm/usage/daily` | `bearer` | `get_llm_usage_daily` | - | `LlmUsageDailyQuery` | `apps/openalpacad/src/routes/settings.rs` |
+| GET | `/v1/me` | `bearer` | `get_me_handler` | - | - | `apps/openalpacad/src/routes/auth.rs` |
+| GET | `/v1/models` | `bearer` | `list_models` | - | - | `apps/openalpacad/src/routes/settings.rs` |
+| POST | `/v1/models/refresh` | `bearer` | `refresh_models` | - | - | `apps/openalpacad/src/routes/settings.rs` |
+| GET | `/v1/orchestrator/config` | `bearer` | `get_orchestrator_config` | - | - | `apps/openalpacad/src/routes/settings.rs` |
+| PUT | `/v1/orchestrator/config` | `bearer` | `update_orchestrator_config` | `UpdateOrchestratorRequest` | - | `apps/openalpacad/src/routes/settings.rs` |
+| GET | `/v1/orchestrator/decisions` | `bearer` | `dispatch_decisions_handler` | - | `dispatch_decisions::DecisionParams` | `apps/openalpacad/src/routes/dispatch_decisions.rs` |
+| GET | `/v1/orchestrator/latency` | `bearer` | `orchestrator_latency_handler` | - | `orchestrator_latency::LatencyParams` | `apps/openalpacad/src/routes/orchestrator_latency.rs` |
+| GET | `/v1/orchestrator/latency/aggregate` | `bearer` | `orchestrator_latency_aggregate_handler` | - | `orchestrator_latency::AggregateParams` | `apps/openalpacad/src/routes/orchestrator_latency.rs` |
+| GET | `/v1/sessions` | `bearer` | `list_sessions_handler` | - | `sessions::ListSessionsQuery` | `apps/openalpacad/src/routes/sessions.rs` |
+| POST | `/v1/sessions` | `bearer` | `create_session_handler` | `sessions::CreateSessionRequest` | - | `apps/openalpacad/src/routes/sessions.rs` |
+| GET | `/v1/sessions/{id}` | `bearer` | `get_session_handler` | - | - | `apps/openalpacad/src/routes/sessions.rs` |
+| DELETE | `/v1/sessions/{id}` | `bearer` | `delete_session_handler` | - | - | `apps/openalpacad/src/routes/sessions.rs` |
+| PATCH | `/v1/sessions/{id}` | `bearer` | `patch_session_handler` | `sessions::PatchSessionRequest` | - | `apps/openalpacad/src/routes/sessions.rs` |
+| POST | `/v1/sessions/{id}/activate` | `bearer` | `activate_session_handler` | - | - | `apps/openalpacad/src/routes/sessions.rs` |
+| POST | `/v1/sessions/{id}/archive` | `bearer` | `archive_session_handler` | - | - | `apps/openalpacad/src/routes/sessions.rs` |
+| GET | `/v1/sessions/{id}/events` | `bearer` | `get_session_events_handler` | - | `sessions::SessionEventsQuery` | `apps/openalpacad/src/routes/sessions.rs` |
+| GET | `/v1/sessions/{id}/messages` | `bearer` | `get_session_messages_handler` | - | `sessions::SessionMessagesQuery` | `apps/openalpacad/src/routes/sessions.rs` |
+| GET | `/v1/settings/llm` | `bearer` | `get_llm_settings` | - | - | `apps/openalpacad/src/routes/settings.rs` |
+| PUT | `/v1/settings/llm` | `bearer` | `upsert_key` | `AddKeyRequest` | - | `apps/openalpacad/src/routes/settings.rs` |
+| GET | `/v1/settings/llm/cli-backends` | `bearer` | `get_cli_backends` | - | - | `apps/openalpacad/src/routes/settings.rs` |
+| GET | `/v1/settings/llm/credentials` | `bearer` | `get_discovered_credentials` | - | - | `apps/openalpacad/src/routes/settings.rs` |
+| POST | `/v1/settings/llm/credentials/rescan` | `bearer` | `rescan_credentials` | - | - | `apps/openalpacad/src/routes/settings.rs` |
+| PUT | `/v1/settings/llm/keys/priority` | `bearer` | `set_key_priority` | `SetKeyPriorityRequest` | - | `apps/openalpacad/src/routes/settings.rs` |
+| PUT | `/v1/settings/llm/keys/reorder` | `bearer` | `reorder_keys` | `ReorderKeysRequest` | - | `apps/openalpacad/src/routes/settings.rs` |
+| DELETE | `/v1/settings/llm/keys/{provider}/{key_id}` | `bearer` | `delete_key` | - | - | `apps/openalpacad/src/routes/settings.rs` |
+| GET | `/v1/settings/llm/providers/usage` | `bearer` | `get_provider_usage` | - | - | `apps/openalpacad/src/routes/settings.rs` |
+| PUT | `/v1/settings/llm/providers/{provider}/enabled` | `bearer` | `set_provider_enabled` | `SetProviderEnabledRequest` | - | `apps/openalpacad/src/routes/settings.rs` |
+| GET | `/v1/settings/llm/status` | `bearer` | `get_key_status` | - | - | `apps/openalpacad/src/routes/settings.rs` |
+| POST | `/v1/settings/llm/validate` | `bearer` | `validate_key` | `ValidateKeyRequest` | - | `apps/openalpacad/src/routes/settings.rs` |
+| GET | `/v1/skills` | `bearer` | `list_skills_handler` | - | - | `apps/openalpacad/src/routes/skills.rs` |
+| GET | `/v1/skills/health` | `bearer` | `skill_health_handler` | - | - | `apps/openalpacad/src/routes/skills.rs` |
+| GET | `/v1/status` | `bearer` | `status_handler` | - | - | `apps/openalpacad/src/routes/status.rs` |
+| GET | `/v1/tasks` | `bearer` | `list_tasks_handler` | - | `ListTasksQuery` | `apps/openalpacad/src/routes/tasks.rs` |
+| POST | `/v1/tasks` | `bearer` | `create_task_handler` | `CreateTaskRequest` | - | `apps/openalpacad/src/routes/tasks.rs` |
+| GET | `/v1/tasks/{id}` | `bearer` | `get_task_handler` | - | - | `apps/openalpacad/src/routes/tasks.rs` |
+| POST | `/v1/tasks/{id}/action` | `bearer` | `task_action_handler` | `TaskActionRequest` | - | `apps/openalpacad/src/routes/tasks.rs` |
+| POST | `/v1/tasks/{id}/rerun` | `bearer` | `rerun_task_handler` | - | - | `apps/openalpacad/src/routes/tasks.rs` |
+| POST | `/v1/tasks/{id}/steer` | `bearer` | `steer_task_handler` | `SteerTaskRequest` | - | `apps/openalpacad/src/routes/tasks.rs` |
+| GET | `/v1/tasks/{id}/timeline` | `bearer` | `get_task_timeline_handler` | - | - | `apps/openalpacad/src/routes/tasks.rs` |
+| GET | `/v1/tools` | `bearer` | `list_tools_handler` | - | - | `apps/openalpacad/src/routes/tools.rs` |
+| GET | `/v1/usage/summary` | `bearer` | `get_usage_summary` | - | `UsageSummaryQuery` | `apps/openalpacad/src/routes/settings.rs` |
+| GET | `/v1/workspaces` | `bearer` | `get_workspace_handler` | - | `workspaces::WorkspaceQuery` | `apps/openalpacad/src/routes/workspaces.rs` |
+| PATCH | `/v1/workspaces` | `bearer` | `rebase_workspace_handler` | `workspaces::RebaseRequest` | - | `apps/openalpacad/src/routes/workspaces.rs` |
+| POST | `/v1/workspaces/purge` | `bearer` | `purge_workspace_handler` | `workspaces::PurgeRequest` | - | `apps/openalpacad/src/routes/workspaces.rs` |
+
+## Request/Query Types
+
+### `AddKeyRequest`
+
+- External or generic type; see handler source.
+
+### `AgentActionRequest`
+
+- External or generic type; see handler source.
+
+### `ChatSendRequest`
+
+- External or generic type; see handler source.
+
+### `ConfirmationBody`
+
+- External or generic type; see handler source.
+
+### `CreateAgentFromTomlRequest`
+
+- External or generic type; see handler source.
+
+### `CreateAgentRequest`
+
+- External or generic type; see handler source.
+
+### `CreateTaskRequest`
+
+- External or generic type; see handler source.
+
+### `CreateTemplateRequest`
+
+- External or generic type; see handler source.
+
+### `DeleteHistoryQuery`
+
+- External or generic type; see handler source.
+
+### `FeedbackRequest`
+
+- External or generic type; see handler source.
+
+### `HashMap<String, String>`
+
+- External or generic type; see handler source.
+
+### `HistoryQuery`
+
+- External or generic type; see handler source.
+
+### `ListAgentsQuery`
+
+- External or generic type; see handler source.
+
+### `ListTasksQuery`
+
+- External or generic type; see handler source.
+
+### `ListTemplatesQuery`
+
+- External or generic type; see handler source.
+
+### `LlmUsageDailyQuery`
+
+- External or generic type; see handler source.
+
+### `LlmUsageQuery`
+
+- External or generic type; see handler source.
+
+### `ReorderKeysRequest`
+
+- External or generic type; see handler source.
+
+### `SetKeyPriorityRequest`
+
+- External or generic type; see handler source.
+
+### `SetProviderEnabledRequest`
+
+- External or generic type; see handler source.
+
+### `SteerTaskRequest`
+
+- External or generic type; see handler source.
+
+### `TaskActionRequest`
+
+- External or generic type; see handler source.
+
+### `UpdateAgentConfigRequest`
+
+- External or generic type; see handler source.
+
+### `UpdateOrchestratorRequest`
+
+- External or generic type; see handler source.
+
+### `UpdateTemplateRequest`
+
+- External or generic type; see handler source.
+
+### `UpdateWebSearchRequest`
+
+- External or generic type; see handler source.
+
+### `UsageSummaryQuery`
+
+- External or generic type; see handler source.
+
+### `ValidateKeyRequest`
+
+- External or generic type; see handler source.
+
+### `artifacts::ContentParams`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/artifacts.rs`
+
+| Field | Type |
+|---|---|
+| `token` | `Option<String>` |
+| `version` | `Option<u32>` |
+
+### `artifacts::DiffParams`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/artifacts.rs`
+
+| Field | Type |
+|---|---|
+| `from` | `u32` |
+| `to` | `u32` |
+
+### `artifacts::ListArtifactsParams`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/artifacts.rs`
+
+| Field | Type |
+|---|---|
+| `task_id` | `Option<String>` |
+| `kind` | `Option<String>` |
+| `origin` | `Option<String>` |
+| `project_root` | `Option<String>` |
+| `pinned` | `Option<bool>` |
+| `q` | `Option<String>` |
+| `include_missing` | `bool` |
+| `limit` | `Option<i64>` |
+| `offset` | `Option<i64>` |
+
+### `artifacts::PinRequest`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/artifacts.rs`
+
+| Field | Type |
+|---|---|
+| `pinned` | `bool` |
+
+### `command::CommandRequest`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/command.rs`
+
+| Field | Type |
+|---|---|
+| `command` | `String` |
+| `args` | `HashMap<String, serde_json::Value>` |
+| `target_agent` | `Option<String>` |
+
+### `connectors::ConnectorActionBody`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/connectors.rs`
+
+| Field | Type |
+|---|---|
+| `action` | `String` |
+
+### `connectors::ConnectorConfigBody`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/connectors.rs`
+
+| Field | Type |
+|---|---|
+| `token` | `String` |
+
+### `connectors::ConnectorSettingsBody`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/connectors.rs`
+
+| Field | Type |
+|---|---|
+| `settings` | `HashMap<String, String>` |
+
+### `dispatch_decisions::DecisionParams`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/dispatch_decisions.rs`
+
+| Field | Type |
+|---|---|
+| `mode` | `Option<String>` |
+| `from` | `Option<String>` |
+| `to` | `Option<String>` |
+| `limit` | `Option<usize>` |
+
+### `events_history::HistoryParams`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/events_history.rs`
+
+| Field | Type |
+|---|---|
+| `task_id` | `Option<String>` |
+| `agent_id` | `Option<String>` |
+| `event_type` | `Option<String>` |
+| `before` | `Option<i64>` |
+| `limit` | `Option<usize>` |
+
+### `extensions::DeleteQuery`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/extensions.rs`
+
+| Field | Type |
+|---|---|
+| `uninstall` | `bool` |
+| `keep_data` | `bool` |
+
+### `extensions::ListQuery`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/extensions.rs`
+
+| Field | Type |
+|---|---|
+| `include_orphaned` | `bool` |
+
+### `extensions::SetConfigRequest`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/extensions.rs`
+
+| Field | Type |
+|---|---|
+| `key` | `String` |
+| `value` | `serde_json::Value` |
+
+### `followups::QueueFollowupRequest`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/followups.rs`
+
+| Field | Type |
+|---|---|
+| `content` | `String` |
+| `kind` | `Option<String>` |
+| `source_task_id` | `Option<String>` |
+
+### `orchestrator_latency::AggregateParams`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/orchestrator_latency.rs`
+
+| Field | Type |
+|---|---|
+| `from` | `Option<String>` |
+| `to` | `Option<String>` |
+
+### `orchestrator_latency::LatencyParams`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/orchestrator_latency.rs`
+
+| Field | Type |
+|---|---|
+| `mode` | `Option<String>` |
+| `from` | `Option<String>` |
+| `to` | `Option<String>` |
+| `limit` | `Option<usize>` |
+
+### `serde_json::Value`
+
+- External or generic type; see handler source.
+
+### `sessions::CreateSessionRequest`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/sessions.rs`
+
+| Field | Type |
+|---|---|
+| `source` | `Option<String>` |
+| `workspace_path` | `Option<String>` |
+| `title` | `Option<String>` |
+
+### `sessions::ListSessionsQuery`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/sessions.rs`
+
+| Field | Type |
+|---|---|
+| `workspace_id` | `Option<String>` |
+| `source` | `Option<String>` |
+| `status` | `Option<String>` |
+| `q` | `Option<String>` |
+| `limit` | `Option<i64>` |
+| `offset` | `Option<i64>` |
+
+### `sessions::PatchSessionRequest`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/sessions.rs`
+
+| Field | Type |
+|---|---|
+| `title` | `Option<String>` |
+| `workspace_path` | `Option<String>` |
+
+### `sessions::SessionEventsQuery`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/sessions.rs`
+
+| Field | Type |
+|---|---|
+| `after_seq` | `Option<u64>` |
+| `limit` | `Option<i64>` |
+| `types` | `Option<String>` |
+| `kind` | `Option<String>` |
+| `agent` | `Option<String>` |
+| `span_id` | `Option<String>` |
+
+### `sessions::SessionMessagesQuery`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/sessions.rs`
+
+| Field | Type |
+|---|---|
+| `limit` | `Option<i64>` |
+| `offset` | `Option<i64>` |
+| `before_id` | `Option<i64>` |
+
+### `super::TokenParams`
+
+- External or generic type; see handler source.
+
+### `workspaces::PurgeRequest`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/workspaces.rs`
+
+| Field | Type |
+|---|---|
+| `path` | `Option<String>` |
+| `all` | `bool` |
+| `dry_run` | `bool` |
+
+### `workspaces::RebaseRequest`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/workspaces.rs`
+
+| Field | Type |
+|---|---|
+| `old_path` | `String` |
+| `new_path` | `String` |
+
+### `workspaces::WorkspaceQuery`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/workspaces.rs`
+
+| Field | Type |
+|---|---|
+| `path` | `Option<String>` |
+
+## Response Shapes
+
+### `auth::LinkTokenResponse`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/auth.rs`
+
+| Field | Type |
+|---|---|
+| `token` | `String` |
+
+### `auth::MeResponse`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/auth.rs`
+
+| Field | Type |
+|---|---|
+| `user_id` | `String` |
+| `default_lane_key` | `String` |
+| `sources` | `Vec<String>` |
+
+### `command::CommandResponse`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/command.rs`
+
+| Field | Type |
+|---|---|
+| `request_id` | `String` |
+| `status` | `String` |
+
+### `sessions::SessionEventsResponse`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/sessions.rs`
+
+| Field | Type |
+|---|---|
+| `events` | `Vec<openalpaca_core::session_log::LoggedRecord>` |
+| `next_after_seq` | `u64` |
+
+### `sessions::SessionMessagesResponse`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/sessions.rs`
+
+| Field | Type |
+|---|---|
+| `messages` | `Vec<super::chat_types::ConversationMessageView>` |
+| `total` | `i64` |
+
+### `sessions::SessionsResponse`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/sessions.rs`
+
+| Field | Type |
+|---|---|
+| `sessions` | `Vec<SessionView>` |
+| `total` | `i64` |
+
+### `status::StatusResponse`
+
+- Kind: `struct`
+- Source: `apps/openalpacad/src/routes/status.rs`
+
+| Field | Type |
+|---|---|
+| `home_root` | `String` |
+| `state_dir` | `String` |
+| `db_path` | `String` |
+| `project_root` | `Option<String>` |
+| `started_at` | `String` |
+| `uptime_secs` | `u64` |
+| `schema_version` | `i32` |
+| `log_path` | `Option<String>` |
+| `upload_bytes` | `i64` |
+| `produced_bytes` | `i64` |
+| `retention` | `RetentionStatus` |
+| `sessions` | `SessionsStatus` |
+| `routing` | `RoutingStatus` |
+
+## Streaming
+
+- WebSocket `GET /v1/events?token=...` sends `openalpaca_api::events::ServerEvent` JSON payloads.
+- SSE `GET /v1/chat/stream/{stream_id}?token=...` emits events: `thinking`, `delta`, `done`, `error`.
+
+## Related Links
+
+- [CLI API doc](openalpaca.md)
+- [GUI API doc](openalpaca-gui.md)
+- [Database Schema](../database/schema.md)

@@ -5,9 +5,11 @@ description: "System operations agent for file management, directory organizatio
 capabilities:
   - "file_read"
   - "file_write"
+  - "artifact_write"
   - "shell_execute"
   - "workspace_read"
   - "workspace_write"
+  - "read_result"
 denied_capabilities:
   - "web_access"
 temperature: 0.2

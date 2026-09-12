@@ -109,24 +109,13 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
-    /// Event triggered when a DAG node starts or completes
-    DagNodeStatus {
-        task_id: String,
-        node_id: String,
-        node_title: String,
-        agent_id: String,
-        /// "started" | "completed" | "failed"
-        status: String,
-        duration_ms: Option<u64>,
-        output_preview: Option<String>,
-        ts: DateTime<Utc>,
-        instance_id: String,
-    },
     /// A security policy was violated by an agent
     SecurityViolation {
         agent_id: String,
         tool_name: String,
         reason: String,
+        /// The run this happened inside (GAP-10), or `null` outside one.
+        task_id: Option<String>,
         ts: DateTime<Utc>,
         instance_id: String,
     },
@@ -136,6 +125,8 @@ pub enum ServerEvent {
         tool_name: String,
         consecutive_failures: usize,
         reset_after_secs: u64,
+        /// The run whose call tripped it (GAP-10), or `null` outside one.
+        task_id: Option<String>,
         ts: DateTime<Utc>,
         instance_id: String,
     },
@@ -145,6 +136,8 @@ pub enum ServerEvent {
         tool_name: String,
         success: bool,
         duration_ms: u64,
+        /// The run this happened inside (GAP-10), or `null` outside one.
+        task_id: Option<String>,
         ts: DateTime<Utc>,
         instance_id: String,
     },
@@ -155,6 +148,8 @@ pub enum ServerEvent {
         input_tokens: u32,
         output_tokens: u32,
         cost_usd: f64,
+        /// The run this happened inside (GAP-10), or `null` outside one.
+        task_id: Option<String>,
         ts: DateTime<Utc>,
         instance_id: String,
     },
@@ -199,6 +194,8 @@ pub enum ServerEvent {
         tool_arguments: serde_json::Value,
         stream_id: Option<String>,
         lane_key: Option<String>,
+        /// The run waiting on this prompt (GAP-10), or `null` outside one.
+        task_id: Option<String>,
         ts: DateTime<Utc>,
         instance_id: String,
     },
@@ -247,35 +244,159 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
-    /// A plugin was loaded and registered its tools
-    PluginLoaded {
-        plugin_id: String,
-        tools: Vec<String>,
+    /// A session's lifecycle changed — created, activated, archived or
+    /// deleted (migration 039, §5.7) — or one of its runs was found
+    /// interrupted at boot (§5.6b).
+    ///
+    /// The sidebar's honesty frame: a second window showing a session that
+    /// another window just archived or deleted learns about it here, rather
+    /// than on its next manual refresh; and a window open across a daemon
+    /// restart learns that a run it was watching will never finish.
+    SessionChanged {
+        session_id: String,
+        lane_key: String,
+        /// "active" | "archived" | "deleted" | "interrupted"
+        ///
+        /// `interrupted` is not a session state — the row is still `active` or
+        /// `archived` — it is a fact about one of the session's runs, named by
+        /// `task_id`. A client seeing it should re-read the session's
+        /// `interrupted_task_count` and the run itself.
+        status: String,
+        /// The run the change is about: `null` for every lifecycle
+        /// transition, set for `interrupted`.
+        task_id: Option<String>,
+        ts: DateTime<Utc>,
+        instance_id: String,
     },
-    /// A plugin was unloaded (graceful shutdown)
-    PluginUnloaded {
-        plugin_id: String,
+    /// A queued follow-up item was cancelled before it ran (GAP-03).
+    ///
+    /// Fired only when the cancel actually *won* the CAS against the autostart
+    /// claim, so a client that retires a pending chip on this frame is never
+    /// retiring one that is about to run.
+    FollowupCancelled {
+        lane_key: String,
+        followup_id: i64,
+        ts: DateTime<Utc>,
+        instance_id: String,
     },
-    /// A plugin process crashed unexpectedly
-    PluginCrashed {
-        plugin_id: String,
-        error: String,
-        restart_in_secs: u64,
+    /// An agent wrote a **produced** artifact — `artifact_write`, or the
+    /// `workspace_write(entry_type = "artifact")` spill (plan §4.9).
+    ///
+    /// Never fired for uploads: an upload has no agent and no version to
+    /// announce. A supersede is a write, so a second `put` of the same name
+    /// fires again with the bumped `version`.
+    ArtifactWritten {
+        artifact_id: String,
+        /// The run that produced it, when the turn had one. A chat turn with no
+        /// workflow writes a loose artifact and carries neither field.
+        task_id: Option<String>,
+        agent_id: Option<String>,
+        /// The head file's own name (`01-quarterly-report.md`), not the
+        /// model-supplied `name` argument.
+        name: String,
+        /// The snake_case `ArtifactKind` spelling the GUI's union declares.
+        kind: String,
+        version: u32,
+        /// The head file's absolute path (`file_assets.storage_path`).
+        path: String,
+        ts: DateTime<Utc>,
+        instance_id: String,
     },
-    /// A plugin was disabled by the system or user
-    PluginDisabled {
-        plugin_id: String,
-        reason: String,
+    /// One subagent lane of a run opened or closed (plan Phase 4, GAP-09).
+    ///
+    /// Fired on the span's open (`state = "running"`) and on every close. The
+    /// payload is the `subagent_span` row, so `started_at` / `ended_at` are
+    /// the row's own RFC 3339 strings — the socket and
+    /// `GET /v1/tasks/{id}/timeline` cannot disagree by a millisecond.
+    ///
+    /// `state` is never `"blocked"`: a blocked lane is derived at read time
+    /// from the confirmation broker's pending requests, which is live process
+    /// state and has no transition to announce.
+    SubagentSpan {
+        task_id: String,
+        /// The span id — the spawn's `node_id`.
+        span_id: String,
+        /// The lane label, unique within the run (`review·3`).
+        label: String,
+        template_id: String,
+        agent_instance_id: String,
+        /// `"running"` | `"done"` | `"failed"` | `"cancelled"`.
+        state: String,
+        detail: Option<String>,
+        started_at: String,
+        ended_at: Option<String>,
+        duration_ms: Option<i64>,
+        output_preview: Option<String>,
+        ts: DateTime<Utc>,
+        instance_id: String,
     },
-    /// A plugin requires capability approval before activation
-    PluginPendingApproval {
-        plugin_id: String,
+    /// An extension's observed state changed — T5, E5, `mark_failed`, T5-deny,
+    /// T5-gone and §3.7's tool-list refresh (extension design ADR-030).
+    ///
+    /// The GUI **invalidates** on this and re-reads the row; nothing is ever
+    /// rendered from the payload, so a late, dropped or reordered event can
+    /// never show a state the daemon is not in (§8, X-18).
+    ExtensionStateChanged {
+        /// `"mcp"` | `"plugin"`.
+        kind: String,
+        /// The extension id — a server name, or a plugin directory name.
+        id: String,
+        /// The record's new state word, or `"removed"` when the declaration is
+        /// gone and the row simply disappears.
+        state: String,
+        /// The load the change belongs to, so the event log stays unambiguous
+        /// when a late crash notice arrives after a newer load's events.
+        generation: u64,
+        /// Set only by a server-driven `tools/list_changed` refresh.
+        #[serde(default)]
+        tools_changed: bool,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
+    /// **S4 moment 1 / 2** — a capability was withheld from a caller
+    /// (extension design §7.1, §7.2, §6.2 #13). Deduped per
+    /// `(scope, extension, moment)` for ten minutes: the announcement, never
+    /// the error.
+    ExtensionCapabilityWithheld {
+        /// `"mcp"` | `"plugin"`.
+        kind: String,
+        id: String,
+        /// The tool name, capability or skill id the withholding is about.
+        subject: String,
+        /// `"attempted_use"` | `"surface_assembly"` | `"scheduled_skip"`.
+        moment: String,
+        /// The record's state word, or `"unrecorded"`.
+        state: String,
+        /// The dedup scope key — the skill id for `scheduled_skip`.
+        scope: String,
+        /// The caller held a previous load's handle.
+        stale: bool,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
+    /// **S4 moment 3** — T1 step 3's dependent scan: one per transition, never
+    /// deduped (extension design §3.2 T1, §7.3).
+    ExtensionCapabilityWithdrawn {
+        /// `"mcp"` | `"plugin"`.
+        kind: String,
+        id: String,
+        /// The record's state word at the transition.
+        state: String,
+        /// `"disable"` | `"watcher"` | `"declaration_gone"` | `"deny"` |
+        /// `"reload"` | `"crash"` | `"server_list_change"` — what the wording is
+        /// keyed on, never the state.
+        cause: String,
         capabilities: Vec<String>,
-    },
-    /// A plugin needs configuration keys before it can start
-    PluginNeedsConfig {
-        plugin_id: String,
-        missing_keys: Vec<String>,
+        tools: Vec<String>,
+        affected_templates: Vec<String>,
+        affected_skills: Vec<String>,
+        /// The cron-scheduled subset; the owner notice fires only when this is
+        /// non-empty.
+        affected_cron_skills: Vec<String>,
+        /// The daemon's default lane, where the notice was written.
+        notice_lane: String,
+        ts: DateTime<Utc>,
+        instance_id: String,
     },
 }
 

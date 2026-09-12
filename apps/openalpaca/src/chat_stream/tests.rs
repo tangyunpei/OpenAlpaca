@@ -206,3 +206,86 @@ fn test_stream_result_usage() {
     };
     assert!(result.usage().is_some());
 }
+
+// ── ChatTarget (plan §5.7) ──────────────────────────────────────────
+
+/// The CLI now sends the project every turn belongs to, exactly as the GUI's
+/// header does — §4.7's client story, whose CLI half was never wired.
+#[test]
+fn a_turn_carries_the_working_directory_as_its_project() {
+    let target = ChatTarget::for_workspace(Some("/repo".to_string()));
+    assert_eq!(
+        target.headers(),
+        vec![("x-workspace-path", "/repo".to_string())],
+        "the daemon resolves this to a project root itself (R22)"
+    );
+}
+
+/// R81: a header value cannot carry a non-ASCII byte, so a CJK project path —
+/// an ordinary one here — is percent-encoded UTF-8 and the daemon decodes it.
+/// Before this it was dropped in transit and the turn ran with no project.
+#[test]
+fn a_cjk_working_directory_is_sent_as_ascii() {
+    let target = ChatTarget::for_workspace(Some("/Users/jun/项目/openalpaca".to_string()));
+    let headers = target.headers();
+    let (name, value) = headers.first().expect("one header");
+    assert_eq!(*name, "x-workspace-path");
+    assert_eq!(value, "/Users/jun/%E9%A1%B9%E7%9B%AE/openalpaca");
+    assert!(
+        value.is_ascii(),
+        "a header value the daemon can read at all: {value}"
+    );
+
+    // A literal `%` is escaped too, so the daemon's decode gives the path back
+    // byte for byte rather than turning `50%20off` into `50 off`.
+    assert_eq!(
+        ChatTarget::for_workspace(Some("/tmp/50%20off".to_string())).headers()[0].1,
+        "/tmp/50%2520off",
+    );
+}
+
+/// A CWD the CLI could not canonicalize is no project at all: sending a
+/// relative or unresolvable path would be resolved against the *daemon's*
+/// directory, which is the bug R22 closed.
+#[test]
+fn a_turn_with_no_resolvable_directory_sends_no_header() {
+    let target = ChatTarget::for_workspace(None);
+    assert!(target.headers().is_empty());
+}
+
+#[test]
+fn an_ordinary_turn_names_no_session() {
+    let body = ChatTarget::for_workspace(None).body("hello", &[]);
+    assert_eq!(body["content"], "hello");
+    assert!(
+        body.get("session_id").is_none(),
+        "an unnamed turn is what lets the daemon open a new conversation when \
+         the project changed (R48)"
+    );
+    assert!(body.get("attachments").is_none());
+}
+
+/// `--resume` / `--session` name the conversation, and R49 then makes *its*
+/// project govern the turn — which is why the header stays on the request
+/// rather than being dropped: an unbound session takes it as a first binding.
+#[test]
+fn a_resumed_turn_names_its_session_and_keeps_the_project() {
+    let target =
+        ChatTarget::for_workspace(Some("/repo".to_string())).resuming("sess-1".to_string());
+    let body = target.body("hello", &[]);
+    assert_eq!(body["session_id"], "sess-1");
+    assert_eq!(
+        target.headers(),
+        vec![("x-workspace-path", "/repo".to_string())]
+    );
+}
+
+#[test]
+fn attachments_ride_along_with_the_session() {
+    let attachments = vec![serde_json::json!({ "file_id": "file-1" })];
+    let body = ChatTarget::for_workspace(None)
+        .resuming("sess-1".to_string())
+        .body("look at this", &attachments);
+    assert_eq!(body["attachments"][0]["file_id"], "file-1");
+    assert_eq!(body["session_id"], "sess-1");
+}

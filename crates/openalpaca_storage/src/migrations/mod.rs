@@ -181,4 +181,39 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "drop_context_compaction_log",
         sql: include_str!("034_drop_context_compaction_log.sql"),
     },
+    Migration {
+        version: 35,
+        name: "drop_planner_telemetry",
+        sql: include_str!("035_drop_planner_telemetry.sql"),
+    },
+    Migration {
+        version: 36,
+        name: "artifact_store",
+        sql: include_str!("036_artifact_store.sql"),
+    },
+    Migration {
+        version: 37,
+        name: "run_observability",
+        sql: include_str!("037_run_observability.sql"),
+    },
+    Migration {
+        version: 38,
+        name: "message_run_links",
+        sql: include_str!("038_message_run_links.sql"),
+    },
+    Migration {
+        version: 39,
+        name: "sessions",
+        sql: include_str!("039_sessions.sql"),
+    },
+    Migration {
+        version: 40,
+        name: "llm_call_log_timestamp_index",
+        sql: include_str!("040_llm_call_log_timestamp_index.sql"),
+    },
+    Migration {
+        version: 41,
+        name: "execution_log_timestamp_indexes",
+        sql: include_str!("041_execution_log_timestamp_indexes.sql"),
+    },
 ];

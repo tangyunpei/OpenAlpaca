@@ -1,0 +1,1095 @@
+/**
+ * Daemon wire types.
+ *
+ * Every shape here is transcribed from the Rust source the daemon actually
+ * serializes (see `API_MAP.md` §"Sources verified"), not from the design
+ * fixtures. Where the legacy SvelteKit client drifted from the daemon the
+ * daemon wins — e.g. agent templates serialize `capabilities` /
+ * `denied_capabilities`, which the old client called `skills` / `denied_skills`.
+ *
+ * Field names stay snake_case because that is what crosses the wire; only the
+ * Tauri `ConnectionInfo` is camelCase (serde rename on the Rust side).
+ */
+
+// ── Tasks ───────────────────────────────────────────────────────────────────
+
+/**
+ * `TaskStatus` on the wire (`apps/openalpacad/src/routes/tasks_types.rs`).
+ *
+ * `interrupted` is the boot sweep's (daemon plan §5.6b): a run the daemon was
+ * driving when it went away. It is terminal — a new daemon cannot re-enter the
+ * loop — but it is not a failure, and the restart affordance is `Re-run`.
+ */
+export type TaskStatusValue =
+  | "queued"
+  | "running"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
+
+/** The design's five-state run model. `completed` maps to `done`. */
+export type RunStatus =
+  | "running"
+  | "queued"
+  | "paused"
+  | "done"
+  | "cancelled"
+  | "failed"
+  | "interrupted";
+
+/** Free-form artifact reference parsed out of `task.outcome_json`. Schema-less by design; `/v1/artifacts?task_id=` is the typed answer. */
+export interface ParsedOutcome {
+  outcome_summary: string | null;
+  outcome_kind: string;
+  artifact_count: number;
+  artifacts: unknown[];
+  no_artifact_reason?: string;
+}
+
+/** Serialized `Task`. `state_json`/`outcome_json` are `#[serde(skip_serializing)]`. */
+export interface Task {
+  id: string;
+  title: string;
+  description: string | null;
+  status: TaskStatusValue;
+  priority: number;
+  progress_current: number | null;
+  progress_total: number | null;
+  result_summary: string | null;
+  created_by: string;
+  source_lane: string;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+  state_version: number;
+  outcome_kind?: string;
+  artifact_count?: number;
+  outcome?: ParsedOutcome;
+  /**
+   * List route only (GAP-08b) — one grouped `cost_for_tasks` query per page,
+   * `0` for a task with no logged LLM calls. The detail route's `Task` has no
+   * such field yet; that unification is a later phase (see `run-model.ts`).
+   */
+  cost_usd?: number;
+  /**
+   * List route only (R38) — how many agents the run spawned, from one grouped
+   * `subagent_span` query per page. This is what is left of the
+   * `assigned_agents` array P8 deleted: a count, not names. A span opens at
+   * spawn, so an agent still working is counted. Absent on the detail route,
+   * and on a daemon older than the field.
+   */
+  subagent_count?: number;
+  /**
+   * R40 — whether `POST /v1/tasks/{id}/steer` would take a message for this
+   * run right now: it is the local user's, it is not terminal, and a workflow
+   * is still attached to it. Computed at read time, never stored, and served
+   * by both task routes (on the detail it sits beside `task`, not inside it).
+   *
+   * Absent on a daemon older than the field — which is not the same as
+   * `false`, so treat only an explicit `false` as a refusal.
+   */
+  steerable?: boolean;
+}
+
+/**
+ * `GET /v1/tasks/{id}`. Still a different shape from a list row (nested under
+ * `task`, no `cost_usd`) — API_MAP §5 warns the two disagree; do not conflate
+ * them.
+ *
+ * The legacy `assignments` array is gone (P8): a run's agents are lanes on
+ * `GET /v1/tasks/{id}/timeline`, which — unlike `agent_task_history` — has a
+ * row for a subagent that is still working.
+ */
+export interface TaskDetailResponse {
+  task: Task;
+  outcome?: ParsedOutcome;
+  /**
+   * R40's steerability hint. It sits beside `task` rather than inside it
+   * because it is not one of the run's columns — see {@link Task.steerable}.
+   */
+  steerable?: boolean;
+}
+
+export interface CreateTaskRequest {
+  title: string;
+  description?: string;
+  priority?: number;
+  created_by: string;
+  source_lane: string;
+}
+
+export interface CreateTaskResponse {
+  task_id: string;
+  status: string;
+}
+
+export interface TaskActionResponse {
+  task_id: string;
+  status: string;
+  /**
+   * §5.6c's replay resume only: the conversation the history came from, and
+   * how much of it did. Absent for every transition and for `start`, so their
+   * copy is unchanged — and `rounds_replayed` is what tells a resumed run from
+   * one that quietly started over under the same id.
+   */
+  session_id?: string;
+  rounds_replayed?: number;
+  from_seq?: number | null;
+  to_seq?: number | null;
+}
+
+/**
+ * The verbs `POST /v1/tasks/{id}/action` accepts.
+ *
+ * The first three are state transitions. `start` is not: it dispatches a
+ * *stored* row — one `POST /v1/tasks` queued and nothing ever ran — under its
+ * own id (D5), which is why it answers with the id you sent. Re-running a
+ * finished run is a different route, `POST /v1/tasks/{id}/rerun`, because that
+ * one answers with an id you have not seen.
+ */
+export type TaskAction = "cancel" | "pause" | "resume" | "start";
+
+// ── Chat ────────────────────────────────────────────────────────────────────
+
+export interface AttachmentRef {
+  file_id: string;
+  caption?: string;
+}
+
+export interface AttachmentDisplay {
+  file_id: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+}
+
+export interface ToolConfirmation {
+  request_id: string;
+  tool_name: string;
+  tool_arguments: unknown;
+  status: "pending" | "approved" | "denied" | "expired";
+}
+
+/**
+ * One `role='artifact'` link on a stored message (GAP-23, closed): a file the
+ * message's *run* produced, as the daemon resolves it — the id the Library
+ * opens, the name to show, and the kind the badge is drawn from.
+ */
+export interface MessageArtifact {
+  id: string;
+  name: string;
+  /** The daemon's snake_case `ArtifactKind`; `null` for a pre-036 row. */
+  kind: string | null;
+}
+
+/** `ConversationMessageView` — the stored row, plus its artifact links. */
+export interface ChatMessage {
+  id: number;
+  lane_key: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  source?: string;
+  /**
+   * The model that answered, when the daemon persisted one (GAP-13,
+   * migration 038's column). The wire sends a literal `null` — not an
+   * omitted key — for every row written before that migration, plus any
+   * template answer (slash command, `skill_withdrawn`, the social fast
+   * path's no-router echo) that never ran a model at all.
+   */
+  model?: string | null;
+  tokens_in?: number;
+  tokens_out?: number;
+  duration_ms?: number;
+  created_at: string;
+  attachments?: AttachmentDisplay[];
+  content_json?: string | null;
+  display_text?: string | null;
+  confirmation?: ToolConfirmation;
+  /**
+   * The run this message started (a delegating turn) or reported on (a
+   * completion report) — migration 038's column. `null` for ordinary chat.
+   */
+  task_id?: string | null;
+  /**
+   * Files this message's run produced. Served on every message (`[]` for the
+   * overwhelming majority), so no client has to tell "none" from "not served".
+   */
+  artifacts?: MessageArtifact[];
+}
+
+export interface ChatSendRequest {
+  content: string;
+  attachments?: AttachmentRef[];
+  /**
+   * Run this one turn on a named model (GAP-13, closed). Validated against the
+   * registry before dispatch — an id the daemon does not know is
+   * `400 UNKNOWN_MODEL`, and so is every model of a disabled provider.
+   * Request-scoped: nothing is persisted, so the next turn is back on the
+   * daemon default unless this names a model again.
+   */
+  model?: string;
+}
+
+export interface ChatSendResponse {
+  stream_id: string;
+  lane_key: string;
+  /**
+   * The model this turn will run on: the request's `model` when it named one,
+   * else the daemon default. `null` only on a daemon with no LLM router at
+   * all. The SSE `done` frame's `model` still reports what actually answered.
+   */
+  model_used: string | null;
+}
+
+export interface ChatHistoryResponse {
+  messages: ChatMessage[];
+  total: number;
+  lane_key: string;
+  /** The conversation these messages came from; `null` on a lane with none. */
+  session_id: string | null;
+}
+
+export interface ChatDeleteResponse {
+  deleted: number;
+}
+
+/**
+ * `ApprovalScope` (`security/confirmation.rs`). Forwarded by the HTTP route
+ * to the sandbox's `ConfirmationResponse` (GAP-01, closed): an omitted or
+ * `these_args` scope approves this call only; `entire_tool` caches the
+ * approval for the rest of the session.
+ */
+export type ApprovalScope = "these_args" | "entire_tool";
+
+export interface ConfirmationRequestBody {
+  approved: boolean;
+  approval_scope?: ApprovalScope;
+}
+
+export type FeedbackValue = "positive" | "negative";
+
+export interface FeedbackResponse {
+  message_id: number;
+  feedback: FeedbackValue;
+  comment: string | null;
+}
+
+// ── Sessions ────────────────────────────────────────────────────────────────
+//
+// A session is one conversation transcript: an epoch of a lane, bound to at
+// most one workspace, with an `active` → `archived` lifecycle. A lane holds
+// many of them and at most one active one. `/v1/sessions` replaced the two
+// `/v1/conversations` reads (daemon plan §5.7, P19); the compaction columns
+// (`summary`, `summary_version`, …) are the daemon's own bookkeeping and are
+// deliberately not on the wire.
+
+export type SessionStatus = "active" | "archived";
+
+export interface Session {
+  id: string;
+  lane_key: string;
+  source: string;
+  title: string;
+  workspace_id: string | null;
+  status: SessionStatus;
+  message_count: number;
+  last_message_at: string | null;
+  created_at: string;
+  updated_at: string;
+  ended_at: string | null;
+  /** Runs this session's lane has in flight right now. */
+  active_task_count: number;
+  /** Runs started from this session that were left interrupted. */
+  interrupted_task_count: number;
+}
+
+export interface SessionsResponse {
+  sessions: Session[];
+  total: number;
+}
+
+export interface SessionMessagesResponse {
+  messages: ChatMessage[];
+  total: number;
+}
+
+// ── Files ───────────────────────────────────────────────────────────────────
+
+export type FileAssetStatus = "uploaded" | "processing" | "ready" | "error";
+
+export interface FileAsset {
+  id: string;
+  owner_id: string;
+  sha256: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  storage_path: string;
+  status: FileAssetStatus;
+  extracted_text: string | null;
+  extract_error: string | null;
+  metadata_json: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FileUploadResponse {
+  id: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  status: string;
+}
+
+export interface FileOpenResponse {
+  id: string;
+  status: "opened";
+}
+
+// ── LLM settings, keys, models ──────────────────────────────────────────────
+
+export type KeyPriorityValue = "primary" | "fallback";
+export type KeySourceValue =
+  | "api_console"
+  | "claude_code"
+  | "claude_max_pro"
+  | "codex"
+  | "environment"
+  | "other";
+export type KeyHealthValue = "healthy" | "rate_limited" | "error" | "unknown";
+
+export interface ExternalUsage {
+  period: string;
+  cost_usd: number;
+  token_count: number;
+  rate_limit_remaining: number | null;
+  fetched_at: string;
+  approximate: boolean;
+}
+
+export interface KeyInfo {
+  id: string;
+  masked_secret: string;
+  tier: string | null;
+  priority: KeyPriorityValue;
+  source: KeySourceValue;
+  notes: string | null;
+  status: string;
+  monthly_usage_usd: number | null;
+  managed?: boolean;
+  credential_status?: string | null;
+  credential_expires_at?: number | null;
+  external_usage?: ExternalUsage | null;
+}
+
+export interface ProviderInfo {
+  enabled: boolean;
+  key_selection_strategy: string;
+  keys: KeyInfo[];
+}
+
+export interface OrchestratorInfo {
+  model: string;
+  fallback_models: string[];
+}
+
+export interface LlmSettingsResponse {
+  orchestrator: OrchestratorInfo;
+  providers: Record<string, ProviderInfo>;
+}
+
+/**
+ * `PUT /v1/settings/llm/providers/{provider}/enabled` — the row as it stands.
+ *
+ * `enabled` is the disposition now in `llm.toml`; `loaded` is whether the
+ * daemon's router actually holds the provider. They differ when an enable
+ * could not register — no usable key, or the provider is not compiled in — and
+ * `warning` is then the daemon's own sentence about why. A disable is
+ * `loaded: false` with no warning: that is what it asked for.
+ */
+export interface ProviderEnabledResponse {
+  id: string;
+  enabled: boolean;
+  loaded: boolean;
+  warning: string | null;
+}
+
+export interface KeyStatusEntry {
+  id: string;
+  health: KeyHealthValue;
+  consecutive_rate_limits: number;
+  is_available: boolean;
+}
+
+export type KeyStatusMap = Record<string, KeyStatusEntry[]>;
+
+export interface AddKeyRequest {
+  provider: string;
+  key: {
+    id?: string;
+    secret: string;
+    tier?: string;
+    priority?: string;
+    source?: string;
+    notes?: string;
+  };
+}
+
+export interface ReorderKeysRequest {
+  provider: string;
+  key_order: string[];
+  primary_key_id?: string;
+}
+
+export interface SetKeyPriorityRequest {
+  provider: string;
+  key_id: string;
+  priority: KeyPriorityValue;
+}
+
+export interface ValidateKeyRequest {
+  provider: string;
+  secret: string;
+}
+
+export interface KeyValidationResult {
+  valid: boolean;
+  tier: string | null;
+  detected_source: string | null;
+  models_available: string[];
+  rate_limits: string | null;
+  format_error: string | null;
+}
+
+export interface DiscoveredCredentialInfo {
+  source: "claude_code" | "codex";
+  provider: string;
+  status: string;
+  expires_at: number | null;
+  auto_refresh: boolean;
+}
+
+export interface CliBackendStatus {
+  name: string;
+  available: boolean;
+  path: string | null;
+  enabled: boolean;
+}
+
+/** `health` is hardcoded `"healthy"`; `total_tokens` is lifetime, not today (GAP-08c). */
+export interface ProviderUsageSummary {
+  provider: string;
+  total_cost_usd: number;
+  total_tokens: number;
+  total_requests: number;
+  health: string;
+  external_usage: ExternalUsage | null;
+}
+
+/** `routing::model_registry::ModelEntry`. */
+export interface ModelEntry {
+  id: string;
+  provider: string;
+  context_window: number;
+  input_price_per_million: number;
+  output_price_per_million: number;
+}
+
+// ── Usage ───────────────────────────────────────────────────────────────────
+
+export interface LlmCallLog {
+  id: number;
+  timestamp: string;
+  agent_id: string | null;
+  task_id: string | null;
+  provider: string;
+  model: string;
+  key_id: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+  status: string;
+  latency_ms: number | null;
+  error_message: string | null;
+}
+
+export interface LlmUsageDaily {
+  date: string;
+  agent_id: string;
+  model: string;
+  total_requests: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_cost_usd: number;
+}
+
+/**
+ * `GET /v1/usage/summary?window=today` (GAP-08c, closed in T50).
+ *
+ * `date` is the daemon's **UTC** day, and every figure here is that day's. It
+ * is echoed because the client's own local date disagrees with it for up to
+ * twelve hours, and a total labelled with the wrong day is worse than none.
+ */
+export interface UsageSummary {
+  date: string;
+  total_usd: number;
+  by_provider: UsageProviderRow[];
+  caps: UsageCaps;
+}
+
+/** One provider's share of the day, from that day's call log — not lifetime. */
+export interface UsageProviderRow {
+  provider: string;
+  usd: number;
+  calls: number;
+  /** Input + output tokens: the design's `41k tok today`. */
+  tokens: number;
+}
+
+/**
+ * The two caps the daemon enforces (N4). There is **no daily budget** and none
+ * is coming: today's total is an informational figure with no denominator, so
+ * the design's spend progress bar stays undrawn and the panel names these
+ * instead.
+ */
+export interface UsageCaps {
+  workflow_max_cost_usd: number;
+  agent_max_cost_usd: number;
+}
+
+// ── Orchestrator ────────────────────────────────────────────────────────────
+
+/** `daily_cost_usd` sums today's UTC `llm_usage_daily` rows (GAP-08a, closed). */
+export interface OrchestratorConfigResponse {
+  model: string;
+  fallback_models: string[];
+  active_agents: number;
+  active_tasks: number;
+  daily_cost_usd: number;
+}
+
+export interface UpdateOrchestratorRequest {
+  model: string;
+  fallback_models: string[];
+}
+
+export interface OrchestratorLatencyRecord {
+  id: number;
+  request_id: string;
+  mode: string;
+  ack_ms: number;
+  fallback_reason: string | null;
+  auto_promotion_reason: string | null;
+  timestamp: string;
+}
+
+export interface LatencyAggregate {
+  mode: string;
+  count: number;
+  p50_total_ms: number;
+  p95_total_ms: number;
+  p99_total_ms: number;
+  mean_ack_ms: number;
+  auto_promotion_count: number;
+  fallback_count: number;
+}
+
+export interface DispatchDecisionRecord {
+  id: number;
+  request_id: string;
+  task_id: string | null;
+  mode: string;
+  reason: string;
+  agent_count: number;
+  dag_node_count: number | null;
+  predictability_score: number | null;
+  error_message: string | null;
+  timestamp: string;
+}
+
+// ── Agents ──────────────────────────────────────────────────────────────────
+
+/** `TemplateResponse` — note `capabilities`, not `skills`. */
+export interface AgentTemplate {
+  id: string;
+  name: string;
+  description: string;
+  icon?: string;
+  singleton: boolean;
+  capabilities: string[];
+  denied_capabilities: string[];
+  temperature: number;
+  verbosity: string;
+  model?: string;
+  fallback_models: string[];
+  max_tool_calls?: number;
+  timeout_seconds?: number;
+  max_cost_per_task?: number;
+  require_confirmation_for: string[];
+  persona: string;
+  body: string;
+  /**
+   * Completed runs of this template within `window` (GAP-20, T48), counted
+   * from `subagent_span` — a run still in flight does not count. Always
+   * sent; `0` for a template with no completed run in the window.
+   */
+  run_count: number;
+  /** When the newest of those completed runs started. Absent when there are none. */
+  last_run_at?: string;
+  /**
+   * The window `run_count`/`last_run_at` were computed over —
+   * `"7d" | "30d" | "all"` — so the card can label itself with what the
+   * daemon actually counted rather than assuming.
+   */
+  window: string;
+}
+
+export interface AgentInstance {
+  id: string;
+  template_id: string;
+  name: string;
+  status: string;
+  current_task: string | null;
+}
+
+export interface Agent {
+  id: string;
+  name: string;
+  description: string | null;
+  icon: string | null;
+  status: string;
+  current_task_id: string | null;
+  template_id?: string;
+  skills_json: string;
+  preset_json: string;
+  constraints_json: string | null;
+  llm_config_json: string | null;
+  persona: string | null;
+  created_at: string;
+  updated_at: string | null;
+}
+
+/** Lifetime-scoped and keyed by instance, not template — GAP-20. */
+export interface AgentMetrics {
+  agent_id: string;
+  tasks_completed: number;
+  tasks_failed: number;
+  total_runtime_seconds: number;
+  average_runtime_seconds: number;
+  success_rate: number;
+  updated_at: string;
+}
+
+export interface AgentDetailResponse {
+  agent: Agent;
+  metrics: AgentMetrics | null;
+}
+
+export interface AgentActionResponse {
+  agent_id: string;
+  status: string;
+}
+
+export interface AgentConfigFile {
+  agent: { id: string; name: string; description: string; icon?: string };
+  skills: { assigned: string[]; denied?: string[] };
+  preset: { persona: string; temperature?: number; verbosity?: string };
+  constraints?: {
+    max_tool_calls?: number;
+    timeout_seconds?: number;
+    max_cost_per_task?: number;
+    require_confirmation_for?: string[];
+    allowed_capabilities?: string[];
+    denied_capabilities?: string[];
+  };
+  llm?: { model?: string; fallback_models?: string[] };
+}
+
+export interface AgentConfigResponse {
+  config: AgentConfigFile;
+  config_version: number;
+}
+
+// ── Extensions / tools / connectors / skills ────────────────────────────────
+
+/** The two ENABLE-axis extension kinds (ADR-030 §1). */
+export type ExtensionKind = "mcp" | "plugin";
+
+/** `ExtensionState::word()` — reported literally, never as a target state. */
+export type ExtensionStateWord =
+  | "enabled"
+  | "disabled"
+  | "unapproved"
+  | "failed"
+  | "orphaned"
+  | "enabling"
+  | "disabling";
+
+/** `UnapprovedReason::word()` ∪ `FailureReason::word()` (ADR-030 §8). */
+export type ExtensionReason =
+  | "never_seen"
+  | "denied"
+  | "capabilities_grew"
+  | "needs_authorization"
+  | "needs_config"
+  | "config_invalid"
+  | "unreachable"
+  | "crashed";
+
+export type ExtensionConsent = "approved" | "pending" | "denied";
+
+/**
+ * What `plugin.toml` declares, read at scan — **static**, never a cache of
+ * runtime discovery (ADR-030 §8, X-19). It is what an `unapproved` row shows,
+ * because a plugin that has never run has no runtime `tools` to show.
+ */
+export interface DeclaredContributions {
+  capabilities: string[];
+  virtual_capabilities: string[];
+  /** `plugin.toml`'s `[types]` table, as declared. */
+  types: Record<string, boolean>;
+}
+
+/** One row of `GET /v1/extensions` (ADR-030 §8). */
+export interface ExtensionRow {
+  kind: ExtensionKind;
+  id: string;
+  version: string | null;
+  /** MCP only — `stdio` | `streamable-http`. */
+  transport: string | null;
+  /**
+   * The **persisted disposition** — the toggle binds here, never to the state
+   * word. `null` on the two rows whose bit nobody can read (§4, §8): a plugin
+   * while `.permissions.toml` is unreadable, and the `config/mcp.toml`
+   * pseudo-record.
+   */
+  enabled: boolean | null;
+  /** Plugins only; `null` for MCP. */
+  consent: ExtensionConsent | null;
+  state: ExtensionStateWord;
+  reason: ExtensionReason | null;
+  /** `FailureReason::actionable()` — drives the tone and the CTA (§9.2). */
+  actionable: boolean;
+  detail: string | null;
+  hint: string | null;
+  missing_config_keys: string[];
+  /** `Unapproved{CapabilitiesGrew}` — the DELTA, not the whole list. */
+  added_capabilities: string[];
+  /** Live when `enabled`; empty otherwise — never a cache (§10). */
+  tools: string[];
+  skipped_tools: string[];
+  withdrawn_by_server: string[];
+  tools_changed_at: string | null;
+  declared: DeclaredContributions | null;
+  skills: string[];
+  agents: string[];
+  connector: string | null;
+  provider: string | null;
+  /** When the record entered its **current** state — every state, not just failed. */
+  since: string;
+  /** Present only on the verb that produced one (`disable` / `reload`). */
+  warnings?: string[];
+}
+
+export type ExtensionVerb =
+  "enable" | "disable" | "reload" | "approve" | "deny";
+
+/**
+ * What a `plugin.toml` declares, read **before** the directory is copied
+ * (GAP-24). It is the approval preview: an install grants nothing, so this is
+ * what the owner is deciding about when they approve.
+ */
+export interface ManifestSummary {
+  /** The directory name the plugin takes, which is its extension id. */
+  name: string;
+  version: string;
+  description: string;
+  entry: string;
+  capabilities: string[];
+  virtual_capabilities: string[];
+  /** The `[types]` table as declared: `tool`, `skill`, `agent`, … */
+  types: Record<string, boolean>;
+  required_config_keys: string[];
+  /** Values that never land in `plugins/.config/<name>.toml`. */
+  sensitive_config_keys: string[];
+}
+
+/** `POST /v1/extensions/{kind}` and `PUT /v1/extensions/plugin/{id}`. */
+export interface InstallResponse {
+  extension: ExtensionRow;
+  /** `null` for an MCP server, which has no manifest and no consent gate. */
+  manifest: ManifestSummary | null;
+  /** Update only: what the replacement asks for beyond the recorded consent. */
+  added_capabilities?: string[];
+  /** Update only: the consent decision was dropped, so it is waiting again. */
+  consent_reset?: boolean;
+}
+
+/** `POST /v1/extensions/plugin/validate` — the dry run. */
+export interface ValidateResponse {
+  manifest: ManifestSummary;
+  /** A plugin of this name is already in the store, so this would be an update. */
+  installed: boolean;
+}
+
+/** `DELETE /v1/extensions/{kind}/{id}?uninstall=true`. */
+export interface UninstallResponse {
+  removed: string;
+  /** Where the directory went. Nothing is deleted — it is moved to the trash. */
+  trashed: string | null;
+  kept_data: boolean;
+  data_trashed: string | null;
+}
+
+/** The body of `POST /v1/extensions/mcp` — one `[servers.<name>]` block. */
+export interface McpDeclaration {
+  name: string;
+  transport: "stdio" | "http";
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+  url?: string;
+  bearer_env?: string;
+  api_key_header?: string;
+  api_key_env?: string;
+  connect_timeout_secs?: number;
+  request_timeout_secs?: number;
+  enabled?: boolean;
+}
+
+/**
+ * Where an extension tool came from (`GET /v1/tools`). `null` for builtins and
+ * for `config/tools/*.toml` tools — a builtin row carries no enable field at
+ * all, because there is no per-tool enable state anywhere (S1, §8).
+ */
+export interface ToolOrigin {
+  kind: ExtensionKind;
+  id: string;
+  enabled: boolean;
+  state: ExtensionStateWord;
+}
+
+/** One row of `GET /v1/tools` (ADR-030 §8). */
+export interface ToolCatalogEntry {
+  name: string;
+  description: string;
+  source: "builtin" | "mcp" | "plugin" | "config";
+  origin: ToolOrigin | null;
+  provides_capabilities: string[];
+  requires_confirmation: boolean;
+  invocations_today: number;
+  version: string;
+  author: string;
+}
+
+/**
+ * `ConnectorStatus` — one row of `GET /v1/connectors` (GAP-17, detail half —
+ * T49).
+ *
+ * `name` is the connector's own display name, taken from its factory: before
+ * T49 the route derived it from a `match` on two ids, so Discord rendered as
+ * `discord`. `source` is the attribution token the daemon grouped
+ * `messages_7d` by — the same string as `id`, carried explicitly so the count
+ * and the rows it counted cannot drift apart. `registered` is whether the
+ * daemon's connector manager holds a *spawned handle*: not "enabled", and not
+ * "alive" — a handle whose task exited is still registered and reports
+ * `status: "error"`.
+ */
+export interface Connector {
+  id: string;
+  name: string;
+  status: string;
+  configured: boolean;
+  source: string;
+  registered: boolean;
+  /** Messages attributed to this connector in the last seven UTC days. */
+  messages_7d: number;
+}
+
+export type ConnectorAction = "enable" | "disable" | "delete";
+
+/**
+ * One row of `GET /v1/skills` — the skill catalog.
+ *
+ * `origin` is the `ToolOrigin` rule one axis over: the extension row read at
+ * render time for a plugin skill, and `null` for a file skill, which is on no
+ * ENABLE axis at all and so carries no enable field of any kind. There is no
+ * per-skill toggle — a skill runs when the agent's capabilities cover
+ * `requires_capabilities` and the plugin serving it is enabled (S1).
+ */
+export interface SkillCatalogEntry {
+  /** Directory name, lowercased — what `skill_execution_log` keys on. */
+  id: string;
+  name: string;
+  description: string;
+  source: "file" | "plugin";
+  origin: ToolOrigin | null;
+  requires_capabilities: string[];
+  /** `slash` without its leading "/"; `null` when the skill declares none. */
+  triggers: { slash: string | null; keywords: string[] };
+  /** `invoke.cron`, or `null` for a skill the wake scheduler does not drive. */
+  schedule: string | null;
+  invocations_today: number;
+  /** `null` when the frontmatter omits it — never an invented number. */
+  version: string | null;
+  /** `plugin:<id>`, `file:project` or `file:user`. */
+  author: string;
+}
+
+/**
+ * Health metrics keyed by `skill_id` — lifetime totals, with no name and no
+ * description of their own. `GET /v1/skills` supplies those.
+ */
+export interface SkillHealthMetrics {
+  skill_id: string;
+  total_invocations: number;
+  clean_success_rate: number;
+  clean_success_rate_7d: number;
+  repair_rate: number;
+  repair_effectiveness: number;
+  degraded_rate: number;
+  avg_duration_ms: number;
+  avg_cost_usd: number;
+  avg_rounds: number;
+  last_invoked_at: string | null;
+  user_satisfaction_rate: number | null;
+  feedback_count: number;
+  feedback_coverage: number;
+}
+
+// ── Telemetry / health ──────────────────────────────────────────────────────
+
+/**
+ * Persisted event row. `task_id` is the run it happened inside — filled since
+ * migration 037 for every arm that knows its run, `null` for an event that
+ * belongs to none (and on rows written before the column existed).
+ */
+export interface EventLogRecord {
+  id: number;
+  timestamp: string;
+  agent_id: string | null;
+  task_id: string | null;
+  event_type: string;
+  detail?: unknown;
+  result?: unknown;
+}
+
+/** `GET /v1/health` — unauthenticated, and exactly these four fields. */
+export interface HealthResponse {
+  status: string;
+  version: string;
+  pid: number;
+  instance_id: string;
+}
+
+/**
+ * `GET /v1/status` — the authenticated sibling of `/v1/health` (plan §4.7
+ * item 4). It names absolute paths on the owner's disk, hence the token.
+ *
+ * GAP-14, closed in Phase 8: every field below is served today.
+ */
+export interface DaemonStatus {
+  /** `~/.openalpaca` (or `$OPENALPACA_HOME_STORE`). */
+  home_root: string;
+  state_dir: string;
+  db_path: string;
+  /**
+   * The project root the request's own `x-workspace-path` resolves to — the
+   * canonical value a `workspace_id` is compared against (R50). `null` when
+   * no header was sent, or when the path is not inside a project.
+   */
+  project_root: string | null;
+  /** When this daemon run began, RFC 3339. */
+  started_at: string;
+  /** Seconds since `started_at` — the daemon's own clock, never negative. */
+  uptime_secs: number;
+  /** The migration version the open database is at, not a compile-time count. */
+  schema_version: number;
+  /**
+   * `<state_dir>/logs/daemon.log`, when the CLI wrote one. `null` for a daemon
+   * started any other way (`cargo run`, the GUI sidecar) — there is no such
+   * file to copy a path to.
+   */
+  log_path: string | null;
+  /** Bytes the user uploaded — what the daemon's upload cap is read against. */
+  upload_bytes: number;
+  /** Bytes agents produced. Informational; never charged against the cap. */
+  produced_bytes: number;
+  /**
+   * The `orchestrator.sessions` limits this daemon is actually enforcing —
+   * the denominator `sessions.last_sweep`'s `over_cap_after` is measured
+   * against, and what the Storage card's "raise the cap" advice means.
+   */
+  retention: DaemonRetentionStatus;
+  sessions: DaemonSessionsStatus;
+  /**
+   * The `orchestrator.routing` switches a client renders against. Today that
+   * is one: §5.6c's experimental replay resume. The flag lives in the
+   * daemon's `daemon.toml`, so the daemon is what says — the alternative is a
+   * `Resume` control whose only possible answer is `409 RESUME_DISABLED`.
+   */
+  routing: DaemonRoutingStatus;
+}
+
+export interface DaemonRoutingStatus {
+  /**
+   * Whether this daemon would honour `{"action":"resume"}` on an
+   * `interrupted` run. Off unless a `daemon.toml` turns it on.
+   */
+  resume_enabled: boolean;
+}
+
+export interface DaemonRetentionStatus {
+  /** Per session, counting `log.jsonl` segments plus `results/`. */
+  log_max_session_bytes: number;
+  /** Across all sessions — the total-cap denominator. */
+  log_max_total_bytes: number;
+  /** Age-based sweep of archived session logs; `0` means it is disabled. */
+  log_retention_days: number;
+}
+
+export interface DaemonSessionsStatus {
+  /** The boot session-log sweep's account, or `null` when no pass ran. */
+  last_sweep: SessionSweep | null;
+  /**
+   * Log records the writers dropped this boot (a full channel, or a directory
+   * that would not open). Non-zero means a transcript has a hole in it.
+   */
+  dropped_records: number;
+}
+
+export interface SessionSweep {
+  sessions_visited: number;
+  sessions_evicted: number;
+  files_removed: number;
+  bytes_freed: number;
+  bytes_before: number;
+  bytes_after: number;
+  /** Still over the total cap with only protected bytes left — worth saying. */
+  over_cap_after: boolean;
+  index_rows_cleared: number;
+}
+
+export interface DaemonProvidersResponse {
+  web_search: {
+    api_key_configured: boolean;
+    api_key_hint: string;
+    timeout_secs: number;
+  };
+}
+
+// ── Shared helpers ──────────────────────────────────────────────────────────
+
+/** `completed` is the daemon's terminal-success value; the design calls it `done`. */
+export function toRunStatus(status: TaskStatusValue): RunStatus {
+  return status === "completed" ? "done" : status;
+}
+
+export function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}

@@ -7,10 +7,11 @@ use crate::agent::subagent::AgentConstraints;
 use crate::bus::EventBus;
 use crate::daemon_config::CircuitBreakerConfig;
 use crate::events::SystemEvent;
-use crate::security::capabilities::CapabilityManager;
+use crate::security::capabilities::{Allowlist, CapabilityManager};
 use crate::security::circuit_breaker::{ToolCircuitBreaker, is_transient_tool_error};
 use crate::security::confirmation::{ConfirmationBroker, ConfirmationRequest};
 use crate::security::sanitizer::InputSanitizer;
+use crate::tools::extensions::is_withheld_refusal;
 use crate::tools::registry::ToolContext;
 use crate::tools::ToolRegistry;
 use chrono::Utc;
@@ -22,7 +23,9 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub struct SandboxPolicy {
     pub agent_id: String,
-    pub allowed_capabilities: Vec<String>,
+    /// The ALLOW axis. `Allowlist::Only(vec![])` admits nothing; a surface that
+    /// means "no allow-list restriction" must spell `Allowlist::Unrestricted`.
+    pub allowed_capabilities: Allowlist,
     pub denied_capabilities: Vec<String>,
     pub require_confirmation_for: Vec<String>,
     pub max_tool_calls: Option<u32>,
@@ -42,7 +45,7 @@ impl SandboxPolicy {
     pub fn from_constraints(agent_id: &str, constraints: &AgentConstraints) -> Self {
         Self {
             agent_id: agent_id.to_string(),
-            allowed_capabilities: constraints.allowed_capabilities.clone(),
+            allowed_capabilities: Allowlist::from_agent_constraints(constraints),
             denied_capabilities: constraints.denied_capabilities.clone(),
             require_confirmation_for: constraints.require_confirmation_for.clone(),
             max_tool_calls: constraints.max_tool_calls,
@@ -121,6 +124,15 @@ impl SandboxManager {
         self.confirmation_broker = Some(broker);
     }
 
+    /// The registry this sandbox dispatches through.
+    ///
+    /// Exposed so the agentic loop can stamp `ext {kind, id, generation}` on
+    /// its `tool_call`/`tool_result` records (§5.4, P-17) — the extension
+    /// identity is derived from the registered tool and lives nowhere else.
+    pub fn registry(&self) -> &ToolRegistry {
+        &self.registry
+    }
+
     /// Execute a tool call within the sandbox.
     ///
     /// Flow:
@@ -138,18 +150,22 @@ impl SandboxManager {
         ctx: &ToolContext,
     ) -> Result<String, String> {
         let agent_id = ctx.agent_id.as_deref().unwrap_or("unknown");
+        // The run every event below is attributed to (GAP-10); `None` for a
+        // call made outside a workflow.
+        let task_id = ctx.task_id.as_deref();
+        // Set only where the agentic loop is writing this call's records: it
+        // is what lets the session writer find this call's audit row and add
+        // the `log_seq` half to it (R51).
+        let session_id = ctx.session_id.as_deref();
 
         // 1. Capability check
-        let constraints = AgentConstraints {
-            allowed_capabilities: policy.allowed_capabilities.clone(),
-            denied_capabilities: policy.denied_capabilities.clone(),
-            ..Default::default()
-        };
-
-        if let Err(violation) =
-            CapabilityManager::check_agent_capability(agent_id, &tool_call.name, &constraints)
-        {
-            self.emit_security_violation(agent_id, &tool_call.name, &violation.to_string());
+        if let Err(violation) = CapabilityManager::check_agent_capability(
+            agent_id,
+            &tool_call.name,
+            &policy.allowed_capabilities,
+            &policy.denied_capabilities,
+        ) {
+            self.emit_security_violation(agent_id, &tool_call.name, &violation.to_string(), task_id);
             return Err(violation.to_string());
         }
 
@@ -162,7 +178,7 @@ impl SandboxManager {
             &registered,
             &shell_like,
         ) {
-            self.emit_security_violation(agent_id, &tool_call.name, &violation.to_string());
+            self.emit_security_violation(agent_id, &tool_call.name, &violation.to_string(), task_id);
             return Err(violation.to_string());
         }
 
@@ -194,12 +210,14 @@ impl SandboxManager {
                     let detail = serde_json::json!({
                         "tool_name": tool_call.name,
                         "reason": "auto_approve policy bypass",
+                        "task_id": task_id,
                     });
                     let result = serde_json::json!({ "outcome": "auto_approved" });
                     let repo = openalpaca_storage::repository::EventLogRepository::new(db);
-                    if let Err(e) = repo.log(
+                    if let Err(e) = repo.log_for_task(
                         "tool_auto_approved",
                         Some(agent_id),
+                        task_id,
                         Some(&detail),
                         Some(&result),
                     ) {
@@ -216,6 +234,11 @@ impl SandboxManager {
                     tool_arguments: tool_call.arguments.clone(),
                     stream_id: policy.stream_id.clone(),
                     lane_key: policy.lane_key.clone(),
+                    // Attribution for the run timeline's derived `blocked`
+                    // lane (GAP-09): which run, and which of its lanes, is
+                    // actually waiting on this prompt.
+                    task_id: ctx.task_id.clone(),
+                    agent_instance_id: ctx.agent_instance_id.clone(),
                     timestamp: Utc::now(),
                 };
 
@@ -231,6 +254,7 @@ impl SandboxManager {
                     tool_arguments: tool_call.arguments.clone(),
                     stream_id: policy.stream_id.clone(),
                     lane_key: policy.lane_key.clone(),
+                    task_id: ctx.task_id.clone(),
                     timestamp: Utc::now(),
                 });
                 let timeout_secs = policy.confirmation_timeout_secs.unwrap_or(300);
@@ -282,14 +306,14 @@ impl SandboxManager {
                     tool = %tool_call.name,
                     "Tool blocked: fail-closed"
                 );
-                self.emit_security_violation(agent_id, &tool_call.name, &reason);
+                self.emit_security_violation(agent_id, &tool_call.name, &reason, task_id);
                 return Err(reason);
             }
         }
 
         // 4. Circuit breaker check
         if let Err(reason) = self.circuit_breaker.check(agent_id, &tool_call.name) {
-            self.emit_tool_executed(agent_id, &tool_call.name, false, 0);
+            self.emit_tool_executed(agent_id, tool_call, false, 0, task_id, session_id);
             return Err(reason);
         }
 
@@ -303,7 +327,20 @@ impl SandboxManager {
         let registry = self.registry.clone();
         let tool_name = tool_call.name.clone();
         let arguments = tool_call.arguments.clone();
-        let ctx_owned = ctx.clone();
+        // The one place a per-call context is finalized before dispatch, so the
+        // one place the bus is threaded onto it: a tool that announces its own
+        // side effects (`artifact_write`'s `ArtifactWritten`) gets a handle
+        // without every runner construction site learning about it. Nothing
+        // here is keyed on the tool name — the sandbox hands out the bus, the
+        // tool decides whether it has anything to say. A caller that already
+        // supplied one keeps it.
+        let ctx_owned = {
+            let mut owned = ctx.clone();
+            if owned.event_bus.is_none() {
+                owned.event_bus = Some(self.bus.clone());
+            }
+            owned
+        };
 
         let start = std::time::Instant::now();
         let result = if is_exempt {
@@ -322,16 +359,23 @@ impl SandboxManager {
 
         match result {
             Ok(Ok(output)) => {
-                self.emit_tool_executed(agent_id, &tool_call.name, true, duration_ms);
+                self.emit_tool_executed(agent_id, tool_call, true, duration_ms, task_id, session_id);
                 self.circuit_breaker
                     .record_success(agent_id, &tool_call.name);
                 Ok(output)
             }
             Ok(Err(err)) => {
-                self.emit_tool_executed(agent_id, &tool_call.name, false, duration_ms);
-                if is_transient_tool_error(&err) {
+                self.emit_tool_executed(agent_id, tool_call, false, duration_ms, task_id, session_id);
+                // A withheld capability is a governance decision, not a failure
+                // of the tool (ADR-030's S4). The refusal quotes the
+                // extension's own error detail, which routinely contains
+                // "timed out" — so counting it let a few refused calls open the
+                // breaker for this agent, and an open breaker outlives the
+                // reload that fixes the extension. Nothing here backs off into
+                // success.
+                if is_transient_tool_error(&err) && !is_withheld_refusal(&err) {
                     self.circuit_breaker
-                        .record_failure(agent_id, &tool_call.name);
+                        .record_failure_for_task(agent_id, &tool_call.name, task_id);
                 }
                 Err(err)
             }
@@ -340,20 +384,29 @@ impl SandboxManager {
                     "Tool '{}' timed out after {}s",
                     tool_call.name, policy.max_tool_runtime_secs
                 );
-                self.emit_security_violation(agent_id, &tool_call.name, &reason);
+                self.emit_security_violation(agent_id, &tool_call.name, &reason, task_id);
                 // Timeouts are transient — record for circuit breaker
                 self.circuit_breaker
-                    .record_failure(agent_id, &tool_call.name);
+                    .record_failure_for_task(agent_id, &tool_call.name, task_id);
                 Err(reason)
             }
         }
     }
 
-    fn emit_security_violation(&self, agent_id: &str, tool_name: &str, reason: &str) {
+    /// `task_id` is the run the refused call belonged to (GAP-10), or `None`
+    /// outside one — never guessed from the agent.
+    fn emit_security_violation(
+        &self,
+        agent_id: &str,
+        tool_name: &str,
+        reason: &str,
+        task_id: Option<&str>,
+    ) {
         self.bus.publish(SystemEvent::SecurityViolation {
             agent_id: agent_id.to_string(),
             tool_name: tool_name.to_string(),
             reason: reason.to_string(),
+            task_id: task_id.map(|t| t.to_string()),
             timestamp: Utc::now(),
         });
 
@@ -362,12 +415,14 @@ impl SandboxManager {
             let detail = serde_json::json!({
                 "tool_name": tool_name,
                 "reason": reason,
+                "task_id": task_id,
             });
             let result = serde_json::json!({ "outcome": "denied" });
             let repo = openalpaca_storage::repository::EventLogRepository::new(db);
-            if let Err(e) = repo.log(
+            if let Err(e) = repo.log_for_task(
                 "security_violation",
                 Some(agent_id),
+                task_id,
                 Some(&detail),
                 Some(&result),
             ) {
@@ -376,12 +431,29 @@ impl SandboxManager {
         }
     }
 
-    fn emit_tool_executed(&self, agent_id: &str, tool_name: &str, success: bool, duration_ms: u64) {
+    /// `session_id` is the turn's session when the agentic loop is logging
+    /// this call (§5.4). With the call's `tool_use_id` it is how the session
+    /// writer finds the audit row this event writes and merges its `log_seq`
+    /// and previews onto it (R51) — the daemon's insert itself is
+    /// unconditional, because the writer's copy is best-effort and an audit
+    /// row is not.
+    fn emit_tool_executed(
+        &self,
+        agent_id: &str,
+        tool_call: &ToolCall,
+        success: bool,
+        duration_ms: u64,
+        task_id: Option<&str>,
+        session_id: Option<&str>,
+    ) {
         self.bus.publish(SystemEvent::ToolExecuted {
             agent_id: agent_id.to_string(),
-            tool_name: tool_name.to_string(),
+            tool_name: tool_call.name.clone(),
             success,
             duration_ms,
+            task_id: task_id.map(|t| t.to_string()),
+            session_id: session_id.map(|s| s.to_string()),
+            tool_use_id: Some(tool_call.id.clone()).filter(|id| !id.is_empty()),
             timestamp: Utc::now(),
         });
     }

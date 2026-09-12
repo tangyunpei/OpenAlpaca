@@ -172,6 +172,7 @@ async fn steer_routing_eval() {
     use openalpaca_core::context::{SharedContext, TaskEntryStatus};
     use openalpaca_core::daemon_config::DaemonConfig;
     use openalpaca_core::events::SystemEvent;
+    use openalpaca_core::gateway::HandleRequest;
     use openalpaca_core::lane::LaneManager;
     use openalpaca_core::middleware::prompt::SystemPersona;
     use openalpaca_core::orchestrator::{Orchestrator, skill_catalog, skill_router};
@@ -270,18 +271,16 @@ async fn steer_routing_eval() {
         let mut rx = bus.subscribe();
         let request_id = Uuid::new_v4();
         let reply = orch
-            .handle_message(
+            .handle_message(HandleRequest::new(
                 request_id,
-                "cli".to_string(),
+                "cli",
                 item.message.clone(),
                 // System principal: passes the trust gate and keeps the
                 // background user-trait extraction (a real LLM call) off.
                 Principal::System,
                 Scope::Global,
                 lane_key.clone(),
-                None,
-                None,
-            )
+            ))
             .await;
 
         // Score by observing what actually happened during the turn.

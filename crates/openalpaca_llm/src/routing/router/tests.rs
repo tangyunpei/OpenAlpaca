@@ -1151,3 +1151,115 @@ async fn test_streaming_non_retryable_error_fails_immediately() {
         "Non-retryable errors should fail immediately"
     );
 }
+
+// ── R58(c): the CLI backend does not outlive the provider it belongs to ─────
+
+/// A disable leaves exactly one trace in the router: the provider is gone from
+/// `providers`. The CLI-backend branch of the fallback resolves its target
+/// from the *model registry*, which is a different map, so without this gate a
+/// call naming a model of the provider the owner just switched off could still
+/// be served — by Claude Code or Codex on that owner's machine.
+#[tokio::test]
+async fn the_cli_backend_will_not_serve_a_provider_that_is_not_loaded() {
+    let cli_provider = Arc::new(MockProvider::new(
+        "claude_cli",
+        vec![Ok(MockProvider::ok_response("claude_cli"))],
+    ));
+
+    // No `providers` entry — this is what a disabled provider looks like.
+    let router = LlmRouter::new(
+        HashMap::new(),
+        ModelRegistry::with_defaults(),
+        HashMap::new(),
+        Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+        "claude-sonnet-4-5-20250929".to_string(),
+    );
+    router.register_cli_backend(ProviderType::Anthropic, cli_provider.clone());
+
+    let err = router
+        .try_fallback("claude-sonnet-4-5-20250929", &make_request(None))
+        .await
+        .expect_err("a provider that is not loaded may not be served at all");
+
+    assert!(matches!(err, LlmRouterError::AllFallbacksFailed), "{err:?}");
+    assert_eq!(
+        cli_provider.call_count.load(Ordering::SeqCst),
+        0,
+        "the CLI backend was never reached"
+    );
+}
+
+// ── R59: a disable must not wait on an in-flight call ───────────────────────
+
+/// Enters the provider, says so, and then takes its time.
+struct SlowProvider {
+    started: tokio::sync::mpsc::UnboundedSender<()>,
+    delay: std::time::Duration,
+}
+
+#[async_trait]
+impl LlmProvider for SlowProvider {
+    fn name(&self) -> &str {
+        "slow"
+    }
+    fn supports_tools(&self) -> bool {
+        false
+    }
+    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        let _ = self.started.send(());
+        tokio::time::sleep(self.delay).await;
+        Ok(MockProvider::ok_response("claude-sonnet-4-5-20250929"))
+    }
+    async fn chat_with_key(
+        &self,
+        _key: &str,
+        request: ChatRequest,
+    ) -> Result<ChatResponse, LlmError> {
+        self.chat(request).await
+    }
+}
+
+/// `deregister_provider`'s `remove` takes a DashMap shard's write lock
+/// **synchronously**, inside an async task. While `try_model` held its `Ref`
+/// across the network call, a disable issued mid-call parked the calling worker
+/// thread for the length of that call — up to two 30 s rate-limit wait cycles —
+/// and the HTTP `PUT` behind it did not answer until then.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_disable_during_an_in_flight_call_does_not_wait_for_it() {
+    let (started, mut arrived) = tokio::sync::mpsc::unbounded_channel();
+    let provider = Arc::new(SlowProvider {
+        started,
+        delay: std::time::Duration::from_millis(600),
+    });
+    let router = Arc::new(LlmRouter::single_provider(
+        provider,
+        ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    ));
+
+    let call = tokio::spawn({
+        let router = Arc::clone(&router);
+        async move { router.complete(make_request(None)).await }
+    });
+    arrived.recv().await.expect("the call reached the provider");
+
+    let before = std::time::Instant::now();
+    let removed = router.deregister_provider(&ProviderType::Anthropic);
+    let waited = before.elapsed();
+
+    assert!(
+        waited < std::time::Duration::from_millis(200),
+        "the disable waited {waited:?} on an in-flight call"
+    );
+    assert!(!removed.is_empty(), "the models went with it");
+    assert!(
+        !router.has_provider(&ProviderType::Anthropic),
+        "and so did the provider"
+    );
+
+    let response = call
+        .await
+        .expect("join")
+        .expect("the in-flight call finishes on its own Arc");
+    assert_eq!(response.model, "claude-sonnet-4-5-20250929");
+}

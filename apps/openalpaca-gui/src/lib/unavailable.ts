@@ -1,0 +1,269 @@
+/**
+ * Honest degradation.
+ *
+ * The design shows surfaces the daemon cannot serve (API_MAP §3). Rather than
+ * inventing placeholder rows that look like real data, every such surface goes
+ * through this module: the adapter returns a typed `Unavailable`, and the view
+ * renders the design's own empty-state copy plus a muted note naming the
+ * missing API.
+ *
+ * The registry below is the single source of truth for those notes **and** for
+ * the gap report — the hand-off document is generated from this table, so it
+ * cannot drift from what the UI actually says.
+ *
+ * Rule: never fabricate. If it is not in the registry and not on the wire, it
+ * does not render.
+ */
+
+export type GapId = "GAP-17" | "GAP-20";
+
+export type GapFixSize = "XS" | "S" | "S–M" | "M" | "L";
+
+export interface GapDescriptor {
+  id: GapId;
+  /** Reads as "{label} not yet available" in the UI note. */
+  label: string;
+  /** The route or field that does not exist. */
+  missingApi: string;
+  /** What API_MAP §3 proposes adding to the daemon. */
+  proposedEndpoint: string;
+  /** Which design surfaces this blocks. */
+  blocks: string;
+  fixSize: GapFixSize;
+  /** Set when "{label} not yet available" would read wrong. */
+  noteOverride?: string;
+}
+
+export const GAPS: Record<GapId, GapDescriptor> = {
+  // GAP-02 (steering was chat-text-only) closed with Phase 5:
+  // `POST /v1/tasks/{id}/steer` pushes into the same rail the `/steer ` chat
+  // prefix does, but addressed at a *run* — the composer's steer mode now aims
+  // at the run the user picked instead of at whatever the lane happens to be
+  // running, and the queue answers `accepted`/`inbox_depth` rather than
+  // nothing. The chat prefix is untouched; it is still the CLI's and
+  // Telegram's only channel.
+  // GAP-03 (no follow-up API) closed with Phase 5:
+  // `GET|POST /v1/lanes/{lane_key}/followups` and
+  // `DELETE …/{id}` serve the queue the model's `queue_followup` tool already
+  // wrote to. The `Queue follow-up` control and the pending list are real, and
+  // cancel is a compare-and-swap against the daemon's autostart — a follow-up
+  // that has already been claimed answers `409` rather than reporting a cancel
+  // that did not happen.
+  // GAP-04 (no artifact resource), GAP-05 (no versions or diff), GAP-11
+  // (content unloadable by the browser) and GAP-12 (no server-side pins) all
+  // closed with Phase 3: `/v1/artifacts*` lists, reads, versions, diffs and
+  // pins, the content routes take `?token=` inline so an `<img>` can load them,
+  // and `PUT …/pin` made the pin server state. HTML/SVG previews are *shown as
+  // source* by choice, not by absence — rendering agent markup in the webview
+  // is a security review, not a missing route, so it is not a gap. What that
+  // choice looks like in the code (API_MAP GAP-11, 4ae49d2): markup is planned
+  // as `kind: "code"` (`views/library/preview.ts`) and nothing anywhere passes
+  // `kind: "html"`, so `MediaPreview.tsx`'s sanitizing `HtmlPreview` is live
+  // code with no reachable caller — not a renderer waiting on a route.
+  // GAP-06 (no way to re-run or to start a queued run) closed with Phase 5,
+  // and not in the shape §3 proposed: `start` is `POST /v1/tasks/{id}/action
+  // { action: "start" }` and keeps the run's id (D5), but `rerun` is its own
+  // route, `POST /v1/tasks/{id}/rerun`, answering `201` with a *new* id and
+  // the `source_task_id` it was copied from. A re-run is a second run, and the
+  // finished one keeps its row and its result — which is what the user is
+  // re-running against — so the two verbs cannot share a response shape.
+  // GAP-08c (no usage rollup, no served cap) closed in Phase 8 item 7:
+  // `GET /v1/usage/summary?window=today` serves `{ date, total_usd,
+  // by_provider: [{ provider, usd, calls, tokens }], caps }`. `date` is the
+  // daemon's UTC day — the client's own is local and the two disagree for up
+  // to twelve hours — the total is the `llm_usage_daily` rollup for it, and
+  // `by_provider` is that day's `llm_call_log` rows, so the per-provider
+  // token figure is finally today's rather than lifetime.
+  // `caps` is N4 on the wire: `workflow_max_cost_usd` and
+  // `agent_max_cost_usd`, the per-workflow and per-turn limits the daemon
+  // actually enforces. There is **no** `daily_*` key and no daily budget —
+  // adding one would be a new enforcement point in the router, not a label —
+  // so today's total ships with no denominator and the design's progress bar
+  // stays undrawn *by decision*, which is what the panel now says.
+  // GAP-09 (no subagent timeline) closed with Phase 4: `subagent_span` records
+  // each lane from its spawn — start time, label, template, instance and
+  // detail — `GET /v1/tasks/{id}/timeline` serves them, and the `subagent_span`
+  // event moves the swimlanes live. `blocked` and the interrupted-lane rule
+  // are derived at read time rather than stored, so neither can go stale.
+  // GAP-10 (no per-run event log) closed with Phase 4: `event_log.task_id` is
+  // filled by every persistence arm that knows its run, and
+  // `GET /v1/events/history?task_id=&event_type=&before=&limit=` serves the
+  // run's own log as a keyset-paginated envelope. The run detail reads it, so
+  // the card is no longer this session's socket ring with the tool rows
+  // missing.
+  // GAP-13 (the model picker wrote the daemon-wide default) closed in
+  // Phase 8: `POST /v1/chat` takes an optional `model`, validated against the
+  // registry before dispatch — `400 UNKNOWN_MODEL` for an id it does not know,
+  // which includes every model of a disabled provider, because R58b takes
+  // those rows out of the registry. The id reaches that one turn's
+  // `LoopConfig.model` and nothing else: nothing is persisted, so the picker no
+  // longer changes what every other client gets. The response echoes
+  // `model_used`, and the answering model is now stored on the assistant row,
+  // so the transcript still names it after a reload. Lane-scoped *memory* of a
+  // pick (the `preference` KV) is a separate, later decision — this is
+  // request-scoped by design, not by omission.
+  // GAP-14 (no uptime, schema version or log path) closed in Phase 8:
+  // `GET /v1/status` carries `started_at`/`uptime_secs` from the top of the
+  // daemon's own `async_main`, `schema_version` read from the open database
+  // rather than counted from the migration files, and `log_path` — the
+  // CLI-managed `state/logs/daemon.log`, or `null` for a daemon started any
+  // other way, which is the honest answer rather than a path to a file nobody
+  // wrote. It also carries §4.8's two size totals and the boot session-log
+  // sweep, so the Connection panel says what the store costs. The daemon log
+  // is bounded in the same change (16 MB, three generations), because serving
+  // a path to an unbounded file would be an invitation.
+  // GAP-15 (no provider enable/disable) closed in Phase 8:
+  // `PUT /v1/settings/llm/providers/{provider}/enabled` writes the bit to
+  // `llm.toml` through the one atomic writer and then moves the router — a
+  // disable unloads the provider and takes its models out of the registry, an
+  // enable re-registers it and puts the catalogue back. Disabling the provider
+  // that serves the default model answers `409 PROVIDER_IS_DEFAULT` rather
+  // than stranding every request. `enabled` was already on the wire in
+  // `GET /v1/settings/llm`; only the write was missing. The model picker's
+  // `off` group badge is still not drawn — `GET /v1/models` lists models, not
+  // providers, and a disabled provider simply has none there.
+  // The detail half of GAP-17 closed with Phase 8 item 6 (T49):
+  // `GET /v1/connectors` rows carry `source` (the token the count was grouped
+  // by), `registered` (the manager holds a spawned handle) and `messages_7d`
+  // — one grouped query over `conversation_messages` for the last seven UTC
+  // days — and the display name comes off the connector's own factory, so
+  // Discord no longer renders as its raw id. The `unwired` badge was never a
+  // daemon gap: it is the client-side join of the extension rows' `connector`
+  // against this list, and it has always been real.
+  "GAP-17": {
+    id: "GAP-17",
+    label: "Connect service",
+    missingApi:
+      "no route adds a connector — POST /v1/connectors/{id}/config sets a bearer token on one that is already compiled in",
+    proposedEndpoint: "POST /v1/connectors { kind, credentials }",
+    blocks: "The `Connect service` action in Settings → Connectors",
+    fixSize: "M",
+    noteOverride:
+      "Connectors are compiled into the daemon — there is no route that adds one, only a token to set on the ones that exist",
+  },
+  // GAP-18 (the catalog) closed in two halves. The tool half was
+  // `GET /v1/tools` (ADR-030 §8): the Settings → Tools rows are real, and
+  // `enabled` was struck from the claim entirely — that field is derived from
+  // the extension row and does not exist per tool. The skill half is
+  // `GET /v1/skills`: id, name, description, `requires_capabilities`,
+  // triggers, schedule, today's count and provenance, with the same `origin`
+  // rule (null for a file skill, which is on no ENABLE axis). The health rows
+  // are named from it and keep showing their id when the catalog no longer
+  // holds one.
+  // The counts half of GAP-20 closed with P8's replacement data and Phase 8
+  // item 5 (T48) finished it: a template row carries `run_count`,
+  // `last_run_at` and `window`, grouped out of `subagent_span` in one query
+  // per list — `?window=7d|30d|all` (default `7d`, 400 `UNKNOWN_WINDOW`
+  // otherwise), counting *completed* runs only (`state != 'running'`), so
+  // `12 runs · 7d` is the daemon's own number over the window it says it used.
+  // What is left is the toggle: a template has no `enabled` field and
+  // nothing would enforce one in the spawn path.
+  "GAP-20": {
+    id: "GAP-20",
+    label: "Agent template enable/disable",
+    missingApi:
+      "TemplateResponse has no enabled flag, and nothing enforces one where subagents are spawned",
+    proposedEndpoint: "PUT /v1/agent-templates/{id}/enabled",
+    blocks: "The per-template toggle in Settings → Agents",
+    fixSize: "M",
+    noteOverride:
+      "Templates have no enabled flag — the per-template toggle is not served",
+  },
+  // GAP-21 (a conversation could be neither renamed nor deleted) is closed
+  // with Phase 7a. Its daemon half landed first: migration 039 made a lane
+  // hold many sessions, `PATCH /v1/sessions/{id}` renames one and
+  // `DELETE /v1/sessions/{id}` removes it transactionally (409 while a run it
+  // started is in flight). Its client half is the chat view's conversation
+  // sidebar, which carries both verbs plus archive, activate and "New chat" —
+  // so there is no surface left that shows a conversation it cannot operate.
+  // GAP-22 (the six `plugin_*` variants carrying no `ts`/`instance_id`) is
+  // closed: C7 deleted those variants with `/v1/plugins*`, and the extension
+  // family that replaced them carries both on every frame (ADR-030 §7.3).
+  // GAP-23 (a stored message had no run link and no artifact refs) is closed:
+  // migration 038 added `conversation_messages.task_id`, the delegating turn
+  // and the completion report both write it, the report also writes a
+  // `role='artifact'` link per file its run produced, and both history routes
+  // serve them. The transcript reads the run pill and the chips off history;
+  // the recap *card* stays session-local, because the status, duration and
+  // summary it prints live on the `task_status` frame, not on a message.
+  // GAP-24 (was GAP-19, "plugin install", widened in ADR-030 §9.1 to both
+  // extension kinds) is closed with Phase 8 item 9, in the shape §3 proposed:
+  // `POST /v1/extensions/{kind}` installs a plugin from a local path or writes
+  // a `[servers.<name>]` block, `PUT …/plugin/{id}` replaces a plugin's tree
+  // through T0–T5 → staged rename → the load path, and
+  // `DELETE …/{kind}/{id}?uninstall=true` is the real removal — the flag being
+  // what keeps the bare DELETE the orphan-row verb it always was.
+  // Two things the route surface makes true rather than promising: an install
+  // **grants nothing** (the row lands `unapproved`/`never_seen` and `approve`
+  // is the single action that starts it, with the manifest returned beside it
+  // as the preview), and an uninstall **deletes nothing** (the directory is
+  // moved to `plugins/.trash/`, and the response says where). `source: "url"`
+  // stays declined; it is its own security review.
+};
+
+// ── Result type ─────────────────────────────────────────────────────────────
+
+export interface Available<T> {
+  available: true;
+  data: T;
+}
+
+export interface Unavailable {
+  available: false;
+  /** The gap this surface is waiting on. */
+  gap: GapDescriptor;
+  /** Human sentence for the muted note under the empty state. */
+  reason: string;
+  /** The specific route/field that is missing. */
+  missingApi: string;
+}
+
+export type Availability<T> = Available<T> | Unavailable;
+
+export function available<T>(data: T): Available<T> {
+  return { available: true, data };
+}
+
+/** The note a view shows beside the design's own empty-state copy. */
+export function gapNote(gap: GapDescriptor): string {
+  return gap.noteOverride ?? `${gap.label} not yet available`;
+}
+
+/**
+ * The fuller note an empty state shows: what is missing, and what the daemon
+ * would have to grow for the surface to work. Every view uses this one string
+ * so the same gap never reads two different ways.
+ */
+export function gapDetail(result: Unavailable): string {
+  return `${result.reason} — proposed ${result.gap.proposedEndpoint}`;
+}
+
+export function unavailable(id: GapId, reason?: string): Unavailable {
+  const gap = GAPS[id];
+  return {
+    available: false,
+    gap,
+    reason: reason ?? gapNote(gap),
+    missingApi: gap.missingApi,
+  };
+}
+
+export function isAvailable<T>(
+  result: Availability<T>,
+): result is Available<T> {
+  return result.available;
+}
+
+export function unwrapOr<T>(result: Availability<T>, fallback: T): T {
+  return result.available ? result.data : fallback;
+}
+
+/** Every gap, ordered by id — the source for the generated hand-off report. */
+export function listGaps(): GapDescriptor[] {
+  return Object.values(GAPS).sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/** Gaps that leave a design surface with no data at all. */
+export function listBlockingGaps(): GapDescriptor[] {
+  return listGaps().filter((gap) => gap.noteOverride === undefined);
+}

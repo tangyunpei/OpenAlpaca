@@ -19,6 +19,7 @@ use crate::middleware::prompt::AgentPersona;
 use crate::orchestrator::{ConversationContext, Orchestrator};
 use crate::prompt_ctx::{SectionPriority, sources::{ContextRequest, ExecutionPath}};
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
+use crate::security::capabilities::Allowlist;
 use crate::security::sandbox::SandboxManager;
 use crate::security::sandbox::SandboxPolicy;
 use crate::tools::registry::ToolContext;
@@ -123,6 +124,7 @@ impl Orchestrator {
             task_id: None,
             owner_id: owner_id.map(|s| s.to_string()),
             workspace_id: scope_ctx.workspace_id.clone(),
+            request_workspace_root: scope_ctx.request_workspace_root.clone(),
             skill_stack: vec![],
             effective_constraints: None,
             lane_key: Some(lane_key.to_string()),
@@ -134,9 +136,17 @@ impl Orchestrator {
             // items persist it for re-entry scope; None elsewhere (other
             // paths carry no tools that read it).
             workspace_path: match &loop_overrides {
-                Some(super::LoopOverrides::MainLoop { workspace_path }) => workspace_path.clone(),
+                Some(super::LoopOverrides::MainLoop { workspace_path, .. }) => {
+                    workspace_path.clone()
+                }
                 _ => None,
             },
+            // No agent instance: this path is not a subagent lane.
+            agent_instance_id: None,
+            // Filled in by the sandbox at dispatch (T28), which owns the bus.
+            session_id: None,
+            session_log: None,
+            event_bus: None,
         };
 
         // Apply loop overrides if provided (main loop)
@@ -145,9 +155,9 @@ impl Orchestrator {
                 Some(super::LoopOverrides::MainLoop { .. }) => {
                     // Routing V2 main loop: budgets from
                     // `[orchestrator.routing]`; tool surface = base picks ∪
-                    // the per-request set (core tools, MCP/plugin extension
-                    // tools minus the global deny list, `invoke_skill`, and —
-                    // when active — the workflow tools).
+                    // the per-request set (core tools, the enabled MCP/plugin
+                    // extension tools, `invoke_skill`, and — when active —
+                    // the workflow tools).
                     let routing = self.daemon_config.load().orchestrator.routing.clone();
                     let set = crate::tools::builtins::main_loop_tool_set(
                         self.task_dispatcher.clone(),
@@ -165,26 +175,21 @@ impl Orchestrator {
                         &tool_ctx,
                     );
                     // Base surface: suggested picks ("core_union", default) or
-                    // the whole registry minus the global deny list ("full").
-                    // Either way `set.definitions` is unioned in below, so
-                    // extension tools and `invoke_skill` are reachable in both
-                    // modes (deduped by name).
+                    // the whole registry ("full"). Either way
+                    // `set.definitions` is unioned in below, so extension
+                    // tools and `invoke_skill` are reachable in both modes
+                    // (deduped by name).
                     let mut defs: Vec<openalpaca_llm::ToolDefinition> =
                         if routing.tool_selection == "full" {
-                            let deny = self
-                                .daemon_config
-                                .load()
-                                .execution
-                                .skill_defaults
-                                .global_tool_deny
-                                .clone();
                             self.tool_registry
                                 .registered_tool_names()
                                 .iter()
-                                .filter(|n| !deny.contains(n))
-                                .filter_map(|n| {
-                                    self.tool_registry.get(n).map(|t| t.definition.clone())
-                                })
+                                .filter_map(|n| self.tool_registry.get(n))
+                                // The third assembly site: it never passes
+                                // through `extension_tool_defs`, so it carries
+                                // the same state filter (design §6.2 #2).
+                                .filter(|t| self.tool_registry.extension_is_available(t))
+                                .map(|t| t.definition.clone())
                                 .collect()
                         } else {
                             tool_defs
@@ -201,7 +206,11 @@ impl Orchestrator {
                         Some(set),
                     )
                 }
-                None => (tool_defs, None, None, None),
+                // `None` (no override at all) and `ModelOnly` (a model
+                // override that isn't the main loop — bootstrap, or an
+                // attachment-only forced-simple turn) both skip the main
+                // loop's tool-surface assembly.
+                _ => (tool_defs, None, None, None),
             };
 
         // Keep the guard/telemetry name list in sync with the actual surface
@@ -212,6 +221,44 @@ impl Orchestrator {
             tool_names
         };
 
+        // §5.5: a main-loop turn narrates into the lane's active session, with
+        // `task_id` absent — that absence is what tells a reader a record came
+        // from chat rather than from a run. The gateway resolved (and, on a
+        // project switch, created) this session moments ago for the same turn;
+        // this reads the answer back rather than re-deriving it, and a lane
+        // with no session simply has no log.
+        let session_log = match (self.shared_context.session_log(), self.db.as_ref()) {
+            (Some(service), Some(db)) => openalpaca_storage::ConversationRepository::new(db)
+                .active_session_id(lane_key)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(lane_key, "Failed to resolve the lane's session log: {e}");
+                    None
+                })
+                .map(|id| service.open(&id, Some(lane_key), Some(source), None)),
+            _ => None,
+        };
+
+        // §5.4's one threshold, shared by the spill and the inline cut.
+        let inline_bytes = self
+            .daemon_config
+            .load()
+            .orchestrator
+            .sessions
+            .tool_result_inline_bytes;
+
+        // GAP-13: the model this one turn runs on. The route validated the id
+        // against `model_registry()` before dispatch, so a name that reaches
+        // here resolves — which is what keeps the context window below honest
+        // instead of silently falling back to 200k. Without an override this is
+        // exactly `self.loop_config.model`, and either way the stored config is
+        // left alone: the override dies with the request.
+        let turn_model = match &loop_overrides {
+            Some(super::LoopOverrides::MainLoop { model_override, .. })
+            | Some(super::LoopOverrides::ModelOnly { model_override }) => model_override.clone(),
+            None => None,
+        }
+        .or_else(|| self.loop_config.model.clone());
+
         let (tools_for_loop, policy_opt, config_for_loop);
         if !tool_defs.is_empty() {
             tracing::info!(
@@ -220,13 +267,17 @@ impl Orchestrator {
                 tool_names
             );
 
-            // Lowercased: `check_agent_capability` lowercases the tool name
-            // and expects allow-list entries pre-normalized (matters for
-            // mixed-case MCP/plugin tool names on the default surface).
-            let resolved: Vec<String> = tool_defs.iter().map(|t| t.name.to_lowercase()).collect();
             policy_opt = Some(SandboxPolicy {
                 agent_id: "orchestrator".to_string(),
-                allowed_capabilities: resolved,
+                // Closed set: the main loop may call exactly the surface it was
+                // handed (this arm only runs when that surface is non-empty).
+                // `Allowlist::only` lowercases: `check_agent_capability`
+                // lowercases the tool name and compares verbatim, which
+                // matters for mixed-case MCP/plugin names on the default
+                // surface (X-23).
+                allowed_capabilities: Allowlist::only(
+                    tool_defs.iter().map(|t| t.name.as_str()),
+                ),
                 denied_capabilities: vec![],
                 require_confirmation_for: vec![],
                 max_tool_calls: None,
@@ -252,18 +303,30 @@ impl Orchestrator {
                 // on the simple-query loop.
                 enable_caching: true,
                 thinking: None,
+                session_log: session_log.clone(),
+                tool_result_inline_bytes: inline_bytes,
+                model: turn_model,
                 ..self.loop_config.clone()
             };
             tools_for_loop = tool_defs;
         } else {
             tools_for_loop = vec![];
             policy_opt = None;
-            config_for_loop = self.loop_config.clone();
+            config_for_loop = LoopConfig {
+                session_log: session_log.clone(),
+                tool_result_inline_bytes: inline_bytes,
+                model: turn_model,
+                ..self.loop_config.clone()
+            };
         }
 
         // ── Resolve model context window (drives Layer 5 trimming + budget) ──
         //
-        // Default to 200_000 when no LLM router is present (echo-stub path).
+        // Default to 200_000 when no LLM router is present (echo-stub path) or
+        // when the loop names no model and the router's own default governs.
+        // GAP-13's override is the one thing that names a model here, and the
+        // route refuses an id the registry does not know — so a `Some` that
+        // reaches this lookup resolves, and the window is the real one.
         let model_window = self.llm_router.as_ref()
             .and_then(|r| config_for_loop.model.as_deref()
                 .and_then(|m| r.model_registry().get_model_info(m)))
@@ -516,7 +579,7 @@ impl Orchestrator {
             + composed.token_budget.dynamic_context_tokens)
             as usize;
         budget.register_section("system_prompt", system_prompt_tokens);
-        budget.register_section("tools", tools_for_loop.len() * 200);
+        budget.register_section("tools", crate::runner::estimate_tools_tokens(&tools_for_loop));
 
         let (response_content, is_structured) = if let Some(ref router) = self.llm_router {
             // The messages vec came out of the compose engine above, which
@@ -721,6 +784,9 @@ impl Orchestrator {
                 input_tokens: result.total_input_tokens,
                 output_tokens: result.total_output_tokens,
                 cost_usd: call_cost,
+                // A main-loop turn belongs to no run — the same `None` the
+                // usage row beside it records (GAP-10).
+                task_id: None,
                 timestamp: Utc::now(),
             });
 
@@ -801,6 +867,7 @@ impl Orchestrator {
         query: &str,
         lane_key: &str,
         ctx: &ConversationContext,
+        model_override: Option<String>,
     ) -> Result<String, String> {
         let router = self.llm_router.as_ref().ok_or_else(|| "No LLM router".to_string())?;
 
@@ -910,11 +977,17 @@ impl Orchestrator {
 
         let messages: Vec<ChatMessage> = composed.messages.as_ref().clone();
 
+        // GAP-13 fix round 1 (finding #1): the social fast path is one of
+        // the branches that runs a model, so the request's override must
+        // reach `LoopConfig.model` here too — same fallback shape as
+        // `turn_model` above (override, else the daemon default, unchanged
+        // when the request named none).
         let config = LoopConfig {
             max_rounds: 1,
             max_tools_per_round: 0,
             enable_caching: false,
             thinking: None,
+            model: model_override.or_else(|| self.loop_config.model.clone()),
             ..self.loop_config.clone()
         };
 
@@ -989,6 +1062,8 @@ impl Orchestrator {
             input_tokens: result.total_input_tokens,
             output_tokens: result.total_output_tokens,
             cost_usd: call_cost,
+            // As above: a main-loop turn belongs to no run (GAP-10).
+            task_id: None,
             timestamp: Utc::now(),
         });
 

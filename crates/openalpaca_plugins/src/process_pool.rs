@@ -141,6 +141,7 @@ impl PluginProcess {
                     "plugin '{}' initialize did not return ready: true",
                     plugin_id
                 ),
+                data: None,
             });
         }
 

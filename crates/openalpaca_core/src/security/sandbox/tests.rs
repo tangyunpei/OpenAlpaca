@@ -67,7 +67,9 @@ fn make_sandbox() -> SandboxManager {
 fn make_policy(agent_id: &str) -> SandboxPolicy {
     SandboxPolicy {
         agent_id: agent_id.to_string(),
-        allowed_capabilities: vec![],
+        // These tests exercise sanitization, confirmation, the circuit breaker
+        // and timeouts — not the allow axis.
+        allowed_capabilities: Allowlist::Unrestricted,
         denied_capabilities: vec![],
         require_confirmation_for: vec![],
         max_tool_calls: None,
@@ -90,6 +92,15 @@ fn make_tool_call(name: &str) -> ToolCall {
 fn make_ctx(agent_id: &str) -> ToolContext {
     ToolContext {
         agent_id: Some(agent_id.to_string()),
+        ..Default::default()
+    }
+}
+
+/// A context that belongs to a run — what every call inside a workflow has.
+fn make_ctx_for_task(agent_id: &str, task_id: &str) -> ToolContext {
+    ToolContext {
+        agent_id: Some(agent_id.to_string()),
+        task_id: Some(task_id.to_string()),
         ..Default::default()
     }
 }
@@ -117,6 +128,21 @@ async fn test_denied_capability() {
     let result = sandbox.execute_tool(&tc, &policy, &ctx).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("denied"));
+}
+
+/// A0 (bug A): an allow list that resolved to nothing blocks execution — it is
+/// never read as "unconstrained".
+#[tokio::test]
+async fn test_empty_allowlist_blocks_execution() {
+    let sandbox = make_sandbox();
+    let mut policy = make_policy("agent1");
+    policy.allowed_capabilities = Allowlist::Only(vec![]);
+    let tc = make_tool_call("web_search");
+    let ctx = make_ctx("agent1");
+
+    let result = sandbox.execute_tool(&tc, &policy, &ctx).await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("not in allow list"));
 }
 
 #[tokio::test]
@@ -194,6 +220,95 @@ async fn test_tool_event_emitted() {
             assert!(success);
         }
         other => panic!("Expected ToolExecuted, got: {:?}", other),
+    }
+}
+
+// ── GAP-10: the run the call belonged to ────────────────────────────────────
+
+/// `ctx.task_id` is already at the emit site; the frame now carries it, so the
+/// event log can be filtered to one run instead of guessing from `agent_id`.
+#[tokio::test]
+async fn tool_executed_carries_the_run_it_belonged_to() {
+    let bus = EventBus::default();
+    let mut rx = bus.subscribe();
+    let sandbox = SandboxManager::new(make_registry(), bus, &CircuitBreakerConfig::default());
+    let policy = make_policy("agent1");
+    let tc = make_tool_call("web_search");
+    let ctx = make_ctx_for_task("agent1", "t-1");
+
+    let _ = sandbox.execute_tool(&tc, &policy, &ctx).await;
+
+    match rx.try_recv().unwrap() {
+        SystemEvent::ToolExecuted { task_id, .. } => {
+            assert_eq!(task_id.as_deref(), Some("t-1"));
+        }
+        other => panic!("Expected ToolExecuted, got: {:?}", other),
+    }
+}
+
+/// A refusal is attributed the same way — a run whose tool was denied shows the
+/// denial in its own log.
+#[tokio::test]
+async fn security_violation_carries_the_run_it_belonged_to() {
+    let bus = EventBus::default();
+    let mut rx = bus.subscribe();
+    let sandbox = SandboxManager::new(make_registry(), bus, &CircuitBreakerConfig::default());
+    let mut policy = make_policy("agent1");
+    policy.denied_capabilities = vec!["web_search".to_string()];
+    let tc = make_tool_call("web_search");
+    let ctx = make_ctx_for_task("agent1", "t-1");
+
+    let _ = sandbox.execute_tool(&tc, &policy, &ctx).await;
+
+    match rx.try_recv().unwrap() {
+        SystemEvent::SecurityViolation { task_id, .. } => {
+            assert_eq!(task_id.as_deref(), Some("t-1"));
+        }
+        other => panic!("Expected SecurityViolation, got: {:?}", other),
+    }
+}
+
+/// A call outside any run — a main-loop turn — carries no run, and says so
+/// rather than borrowing one.
+#[tokio::test]
+async fn a_call_outside_a_run_carries_no_task_id() {
+    let bus = EventBus::default();
+    let mut rx = bus.subscribe();
+    let sandbox = SandboxManager::new(make_registry(), bus, &CircuitBreakerConfig::default());
+    let policy = make_policy("agent1");
+    let tc = make_tool_call("web_search");
+    let ctx = make_ctx("agent1");
+
+    let _ = sandbox.execute_tool(&tc, &policy, &ctx).await;
+
+    match rx.try_recv().unwrap() {
+        SystemEvent::ToolExecuted { task_id, .. } => assert_eq!(task_id, None),
+        other => panic!("Expected ToolExecuted, got: {:?}", other),
+    }
+}
+
+/// The confirmation prompt is a run event too — §4.4's `blocked` lane and the
+/// run's own log both need to know which run is waiting.
+#[tokio::test]
+async fn tool_confirmation_requested_carries_the_run_it_belonged_to() {
+    let bus = EventBus::default();
+    let mut rx = bus.subscribe();
+    let mut sandbox =
+        SandboxManager::new(make_registry(), bus, &CircuitBreakerConfig::default());
+    sandbox.set_confirmation_broker(Arc::new(ConfirmationBroker::new()));
+    let mut policy = make_policy("agent1");
+    policy.require_confirmation_for = vec!["web_search".to_string()];
+    policy.confirmation_timeout_secs = Some(1);
+    let tc = make_tool_call("web_search");
+    let ctx = make_ctx_for_task("agent1", "t-1");
+
+    let _ = sandbox.execute_tool(&tc, &policy, &ctx).await;
+
+    match rx.try_recv().unwrap() {
+        SystemEvent::ToolConfirmationRequested { task_id, .. } => {
+            assert_eq!(task_id.as_deref(), Some("t-1"));
+        }
+        other => panic!("Expected ToolConfirmationRequested, got: {:?}", other),
     }
 }
 
@@ -336,6 +451,103 @@ async fn test_confirmation_timeout() {
         err.contains("timed out"),
         "Should timeout, got: {}",
         err
+    );
+}
+
+/// ADR-030's S4 refusal is a governance decision, not a failure of the tool —
+/// and a `Failed` extension's refusal quotes the extension's own error detail,
+/// which routinely says "timed out". Counted as a transient failure, a handful
+/// of refused calls opened the breaker for this agent, and an open breaker
+/// outlives the reload that fixes the extension.
+#[tokio::test]
+async fn a_withheld_capability_never_opens_the_circuit_breaker() {
+    use crate::tools::extensions::{ExtensionId, ExtensionState, FailureReason, Transition};
+
+    let registry = Arc::new(ToolRegistry::default());
+    let ext = ExtensionId::mcp("github");
+    let generation = match registry
+        .extensions()
+        .begin(&ext, ExtensionState::Enabling, None)
+    {
+        Transition::Took(g) => g,
+        other => panic!("E0 refused: {other:?}"),
+    };
+    registry.extensions().restore(&ext);
+    registry
+        .extensions()
+        .record_tools(&ext, ["github__create_issue".to_string()]);
+    assert!(
+        registry
+            .extensions()
+            .commit(&ext, ExtensionState::Enabled)
+    );
+    // An MCP-backed tool: the gate is keyed on the backend's server name and
+    // the generation stamped into this handle.
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "github__create_issue".to_string(),
+                description: "Create an issue".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::Mcp {
+                client: Arc::new(openalpaca_mcp::McpClient::disconnected_for_tests("github")),
+                remote_name: "create_issue".to_string(),
+                server_name: "github".to_string(),
+                generation,
+            },
+            provides_capabilities: vec!["github__create_issue".to_string()],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "mcp:github".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+    // The child died on a handshake that timed out — the detail the S4 refusal
+    // quotes back to the model.
+    assert!(registry.extensions().mark_failed(
+        &ext,
+        generation,
+        FailureReason::Crashed,
+        "stdio handshake timed out after 10s",
+    ));
+
+    let sandbox = SandboxManager::new(
+        registry,
+        EventBus::default(),
+        &CircuitBreakerConfig::default(),
+    );
+    let policy = make_policy("agent-1");
+    let ctx = make_ctx_for_task("agent-1", "task-1");
+
+    // Well past the default failure_threshold of 5.
+    for attempt in 0..12 {
+        let err = sandbox
+            .execute_tool(&make_tool_call("github__create_issue"), &policy, &ctx)
+            .await
+            .expect_err("a failed extension's tool is withheld");
+        assert!(
+            crate::tools::extensions::is_withheld_refusal(&err),
+            "attempt {attempt} must be the S4 refusal, not a tool error: {err}"
+        );
+        assert!(
+            err.contains("timed out"),
+            "and it quotes the detail the breaker used to key on: {err}"
+        );
+    }
+
+    // The breaker is untouched: the next call is still refused by the gate, not
+    // by a breaker that has to time out before the owner's reload can help.
+    assert!(
+        sandbox
+            .circuit_breaker
+            .check("agent-1", "github__create_issue")
+            .is_ok(),
+        "a withheld capability must never open the breaker"
     );
 }
 

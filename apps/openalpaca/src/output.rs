@@ -62,7 +62,9 @@ pub fn status_color(status: &str) -> ColoredString {
     match status.to_lowercase().as_str() {
         "running" | "active" | "ok" | "idle" | "success" | "completed" => status.green(),
         "failed" | "error" | "disabled" | "cancelled" => status.red(),
-        "paused" | "waiting" | "queued" | "pending" => status.yellow(),
+        // `interrupted` (§5.6b) is terminal but is not a failure — the daemon
+        // went away — so it is not painted red.
+        "paused" | "waiting" | "queued" | "pending" | "interrupted" => status.yellow(),
         _ => status.dimmed(),
     }
 }

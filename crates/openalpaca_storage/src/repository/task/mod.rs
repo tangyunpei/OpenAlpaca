@@ -1,10 +1,98 @@
 //! Repository for task operations
 
+use std::collections::HashMap;
+
 use crate::Database;
 use crate::models::task::{OutcomeKind, Task, TaskStatus};
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{OptionalExtension, Row};
+
+/// One row the boot sweep is about to call `interrupted` (§5.6b).
+///
+/// Read before the flip, because the recovery pass needs the run's session to
+/// find its undrained steering, and after the flip the rows are no longer
+/// distinguishable from any other terminal run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NonTerminalRun {
+    pub id: String,
+    /// The conversation the run was started from (migration 039). `None` for a
+    /// run dispatched on a lane with no session row, and for pre-039 rows —
+    /// such a run has no log to recover steering from.
+    pub session_id: Option<String>,
+    /// The `task.source_lane` column: the lane a recovered follow-up belongs
+    /// to.
+    pub lane_key: String,
+    /// The status the row carried when the daemon died — `queued`, `running`
+    /// or `paused`. Kept as the raw string so the boot log can name it.
+    pub status: String,
+}
+
+/// How many ids [`TaskRepository::titles_for`] puts in one `IN (…)`. Well under
+/// SQLite's default variable limit (32 766 since 3.32; 999 in the releases
+/// before it), and one statement covers a full artifact page, whose own limit is
+/// smaller than this.
+const TITLES_FOR_CHUNK: usize = 500;
+
+/// Every column [`TaskRepository::row_to_task`] reads, in the order it reads
+/// them. Written once: the list used to be copied into each `SELECT`, and a
+/// column added to the table but to only some of the copies is invisible until
+/// something asks for it (migration 037's `source_task_id` was exactly that).
+const TASK_COLUMNS: &str = "id, title, description, status, priority, progress_current, \
+     progress_total, result_summary, created_by, source_lane, created_at, updated_at, \
+     completed_at, state_json, state_version, outcome_json, outcome_kind, artifact_count, \
+     workspace_id, source_task_id, session_id";
+
+/// The placeholder tuple matching [`TASK_COLUMNS`].
+const TASK_VALUES: &str = "(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, \
+     ?16, ?17, ?18, ?19, ?20, ?21)";
+
+/// [`TaskRepository::upsert_queued`]'s conflict tail — the row is reset to a
+/// fresh queued run, keeping only what makes it *this* row (`id`, `created_at`,
+/// `priority`).
+const RELAUNCH_ON_CONFLICT: &str = "ON CONFLICT(id) DO UPDATE SET \
+     title = excluded.title, \
+     description = excluded.description, \
+     status = excluded.status, \
+     progress_current = NULL, \
+     progress_total = NULL, \
+     result_summary = NULL, \
+     created_by = excluded.created_by, \
+     source_lane = excluded.source_lane, \
+     updated_at = excluded.updated_at, \
+     completed_at = NULL, \
+     state_json = NULL, \
+     state_version = 0, \
+     outcome_json = NULL, \
+     outcome_kind = NULL, \
+     artifact_count = 0, \
+     workspace_id = excluded.workspace_id, \
+     source_task_id = excluded.source_task_id, \
+     session_id = excluded.session_id";
+
+/// [`TaskRepository::upsert_queued_preserving_state`]'s conflict tail — the
+/// row goes live again **over what the last attempt accumulated**.
+///
+/// The difference from [`RELAUNCH_ON_CONFLICT`] is exactly the columns a run
+/// builds up as it works: `state_json` (and the `state_version` its next
+/// writer must match), `outcome_json`, `outcome_kind` and `artifact_count`.
+/// What describes a run that has *stopped* still goes — the summary, the
+/// progress counters and `completed_at` — because the run this row names has
+/// not stopped.
+const RESUME_ON_CONFLICT: &str = "ON CONFLICT(id) DO UPDATE SET \
+     title = excluded.title, \
+     description = excluded.description, \
+     status = excluded.status, \
+     progress_current = NULL, \
+     progress_total = NULL, \
+     result_summary = NULL, \
+     created_by = excluded.created_by, \
+     source_lane = excluded.source_lane, \
+     updated_at = excluded.updated_at, \
+     completed_at = NULL, \
+     workspace_id = excluded.workspace_id, \
+     source_task_id = excluded.source_task_id, \
+     session_id = excluded.session_id";
 
 /// Repository for task CRUD operations.
 pub struct TaskRepository<'a> {
@@ -20,10 +108,62 @@ impl<'a> TaskRepository<'a> {
 
     /// Create a new task.
     pub fn create(&self, task: &Task) -> Result<()> {
+        self.insert_row(task, "", "Failed to create task")
+    }
+
+    /// Create the row, or re-launch the one already at this id (D5).
+    ///
+    /// The plan calls this the least clean code it asks for, and it is: every
+    /// other dispatch mints a fresh id and `INSERT`s. `POST /v1/tasks/{id}/action
+    /// {"action":"start"}` does not — D5 settled that `start` keeps the task id
+    /// the client is already holding — so its persist step has to be a
+    /// create-or-update. It lives here, alone, rather than as a branch inside
+    /// the dispatcher, so there is exactly one place to read to know what a
+    /// re-launch does to a stored row.
+    ///
+    /// On conflict the row is reset to a **fresh queued run**: the previous
+    /// attempt's status, progress, summary, outcome and state are cleared,
+    /// because a row that keeps them describes a run that is no longer the one
+    /// it names. `state_version` goes back to `0` for the dispatcher's state
+    /// init, which writes against that version.
+    ///
+    /// What survives is identity, not history: `id`, `created_at` and
+    /// `priority` are the row's own and are never re-minted. Note the
+    /// consequence, which is why the caller in front of this refuses both a
+    /// live run and a finished one (R43): re-launching a *finished* row would
+    /// discard that run's result. `rerun` is the verb that keeps it — it copies
+    /// the goal onto a new id and leaves the original untouched.
+    pub fn upsert_queued(&self, task: &Task) -> Result<()> {
+        self.insert_row(task, RELAUNCH_ON_CONFLICT, "Failed to upsert queued task")
+    }
+
+    /// [`Self::upsert_queued`]'s sibling for §5.6c's `resume`: the row goes
+    /// live again **without** losing what the interrupted attempt accumulated.
+    ///
+    /// `start` and `rerun` never need this — `start` only ever re-launches a
+    /// row that never ran (R43) and `rerun` writes a new row — but `resume` is
+    /// the first verb to re-enter a row that *did* run, and the completion
+    /// report's artifact list is built from `state_json`
+    /// (`TaskState::collect_artifacts`), not from a query over the run's
+    /// assets. Resetting it would leave a run that wrote three files before it
+    /// crashed finishing with only what it produced after the resume, the
+    /// earlier files still on disk and claimed by nothing.
+    ///
+    /// Kept as a second `ON CONFLICT` tail rather than a flag on one: the two
+    /// verbs mean different things to a stored row, and a reader should be
+    /// able to see which columns each keeps without following a boolean.
+    pub fn upsert_queued_preserving_state(&self, task: &Task) -> Result<()> {
+        self.insert_row(task, RESUME_ON_CONFLICT, "Failed to resume queued task")
+    }
+
+    /// The one `INSERT INTO task`, with an optional `ON CONFLICT` tail.
+    ///
+    /// Both writers bind [`TASK_COLUMNS`] in the same order from the same
+    /// place, so a column can never reach one statement and miss the other.
+    fn insert_row(&self, task: &Task, on_conflict: &str, context: &'static str) -> Result<()> {
         self.db.with_connection(|conn| {
             conn.execute(
-                "INSERT INTO task (id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at, state_json, state_version, outcome_json, outcome_kind, artifact_count)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                &format!("INSERT INTO task ({TASK_COLUMNS}) VALUES {TASK_VALUES} {on_conflict}"),
                 rusqlite::params![
                     task.id,
                     task.title,
@@ -37,15 +177,19 @@ impl<'a> TaskRepository<'a> {
                     task.source_lane,
                     task.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
                     task.updated_at.format("%Y-%m-%d %H:%M:%S").to_string(),
-                    task.completed_at.map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
+                    task.completed_at
+                        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()),
                     task.state_json,
                     task.state_version,
                     task.outcome_json,
                     task.outcome_kind.map(|k| k.as_str().to_string()),
                     task.artifact_count,
+                    task.workspace_id,
+                    task.source_task_id,
+                    task.session_id,
                 ],
             )
-            .context("Failed to create task")?;
+            .context(context)?;
             Ok(())
         })
     }
@@ -53,10 +197,9 @@ impl<'a> TaskRepository<'a> {
     /// Get a task by ID.
     pub fn get(&self, id: &str) -> Result<Option<Task>> {
         self.db.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at, state_json, state_version, outcome_json, outcome_kind, artifact_count
-                 FROM task WHERE id = ?",
-            )?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {TASK_COLUMNS} FROM task WHERE id = ?"
+            ))?;
             let task = stmt
                 .query_row([id], Self::row_to_task)
                 .optional()
@@ -65,13 +208,48 @@ impl<'a> TaskRepository<'a> {
         })
     }
 
+    /// `id -> title` for the ids that exist — the list routes' join (R26).
+    ///
+    /// Two columns, one statement per [`TITLES_FOR_CHUNK`] ids, all inside a
+    /// single connection acquisition. The alternative a caller reaches for —
+    /// [`Self::get`] per id — materializes a whole [`Task`] each time, blobs
+    /// (`state_json`, `outcome_json`) included, and takes the global connection
+    /// mutex once per row, to read one short string.
+    ///
+    /// Ids with no row are simply absent from the map (a run whose task was
+    /// deleted has no title, which is not an error); an empty slice queries
+    /// nothing.
+    pub fn titles_for(&self, ids: &[String]) -> Result<HashMap<String, String>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        self.db
+            .with_connection(|conn| {
+                let mut titles = HashMap::with_capacity(ids.len());
+                for chunk in ids.chunks(TITLES_FOR_CHUNK) {
+                    let placeholders = vec!["?"; chunk.len()].join(", ");
+                    let mut stmt = conn.prepare(&format!(
+                        "SELECT id, title FROM task WHERE id IN ({placeholders})"
+                    ))?;
+                    let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })?;
+                    for row in rows {
+                        let (id, title) = row?;
+                        titles.insert(id, title);
+                    }
+                }
+                Ok(titles)
+            })
+            .context("Failed to load task titles")
+    }
+
     /// List tasks by creator.
     pub fn list_by_creator(&self, created_by: &str, limit: usize) -> Result<Vec<Task>> {
         self.db.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at, state_json, state_version, outcome_json, outcome_kind, artifact_count
-                 FROM task WHERE created_by = ? ORDER BY created_at DESC LIMIT ?",
-            )?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {TASK_COLUMNS} FROM task WHERE created_by = ? ORDER BY created_at DESC LIMIT ?"
+            ))?;
             let rows = stmt.query_map(rusqlite::params![created_by, limit as i64], |row| {
                 Self::row_to_task(row)
             })?;
@@ -86,10 +264,9 @@ impl<'a> TaskRepository<'a> {
     /// List tasks by status.
     pub fn list_by_status(&self, status: TaskStatus, limit: usize) -> Result<Vec<Task>> {
         self.db.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at, state_json, state_version, outcome_json, outcome_kind, artifact_count
-                 FROM task WHERE status = ? ORDER BY created_at DESC LIMIT ?",
-            )?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {TASK_COLUMNS} FROM task WHERE status = ? ORDER BY created_at DESC LIMIT ?"
+            ))?;
             let rows = stmt.query_map(rusqlite::params![status.as_str(), limit as i64], |row| {
                 Self::row_to_task(row)
             })?;
@@ -104,10 +281,11 @@ impl<'a> TaskRepository<'a> {
     /// List active tasks (queued, running, or paused).
     pub fn list_active(&self, limit: usize) -> Result<Vec<Task>> {
         self.db.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at, state_json, state_version, outcome_json, outcome_kind, artifact_count
-                 FROM task WHERE status IN ('queued', 'running', 'paused') ORDER BY priority DESC, created_at ASC LIMIT ?",
-            )?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {TASK_COLUMNS} FROM task
+                 WHERE status IN ('queued', 'running', 'paused')
+                 ORDER BY priority DESC, created_at ASC LIMIT ?"
+            ))?;
             let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
                 Self::row_to_task(row)
             })?;
@@ -122,14 +300,11 @@ impl<'a> TaskRepository<'a> {
     /// List active tasks (queued/running/paused) filtered by creator.
     pub fn list_active_by_creator(&self, created_by: &str, limit: usize) -> Result<Vec<Task>> {
         self.db.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, title, description, status, priority, progress_current, progress_total,
-                        result_summary, created_by, source_lane, created_at, updated_at, completed_at,
-                        state_json, state_version, outcome_json, outcome_kind, artifact_count
-                 FROM task
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {TASK_COLUMNS} FROM task
                  WHERE created_by = ? AND status IN ('queued', 'running', 'paused')
-                 ORDER BY priority DESC, created_at ASC LIMIT ?",
-            )?;
+                 ORDER BY priority DESC, created_at ASC LIMIT ?"
+            ))?;
             let rows = stmt.query_map(rusqlite::params![created_by, limit as i64], |row| {
                 Self::row_to_task(row)
             })?;
@@ -142,10 +317,9 @@ impl<'a> TaskRepository<'a> {
     /// List recent tasks of all statuses (most recent first).
     pub fn list_recent(&self, limit: usize) -> Result<Vec<Task>> {
         self.db.with_connection(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, title, description, status, priority, progress_current, progress_total, result_summary, created_by, source_lane, created_at, updated_at, completed_at, state_json, state_version, outcome_json, outcome_kind, artifact_count
-                 FROM task ORDER BY created_at DESC LIMIT ?",
-            )?;
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {TASK_COLUMNS} FROM task ORDER BY created_at DESC LIMIT ?"
+            ))?;
             let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
                 Self::row_to_task(row)
             })?;
@@ -177,24 +351,57 @@ impl<'a> TaskRepository<'a> {
         })
     }
 
-    /// Mark every non-terminal task (queued / running / paused) as failed
-    /// with the given reason, preserving any result summary already present.
+    /// The rows the boot sweep is about to call `interrupted` — read *before*
+    /// the flip, because the steering recovery pass (§5.6b) needs each run's
+    /// session before the status that identifies it is gone.
+    ///
+    /// Empty on every boot but the one after a crash, which is what makes the
+    /// recovery pass free in the ordinary case.
+    pub fn list_non_terminal(&self) -> Result<Vec<NonTerminalRun>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, session_id, source_lane, status FROM task \
+                 WHERE status IN ('queued', 'running', 'paused') ORDER BY id",
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(NonTerminalRun {
+                        id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        lane_key: row.get(2)?,
+                        status: row.get::<_, String>(3)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .context("Failed to list non-terminal tasks")?;
+            Ok(rows)
+        })
+    }
+
+    /// Mark every non-terminal task (queued / running / paused) `interrupted`
+    /// with the given detail, preserving any result summary already present.
     /// Returns the number of tasks swept.
     ///
-    /// Used by the daemon's startup orphan sweep (Routing V2 Phase 3):
-    /// in-flight execution does not survive a restart, so any task left
-    /// non-terminal in the DB is an orphan.
-    pub fn fail_all_non_terminal(&self, reason: &str) -> Result<usize> {
+    /// The daemon's startup sweep (§5.6b): in-flight execution does not
+    /// survive a restart — the tokio tasks driving it are gone — so any task
+    /// left non-terminal belongs to a dead incarnation. It is **not** a
+    /// failure, and this used to write one; `interrupted` says what actually
+    /// happened and carries a restart affordance (`rerun`, GAP-06).
+    ///
+    /// Idempotent: `interrupted` is terminal, so the next boot matches none of
+    /// the rows this one wrote.
+    pub fn interrupt_all_non_terminal(&self, detail: &str) -> Result<usize> {
         self.db.with_connection(|conn| {
             let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
             let rows = conn
                 .execute(
-                    "UPDATE task SET status = 'failed',
+                    "UPDATE task SET status = 'interrupted',
                             result_summary = COALESCE(result_summary, ?1),
+                            outcome_kind = COALESCE(outcome_kind, 'interrupted'),
                             updated_at = ?2,
                             completed_at = COALESCE(completed_at, ?2)
                      WHERE status IN ('queued', 'running', 'paused')",
-                    rusqlite::params![reason, now],
+                    rusqlite::params![detail, now],
                 )
                 .context("Failed to sweep non-terminal tasks")?;
             Ok(rows)
@@ -302,6 +509,9 @@ impl<'a> TaskRepository<'a> {
                 .as_deref()
                 .and_then(|s| s.parse().ok()),
             artifact_count: row.get(17)?,
+            workspace_id: row.get(18)?,
+            source_task_id: row.get(19)?,
+            session_id: row.get(20)?,
         })
     }
 

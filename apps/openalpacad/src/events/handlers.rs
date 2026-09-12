@@ -37,6 +37,78 @@ impl EventBroadcaster {
         let _ = self.tx.send(event);
     }
 
+    /// Broadcast a produced-artifact event and persist it (plan §4.9).
+    ///
+    /// `ts`/`instance_id` are stamped here, exactly as `task_status` stamps
+    /// them, so an artifact row in the event log is orderable against the run
+    /// rows around it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn artifact_written(
+        &self,
+        artifact_id: &str,
+        task_id: Option<&str>,
+        agent_id: Option<&str>,
+        name: &str,
+        kind: &str,
+        version: u32,
+        path: &str,
+    ) {
+        let event = ServerEvent::ArtifactWritten {
+            artifact_id: artifact_id.to_string(),
+            task_id: task_id.map(str::to_string),
+            agent_id: agent_id.map(str::to_string),
+            name: name.to_string(),
+            kind: kind.to_string(),
+            version,
+            path: path.to_string(),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast one subagent-lane transition and persist it (GAP-09).
+    ///
+    /// `started_at` / `ended_at` are passed through as the row's own strings;
+    /// only `ts` (the moment of the announcement) and `instance_id` are
+    /// stamped here, exactly as `task_status` stamps them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn subagent_span(
+        &self,
+        task_id: &str,
+        span_id: &str,
+        label: &str,
+        template_id: &str,
+        agent_instance_id: &str,
+        state: &str,
+        detail: Option<&str>,
+        started_at: &str,
+        ended_at: Option<&str>,
+        duration_ms: Option<i64>,
+        output_preview: Option<&str>,
+    ) {
+        let event = ServerEvent::SubagentSpan {
+            task_id: task_id.to_string(),
+            span_id: span_id.to_string(),
+            label: label.to_string(),
+            template_id: template_id.to_string(),
+            agent_instance_id: agent_instance_id.to_string(),
+            state: state.to_string(),
+            detail: detail.map(str::to_string),
+            started_at: started_at.to_string(),
+            ended_at: ended_at.map(str::to_string),
+            duration_ms,
+            output_preview: output_preview.map(str::to_string),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
     /// Broadcast an agent status event and persist it
     pub fn agent_status(
         &self,
@@ -153,40 +225,21 @@ impl EventBroadcaster {
         let _ = self.tx.send(event);
     }
 
-    /// Broadcast a DAG node status event and persist it
-    #[allow(clippy::too_many_arguments)]
-    pub fn dag_node_status(
+    /// Broadcast a security violation event and persist it.
+    ///
+    /// `task_id` is the run the refused call belonged to (GAP-10).
+    pub fn security_violation(
         &self,
-        task_id: &str,
-        node_id: &str,
-        node_title: &str,
         agent_id: &str,
-        status: &str,
-        duration_ms: Option<u64>,
-        output_preview: Option<String>,
+        tool_name: &str,
+        reason: &str,
+        task_id: Option<&str>,
     ) {
-        let event = ServerEvent::DagNodeStatus {
-            task_id: task_id.to_string(),
-            node_id: node_id.to_string(),
-            node_title: node_title.to_string(),
-            agent_id: agent_id.to_string(),
-            status: status.to_string(),
-            duration_ms,
-            output_preview,
-            ts: Utc::now(),
-            instance_id: self.instance_id.clone(),
-        };
-
-        self.persist(&event);
-        let _ = self.tx.send(event);
-    }
-
-    /// Broadcast a security violation event and persist it
-    pub fn security_violation(&self, agent_id: &str, tool_name: &str, reason: &str) {
         let event = ServerEvent::SecurityViolation {
             agent_id: agent_id.to_string(),
             tool_name: tool_name.to_string(),
             reason: reason.to_string(),
+            task_id: task_id.map(|t| t.to_string()),
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };
@@ -202,12 +255,14 @@ impl EventBroadcaster {
         tool_name: &str,
         consecutive_failures: usize,
         reset_after_secs: u64,
+        task_id: Option<&str>,
     ) {
         let event = ServerEvent::CircuitBreakerTripped {
             agent_id: agent_id.to_string(),
             tool_name: tool_name.to_string(),
             consecutive_failures,
             reset_after_secs,
+            task_id: task_id.map(|t| t.to_string()),
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };
@@ -216,23 +271,54 @@ impl EventBroadcaster {
         let _ = self.tx.send(event);
     }
 
-    /// Broadcast a tool executed event and persist it
-    pub fn tool_executed(&self, agent_id: &str, tool_name: &str, success: bool, duration_ms: u64) {
+    /// Broadcast a tool executed event and persist it.
+    ///
+    /// `task_id` is the run the call belonged to (GAP-10); `None` for a call
+    /// made outside a workflow.
+    ///
+    /// `session_id` and `tool_use_id` are **not** broadcast —
+    /// `ServerEvent::ToolExecuted` is unchanged and a WS subscriber has no use
+    /// for them. They go on the row: together they are the key the session
+    /// writer matches to merge its `log_seq` and previews onto it (R51). The
+    /// insert itself is unconditional — the writer's copy is best-effort (a
+    /// full channel drops it, a cancelled round loses it) and an audit row
+    /// `invocations_today` counts is not.
+    #[allow(clippy::too_many_arguments)]
+    pub fn tool_executed(
+        &self,
+        agent_id: &str,
+        tool_name: &str,
+        success: bool,
+        duration_ms: u64,
+        task_id: Option<&str>,
+        session_id: Option<&str>,
+        tool_use_id: Option<&str>,
+    ) {
         let event = ServerEvent::ToolExecuted {
             agent_id: agent_id.to_string(),
             tool_name: tool_name.to_string(),
             success,
             duration_ms,
+            task_id: task_id.map(|t| t.to_string()),
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };
 
         self.persist(&event);
-        self.persist_tool_execution(agent_id, tool_name, success, duration_ms);
+        self.persist_tool_execution(
+            agent_id,
+            tool_name,
+            success,
+            duration_ms,
+            task_id,
+            session_id,
+            tool_use_id,
+        );
         let _ = self.tx.send(event);
     }
 
     /// Broadcast an LLM call completed event and persist it
+    #[allow(clippy::too_many_arguments)]
     pub fn llm_call_completed(
         &self,
         agent_id: &str,
@@ -240,6 +326,7 @@ impl EventBroadcaster {
         input_tokens: u32,
         output_tokens: u32,
         cost_usd: f64,
+        task_id: Option<&str>,
     ) {
         let event = ServerEvent::LlmCallCompleted {
             agent_id: agent_id.to_string(),
@@ -247,6 +334,7 @@ impl EventBroadcaster {
             input_tokens,
             output_tokens,
             cost_usd,
+            task_id: task_id.map(|t| t.to_string()),
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };
@@ -332,6 +420,7 @@ impl EventBroadcaster {
         tool_arguments: &serde_json::Value,
         stream_id: Option<&str>,
         lane_key: Option<&str>,
+        task_id: Option<&str>,
     ) {
         let event = ServerEvent::ToolConfirmationRequested {
             request_id: request_id.to_string(),
@@ -340,6 +429,7 @@ impl EventBroadcaster {
             tool_arguments: tool_arguments.clone(),
             stream_id: stream_id.map(|s| s.to_string()),
             lane_key: lane_key.map(|s| s.to_string()),
+            task_id: task_id.map(|t| t.to_string()),
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };
@@ -395,6 +485,132 @@ impl EventBroadcaster {
             lane_key: lane_key.to_string(),
             followup_id,
             kind: kind.to_string(),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast a session lifecycle change and persist it (§5.7).
+    ///
+    /// `task_id` is set only by §5.6b's `interrupted` frame, which is about
+    /// one run of the session rather than the session's own lifecycle; it is
+    /// what lets the persisted row hang off the task (`log_for_task`).
+    pub fn session_changed(
+        &self,
+        session_id: &str,
+        lane_key: &str,
+        status: &str,
+        task_id: Option<&str>,
+    ) {
+        let event = ServerEvent::SessionChanged {
+            session_id: session_id.to_string(),
+            lane_key: lane_key.to_string(),
+            status: status.to_string(),
+            task_id: task_id.map(str::to_string),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast a follow-up cancelled event and persist it (GAP-03)
+    pub fn followup_cancelled(&self, lane_key: &str, followup_id: i64) {
+        let event = ServerEvent::FollowupCancelled {
+            lane_key: lane_key.to_string(),
+            followup_id,
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast an extension state transition and persist it (extension
+    /// design ADR-030 §3.2 T5, §3.3 E5, §3.6, §3.7).
+    pub fn extension_state_changed(
+        &self,
+        kind: &str,
+        id: &str,
+        state: &str,
+        generation: u64,
+        tools_changed: bool,
+    ) {
+        let event = ServerEvent::ExtensionStateChanged {
+            kind: kind.to_string(),
+            id: id.to_string(),
+            state: state.to_string(),
+            generation,
+            tools_changed,
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast an S4 withholding and persist it (extension design §7.1,
+    /// §7.2, §6.2 #13). Already deduped by the ledger.
+    #[allow(clippy::too_many_arguments)]
+    pub fn extension_capability_withheld(
+        &self,
+        kind: &str,
+        id: &str,
+        subject: &str,
+        moment: &str,
+        state: &str,
+        scope: &str,
+        stale: bool,
+    ) {
+        let event = ServerEvent::ExtensionCapabilityWithheld {
+            kind: kind.to_string(),
+            id: id.to_string(),
+            subject: subject.to_string(),
+            moment: moment.to_string(),
+            state: state.to_string(),
+            scope: scope.to_string(),
+            stale,
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast T1 step 3's dependent scan and persist it (extension design
+    /// §3.2 T1, §7.3). One per transition, never deduped.
+    #[allow(clippy::too_many_arguments)]
+    pub fn extension_capability_withdrawn(
+        &self,
+        kind: &str,
+        id: &str,
+        state: &str,
+        cause: &str,
+        capabilities: Vec<String>,
+        tools: Vec<String>,
+        affected_templates: Vec<String>,
+        affected_skills: Vec<String>,
+        affected_cron_skills: Vec<String>,
+        notice_lane: &str,
+    ) {
+        let event = ServerEvent::ExtensionCapabilityWithdrawn {
+            kind: kind.to_string(),
+            id: id.to_string(),
+            state: state.to_string(),
+            cause: cause.to_string(),
+            capabilities,
+            tools,
+            affected_templates,
+            affected_skills,
+            affected_cron_skills,
+            notice_lane: notice_lane.to_string(),
             ts: Utc::now(),
             instance_id: self.instance_id.clone(),
         };

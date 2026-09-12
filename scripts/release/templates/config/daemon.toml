@@ -4,6 +4,23 @@
 [execution.lead_agent_defaults]
 batch_spawn_enabled = true
 
+[execution.artifacts]
+# Largest single artifact body `artifact_write` (and the
+# `workspace_write(entry_type = "artifact")` spill) will accept, in bytes.
+# Default 10485760 (10 MB) — file_write's cap, not the 50 MB upload cap:
+# this content comes out of a context window.
+# max_artifact_bytes = 10485760
+# Versions kept per artifact under `.versions/`. On write, the oldest
+# superseded version beyond this bound is pruned; the head is never pruned.
+# max_versions_per_artifact = 20
+
+[extensions]
+# How long a disable, reload or shutdown waits for an extension's in-flight tool
+# calls (a plugin's out-of-process skill and agent runs included) to finish
+# before it is torn down anyway. New calls are already refused by then; on
+# expiry the supervisor warns with the straggler count and proceeds.
+# drain_timeout_secs = 10
+
 [orchestrator.routing]
 # Routing V2: everything past the deterministic tier (slash task control,
 # skills, /steer) and the social fast path enters the main loop, where
@@ -31,8 +48,29 @@ main_loop_max_tools_per_round = 4
 # Main-loop tool surface: "core_union" (keyword-suggested tools + the
 # core set: start_workflow, task_status, memory tools, and — on lanes
 # with active workflows — steer_workflow/queue_followup) or "full"
-# (entire registry minus the global tool deny list; escape hatch).
+# (the entire registry; escape hatch). Both modes drop the tools of a
+# disabled MCP server or plugin; there is no per-tool opt-out.
 tool_selection = "core_union"
+# EXPERIMENTAL (§5.6c, S2) — replay resume, off by default.
+# With this on, `POST /v1/tasks/{id}/action {"action":"resume"}` re-enters an
+# `interrupted` run under its own id: the loop's history is rebuilt from that
+# run's session-log records (its rounds and their tool results, honouring the
+# newest compaction boundary) and continued with a synthetic
+# `<user_interjection>` telling the model not to repeat side-effecting calls
+# it already made. Nothing recorded is re-executed — a replay re-primes
+# context. Leave it off unless you are exercising it: `rerun` (a new id, a
+# clean start) is the trusted way to run an interrupted goal again, and a
+# replay that misreads a torn log hands the model a false account of its own
+# work. `resume` on a *paused* run is unaffected by this flag.
+resume_enabled = false
+
+[orchestrator.sessions]
+# Largest existing file file_write will image into the session's
+# snapshots/ before overwriting it (§5.7). Default 10485760 (10 MB) —
+# kept equal to file_write's own content limit on purpose: a smaller
+# value reopens a band of existing files file_write would otherwise
+# refuse to touch at all, purely because this tier exists.
+# snapshot_max_bytes = 10485760
 
 [security]
 max_input_length = 32768

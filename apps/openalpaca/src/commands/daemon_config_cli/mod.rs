@@ -71,6 +71,17 @@ static MAPPINGS: &[TomlMapping] = &[
         section: &["execution", "lead_agent_defaults"],
         field: "max_cost",
     },
+    // Execution: Artifacts
+    TomlMapping {
+        schema_key: "daemon.execution.artifacts.max_artifact_bytes",
+        section: &["execution", "artifacts"],
+        field: "max_artifact_bytes",
+    },
+    TomlMapping {
+        schema_key: "daemon.execution.artifacts.max_versions_per_artifact",
+        section: &["execution", "artifacts"],
+        field: "max_versions_per_artifact",
+    },
     // Orchestrator: Memory (cont.)
     TomlMapping {
         schema_key: "daemon.orchestrator.summary_min_new_older_messages",
@@ -295,7 +306,7 @@ fn find_mapping(schema_key: &str) -> Option<&'static TomlMapping> {
 ///
 /// Resolution order:
 /// 1. `OPENALPACA_CONFIG_DIR` env var override
-/// 2. `app_dir()/config/daemon.toml` (writable, created if needed)
+/// 2. `home_root()/config/daemon.toml` (writable, created if needed)
 /// 3. Walk up from CWD looking for `config/daemon.toml` (dev/repo fallback)
 pub fn daemon_config_path() -> Result<PathBuf> {
     // 1. OPENALPACA_CONFIG_DIR override
@@ -305,9 +316,9 @@ pub fn daemon_config_path() -> Result<PathBuf> {
             return Ok(p.join("daemon.toml"));
         }
     }
-    // 2. Writable app_dir/config/
-    if let Ok(app) = openalpaca_storage::paths::app_dir() {
-        let p = app.join("config").join("daemon.toml");
+    // 2. Writable home_root()/config/
+    if let Ok(dir) = openalpaca_storage::store::runtime_config_dir() {
+        let p = dir.join("daemon.toml");
         if p.exists() {
             return Ok(p);
         }

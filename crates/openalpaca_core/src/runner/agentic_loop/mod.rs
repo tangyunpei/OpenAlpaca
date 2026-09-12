@@ -11,18 +11,22 @@ pub use config::{LoopConfig, LoopFinishReason, LoopResult, StreamCallback};
 
 // Internal re-exports so the core loop and tests can access submodule items
 use backend::LlmBackend;
-pub(crate) use context::{compress_context, estimate_messages_tokens};
-use tool_helpers::{format_tool_error, format_tool_error_with_hint, truncate_tool_result};
+pub(crate) use context::{compress_context, estimate_messages_tokens, estimate_tools_tokens};
+use tool_helpers::{
+    format_tool_error, format_tool_error_with_hint, head_tail_tool_result, truncate_tool_result_to,
+};
 #[cfg(test)]
-use tool_helpers::MAX_TOOL_RESULT_SIZE;
+use tool_helpers::{MAX_TOOL_RESULT_SIZE, truncate_tool_result};
 
 use chrono::Utc;
 use crate::runner::steering::SteeringMsg;
 use crate::security::capabilities::CapabilityManager;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+use crate::session_log::{Record, RecordType, spill_preview, spill_stub};
 use crate::tools::registry::ToolContext;
+use serde_json::{Value, json};
 use openalpaca_llm::{
-    ChatMessage, FinishReason, LlmProvider, LlmRouter, LlmRouterError, RequestContext,
+    ChatMessage, FinishReason, LlmProvider, LlmRouter, LlmRouterError, RequestContext, ToolCall,
     ToolDefinition,
 };
 #[cfg(test)]
@@ -134,6 +138,7 @@ pub async fn run_agentic_loop(
         cancel_token,
         tool_context,
         None,
+        None,
     )
     .await
 }
@@ -170,8 +175,137 @@ pub async fn run_agentic_loop_routed(
         cancel_token,
         tool_context,
         cost_accumulator,
+        task_id,
     )
     .await
+}
+
+/// Narrate one event into the turn's session log (§5.5).
+///
+/// A no-op when the loop has no log — every non-session caller, and every
+/// test that does not care. `emit` itself is a non-blocking `try_send`, so
+/// this never stalls a round.
+fn log_event(
+    config: &LoopConfig,
+    task_id: Option<&str>,
+    agent_id: &str,
+    kind: RecordType,
+    data: Value,
+) {
+    if let Some(ref log) = config.session_log {
+        log.emit(
+            Record::new(kind)
+                .task(task_id)
+                .span(config.span_id.as_deref())
+                .agent(Some(agent_id))
+                .with_data(data),
+        );
+    }
+}
+
+/// Narrate a record that carries bytes for `results/` (§5.4's spill).
+///
+/// Separate from [`log_event`] only because the spill is the one record whose
+/// payload does not travel inside `data`.
+///
+/// **Returns whether the record reached the writer.** A full channel or a
+/// writer that has gone drops the record (§5.5's counted loss) — and with it
+/// the `Spill{content}`, so no file is ever written. The caller must know,
+/// because the model's copy is built from the same decision: a reference to a
+/// file that will never exist is worse than the head-only cut the spill
+/// replaced. `false` also when there is no session log at all, which is the
+/// case [`spill_plan`] already refuses to spill in.
+fn log_spill_event(
+    config: &LoopConfig,
+    task_id: Option<&str>,
+    agent_id: &str,
+    data: Value,
+    spill: Option<(String, String)>,
+) -> bool {
+    let Some(ref log) = config.session_log else {
+        return false;
+    };
+    let mut record = Record::new(RecordType::ToolResult)
+        .task(task_id)
+        .span(config.span_id.as_deref())
+        .agent(Some(agent_id))
+        .with_data(data);
+    if let Some((rel, content)) = spill {
+        record = record.with_spill(rel, content);
+    }
+    log.emit(record)
+}
+
+/// What the model is handed for one tool result (§5.4).
+///
+/// `spill_ref` is `Some` **only** when the spill record actually reached the
+/// writer: the stub promises a file, and the only thing that can write it is
+/// the record the loop just emitted. When that record was dropped the model
+/// gets the inline head instead — no reference, nothing to page.
+///
+/// One case remains best-effort and cannot be caught here: `write_spill_file`
+/// failing *after* the record was accepted (a full disk, a permission change).
+/// The record is honest about that — it keeps the preview and gains
+/// `spill_error` plus the reference it could not honour — and `read_result`
+/// reads that record so the model is told the spill was never written rather
+/// than that the reference does not exist.
+fn model_visible_result(
+    config: &LoopConfig,
+    result_text: &str,
+    ok: bool,
+    spill_ref: Option<&str>,
+) -> String {
+    // An `Err`'s head **and** tail, because a compiler or test failure is at
+    // the tail — §5.4: an error "stays inline but switches to head+tail". That
+    // is a rule about the *model's* copy, and it holds whether or not the log
+    // spilled the full bytes behind it.
+    if !ok {
+        return head_tail_tool_result(result_text.to_string(), config.tool_result_inline_bytes);
+    }
+    match spill_ref {
+        Some(rel) => spill_stub(result_text.len(), &spill_preview(result_text), rel),
+        None => truncate_tool_result_to(result_text.to_string(), config.tool_result_inline_bytes),
+    }
+}
+
+/// Decide whether a tool result spills, and reserve its reference if so.
+///
+/// Two conditions, both from §5.4: it must be over `tool_result_inline_bytes`,
+/// and there must be a session log, since `results/` is a session's directory
+/// and a loop without one has nowhere to put the bytes.
+///
+/// **An `Err` spills too.** §5.4's "stays inline but switches to head+tail" is
+/// about the model's copy ([`model_visible_result`] honours it), not about what
+/// the log keeps: an un-spilled large error left the record with a 2 KB head cut
+/// by the envelope cap while the model had seen head **and** tail, so the log —
+/// and with it §5.6c's replay of a resumed run — held strictly less than the
+/// model was given.
+fn spill_plan(
+    config: &LoopConfig,
+    call: &ToolCall,
+    result_text: &str,
+) -> Option<(String, String)> {
+    if result_text.len() <= config.tool_result_inline_bytes {
+        return None;
+    }
+    let log = config.session_log.as_ref()?;
+    Some((
+        log.reserve_spill(&call.name, &call.id),
+        result_text.to_string(),
+    ))
+}
+
+/// `ext {kind, id, generation}` for a tool that belongs to an extension
+/// (§5.4, P-17) — what makes the S4 refusal auditable per session. `None`
+/// for builtins, which are never on the ENABLE axis.
+fn tool_extension(sandbox: Option<&SandboxManager>, tool_name: &str) -> Option<Value> {
+    let tool = sandbox?.registry().get(tool_name)?;
+    let id = tool.extension_id()?;
+    Some(json!({
+        "kind": id.kind.as_str(),
+        "id": id.name,
+        "generation": tool.incarnation(),
+    }))
 }
 
 /// Return drained-but-unsent steering messages to the inbox on a loop exit
@@ -185,7 +319,10 @@ fn return_pending_steering(config: &LoopConfig, pending: &mut Vec<SteeringMsg>) 
     }
 }
 
-/// Core agentic loop implementation shared by both Direct and Router backends.
+/// Run the loop and narrate its exit (§5.5: "at every exit").
+///
+/// The exit record lives here rather than at the nine `return`s inside the
+/// core so no future exit can be added without one.
 #[allow(clippy::too_many_arguments)]
 async fn run_agentic_loop_inner(
     backend: LlmBackend<'_>,
@@ -199,8 +336,92 @@ async fn run_agentic_loop_inner(
     cancel_token: Option<CancellationToken>,
     tool_context: Option<&ToolContext>,
     cost_accumulator: Option<LoopCostAccumulator>,
+    task_id: Option<&str>,
+) -> LoopResult {
+    let result = run_agentic_loop_core(
+        backend,
+        initial_messages,
+        tools,
+        config,
+        sandbox,
+        agent_id,
+        sandbox_policy,
+        context_budget,
+        cancel_token,
+        tool_context,
+        cost_accumulator,
+        task_id,
+    )
+    .await;
+
+    if config.session_log.is_some() {
+        if let LoopFinishReason::Error(ref message) = result.finish_reason {
+            log_event(
+                config,
+                task_id,
+                agent_id,
+                RecordType::Error,
+                json!({ "where": "agentic_loop", "message": message }),
+            );
+        }
+        log_event(
+            config,
+            task_id,
+            agent_id,
+            RecordType::WorkflowDone,
+            json!({
+                "finish_reason": finish_reason_str(&result.finish_reason),
+                "rounds_used": result.rounds_used,
+                "tool_calls_made": result.tool_calls_made,
+                "input_tokens": result.total_input_tokens,
+                "output_tokens": result.total_output_tokens,
+                "estimated_cost_usd": result.estimated_cost,
+                "elapsed_ms": result.elapsed.as_millis() as u64,
+                "model": result.model_used,
+            }),
+        );
+    }
+    result
+}
+
+/// The exit word a reader sees, stable across refactors of the enum's Debug.
+fn finish_reason_str(reason: &LoopFinishReason) -> &'static str {
+    match reason {
+        LoopFinishReason::Complete => "complete",
+        LoopFinishReason::MaxRounds => "max_rounds",
+        LoopFinishReason::CostExceeded => "cost_exceeded",
+        LoopFinishReason::Truncated => "truncated",
+        LoopFinishReason::Cancelled => "cancelled",
+        LoopFinishReason::Error(_) => "error",
+    }
+}
+
+/// Core agentic loop implementation shared by both Direct and Router backends.
+#[allow(clippy::too_many_arguments)]
+async fn run_agentic_loop_core(
+    backend: LlmBackend<'_>,
+    initial_messages: Vec<ChatMessage>,
+    tools: Vec<ToolDefinition>,
+    config: &LoopConfig,
+    sandbox: Option<&SandboxManager>,
+    agent_id: &str,
+    sandbox_policy: Option<&SandboxPolicy>,
+    context_budget: Option<&crate::context_budget::ContextBudgetManager>,
+    cancel_token: Option<CancellationToken>,
+    tool_context: Option<&ToolContext>,
+    cost_accumulator: Option<LoopCostAccumulator>,
+    task_id: Option<&str>,
 ) -> LoopResult {
     let mut state = LoopState::new();
+    // Baseline the agent-scoped cumulative cost BEFORE round 0's LLM call.
+    // `agent_cost()` (Router backend) returns the cost tracker's cumulative
+    // total for `agent_id`, not this turn's spend — the main loop reuses a
+    // literal id ("orchestrator") across every turn with no accumulator, so
+    // without this baseline round 0's delta would equal the agent's entire
+    // lifetime spend, tripping CostExceeded before the first LLM call once
+    // that total passes max_cost (A5, bug-main-loop-cost-lockout.md option 1).
+    // Only the baseline changes; the delta arithmetic below is unchanged.
+    state.last_cost = backend.agent_cost(0, 0).await;
     let cost_acc = cost_accumulator.unwrap_or_default();
     let mut messages: Arc<Vec<ChatMessage>> = Arc::new(initial_messages);
     let tools_arc = Arc::new(tools);
@@ -214,23 +435,17 @@ async fn run_agentic_loop_inner(
     // them, so budget exits can re-append unsent messages to the inbox for
     // follow-up conversion.
     let mut steering_bonus_rounds: usize = 0;
+    // P-14: what this run's compactions have taken out of its context so far,
+    // in tokens. Cumulative across every compaction the loop performs, which
+    // is what makes a later `compaction` record readable on its own.
+    let mut cumulative_dropped_tokens: u64 = 0;
     let mut pending_steering: Vec<SteeringMsg> = Vec::new();
 
     // Pre-compute tool token estimate once — avoids re-serializing tool JSON
     // schemas on every Router retry attempt. `None` for Direct backend because
     // it uses `ChatRequest` which doesn't pass through `estimate_request_tokens`.
     let tools_token_estimate: Option<u32> = if backend.supports_retry() {
-        let tool_bytes: usize = tools_arc
-            .iter()
-            .map(|t| {
-                let base = t.description.len() + t.parameters.to_string().len();
-                let examples = t.input_examples.as_ref().map_or(0, |ex| {
-                    ex.iter().map(|e| e.to_string().len()).sum()
-                });
-                base + examples
-            })
-            .sum();
-        Some((tool_bytes / 4) as u32)
+        Some(estimate_tools_tokens(&tools_arc) as u32)
     } else {
         None
     };
@@ -424,6 +639,39 @@ async fn run_agentic_loop_inner(
                     );
                 });
 
+                cumulative_dropped_tokens += report
+                    .initial_tokens
+                    .saturating_sub(report.final_tokens)
+                    as u64;
+
+                // §5.5: the loop narrates its compaction into the session
+                // log. `preserved_from_seq` (P-14) is stamped by the writer,
+                // which is the only party that knows what the log already
+                // holds. `dropped_from_seq` and `summary_msg_id` need a
+                // message→log-seq map that does not exist yet (T55) and are
+                // explicit nulls rather than guesses; every other value below
+                // is the report's own.
+                log_event(
+                    config,
+                    task_id,
+                    agent_id,
+                    RecordType::Compaction,
+                    json!({
+                        "tier": format!("{tier:?}"),
+                        "trigger": "auto",
+                        "pre_tokens": report.initial_tokens,
+                        "post_tokens": report.final_tokens,
+                        "messages_before": report.messages_before,
+                        "messages_after": report.messages_after,
+                        "messages_discarded": report.messages_discarded,
+                        "memories_extracted": report.memories_extracted,
+                        "tiers_applied": format!("{:?}", report.tiers_applied),
+                        "cumulative_dropped_tokens": cumulative_dropped_tokens,
+                        "dropped_from_seq": Value::Null,
+                        "summary_msg_id": Value::Null,
+                    }),
+                );
+
                 // Emit CompactionTriggered telemetry
                 if let Some(ref bus) = config.event_bus {
                     bus.publish(crate::events::SystemEvent::CompactionTriggered {
@@ -456,6 +704,21 @@ async fn run_agentic_loop_inner(
                     round = state.rounds,
                     interjections = drained.len(),
                     "Steering drain: injecting user interjections"
+                );
+                log_event(
+                    config,
+                    task_id,
+                    agent_id,
+                    RecordType::SteeringDrained,
+                    json!({
+                        "at": "round_boundary",
+                        "round": state.rounds,
+                        "count": drained.len(),
+                        "request_ids": drained
+                            .iter()
+                            .map(|m| m.request_id.to_string())
+                            .collect::<Vec<_>>(),
+                    }),
                 );
                 for msg in &drained {
                     Arc::make_mut(&mut messages)
@@ -649,6 +912,52 @@ async fn run_agentic_loop_inner(
                     }
                 }
 
+                // §5.5: one `round` record per LLM response. It carries the
+                // `tool_use` blocks **verbatim** — id, name, full input — so
+                // both halves of the assistant(tool_use)/user(tool_result)
+                // alternation are reconstructible bit-for-bit, which is what
+                // makes replay-resume possible (§5.4). The `context` block is
+                // `ContextBudgetManager::section_breakdown()`, so a per-turn
+                // `/context` bar needs no new endpoint (P-19).
+                if config.session_log.is_some() {
+                    let context = context_budget.map(|budget| {
+                        let sections: std::collections::HashMap<&str, usize> =
+                            budget.section_breakdown().into_iter().collect();
+                        json!({
+                            "window": budget.model_context_window(),
+                            "system_prompt": sections.get("system_prompt").copied().unwrap_or(0),
+                            "tools": sections.get("tools").copied().unwrap_or(0),
+                            "messages": msg_tokens_estimate,
+                            "free": budget.free_zone_capacity(),
+                        })
+                    });
+                    log_event(
+                        config,
+                        task_id,
+                        agent_id,
+                        RecordType::Round,
+                        json!({
+                            "round": state.rounds,
+                            "model": response.model,
+                            "input_tokens": response.usage.input_tokens,
+                            "output_tokens": response.usage.output_tokens,
+                            "cache_read_input_tokens": response.usage.cache_read_input_tokens,
+                            "stop_reason": format!("{:?}", response.finish_reason),
+                            "text": response.content,
+                            "tool_use": response
+                                .tool_calls
+                                .iter()
+                                .map(|tc| json!({
+                                    "id": tc.id,
+                                    "name": tc.name,
+                                    "input": tc.arguments,
+                                }))
+                                .collect::<Vec<_>>(),
+                            "context": context,
+                        }),
+                    );
+                }
+
                 // ── 10. Persist or execute tools ──────────────────
                 let persist_span = tracing::info_span!(
                     "loop.step.persist_or_tools",
@@ -705,18 +1014,59 @@ async fn run_agentic_loop_inner(
                         );
                     });
 
-                    let effective_ctx = tool_context.cloned().unwrap_or_else(|| ToolContext {
+                    let mut effective_ctx = tool_context.cloned().unwrap_or_else(|| ToolContext {
                         agent_id: Some(agent_id.to_string()),
                         ..Default::default()
                     });
+                    // The session whose log carries this call's records — and
+                    // therefore its `tool_execution_log` index row. Set from
+                    // the loop's own handle so the two can never disagree:
+                    // where this is `Some`, the sandbox leaves the row to the
+                    // session writer instead of writing a bare one.
+                    effective_ctx.session_id = config
+                        .session_log
+                        .as_ref()
+                        .map(|log| log.session_id().to_string());
+                    // The same handle, for the one tool that writes into the
+                    // log before it acts: `file_write`'s pre-edit image
+                    // (§5.7). Set from `config` so the id and the handle can
+                    // never name two different sessions.
+                    effective_ctx.session_log = config.session_log.clone();
+
+                    // §5.5: the call is announced before dispatch, so a
+                    // `tool_call` with no matching `tool_result` is exactly
+                    // what a crash or a cancellation looks like in the log.
+                    for tc in &executable {
+                        log_event(
+                            config,
+                            task_id,
+                            agent_id,
+                            RecordType::ToolCall,
+                            json!({
+                                "tool_use_id": tc.id,
+                                "name": tc.name,
+                                "input": tc.arguments,
+                                "ext": tool_extension(sandbox, &tc.name),
+                            }),
+                        );
+                    }
+                    let tool_started = Instant::now();
+
+                    let effective_ctx = effective_ctx;
+                    // The **untruncated** output. §5.4 makes the JSONL the
+                    // source of truth for tool payloads, so the cut to
+                    // `MAX_TOOL_RESULT_SIZE` happens once, below, on the copy
+                    // that goes into the model's context — never on the copy
+                    // the log records. The envelope cap still bounds what
+                    // lands inline in the record.
                     let tool_futures = executable.iter().map(|&tc| {
                         let ctx_ref = &effective_ctx;
                         async move {
                             if let (Some(sbx), Some(policy)) = (sandbox, sandbox_policy) {
                                 match sbx.execute_tool(tc, policy, ctx_ref).await {
-                                    Ok(output) => truncate_tool_result(output),
+                                    Ok(output) => output,
                                     Err(err) => {
-                                        truncate_tool_result(format_tool_error_with_hint(&tc.name, &err.to_string()))
+                                        format_tool_error_with_hint(&tc.name, &err.to_string())
                                     }
                                 }
                             } else {
@@ -752,9 +1102,74 @@ async fn run_agentic_loop_inner(
                             .await
                     };
 
+                    // The batch shares one wall-clock: `join_all` runs them
+                    // together, so per-call durations would be fiction.
+                    let batch_duration_ms = tool_started.elapsed().as_millis() as i64;
+
                     // Collect results in order (join_all preserves input order)
                     for (tc, result_text) in executable.iter().zip(results.iter()) {
                         state.tool_calls_made += 1;
+                        let ok = !result_text.starts_with("[tool_error]");
+                        // §5.4's "Spill, don't truncate". A result over the
+                        // threshold is written once to the session's
+                        // `results/` and the model is handed a stub naming it,
+                        // so the tail of a `cargo test` or a `web_fetch` is
+                        // reachable through `read_result` instead of gone.
+                        //
+                        // The reference has to be known *here*: the model's
+                        // copy is built on this path and the loop can never
+                        // wait for the writer, so the emitter reserves the
+                        // name and the writer honours it.
+                        let spill = spill_plan(config, tc, result_text);
+                        // The reference, not the payload: the stub needs the
+                        // name two lines below and the bytes belong to the
+                        // record, which is about to take ownership of them.
+                        let spill_ref = spill.as_ref().map(|(rel, _)| rel.clone());
+                        let mut record = json!({
+                            "tool_use_id": tc.id,
+                            "name": tc.name,
+                            "ok": ok,
+                            "duration_ms": batch_duration_ms,
+                            // On a refusal this is the S4 string the gate
+                            // answered with, which is what makes a
+                            // withheld capability auditable per session.
+                            "error": (!ok).then(|| result_text.clone()),
+                            "result": result_text,
+                            "ext": tool_extension(sandbox, &tc.name),
+                        });
+                        if spill.is_some()
+                            && let Some(map) = record.as_object_mut()
+                        {
+                            // The writer replaces this with the reference and
+                            // the preview once the file is on disk; sending
+                            // the bytes twice is exactly what §5.4 forbids.
+                            map.insert("result".into(), Value::Null);
+                            // An `Err` carries the same text a second time in
+                            // `error`, which is what the index row's
+                            // `error_message` is read from. Left whole it would
+                            // push the envelope past its 64 KB cap — tripping
+                            // the "needs a spill" warning at the site that just
+                            // spilled — so it keeps the same 2 KB head the
+                            // preview does, and the whole text stays in the
+                            // file the record names.
+                            if !ok {
+                                map.insert(
+                                    "error".into(),
+                                    Value::from(spill_preview(result_text)),
+                                );
+                            }
+                        }
+                        let emitted = log_spill_event(config, task_id, agent_id, record, spill);
+                        // What the model is handed. The spill's stub above the
+                        // threshold — but only when the record carrying the
+                        // bytes was accepted: a dropped record writes no file,
+                        // and the head is better than a reference to nothing.
+                        let model_text = model_visible_result(
+                            config,
+                            result_text,
+                            ok,
+                            spill_ref.as_deref().filter(|_| emitted),
+                        );
                         persist_span.in_scope(|| {
                             tracing::debug!(
                                 agent_id = agent_id,
@@ -763,11 +1178,12 @@ async fn run_agentic_loop_inner(
                                 tool_call_number = state.tool_calls_made,
                                 success = !result_text.starts_with("[tool_error]"),
                                 result_len = result_text.len(),
+                                model_visible_len = model_text.len(),
                                 "Tool execution completed"
                             );
                         });
                         Arc::make_mut(&mut messages)
-                            .push(ChatMessage::tool_result(&tc.id, result_text));
+                            .push(ChatMessage::tool_result(&tc.id, &model_text));
                     }
 
                     // Over-budget tools get error
@@ -838,6 +1254,21 @@ async fn run_agentic_loop_inner(
                                 "Steering completion guard: continuing loop for late interjections"
                             );
                         });
+                        log_event(
+                            config,
+                            task_id,
+                            agent_id,
+                            RecordType::SteeringDrained,
+                            json!({
+                                "at": "completion_guard",
+                                "round": state.rounds,
+                                "count": drained.len(),
+                                "request_ids": drained
+                                    .iter()
+                                    .map(|m| m.request_id.to_string())
+                                    .collect::<Vec<_>>(),
+                            }),
+                        );
                         Arc::make_mut(&mut messages)
                             .push(ChatMessage::assistant(&response.content));
                         for msg in &drained {

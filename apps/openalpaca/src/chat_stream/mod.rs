@@ -50,10 +50,105 @@ impl StreamResult {
     }
 }
 
+/// Percent-encode a path for a header value (R81) — non-ASCII, the control
+/// range, and `%` itself, nothing else.
+///
+/// Not `urlencoding::encode`: that escapes `/` too, which would turn every
+/// ordinary path in a request log into `%2FUsers%2F…` for no gain. What has to
+/// be escaped is what a header value cannot carry; `%` goes with it so that a
+/// directory literally named `50%20off` does not decode into `50 off` at the
+/// other end.
+fn encode_header_path(path: &str) -> String {
+    let mut encoded = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        if byte == b'%' || !(0x20..=0x7e).contains(&byte) {
+            encoded.push_str(&format!("%{byte:02X}"));
+        } else {
+            encoded.push(byte as char);
+        }
+    }
+    encoded
+}
+
+/// Where a CLI turn goes: which project it belongs to, and which conversation.
+///
+/// **The project** is the CLI's own working directory, sent as
+/// `x-workspace-path` exactly as the GUI's window sends its picker's path —
+/// §4.7's client story, whose CLI half was missing. The daemon resolves it to a
+/// project root itself (R22, `MemoryScopeContext::for_request`), so this must
+/// be an absolute path or nothing at all: a relative one would be resolved
+/// against the *daemon's* directory, which is the bug that ruling closed.
+///
+/// **The conversation** is named only by `--resume` / `--session`. An unnamed
+/// turn lands in the lane's active session, which is what lets the daemon open
+/// a new one when the project changed (R48). A named one addresses that
+/// conversation and, by R49, **takes its project** — the header is still sent
+/// because a session with no binding of its own takes it as a first binding.
+#[derive(Debug, Clone, Default)]
+pub struct ChatTarget {
+    workspace_path: Option<String>,
+    session_id: Option<String>,
+}
+
+impl ChatTarget {
+    /// The CLI's working directory, canonicalized — or nothing when it cannot
+    /// be resolved, which is honestly "this turn belongs to no project".
+    pub fn for_cwd() -> Self {
+        let workspace_path = std::env::current_dir()
+            .and_then(|dir| dir.canonicalize())
+            .ok()
+            .map(|dir| dir.to_string_lossy().to_string());
+        Self::for_workspace(workspace_path)
+    }
+
+    pub fn for_workspace(workspace_path: Option<String>) -> Self {
+        Self {
+            workspace_path,
+            session_id: None,
+        }
+    }
+
+    /// Address a stored conversation from here on.
+    pub fn resuming(mut self, session_id: String) -> Self {
+        self.session_id = Some(session_id);
+        self
+    }
+
+    /// The extra request headers this turn carries. Empty is a real answer.
+    ///
+    /// The path is **percent-encoded UTF-8** (ruling R81): a header value is
+    /// bytes, and the daemon's read (`HeaderValue::to_str`) refuses anything
+    /// above `\x7f`, so a CJK project directory — an ordinary path — used to be
+    /// dropped in transit and the turn ran with no project at all. Only what
+    /// must be escaped is: a plain ASCII path is its own encoding.
+    pub fn headers(&self) -> Vec<(&'static str, String)> {
+        match &self.workspace_path {
+            Some(path) => vec![("x-workspace-path", encode_header_path(path))],
+            None => Vec::new(),
+        }
+    }
+
+    /// The `POST /v1/chat` body. Absent fields are absent, not null: the
+    /// daemon's `session_id` is `Option`, and `attachments` defaults to empty.
+    pub fn body(&self, content: &str, attachments: &[serde_json::Value]) -> serde_json::Value {
+        let mut body = serde_json::json!({ "content": content });
+        if !attachments.is_empty() {
+            body["attachments"] = serde_json::json!(attachments);
+        }
+        if let Some(session_id) = &self.session_id {
+            body["session_id"] = serde_json::json!(session_id);
+        }
+        body
+    }
+}
+
 /// POST /v1/chat → ChatSendResponse { stream_id, lane_key }
-pub async fn send_chat(client: &DaemonClient, content: &str) -> Result<ChatSendResponse> {
-    let body = serde_json::json!({ "content": content });
-    client.post("/v1/chat", &body).await
+pub async fn send_chat(
+    client: &DaemonClient,
+    content: &str,
+    target: &ChatTarget,
+) -> Result<ChatSendResponse> {
+    send_chat_with_attachments(client, content, &[], target).await
 }
 
 /// GET /v1/chat/stream/{stream_id}?token=... → parse SSE → render → StreamResult
@@ -76,22 +171,11 @@ pub async fn send_chat_with_attachments(
     client: &DaemonClient,
     content: &str,
     attachments: &[serde_json::Value],
+    target: &ChatTarget,
 ) -> Result<ChatSendResponse> {
-    let body = serde_json::json!({
-        "content": content,
-        "attachments": attachments,
-    });
-    client.post("/v1/chat", &body).await
-}
-
-/// Convenience: send_chat + stream_chat (for non-REPL modes)
-pub async fn send_and_stream(
-    client: &DaemonClient,
-    content: &str,
-    opts: &StreamOptions,
-) -> Result<StreamResult> {
-    let resp = send_chat(client, content).await?;
-    stream_chat(client, &resp.stream_id, opts).await
+    let body = target.body(content, attachments);
+    let headers = target.headers();
+    client.post_with_headers("/v1/chat", &body, &headers).await
 }
 
 /// Convenience: send_chat_with_attachments + stream_chat
@@ -99,13 +183,10 @@ pub async fn send_and_stream_with_attachments(
     client: &DaemonClient,
     content: &str,
     attachments: &[serde_json::Value],
+    target: &ChatTarget,
     opts: &StreamOptions,
 ) -> Result<StreamResult> {
-    let resp = if attachments.is_empty() {
-        send_chat(client, content).await?
-    } else {
-        send_chat_with_attachments(client, content, attachments).await?
-    };
+    let resp = send_chat_with_attachments(client, content, attachments, target).await?;
     stream_chat(client, &resp.stream_id, opts).await
 }
 
@@ -349,7 +430,7 @@ pub async fn poll_task_completion(client: &DaemonClient, task_id: &str) -> Resul
             }
         };
 
-        // GET /v1/tasks/{id} returns { "task": {...}, "assignments": [...] }
+        // GET /v1/tasks/{id} returns { "task": {...}, "outcome": {...}? }
         let task = &resp["task"];
         let status = task["status"].as_str().unwrap_or("");
 
@@ -385,6 +466,21 @@ pub async fn poll_task_completion(client: &DaemonClient, task_id: &str) -> Resul
                 if !summary.is_empty() {
                     println!("{} {}", "Error:".red(), summary);
                 }
+                return Ok(());
+            }
+            // Terminal, but not a failure: the daemon went away mid-run
+            // (§5.6b). Polling must stop — the run will never move again — and
+            // the restart verb is `rerun`, not `start` (R43).
+            "interrupted" => {
+                let summary = task["result_summary"].as_str().unwrap_or("");
+                println!("{}", "[Task interrupted — the daemon restarted]".yellow());
+                if !summary.is_empty() {
+                    println!("{} {}", "Detail:".yellow(), summary);
+                }
+                println!(
+                    "{}",
+                    "Nothing was lost — re-run it to start the same goal again.".dimmed()
+                );
                 return Ok(());
             }
             _ => {

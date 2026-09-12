@@ -278,6 +278,7 @@ impl TelegramConnector {
                 workspace_path: None, // Telegram has no workspace context; uses Global scope only
                 stream_id: None,
                 lane_override: None,
+                model_override: None,
             })
             .await;
 

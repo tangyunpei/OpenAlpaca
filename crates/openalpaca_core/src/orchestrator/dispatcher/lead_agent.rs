@@ -3,23 +3,50 @@ use super::update_state_with_retry;
 use super::usage;
 use super::{
     DispatchOutcome, TaskDispatcher, finalize_task_with_outcome, format_task_result,
-    persist_conversation, spawn_task_memory_extraction,
+    persist_completion_report, spawn_task_memory_extraction,
 };
 use crate::agent::registry::DestroyOutcome;
 use crate::agent::subagent::SubAgent;
 use crate::context::TaskEntryStatus;
 use crate::events::SystemEvent;
+use crate::memory::scope_context::MemoryScopeContext;
 use crate::runner::lead_agent::run_lead_agent;
-use crate::runner::steering::SteeringInbox;
+use crate::runner::steering::{SteeringInbox, SteeringMsg, SteeringOrigin};
+use crate::session_log::replay::{ResumeHistory, ResumeSeed, resume_interjection};
 use chrono::Utc;
 use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+/// How a dispatch's persist step writes the run's row.
+///
+/// Every dispatch but one mints a fresh id, so the row cannot exist yet. The
+/// exception is D5's `start`, which re-launches a row the client already holds
+/// an id for — see [`TaskRepository::upsert_queued`].
+///
+/// [`TaskRepository::upsert_queued`]: openalpaca_storage::repository::TaskRepository::upsert_queued
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RowWrite {
+    /// A fresh id: `INSERT`.
+    Create,
+    /// D5's `start`: create-or-update on the caller's id.
+    Relaunch,
+}
 
 impl TaskDispatcher {
     /// Dispatch a task using the Lead Agent orchestration pattern.
     /// Spawns a lead agent instance from the "lead_agent" template (singleton),
     /// registers the task, and runs the lead agent execution loop.
+    ///
+    /// `session_id` is **the turn's** conversation, carried from the caller that
+    /// has one (§5.5 item 5: the main loop's `start_workflow` knows it, because
+    /// the gateway pinned it for this turn). It is used as given; `None` — a
+    /// scheduled skill, a `start`/`rerun` from the route, any caller with no
+    /// turn — falls back to the lane's active session, resolved at dispatch.
+    /// Without the carry, a `create_session`/`activate_session` landing during
+    /// the loop's LLM round re-homed the completion report, its artifact links
+    /// and the run's JSONL into whichever conversation happened to be active by
+    /// the time the dispatch ran.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn dispatch_lead_agent(
         &self,
         description: &str,
@@ -27,10 +54,148 @@ impl TaskDispatcher {
         created_by: &str,
         lane_key: &str,
         source: &str,
-        workspace_id: Option<String>,
+        workspace: MemoryScopeContext,
+        session_id: Option<&str>,
     ) -> Result<DispatchOutcome, String> {
-        let task_id = Uuid::new_v4().to_string();
+        self.dispatch_lead_agent_inner(
+            Uuid::new_v4().to_string(),
+            description,
+            title,
+            created_by,
+            lane_key,
+            source,
+            workspace,
+            None,
+            RowWrite::Create,
+            None,
+            session_id,
+        )
+    }
+
+    /// GAP-06's `rerun`: a **new** run carrying an old one's goal, with the
+    /// provenance link back to it (`task.source_task_id`).
+    ///
+    /// The asymmetry with [`Self::dispatch_lead_agent_with_id`] is deliberate.
+    /// A re-run is a second run of the same work, and both rows have to survive
+    /// — the original's result is the thing the user is comparing against — so
+    /// it gets a new id and answers `201`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn dispatch_lead_agent_rerun(
+        &self,
+        description: &str,
+        title: String,
+        created_by: &str,
+        lane_key: &str,
+        source: &str,
+        workspace: MemoryScopeContext,
+        source_task_id: &str,
+    ) -> Result<DispatchOutcome, String> {
+        self.dispatch_lead_agent_inner(
+            Uuid::new_v4().to_string(),
+            description,
+            title,
+            created_by,
+            lane_key,
+            source,
+            workspace,
+            Some(source_task_id.to_string()),
+            RowWrite::Create,
+            None,
+            // A re-run comes from the route, not from a turn: the lane's
+            // active session is the only answer there is.
+            None,
+        )
+    }
+
+    /// D5's `start`: run a stored row **under its own id**.
+    ///
+    /// The caller must already hold the id's run slot
+    /// ([`SharedContext::claim_run_slot`](crate::context::SharedContext::claim_run_slot))
+    /// and must release it if this returns `Err` — the claim is what stops two
+    /// simultaneous `start`s from putting two lead agents on one task id.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn dispatch_lead_agent_with_id(
+        &self,
+        task_id: &str,
+        description: &str,
+        title: String,
+        created_by: &str,
+        lane_key: &str,
+        source: &str,
+        workspace: MemoryScopeContext,
+    ) -> Result<DispatchOutcome, String> {
+        self.dispatch_lead_agent_inner(
+            task_id.to_string(),
+            description,
+            title,
+            created_by,
+            lane_key,
+            source,
+            workspace,
+            None,
+            RowWrite::Relaunch,
+            None,
+            // `start` likewise has no turn behind it.
+            None,
+        )
+    }
+
+    /// §5.6c's `resume` (S2): `start`'s path, plus the history the run left
+    /// behind.
+    ///
+    /// It goes through the same [`Self::dispatch_lead_agent_with_id`] machinery
+    /// — `RowWrite::Relaunch`, one id, one row — rather than a dispatcher of
+    /// its own, because everything except the seeded history is identical: the
+    /// caller holds the id, the row is re-queued in place, and the run slot was
+    /// claimed before this was called. The seed is what the lead's loop reads
+    /// to rebuild its messages instead of starting from the objective alone.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn dispatch_lead_agent_resume(
+        &self,
+        task_id: &str,
+        description: &str,
+        title: String,
+        created_by: &str,
+        lane_key: &str,
+        source: &str,
+        workspace: MemoryScopeContext,
+        resume: ResumeSeed,
+    ) -> Result<DispatchOutcome, String> {
+        self.dispatch_lead_agent_inner(
+            task_id.to_string(),
+            description,
+            title,
+            created_by,
+            lane_key,
+            source,
+            workspace,
+            None,
+            RowWrite::Relaunch,
+            Some(resume),
+            // The seed's own session wins above; nothing to carry here.
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_lead_agent_inner(
+        &self,
+        task_id: String,
+        description: &str,
+        title: String,
+        created_by: &str,
+        lane_key: &str,
+        source: &str,
+        workspace: MemoryScopeContext,
+        source_task_id: Option<String>,
+        row_write: RowWrite,
+        resume: Option<ResumeSeed>,
+        turn_session_id: Option<&str>,
+    ) -> Result<DispatchOutcome, String> {
         let now = Utc::now();
+        // Whether this dispatch is §5.6c's `resume`, asked before the seed is
+        // moved into the spawn: the row write and the state init both differ.
+        let resuming = resume.is_some();
 
         // Spawn a lead agent instance from the singleton template.
         // Prefer templates with "orchestration" capability, fall back to any template.
@@ -81,6 +246,7 @@ impl TaskDispatcher {
             agent_id: lead_agent.id.clone(),
             instance_id: lead_agent.id.clone(),
             template_id: lead_agent.template_id.clone(),
+            name: lead_agent.name.clone(),
             status: "spawned".to_string(),
             current_task_id: Some(task_id.clone()),
             timestamp: now,
@@ -92,6 +258,35 @@ impl TaskDispatcher {
             title: title.clone(),
             created_by: created_by.to_string(),
             timestamp: now,
+        });
+
+        // §5.1: the session this run was started from. It is what makes the
+        // completion report land in the conversation that asked for the work,
+        // even when the user has opened another one by the time the run
+        // finishes.
+        //
+        // §5.6c: a resume keeps the run's **own** session — the conversation
+        // whose log it was rebuilt from. Re-resolving the lane's current one
+        // would re-home the row mid-recovery and point the run's log at a
+        // transcript it has no history in.
+        //
+        // §5.5 item 5: otherwise the **turn's** session, carried from the
+        // caller that has one, because the lane's active session can change
+        // during the LLM round that decided to start this workflow. Only a
+        // caller with no turn at all falls back to reading the lane.
+        let session_id = resume
+            .as_ref()
+            .map(|r| r.session_id.clone())
+            .or_else(|| turn_session_id.map(str::to_string))
+            .or_else(|| {
+            self.db.as_ref().and_then(|db| {
+                openalpaca_storage::ConversationRepository::new(db)
+                    .active_session_id(lane_key)
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(%lane_key, "Failed to resolve the lane's active session: {e}");
+                        None
+                    })
+            })
         });
 
         // Persist task to DB
@@ -116,24 +311,67 @@ impl TaskDispatcher {
                 outcome_json: None,
                 outcome_kind: None,
                 artifact_count: 0,
+                // §4.7 item 3: the project this run belonged to. The request's
+                // workspace root and nothing else — `workspace_id` on the same
+                // context falls back to the daemon CWD for memory scoping, and
+                // recording *that* would claim a Telegram run belonged to
+                // whatever repository the daemon started in (R22).
+                workspace_id: workspace.request_workspace_root.clone(),
+                // Set only by `rerun`, which is the only dispatch that copies
+                // another run's goal onto a new id (GAP-06).
+                source_task_id: source_task_id.clone(),
+                session_id: session_id.clone(),
             };
-            if let Err(e) = repo.create(&task) {
+            let persisted = match row_write {
+                RowWrite::Create => repo.create(&task),
+                // §5.6c: a resume re-enters a row that *did* run, and its
+                // final artifact list is built from `state_json` — so the
+                // accumulators stay (Important 3). Every other relaunch is
+                // D5's `start` on a row that never ran, and replaces whatever
+                // the last attempt left on it.
+                RowWrite::Relaunch if resuming => repo.upsert_queued_preserving_state(&task),
+                RowWrite::Relaunch => repo.upsert_queued(&task),
+            };
+            if let Err(e) = persisted {
                 tracing::warn!("Failed to persist lead agent task to DB: {e}");
             }
 
-            // Initialize state_json with workspace
-            let step_info = vec![(
-                lead_agent.id.clone(),
-                lead_agent.name.clone(),
-                "lead_orchestrator".to_string(),
-            )];
-            let initial_state = TaskState::initial(description, &step_info);
-            let state_json = initial_state.to_json();
-            match repo.update_state(&task_id, &state_json, 0) {
+            // The run's working state. A resume keeps the one the crashed half
+            // left — its steps carry the artifact pointers the completion
+            // report is assembled from — and only hands the lead's step to the
+            // instance now running it, after claiming what the dead instance
+            // wrote into the workspace but never got to claim. Re-initialising
+            // here would make the resumed run disown the files it already
+            // produced.
+            let preserved = resuming
+                .then(|| repo.get(&task_id).ok().flatten())
+                .flatten()
+                .and_then(|row| {
+                    let version = row.state_version;
+                    serde_json::from_str::<TaskState>(row.state_json.as_deref()?)
+                        .ok()
+                        .map(|state| (state, version))
+                });
+            let (state_json, base_version) = match preserved {
+                Some((mut state, version)) => {
+                    state.scan_workspace_artifacts(0);
+                    state.rebind_step_agent(0, &lead_agent.id, &lead_agent.name);
+                    (state.to_json(), version)
+                }
+                None => {
+                    let step_info = vec![(
+                        lead_agent.id.clone(),
+                        lead_agent.name.clone(),
+                        "lead_orchestrator".to_string(),
+                    )];
+                    (TaskState::initial(description, &step_info).to_json(), 0)
+                }
+            };
+            match repo.update_state(&task_id, &state_json, base_version) {
                 Ok(true) => {}
                 Ok(false) => {
                     tracing::warn!(task_id = %task_id, "State init version conflict, retrying");
-                    let _ = repo.update_state(&task_id, &state_json, 1);
+                    let _ = repo.update_state(&task_id, &state_json, base_version + 1);
                 }
                 Err(e) => {
                     tracing::error!(task_id = %task_id, error = %e, "Failed to initialize task state");
@@ -150,7 +388,9 @@ impl TaskDispatcher {
             lane_key.to_string(),
             source.to_string(),
             created_by.to_string(),
-            workspace_id,
+            workspace,
+            session_id,
+            resume,
         );
 
         let ack = format!(
@@ -178,9 +418,16 @@ impl TaskDispatcher {
         lane_key: String,
         source: String,
         created_by: String,
-        workspace_id: Option<String>,
+        workspace: MemoryScopeContext,
+        session_id: Option<String>,
+        resume: Option<ResumeSeed>,
     ) {
         let Some(router) = self.require_router(&task_id) else {
+            // Nothing will run, so nothing will clean up after it: release the
+            // run slot D5's `start` claimed before dispatching, or that id
+            // answers "already running" until the daemon restarts. A no-op for
+            // every other dispatch — those register their token below.
+            self.shared_context.remove_cancellation_token(&task_id);
             return;
         };
 
@@ -198,9 +445,10 @@ impl TaskDispatcher {
         let context_manager = self.context_manager.clone();
         let compose_engine = self.compose_engine.clone();
 
-        // Create cancellation token for this task
-        let cancel_token = CancellationToken::new();
-        ctx.register_cancellation_token(&task_id, cancel_token.clone());
+        // This run's cancellation token — the one a `start`/`resume` claim
+        // already installed, if there was one, so a cancel issued in the window
+        // between the claim and here is observed instead of replaced away.
+        let cancel_token = ctx.run_cancellation_token(&task_id);
 
         // Routing V2: attach the workflow to its lane unconditionally — the
         // lane attachment backs the StartWorkflowTool per-lane cap and the
@@ -222,6 +470,50 @@ impl TaskDispatcher {
             }
         };
 
+        // §5.6c — the resume note goes in through the **steering rail**, not
+        // as a message appended by hand: the loop drains its inbox at the
+        // round boundary immediately before it builds the first request, so a
+        // push here is delivered as `<user_interjection>` in round 1, on the
+        // channel the lead's own prompt already teaches it to obey mid-run.
+        //
+        // With steering off there is no rail to use, and a push the inbox
+        // refuses is not worth failing a resume over — either way the same
+        // text is carried inline by the rebuilt history instead.
+        let resume = resume.map(|seed| {
+            let plan = seed.replay;
+            let note = resume_interjection(plan.last_ts.unwrap_or_else(Utc::now));
+            let delivered = steering_inbox.as_ref().is_some_and(|inbox| {
+                inbox
+                    .push(SteeringMsg {
+                        text: note.clone(),
+                        request_id: Uuid::new_v4(),
+                        // The daemon wrote this, not the user — which is a
+                        // fact about the message, not only about its
+                        // principal: the origin is what keeps it out of the
+                        // `unprocessed_steering` queue on an early exit, and
+                        // what renders it as a `<system_note>` rather than an
+                        // instruction the user never gave.
+                        principal: crate::security::policy::Principal::System,
+                        scope: crate::security::policy::Scope::Global,
+                        workspace_path: workspace.request_workspace_root.clone(),
+                        received_at: Utc::now(),
+                        origin: SteeringOrigin::Daemon,
+                    })
+                    .inspect_err(|e| {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            "The resume interjection could not enter the steering rail ({e:?}); \
+                             the rebuilt history will carry it inline instead"
+                        );
+                    })
+                    .is_ok()
+            });
+            ResumeHistory {
+                plan,
+                inline_note: (!delivered).then_some(note),
+            }
+        });
+
         tokio::spawn(async move {
             let start_time = std::time::Instant::now();
 
@@ -236,6 +528,7 @@ impl TaskDispatcher {
                 .update_status(&task_id, TaskEntryStatus::Running);
             bus.publish(SystemEvent::TaskUpdated {
                 task_id: task_id.clone(),
+                title: task_title.clone(),
                 status: "running".to_string(),
                 progress_current: Some(0),
                 progress_total: None, // Lead agent has dynamic progress
@@ -244,6 +537,50 @@ impl TaskDispatcher {
             if let Some(ref db) = db {
                 let repo = openalpaca_storage::repository::TaskRepository::new(db);
                 let _ = repo.update_status(&task_id, openalpaca_storage::TaskStatus::Running);
+            }
+
+            // The lead's own lane (plan Phase 4, GAP-09). Its span id is
+            // derived from the task rather than a fresh UUID: there is exactly
+            // one lead lane per run, so the id stays reconstructible from the
+            // task alone. Opened after the status flip, so a reader that sees
+            // a running task always sees a lane for it.
+            let lead_span_id = format!("lead::{task_id}");
+            let lead_label = crate::runner::span::open_span(
+                db.as_ref(),
+                &bus,
+                &task_id,
+                &lead_span_id,
+                &lead_agent.template_id,
+                &lead_agent.id,
+                &description,
+            );
+
+            // §5.5: the run's session log. Opened from the session the
+            // dispatch pinned, registered against the task id so
+            // `push_steering` can narrate into it, and handed to the lead's
+            // loop and to every subagent it spawns — one log per session,
+            // `span_id` the dimension that tells the lanes apart (P-20).
+            let session_log = session_id.as_ref().and_then(|id| {
+                ctx.session_log()
+                    .map(|svc| svc.open(id, Some(&lane_key), Some(&source), None))
+            });
+            if let Some(ref log) = session_log {
+                ctx.register_task_session_log(&task_id, log.clone());
+                log.emit(
+                    crate::session_log::Record::new(
+                        crate::session_log::RecordType::SubagentOpen,
+                    )
+                    .task(Some(&task_id))
+                    .span(Some(&lead_span_id))
+                    .agent(Some(&lead_agent.id))
+                    .with_data(serde_json::json!({
+                        "span_id": lead_span_id,
+                        "template": lead_agent.template_id,
+                        "label": lead_label,
+                        "role": "lead",
+                        "objective": description.chars().take(500).collect::<String>(),
+                    })),
+                );
             }
 
             // Mark step 0 as running now (before the agentic loop) so started_at is accurate
@@ -276,19 +613,29 @@ impl TaskDispatcher {
                 &lane_key,
                 &source,
                 &daemon_config,
-                workspace_id.clone(),
+                workspace.clone(),
                 Some(cancel_token),
                 steering_inbox.clone(),
+                session_log.clone(),
+                &lead_span_id,
                 &connector_block,
                 broker,
                 skill_catalog,
                 context_manager,
                 compose_engine,
+                resume,
             )
             .await;
 
-            // Cleanup cancellation token
-            ctx.remove_cancellation_token(&task_id);
+            // The cancellation token is NOT released here (R45). It is also
+            // the run slot `Orchestrator::start_task` claims, and everything
+            // below — lane teardown, the steering drain, the state write, the
+            // completion report, the span close — happens while the row still
+            // says `running`. Releasing it now would leave that whole stretch
+            // unclaimed on a non-terminal row, and a `start` arriving in it
+            // would re-queue the row under a second lead agent that this run's
+            // own `finalize_task_with_outcome` would then write over. It is
+            // released immediately after that finalize instead.
 
             // Remove the task lane — task lanes are per-execution and would
             // otherwise accumulate for the daemon's lifetime (slow leak).
@@ -309,10 +656,29 @@ impl TaskDispatcher {
             if let Some(ref inbox) = steering_inbox {
                 let leftovers = inbox.close_and_drain();
                 ctx.remove_steering_inbox(&task_id);
+                // §5.6c: the resume note is the daemon's own narration, pushed
+                // onto the rail before the loop starts. A loop that exits
+                // before its first round boundary (cancelled, or a budget exit
+                // returning drained-but-unsent messages) leaves it here — and
+                // an `unprocessed_steering` row is rendered to the model as
+                // "messages the user sent while the last workflow was
+                // finishing … act on them now". Daemon text filed there is a
+                // provenance nothing downstream can correct, so it is dropped
+                // and said so, never queued.
+                let (daemon, leftovers): (Vec<_>, Vec<_>) = leftovers
+                    .into_iter()
+                    .partition(|msg| msg.origin == SteeringOrigin::Daemon);
+                for msg in &daemon {
+                    tracing::info!(
+                        task_id = %task_id,
+                        request_id = %msg.request_id,
+                        "Dropping an undelivered daemon-authored rail message (the loop exited \
+                         before draining it): {}",
+                        msg.text.chars().take(120).collect::<String>()
+                    );
+                }
                 if !leftovers.is_empty() {
                     if let Some(ref db) = db {
-                        let repo =
-                            openalpaca_storage::repository::FollowupRepository::new(db);
                         for msg in leftovers {
                             let principal_json = match serde_json::to_string(&msg.principal)
                             {
@@ -325,21 +691,35 @@ impl TaskDispatcher {
                                     continue;
                                 }
                             };
-                            match repo.queue(
+                            // R56: the same guarded insert the dropped-record
+                            // fallback (`runner/steering.rs`) and the boot
+                            // recovery use, so a message the fallback already
+                            // filed (log channel saturated for this push,
+                            // still undrained at detach) is not filed again
+                            // here — one steered instruction must not surface
+                            // twice via `<unprocessed_steering>`.
+                            match crate::runner::steering::file_unprocessed_steering(
+                                db,
                                 &lane_key,
-                                "unprocessed_steering",
+                                &task_id,
                                 &msg.text,
                                 &principal_json,
                                 msg.workspace_path.as_deref(),
-                                Some(&task_id),
                             ) {
-                                Ok(followup_id) => {
+                                Ok(Some(followup_id)) => {
                                     bus.publish(SystemEvent::FollowupQueued {
                                         lane_key: lane_key.clone(),
                                         followup_id,
                                         kind: "unprocessed_steering".to_string(),
                                         timestamp: Utc::now(),
                                     });
+                                }
+                                Ok(None) => {
+                                    tracing::debug!(
+                                        task_id = %task_id,
+                                        "steering leftover already filed as a follow-up — \
+                                         skipping the duplicate"
+                                    );
                                 }
                                 Err(e) => tracing::warn!(
                                     task_id = %task_id,
@@ -404,6 +784,7 @@ impl TaskDispatcher {
                 agent_id: lead_agent.id.clone(),
                 instance_id: lead_agent.id.clone(),
                 template_id: lead_agent.template_id.clone(),
+                name: lead_agent.name.clone(),
                 status: destroy_status.to_string(),
                 current_task_id: None,
                 timestamp: now,
@@ -481,15 +862,23 @@ impl TaskDispatcher {
                     .as_deref()
                     .or(lead_agent.llm_config.model.as_deref())
                     .unwrap_or(&default_model);
-                persist_conversation(
+                // GAP-23: the report carries the run it closed *and* a
+                // `role='artifact'` link per file the run produced — the two
+                // things a reloaded transcript cannot otherwise know.
+                // §5.3: into the session this run was *started from*, which
+                // may since have been archived — not into whatever the lane is
+                // currently showing.
+                persist_completion_report(
                     db,
                     &lane_key,
                     &source,
+                    session_id.as_deref(),
                     content,
                     Some(actual_model.to_string()),
                     result.loop_result.total_input_tokens as i64,
                     result.loop_result.total_output_tokens as i64,
                     runtime_secs,
+                    &task_id,
                 );
             }
 
@@ -503,6 +892,47 @@ impl TaskDispatcher {
                     "Task status: running → failed"
                 );
             }
+            // Close the lead's lane *before* the task goes terminal: the
+            // timeline reports a span still running on a terminal task as
+            // `cancelled`/`"interrupted"`, and closing after the flip would
+            // leave a window where a reader saw the lead as interrupted.
+            let lead_state =
+                crate::runner::span::span_state_for(&result.loop_result.finish_reason);
+            let lead_detail =
+                crate::runner::span::span_detail_for(&result.loop_result.finish_reason);
+            crate::runner::span::close_span(
+                db.as_ref(),
+                &bus,
+                &lead_span_id,
+                lead_state,
+                lead_detail.as_deref(),
+                Some(result.final_content.as_str()),
+            );
+            if let Some(ref log) = session_log {
+                log.emit(
+                    crate::session_log::Record::new(
+                        crate::session_log::RecordType::SubagentClose,
+                    )
+                    .task(Some(&task_id))
+                    .span(Some(&lead_span_id))
+                    .agent(Some(&lead_agent.id))
+                    .with_data(serde_json::json!({
+                        "span_id": lead_span_id,
+                        "role": "lead",
+                        "state": lead_state.as_str(),
+                        "detail": lead_detail,
+                        "output_preview": result
+                            .final_content
+                            .chars()
+                            .take(200)
+                            .collect::<String>(),
+                    })),
+                );
+            }
+            // The run's transcript link is per-run state, like the steering
+            // inbox: released once nothing else will narrate into it.
+            ctx.remove_task_session_log(&task_id);
+
             finalize_task_with_outcome(
                 &ctx,
                 &bus,
@@ -511,6 +941,14 @@ impl TaskDispatcher {
                 &final_content,
                 result.success,
             );
+
+            // Now the id is genuinely free (R45): the row is terminal and
+            // carries this run's result, so the next `start` on it is refused
+            // by R43's guard rather than racing this tail. Nothing between
+            // `run_lead_agent` returning and here reads the token — the only
+            // other readers are `cancel_task` (a cancel during the tail already
+            // had nothing left to stop) and `claim_run_slot` itself.
+            ctx.remove_cancellation_token(&task_id);
 
             // Routing V2: auto-start the next queued follow-up for this lane.
             // Inert unless a runner is wired AND a `followup` row is queued
@@ -527,6 +965,19 @@ impl TaskDispatcher {
                                 lane_key = %lane_key,
                                 "Auto-starting queued follow-up"
                             );
+                            // The claim re-homed the lane onto the session the
+                            // item was promised in (§5.3) — say so, or a second
+                            // window keeps showing the conversation that just
+                            // stepped down.
+                            if let Some(ref session_id) = row.session_id {
+                                bus.publish(SystemEvent::SessionChanged {
+                                    session_id: session_id.clone(),
+                                    lane_key: lane_key.clone(),
+                                    status: openalpaca_storage::SESSION_ACTIVE.to_string(),
+                                    task_id: None,
+                                    timestamp: Utc::now(),
+                                });
+                            }
                             let scope = match row.workspace_path.clone() {
                                 Some(path) => crate::security::policy::Scope::Workspace { path },
                                 None => crate::security::policy::Scope::Global,
@@ -569,7 +1020,7 @@ impl TaskDispatcher {
                     &final_content,
                     "lead_agent",
                     result.success,
-                    workspace_id,
+                    workspace.workspace_id,
                 );
             }
 

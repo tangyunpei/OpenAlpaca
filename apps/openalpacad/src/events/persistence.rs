@@ -60,6 +60,7 @@ impl EventBroadcaster {
                 // Log task status changes
                 ServerEvent::TaskStatus {
                     task_id,
+                    title,
                     status,
                     progress_current,
                     progress_total,
@@ -71,6 +72,7 @@ impl EventBroadcaster {
                 } => {
                     let detail = serde_json::json!({
                         "task_id": task_id,
+                        "title": title,
                         "status": status,
                         "progress_current": progress_current,
                         "progress_total": progress_total,
@@ -79,7 +81,7 @@ impl EventBroadcaster {
                         "artifact_count": artifact_count,
                         "outcome_summary": outcome_summary,
                     });
-                    repo.log("task_status", None, Some(&detail), None)
+                    repo.log_for_task("task_status", None, Some(task_id), Some(&detail), None)
                 }
                 // Log key status changes
                 ServerEvent::KeyStatusChanged {
@@ -146,31 +148,42 @@ impl EventBroadcaster {
                     agent_id,
                     tool_name,
                     reason,
+                    task_id,
                     ..
                 } => {
                     let detail = serde_json::json!({
                         "agent_id": agent_id,
                         "tool_name": tool_name,
-                        "reason": reason
+                        "reason": reason,
+                        "task_id": task_id
                     });
-                    repo.log("security_violation", Some(agent_id), Some(&detail), None)
+                    repo.log_for_task(
+                        "security_violation",
+                        Some(agent_id),
+                        task_id.as_deref(),
+                        Some(&detail),
+                        None,
+                    )
                 }
                 ServerEvent::CircuitBreakerTripped {
                     agent_id,
                     tool_name,
                     consecutive_failures,
                     reset_after_secs,
+                    task_id,
                     ..
                 } => {
                     let detail = serde_json::json!({
                         "agent_id": agent_id,
                         "tool_name": tool_name,
                         "consecutive_failures": consecutive_failures,
-                        "reset_after_secs": reset_after_secs
+                        "reset_after_secs": reset_after_secs,
+                        "task_id": task_id
                     });
-                    repo.log(
+                    repo.log_for_task(
                         "circuit_breaker_tripped",
                         Some(agent_id),
+                        task_id.as_deref(),
                         Some(&detail),
                         None,
                     )
@@ -180,15 +193,23 @@ impl EventBroadcaster {
                     tool_name,
                     success,
                     duration_ms,
+                    task_id,
                     ..
                 } => {
                     let detail = serde_json::json!({
                         "agent_id": agent_id,
                         "tool_name": tool_name,
                         "success": success,
-                        "duration_ms": duration_ms
+                        "duration_ms": duration_ms,
+                        "task_id": task_id
                     });
-                    repo.log("tool_executed", Some(agent_id), Some(&detail), None)
+                    repo.log_for_task(
+                        "tool_executed",
+                        Some(agent_id),
+                        task_id.as_deref(),
+                        Some(&detail),
+                        None,
+                    )
                 }
                 ServerEvent::LlmCallCompleted {
                     agent_id,
@@ -196,6 +217,7 @@ impl EventBroadcaster {
                     input_tokens,
                     output_tokens,
                     cost_usd,
+                    task_id,
                     ..
                 } => {
                     let detail = serde_json::json!({
@@ -203,9 +225,16 @@ impl EventBroadcaster {
                         "model": model,
                         "input_tokens": input_tokens,
                         "output_tokens": output_tokens,
-                        "cost_usd": cost_usd
+                        "cost_usd": cost_usd,
+                        "task_id": task_id
                     });
-                    repo.log("llm_call_completed", Some(agent_id), Some(&detail), None)
+                    repo.log_for_task(
+                        "llm_call_completed",
+                        Some(agent_id),
+                        task_id.as_deref(),
+                        Some(&detail),
+                        None,
+                    )
                 }
                 ServerEvent::SkillCatalogUpdated {
                     skill_name, action, ..
@@ -257,36 +286,26 @@ impl EventBroadcaster {
                     });
                     repo.log("skill_failed", None, Some(&detail), None)
                 }
-                // Log DAG node status changes
-                ServerEvent::DagNodeStatus {
-                    task_id,
-                    node_id,
-                    agent_id,
-                    status,
-                    duration_ms,
-                    ..
-                } => {
-                    let detail = serde_json::json!({
-                        "task_id": task_id,
-                        "node_id": node_id,
-                        "agent_id": agent_id,
-                        "status": status,
-                        "duration_ms": duration_ms,
-                    });
-                    repo.log("dag_node_status", Some(agent_id), Some(&detail), None)
-                }
                 ServerEvent::ToolConfirmationRequested {
                     request_id,
                     agent_id,
                     tool_name,
+                    task_id,
                     ..
                 } => {
                     let detail = serde_json::json!({
                         "request_id": request_id,
                         "agent_id": agent_id,
-                        "tool_name": tool_name
+                        "tool_name": tool_name,
+                        "task_id": task_id
                     });
-                    repo.log("tool_confirmation_requested", Some(agent_id), Some(&detail), None)
+                    repo.log_for_task(
+                        "tool_confirmation_requested",
+                        Some(agent_id),
+                        task_id.as_deref(),
+                        Some(&detail),
+                        None,
+                    )
                 }
                 // Log SOUL.md personality updates with actor attribution
                 ServerEvent::SoulUpdated {
@@ -316,7 +335,7 @@ impl EventBroadcaster {
                         "lane_key": lane_key,
                         "title": title,
                     });
-                    repo.log("workflow_started", None, Some(&detail), None)
+                    repo.log_for_task("workflow_started", None, Some(task_id), Some(&detail), None)
                 }
                 ServerEvent::WorkflowSteered {
                     task_id, lane_key, ..
@@ -325,7 +344,7 @@ impl EventBroadcaster {
                         "task_id": task_id,
                         "lane_key": lane_key,
                     });
-                    repo.log("workflow_steered", None, Some(&detail), None)
+                    repo.log_for_task("workflow_steered", None, Some(task_id), Some(&detail), None)
                 }
                 ServerEvent::WorkflowProgress {
                     task_id,
@@ -338,7 +357,13 @@ impl EventBroadcaster {
                         "lane_key": lane_key,
                         "message": message,
                     });
-                    repo.log("workflow_progress", None, Some(&detail), None)
+                    repo.log_for_task(
+                        "workflow_progress",
+                        None,
+                        Some(task_id),
+                        Some(&detail),
+                        None,
+                    )
                 }
                 ServerEvent::FollowupQueued {
                     lane_key,
@@ -353,65 +378,179 @@ impl EventBroadcaster {
                     });
                     repo.log("followup_queued", None, Some(&detail), None)
                 }
-                // Plugin lifecycle events
-                ServerEvent::PluginLoaded {
-                    plugin_id, tools, ..
-                } => {
-                    let detail = serde_json::json!({
-                        "plugin_id": plugin_id,
-                        "tools": tools
-                    });
-                    repo.log("plugin_loaded", None, Some(&detail), None)
-                }
-                ServerEvent::PluginUnloaded { plugin_id, .. } => {
-                    let detail = serde_json::json!({
-                        "plugin_id": plugin_id
-                    });
-                    repo.log("plugin_unloaded", None, Some(&detail), None)
-                }
-                ServerEvent::PluginCrashed {
-                    plugin_id,
-                    error,
-                    restart_in_secs,
+                ServerEvent::SessionChanged {
+                    session_id,
+                    lane_key,
+                    status,
+                    task_id,
                     ..
                 } => {
                     let detail = serde_json::json!({
-                        "plugin_id": plugin_id,
-                        "error": error,
-                        "restart_in_secs": restart_in_secs
+                        "session_id": session_id,
+                        "lane_key": lane_key,
+                        "status": status,
+                        "task_id": task_id,
                     });
-                    repo.log("plugin_crashed", None, Some(&detail), None)
+                    // §5.6b's `interrupted` frame names a run, so the row
+                    // hangs off it (T33's `log_for_task`) and shows up in that
+                    // run's own log; a lifecycle transition names no task and
+                    // writes the same row it always did.
+                    repo.log_for_task(
+                        "session_changed",
+                        None,
+                        task_id.as_deref(),
+                        Some(&detail),
+                        None,
+                    )
                 }
-                ServerEvent::PluginDisabled {
-                    plugin_id, reason, ..
+                ServerEvent::FollowupCancelled {
+                    lane_key,
+                    followup_id,
+                    ..
                 } => {
                     let detail = serde_json::json!({
-                        "plugin_id": plugin_id,
-                        "reason": reason
+                        "lane_key": lane_key,
+                        "followup_id": followup_id,
                     });
-                    repo.log("plugin_disabled", None, Some(&detail), None)
+                    repo.log("followup_cancelled", None, Some(&detail), None)
                 }
-                ServerEvent::PluginPendingApproval {
-                    plugin_id,
+                // A produced artifact (plan §4.9). Persisted like `task_status`
+                // so it appears in `GET /v1/events/history` and feeds GAP-10's
+                // per-run log; the agent goes in the indexed column so
+                // `?agent_id=` finds it.
+                ServerEvent::ArtifactWritten {
+                    artifact_id,
+                    task_id,
+                    agent_id,
+                    name,
+                    kind,
+                    version,
+                    path,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "artifact_id": artifact_id,
+                        "task_id": task_id,
+                        "agent_id": agent_id,
+                        "name": name,
+                        "kind": kind,
+                        "version": version,
+                        "path": path,
+                    });
+                    repo.log_for_task(
+                        "artifact_written",
+                        agent_id.as_deref(),
+                        task_id.as_deref(),
+                        Some(&detail),
+                        None,
+                    )
+                }
+                // One subagent lane opening or closing (GAP-09). Persisted
+                // like the rest so the run's history survives a restart; the
+                // agent *instance* goes in the indexed `agent_id` column,
+                // because that is what identifies the lane.
+                ServerEvent::SubagentSpan {
+                    task_id,
+                    span_id,
+                    label,
+                    template_id,
+                    agent_instance_id,
+                    state,
+                    detail,
+                    started_at,
+                    ended_at,
+                    duration_ms,
+                    output_preview,
+                    ..
+                } => {
+                    let payload = serde_json::json!({
+                        "task_id": task_id,
+                        "span_id": span_id,
+                        "label": label,
+                        "template_id": template_id,
+                        "agent_instance_id": agent_instance_id,
+                        "state": state,
+                        "detail": detail,
+                        "started_at": started_at,
+                        "ended_at": ended_at,
+                        "duration_ms": duration_ms,
+                        "output_preview": output_preview,
+                    });
+                    repo.log_for_task(
+                        "subagent_span",
+                        Some(agent_instance_id.as_str()),
+                        Some(task_id.as_str()),
+                        Some(&payload),
+                        None,
+                    )
+                }
+                // Extension (MCP server / plugin) state transitions
+                ServerEvent::ExtensionStateChanged {
+                    kind,
+                    id,
+                    state,
+                    generation,
+                    tools_changed,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "kind": kind,
+                        "id": id,
+                        "state": state,
+                        "generation": generation,
+                        "tools_changed": tools_changed,
+                    });
+                    repo.log("extension_state_changed", None, Some(&detail), None)
+                }
+                // S4 moment 1/2 — a withheld capability (already deduped)
+                ServerEvent::ExtensionCapabilityWithheld {
+                    kind,
+                    id,
+                    subject,
+                    moment,
+                    state,
+                    scope,
+                    stale,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "kind": kind,
+                        "id": id,
+                        "subject": subject,
+                        "moment": moment,
+                        "state": state,
+                        "scope": scope,
+                        "stale": stale,
+                    });
+                    repo.log("extension_capability_withheld", None, Some(&detail), None)
+                }
+                // S4 moment 3 — T1 step 3's dependent scan, one per transition
+                ServerEvent::ExtensionCapabilityWithdrawn {
+                    kind,
+                    id,
+                    state,
+                    cause,
                     capabilities,
+                    tools,
+                    affected_templates,
+                    affected_skills,
+                    affected_cron_skills,
+                    notice_lane,
                     ..
                 } => {
                     let detail = serde_json::json!({
-                        "plugin_id": plugin_id,
-                        "capabilities": capabilities
+                        "kind": kind,
+                        "id": id,
+                        "state": state,
+                        "cause": cause,
+                        "capabilities": capabilities,
+                        "tools": tools,
+                        "affected_templates": affected_templates,
+                        "affected_skills": affected_skills,
+                        "affected_cron_skills": affected_cron_skills,
+                        "notice_lane": notice_lane,
                     });
-                    repo.log("plugin_pending_approval", None, Some(&detail), None)
-                }
-                ServerEvent::PluginNeedsConfig {
-                    plugin_id,
-                    missing_keys,
-                    ..
-                } => {
-                    let detail = serde_json::json!({
-                        "plugin_id": plugin_id,
-                        "missing_keys": missing_keys
-                    });
-                    repo.log("plugin_needs_config", None, Some(&detail), None)
+                    repo.log("extension_capability_withdrawn", None, Some(&detail), None)
                 }
             };
             if let Err(e) = persist_result {
@@ -420,28 +559,354 @@ impl EventBroadcaster {
         }
     }
 
-    /// Persist a tool execution to the tool_execution_log table (in addition to event_log).
+    /// Persist a tool execution to the tool_execution_log table (in addition
+    /// to event_log).
+    ///
+    /// This is the row's **audit half** and it is written for every executed
+    /// call (R51). `session_id` and `tool_use_id` are carried so the session
+    /// writer can find this row and add the index half — `log_seq`, the
+    /// previews, `result_ref` — rather than writing a second row for the same
+    /// call.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn persist_tool_execution(
         &self,
         agent_id: &str,
         tool_name: &str,
         success: bool,
         duration_ms: u64,
+        task_id: Option<&str>,
+        session_id: Option<&str>,
+        tool_use_id: Option<&str>,
     ) {
         if let Some(ref db) = self.db {
             let entry = ToolExecutionEntry {
-                id: None,
-                request_id: None,
+                request_id: tool_use_id.map(str::to_string),
                 agent_id: agent_id.to_string(),
                 tool_name: tool_name.to_string(),
                 success,
                 duration_ms: duration_ms as i64,
-                error_message: None,
-                timestamp: None,
+                session_id: session_id.map(str::to_string),
+                task_id: task_id.map(str::to_string),
+                ..Default::default()
             };
             if let Err(e) = SkillExecutionRepository::new(db).record_tool(&entry) {
                 tracing::warn!("Failed to persist tool execution log: {e}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openalpaca_storage::Database;
+
+    fn test_db() -> (tempfile::TempDir, Database) {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let db = Database::open(&dir.path().join("test.db")).expect("open test db");
+        (dir, db)
+    }
+
+    /// T28 — `artifact_written` is persisted like `task_status`, so it shows up
+    /// in `GET /v1/events/history` and feeds GAP-10's per-run log. The agent id
+    /// goes in the indexed column, so `?agent_id=` finds the row.
+    #[test]
+    fn artifact_written_is_persisted_to_the_event_log() {
+        let (_dir, db) = test_db();
+        let eb = EventBroadcaster::new(16, "inst-1".to_string(), Some(db.clone()));
+
+        eb.artifact_written(
+            "a-1",
+            Some("t-1"),
+            Some("writing_agent"),
+            "01-quarterly-report.md",
+            "markdown",
+            2,
+            "/p/.openalpaca/artifacts/run/01-quarterly-report.md",
+        );
+
+        let rows = EventLogRepository::new(&db).recent(10).unwrap();
+        let row = rows
+            .iter()
+            .find(|r| r.event_type == "artifact_written")
+            .expect("the artifact write must reach the event log");
+        assert_eq!(row.agent_id.as_deref(), Some("writing_agent"));
+        let detail = row.detail.as_ref().expect("the row carries a detail blob");
+        assert_eq!(detail["artifact_id"], "a-1");
+        assert_eq!(detail["task_id"], "t-1");
+        assert_eq!(detail["agent_id"], "writing_agent");
+        assert_eq!(detail["name"], "01-quarterly-report.md");
+        assert_eq!(detail["kind"], "markdown");
+        assert_eq!(detail["version"], 2);
+        assert_eq!(
+            detail["path"],
+            "/p/.openalpaca/artifacts/run/01-quarterly-report.md"
+        );
+    }
+
+    /// A loose artifact still logs; it simply has no agent column to fill.
+    #[test]
+    fn a_loose_artifact_logs_without_an_agent() {
+        let (_dir, db) = test_db();
+        let eb = EventBroadcaster::new(16, "inst-1".to_string(), Some(db.clone()));
+
+        eb.artifact_written(
+            "a-2",
+            None,
+            None,
+            "01-notes.md",
+            "markdown",
+            1,
+            "/h/.openalpaca/artifacts/loose/01-notes.md",
+        );
+
+        let rows = EventLogRepository::new(&db).recent(10).unwrap();
+        let row = rows
+            .iter()
+            .find(|r| r.event_type == "artifact_written")
+            .expect("a loose artifact must still be logged");
+        assert_eq!(row.agent_id, None);
+        let detail = row.detail.as_ref().expect("the row carries a detail blob");
+        assert!(detail["task_id"].is_null());
+        assert!(detail["agent_id"].is_null());
+    }
+
+    // ── GAP-10: the run goes in the indexed column ──────────────────────
+
+    /// Every arm that knows its run writes the id to `event_log.task_id`, not
+    /// only into `detail` — that column is what `?task_id=` reads.
+    #[test]
+    fn the_run_scoped_arms_fill_the_task_column() {
+        let (_dir, db) = test_db();
+        let eb = EventBroadcaster::new(16, "inst-1".to_string(), Some(db.clone()));
+
+        eb.task_status("t-1", "A run", "running", None, None, None, None, None, None);
+        eb.tool_executed("research_agent::a1", "web_search", true, 12, Some("t-1"), None, None);
+        eb.security_violation("research_agent::a1", "shell", "denied", Some("t-1"));
+        eb.circuit_breaker_tripped("research_agent::a1", "web_search", 3, 300, Some("t-1"));
+        eb.llm_call_completed("research_agent::a1", "m", 1, 2, 0.1, Some("t-1"));
+        eb.tool_confirmation_requested(
+            "req-1",
+            "research_agent::a1",
+            "shell",
+            &serde_json::json!({}),
+            None,
+            None,
+            Some("t-1"),
+        );
+        eb.workflow_steered("t-1", "junpei:cli");
+        eb.workflow_started("t-1", "junpei:cli", "A run");
+        eb.workflow_progress("t-1", "junpei:cli", "read 12 files");
+        eb.artifact_written(
+            "a-1",
+            Some("t-1"),
+            Some("writing_agent"),
+            "01-report.md",
+            "markdown",
+            1,
+            "/p/.openalpaca/artifacts/run/01-report.md",
+        );
+        eb.subagent_span(
+            "t-1",
+            "node-1",
+            "review·1",
+            "review_agent",
+            "review_agent::a1b2",
+            "running",
+            None,
+            "2026-09-05T10:00:00.000Z",
+            None,
+            None,
+            None,
+        );
+
+        let rows = EventLogRepository::new(&db).recent(50).unwrap();
+        for event_type in [
+            "task_status",
+            "tool_executed",
+            "security_violation",
+            "circuit_breaker_tripped",
+            "llm_call_completed",
+            "tool_confirmation_requested",
+            "workflow_steered",
+            "workflow_started",
+            "workflow_progress",
+            "artifact_written",
+            "subagent_span",
+        ] {
+            let row = rows
+                .iter()
+                .find(|r| r.event_type == event_type)
+                .unwrap_or_else(|| panic!("{event_type} must reach the event log"));
+            assert_eq!(
+                row.task_id.as_deref(),
+                Some("t-1"),
+                "{event_type} must carry its run in the indexed column"
+            );
+            // Still in `detail` too — readers written before the column exists
+            // keep working.
+            assert_eq!(
+                row.detail.as_ref().and_then(|d| d["task_id"].as_str()),
+                Some("t-1"),
+                "{event_type} keeps the id in its detail blob"
+            );
+        }
+    }
+
+    /// R51: the audit row is **never** best-effort. The session writer's copy
+    /// of a call can be dropped by a full channel, lost with a cancelled
+    /// round, or never written at all if the writer could not open its
+    /// directory — so a call whose row the daemon stood down from had no
+    /// `tool_execution_log` row anywhere and `invocations_today` under-counted
+    /// it. The daemon inserts every executed call; the writer merges its
+    /// `log_seq` and previews onto that same row.
+    #[test]
+    fn a_session_logged_call_still_writes_its_audit_row() {
+        let (_dir, db) = test_db();
+        let eb = EventBroadcaster::new(16, "inst-1".to_string(), Some(db.clone()));
+
+        eb.tool_executed(
+            "orchestrator",
+            "web_search",
+            true,
+            5,
+            Some("task-1"),
+            Some("sess-1"),
+            Some("toolu_1"),
+        );
+
+        let count = |db: &Database| -> i64 {
+            db.with_connection(|conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM tool_execution_log", [], |r| r.get(0))?)
+            })
+            .unwrap()
+        };
+        assert_eq!(count(&db), 1, "the audit row is unconditional");
+        let (session, task, request, log_seq): (String, String, String, Option<i64>) = db
+            .with_connection(|conn| {
+                Ok(conn.query_row(
+                    "SELECT session_id, task_id, request_id, log_seq FROM tool_execution_log",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(session, "sess-1");
+        assert_eq!(task, "task-1");
+        assert_eq!(request, "toolu_1", "the call's tool-use id is the match key");
+        assert_eq!(log_seq, None, "the index half is the writer's to fill in");
+
+        // The writer's record lands: one row, now carrying the pointer.
+        SkillExecutionRepository::new(&db)
+            .attach_session_index(&ToolExecutionEntry {
+                request_id: Some("toolu_1".to_string()),
+                agent_id: "orchestrator".to_string(),
+                tool_name: "web_search".to_string(),
+                success: true,
+                duration_ms: 5,
+                session_id: Some("sess-1".to_string()),
+                log_seq: Some(9),
+                result_ref: Some("log:10".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(count(&db), 1, "the writer merges, it does not add a row");
+        let log_seq: i64 = db
+            .with_connection(|conn| {
+                Ok(conn.query_row("SELECT log_seq FROM tool_execution_log", [], |r| r.get(0))?)
+            })
+            .unwrap();
+        assert_eq!(log_seq, 9);
+
+        // The event-log audit trail is unaffected.
+        let rows = EventLogRepository::new(&db).recent(10).unwrap();
+        assert!(rows.iter().any(|r| r.event_type == "tool_executed"));
+
+        // A call outside any session log is one row too.
+        eb.tool_executed("orchestrator", "web_search", true, 5, None, None, None);
+        assert_eq!(count(&db), 2);
+    }
+
+    /// An event with no run leaves the column NULL rather than borrowing one.
+    #[test]
+    fn a_task_less_event_leaves_the_column_null() {
+        let (_dir, db) = test_db();
+        let eb = EventBroadcaster::new(16, "inst-1".to_string(), Some(db.clone()));
+
+        eb.tool_executed("orchestrator", "web_search", true, 5, None, None, None);
+        eb.connector_status("telegram", "connected");
+
+        let rows = EventLogRepository::new(&db).recent(10).unwrap();
+        for event_type in ["tool_executed", "connector_status"] {
+            let row = rows.iter().find(|r| r.event_type == event_type).unwrap();
+            assert_eq!(row.task_id, None);
+        }
+    }
+
+    /// A lane's open and its close are two rows, both carrying the whole span
+    /// payload, with the agent *instance* in the indexed column.
+    #[test]
+    fn a_subagent_span_logs_its_open_and_its_close() {
+        let (_dir, db) = test_db();
+        let eb = EventBroadcaster::new(16, "inst-1".to_string(), Some(db.clone()));
+
+        eb.subagent_span(
+            "t-1",
+            "node-1",
+            "review\u{b7}1",
+            "review_agent",
+            "review_agent::a1b2",
+            "running",
+            None,
+            "2026-09-05T10:00:00.000Z",
+            None,
+            None,
+            None,
+        );
+        eb.subagent_span(
+            "t-1",
+            "node-1",
+            "review\u{b7}1",
+            "review_agent",
+            "review_agent::a1b2",
+            "cancelled",
+            Some("cancelled before starting"),
+            "2026-09-05T10:00:00.000Z",
+            Some("2026-09-05T10:00:04.500Z"),
+            Some(4_500),
+            None,
+        );
+
+        let rows = EventLogRepository::new(&db).recent(10).unwrap();
+        let spans: Vec<_> = rows
+            .iter()
+            .filter(|r| r.event_type == "subagent_span")
+            .collect();
+        assert_eq!(spans.len(), 2, "the open and the close are both logged");
+        assert!(
+            spans
+                .iter()
+                .all(|r| r.agent_id.as_deref() == Some("review_agent::a1b2"))
+        );
+
+        let close = spans
+            .iter()
+            .find(|r| {
+                r.detail
+                    .as_ref()
+                    .is_some_and(|d| d["state"] == "cancelled")
+            })
+            .expect("the close row exists");
+        let detail = close.detail.as_ref().unwrap();
+        assert_eq!(detail["task_id"], "t-1");
+        assert_eq!(detail["span_id"], "node-1");
+        assert_eq!(detail["label"], "review\u{b7}1");
+        assert_eq!(detail["template_id"], "review_agent");
+        assert_eq!(detail["agent_instance_id"], "review_agent::a1b2");
+        assert_eq!(detail["detail"], "cancelled before starting");
+        assert_eq!(detail["started_at"], "2026-09-05T10:00:00.000Z");
+        assert_eq!(detail["ended_at"], "2026-09-05T10:00:04.500Z");
+        assert_eq!(detail["duration_ms"], 4_500);
+        assert!(detail["output_preview"].is_null());
     }
 }

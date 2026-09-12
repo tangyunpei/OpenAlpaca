@@ -10,14 +10,16 @@ use crate::compose::{
 use crate::context::SharedContext;
 use crate::daemon_config::DaemonConfig;
 use crate::events::SystemEvent;
+use crate::memory::scope_context::MemoryScopeContext;
 use crate::middleware::prompt::{format_tool_guidance, SystemPersona};
 use crate::prompt_ctx::ContextManager;
 use crate::prompt_ctx::section::ContextBundle;
 use crate::prompt_ctx::{ExecutionPath, SectionPriority};
-use crate::runner::plugin_agent::{PluginLoopOutcome, run_plugin_agent_loop};
+use crate::runner::plugin_agent::{PluginLoopOutcome, PluginRunScope, run_plugin_agent_loop};
 use crate::runner::steering::SteeringInbox;
 use crate::runner::{LoopConfig, run_agentic_loop_routed};
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+use crate::tools::extensions::ExtensionId;
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
 use crate::tools::ToolRegistry;
 use arc_swap::ArcSwap;
@@ -30,6 +32,38 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+/// Narrate a lane's close into the run's session log, beside the 037 span
+/// write (§5.5).
+///
+/// One helper rather than three copies, because a subagent lane closes at
+/// three different places — cancelled before it started, a plugin loop's
+/// outcome, and an LLM loop's finish reason — and all three must say the same
+/// words the span row says.
+fn emit_subagent_close(
+    log: Option<&crate::session_log::SessionLogHandle>,
+    task_id: &str,
+    span_id: &str,
+    instance_id: &str,
+    state: openalpaca_storage::SpanState,
+    detail: Option<&str>,
+    output: Option<&str>,
+) {
+    let Some(log) = log else { return };
+    log.emit(
+        crate::session_log::Record::new(crate::session_log::RecordType::SubagentClose)
+            .task(Some(task_id))
+            .span(Some(span_id))
+            .agent(Some(instance_id))
+            .with_data(serde_json::json!({
+                "span_id": span_id,
+                "role": "subagent",
+                "state": state.as_str(),
+                "detail": detail,
+                "output_preview": output.map(|o| o.chars().take(200).collect::<String>()),
+            })),
+    );
+}
 
 /// Maximum nesting depth for subagent spawning.
 /// Prevents indirect recursion (e.g., A spawns B spawns C spawns A...).
@@ -54,7 +88,9 @@ pub struct SpawnSubagentTool {
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
     /// Tracks how many subagents have been spawned (for observability).
     spawn_count: AtomicUsize,
-    workspace_id: Option<String>,
+    /// The turn's workspace identity: `workspace_id` scopes memory,
+    /// `request_workspace_root` alone places artifacts (R22).
+    workspace: MemoryScopeContext,
     /// Cancellation token from the parent lead agent task.
     /// Child tokens are created for each subagent so they auto-cancel
     /// when the parent task is cancelled.
@@ -86,6 +122,16 @@ pub struct SpawnSubagentTool {
 }
 
 impl SpawnSubagentTool {
+    /// The run's session event log, if one is open (§5.5).
+    ///
+    /// Read off `SharedContext` by task id rather than threaded through the
+    /// constructor: the dispatcher registers the handle there for exactly
+    /// this reason, the same way it registers the steering inbox, and the
+    /// spawn tool already holds both the context and the task id.
+    fn session_log(&self) -> Option<crate::session_log::SessionLogHandle> {
+        self.shared_context.task_session_log(&self.task_id)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         router: Arc<LlmRouter>,
@@ -101,7 +147,7 @@ impl SpawnSubagentTool {
         tracker: Arc<SubagentTracker>,
         depth: u32,
         max_concurrent_subagents: usize,
-        workspace_id: Option<String>,
+        workspace: MemoryScopeContext,
         confirmation_broker: Option<Arc<crate::security::confirmation::ConfirmationBroker>>,
         context_manager: Arc<ContextManager>,
         parent_bundle: Arc<ContextBundle>,
@@ -140,7 +186,7 @@ impl SpawnSubagentTool {
             depth,
             max_concurrent_subagents,
             concurrency_semaphore: Arc::new(tokio::sync::Semaphore::new(max_concurrent_subagents)),
-            workspace_id,
+            workspace,
             prompt_template,
             confirmation_broker,
             context_manager,
@@ -212,12 +258,29 @@ impl BuiltInTool for SpawnSubagentTool {
             .shared_context
             .agent_registry
             .spawn_instance(agent_id, self.task_id.clone())
-            .map_err(|e| format!("Cannot spawn agent '{}': {}", agent_id, e))?;
+            .map_err(|e| {
+                // A template a **disabled plugin** used to contribute is
+                // attributed to that plugin rather than reading as an unknown
+                // name (extension design §10 case 5(a)).
+                match self
+                    .shared_context
+                    .agent_registry
+                    .template_tombstone(agent_id)
+                {
+                    Some(plugin_id) => self.tool_registry.withdrawn_contribution_refusal(
+                        "Agent template",
+                        agent_id,
+                        &plugin_id,
+                    ),
+                    None => format!("Cannot spawn agent '{}': {}", agent_id, e),
+                }
+            })?;
         let instance_id = agent.id.clone();
         self.bus.publish(SystemEvent::AgentStatusChanged {
             agent_id: instance_id.clone(),
             instance_id: instance_id.clone(),
             template_id: agent_id.to_string(),
+            name: agent.name.clone(),
             status: "spawned".to_string(),
             current_task_id: Some(self.task_id.clone()),
             timestamp: Utc::now(),
@@ -229,15 +292,55 @@ impl BuiltInTool for SpawnSubagentTool {
             self.bus.clone(),
         );
 
-        // 4. Emit DagNodeStarted (reusing event, node_id = UUID)
+        // 4. This spawn's node id — the span id below, and the `span_id` on
+        // every event and session-log record this lane produces.
         let node_id = Uuid::new_v4().to_string();
-        self.bus.publish(SystemEvent::DagNodeStarted {
-            task_id: self.task_id.clone(),
-            node_id: node_id.clone(),
-            node_title: objective.chars().take(80).collect(),
-            agent_id: agent_id.to_string(),
-            timestamp: Utc::now(),
-        });
+
+        // …open this lane's span (plan Phase 4, GAP-09). The span id *is* the
+        // node id, so every event and session-log record this lane produces
+        // names the same thing. Unlike `record_agent_history`, which writes
+        // nothing until the run returns, this row exists from the moment the
+        // lane starts — that is the whole point: an in-flight lane must be
+        // visible.
+        let span_label = crate::runner::span::open_span(
+            self.db.as_ref(),
+            &self.bus,
+            &self.task_id,
+            &node_id,
+            agent_id,
+            &instance_id,
+            objective,
+        );
+
+        // §5.5: the lane's open, narrated beside the 037 span write. The
+        // record's `span_id` *is* the span id, so `?span_id=` on the reader
+        // is a pure filter over one globally ordered log (P-20).
+        let session_log = self.session_log();
+        if let Some(ref log) = session_log {
+            log.emit(
+                crate::session_log::Record::new(crate::session_log::RecordType::SubagentOpen)
+                    .task(Some(&self.task_id))
+                    .span(Some(&node_id))
+                    .agent(Some(&instance_id))
+                    .with_data(serde_json::json!({
+                        "span_id": node_id,
+                        "template": agent_id,
+                        "label": span_label,
+                        "role": "subagent",
+                        "objective": objective.chars().take(500).collect::<String>(),
+                        // P-17: a plugin-backed template says so, so a reader
+                        // never has to guess which extension ran the lane.
+                        "plugin_id": self
+                            .shared_context
+                            .agent_registry
+                            .get_template(agent_id)
+                            .and_then(|t| match t.source {
+                                AgentSource::Plugin { plugin_id, .. } => Some(plugin_id),
+                                AgentSource::Internal => None,
+                            }),
+                    })),
+            );
+        }
 
         self.spawn_count.fetch_add(1, Ordering::SeqCst);
         let agent_start = std::time::Instant::now();
@@ -245,9 +348,12 @@ impl BuiltInTool for SpawnSubagentTool {
         // 5. Build SandboxManager for subagent
         let subagent_tool_ctx = ToolContext {
             agent_id: Some(agent_id.to_string()),
+            // The lane this call belongs to (GAP-09's derived `blocked`).
+            agent_instance_id: Some(instance_id.clone()),
             task_id: Some(self.task_id.clone()),
             owner_id: Some(self.created_by.clone()),
-            workspace_id: self.workspace_id.clone(),
+            workspace_id: self.workspace.workspace_id.clone(),
+            request_workspace_root: self.workspace.request_workspace_root.clone(),
             skill_stack: vec![],
             effective_constraints: None,
             // Subagents are lane-detached: no lane/request threading here.
@@ -257,6 +363,10 @@ impl BuiltInTool for SpawnSubagentTool {
             principal: None,
             scope: None,
             workspace_path: None,
+            // Filled in by the sandbox at dispatch (T28), which owns the bus.
+            session_id: None,
+            session_log: None,
+            event_bus: None,
         };
         let mut sandbox = SandboxManager::new(
             self.tool_registry.clone(),
@@ -268,7 +378,8 @@ impl BuiltInTool for SpawnSubagentTool {
         }
 
         // 6. Resolve tools for subagent's skills
-        let tools = crate::tools::resolve_agent_tools(&agent, &self.tool_registry);
+        let tools =
+            crate::tools::resolve_agent_tools(&agent, &self.tool_registry, Some(&subagent_tool_ctx));
 
         // 7. Build LoopConfig from daemon defaults + agent constraints
         let mut loop_config =
@@ -283,6 +394,17 @@ impl BuiltInTool for SpawnSubagentTool {
             .load()
             .experimental
             .ephemeral_pressure_layer;
+        // §5.4: one log per session, subagents as a *dimension* — the lane's
+        // rounds and tool calls land in the run's transcript stamped with
+        // this span id, never in a file of their own.
+        loop_config.session_log = session_log.clone();
+        loop_config.span_id = Some(node_id.clone());
+        loop_config.tool_result_inline_bytes = self
+            .daemon_config
+            .load()
+            .orchestrator
+            .sessions
+            .tool_result_inline_bytes;
 
         // 8. Build messages with context distillation via PromptBuilder
         let default_model = self.router.default_model();
@@ -444,8 +566,21 @@ impl BuiltInTool for SpawnSubagentTool {
             .get_template(agent_id)
             .map(|t| t.source)
         {
-            Some(AgentSource::Plugin { executor, .. }) => {
-                Some((executor, objective.to_string()))
+            Some(AgentSource::Plugin {
+                plugin_id,
+                executor,
+            }) => {
+                // The run-guard's scope (design §3.2 T3(b)): the plugin id, the
+                // ledger, and the **bridge's** generation — an in-flight
+                // subagent holds a cloned executor, so a lead that spawns from
+                // this template after a disable → re-enable must be refused at
+                // pre-flight rather than at its first RPC.
+                let scope = PluginRunScope {
+                    ledger: Arc::clone(self.tool_registry.extensions()),
+                    extension: ExtensionId::plugin(plugin_id),
+                    generation: executor.generation(),
+                };
+                Some((executor, objective.to_string(), scope))
             }
             _ => None,
         };
@@ -468,6 +603,7 @@ impl BuiltInTool for SpawnSubagentTool {
         let db = self.db.clone();
         let agent_id_owned = agent_id.to_string();
         let objective_preview: String = objective.chars().take(50).collect();
+        let span_log = session_log.clone();
         tokio::task::spawn(async move {
             // Hold the concurrency permit for the lifetime of this subagent.
             // It is automatically released when this async block completes.
@@ -481,6 +617,26 @@ impl BuiltInTool for SpawnSubagentTool {
                     &run_id_clone,
                     "Cancelled before starting (parent task was cancelled)".to_string(),
                 );
+                // The lane opened when the spawn was announced, so it has to
+                // close here too — otherwise a cancelled batch leaves lanes
+                // running until the next daemon boot sweeps them.
+                crate::runner::span::close_span(
+                    db.as_ref(),
+                    &bus,
+                    &node_id,
+                    openalpaca_storage::SpanState::Cancelled,
+                    Some("cancelled before starting"),
+                    None,
+                );
+                emit_subagent_close(
+                    span_log.as_ref(),
+                    &task_id,
+                    &node_id,
+                    &instance_id,
+                    openalpaca_storage::SpanState::Cancelled,
+                    Some("cancelled before starting"),
+                    None,
+                );
                 busy_guard.restore();
                 return;
             }
@@ -493,7 +649,7 @@ impl BuiltInTool for SpawnSubagentTool {
             // cancellation semantics are unchanged (the permit is held for
             // the loop's lifetime and the child token is checked between
             // steps).
-            if let Some((executor, objective_full)) = plugin_execution {
+            if let Some((executor, objective_full, scope)) = plugin_execution {
                 tracing::info!(
                     agent_id = %agent_id_owned,
                     instance_id = %instance_id,
@@ -510,37 +666,83 @@ impl BuiltInTool for SpawnSubagentTool {
                     "task_id": task_id,
                 });
 
-                let outcome = run_plugin_agent_loop(
-                    &executor,
-                    &instance_id,
-                    &task_id,
-                    &instructions,
-                    &plugin_ctx,
-                    &sandbox,
-                    &sandbox_policy,
-                    &subagent_tool_ctx,
-                    child_token.as_ref(),
-                )
-                .await;
+                // The run-guard (design §3.2 T3(b)): pre-flight refuses a run
+                // against a plugin that is not `Enabled` or against a previous
+                // load of one, **before** `spawn` is ever sent; the guard it
+                // returns is held for the whole run, so T3's drain waits for
+                // this loop the way it waits for a tool call.
+                let outcome = match scope
+                    .ledger
+                    .begin_run(&scope.extension, scope.generation)
+                {
+                    Ok(guard) => {
+                        let ledger = Arc::clone(&scope.ledger);
+                        let outcome = ledger
+                            .run_scoped(
+                                &scope.extension,
+                                run_plugin_agent_loop(
+                                    &executor,
+                                    &instance_id,
+                                    &task_id,
+                                    &instructions,
+                                    &plugin_ctx,
+                                    &sandbox,
+                                    &sandbox_policy,
+                                    &subagent_tool_ctx,
+                                    child_token.as_ref(),
+                                    Some(&scope),
+                                ),
+                            )
+                            .await;
+                        drop(guard);
+                        outcome
+                    }
+                    Err(refusal) => PluginLoopOutcome::Failed {
+                        error: refusal,
+                        tool_calls_made: 0,
+                    },
+                };
 
                 let duration_ms = agent_start.elapsed().as_millis() as u64;
                 busy_guard.restore();
 
-                bus.publish(SystemEvent::DagNodeCompleted {
-                    task_id: task_id.clone(),
-                    node_id: node_id.clone(),
-                    node_title: objective_preview.clone(),
-                    agent_id: instance_id.clone(),
-                    success: outcome.success(),
-                    duration_ms,
-                    output_preview: match &outcome {
-                        PluginLoopOutcome::Completed { content, .. } if !content.is_empty() => {
-                            Some(content.chars().take(200).collect())
-                        }
-                        _ => None,
-                    },
-                    timestamp: Utc::now(),
-                });
+                // Close the lane (GAP-09). A plugin loop has no
+                // `LoopFinishReason` of its own — a cancellation between steps
+                // comes back as `Failed { error: "Cancelled" }` — so the
+                // cancel token is what separates a cancelled lane from a
+                // failed one, keeping this path's vocabulary identical to the
+                // LLM path's below.
+                let cancelled = child_token.as_ref().is_some_and(|t| t.is_cancelled());
+                let span_state = crate::runner::span::plugin_span_state(
+                    outcome.success(),
+                    cancelled,
+                );
+                let span_detail = match &outcome {
+                    PluginLoopOutcome::Completed { .. } => None,
+                    _ if cancelled => Some("cancelled".to_string()),
+                    PluginLoopOutcome::Failed { error, .. } => Some(error.clone()),
+                };
+                let plugin_output = match &outcome {
+                    PluginLoopOutcome::Completed { content, .. } => Some(content.as_str()),
+                    _ => None,
+                };
+                crate::runner::span::close_span(
+                    db.as_ref(),
+                    &bus,
+                    &node_id,
+                    span_state,
+                    span_detail.as_deref(),
+                    plugin_output,
+                );
+                emit_subagent_close(
+                    span_log.as_ref(),
+                    &task_id,
+                    &node_id,
+                    &instance_id,
+                    span_state,
+                    span_detail.as_deref(),
+                    plugin_output,
+                );
 
                 // No LLM usage to record — the plugin runs its own model
                 // calls out-of-process. Agent history still counts the run.
@@ -598,7 +800,6 @@ impl BuiltInTool for SpawnSubagentTool {
             .await;
 
             let duration_ms = agent_start.elapsed().as_millis() as u64;
-            let now = Utc::now();
 
             let agent_success = matches!(
                 &result.finish_reason,
@@ -610,21 +811,29 @@ impl BuiltInTool for SpawnSubagentTool {
             // Destroy instance (explicit restore; guard is backup for panics)
             busy_guard.restore();
 
-            // Emit DagNodeCompleted
-            bus.publish(SystemEvent::DagNodeCompleted {
-                task_id: task_id.clone(),
-                node_id: node_id.clone(),
-                node_title: objective_preview.clone(),
-                agent_id: instance_id.clone(),
-                success: agent_success,
-                duration_ms,
-                output_preview: if result.final_content.is_empty() {
-                    None
-                } else {
-                    Some(result.final_content.chars().take(200).collect())
-                },
-                timestamp: now,
-            });
+            // Close the lane (GAP-09). `agent_success` folds a cancellation
+            // into `false` because the lead agent needs a boolean; the span
+            // maps `Cancelled` explicitly, because "cancelled" and "failed"
+            // read differently and the UI has separate copy for each.
+            let span_state = crate::runner::span::span_state_for(&result.finish_reason);
+            let span_detail = crate::runner::span::span_detail_for(&result.finish_reason);
+            crate::runner::span::close_span(
+                db.as_ref(),
+                &bus,
+                &node_id,
+                span_state,
+                span_detail.as_deref(),
+                Some(result.final_content.as_str()),
+            );
+            emit_subagent_close(
+                span_log.as_ref(),
+                &task_id,
+                &node_id,
+                &instance_id,
+                span_state,
+                span_detail.as_deref(),
+                Some(result.final_content.as_str()),
+            );
 
             // Record LLM usage + agent history
             crate::orchestrator::dispatcher::usage::record_llm_usage(
@@ -1048,15 +1257,22 @@ impl BuiltInTool for PostUpdateTool {
             .ok_or_else(|| "Missing required parameter: message".to_string())?;
 
         if let Some(ref db) = self.db {
+            // A progress note is lane chatter, not the run's own record: no
+            // run link, so nothing else in the transcript claims to be the
+            // report (GAP-23).
             crate::orchestrator::dispatcher::outcome::persist_conversation(
                 db,
                 &self.lane_key,
                 &self.source,
+                // Lane chatter goes wherever the lane is talking now — only
+                // the completion report is pinned to the run's own session.
+                None,
                 message.to_string(),
                 None,
                 0,
                 0,
                 0,
+                None,
             );
         }
         self.bus.publish(SystemEvent::WorkflowProgress {

@@ -4178,7 +4178,6 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
- "sha2",
  "teloxide",
  "tempfile",
  "thiserror 2.0.20",
@@ -4203,6 +4202,7 @@ dependencies = [
  "blake3",
  "chrono",
  "dashmap",
+ "file-lock",
  "futures-util",
  "infer 0.16.0",
  "lru",
@@ -4222,6 +4222,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 0.9.12+spec-1.1.0",
+ "toml_edit 0.25.13+spec-1.1.0",
  "tracing",
  "tracing-test",
  "url",
@@ -4242,7 +4243,6 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
- "tauri-plugin-fs",
  "tokio",
  "tracing",
 ]
@@ -4257,7 +4257,6 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "dashmap",
- "directories",
  "fastembed",
  "file-lock",
  "futures-util",
@@ -4306,6 +4305,7 @@ version = "0.1.0"
 name = "openalpaca_plugins"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "chrono",
  "notify",
@@ -4313,12 +4313,14 @@ dependencies = [
  "openalpaca_connectors",
  "openalpaca_core",
  "openalpaca_llm",
+ "openalpaca_storage",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
+ "toml_edit 0.25.13+spec-1.1.0",
  "tracing",
  "uuid",
 ]
@@ -4338,9 +4340,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "similar",
  "sqlite-vec",
  "tempfile",
  "tracing",
+ "tracing-test",
+ "unicode-normalization",
  "uuid",
 ]
 
@@ -4390,15 +4395,18 @@ dependencies = [
  "signal-hook",
  "teloxide",
  "tempfile",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-stream",
  "tokio-util",
  "toml 0.9.12+spec-1.1.0",
+ "toml_edit 0.25.13+spec-1.1.0",
  "tower-http",
  "tracing",
  "tracing-subscriber",
  "twilight-http",
  "twilight-model",
+ "urlencoding",
  "uuid",
  "zip",
 ]
@@ -6151,6 +6159,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
+name = "similar"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f66ca1f7aca2474dc10c942eb22feffc897735f54cd1db90138c2fddb490987"
+dependencies = [
+ "bstr",
+]
+
+[[package]]
 name = "siphasher"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7315,6 +7332,7 @@ dependencies = [
  "indexmap 2.14.1",
  "toml_datetime 1.1.1+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow 1.0.4",
 ]
 

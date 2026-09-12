@@ -1,9 +1,11 @@
+mod artifact_write;
 mod file_ops;
 mod helpers;
 mod invoke_skill;
 mod main_loop;
 mod memory_ops;
 mod memory_search;
+mod read_result;
 mod send;
 mod shell_execute;
 mod start_workflow;
@@ -40,8 +42,10 @@ use tokio::process::Command;
 /// Shared lock type for the connector send provider, set post-construction.
 pub type ConnectorSendLock = Arc<RwLock<Option<Arc<dyn ConnectorSendProvider>>>>;
 
+use self::artifact_write::artifact_write_tool;
 use self::file_ops::{file_read_tool, file_write_tool};
 use self::memory_search::memory_search_tool;
+use self::read_result::read_result_tool;
 use self::shell_execute::shell_execute_tool;
 use self::update_persona::update_persona_tool;
 use self::web_fetch::web_fetch_tool;
@@ -102,12 +106,21 @@ impl BuiltInTool for WorkspaceReadTool {
         let result: Vec<serde_json::Value> = entries
             .iter()
             .map(|e| {
-                serde_json::json!({
+                let mut value = serde_json::json!({
                     "key": e.key,
                     "content": e.content,
                     "author": e.author_agent_id,
                     "type": e.entry_type,
-                })
+                });
+                // An entry whose bytes live in the artifact store says so: the
+                // spill leaves only a preview behind, and without the id a
+                // second agent picking up the hand-off would have no way to
+                // tell, let alone to name what it is missing.
+                if let Some(id) = &e.file_asset_id {
+                    value["file_asset_id"] = serde_json::json!(id);
+                    value["truncated"] = serde_json::json!(e.truncated);
+                }
+                value
             })
             .collect();
 
@@ -121,6 +134,9 @@ impl BuiltInTool for WorkspaceReadTool {
 
 struct WorkspaceWriteTool {
     db: Option<openalpaca_storage::Database>,
+    /// Only the artifact caps are read from it — the spill's size limit and
+    /// its version bound (`[execution.artifacts]`).
+    daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
 }
 
 #[async_trait]
@@ -158,7 +174,9 @@ impl BuiltInTool for WorkspaceWriteTool {
         if content.len() > MAX_WORKSPACE_CONTENT_SIZE {
             return Err(format!(
                 "Content size {} bytes exceeds the {} byte limit. \
-                 Condense or summarize your content to fit within the limit, then retry.",
+                 Condense or summarize your content to fit within the limit, then retry \
+                 — or save the full deliverable with artifact_write, which takes far larger \
+                 content and versions it.",
                 content.len(),
                 MAX_WORKSPACE_CONTENT_SIZE
             ));
@@ -174,6 +192,47 @@ impl BuiltInTool for WorkspaceWriteTool {
             "context" => WorkspaceEntryType::Context,
             _ => WorkspaceEntryType::Text,
         };
+
+        // The §4.6 spill: an artifact entry's bytes belong in the artifact
+        // store, not in the task's state blob. Done once, before the
+        // optimistic-concurrency loop, so a retry cannot mint extra versions.
+        // An entry the caller already backed with an asset (an upload, say) is
+        // left alone.
+        let explicit_asset_id = arguments.get("file_asset_id").and_then(|v| v.as_str());
+        let mut spilled_id: Option<String> = None;
+        let mut spill_error: Option<String> = None;
+        let mut stored_content = content;
+        // Whether `stored_content` ends up shorter than what the store holds.
+        let mut spill_truncated = false;
+        // Assigned only on a successful spill; `stored_content` borrows it.
+        let preview;
+        if entry_type == WorkspaceEntryType::Artifact && explicit_asset_id.is_none() {
+            match artifact_write::spill_workspace_entry(
+                db,
+                ctx,
+                task_id,
+                key,
+                content,
+                self.daemon_config.as_ref(),
+            ) {
+                Ok(id) => {
+                    preview = artifact_write::spill_preview(content);
+                    spill_truncated = preview.as_str() != content;
+                    stored_content = &preview;
+                    spilled_id = Some(id);
+                }
+                Err(e) => {
+                    // Never silently: the entry keeps its full content and the
+                    // caller is told the artifact did not land.
+                    tracing::warn!(
+                        task_id,
+                        key,
+                        "workspace_write artifact spill failed, keeping content inline: {e}"
+                    );
+                    spill_error = Some(e);
+                }
+            }
+        }
 
         const MAX_RETRIES: usize = 5;
         for attempt in 0..MAX_RETRIES {
@@ -191,11 +250,13 @@ impl BuiltInTool for WorkspaceWriteTool {
 
             state
                 .workspace
-                .write(key, content, agent_id, entry_type.clone(), &[])?;
+                .write(key, stored_content, agent_id, entry_type.clone(), &[])?;
 
             // Set file_asset_id in the same state mutation (before persisting)
-            if let Some(fid) = arguments.get("file_asset_id").and_then(|v| v.as_str()) {
-                state.workspace.set_file_asset_id(key, fid);
+            if let Some(fid) = explicit_asset_id.or(spilled_id.as_deref()) {
+                // Only the spill shortens the entry; an explicitly supplied id
+                // leaves the caller's content verbatim.
+                state.workspace.set_file_asset_id(key, fid, spill_truncated);
             }
 
             let new_json = state.to_json();
@@ -204,7 +265,17 @@ impl BuiltInTool for WorkspaceWriteTool {
                 .map_err(|e| format!("Failed to persist workspace: {e}"))?;
 
             if updated {
-                return Ok(format!("Workspace entry '{}' written successfully", key));
+                return Ok(match (&spilled_id, &spill_error) {
+                    (Some(id), _) => format!(
+                        "Workspace entry '{key}' written successfully and saved as artifact {id} \
+                         (the entry keeps a preview; the full content is in the artifact)"
+                    ),
+                    (None, Some(e)) => format!(
+                        "Workspace entry '{key}' written successfully, but the artifact \
+                         could not be saved ({e}) — the full content was kept in the entry"
+                    ),
+                    (None, None) => format!("Workspace entry '{key}' written successfully"),
+                });
             }
 
             // Version conflict — retry with fresh state
@@ -250,15 +321,30 @@ pub fn builtin_tools(
     let ws_root = workspace_root
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    // Clone db before memory_search consumes it — workspace tools need it too.
+    // Clone db before memory_search consumes it — the workspace and artifact
+    // tools need it too.
     let ws_db = db.clone();
+    // The daemon config the file, artifact and workspace tools share.
+    let tool_cfg = daemon_config.clone();
 
     let mut tools = vec![
         web_search_tool(ws_cfg),
         web_fetch_tool(),
         file_read_tool(ws_root.clone()),
-        file_write_tool(ws_root),
+        // The config carries §5.7's `snapshot_max_bytes` — the bound on the
+        // pre-edit image `file_write` takes before it overwrites a file.
+        file_write_tool(ws_root, tool_cfg.clone()),
         shell_execute_tool(),
+        // §5.4's counterpart to the `results/` spill. Registered on every
+        // surface because the stub the loop emits names it on every surface —
+        // owner decision T15 (whether it is *appended* to an allowlist) is
+        // pending and is implemented as no change, so an agent that was not
+        // granted it is refused by the gate.
+        read_result_tool(None),
+        // Registered unconditionally, like the workspace tools: the definition
+        // has to exist for capability resolution even where no database was
+        // wired (tests, the CLI), and the tool refuses at call time instead.
+        artifact_write_tool(ws_db.clone(), tool_cfg.clone()),
     ];
     if let (Some(db), Some(dc)) = (db, daemon_config) {
         tools.push(memory_search_tool(db, embedder, dc));
@@ -274,7 +360,10 @@ pub fn builtin_tools(
         let backend = if def.name == "workspace_read" {
             ToolBackend::BuiltIn(Arc::new(WorkspaceReadTool { db: ws_db.clone() }))
         } else {
-            ToolBackend::BuiltIn(Arc::new(WorkspaceWriteTool { db: ws_db.clone() }))
+            ToolBackend::BuiltIn(Arc::new(WorkspaceWriteTool {
+                db: ws_db.clone(),
+                daemon_config: tool_cfg.clone(),
+            }))
         };
         tools.push(RegisteredTool {
             annotations: annotations_for_builtin(&def.name),
@@ -488,9 +577,13 @@ impl BuiltInTool for ScriptToolBuiltIn {
 /// Returns `None` for unknown names; callers default to `None` (no special treatment).
 pub(crate) fn annotations_for_builtin(name: &str) -> Option<openalpaca_mcp::ToolAnnotations> {
     match name {
-        "file_read" | "workspace_read" | "memory_search" => Some(read_only_annotations()),
+        "file_read" | "workspace_read" | "memory_search" | "read_result" => {
+            Some(read_only_annotations())
+        }
         "web_fetch" | "web_search" => Some(read_only_open_world_annotations()),
-        "file_write" | "workspace_write" | "update_persona" => Some(destructive_local_annotations()),
+        "file_write" | "workspace_write" | "artifact_write" | "update_persona" => {
+            Some(destructive_local_annotations())
+        }
         "shell_execute" | "send" => Some(destructive_open_world_annotations()),
         _ => None,
     }

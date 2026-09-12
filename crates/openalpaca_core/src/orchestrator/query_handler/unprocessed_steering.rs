@@ -9,7 +9,9 @@
 //! cache-staleness reasons — see `workflow_context.rs`).
 
 use openalpaca_storage::Database;
-use openalpaca_storage::repository::{FOLLOWUP_KIND_UNPROCESSED_STEERING, FollowupRepository};
+use openalpaca_storage::repository::{
+    FOLLOWUP_KIND_UNPROCESSED_STEERING, FollowupRecord, FollowupRepository,
+};
 
 /// At most this many leftover rows surface per turn; the rest stay queued
 /// for the following turns.
@@ -33,12 +35,54 @@ pub(crate) fn take_unprocessed_steering_block(
             return None;
         }
     };
-    let leftovers: Vec<_> = rows
+    let candidates: Vec<_> = rows
         .into_iter()
         .filter(|r| r.kind == FOLLOWUP_KIND_UNPROCESSED_STEERING)
         .take(MAX_ROWS_PER_TURN)
         .collect();
-    if leftovers.is_empty() {
+    claim_and_render(&repo, lane_key, candidates)
+}
+
+/// Claim each listed leftover, then render the ones that were still there.
+///
+/// **Claim before render, never after.** The listing above and this claim are
+/// two separate trips through the connection mutex, and
+/// `DELETE /v1/lanes/{lane_key}/followups/{id}` CASes the same rows off
+/// `queued` in between. Marking them done *after* building the block would put
+/// content the user had already cancelled — and seen retired from the queue —
+/// in front of the model, and would overwrite the `cancelled` the client was
+/// told about with `done`. So each row is claimed first, and only the claims
+/// that won are rendered.
+///
+/// A row that lost is skipped silently: its cancellation was already
+/// announced (`FollowupCancelled`), and there is nothing to tell the model
+/// about a message that no longer exists. A row whose claim *errored* is also
+/// skipped, which leaves it queued for the next turn — better a duplicate than
+/// a silently lost instruction, the same trade the previous shape made.
+///
+/// Split out from [`take_unprocessed_steering_block`] so the gap between the
+/// list and the claim is addressable in a test.
+fn claim_and_render(
+    repo: &FollowupRepository<'_>,
+    lane_key: &str,
+    candidates: Vec<FollowupRecord>,
+) -> Option<String> {
+    let mut claimed: Vec<FollowupRecord> = Vec::with_capacity(candidates.len());
+    for row in candidates {
+        match repo.mark_done_if_queued(row.id) {
+            Ok(true) => claimed.push(row),
+            // Cancelled (or otherwise moved off `queued`) since the list.
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(
+                    lane_key = %lane_key,
+                    followup_id = row.id,
+                    "Failed to claim unprocessed steering row: {e}"
+                );
+            }
+        }
+    }
+    if claimed.is_empty() {
         return None;
     }
 
@@ -48,7 +92,7 @@ pub(crate) fn take_unprocessed_steering_block(
          were NOT processed — the workflow ended before they could be \
          delivered, and nothing has acted on them:\n",
     );
-    for row in &leftovers {
+    for row in &claimed {
         block.push_str(&format!("- {}\n", row.content));
     }
     block.push_str(
@@ -56,20 +100,6 @@ pub(crate) fn take_unprocessed_steering_block(
          the user how to proceed.\n\
          </unprocessed_steering>",
     );
-
-    // Mark surfaced rows done — they must surface exactly once. A failed
-    // update is logged and the row may surface again next turn; better a
-    // duplicate than a silently lost instruction.
-    for row in &leftovers {
-        if let Err(e) = repo.mark_done(row.id) {
-            tracing::warn!(
-                lane_key = %lane_key,
-                followup_id = row.id,
-                "Failed to mark unprocessed steering row done: {e}"
-            );
-        }
-    }
-
     Some(block)
 }
 
@@ -178,6 +208,79 @@ mod tests {
         assert!(block2.contains("msg-5"), "{block2}");
         assert!(block2.contains("msg-6"), "{block2}");
         assert_eq!(take_unprocessed_steering_block(Some(&db), "user1:cli"), None);
+    }
+
+    /// **The race.** `DELETE /v1/lanes/{lane_key}/followups/{id}` cancels a
+    /// leftover in the gap between this injector's list and its claim — every
+    /// repository call takes and releases the connection separately, so the gap
+    /// is real. The cancelled row must not reach the model (the user was told
+    /// it was dropped, and the client has already retired the chip) and must
+    /// not end up `done` (which would overwrite what was announced).
+    #[test]
+    fn test_a_row_cancelled_between_list_and_claim_never_reaches_the_model() {
+        let (_dir, db) = setup_db();
+        let repo = FollowupRepository::new(&db);
+        let cancelled = repo
+            .queue(
+                "user1:cli",
+                FOLLOWUP_KIND_UNPROCESSED_STEERING,
+                "drop this one",
+                "\"System\"",
+                None,
+                None,
+            )
+            .unwrap();
+        let survivor = repo
+            .queue(
+                "user1:cli",
+                FOLLOWUP_KIND_UNPROCESSED_STEERING,
+                "keep this one",
+                "\"System\"",
+                None,
+                None,
+            )
+            .unwrap();
+
+        // What the injector read when it listed the lane…
+        let candidates = repo.list_queued_by_lane("user1:cli").unwrap();
+        assert_eq!(candidates.len(), 2);
+        // …and what the DELETE route did before the injector could claim.
+        assert!(repo.cancel_if_queued(cancelled, "user1:cli").unwrap());
+
+        let block =
+            claim_and_render(&repo, "user1:cli", candidates).expect("the survivor still renders");
+        assert!(!block.contains("drop this one"), "{block}");
+        assert!(block.contains("- keep this one"), "{block}");
+        assert_eq!(
+            repo.get(cancelled).unwrap().unwrap().status,
+            "cancelled",
+            "the cancelled row stays cancelled"
+        );
+        assert_eq!(repo.get(survivor).unwrap().unwrap().status, "done");
+    }
+
+    /// When every listed row lost its claim there is nothing to say, and the
+    /// turn gets no block at all — not an empty one.
+    #[test]
+    fn test_all_candidates_cancelled_renders_nothing() {
+        let (_dir, db) = setup_db();
+        let repo = FollowupRepository::new(&db);
+        let id = repo
+            .queue(
+                "user1:cli",
+                FOLLOWUP_KIND_UNPROCESSED_STEERING,
+                "the only one",
+                "\"System\"",
+                None,
+                None,
+            )
+            .unwrap();
+
+        let candidates = repo.list_queued_by_lane("user1:cli").unwrap();
+        assert!(repo.cancel_if_queued(id, "user1:cli").unwrap());
+
+        assert_eq!(claim_and_render(&repo, "user1:cli", candidates), None);
+        assert_eq!(repo.get(id).unwrap().unwrap().status, "cancelled");
     }
 
     #[test]

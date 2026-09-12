@@ -28,9 +28,9 @@ impl LlmRouter {
             .resolve_provider(model)
             .ok_or_else(|| LlmRouterError::UnknownModel(model.to_string()))?;
 
+        // As in `try_model`: the `Ref` must not outlive the lookup (R59).
         let entry = self
-            .providers
-            .get(&provider_type)
+            .provider_entry(&provider_type)
             .ok_or_else(|| LlmRouterError::ProviderNotConfigured(provider_type.to_string()))?;
 
         let pool = entry.key_pool.load();
@@ -165,11 +165,14 @@ impl LlmRouter {
             .resolve_provider(model)
             .ok_or_else(|| LlmRouterError::UnknownModel(model.to_string()))?;
 
+        // Take the entry *out* of the map — two `Arc` clones — and drop the
+        // `Ref` before awaiting anything. Holding it across the call would make
+        // `deregister_provider`'s synchronous shard write lock wait for the
+        // network, parking the worker thread that issued the disable (R59).
         let entry = self
-            .providers
-            .get(&provider_type)
+            .provider_entry(&provider_type)
             .ok_or_else(|| LlmRouterError::ProviderNotConfigured(provider_type.to_string()))?;
 
-        self.execute_with_retry(entry.value(), model, request).await
+        self.execute_with_retry(&entry, model, request).await
     }
 }

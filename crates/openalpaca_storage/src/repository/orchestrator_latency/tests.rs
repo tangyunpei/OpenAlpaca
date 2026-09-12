@@ -52,8 +52,6 @@ fn test_aggregate_single_mode() {
             id: None,
             request_id: format!("req-{}", i),
             mode: "main_loop".to_string(),
-            planner_ms: 10 + i,
-            dispatch_ms: 5,
             ack_ms: 2,
             fallback_reason: None,
             auto_promotion_reason: None,
@@ -68,7 +66,7 @@ fn test_aggregate_single_mode() {
     assert_eq!(aggs[0].count, 10);
     assert!(aggs[0].p50_total_ms > 0);
     assert!(aggs[0].p95_total_ms >= aggs[0].p50_total_ms);
-    assert!(aggs[0].mean_planner_ms > 0.0);
+    assert!(aggs[0].mean_ack_ms > 0.0);
 }
 
 #[test]
@@ -82,8 +80,6 @@ fn test_aggregate_multiple_modes() {
                 id: None,
                 request_id: format!("req-{}-{}", mode, i),
                 mode: mode.to_string(),
-                planner_ms: 10,
-                dispatch_ms: 5,
                 ack_ms: 2,
                 fallback_reason: if i == 0 {
                     Some("test".to_string())

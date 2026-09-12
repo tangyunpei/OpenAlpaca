@@ -181,6 +181,26 @@ impl LlmRouter {
         self.fallback_chains.get(model)
     }
 
+    /// Clone a provider's entry out of the map.
+    ///
+    /// The one way a request may reach a provider: the returned entry owns its
+    /// `Arc`s, so the `DashMap` shard's read lock is released here rather than
+    /// at the end of the call. A `Ref` held across an `.await` blocks
+    /// [`Self::deregister_provider`], whose `remove` is a synchronous write
+    /// lock on that same shard (R59).
+    pub(super) fn provider_entry(&self, provider_type: &ProviderType) -> Option<ProviderEntry> {
+        self.providers.get(provider_type).map(|e| e.value().clone())
+    }
+
+    /// Is this provider loaded right now?
+    ///
+    /// The router keeps no `enabled` bit of its own — a disabled provider is
+    /// simply not in the map — so this is what "the owner has it switched on
+    /// and it loaded" looks like from inside (R58c, R60).
+    pub fn has_provider(&self, provider_type: &ProviderType) -> bool {
+        self.providers.contains_key(provider_type)
+    }
+
     /// Get list of configured providers.
     pub fn configured_providers(&self) -> Vec<ProviderType> {
         self.providers.iter().map(|entry| entry.key().clone()).collect()
@@ -244,12 +264,11 @@ impl LlmRouter {
 
     /// Get key statuses for a provider.
     pub async fn key_statuses(&self, provider: &ProviderType) -> Option<Vec<KeyStatus>> {
-        if let Some(entry) = self.providers.get(provider) {
-            let pool = entry.value().key_pool.load();
-            Some(pool.key_statuses().await)
-        } else {
-            None
-        }
+        // Cloned out for the same reason as in `try_model` (R59): no shard lock
+        // is held across the await.
+        let entry = self.provider_entry(provider)?;
+        let pool = entry.key_pool.load();
+        Some(pool.key_statuses().await)
     }
 }
 

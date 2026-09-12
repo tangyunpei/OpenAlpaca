@@ -3,7 +3,7 @@ use axum::{
     Router,
     extract::{DefaultBodyLimit, State},
     response::Json,
-    routing::{delete, get, post, put},
+    routing::{delete, get, patch, post, put},
 };
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
@@ -55,12 +55,46 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/auth/link",
             post(crate::routes::generate_link_token_handler),
         )
+        // Identity (GAP-16)
+        .route("/v1/me", get(crate::routes::get_me_handler))
         .route("/v1/tasks", post(crate::routes::create_task_handler))
         .route("/v1/tasks", get(crate::routes::list_tasks_handler))
         .route("/v1/tasks/{id}", get(crate::routes::get_task_handler))
         .route(
+            "/v1/tasks/{id}/timeline",
+            get(crate::routes::get_task_timeline_handler),
+        )
+        .route(
             "/v1/tasks/{id}/action",
             post(crate::routes::task_action_handler),
+        )
+        // Task-addressed steering (GAP-02) — the same rail the `/steer ` chat
+        // prefix pushes into, aimed at a run instead of at a lane.
+        .route(
+            "/v1/tasks/{id}/steer",
+            post(crate::routes::steer_task_handler),
+        )
+        // Re-run (GAP-06) — a *new* run from a finished one's goal, so it has
+        // its own route and answers 201 with an id the caller has not seen.
+        // Its sibling `start` (same id, D5) rides `/action` instead.
+        .route(
+            "/v1/tasks/{id}/rerun",
+            post(crate::routes::rerun_task_handler),
+        )
+        // The lane follow-up queue (GAP-03) — the read-back, write and
+        // race-safe cancel for the queue the model's `queue_followup` tool and
+        // the steering-leftover conversion already write to.
+        .route(
+            "/v1/lanes/{lane_key}/followups",
+            get(crate::routes::list_followups_handler),
+        )
+        .route(
+            "/v1/lanes/{lane_key}/followups",
+            post(crate::routes::queue_followup_handler),
+        )
+        .route(
+            "/v1/lanes/{lane_key}/followups/{id}",
+            delete(crate::routes::cancel_followup_handler),
         )
 
         .route("/v1/agents", get(crate::routes::list_agents_handler))
@@ -122,13 +156,39 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/files/{id}",
             get(crate::routes::get_file_metadata_handler),
         )
-        .route(
-            "/v1/files/{id}/content",
-            get(crate::routes::get_file_content_handler),
-        )
+        // `/v1/files/{id}/content` is NOT here — GAP-11 moved it to the
+        // `content` sub-router below, which authenticates inline.
         .route(
             "/v1/files/{id}/open",
             post(crate::routes::open_file_handler),
+        )
+        // Artifact routes (plan §4.9). The content routes are likewise on the
+        // `content` sub-router; everything that returns JSON stays here.
+        .route("/v1/artifacts", get(crate::routes::list_artifacts_handler))
+        .route("/v1/artifacts/{id}", get(crate::routes::get_artifact_handler))
+        .route(
+            "/v1/artifacts/{id}/versions",
+            get(crate::routes::list_artifact_versions_handler),
+        )
+        .route(
+            "/v1/artifacts/{id}/diff",
+            get(crate::routes::get_artifact_diff_handler),
+        )
+        .route(
+            "/v1/artifacts/{id}/pin",
+            put(crate::routes::pin_artifact_handler),
+        )
+        // Workspaces (plan §4.8, "Project moved"). One root per call: the GET
+        // describes it, the PATCH re-bases everything addressed under it.
+        .route(
+            "/v1/workspaces",
+            get(crate::routes::get_workspace_handler).patch(crate::routes::rebase_workspace_handler),
+        )
+        // Purge deletes a project's conversations, runs and uploads, and
+        // answers the plan it followed. `dry_run` defaults to true.
+        .route(
+            "/v1/workspaces/purge",
+            post(crate::routes::purge_workspace_handler),
         )
         // Chat routes (Phase 5.6)
         .route("/v1/chat", post(crate::routes::send_chat_handler))
@@ -140,14 +200,35 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/chat/history",
             delete(crate::routes::delete_chat_history_handler),
         )
-        // Cross-platform conversation API (Phase 5.6)
+        // Sessions (plan §5.7) — replaces `/v1/conversations` (P19), which was
+        // deleted rather than aliased.
+        .route("/v1/sessions", get(crate::routes::list_sessions_handler))
+        .route("/v1/sessions", post(crate::routes::create_session_handler))
+        .route("/v1/sessions/{id}", get(crate::routes::get_session_handler))
         .route(
-            "/v1/conversations",
-            get(crate::routes::list_conversations_handler),
+            "/v1/sessions/{id}",
+            patch(crate::routes::patch_session_handler),
         )
         .route(
-            "/v1/conversations/{id}/messages",
-            get(crate::routes::get_conversation_messages_handler),
+            "/v1/sessions/{id}",
+            delete(crate::routes::delete_session_handler),
+        )
+        .route(
+            "/v1/sessions/{id}/messages",
+            get(crate::routes::get_session_messages_handler),
+        )
+        // §5.4's per-session JSONL, paged by its `seq` cursor.
+        .route(
+            "/v1/sessions/{id}/events",
+            get(crate::routes::get_session_events_handler),
+        )
+        .route(
+            "/v1/sessions/{id}/activate",
+            post(crate::routes::activate_session_handler),
+        )
+        .route(
+            "/v1/sessions/{id}/archive",
+            post(crate::routes::archive_session_handler),
         )
         // Settings routes (Phase 5.5)
         .route("/v1/settings/llm", get(crate::routes::get_llm_settings))
@@ -178,6 +259,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/llm/usage/daily",
             get(crate::routes::get_llm_usage_daily),
         )
+        // GAP-08c: today's spend, its per-provider breakdown, and the two caps
+        // that bound it (N4 — there is no daily budget to serve).
+        .route("/v1/usage/summary", get(crate::routes::get_usage_summary))
         // Model discovery routes
         .route("/v1/models", get(crate::routes::list_models))
         .route("/v1/models/refresh", post(crate::routes::refresh_models))
@@ -199,6 +283,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/settings/llm/providers/usage",
             get(crate::routes::get_provider_usage),
+        )
+        // GAP-15: the ENABLE bit for one provider. `usage` above is a literal
+        // segment, so the two never collide.
+        .route(
+            "/v1/settings/llm/providers/{provider}/enabled",
+            put(crate::routes::set_provider_enabled),
         )
         // Orchestrator config routes (Phase 5.7)
         .route(
@@ -225,6 +315,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 .get(crate::routes::get_feedback_handler)
                 .delete(crate::routes::delete_feedback_handler),
         )
+        // Skill catalog (GAP-18's second half) — read-only, like `/v1/tools`;
+        // there is no per-skill enable state to write.
+        .route("/v1/skills", get(crate::routes::list_skills_handler))
         // Skill health routes (Phase 4a)
         .route(
             "/v1/skills/health",
@@ -235,31 +328,42 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/chat/confirmations/{request_id}",
             post(crate::routes::confirm_tool),
         )
-        // Plugin routes
+        // Extension routes — the ENABLE axis (extension design §8, ADR-030)
         .route(
-            "/v1/plugins",
-            get(crate::routes::list_plugins_handler),
+            "/v1/extensions",
+            get(crate::routes::list_extensions_handler),
+        )
+        // GAP-24 — install / update / uninstall. The uninstall is a query flag
+        // on the DELETE C6 already registered, so the orphan-row removal keeps
+        // its meaning and the destructive half has to be asked for by name.
+        .route(
+            "/v1/extensions/{kind}",
+            post(crate::routes::install_extension_handler),
         )
         .route(
-            "/v1/plugins/{name}/approve",
-            post(crate::routes::approve_plugin_handler),
+            "/v1/extensions/plugin/validate",
+            post(crate::routes::validate_plugin_handler),
         )
         .route(
-            "/v1/plugins/{name}/deny",
-            post(crate::routes::deny_plugin_handler),
+            "/v1/extensions/{kind}/{id}",
+            delete(crate::routes::delete_extension_handler)
+                .put(crate::routes::update_extension_handler),
         )
         .route(
-            "/v1/plugins/{name}/enable",
-            post(crate::routes::enable_plugin_handler),
+            "/v1/extensions/{kind}/{id}/config",
+            get(crate::routes::get_extension_config_handler)
+                .post(crate::routes::set_extension_config_handler),
         )
+        // enable | disable | reload | approve | deny
         .route(
-            "/v1/plugins/{name}/disable",
-            post(crate::routes::disable_plugin_handler),
+            "/v1/extensions/{kind}/{id}/{verb}",
+            post(crate::routes::extension_action_handler),
         )
-        .route(
-            "/v1/plugins/{name}/config",
-            post(crate::routes::set_plugin_config_handler),
-        )
+        // Tool catalog (GAP-18) — read-only; no per-tool toggle (S1)
+        .route("/v1/tools", get(crate::routes::list_tools_handler))
+        // Where the daemon keeps things (§4.7 item 4) — protected because it
+        // names absolute paths; `/v1/health` stays the public liveness probe.
+        .route("/v1/status", get(crate::routes::status_handler))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::middleware::auth_middleware,
@@ -274,11 +378,31 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         get(crate::routes::chat_stream_handler),
     );
 
+    // Content routes (GAP-11): the bytes a webview `<img src>`/`<iframe src>`
+    // must be able to load, which cannot carry a request header. Each handler
+    // validates the token inline — `?token=` *or* `Authorization: Bearer` — and
+    // then applies the same owner check it always did, so only authentication
+    // moved off the middleware. Metadata and `/open` stay protected.
+    let content = Router::new()
+        .route(
+            "/v1/files/{id}/content",
+            get(crate::routes::get_file_content_handler),
+        )
+        .route(
+            "/v1/artifacts/{id}/content",
+            get(crate::routes::get_artifact_content_handler),
+        )
+        .route(
+            "/v1/artifacts/{id}/versions/{n}/content",
+            get(crate::routes::get_artifact_version_content_handler),
+        );
+
     // Merge all routes
     public
         .merge(protected_routes)
         .merge(websocket)
         .merge(chat_sse)
+        .merge(content)
         .with_state(state)
         .layer(CorsLayer::permissive())
 }

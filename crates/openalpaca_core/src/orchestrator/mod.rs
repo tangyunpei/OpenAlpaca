@@ -18,8 +18,10 @@ mod handlers;
 mod memory_ops;
 mod query_handler;
 mod summary;
+mod task_launch;
 mod task_ops;
 
+pub use task_launch::{RerunOutcome, StartOutcome, TaskLaunchError};
 pub use task_ops::{TaskActionError, apply_task_action};
 // Routing V2 shared cores, re-exported for the main-loop builtin tools
 // (`memory_store` / `memory_forget` / `task_status`).

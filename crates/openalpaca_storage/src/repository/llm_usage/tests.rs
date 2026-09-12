@@ -198,5 +198,189 @@ fn test_empty_results() {
 #[test]
 fn test_schema_version() {
     let db = setup_db();
-    assert_eq!(db.schema_version().unwrap(), 34);
+    assert_eq!(db.schema_version().unwrap(), 41);
+}
+
+fn call_log_for_task(task_id: &str, cost_usd: f64) -> LlmCallLog {
+    LlmCallLog {
+        id: None,
+        timestamp: Utc::now(),
+        agent_id: Some("orchestrator".to_string()),
+        task_id: Some(task_id.to_string()),
+        provider: "anthropic".to_string(),
+        model: "claude-sonnet-4-5-20250929".to_string(),
+        key_id: None,
+        input_tokens: 10,
+        output_tokens: 5,
+        cost_usd,
+        status: "success".to_string(),
+        latency_ms: Some(100),
+        error_message: None,
+    }
+}
+
+#[test]
+fn test_cost_for_tasks_sums_multiple_calls_per_task() {
+    let db = setup_db();
+    let repo = LlmUsageRepository::new(&db);
+
+    repo.insert_call_log(&call_log_for_task("task1", 0.01)).unwrap();
+    repo.insert_call_log(&call_log_for_task("task1", 0.02)).unwrap();
+    repo.insert_call_log(&call_log_for_task("task2", 0.05)).unwrap();
+    // A call with no task_id must not leak into either total.
+    repo.insert_call_log(&LlmCallLog {
+        task_id: None,
+        ..call_log_for_task("unused", 99.0)
+    })
+    .unwrap();
+
+    let costs = repo
+        .cost_for_tasks(&["task1".to_string(), "task2".to_string()])
+        .unwrap();
+
+    assert_eq!(costs.len(), 2);
+    assert!((costs["task1"] - 0.03).abs() < 1e-9);
+    assert!((costs["task2"] - 0.05).abs() < 1e-9);
+}
+
+#[test]
+fn test_cost_for_tasks_omits_tasks_with_no_logged_cost() {
+    let db = setup_db();
+    let repo = LlmUsageRepository::new(&db);
+
+    repo.insert_call_log(&call_log_for_task("task1", 0.01)).unwrap();
+
+    let costs = repo
+        .cost_for_tasks(&["task1".to_string(), "task-with-no-calls".to_string()])
+        .unwrap();
+
+    assert_eq!(costs.len(), 1);
+    assert!(costs.contains_key("task1"));
+    assert!(!costs.contains_key("task-with-no-calls"));
+}
+
+#[test]
+fn test_cost_for_tasks_empty_input_returns_empty_map_without_querying() {
+    let db = setup_db();
+    let repo = LlmUsageRepository::new(&db);
+    repo.insert_call_log(&call_log_for_task("task1", 0.01)).unwrap();
+
+    let costs = repo.cost_for_tasks(&[]).unwrap();
+    assert!(costs.is_empty());
+}
+
+// ── today's per-provider figures (GAP-08c, T50) ─────────────────────────────
+
+fn call(provider: &str, cost_usd: f64, input: i32, output: i32) -> LlmCallLog {
+    LlmCallLog {
+        id: None,
+        timestamp: Utc::now(),
+        agent_id: Some("agent1".to_string()),
+        task_id: None,
+        provider: provider.to_string(),
+        model: "m".to_string(),
+        key_id: None,
+        input_tokens: input,
+        output_tokens: output,
+        cost_usd,
+        status: "success".to_string(),
+        latency_ms: Some(1),
+        error_message: None,
+    }
+}
+
+/// `GET /v1/usage/summary`'s `by_provider`: today's call rows grouped once,
+/// never the lifetime `all_provider_usage()` the Settings panel used to show.
+#[test]
+fn provider_usage_since_groups_todays_calls_by_provider() {
+    let db = setup_db();
+    let repo = LlmUsageRepository::new(&db);
+
+    repo.insert_call_log(&call("anthropic", 0.01, 100, 50)).unwrap();
+    repo.insert_call_log(&call("anthropic", 0.02, 200, 25)).unwrap();
+    repo.insert_call_log(&call("openai", 0.005, 10, 5)).unwrap();
+
+    let rows = repo.provider_usage_since("2000-01-01 00:00:00").unwrap();
+    assert_eq!(rows.len(), 2);
+    // Stable order, so the wire shape does not depend on the hash seed.
+    assert_eq!(rows[0].provider, "anthropic");
+    assert_eq!(rows[0].calls, 2);
+    assert_eq!(rows[0].tokens, 375);
+    assert!((rows[0].cost_usd - 0.03).abs() < 1e-9);
+    assert_eq!(rows[1].provider, "openai");
+    assert_eq!(rows[1].calls, 1);
+    assert_eq!(rows[1].tokens, 15);
+}
+
+/// Yesterday's spend is not today's: the cutoff is the whole point of the row.
+#[test]
+fn provider_usage_since_excludes_calls_before_the_cutoff() {
+    let db = setup_db();
+    let repo = LlmUsageRepository::new(&db);
+
+    let mut old = call("anthropic", 9.99, 1, 1);
+    old.timestamp = Utc::now() - chrono::Duration::days(2);
+    repo.insert_call_log(&old).unwrap();
+    repo.insert_call_log(&call("anthropic", 0.01, 1, 1)).unwrap();
+
+    let since = (Utc::now() - chrono::Duration::days(1))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    let rows = repo.provider_usage_since(&since).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].calls, 1);
+    assert!((rows[0].cost_usd - 0.01).abs() < 1e-9);
+}
+
+/// A day with no calls yet is an empty list, not a row of zeroes for a
+/// provider that has not been used.
+#[test]
+fn provider_usage_since_is_empty_before_the_first_call() {
+    let db = setup_db();
+    let repo = LlmUsageRepository::new(&db);
+
+    assert!(
+        repo.provider_usage_since("2000-01-01 00:00:00")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// R63: `llm_call_log` had no index leading on `timestamp`, so this query —
+/// re-run on every `llm_call_completed` event while Settings is open —
+/// full-scanned the whole append-only log under the daemon's single
+/// connection lock. Migration 040 adds `idx_llm_call_log_timestamp`; this
+/// proves the query plan actually uses it, not merely that the index exists
+/// unused next to the table.
+#[test]
+fn provider_usage_since_query_plan_uses_the_timestamp_index() {
+    let db = setup_db();
+
+    let plan_lines: Vec<String> = db
+        .with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "EXPLAIN QUERY PLAN SELECT provider, SUM(cost_usd), COUNT(*), \
+                 SUM(input_tokens + output_tokens) FROM llm_call_log WHERE timestamp >= ?1 \
+                 GROUP BY provider ORDER BY provider",
+            )?;
+            let rows = stmt.query_map(rusqlite::params!["2000-01-01 00:00:00"], |row| {
+                row.get::<_, String>(3)
+            })?;
+            let mut lines = Vec::new();
+            for row in rows {
+                lines.push(row?);
+            }
+            Ok(lines)
+        })
+        .unwrap();
+
+    let plan = plan_lines.join(" | ");
+    assert!(
+        plan.contains("idx_llm_call_log_timestamp"),
+        "expected the summary query's plan to use idx_llm_call_log_timestamp, got: {plan}"
+    );
+    assert!(
+        !plan.contains("SCAN llm_call_log"),
+        "the timestamp index should turn the WHERE clause into a SEARCH, not a full SCAN: {plan}"
+    );
 }

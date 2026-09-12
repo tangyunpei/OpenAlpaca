@@ -39,6 +39,38 @@ pub struct ChatService {
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
 }
 
+/// Every named attachment exists and belongs to `principal`.
+///
+/// One rule, one place: the route runs it as the last of its **pure** checks,
+/// before anything activates a session (D16), and
+/// [`ChatService::send_message`] runs it for the callers that do not come
+/// through the route. The message wording is part of the contract — the route
+/// maps `Attachment not found` to `404 ATTACHMENT_NOT_FOUND` and `Access denied
+/// to attachment` to `403 ATTACHMENT_ACCESS_DENIED`.
+pub fn preflight_attachments(
+    db: &Database,
+    attachment_refs: &[AttachmentRef],
+    principal: &str,
+) -> Result<()> {
+    let file_repo = FileAssetRepository::new(db);
+    for att_ref in attachment_refs {
+        match file_repo.get_by_id(&att_ref.file_id) {
+            Ok(Some(asset)) => {
+                if asset.owner_id != principal {
+                    anyhow::bail!("Access denied to attachment: {}", att_ref.file_id);
+                }
+            }
+            Ok(None) => {
+                anyhow::bail!("Attachment not found: {}", att_ref.file_id);
+            }
+            Err(e) => {
+                anyhow::bail!("Failed to resolve attachment {}: {}", att_ref.file_id, e);
+            }
+        }
+    }
+    Ok(())
+}
+
 impl ChatService {
     pub fn new(
         gateway: Arc<Gateway>,
@@ -67,30 +99,24 @@ impl ChatService {
     /// 3. `Done { content, model, tokens_in, tokens_out, duration_ms }` — full text + metadata
     ///
     /// On error: `Thinking` → `Error { message }`.
+    ///
+    /// `model_override` (GAP-13) runs this one turn on a named model. The
+    /// route validated the id against the model registry before calling —
+    /// this path only carries it — and nothing persists it, so the next turn
+    /// on the lane is back on the daemon default.
     pub fn send_message(
         &self,
         content: String,
         attachment_refs: Vec<AttachmentRef>,
         principal: &str,
         workspace_path: Option<String>,
+        model_override: Option<String>,
     ) -> Result<ChatSendResponse> {
-        // Fast preflight check so invalid attachment IDs still fail the request immediately.
-        let file_repo = FileAssetRepository::new(&self.db);
-        for att_ref in &attachment_refs {
-            match file_repo.get_by_id(&att_ref.file_id) {
-                Ok(Some(asset)) => {
-                    if asset.owner_id != principal {
-                        anyhow::bail!("Access denied to attachment: {}", att_ref.file_id);
-                    }
-                }
-                Ok(None) => {
-                    anyhow::bail!("Attachment not found: {}", att_ref.file_id);
-                }
-                Err(e) => {
-                    anyhow::bail!("Failed to resolve attachment {}: {}", att_ref.file_id, e);
-                }
-            }
-        }
+        // Fast preflight check so invalid attachment IDs still fail the request
+        // immediately. `POST /v1/chat` runs the same function *before* it
+        // activates a session (D16), so a refused turn never re-homes a lane;
+        // this call is what covers every other caller of `send_message`.
+        preflight_attachments(&self.db, &attachment_refs, principal)?;
 
         let lane_key = format!("{principal}:gui");
 
@@ -157,6 +183,7 @@ impl ChatService {
                     workspace_path,
                     stream_id: Some(sid.clone()),
                     lane_override: None,
+                    model_override,
                 })
                 .await;
 
@@ -234,23 +261,27 @@ impl ChatService {
         })
     }
 
-    /// Get conversation history for a lane.
+    /// Get one session's transcript (migration 039).
+    ///
+    /// Session-scoped, not lane-scoped: a lane now holds many conversations,
+    /// and reading them together would splice two transcripts into one.
     pub fn get_history(
         &self,
-        lane_key: &str,
+        session_id: &str,
         limit: i64,
         offset: i64,
     ) -> Result<(Vec<ConversationMessage>, i64)> {
         let repo = ConversationRepository::new(&self.db);
-        let messages = repo.list_by_lane(lane_key, limit, offset)?;
-        let total = repo.count_by_lane(lane_key)?;
+        let messages = repo.list_by_session(session_id, limit, offset)?;
+        let total = repo.count_by_session(session_id)?;
         Ok((messages, total))
     }
 
-    /// Clear conversation history for a lane.
-    pub fn clear_history(&self, lane_key: &str) -> Result<u64> {
+    /// Clear one session's transcript. The session row survives — this empties
+    /// a conversation, it does not delete it (`DELETE /v1/sessions/{id}` does).
+    pub fn clear_history(&self, session_id: &str) -> Result<u64> {
         let repo = ConversationRepository::new(&self.db);
-        repo.delete_by_lane(lane_key)
+        repo.delete_by_session(session_id)
     }
 
     /// Get a reference to the stream manager.

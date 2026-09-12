@@ -92,8 +92,17 @@ fn test_keys_in_category() {
 #[test]
 fn test_daemon_keys_in_category() {
     let keys = keys_in_category("Daemon");
-    // 41 keys plus the 8 [orchestrator.routing] keys (2026-08-30 wiring audit).
-    assert_eq!(keys.len(), 49);
+    // 41 keys plus the 8 [orchestrator.routing] keys (2026-08-30 wiring audit)
+    // plus the 2 [execution.artifacts] keys (plan §4.6).
+    assert_eq!(keys.len(), 51);
+    assert!(
+        keys.iter()
+            .any(|d| d.key == "daemon.execution.artifacts.max_artifact_bytes")
+    );
+    assert!(
+        keys.iter()
+            .any(|d| d.key == "daemon.execution.artifacts.max_versions_per_artifact")
+    );
     assert!(
         keys.iter()
             .any(|d| d.key == "daemon.orchestrator.routing.steering_enabled")

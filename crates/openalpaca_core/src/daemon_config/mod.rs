@@ -29,6 +29,28 @@ pub struct ExperimentalConfig {
     pub ephemeral_pressure_layer: bool,
 }
 
+/// `[extensions]` — the ENABLE axis's one knob (extension design §3.2 T3).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExtensionsConfig {
+    /// How long a disable waits for in-flight tool calls and out-of-process
+    /// runs to finish before tearing the extension down anyway.
+    ///
+    /// There is no per-request `SandboxPolicy` at the supervisor level to take
+    /// a `max_tool_runtime_secs` from — policies are built per call site — so
+    /// this is the only input. On expiry the supervisor warns with the
+    /// straggler count and proceeds.
+    pub drain_timeout_secs: u64,
+}
+
+impl Default for ExtensionsConfig {
+    fn default() -> Self {
+        Self {
+            drain_timeout_secs: 10,
+        }
+    }
+}
+
 /// Root config loaded from `config/daemon.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -42,12 +64,68 @@ pub struct DaemonConfig {
     pub telemetry: TelemetryConfig,
     #[serde(default)]
     pub experimental: ExperimentalConfig,
+    #[serde(default)]
+    pub extensions: ExtensionsConfig,
+}
+
+/// Warn once about keys this daemon removed but a hand-edited `daemon.toml`
+/// may still carry. `DaemonConfig` is `#[serde(default)]` with no
+/// `deny_unknown_fields`, so such a key parses clean and is silently ignored —
+/// and silence is the one outcome worth avoiding, because the owner could
+/// believe a tool is still suppressed (extension design §11.1).
+///
+/// This probe is the only place the purged key's name survives in code.
+fn warn_on_removed_keys(value: &toml::Value) {
+    let present = value
+        .get("execution")
+        .and_then(|e| e.get("skill_defaults"))
+        .and_then(|sd| sd.get("global_tool_deny"))
+        .is_some();
+    if present {
+        tracing::warn!(
+            "`execution.skill_defaults.global_tool_deny` was removed — per-extension toggles \
+             replace it; see `openalpaca ext list`. The key is being ignored."
+        );
+    }
+}
+
+/// Warn about keys this daemon **parses and serves but does not act on**, when
+/// the owner has set one to something other than its inert default.
+///
+/// The neighbouring probe covers a key that was removed; this one covers a key
+/// that was never wired up. The failure mode is the same and worse: the value is
+/// accepted, clamped and reported by `GET /v1/status`, so
+/// `log_retention_days = 90` reads back as 90 while nothing expires anything by
+/// age (plan §5.4's age pass was not built — owner decision T12). A warn at boot
+/// is what keeps the number from being mistaken for a bound.
+fn warn_on_inert_keys(value: &toml::Value) {
+    let days = value
+        .get("orchestrator")
+        .and_then(|o| o.get("sessions"))
+        .and_then(|s| s.get("log_retention_days"))
+        .and_then(|d| d.as_integer());
+    let inert = i64::from(SessionsConfig::default().log_retention_days);
+    if let Some(days) = days.filter(|d| *d != inert) {
+        tracing::warn!(
+            "`orchestrator.sessions.log_retention_days = {days}` is configured but no age sweep \
+             exists yet — owner decision T12. Only the byte-cap sweep runs \
+             (`log_max_session_bytes`, `log_max_total_bytes`); the value is reported by \
+             `GET /v1/status` and expires nothing."
+        );
+    }
 }
 
 /// Load daemon config from a TOML file. Returns defaults if file is missing or unparseable.
 pub fn load_daemon_config(path: &Path) -> DaemonConfig {
     match std::fs::read_to_string(path) {
-        Ok(content) => match toml::from_str::<DaemonConfig>(&content) {
+        // Parsed through `toml::Value` so the two probes above can see the raw
+        // document; `DaemonConfig` itself would swallow the removed key, and
+        // report the inert one as though it had been set by the defaults.
+        Ok(content) => match toml::from_str::<toml::Value>(&content).and_then(|value| {
+            warn_on_removed_keys(&value);
+            warn_on_inert_keys(&value);
+            value.try_into::<DaemonConfig>()
+        }) {
             Ok(mut config) => {
                 config.validate();
                 tracing::info!("Daemon config loaded from {}", path.display());

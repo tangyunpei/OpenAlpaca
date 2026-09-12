@@ -3,49 +3,47 @@
 //! POST /v1/tasks           -> create a new task
 //! GET  /v1/tasks           -> list tasks (query: created_by, status, limit)
 //! GET  /v1/tasks/{id}      -> get a single task + agent runs
-//! POST /v1/tasks/{id}/action -> perform action (cancel, pause, resume)
+//! GET  /v1/tasks/{id}/timeline -> the run's swimlanes (GAP-09)
+//! POST /v1/tasks/{id}/action -> perform action (cancel, pause, resume, start)
+//!                               `resume` un-pauses a paused run, and — on an
+//!                               `interrupted` one, with `resume_enabled` —
+//!                               replays it from its session log (§5.6c, S2)
+//! POST /v1/tasks/{id}/steer  -> inject a message into a running run (GAP-02)
+//! POST /v1/tasks/{id}/rerun  -> dispatch a new run from a finished one (GAP-06)
 //!
-//! The `assigned_agents` / `assignments` arrays are sourced from
-//! `agent_task_history` (written by the dispatcher's `record_agent_history`),
-//! not the dead-post-V2 `task_agent_assignment` table.
+//! Neither task shape carries agent runs any more: the legacy
+//! `assigned_agents` / `assignments` payload (read from `agent_task_history`)
+//! was deleted with Phase 4's P8, and the timeline route serves the same runs
+//! from `subagent_span` — in flight as well as finished.
 
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
-    response::IntoResponse,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
 };
 use chrono::Utc;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use openalpaca_core::bus::EventBus;
+use openalpaca_core::context::SharedContext;
+use openalpaca_core::daemon_config::RoutingConfig;
 use openalpaca_core::events::SystemEvent;
-use openalpaca_core::orchestrator::{TaskActionError, apply_task_action, parse_outcome};
-use openalpaca_storage::{Database, SubAgentRepository, Task, TaskRepository, TaskStatus};
+use openalpaca_core::orchestrator::{
+    Orchestrator, TaskActionError, TaskLaunchError, apply_task_action, parse_outcome,
+};
+use openalpaca_core::runner::steering::{SteeringMsg, SteeringOrigin, SteeringPushError, push_steering};
+use openalpaca_core::security::confirmation::ConfirmationBroker;
+use openalpaca_core::security::policy::{Principal, Scope};
+use openalpaca_storage::{
+    Database, LlmUsageRepository, SPAN_DETAIL_INTERRUPTED, SubagentSpanRepository, Task,
+    TaskRepository, TaskStatus,
+};
 
-use super::tasks_types::*;
+use super::chat_types::is_lane_owned_by;
+use super::{api_error, request_project_root, tasks_types::*, workspace_header};
 use crate::AppState;
-
-// ── Helpers ───────────────────────────────────────────────────────
-
-/// Summarize the agent runs recorded for a task (from `agent_task_history`)
-/// as the `assigned_agents` JSON array served by `GET /v1/tasks`.
-fn agent_runs_summary(db: &Database, task_id: &str) -> Vec<serde_json::Value> {
-    SubAgentRepository::new(db)
-        .get_history_for_task(task_id)
-        .unwrap_or_default()
-        .iter()
-        .map(|run| {
-            serde_json::json!({
-                "agent_id": run.agent_id,
-                "role": run.role,
-                "status": run.status,
-                "runtime_seconds": run.runtime_seconds,
-                "completed_at": run.completed_at,
-            })
-        })
-        .collect()
-}
 
 // ── Handlers ──────────────────────────────────────────────────────
 
@@ -53,13 +51,41 @@ fn agent_runs_summary(db: &Database, task_id: &str) -> Vec<serde_json::Value> {
 pub async fn create_task_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CreateTaskRequest>,
-) -> impl IntoResponse {
+) -> Response {
+    create_task(
+        &state.db,
+        &state.gateway.shared_context,
+        &state.gateway.lane_manager,
+        &state.gateway.bus,
+        &state.local_user_id,
+        request,
+    )
+}
+
+/// `POST /v1/tasks`, as a `Response` — split out from the handler so the
+/// ownership rules are provable without an `AppState`.
+///
+/// **Owner-scoped on both columns (ruling R79).** The row this parks is what
+/// `start` / `rerun` / `resume` / `steer` later dispatch as *a user*, so the two
+/// identity columns are not the client's to choose: `created_by` is the local
+/// user whatever the body says, and a `source_lane` the caller does not own is
+/// `404 LANE_NOT_FOUND` — never `403`, which would confirm the lane exists
+/// (R40's line, the same one `POST /v1/lanes/{lane}/followups` draws, R42).
+fn create_task(
+    db: &Database,
+    ctx: &SharedContext,
+    lanes: &openalpaca_core::lane::LaneManager,
+    bus: &EventBus,
+    owner_id: &str,
+    request: CreateTaskRequest,
+) -> Response {
     // Input validation
     if request.title.is_empty() || request.title.len() > 500 {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "Title must be 1-500 characters" })),
-        );
+        )
+            .into_response();
     }
     if let Some(ref desc) = request.description
         && desc.len() > 10_000
@@ -67,7 +93,11 @@ pub async fn create_task_handler(
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "Description must be at most 10000 characters" })),
-        );
+        )
+            .into_response();
+    }
+    if !is_lane_owned_by(&request.source_lane, owner_id) {
+        return api_error(StatusCode::NOT_FOUND, "LANE_NOT_FOUND", "No such lane");
     }
 
     let task_id = Uuid::new_v4().to_string();
@@ -82,7 +112,9 @@ pub async fn create_task_handler(
         progress_current: None,
         progress_total: None,
         result_summary: None,
-        created_by: request.created_by.clone(),
+        // R79: the local user, not the body's `created_by`. Every owner-scoped
+        // verb reads this column.
+        created_by: owner_id.to_string(),
         source_lane: request.source_lane.clone(),
         created_at: now,
         updated_at: now,
@@ -92,32 +124,42 @@ pub async fn create_task_handler(
         outcome_json: None,
         outcome_kind: None,
         artifact_count: 0,
+        // `CreateTaskRequest` carries no workspace and this route is not a
+        // dispatch — the project is recorded where a run actually starts
+        // (`dispatch_lead_agent`, §4.7 item 3). `None` says "no project", which
+        // is true of a row created here.
+        workspace_id: None,
+        // Nor is it a re-run: `POST /v1/tasks/{id}/rerun` is the verb that
+        // fills this, and it dispatches rather than passing through here.
+        source_task_id: None,
+        // Same reason as `workspace_id`: the session a run belongs to is
+        // resolved where a run actually starts (§5.1), not on a route that
+        // only parks a row.
+        session_id: None,
     };
 
     // 1. Persist to DB
-    let repo = TaskRepository::new(&state.db);
+    let repo = TaskRepository::new(db);
     if let Err(e) = repo.create(&task) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
-        );
+        )
+            .into_response();
     }
 
     // 2. Register in-memory
-    state
-        .gateway
-        .shared_context
-        .task_registry
+    ctx.task_registry
         .register(task_id.clone(), request.title.clone());
 
     // 3. Create task lane
-    state.gateway.lane_manager.create_task_lane(&task_id);
+    lanes.create_task_lane(&task_id);
 
     // 4. Emit event
-    let _ = state.gateway.bus.publish(SystemEvent::TaskCreated {
+    let _ = bus.publish(SystemEvent::TaskCreated {
         task_id: task_id.clone(),
         title: request.title,
-        created_by: request.created_by,
+        created_by: task.created_by,
         timestamp: now,
     });
 
@@ -128,6 +170,7 @@ pub async fn create_task_handler(
             "status": "queued"
         })),
     )
+        .into_response()
 }
 
 /// GET /v1/tasks
@@ -136,7 +179,14 @@ pub async fn list_tasks_handler(
     Query(query): Query<ListTasksQuery>,
 ) -> impl IntoResponse {
     let repo = TaskRepository::new(&state.db);
-    let limit = query.limit.unwrap_or(50);
+    // Clamped (D13): an oversized page is not just a big response — the grouped
+    // cost query below binds one SQLite parameter per row, so a page of 1 000
+    // asked for more than the 999-variable limit and every `cost_usd` came back
+    // zero through `unwrap_or_default`. Smaller page, honest numbers.
+    let limit = super::page_limit(
+        query.limit.map(|n| i64::try_from(n).unwrap_or(i64::MAX)),
+        DEFAULT_TASK_PAGE,
+    ) as usize;
 
     let tasks = if let Some(ref created_by) = query.created_by {
         repo.list_by_creator(created_by, limit)
@@ -162,34 +212,50 @@ pub async fn list_tasks_handler(
 
     match tasks {
         Ok(tasks) => {
-            let enriched: Vec<serde_json::Value> = tasks
-                .iter()
+            // GAP-08b: one grouped query for every task on the page, rather
+            // than a per-row lookup. R38's agent count is the same shape over
+            // `subagent_span` — the per-row agent signal the deleted
+            // `assigned_agents` array carried, at one query per page instead
+            // of one per row. A read failure yields an empty map, so the page
+            // renders with zeroes rather than 500-ing.
+            let task_ids: Vec<String> = tasks.iter().map(|t| t.id.clone()).collect();
+            let costs = LlmUsageRepository::new(&state.db)
+                .cost_for_tasks(&task_ids)
+                .unwrap_or_else(|e| {
+                    // The same stance as the subagent counts below: a read
+                    // failure costs the numbers, not the page — but it is said
+                    // out loud rather than rendering every run as free.
+                    tracing::warn!("Failed to read costs for task list: {e}");
+                    Default::default()
+                });
+            let subagent_counts = SubagentSpanRepository::new(&state.db)
+                .counts_for_tasks(&task_ids)
+                .unwrap_or_else(|e| {
+                    tracing::warn!("Failed to read subagent counts for task list: {e}");
+                    Default::default()
+                });
+            let summaries: Vec<TaskSummaryResponse> = tasks
+                .into_iter()
                 .map(|t| {
-                    let agents = agent_runs_summary(&state.db, &t.id);
-                    match serde_json::to_value(t) {
-                        Ok(mut v) => {
-                            if let Some(obj) = v.as_object_mut() {
-                                obj.insert(
-                                    "assigned_agents".to_string(),
-                                    serde_json::json!(agents),
-                                );
-                                if let Some(parsed) = parse_outcome(t) {
-                                    if let Ok(outcome_val) = serde_json::to_value(parsed) {
-                                        obj.insert("outcome".to_string(), outcome_val);
-                                    }
-                                }
-                            }
-                            v
-                        }
-                        Err(_) => {
-                            serde_json::json!({ "id": t.id, "error": "serialization_failed" })
-                        }
+                    let outcome = parse_outcome(&t);
+                    let cost_usd = costs.get(&t.id).copied().unwrap_or(0.0);
+                    let subagent_count = subagent_counts.get(&t.id).copied().unwrap_or(0);
+                    // R40 — an in-memory lookup per row (the registered inbox),
+                    // no query: the list stays one page, three queries.
+                    let steerable =
+                        is_steerable(&t, &state.gateway.shared_context, &state.local_user_id);
+                    TaskSummaryResponse {
+                        task: t,
+                        outcome,
+                        cost_usd,
+                        subagent_count,
+                        steerable,
                     }
                 })
                 .collect();
             (
                 StatusCode::OK,
-                Json(serde_json::to_value(enriched).unwrap_or_else(|_| serde_json::json!([]))),
+                Json(serde_json::to_value(summaries).unwrap_or_else(|_| serde_json::json!([]))),
             )
         }
         Err(e) => (
@@ -208,17 +274,16 @@ pub async fn get_task_handler(
 
     match repo.get(&id) {
         Ok(Some(task)) => {
-            let agents = SubAgentRepository::new(&state.db)
-                .get_history_for_task(&id)
-                .unwrap_or_default();
             let outcome = parse_outcome(&task);
+            let steerable =
+                is_steerable(&task, &state.gateway.shared_context, &state.local_user_id);
             (
                 StatusCode::OK,
                 Json(
                     serde_json::to_value(TaskResponse {
                         task,
-                        agents: Some(agents),
                         outcome,
+                        steerable,
                     })
                     .unwrap_or_else(|_| serde_json::json!({"error": "serialization_failed"})),
                 ),
@@ -235,23 +300,168 @@ pub async fn get_task_handler(
     }
 }
 
+/// The lane a pending confirmation is blocking, and the tool it is waiting on.
+///
+/// Keyed by agent *instance*, because that is what a span is: the template id
+/// would blur two lanes of the same kind into one.
+fn blocked_lanes(
+    broker: Option<&ConfirmationBroker>,
+    task_id: &str,
+) -> std::collections::HashMap<String, String> {
+    let Some(broker) = broker else {
+        return std::collections::HashMap::new();
+    };
+    let mut blocked = std::collections::HashMap::new();
+    for request in broker.pending_requests() {
+        if request.task_id.as_deref() != Some(task_id) {
+            continue;
+        }
+        if let Some(instance) = request.agent_instance_id {
+            // First pending request wins: a lane can only be waiting on one
+            // prompt at a time, and the extra ones are queued behind it.
+            blocked.entry(instance).or_insert(request.tool_name);
+        }
+    }
+    blocked
+}
+
+fn stamp(at: chrono::DateTime<Utc>) -> String {
+    at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// Assemble one run's timeline from its stored spans plus what is pending
+/// *right now*. Split out from the handler so every derivation rule is
+/// testable without a router.
+fn build_timeline(
+    task: &Task,
+    spans: Vec<openalpaca_storage::SubagentSpanRecord>,
+    blocked: &std::collections::HashMap<String, String>,
+    now: chrono::DateTime<Utc>,
+) -> TaskTimelineResponse {
+    let terminal = task.status.is_terminal();
+    let lanes = spans
+        .into_iter()
+        .map(|span| {
+            let running = span.state == "running";
+            let (state, detail) = if running && terminal {
+                // The daemon that would have closed this lane is gone (or the
+                // task finalized without it): report the truth, which is that
+                // the lane never finished, not that it is still working.
+                (
+                    "cancelled".to_string(),
+                    Some(SPAN_DETAIL_INTERRUPTED.to_string()),
+                )
+            } else if running && let Some(tool) = blocked.get(&span.agent_instance_id) {
+                ("blocked".to_string(), Some(format!("waiting on {tool}")))
+            } else {
+                (span.state, span.detail)
+            };
+            TimelineLaneResponse {
+                lane_id: span.id,
+                label: span.label,
+                template_id: span.template_id,
+                agent_instance_id: span.agent_instance_id,
+                started_at: span.started_at,
+                ended_at: span.ended_at,
+                state,
+                detail,
+                steps_current: None,
+                steps_total: None,
+            }
+        })
+        .collect();
+
+    TaskTimelineResponse {
+        task_id: task.id.clone(),
+        started_at: stamp(task.created_at),
+        now: stamp(now),
+        completed_at: task.completed_at.map(stamp),
+        lanes,
+    }
+}
+
+/// `GET /v1/tasks/{id}/timeline` — the run's swimlanes (GAP-09).
+fn task_timeline(
+    db: &Database,
+    broker: Option<&ConfirmationBroker>,
+    id: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match TaskRepository::new(db).get(id) {
+        Ok(Some(task)) => {
+            let spans = SubagentSpanRepository::new(db)
+                .list_for_task(id)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(task_id = id, "Failed to read subagent spans: {e}");
+                    Vec::new()
+                });
+            let blocked = blocked_lanes(broker, id);
+            let timeline = build_timeline(&task, spans, &blocked, Utc::now());
+            (
+                StatusCode::OK,
+                Json(
+                    serde_json::to_value(timeline)
+                        .unwrap_or_else(|_| serde_json::json!({"error": "serialization_failed"})),
+                ),
+            )
+        }
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "Task not found" })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+/// GET /v1/tasks/{id}/timeline
+pub async fn get_task_timeline_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    task_timeline(&state.db, state.confirmation_broker.as_deref(), &id)
+}
+
 /// POST /v1/tasks/{id}/action
 pub async fn task_action_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(request): Json<TaskActionRequest>,
-) -> impl IntoResponse {
+) -> Response {
+    // D5 — `start` is answered here, before `apply_task_action`, because it is
+    // not a state transition at all: nothing about the row changes on its own,
+    // a lead agent is dispatched onto it. `apply_task_action` knows three
+    // transitions and would report `UnknownAction` for this one.
+    if request.action == START_ACTION {
+        return start_task(&state.orchestrator, &state.db, &state.local_user_id, &id);
+    }
+
     // Shared with the orchestrator chat handler: registry-first resolution with
     // DB fallback, transition validation, token cancel, persistence, lane sync,
     // and TaskUpdated event all live in core.
-    match apply_task_action(
+    let outcome = apply_task_action(
         &state.gateway.shared_context,
         &state.gateway.lane_manager,
         &state.gateway.bus,
         Some(&state.db),
         &id,
         &request.action,
-    ) {
+    );
+
+    // §5.6c — `resume` is two verbs sharing one word, and the row decides
+    // which. `apply_task_action` owns the original: paused → running, a pure
+    // transition. Everything it refuses (`CannotResume`) is where S2's replay
+    // resume takes over, so the un-pause path is untouched byte for byte and
+    // the new verb answers exactly the cases the old one never could —
+    // starting with `interrupted`, which is the only status it accepts.
+    if request.action == RESUME_ACTION
+        && matches!(outcome, Err(TaskActionError::CannotResume { .. }))
+    {
+        return resume_task(&state.orchestrator, &state.db, &state.local_user_id, &id).await;
+    }
+
+    match outcome {
         Ok(new_status) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -281,22 +491,512 @@ pub async fn task_action_handler(
                 "error": format!("Can only resume a paused task, current state: '{}'", current)
             })),
         ),
-        Err(TaskActionError::UnknownAction) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": format!("Unknown action: '{}'. Valid: cancel, pause, resume", request.action)
-            })),
-        ),
+        Err(TaskActionError::UnknownAction) => unknown_action(&request.action),
         Err(TaskActionError::Db(e)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e })),
         ),
     }
+    .into_response()
+}
+
+/// Every word `POST /v1/tasks/{id}/action` accepts: the three transitions
+/// `apply_task_action` knows, plus [`START_ACTION`], which this route answers
+/// itself. Named so the refusal cannot list a set the route does not honour.
+///
+/// `resume` is one word over two verbs — un-pause a paused run, or (§5.6c,
+/// opt-in) replay-resume an interrupted one — so the set does not grow.
+const VALID_ACTIONS: &str = "cancel, pause, resume, start";
+
+/// The `400` for a word that is none of [`VALID_ACTIONS`]. Keeps the ad-hoc
+/// `{"error": "…"}` envelope its three sibling arms use — §7 says not to
+/// retrofit those now, and half-converting one handler would be worse.
+fn unknown_action(action: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "error": format!("Unknown action: '{action}'. Valid: {VALID_ACTIONS}")
+        })),
+    )
+}
+
+// ── Re-run and start (GAP-06) ─────────────────────────────────────
+//
+// Two verbs, deliberately different shapes, because they are different things:
+//
+//   POST /v1/tasks/{id}/rerun            201, a **new** id
+//   POST /v1/tasks/{id}/action {"start"} 200, the **same** id (D5)
+//
+// A re-run is a second run of a finished run's goal, and both rows have to
+// survive — the first one's result is what the user is comparing against — so
+// it gets its own id and its own row, carrying `source_task_id` back to the
+// original. `start` is not a second anything: it dispatches a row that was
+// queued and never ran, and the client is already holding that id.
+//
+// `start` rides the existing action route rather than getting one of its own
+// because that is where a client already looks for "do something to this run",
+// and D5 fixed its shape (same id, `200`) to be exactly what the other three
+// actions answer with.
+//
+// Both are owner-scoped, on the same line `POST /v1/tasks/{id}/steer` drew
+// (R40): reading a run and cancelling it are not scoped, but a verb that puts
+// work into the daemon *as this user* is.
+
+/// The default page of `GET /v1/tasks`. Bounded at [`super::MAX_PAGE_LIMIT`].
+const DEFAULT_TASK_PAGE: i64 = 50;
+
+/// The action word the route intercepts before [`apply_task_action`].
+const START_ACTION: &str = "start";
+
+/// The action word the route hands to §5.6c's replay resume **after**
+/// [`apply_task_action`] has refused it — see [`task_action_handler`].
+const RESUME_ACTION: &str = "resume";
+
+/// `Ok(())` when `id` names a run this owner started **on a lane this owner
+/// owns**; the refusal otherwise.
+///
+/// Both columns, because a launch is an injecting write on two identities
+/// (ruling R79): `created_by` says whose run it is, `source_lane` says which
+/// conversation the dispatch will post its completion report into and which
+/// lane's follow-up queue a leftover steering message re-enters. A row created
+/// by this user but parked on somebody else's lane is therefore not startable
+/// here either — the `POST /v1/tasks` that created it now refuses that
+/// combination outright, and this is what holds for rows written before it did.
+///
+/// A run this caller cannot see gets the same `404` a missing one does — never
+/// a `403`, which would confirm that the id belongs to somebody.
+fn owned_run(db: &Database, owner_id: &str, id: &str) -> Result<(), Response> {
+    match TaskRepository::new(db).get(id) {
+        Ok(Some(task))
+            if task.created_by == owner_id && is_lane_owned_by(&task.source_lane, owner_id) =>
+        {
+            Ok(())
+        }
+        Ok(_) => Err(api_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "Task not found",
+        )),
+        Err(e) => Err(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DB_ERROR",
+            e.to_string(),
+        )),
+    }
+}
+
+/// Which verb a [`TaskLaunchError`] came from — the two disagree about exactly
+/// one thing, which is what to call a row with no goal to dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchVerb {
+    Rerun,
+    Start,
+    Resume,
+}
+
+/// One response per refusal, so a client can say which one happened without
+/// parsing prose.
+fn launch_refusal(error: TaskLaunchError, verb: LaunchVerb) -> Response {
+    match error {
+        TaskLaunchError::NotFound => {
+            api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Task not found")
+        }
+        // `rerun` only. A run still in flight already has an agent on this
+        // goal; steering or cancelling it is the answer, not a second one.
+        TaskLaunchError::NotTerminal { current } => api_error(
+            StatusCode::CONFLICT,
+            "TASK_NOT_TERMINAL",
+            format!(
+                "This run has not finished ({current}) — steer or cancel it instead of \
+                 re-running it."
+            ),
+        ),
+        // `start` only (R43). A `start` re-launches the row *in place*, so a
+        // finished run would lose its result to the relaunch; `409` because the
+        // request is fine and the row's state is what refuses it, and the
+        // message names `rerun` because that verb does exactly what the caller
+        // wanted, without spending the first run's answer.
+        TaskLaunchError::NotStartable { current } => api_error(
+            StatusCode::CONFLICT,
+            "TASK_NOT_STARTABLE",
+            format!(
+                "This run has already finished ({current}) — re-run it instead of starting it \
+                 again, which would discard its result."
+            ),
+        ),
+        // `start` only, and the reason the verb needs a compare-and-set rather
+        // than a look: two of these would put two lead agents on one id.
+        TaskLaunchError::AlreadyRunning => api_error(
+            StatusCode::CONFLICT,
+            "TASK_ALREADY_RUNNING",
+            "This run is already running.",
+        ),
+        // `422`, not `400`: the request is well-formed and names a real run —
+        // it is the stored row that has nothing a lead agent could be given.
+        //
+        // `start`'s word here is `TASK_NOT_DISPATCHABLE`, not the obvious
+        // `TASK_NOT_STARTABLE` (R44): that one is spent above, on the `409` for
+        // a run that has already finished. One code word cannot carry two
+        // conditions at two statuses — a client that switched on it could not
+        // tell "this row has no goal" from "this run is over", and the two want
+        // opposite next steps.
+        TaskLaunchError::NoDescription => match verb {
+            LaunchVerb::Rerun => api_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "TASK_NOT_RERUNNABLE",
+                "This run has no description to re-dispatch — there is no goal to give a \
+                 lead agent.",
+            ),
+            LaunchVerb::Start | LaunchVerb::Resume => api_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "TASK_NOT_DISPATCHABLE",
+                "This task has no description to dispatch — there is no goal to give a \
+                 lead agent.",
+            ),
+        },
+        // `resume` only (§5.6c). S2 is the plan's one speculative piece and
+        // ships off; `409` because the request is well-formed and it is the
+        // daemon's configuration that refuses it, and the message names both
+        // the key to turn on and the verb that works without it.
+        TaskLaunchError::ResumeDisabled => api_error(
+            StatusCode::CONFLICT,
+            "RESUME_DISABLED",
+            "Replay resume is experimental and disabled — set [orchestrator.routing] \
+             resume_enabled = true in daemon.toml to enable it, or re-run this task instead.",
+        ),
+        // `resume` only. Every status but `interrupted` either chose to stop
+        // (that is `rerun`'s) or has not stopped at all.
+        TaskLaunchError::NotResumable { current } => api_error(
+            StatusCode::CONFLICT,
+            "TASK_NOT_RESUMABLE",
+            format!(
+                "Only an interrupted run can be resumed (this one is {current}) — re-run it \
+                 instead."
+            ),
+        ),
+        // `resume` only, and §5.6c's own words: "a gutted log is a clean 409
+        // pointing at `rerun`". Nothing was claimed or dispatched, so the row
+        // is exactly as it was and `rerun` is still there.
+        TaskLaunchError::ResumeLogMissing => api_error(
+            StatusCode::CONFLICT,
+            "RESUME_LOG_MISSING",
+            "This run's session log no longer holds a complete round to resume from — \
+             re-run it instead.",
+        ),
+        // Capacity, not a bug: every agent template that could lead a run is
+        // busy. `503` says so, and says it is worth trying again.
+        TaskLaunchError::Dispatch(reason) => {
+            api_error(StatusCode::SERVICE_UNAVAILABLE, "DISPATCH_FAILED", reason)
+        }
+        TaskLaunchError::Db(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e),
+    }
+}
+
+/// `POST /v1/tasks/{id}/rerun`, as a `Response`. Split out from the handler so
+/// every status code is provable without a router or an `AppState`.
+fn rerun_task(orchestrator: &Orchestrator, db: &Database, owner_id: &str, id: &str) -> Response {
+    if let Err(refusal) = owned_run(db, owner_id, id) {
+        return refusal;
+    }
+    match orchestrator.rerun_task(id) {
+        Ok(outcome) => (
+            StatusCode::CREATED,
+            Json(RerunTaskResponse {
+                task_id: outcome.task_id,
+                source_task_id: outcome.source_task_id,
+                title: outcome.title,
+                status: outcome.status,
+            }),
+        )
+            .into_response(),
+        Err(e) => launch_refusal(e, LaunchVerb::Rerun),
+    }
+}
+
+/// `POST /v1/tasks/{id}/action {"action":"start"}` (D5), as a `Response`.
+///
+/// The success body is the shape the other three actions answer with, because
+/// from the client's side that is what happened: the run it named changed
+/// state. The id in it is the id it sent.
+fn start_task(orchestrator: &Orchestrator, db: &Database, owner_id: &str, id: &str) -> Response {
+    if let Err(refusal) = owned_run(db, owner_id, id) {
+        return refusal;
+    }
+    match orchestrator.start_task(id) {
+        Ok(outcome) => Json(serde_json::json!({
+            "task_id": outcome.task_id,
+            "status": outcome.status,
+        }))
+        .into_response(),
+        Err(e) => launch_refusal(e, LaunchVerb::Start),
+    }
+}
+
+/// `POST /v1/tasks/{id}/action {"action":"resume"}` on an **interrupted** run
+/// (§5.6c, S2), as a `Response`.
+///
+/// The success body is `start`'s, widened with what the replay recovered: a
+/// client told only "resumed" cannot tell a rebuilt history from a fresh
+/// start under the same id, and those are very different things to show a
+/// user. Owner-scoped like the other two launch verbs (R40) — this puts work
+/// into the daemon as this user.
+async fn resume_task(
+    orchestrator: &Orchestrator,
+    db: &Database,
+    owner_id: &str,
+    id: &str,
+) -> Response {
+    if let Err(refusal) = owned_run(db, owner_id, id) {
+        return refusal;
+    }
+    match orchestrator.resume_task(id).await {
+        Ok(outcome) => Json(serde_json::json!({
+            "task_id": outcome.task_id,
+            "status": outcome.status,
+            "session_id": outcome.session_id,
+            "rounds_replayed": outcome.rounds_replayed,
+            "from_seq": outcome.from_seq,
+            "to_seq": outcome.to_seq,
+        }))
+        .into_response(),
+        Err(e) => launch_refusal(e, LaunchVerb::Resume),
+    }
+}
+
+/// POST /v1/tasks/{id}/rerun
+pub async fn rerun_task_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    rerun_task(&state.orchestrator, &state.db, &state.local_user_id, &id)
+}
+
+// ── Steerability, in one place (R40) ──────────────────────────────
+//
+// Every task row carries a `steerable` flag and the steer route enforces the
+// same three predicates. They are written once, here, because a hint the route
+// would not honour is worse than no hint at all: the client would disable a
+// control that works, or offer one that answers 404 forever.
+//
+// Only the steer route is owner-scoped — reading a run and cancelling it are
+// not, deliberately (that asymmetry is a task-surface decision left to the
+// owner). What this flag does is make the asymmetry legible on the row.
+
+/// Why a run cannot take a steering message right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SteerRefusal {
+    /// Started somewhere else — a connector run carries
+    /// `created_by = "<provider>:<id>"`, never this daemon's local user. A
+    /// steer injects text into somebody else's running agent, so the route
+    /// answers the same `404` it gives for a run that does not exist.
+    NotOwned,
+    /// The row has reached a terminal status. Its inbox is usually closed
+    /// already; this closes the window between `cancel` marking the row and
+    /// the workflow closing the inbox on its way out.
+    Terminal,
+    /// No live inbox: the workflow never registered one (queued, steering
+    /// disabled, or a daemon generation that is gone) or it has closed.
+    NoInbox,
+}
+
+/// The three predicates, evaluated in the order the route reports them.
+fn steer_refusal(
+    task: &Task,
+    shared_context: &SharedContext,
+    owner_id: &str,
+) -> Option<SteerRefusal> {
+    if task.created_by != owner_id {
+        return Some(SteerRefusal::NotOwned);
+    }
+    if task.status.is_terminal() {
+        return Some(SteerRefusal::Terminal);
+    }
+    match shared_context.steering_inbox(&task.id) {
+        Some(inbox) if !inbox.is_closed() => None,
+        _ => Some(SteerRefusal::NoInbox),
+    }
+}
+
+/// The `steerable` flag both task shapes serve.
+///
+/// The rail's `steering_enabled` switch is not a fourth predicate: with the
+/// rail off no workflow registers an inbox at all (`dispatch_lead_agent`), so
+/// such a run already reports `false` through `NoInbox`.
+fn is_steerable(task: &Task, shared_context: &SharedContext, owner_id: &str) -> bool {
+    steer_refusal(task, shared_context, owner_id).is_none()
+}
+
+// ── POST /v1/tasks/{id}/steer (GAP-02) ────────────────────────────
+//
+// Pure reuse. The steering rail is `runner/steering.rs`, it is already
+// task-addressed, and `push_steering` already publishes `WorkflowSteered` for
+// every producer — so this route is one more producer, not a second mechanism.
+// What it adds is the *address*: a GUI holds a run id, not a lane, and the
+// chat `/steer ` prefix can only aim at the lane's sole running workflow. The
+// lane the event is stamped with therefore comes from the run's own
+// `source_lane`, never from the request.
+//
+// The chat prefix is untouched: it is the CLI's and Telegram's only channel.
+
+/// Apply one steering push, as a `Response`. Split out from the handler so
+/// every status code is provable without a router or an `AppState`.
+fn steer_task(
+    db: &Database,
+    shared_context: &SharedContext,
+    bus: &EventBus,
+    routing: &RoutingConfig,
+    owner_id: &str,
+    id: &str,
+    request: SteerTaskRequest,
+    header_workspace: Option<String>,
+) -> Response {
+    // The rollback switch governs the whole rail, so it answers before the
+    // route looks at the request or the row: with steering off there is no
+    // inbox on any workflow to inject into, and a 404/409 would misreport why.
+    if !routing.steering_enabled {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "STEERING_DISABLED",
+            "Steering is disabled — set [orchestrator.routing] steering_enabled = true to \
+             inject messages into running workflows.",
+        );
+    }
+
+    let message = request.message.trim();
+    if message.is_empty() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "EMPTY_MESSAGE",
+            "message must not be empty",
+        );
+    }
+    // The project is a header, never a body field: the body's version was
+    // stored unresolved, while `x-workspace-path` goes through the single
+    // resolver (R22) like every other route's. Refused rather than ignored, so a
+    // client that sends it learns its project was not taken.
+    if request.workspace_path.is_some() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "WORKSPACE_PATH_IN_BODY",
+            "workspace_path is not a body field — send the project as the x-workspace-path \
+             header, the way every other route takes it. Omit it and this message inherits the \
+             run's own project.",
+        );
+    }
+
+    let task = match TaskRepository::new(db).get(id) {
+        Ok(Some(task)) => task,
+        Ok(None) => return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Task not found"),
+        Err(e) => {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string());
+        }
+    };
+
+    // The same predicates the row's `steerable` flag is computed from.
+    match steer_refusal(&task, shared_context, owner_id) {
+        // A run this caller cannot see is a run that does not exist — the same
+        // `404` `routes/files.rs` and `routes/artifacts.rs` already answer
+        // with, byte for byte, rather than a `403` that would confirm the id
+        // belongs to someone.
+        Some(SteerRefusal::NotOwned) => {
+            return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Task not found");
+        }
+        Some(SteerRefusal::Terminal | SteerRefusal::NoInbox) => {
+            return api_error(
+                StatusCode::CONFLICT,
+                "TASK_NOT_STEERABLE",
+                "This run is not accepting steering messages — it is not running, or it has \
+                 already finished.",
+            );
+        }
+        None => {}
+    }
+
+    let msg = SteeringMsg {
+        text: message.to_string(),
+        request_id: Uuid::new_v4(),
+        // The identity a leftover message re-enters the front door with, if the
+        // workflow exits before draining it (follow-up conversion).
+        principal: Principal::User {
+            global_id: owner_id.to_string(),
+        },
+        scope: Scope::Global,
+        // The header's resolved root, else the run's own project — so a message
+        // that outlives the workflow and re-enters as an `unprocessed_steering`
+        // follow-up is scoped where the steer was aimed.
+        workspace_path: header_workspace.or_else(|| task.workspace_id.clone()),
+        received_at: Utc::now(),
+        origin: SteeringOrigin::User,
+    };
+
+    match push_steering(
+        shared_context,
+        bus,
+        &task.id,
+        &task.source_lane,
+        msg,
+        Some(db),
+    ) {
+        Ok(inbox_depth) => Json(SteerTaskResponse {
+            task_id: task.id,
+            accepted: true,
+            inbox_depth,
+            lane_key: task.source_lane,
+        })
+        .into_response(),
+        Err(SteeringPushError::Full) => api_error(
+            StatusCode::CONFLICT,
+            "STEERING_INBOX_FULL",
+            format!(
+                "The steering queue for this run is full ({} messages) — it has not caught up \
+                 with earlier ones yet.",
+                routing.steering_inbox_cap,
+            ),
+        ),
+        // The `NoInbox` pre-check above answers this in the ordinary case;
+        // what is left here is the race — a workflow closing its inbox between
+        // that check and this push — and it gets the same code, because it is
+        // the same fact about the run.
+        Err(SteeringPushError::Closed) => api_error(
+            StatusCode::CONFLICT,
+            "TASK_NOT_STEERABLE",
+            "This run is not accepting steering messages — it is not running, or it has \
+             already finished.",
+        ),
+    }
+}
+
+/// POST /v1/tasks/{id}/steer
+pub async fn steer_task_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<SteerTaskRequest>,
+) -> Response {
+    // The same two steps the sibling injecting route takes: read the header,
+    // resolve it to a project root (R22). `None` is "this request names no
+    // project", which `steer_task` reads as the run's own.
+    let header_workspace = request_project_root(workspace_header(&headers).as_deref());
+    steer_task(
+        &state.db,
+        &state.gateway.shared_context,
+        &state.gateway.bus,
+        &state.daemon_config.load().orchestrator.routing,
+        &state.local_user_id,
+        &id,
+        request,
+        header_workspace,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
+    use openalpaca_core::bus::EventBus;
+    use openalpaca_core::context::SharedContext;
+    use openalpaca_core::daemon_config::RoutingConfig;
+    use openalpaca_core::runner::steering::{SteeringInbox, SteeringMsg, SteeringOrigin};
     use openalpaca_storage::OutcomeKind;
 
     fn make_test_task() -> Task {
@@ -319,6 +1019,9 @@ mod tests {
             outcome_json: None,
             outcome_kind: None,
             artifact_count: 0,
+            workspace_id: None,
+            source_task_id: None,
+            session_id: None,
         }
     }
 
@@ -438,101 +1141,43 @@ mod tests {
         assert!(outcome.artifacts.is_empty());
     }
 
-    fn make_agent_config(id: &str) -> openalpaca_storage::SubAgentConfig {
-        openalpaca_storage::SubAgentConfig {
-            id: id.to_string(),
-            template_id: id.to_string(),
-            name: id.to_string(),
-            description: None,
-            icon: None,
-            status: "idle".to_string(),
-            current_task_id: None,
-            skills_json: "[]".to_string(),
-            preset_json: "{}".to_string(),
-            constraints_json: None,
-            llm_config_json: None,
-            persona: None,
-            created_at: Utc::now(),
-            updated_at: None,
-        }
-    }
-
+    /// P8 — the legacy agent-run payload is gone from both task shapes.
+    /// `subagent_span` + `GET /v1/tasks/{id}/timeline` carry the run's lanes
+    /// now, including the in-flight ones `agent_task_history` never had a row
+    /// for. Nothing else about either shape changes, so the fields the clients
+    /// actually read are asserted present alongside.
     #[test]
-    fn test_agent_runs_summary_from_seeded_history() {
-        use openalpaca_storage::{AgentTaskHistory, Database};
-
-        let dir = tempfile::tempdir().unwrap();
-        let db = Database::open(&dir.path().join("test.db")).unwrap();
-        let task_repo = TaskRepository::new(&db);
-        let mut task = make_test_task();
-        task.id = "task-hist".to_string();
-        task_repo.create(&task).unwrap();
-
-        // No runs yet: the array is empty, not an error.
-        assert!(agent_runs_summary(&db, "task-hist").is_empty());
-
-        // Seed two agent runs (the shape record_agent_history writes).
-        let sub_repo = SubAgentRepository::new(&db);
-        sub_repo.upsert(&make_agent_config("researcher")).unwrap();
-        sub_repo.upsert(&make_agent_config("writer")).unwrap();
-        let base = Utc::now();
-        sub_repo
-            .add_history(&AgentTaskHistory {
-                id: "h1".to_string(),
-                agent_id: "researcher".to_string(),
-                task_id: "task-hist".to_string(),
-                role: "researcher".to_string(),
-                status: "completed".to_string(),
-                runtime_seconds: Some(12),
-                completed_at: base,
-            })
-            .unwrap();
-        sub_repo
-            .add_history(&AgentTaskHistory {
-                id: "h2".to_string(),
-                agent_id: "writer".to_string(),
-                task_id: "task-hist".to_string(),
-                role: "writer".to_string(),
-                status: "failed".to_string(),
-                runtime_seconds: None,
-                completed_at: base + chrono::Duration::seconds(30),
-            })
-            .unwrap();
-
-        let agents = agent_runs_summary(&db, "task-hist");
-        assert_eq!(agents.len(), 2);
-        assert_eq!(agents[0]["agent_id"], "researcher");
-        assert_eq!(agents[0]["status"], "completed");
-        assert_eq!(agents[0]["runtime_seconds"], 12);
-        assert_eq!(agents[1]["agent_id"], "writer");
-        assert_eq!(agents[1]["status"], "failed");
-        assert!(agents[1]["runtime_seconds"].is_null());
-    }
-
-    #[test]
-    fn test_task_response_serializes_agent_runs_under_assignments_key() {
-        use openalpaca_storage::AgentTaskHistory;
-
-        let resp = TaskResponse {
+    fn neither_task_shape_carries_the_legacy_agent_run_payload() {
+        let detail = serde_json::to_value(TaskResponse {
             task: make_test_task(),
-            agents: Some(vec![AgentTaskHistory {
-                id: "h1".to_string(),
-                agent_id: "researcher".to_string(),
-                task_id: "task-1".to_string(),
-                role: "researcher".to_string(),
-                status: "completed".to_string(),
-                runtime_seconds: Some(7),
-                completed_at: Utc::now(),
-            }]),
             outcome: None,
-        };
-        let v = serde_json::to_value(&resp).unwrap();
-        // Legacy key kept for client compatibility (CLI/GUI parse "assignments").
-        let runs = v["assignments"].as_array().expect("assignments array");
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0]["agent_id"], "researcher");
-        assert_eq!(runs[0]["status"], "completed");
-        assert_eq!(runs[0]["runtime_seconds"], 7);
+            steerable: false,
+        })
+        .unwrap();
+        for key in ["assignments", "assigned_agents", "agents"] {
+            assert!(
+                detail.get(key).is_none(),
+                "GET /v1/tasks/{{id}} still serves `{key}`"
+            );
+        }
+        assert!(detail.get("task").is_some());
+
+        let summary = serde_json::to_value(TaskSummaryResponse {
+            task: make_test_task(),
+            outcome: None,
+            cost_usd: 0.0,
+            subagent_count: 0,
+            steerable: false,
+        })
+        .unwrap();
+        for key in ["assignments", "assigned_agents", "agents"] {
+            assert!(
+                summary.get(key).is_none(),
+                "GET /v1/tasks still serves `{key}`"
+            );
+        }
+        assert!(summary.get("id").is_some());
+        assert!(summary.get("cost_usd").is_some());
     }
 
     #[test]
@@ -574,8 +1219,8 @@ mod tests {
         let outcome = parse_outcome(&task);
         let resp = TaskResponse {
             task,
-            agents: None,
             outcome,
+            steerable: false,
         };
 
         let v = serde_json::to_value(&resp).unwrap();
@@ -585,5 +1230,1478 @@ mod tests {
         // But the parsed outcome should be present at top level
         assert!(v.get("outcome").is_some());
         assert_eq!(v["outcome"]["outcome_summary"], "Test");
+    }
+
+    /// Reproduces `list_tasks_handler`'s pre-refactor shape: `serde_json::to_value(&task)`
+    /// with `outcome` (only when it parses) inserted onto the object — the exact algorithm
+    /// `TaskSummaryResponse` replaces — plus `cost_usd` (GAP-08b), which never existed
+    /// pre-refactor but is always present on the typed struct today. Used below to pin
+    /// that the typed struct serializes to byte-for-byte this shape.
+    ///
+    /// The `assigned_agents` key the old algorithm also injected is deliberately absent:
+    /// P8 deleted it, and the test above pins that.
+    fn pre_refactor_shape(task: &Task, cost_usd: f64, subagent_count: i64) -> serde_json::Value {
+        let mut v = serde_json::to_value(task).unwrap();
+        if let Some(obj) = v.as_object_mut() {
+            let outcome_val =
+                parse_outcome(task).and_then(|parsed| serde_json::to_value(parsed).ok());
+            if let Some(outcome_val) = outcome_val {
+                obj.insert("outcome".to_string(), outcome_val);
+            }
+            obj.insert("cost_usd".to_string(), serde_json::json!(cost_usd));
+            obj.insert(
+                "subagent_count".to_string(),
+                serde_json::json!(subagent_count),
+            );
+            // R40's read-time hint, present on every row.
+            obj.insert("steerable".to_string(), serde_json::json!(false));
+        }
+        v
+    }
+
+    // ── GET /v1/tasks/{id}/timeline (GAP-09) ──────────────────────
+
+    /// A temp database with one task row, so spans have a live FK to hang on.
+    fn timeline_db(status: TaskStatus) -> (tempfile::TempDir, Database) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::open(&dir.path().join("test.db")).expect("open db");
+        let mut task = make_test_task();
+        task.status = status;
+        task.completed_at = status.is_terminal().then(Utc::now);
+        TaskRepository::new(&db).create(&task).expect("create task");
+        if status.is_terminal() {
+            TaskRepository::new(&db)
+                .update_status(&task.id, status)
+                .expect("terminal status");
+        }
+        (dir, db)
+    }
+
+    fn open_span(db: &Database, span_id: &str, template: &str, instance: &str) {
+        SubagentSpanRepository::new(db)
+            .open(openalpaca_storage::NewSubagentSpan {
+                id: span_id,
+                task_id: "task-1",
+                template_id: template,
+                agent_instance_id: instance,
+                objective: Some("do the thing"),
+            })
+            .expect("open span");
+    }
+
+    fn body(response: (StatusCode, Json<serde_json::Value>)) -> serde_json::Value {
+        response.1.0
+    }
+
+    /// The envelope: the run's own start, a server `now` for the axis's right
+    /// edge, and one lane per span in start order.
+    #[test]
+    fn the_timeline_carries_the_run_window_and_a_lane_per_span() {
+        let (_dir, db) = timeline_db(TaskStatus::Running);
+        open_span(&db, "n1", "review_agent", "review_agent::a");
+        open_span(&db, "n2", "writing_agent", "writing_agent::b");
+
+        let (status, Json(value)) = task_timeline(&db, None, "task-1");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["task_id"], "task-1");
+        assert!(value["started_at"].is_string());
+        assert!(value["now"].is_string());
+        assert!(value["completed_at"].is_null(), "a live run has no end yet");
+
+        let lanes = value["lanes"].as_array().expect("lanes array");
+        assert_eq!(lanes.len(), 2);
+        assert_eq!(lanes[0]["lane_id"], "n1");
+        assert_eq!(lanes[0]["label"], "review\u{b7}1");
+        assert_eq!(lanes[0]["template_id"], "review_agent");
+        assert_eq!(lanes[0]["agent_instance_id"], "review_agent::a");
+        assert_eq!(lanes[1]["label"], "writing\u{b7}1");
+        // Nothing counts steps inside a subagent loop, so the two optional
+        // fields are absent rather than a fabricated 0/0.
+        assert!(lanes[0].get("steps_current").is_none());
+        assert!(lanes[0].get("steps_total").is_none());
+    }
+
+    /// The correction that motivated the whole table: a lane that has not
+    /// finished is *visible*, with a start and no end. `agent_task_history`
+    /// has no row at all until the run returns.
+    #[test]
+    fn an_in_flight_lane_is_visible_with_no_end() {
+        let (_dir, db) = timeline_db(TaskStatus::Running);
+        open_span(&db, "n1", "review_agent", "review_agent::a");
+
+        let value = body(task_timeline(&db, None, "task-1"));
+        let lane = &value["lanes"][0];
+        assert_eq!(lane["state"], "running");
+        assert!(lane["started_at"].is_string());
+        assert!(lane["ended_at"].is_null());
+        assert!(lane["detail"].is_null());
+    }
+
+    /// A subagent cancelled before it started reports `cancelled`, not
+    /// `failed` — the distinction the write site keeps deliberately.
+    #[test]
+    fn a_cancelled_lane_reports_cancelled_with_its_reason() {
+        let (_dir, db) = timeline_db(TaskStatus::Running);
+        open_span(&db, "n1", "review_agent", "review_agent::a");
+        SubagentSpanRepository::new(&db)
+            .close(
+                "n1",
+                openalpaca_storage::SpanState::Cancelled,
+                Some("cancelled before starting"),
+                None,
+            )
+            .expect("close");
+
+        let value = body(task_timeline(&db, None, "task-1"));
+        assert_eq!(value["lanes"][0]["state"], "cancelled");
+        assert_eq!(value["lanes"][0]["detail"], "cancelled before starting");
+        assert!(value["lanes"][0]["ended_at"].is_string());
+    }
+
+    /// A pending confirmation flips exactly the lane whose agent instance is
+    /// waiting — not its sibling, and not a lane of another run.
+    #[test]
+    fn a_pending_confirmation_blocks_exactly_one_lane() {
+        let (_dir, db) = timeline_db(TaskStatus::Running);
+        open_span(&db, "n1", "review_agent", "review_agent::a");
+        open_span(&db, "n2", "review_agent", "review_agent::b");
+
+        let broker = ConfirmationBroker::new();
+        let _rx = broker.request(
+            &openalpaca_core::security::confirmation::ConfirmationRequest {
+                request_id: "req-1".to_string(),
+                agent_id: "review_agent".to_string(),
+                tool_name: "shell_execute".to_string(),
+                tool_arguments: serde_json::json!({"cmd": "ls"}),
+                stream_id: None,
+                lane_key: None,
+                task_id: Some("task-1".to_string()),
+                agent_instance_id: Some("review_agent::b".to_string()),
+                timestamp: Utc::now(),
+            },
+        );
+        // Another run's prompt must not colour this run's lanes.
+        let _rx2 = broker.request(
+            &openalpaca_core::security::confirmation::ConfirmationRequest {
+                request_id: "req-2".to_string(),
+                agent_id: "review_agent".to_string(),
+                tool_name: "shell_execute".to_string(),
+                tool_arguments: serde_json::json!({}),
+                stream_id: None,
+                lane_key: None,
+                task_id: Some("other-task".to_string()),
+                agent_instance_id: Some("review_agent::a".to_string()),
+                timestamp: Utc::now(),
+            },
+        );
+
+        let value = body(task_timeline(&db, Some(&broker), "task-1"));
+        let lanes = value["lanes"].as_array().unwrap();
+        assert_eq!(lanes[0]["state"], "running", "the sibling keeps running");
+        assert_eq!(lanes[1]["state"], "blocked");
+        assert_eq!(lanes[1]["detail"], "waiting on shell_execute");
+
+        // Answering it puts the lane back: `blocked` is never stored.
+        broker
+            .respond(
+                "req-1",
+                openalpaca_core::security::confirmation::ConfirmationResponse {
+                    approved: true,
+                    approval_scope: None,
+                },
+            )
+            .unwrap();
+        let value = body(task_timeline(&db, Some(&broker), "task-1"));
+        assert_eq!(value["lanes"][1]["state"], "running");
+    }
+
+    /// A lane still `running` on a task that has already finished belongs to a
+    /// dead daemon generation: it reports `cancelled` / `"interrupted"` even
+    /// before the next boot's `close_orphans` writes that down.
+    #[test]
+    fn a_stale_lane_on_a_terminal_run_reports_interrupted() {
+        let (_dir, db) = timeline_db(TaskStatus::Completed);
+        open_span(&db, "n1", "review_agent", "review_agent::a");
+
+        let value = body(task_timeline(&db, None, "task-1"));
+        assert_eq!(value["lanes"][0]["state"], "cancelled");
+        assert_eq!(value["lanes"][0]["detail"], "interrupted");
+        assert!(value["completed_at"].is_string());
+
+        // The row itself is untouched — the derivation is a read-time rule.
+        let stored = SubagentSpanRepository::new(&db)
+            .list_for_task("task-1")
+            .unwrap();
+        assert_eq!(stored[0].state, "running");
+    }
+
+    /// …and a confirmation cannot resurrect a lane on a finished run: the
+    /// terminal rule wins.
+    #[test]
+    fn a_terminal_run_is_never_blocked() {
+        let (_dir, db) = timeline_db(TaskStatus::Failed);
+        open_span(&db, "n1", "review_agent", "review_agent::a");
+
+        let broker = ConfirmationBroker::new();
+        let _rx = broker.request(
+            &openalpaca_core::security::confirmation::ConfirmationRequest {
+                request_id: "req-1".to_string(),
+                agent_id: "review_agent".to_string(),
+                tool_name: "shell_execute".to_string(),
+                tool_arguments: serde_json::json!({}),
+                stream_id: None,
+                lane_key: None,
+                task_id: Some("task-1".to_string()),
+                agent_instance_id: Some("review_agent::a".to_string()),
+                timestamp: Utc::now(),
+            },
+        );
+
+        let value = body(task_timeline(&db, Some(&broker), "task-1"));
+        assert_eq!(value["lanes"][0]["state"], "cancelled");
+        assert_eq!(value["lanes"][0]["detail"], "interrupted");
+    }
+
+    /// A run with no subagents is an empty lane list, not an error — and an
+    /// unknown run is a 404, not an empty timeline.
+    #[test]
+    fn a_run_without_spans_is_empty_and_an_unknown_run_is_a_404() {
+        let (_dir, db) = timeline_db(TaskStatus::Running);
+
+        let (status, Json(value)) = task_timeline(&db, None, "task-1");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["lanes"], serde_json::json!([]));
+
+        let (status, Json(value)) = task_timeline(&db, None, "no-such-task");
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(value["error"], "Task not found");
+    }
+
+    #[test]
+    fn test_task_summary_response_matches_pre_refactor_shape_with_outcome() {
+        let mut task = make_test_task();
+        task.outcome_kind = Some(OutcomeKind::TextOnly);
+        task.artifact_count = 0;
+        task.outcome_json = Some(
+            serde_json::json!({
+                "summary": "Generated a text summary",
+                "outcome_kind": "text_only",
+                "no_artifact_reason": "No files were requested",
+                "artifacts": []
+            })
+            .to_string(),
+        );
+        let expected = pre_refactor_shape(&task, 1.25, 2);
+        let outcome = parse_outcome(&task);
+        let summary = TaskSummaryResponse {
+            task,
+            outcome,
+            cost_usd: 1.25,
+            subagent_count: 2,
+            steerable: false,
+        };
+        let actual = serde_json::to_value(&summary).unwrap();
+
+        assert_eq!(actual, expected);
+        // Sanity: the field the old post-injection added is actually present,
+        // so this test would fail if it silently dropped out.
+        assert!(actual.get("outcome").is_some());
+        assert_eq!(actual["outcome"]["outcome_kind"], "text_only");
+        assert_eq!(actual["cost_usd"], 1.25);
+    }
+
+    #[test]
+    fn test_task_summary_response_matches_pre_refactor_shape_without_outcome() {
+        // No outcome_kind/outcome_json set: parse_outcome returns None, and the
+        // old code never inserted an "outcome" key in that case.
+        let task = make_test_task();
+
+        let expected = pre_refactor_shape(&task, 0.0, 0);
+        let outcome = parse_outcome(&task);
+        assert!(outcome.is_none());
+        let summary = TaskSummaryResponse {
+            task,
+            outcome,
+            cost_usd: 0.0,
+            subagent_count: 0,
+            steerable: false,
+        };
+        let actual = serde_json::to_value(&summary).unwrap();
+
+        assert_eq!(actual, expected);
+        // A task with no logged LLM calls still gets an explicit 0.0, not an
+        // omitted field.
+        assert_eq!(actual["cost_usd"], 0.0);
+        assert!(actual.get("outcome").is_none());
+    }
+
+    /// R38 — the per-run agent signal the list route lost with P8, back as a
+    /// count rather than the old `agent_task_history` array: one grouped
+    /// `SubagentSpanRepository::counts_for_tasks` query over the page's ids,
+    /// exactly the shape `cost_for_tasks` already had. Always serialized, so a
+    /// run that spawned nothing is distinguishable from a daemon too old to
+    /// know the field.
+    #[test]
+    fn task_summary_rows_carry_the_number_of_agents_the_run_spawned() {
+        let v = serde_json::to_value(TaskSummaryResponse {
+            task: make_test_task(),
+            outcome: None,
+            cost_usd: 0.0,
+            subagent_count: 3,
+            steerable: false,
+        })
+        .unwrap();
+        assert_eq!(v["subagent_count"], 3);
+
+        // A run with no spans is absent from the grouped map — the handler's
+        // `unwrap_or(0)` is what turns that into a number, and the key is
+        // still present on the wire.
+        let counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        let v = serde_json::to_value(TaskSummaryResponse {
+            task: make_test_task(),
+            outcome: None,
+            cost_usd: 0.0,
+            subagent_count: counts.get("task-1").copied().unwrap_or(0),
+            steerable: false,
+        })
+        .unwrap();
+        assert!(
+            v.get("subagent_count").is_some(),
+            "a run that spawned nothing still carries the key"
+        );
+        assert_eq!(v["subagent_count"], 0);
+
+        // A list-row field, like `cost_usd`: the detail route's shape is
+        // untouched, and API_MAP §5's warning that the two disagree stands.
+        let detail = serde_json::to_value(TaskResponse {
+            task: make_test_task(),
+            outcome: None,
+            steerable: false,
+        })
+        .unwrap();
+        assert!(detail["task"].get("subagent_count").is_none());
+    }
+
+    /// §4.7 item 3 — the row shape both task routes serve carries the project
+    /// the run belonged to, so `rerun` (Phase 5) and the Library can filter by
+    /// it. Always present, `null` for a run that had no project: an omitted
+    /// key would be indistinguishable from an older daemon.
+    #[test]
+    fn task_rows_carry_the_runs_workspace_id() {
+        let mut task = make_test_task();
+        task.workspace_id = Some("/Users/dev/openalpaca".to_string());
+
+        // GET /v1/tasks — the flattened summary row.
+        let summary = TaskSummaryResponse {
+            task: task.clone(),
+            outcome: None,
+            cost_usd: 0.0,
+            subagent_count: 0,
+            steerable: false,
+        };
+        let v = serde_json::to_value(&summary).unwrap();
+        assert_eq!(v["workspace_id"], "/Users/dev/openalpaca");
+
+        // GET /v1/tasks/{id} — the nested `task` object.
+        let single = TaskResponse {
+            task,
+            outcome: None,
+            steerable: false,
+        };
+        let v = serde_json::to_value(&single).unwrap();
+        assert_eq!(v["task"]["workspace_id"], "/Users/dev/openalpaca");
+
+        // A run with no project reports an explicit null, not a missing key.
+        let v = serde_json::to_value(make_test_task()).unwrap();
+        assert!(v.get("workspace_id").is_some());
+        assert!(v["workspace_id"].is_null());
+    }
+
+    // ── POST /v1/tasks/{id}/steer (GAP-02) ────────────────────────
+
+    const STEER_OWNER: &str = "user-1";
+
+    /// A temp database holding one `Running` task owned by [`STEER_OWNER`],
+    /// on lane `lane-1`, optionally carrying a project.
+    fn steer_db(workspace_id: Option<&str>) -> (tempfile::TempDir, Database) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::open(&dir.path().join("test.db")).expect("open db");
+        let mut task = make_test_task();
+        task.status = TaskStatus::Running;
+        task.completed_at = None;
+        task.workspace_id = workspace_id.map(str::to_string);
+        TaskRepository::new(&db).create(&task).expect("create task");
+        (dir, db)
+    }
+
+    /// A live workflow: a registered inbox for `task-1`, at the given cap.
+    fn steerable(cap: usize) -> (Arc<SharedContext>, EventBus, Arc<SteeringInbox>) {
+        let shared = Arc::new(SharedContext::new());
+        let bus = EventBus::default();
+        let inbox = Arc::new(SteeringInbox::new(cap));
+        shared.register_steering_inbox("task-1", inbox.clone());
+        (shared, bus, inbox)
+    }
+
+    fn steer_request(message: &str) -> SteerTaskRequest {
+        SteerTaskRequest {
+            message: message.to_string(),
+            workspace_path: None,
+        }
+    }
+
+    /// Split a `Response` into its status and its JSON body.
+    async fn split(response: axum::response::Response) -> (StatusCode, serde_json::Value) {
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("read the response body");
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    /// The happy path: the message lands in the run's own inbox, the lane comes
+    /// from `task.source_lane` (the caller addresses a *run*, not a lane), and
+    /// the acknowledgement is the queue depth — not a promise it was read.
+    #[tokio::test]
+    async fn steering_a_running_task_queues_the_message_and_answers_with_the_depth() {
+        let (_dir, db) = steer_db(None);
+        let (shared, bus, inbox) = steerable(16);
+        let mut rx = bus.subscribe();
+
+        let (status, body) = split(steer_task(
+            &db,
+            &shared,
+            &bus,
+            &RoutingConfig::default(),
+            STEER_OWNER,
+            "task-1",
+            steer_request("  focus on the tests  "),
+            None,
+        ))
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["task_id"], "task-1");
+        assert_eq!(body["accepted"], true);
+        assert_eq!(body["inbox_depth"], 1);
+        assert_eq!(body["lane_key"], "lane-1");
+
+        // The text is trimmed, and the identity is the owner's, so a leftover
+        // message re-enters the front door as this user.
+        let drained = inbox.drain_all();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].text, "focus on the tests");
+        assert_eq!(
+            drained[0].principal,
+            openalpaca_core::security::policy::Principal::User {
+                global_id: STEER_OWNER.to_string(),
+            }
+        );
+
+        // The rail's own event, from the shared push helper — no new family.
+        let mut steered = 0;
+        while let Ok(event) = rx.try_recv() {
+            if let SystemEvent::WorkflowSteered {
+                task_id, lane_key, ..
+            } = event
+            {
+                assert_eq!(task_id, "task-1");
+                assert_eq!(lane_key, "lane-1");
+                steered += 1;
+            }
+        }
+        assert_eq!(steered, 1, "exactly one WorkflowSteered");
+    }
+
+    /// The project comes from the request's **header**, resolved like every
+    /// other route's, and defaults to the run's own — so an
+    /// `unprocessed_steering` leftover re-enters scoped where the steer was
+    /// aimed.
+    #[tokio::test]
+    async fn the_message_takes_the_headers_project_and_otherwise_the_runs() {
+        let (_dir, db) = steer_db(Some("/Users/dev/openalpaca"));
+        let (shared, bus, inbox) = steerable(16);
+
+        let _ = steer_task(
+            &db,
+            &shared,
+            &bus,
+            &RoutingConfig::default(),
+            STEER_OWNER,
+            "task-1",
+            steer_request("inherit"),
+            None,
+        );
+        assert_eq!(
+            inbox.drain_all()[0].workspace_path.as_deref(),
+            Some("/Users/dev/openalpaca"),
+            "no header: the run's own project",
+        );
+
+        let _ = steer_task(
+            &db,
+            &shared,
+            &bus,
+            &RoutingConfig::default(),
+            STEER_OWNER,
+            "task-1",
+            steer_request("from the window"),
+            Some("/tmp/other".to_string()),
+        );
+        assert_eq!(
+            inbox.drain_all()[0].workspace_path.as_deref(),
+            Some("/tmp/other"),
+        );
+    }
+
+    /// D12: `workspace_path` in the body was stored **unresolved** — a
+    /// subdirectory or a path under no marker went straight onto the message and
+    /// from there into a follow-up's `workspace_id`. Refused, not ignored.
+    #[tokio::test]
+    async fn a_body_workspace_path_is_refused_and_nothing_is_queued() {
+        let (_dir, db) = steer_db(Some("/Users/dev/openalpaca"));
+        let (shared, bus, inbox) = steerable(16);
+
+        let (status, body) = split(steer_task(
+            &db,
+            &shared,
+            &bus,
+            &RoutingConfig::default(),
+            STEER_OWNER,
+            "task-1",
+            SteerTaskRequest {
+                message: "override".to_string(),
+                workspace_path: Some("/Users/dev/openalpaca/src".to_string()),
+            },
+            None,
+        ))
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "WORKSPACE_PATH_IN_BODY");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("x-workspace-path"),
+            "the refusal names the header to use instead",
+        );
+        assert!(
+            inbox.drain_all().is_empty(),
+            "refused before anything was queued",
+        );
+    }
+
+    /// A backlogged inbox is a `409`, not a dropped message: the caller is told
+    /// the queue is full so it can offer the follow-up instead.
+    #[tokio::test]
+    async fn a_full_inbox_is_a_409_steering_inbox_full() {
+        let (_dir, db) = steer_db(None);
+        let (shared, bus, inbox) = steerable(1);
+        inbox
+            .push(SteeringMsg {
+                text: "earlier".to_string(),
+                request_id: Uuid::new_v4(),
+                principal: openalpaca_core::security::policy::Principal::System,
+                scope: openalpaca_core::security::policy::Scope::Global,
+                workspace_path: None,
+                received_at: Utc::now(),
+                origin: SteeringOrigin::User,
+            })
+            .expect("seed the queue");
+
+        let (status, body) = split(steer_task(
+            &db,
+            &shared,
+            &bus,
+            &RoutingConfig::default(),
+            STEER_OWNER,
+            "task-1",
+            steer_request("one more"),
+            None,
+        ))
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "STEERING_INBOX_FULL");
+        // Nothing was queued past the cap.
+        assert_eq!(inbox.drain_all().len(), 1);
+    }
+
+    /// Two ways a run stops being steerable — it never registered an inbox, or
+    /// it finished and closed the one it had — and both are the same `409`.
+    #[tokio::test]
+    async fn a_run_with_no_live_inbox_is_a_409_task_not_steerable() {
+        let (_dir, db) = steer_db(None);
+
+        // Never registered: the row exists, the workflow does not.
+        let shared = Arc::new(SharedContext::new());
+        let bus = EventBus::default();
+        let (status, body) = split(steer_task(
+            &db,
+            &shared,
+            &bus,
+            &RoutingConfig::default(),
+            STEER_OWNER,
+            "task-1",
+            steer_request("too early"),
+            None,
+        ))
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "TASK_NOT_STEERABLE");
+
+        // Detached: the workflow finished and closed its inbox.
+        let (shared, bus, inbox) = steerable(16);
+        inbox.close_and_drain();
+        let (status, body) = split(steer_task(
+            &db,
+            &shared,
+            &bus,
+            &RoutingConfig::default(),
+            STEER_OWNER,
+            "task-1",
+            steer_request("too late"),
+            None,
+        ))
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "TASK_NOT_STEERABLE");
+    }
+
+    /// The rollback switch answers for the whole route, before it looks at
+    /// anything else: with the rail off there is nothing to inject into.
+    #[tokio::test]
+    async fn steering_disabled_is_a_503_for_every_request() {
+        let (_dir, db) = steer_db(None);
+        let (shared, bus, inbox) = steerable(16);
+        let routing = RoutingConfig {
+            steering_enabled: false,
+            ..RoutingConfig::default()
+        };
+
+        let (status, body) = split(steer_task(
+            &db, &shared, &bus, &routing, STEER_OWNER, "task-1",
+            steer_request("go"),
+            None,
+        ))
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "STEERING_DISABLED");
+        assert!(inbox.is_empty(), "nothing is queued while the rail is off");
+
+        // Not a per-task answer: an unknown run gets the same 503.
+        let (status, _) = split(steer_task(
+            &db, &shared, &bus, &routing, STEER_OWNER, "no-such-task",
+            steer_request("go"),
+            None,
+        ))
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// An unknown run and another owner's run are the same `404` — a run this
+    /// caller cannot see is a run that does not exist.
+    #[tokio::test]
+    async fn an_unknown_or_foreign_run_is_a_404() {
+        let (_dir, db) = steer_db(None);
+        let (shared, bus, inbox) = steerable(16);
+
+        let (status, body) = split(steer_task(
+            &db,
+            &shared,
+            &bus,
+            &RoutingConfig::default(),
+            STEER_OWNER,
+            "no-such-task",
+            steer_request("go"),
+            None,
+        ))
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "NOT_FOUND");
+
+        let (status, body) = split(steer_task(
+            &db,
+            &shared,
+            &bus,
+            &RoutingConfig::default(),
+            "someone-else",
+            "task-1",
+            steer_request("go"),
+            None,
+        ))
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "NOT_FOUND");
+        assert_eq!(
+            body["error"]["message"], "Task not found",
+            "a foreign run must not read differently from a missing one"
+        );
+        assert!(inbox.is_empty());
+    }
+
+    /// An empty (or whitespace-only) message is a `400`: injecting it would
+    /// spend a round on nothing.
+    #[tokio::test]
+    async fn an_empty_message_is_a_400() {
+        let (_dir, db) = steer_db(None);
+        let (shared, bus, inbox) = steerable(16);
+
+        for message in ["", "   \n\t "] {
+            let (status, body) = split(steer_task(
+                &db,
+                &shared,
+                &bus,
+                &RoutingConfig::default(),
+                STEER_OWNER,
+                "task-1",
+                steer_request(message),
+                None,
+            ))
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(body["error"]["code"], "EMPTY_MESSAGE");
+        }
+        assert!(inbox.is_empty());
+    }
+
+    // ── `steerable` on a task row (R40) ───────────────────────────
+
+    /// A run this owner started, still running, with a live inbox.
+    fn live_run() -> Task {
+        let mut task = make_test_task();
+        task.status = TaskStatus::Running;
+        task.completed_at = None;
+        task
+    }
+
+    /// The hint every task row carries, so a client can disable `Steer`
+    /// instead of discovering the answer by sending. All three predicates:
+    /// the run is this owner's, it is not terminal, and it has a live inbox.
+    #[test]
+    fn a_task_row_says_whether_the_run_can_be_steered() {
+        let (shared, _bus, inbox) = steerable(16);
+
+        // All three hold → steerable.
+        assert!(is_steerable(&live_run(), &shared, STEER_OWNER));
+
+        // Another channel's run: `created_by` is `"<provider>:<id>"`, never
+        // this daemon's local user.
+        let mut foreign = live_run();
+        foreign.created_by = "telegram:4242".to_string();
+        assert!(!is_steerable(&foreign, &shared, STEER_OWNER));
+
+        // Terminal in the DB, even while the inbox has not been closed yet.
+        let mut finished = live_run();
+        finished.status = TaskStatus::Completed;
+        assert!(!is_steerable(&finished, &shared, STEER_OWNER));
+
+        // No inbox at all (queued, or a daemon generation that is gone).
+        let bare = Arc::new(SharedContext::new());
+        assert!(!is_steerable(&live_run(), &bare, STEER_OWNER));
+
+        // The inbox it had, closed on the way out.
+        inbox.close_and_drain();
+        assert!(!is_steerable(&live_run(), &shared, STEER_OWNER));
+    }
+
+    /// The hint is served by both task shapes — flattened on a list row,
+    /// beside `task` on the detail — and is always present, so `false` is
+    /// distinguishable from an older daemon that does not know the field.
+    #[test]
+    fn both_task_shapes_serve_the_steerable_hint() {
+        let summary = serde_json::to_value(TaskSummaryResponse {
+            task: live_run(),
+            outcome: None,
+            cost_usd: 0.0,
+            subagent_count: 0,
+            steerable: true,
+        })
+        .unwrap();
+        assert_eq!(summary["steerable"], true);
+
+        let detail = serde_json::to_value(TaskResponse {
+            task: live_run(),
+            outcome: None,
+            steerable: false,
+        })
+        .unwrap();
+        assert_eq!(detail["steerable"], false);
+    }
+
+    /// The anti-drift assertion: a row that says `steerable: false` is a row
+    /// the steer route refuses, and one that says `true` is a row it accepts —
+    /// both sides read the same predicates.
+    #[tokio::test]
+    async fn the_steerable_hint_matches_what_the_steer_route_does() {
+        // Owned, running, live inbox → the hint says yes and the route agrees.
+        let (_dir, db) = steer_db(None);
+        let (shared, bus, inbox) = steerable(16);
+        let task = TaskRepository::new(&db)
+            .get("task-1")
+            .unwrap()
+            .expect("the run exists");
+        assert!(is_steerable(&task, &shared, STEER_OWNER));
+        let (status, _) = split(steer_task(
+            &db,
+            &shared,
+            &bus,
+            &RoutingConfig::default(),
+            STEER_OWNER,
+            "task-1",
+            steer_request("go"),
+            None,
+        ))
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Another owner: the hint says no, and the route answers 404 — the
+        // same answer it gives for a run that does not exist.
+        assert!(!is_steerable(&task, &shared, "someone-else"));
+        let (status, _) = split(steer_task(
+            &db,
+            &shared,
+            &bus,
+            &RoutingConfig::default(),
+            "someone-else",
+            "task-1",
+            steer_request("go"),
+            None,
+        ))
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Terminal row, inbox still open (the window between `cancel` marking
+        // the row and the workflow closing its inbox): the hint says no, and
+        // the route refuses rather than queueing into a run that is over.
+        let mut cancelled = task.clone();
+        cancelled.status = TaskStatus::Cancelled;
+        cancelled.completed_at = Some(Utc::now());
+        TaskRepository::new(&db)
+            .update_status(&cancelled.id, TaskStatus::Cancelled)
+            .expect("mark the run cancelled");
+        assert!(!is_steerable(&cancelled, &shared, STEER_OWNER));
+        let (status, body) = split(steer_task(
+            &db,
+            &shared,
+            &bus,
+            &RoutingConfig::default(),
+            STEER_OWNER,
+            "task-1",
+            steer_request("too late"),
+            None,
+        ))
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "TASK_NOT_STEERABLE");
+        // Nothing was queued past the refusal — only the accepted push above.
+        assert_eq!(inbox.drain_all().len(), 1);
+    }
+
+    // ── Re-run and start (GAP-06) ─────────────────────────────────
+
+    use openalpaca_core::agent::template::parse_agent_markdown;
+    use openalpaca_core::lane::LaneManager;
+    use openalpaca_core::middleware::prompt::SystemPersona;
+    use openalpaca_core::orchestrator::{Orchestrator, skill_catalog, skill_router};
+    use openalpaca_core::runner::LoopConfig;
+    use openalpaca_core::security::gate::SecurityGate;
+    use openalpaca_core::security::sandbox::SandboxManager;
+    use openalpaca_core::tools::ToolRegistry;
+    use openalpaca_llm::{
+        ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, LlmRouter, ProviderType,
+        Usage,
+    };
+
+    const LAUNCH_OWNER: &str = "user-1";
+
+    /// A provider that answers anything in one line. Present so the dispatch
+    /// takes the same path production does; the run itself never gets far.
+    struct StubLlm;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for StubLlm {
+        fn name(&self) -> &str {
+            "stub"
+        }
+        fn supports_tools(&self) -> bool {
+            false
+        }
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            Ok(ChatResponse {
+                content: "done".to_string(),
+                tool_calls: vec![],
+                model: "stub-model".to_string(),
+                usage: Usage::default(),
+                finish_reason: FinishReason::Stop,
+                thinking: None,
+                parts: None,
+            })
+        }
+    }
+
+    /// An orchestrator over `db`, with a lead-agent template unless
+    /// `with_lead_agent` is false (which is how the `503` is reached).
+    fn launch_orchestrator(db: &Database, with_lead_agent: bool) -> Orchestrator {
+        let ctx = Arc::new(SharedContext::new());
+        if with_lead_agent {
+            let template = parse_agent_markdown(
+                "---\nid: \"lead_agent\"\nname: \"Lead Agent\"\n\
+                 description: \"leads runs\"\nsingleton: true\n\
+                 capabilities:\n  - \"orchestration\"\n---\n\nLead the run.\n",
+            )
+            .expect("the fixture template parses");
+            ctx.agent_registry.register_template(template);
+        }
+        let bus = EventBus::default();
+        let registry = Arc::new(ToolRegistry::default());
+        let gate = Arc::new(SecurityGate::new(Arc::new(SandboxManager::with_defaults(
+            registry.clone(),
+            bus.clone(),
+        ))));
+        Orchestrator::new(
+            ctx,
+            Arc::new(LaneManager::new()),
+            bus,
+            SystemPersona::default(),
+            Some(Arc::new(LlmRouter::single_provider(
+                Arc::new(StubLlm),
+                ProviderType::Anthropic,
+                "stub-model".to_string(),
+            ))),
+            LoopConfig::default(),
+            gate,
+            registry,
+            Some(db.clone()),
+            None,
+            Arc::new(skill_catalog::SkillCatalog::new()),
+            Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+            Arc::new(arc_swap::ArcSwap::from_pointee(
+                openalpaca_core::daemon_config::DaemonConfig::default(),
+            )),
+        )
+    }
+
+    // ── POST /v1/tasks (ruling R79) ──────────────────────────────────
+
+    /// The two identity columns are the daemon's, not the body's: a client that
+    /// names somebody else as the creator gets a row it can actually operate,
+    /// attributed to itself.
+    #[tokio::test]
+    async fn creating_a_run_stores_the_local_user_whatever_the_body_claims() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::open(&dir.path().join("test.db")).expect("open db");
+        let ctx = SharedContext::new();
+        let lanes = openalpaca_core::lane::LaneManager::new();
+        let bus = EventBus::default();
+        let mut rx = bus.subscribe();
+
+        let (status, body) = split(create_task(
+            &db,
+            &ctx,
+            &lanes,
+            &bus,
+            LAUNCH_OWNER,
+            CreateTaskRequest {
+                title: "Ship it".to_string(),
+                description: None,
+                priority: None,
+                created_by: "someone-else".to_string(),
+                source_lane: "user-1:gui".to_string(),
+            },
+        ))
+        .await;
+
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let id = body["task_id"].as_str().expect("an id").to_string();
+        let stored = TaskRepository::new(&db)
+            .get(&id)
+            .unwrap()
+            .expect("the row");
+        assert_eq!(stored.created_by, LAUNCH_OWNER);
+        assert_eq!(stored.source_lane, "user-1:gui");
+
+        // The event says the same thing the row does.
+        let mut announced = 0;
+        while let Ok(event) = rx.try_recv() {
+            if let SystemEvent::TaskCreated { created_by, .. } = event {
+                assert_eq!(created_by, LAUNCH_OWNER);
+                announced += 1;
+            }
+        }
+        assert_eq!(announced, 1);
+    }
+
+    /// A run launched onto a lane posts its report into that conversation, so
+    /// naming somebody else's lane is `404` — never `403`, which would confirm
+    /// the lane exists (R40's line).
+    #[tokio::test]
+    async fn creating_a_run_on_a_foreign_lane_is_a_404() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::open(&dir.path().join("test.db")).expect("open db");
+        let ctx = SharedContext::new();
+        let lanes = openalpaca_core::lane::LaneManager::new();
+        let bus = EventBus::default();
+
+        for lane in ["someone-else:gui", "user-10:gui", "user-1", ""] {
+            let (status, body) = split(create_task(
+                &db,
+                &ctx,
+                &lanes,
+                &bus,
+                LAUNCH_OWNER,
+                CreateTaskRequest {
+                    title: "Ship it".to_string(),
+                    description: None,
+                    priority: None,
+                    created_by: LAUNCH_OWNER.to_string(),
+                    source_lane: lane.to_string(),
+                },
+            ))
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "lane {lane:?}");
+            assert_eq!(body["error"]["code"], "LANE_NOT_FOUND");
+        }
+        assert!(
+            TaskRepository::new(&db).list_recent(10).unwrap().is_empty(),
+            "nothing was parked",
+        );
+    }
+
+    /// A temp database holding one run owned by [`LAUNCH_OWNER`].
+    fn launch_db(status: TaskStatus, description: Option<&str>) -> (tempfile::TempDir, Database) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::open(&dir.path().join("test.db")).expect("open db");
+        let mut task = make_test_task();
+        task.status = status;
+        task.description = description.map(str::to_string);
+        task.source_lane = "user-1:gui".to_string();
+        task.completed_at = status.is_terminal().then(Utc::now);
+        TaskRepository::new(&db).create(&task).expect("create task");
+        (dir, db)
+    }
+
+    /// The verb's whole point: a re-run is a **new** run, and the response says
+    /// which one it came from — the id the caller sent.
+    #[tokio::test]
+    async fn re_running_a_finished_run_is_a_201_carrying_a_new_id() {
+        let (_dir, db) = launch_db(TaskStatus::Completed, Some("write the changelog"));
+        let orchestrator = launch_orchestrator(&db, true);
+
+        let response = rerun_task(&orchestrator, &db, LAUNCH_OWNER, "task-1");
+        let (status, body) = split(response).await;
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert_ne!(
+            body["task_id"], "task-1",
+            "201 means a run that is not this one"
+        );
+        assert_eq!(body["source_task_id"], "task-1");
+        assert_eq!(body["title"], "Test task");
+        assert!(body["status"].is_string());
+
+        // The link is stored, not just answered: it outlives the response.
+        let copy = TaskRepository::new(&db)
+            .get(body["task_id"].as_str().unwrap())
+            .unwrap()
+            .expect("the new row");
+        assert_eq!(copy.source_task_id.as_deref(), Some("task-1"));
+    }
+
+    /// A run still in flight already has an agent on this goal.
+    #[tokio::test]
+    async fn re_running_a_live_run_is_a_409_task_not_terminal() {
+        for status in [TaskStatus::Queued, TaskStatus::Running, TaskStatus::Paused] {
+            let (_dir, db) = launch_db(status, Some("write the changelog"));
+            let orchestrator = launch_orchestrator(&db, true);
+
+            let (code, body) = split(rerun_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
+            assert_eq!(code, StatusCode::CONFLICT, "status {status:?}");
+            assert_eq!(body["error"]["code"], "TASK_NOT_TERMINAL");
+            assert!(
+                body["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(status.as_str()),
+                "the refusal names the state it refused",
+            );
+            // Nothing was dispatched.
+            assert_eq!(TaskRepository::new(&db).list_recent(10).unwrap().len(), 1);
+        }
+    }
+
+    /// `422`, not `400`: the request is well-formed and names a real run — the
+    /// stored row is what has nothing to give a lead agent.
+    #[tokio::test]
+    async fn re_running_a_row_with_no_goal_is_a_422_task_not_rerunnable() {
+        for description in [None, Some("   \n ")] {
+            let (_dir, db) = launch_db(TaskStatus::Completed, description);
+            let orchestrator = launch_orchestrator(&db, true);
+
+            let (code, body) = split(rerun_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
+            assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(body["error"]["code"], "TASK_NOT_RERUNNABLE");
+        }
+    }
+
+    /// Owner-scoped, on the line `steer` drew (R40): a run this caller cannot
+    /// see reads exactly like one that does not exist.
+    #[tokio::test]
+    async fn re_running_an_unknown_or_foreign_run_is_a_404() {
+        let (_dir, db) = launch_db(TaskStatus::Completed, Some("write the changelog"));
+        let orchestrator = launch_orchestrator(&db, true);
+
+        let (code, body) = split(rerun_task(&orchestrator, &db, LAUNCH_OWNER, "no-such-run")).await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "NOT_FOUND");
+
+        let (code, foreign) = split(rerun_task(&orchestrator, &db, "someone-else", "task-1")).await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        assert_eq!(
+            foreign["error"], body["error"],
+            "a foreign run must not read differently from a missing one",
+        );
+        assert_eq!(TaskRepository::new(&db).list_recent(10).unwrap().len(), 1);
+    }
+
+    /// R79's second half: `start` / `rerun` / `resume` re-check the **lane**,
+    /// not just the creator. A row created by this user but parked on somebody
+    /// else's lane would dispatch a lead agent that posts its completion report
+    /// into that conversation — so it reads as a run that does not exist.
+    #[tokio::test]
+    async fn launching_a_run_parked_on_a_foreign_lane_is_a_404() {
+        let (_dir, db) = launch_db(TaskStatus::Completed, Some("write the changelog"));
+        let orchestrator = launch_orchestrator(&db, true);
+        // The row is this owner's, and its lane is not.
+        db.with_connection(|conn| {
+            conn.execute(
+                "UPDATE task SET source_lane = 'someone-else:gui' WHERE id = 'task-1'",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect("re-park the row");
+
+        let (code, body) = split(rerun_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "NOT_FOUND");
+
+        let (code, _) = split(start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+
+        let (code, _) = split(resume_task(&orchestrator, &db, LAUNCH_OWNER, "task-1").await).await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+
+        assert_eq!(
+            TaskRepository::new(&db).list_recent(10).unwrap().len(),
+            1,
+            "nothing was dispatched",
+        );
+    }
+
+    /// Every template that could lead a run is busy — capacity, not a bug, so
+    /// `503` and a message worth retrying on.
+    #[tokio::test]
+    async fn a_launch_with_no_lead_agent_available_is_a_503() {
+        let (_dir, db) = launch_db(TaskStatus::Completed, Some("write the changelog"));
+        let orchestrator = launch_orchestrator(&db, false);
+
+        let (code, body) = split(rerun_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "DISPATCH_FAILED");
+    }
+
+    /// D5 — `start` answers with the id the caller sent, in the same
+    /// `{task_id, status}` shape the other three actions use.
+    #[tokio::test]
+    async fn starting_a_queued_run_is_a_200_with_the_same_id() {
+        let (_dir, db) = launch_db(TaskStatus::Queued, Some("write the changelog"));
+        let orchestrator = launch_orchestrator(&db, true);
+
+        let (code, body) = split(start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body["task_id"], "task-1", "D5: the id does not change");
+        assert!(matches!(
+            body["status"].as_str(),
+            Some("queued") | Some("running")
+        ));
+        // One row before, one row after — and it is the same row.
+        assert_eq!(TaskRepository::new(&db).list_recent(10).unwrap().len(), 1);
+    }
+
+    /// The second `start` on one id loses. Both calls are made before anything
+    /// is awaited, so this is the real race the claim exists for, not a
+    /// sequence the runtime happened to order.
+    #[tokio::test]
+    async fn starting_the_same_run_twice_is_a_409_the_second_time() {
+        let (_dir, db) = launch_db(TaskStatus::Queued, Some("write the changelog"));
+        let orchestrator = launch_orchestrator(&db, true);
+
+        let first = start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1");
+        let second = start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1");
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let (code, body) = split(second).await;
+        assert_eq!(code, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "TASK_ALREADY_RUNNING");
+        assert_eq!(TaskRepository::new(&db).list_recent(10).unwrap().len(), 1);
+    }
+
+    /// A title-only row — `POST /v1/tasks` allows one — has no goal to
+    /// dispatch. Same `422`, its own code: nothing was ever run to re-run.
+    #[tokio::test]
+    async fn starting_a_row_with_no_goal_is_a_422_task_not_dispatchable() {
+        let (_dir, db) = launch_db(TaskStatus::Queued, None);
+        let orchestrator = launch_orchestrator(&db, true);
+
+        let (code, body) = split(start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
+        assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"]["code"], "TASK_NOT_DISPATCHABLE");
+    }
+
+    /// R43 — `start` re-launches a row **in place**, so a finished run is not
+    /// startable: doing it would clear the summary, outcome and artifact count
+    /// that run produced. `409`, and its own code word, because the caller can
+    /// still `rerun` — which keeps this row and answers with a new id.
+    #[tokio::test]
+    async fn starting_a_finished_run_is_a_409_task_not_startable() {
+        for status in [
+            TaskStatus::Completed,
+            TaskStatus::Failed,
+            TaskStatus::Cancelled,
+        ] {
+            let (_dir, db) = launch_db(status, Some("write the changelog"));
+            TaskRepository::new(&db)
+                .set_result("task-1", "the first run's answer")
+                .expect("store a result worth protecting");
+            let before = TaskRepository::new(&db).get("task-1").unwrap().unwrap();
+            let orchestrator = launch_orchestrator(&db, true);
+
+            let (code, body) = split(start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
+            assert_eq!(code, StatusCode::CONFLICT, "status {status:?}");
+            assert_eq!(body["error"]["code"], "TASK_NOT_STARTABLE");
+            assert!(
+                body["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("re-run"),
+                "the refusal has to name the verb that does work",
+            );
+
+            // The finished run's row is exactly as it was.
+            let after = TaskRepository::new(&db).get("task-1").unwrap().unwrap();
+            assert_eq!(after.status, before.status);
+            assert_eq!(after.result_summary, before.result_summary);
+            assert_eq!(after.completed_at, before.completed_at);
+            assert_eq!(after.state_version, before.state_version);
+            assert_eq!(TaskRepository::new(&db).list_recent(10).unwrap().len(), 1);
+        }
+    }
+
+    /// `pause` does not cancel the run's token, so a paused row is still live
+    /// and `start` answers the running refusal rather than R43's. Asserted
+    /// because it holds by construction, and construction changes.
+    #[tokio::test]
+    async fn starting_a_paused_run_is_a_409_task_already_running() {
+        let (_dir, db) = launch_db(TaskStatus::Paused, Some("write the changelog"));
+        let orchestrator = launch_orchestrator(&db, true);
+        orchestrator.shared_context.register_cancellation_token(
+            "task-1",
+            tokio_util::sync::CancellationToken::new(),
+        );
+
+        let (code, body) = split(start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
+        assert_eq!(code, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "TASK_ALREADY_RUNNING");
+    }
+
+    #[tokio::test]
+    async fn starting_an_unknown_or_foreign_run_is_a_404() {
+        let (_dir, db) = launch_db(TaskStatus::Queued, Some("write the changelog"));
+        let orchestrator = launch_orchestrator(&db, true);
+
+        let (code, body) = split(start_task(&orchestrator, &db, LAUNCH_OWNER, "no-such-run")).await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "NOT_FOUND");
+
+        let (code, _) = split(start_task(&orchestrator, &db, "someone-else", "task-1")).await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+    }
+
+    // ── resume (§5.6c, S2) ─────────────────────────────────────────
+
+    /// A run with a session, whose log holds one complete round.
+    fn resumable_db(status: TaskStatus) -> (tempfile::TempDir, tempfile::TempDir, Database) {
+        let (dir, db) = launch_db(status, Some("write the changelog"));
+        let logs = tempfile::tempdir().expect("tempdir");
+        let session = logs.path().join("s1");
+        std::fs::create_dir_all(&session).unwrap();
+        let body = [
+            serde_json::json!({
+                "v": 1, "seq": 1, "ts": "2026-09-06T10:00:00.000Z", "type": "round",
+                "task_id": "task-1",
+                "data": {
+                    "round": 1, "text": "reading",
+                    "tool_use": [{"id": "tu-1", "name": "file_read", "input": {}}],
+                },
+            }),
+            serde_json::json!({
+                "v": 1, "seq": 2, "ts": "2026-09-06T10:00:01.000Z", "type": "tool_result",
+                "task_id": "task-1",
+                "data": {"tool_use_id": "tu-1", "name": "file_read", "ok": true, "result": "ok"},
+            }),
+        ]
+        .iter()
+        .map(|r| format!("{}\n", serde_json::to_string(r).unwrap()))
+        .collect::<String>();
+        std::fs::write(session.join("log.jsonl"), body).unwrap();
+        db.with_connection(|conn| {
+            conn.execute("UPDATE task SET session_id = 's1' WHERE id = 'task-1'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        (dir, logs, db)
+    }
+
+    /// Point the orchestrator's session-log service at `root`, and optionally
+    /// turn S2 on the way a hand-edited `daemon.toml` would.
+    fn with_session_logs(orchestrator: &Orchestrator, root: &std::path::Path, resume: bool) {
+        orchestrator.shared_context.set_session_log(Arc::new(
+            openalpaca_core::session_log::SessionLogService::new(
+                root.to_path_buf(),
+                None,
+                openalpaca_core::session_log::SessionLogLimits::default(),
+                "test".to_string(),
+            ),
+        ));
+        let mut config = openalpaca_core::daemon_config::DaemonConfig::clone(
+            &orchestrator.daemon_config.load(),
+        );
+        config.orchestrator.routing.resume_enabled = resume;
+        orchestrator.daemon_config.store(Arc::new(config));
+    }
+
+    /// The flag ships off, so the verb that would replay a transcript refuses
+    /// and names both the key and `rerun`.
+    #[tokio::test]
+    async fn resuming_an_interrupted_run_with_the_flag_off_is_a_409_resume_disabled() {
+        let (_dir, logs, db) = resumable_db(TaskStatus::Interrupted);
+        let orchestrator = launch_orchestrator(&db, true);
+        with_session_logs(&orchestrator, logs.path(), false);
+
+        let (code, body) = split(resume_task(&orchestrator, &db, LAUNCH_OWNER, "task-1").await).await;
+        assert_eq!(code, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "RESUME_DISABLED");
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("resume_enabled"), "{message}");
+        assert!(message.contains("re-run"), "{message}");
+    }
+
+    /// `resume` is for an interrupted run. Anything else is `rerun`'s, and the
+    /// refusal says which one the caller has.
+    #[tokio::test]
+    async fn resuming_a_run_that_is_not_interrupted_is_a_409_task_not_resumable() {
+        for status in [TaskStatus::Completed, TaskStatus::Failed, TaskStatus::Running] {
+            let (_dir, logs, db) = resumable_db(status);
+            let orchestrator = launch_orchestrator(&db, true);
+            with_session_logs(&orchestrator, logs.path(), true);
+
+            let (code, body) =
+                split(resume_task(&orchestrator, &db, LAUNCH_OWNER, "task-1").await).await;
+            assert_eq!(code, StatusCode::CONFLICT, "{status:?}");
+            assert_eq!(body["error"]["code"], "TASK_NOT_RESUMABLE");
+            assert!(
+                body["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(status.as_str()),
+                "the refusal names the row's own status",
+            );
+        }
+    }
+
+    /// §5.6c: "a gutted log is a clean 409 pointing at `rerun`" — and the row
+    /// is untouched, so that `rerun` is still there to take.
+    #[tokio::test]
+    async fn resuming_a_run_whose_log_is_gone_is_a_409_resume_log_missing() {
+        let (_dir, logs, db) = resumable_db(TaskStatus::Interrupted);
+        std::fs::remove_file(logs.path().join("s1").join("log.jsonl")).unwrap();
+        let orchestrator = launch_orchestrator(&db, true);
+        with_session_logs(&orchestrator, logs.path(), true);
+
+        let (code, body) = split(resume_task(&orchestrator, &db, LAUNCH_OWNER, "task-1").await).await;
+        assert_eq!(code, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "RESUME_LOG_MISSING");
+        let row = TaskRepository::new(&db).get("task-1").unwrap().unwrap();
+        assert_eq!(row.status, TaskStatus::Interrupted, "nothing was spent");
+    }
+
+    /// The happy path: the same id (D5), and a body that says how much of the
+    /// transcript came back — "resumed" alone cannot be told from a fresh
+    /// start under the same id.
+    #[tokio::test]
+    async fn resuming_an_interrupted_run_is_a_200_with_the_same_id_and_the_replay_span() {
+        let (_dir, logs, db) = resumable_db(TaskStatus::Interrupted);
+        let orchestrator = launch_orchestrator(&db, true);
+        with_session_logs(&orchestrator, logs.path(), true);
+
+        let (code, body) = split(resume_task(&orchestrator, &db, LAUNCH_OWNER, "task-1").await).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body["task_id"], "task-1");
+        assert_eq!(body["session_id"], "s1");
+        assert_eq!(body["rounds_replayed"], 1);
+        assert_eq!(body["from_seq"], 1);
+        assert_eq!(body["to_seq"], 2);
+        assert_eq!(TaskRepository::new(&db).list_recent(10).unwrap().len(), 1);
+    }
+
+    /// R40 — a verb that puts work into the daemon as this user is
+    /// owner-scoped, and a run this caller cannot see is a `404`, never a
+    /// `403` that would confirm the id belongs to somebody.
+    #[tokio::test]
+    async fn resuming_an_unknown_or_foreign_run_is_a_404() {
+        let (_dir, logs, db) = resumable_db(TaskStatus::Interrupted);
+        let orchestrator = launch_orchestrator(&db, true);
+        with_session_logs(&orchestrator, logs.path(), true);
+
+        let (code, _) = split(resume_task(&orchestrator, &db, LAUNCH_OWNER, "nope").await).await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        let (code, _) = split(resume_task(&orchestrator, &db, "someone-else", "task-1").await).await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+    }
+
+    /// The word `resume` still means what it always meant on a **paused** run:
+    /// `apply_task_action`'s transition, untouched, and reached without the
+    /// replay verb ever being consulted (the flag is off here, and a
+    /// flag-first route would have refused this).
+    #[tokio::test]
+    async fn resuming_a_paused_run_is_still_the_plain_transition() {
+        let (_dir, db) = launch_db(TaskStatus::Paused, Some("write the changelog"));
+        let ctx = Arc::new(SharedContext::new());
+        let lanes = Arc::new(LaneManager::new());
+        let bus = EventBus::default();
+
+        let new_status = apply_task_action(&ctx, &lanes, &bus, Some(&db), "task-1", "resume")
+            .expect("a paused run resumes");
+        assert_eq!(new_status.as_str(), "running");
+        let row = TaskRepository::new(&db).get("task-1").unwrap().unwrap();
+        assert_eq!(row.status, TaskStatus::Running);
+    }
+
+    /// The refusal a client sees for a typo has to list the verb the route
+    /// actually grew, or `start` looks unimplemented.
+    #[test]
+    fn the_unknown_action_refusal_lists_start() {
+        let (status, Json(body)) = unknown_action("explode");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = body["error"].as_str().expect("a message");
+        assert!(message.contains("explode"));
+        for word in ["cancel", "pause", "resume", START_ACTION] {
+            assert!(message.contains(word), "the valid set must list {word}");
+        }
     }
 }

@@ -68,6 +68,8 @@ pub(crate) fn record_llm_usage(
         input_tokens: loop_result.total_input_tokens,
         output_tokens: loop_result.total_output_tokens,
         cost_usd: call_cost,
+        // The one LLM path that runs inside a workflow (GAP-10).
+        task_id: Some(task_id.to_string()),
         timestamp: Utc::now(),
     });
 }

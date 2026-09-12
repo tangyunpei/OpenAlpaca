@@ -1,35 +1,50 @@
 //! OpenAlpaca Storage Module
 //!
-//! Provides unified app directory management, discovery mechanism,
-//! singleton lock, and SQLite database for daemon/GUI/CLI coordination.
+//! Provides the single path module (`store`), the discovery mechanism,
+//! the singleton lock, and the SQLite database for daemon/GUI/CLI coordination.
 
+pub mod artifacts;
 pub mod config_schema;
+mod content_io;
 pub mod database;
 pub mod discovery;
 pub mod migrations;
 pub mod models;
-pub mod paths;
 pub mod repository;
+pub mod store;
+pub mod uploads;
 
 #[cfg(test)]
 pub(crate) mod test_util;
 
+pub use artifacts::{
+    ArtifactDiff, ArtifactError, ArtifactQuery, ArtifactRecord, ArtifactStore, ArtifactVersionRow,
+    HomeScopeRows, NewArtifact, PurgeCounts, PurgeKept, PurgeOutcome, PurgePlan, PurgeSession,
+    RebaseCounts, USER_EDIT_NOTE, VerifyReport, WorkspaceRows,
+};
 pub use database::Database;
 pub use models::{Agent, EventLog, Memory, MemoryRole};
 pub use models::{AgentMetrics, AgentTaskHistory, SubAgentConfig};
+pub use models::{ArtifactKind, ArtifactOrigin};
 pub use models::{OutcomeKind, Task, TaskStatus};
-pub use models::{AttachmentRef, FileAsset, FileAssetStatus};
+pub use models::{AttachmentRef, FileAsset, FileAssetStatus, MessageArtifact};
 pub use models::{Conversation, ConversationMessage};
 pub use models::{ExternalIdentity, GlobalUser, LinkToken};
 pub use models::{MemoryKind, MemoryScope, MemorySource, MemoryV2};
 pub use models::MessageFeedback;
-pub use models::{SkillExecutionEntry, ToolExecutionEntry};
+pub use models::{PREVIEW_CHARS, SkillExecutionEntry, ToolExecutionEntry};
 pub use models::SkillHealthMetrics;
 pub use repository::{
-    AgentRepository, ConfigRepository, ConversationRepository, EventLogRepository,
+    ARTIFACT_ROLE, ATTACHMENT_ROLE, AgentRepository, ConfigRepository, ConversationRepository,
+    EventLogRepository, FOLLOWUP_KIND_FOLLOWUP, FOLLOWUP_KIND_UNPROCESSED_STEERING,
     FileAssetRepository, FollowupRecord, FollowupRepository, IdentityRepository,
     LlmUsageRepository, MemoryRepository,
     MessageFeedbackRepository, OrchestratorLatencyRepository, PreferenceRepository,
-    SkillExecutionRepository, SubAgentRepository, TaskRepository,
+    SESSION_ACTIVE, SESSION_ARCHIVED, SessionFilter, SkillExecutionRepository, StorageBytes,
+    SubAgentRepository, SubagentSpanRepository, TaskRepository, resolve_skill_key,
 };
-pub use repository::llm_usage::LlmUsageDaily;
+pub use repository::llm_usage::{LlmUsageDaily, ProviderCallUsage};
+pub use repository::subagent_span::{
+    NewSubagentSpan, SPAN_DETAIL_INTERRUPTED, SpanState, SubagentSpanRecord, TemplateRunCount,
+};
+pub use uploads::{NewUpload, StoredUpload, UploadError, UploadStore};

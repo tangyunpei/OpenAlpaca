@@ -247,6 +247,13 @@ pub(super) fn finalize_task(
     outcome_summary: Option<&str>,
 ) {
     let now = chrono::Utc::now();
+    // Title comes from the in-memory registry; a DB-only task resurrected
+    // after a restart (no registry entry) falls back to "" (GAP-07).
+    let title = ctx
+        .task_registry
+        .get(task_id)
+        .map(|e| e.title)
+        .unwrap_or_default();
     if success {
         ctx.task_registry
             .update_status(task_id, crate::context::TaskEntryStatus::Completed);
@@ -267,6 +274,7 @@ pub(super) fn finalize_task(
         }
         bus.publish(crate::events::SystemEvent::TaskCompleted {
             task_id: task_id.to_string(),
+            title,
             result_summary: Some(summary.to_string()),
             outcome_kind: outcome_kind.map(|k| k.as_str().to_string()),
             artifact_count,
@@ -293,6 +301,7 @@ pub(super) fn finalize_task(
         }
         bus.publish(crate::events::SystemEvent::TaskFailed {
             task_id: task_id.to_string(),
+            title,
             error: summary.to_string(),
             outcome_kind: outcome_kind.map(|k| k.as_str().to_string()),
             timestamp: now,
@@ -318,29 +327,56 @@ pub(super) fn completion_status_line(
 }
 
 /// Persist a task result as a conversation message.
-/// `pub(crate)` so the lead-agent `post_update` tool can reuse it.
+///
+/// `pub` — re-exported from `orchestrator::dispatcher` — because the lead
+/// agent's `post_update` tool and the daemon's `NotificationDispatcher` both
+/// reuse it: T1 step 3's cron notice is written to the default lane through
+/// exactly this call (extension design §7.3 step 2).
+///
+/// Two things about the arguments, stated so nobody re-derives them: the
+/// `source` argument is the **column**, not the role — `role` is hardcoded
+/// `"assistant"` below, which is why the row renders (the GUI transcript skips
+/// only `role === "system"`) — and it should be the lane's own source, because
+/// `get_or_create_conversation` creates a missing conversation with whatever
+/// `source` it is handed.
+///
+/// `task_id` is GAP-23's run link, and only the two messages the design names
+/// carry one: the turn that *started* a workflow (written at the gateway) and
+/// the completion report that closed it ([`persist_completion_report`]). Every
+/// other caller — the lead's `post_update` progress note, the daemon's
+/// extension notices — passes `None`: those are lane chatter, not the run's
+/// own record. Returns the new message's id, or `None` if nothing was written.
+///
+/// `session_id` is §5.3's pin. `Some` writes into that conversation whatever
+/// the lane is currently showing — the caller has a reason to name it, and the
+/// only reason that exists is that this message belongs to a run started
+/// there. `None` means "wherever this lane is talking now", which is what lane
+/// chatter wants, and it creates the lane's session if it has none.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn persist_conversation(
+pub fn persist_conversation(
     db: &openalpaca_storage::Database,
     lane_key: &str,
     source: &str,
+    session_id: Option<&str>,
     content: String,
     model: Option<String>,
     tokens_in: i64,
     tokens_out: i64,
     runtime_secs: i64,
-) {
+    task_id: Option<&str>,
+) -> Option<i64> {
     let conv_repo = openalpaca_storage::ConversationRepository::new(db);
-    if let Err(e) = conv_repo.get_or_create_conversation(lane_key, source) {
+    if session_id.is_none()
+        && let Err(e) = conv_repo.get_or_create_active_session(lane_key, source, None)
+    {
         tracing::warn!(
-            "persist_conversation: failed to get/create conversation for lane '{}': {e}",
+            "persist_conversation: failed to get/create session for lane '{}': {e}",
             lane_key
         );
-        return;
+        return None;
     }
 
     let msg = openalpaca_storage::ConversationMessage {
-        id: 0,
         lane_key: lane_key.to_string(),
         role: "assistant".to_string(),
         content,
@@ -349,24 +385,96 @@ pub(crate) fn persist_conversation(
         tokens_in: Some(tokens_in),
         tokens_out: Some(tokens_out),
         duration_ms: Some(runtime_secs * 1000),
-        created_at: String::new(),
-        content_json: None,
-        display_text: None,
+        task_id: task_id.map(str::to_string),
+        session_id: session_id.map(str::to_string),
+        ..Default::default()
     };
 
     match conv_repo.insert(&msg) {
-        Ok(_) => {
-            if let Err(e) = conv_repo.increment_message_count(lane_key) {
+        Ok(message_id) => {
+            let counted = match session_id {
+                Some(id) => conv_repo.increment_message_count_for_session(id),
+                None => conv_repo.increment_message_count(lane_key),
+            };
+            if let Err(e) = counted {
                 tracing::warn!(
                     "persist_conversation: failed to increment message count for lane '{}': {e}",
                     lane_key
                 );
             }
+            Some(message_id)
         }
         Err(e) => {
             tracing::warn!(
                 "persist_conversation: failed to insert assistant message for lane '{}': {e}",
                 lane_key
+            );
+            None
+        }
+    }
+}
+
+/// Persist a workflow's completion report — GAP-23's second link.
+///
+/// The report is the one message that can name the run's *output*: by the time
+/// it is written, `file_assets` has a row for everything the run produced,
+/// which is why the delegating turn (written before the work happened) carries
+/// only the run id. Each produced file gets a `role='artifact'` row beside the
+/// message, so a reloaded transcript draws the report card and its chips from
+/// history alone instead of from the frames one client happened to watch.
+///
+/// A failure to link is logged, never fatal: the report itself is the record of
+/// the run, and losing a chip must not lose the message.
+#[allow(clippy::too_many_arguments)]
+pub fn persist_completion_report(
+    db: &openalpaca_storage::Database,
+    lane_key: &str,
+    source: &str,
+    session_id: Option<&str>,
+    content: String,
+    model: Option<String>,
+    tokens_in: i64,
+    tokens_out: i64,
+    runtime_secs: i64,
+    task_id: &str,
+) {
+    let Some(message_id) = persist_conversation(
+        db,
+        lane_key,
+        source,
+        session_id,
+        content,
+        model,
+        tokens_in,
+        tokens_out,
+        runtime_secs,
+        Some(task_id),
+    ) else {
+        return;
+    };
+
+    let file_repo = openalpaca_storage::FileAssetRepository::new(db);
+    let produced = match file_repo.produced_ids_for_task(task_id) {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task_id,
+                "Failed to read the run's produced artifacts for its report: {e}"
+            );
+            return;
+        }
+    };
+    for (i, file_id) in produced.iter().enumerate() {
+        if let Err(e) = file_repo.link_to_message_with_role(
+            message_id,
+            file_id,
+            i as i32,
+            None,
+            openalpaca_storage::ARTIFACT_ROLE,
+        ) {
+            tracing::warn!(
+                task_id = %task_id,
+                "Failed to link artifact {file_id} to completion report {message_id}: {e}"
             );
         }
     }

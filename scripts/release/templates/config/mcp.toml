@@ -1,0 +1,38 @@
+# MCP (Model Context Protocol) server configuration.
+#
+# OpenAlpaca connects to declared MCP servers at boot and exposes their tools
+# in the tool registry with the namespaced name `<server>__<tool>`.
+#
+# All servers below are commented out by default. Uncomment and configure the
+# ones you want to connect to, or add your own.
+
+[defaults]
+connect_timeout_secs = 30
+request_timeout_secs = 30
+max_reconnect_attempts = 3
+reconnect_backoff_ms = 100
+
+# ─── Example: Filesystem server (stdio) ───
+# Requires Node.js + npx. Tools appear as `fs__read_file`, `fs__write_file`, etc.
+# [servers.fs]
+# transport = "stdio"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+# ─── Example: Remote HTTP server with bearer env ───
+# [servers.brave]
+# transport = "http"
+# url = "https://mcp.example.com/brave/v1"
+# auth = { bearer_env = "BRAVE_MCP_TOKEN" }
+
+# ─── Example: Remote HTTP server with API key ───
+# [servers.github]
+# transport = "http"
+# url = "https://mcp.example.com/github/v1"
+# auth = { api_key_header = "X-API-Key", api_key_env = "GITHUB_MCP_TOKEN" }
+
+# ─── Example: Explicitly disabled without removing ───
+# [servers.experimental]
+# transport = "stdio"
+# command = "./some/binary"
+# enabled = false

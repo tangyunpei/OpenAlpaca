@@ -45,7 +45,15 @@ On a first install, restart your shell (or run `export PATH="$HOME/.local/bin:$P
 - CLI: `~/.local/bin/openalpaca` (symlink)
 - Install prefix: `~/.local/openalpaca` (CLI under `bin/`, daemon under `libexec/`)
 - GUI: `~/Applications/openalpaca-gui.app`
-- Data/config: `~/Library/Application Support/OpenAlpaca`
+- Data/config: `~/.openalpaca`
+
+On a machine that already ran an older install, first boot moves the previous
+`~/Library/Application Support/OpenAlpaca` (macOS) contents into the new
+location automatically (idempotent and resumable, but **not reversible**) —
+back that directory up first. A still-running old daemon blocks the move;
+start it there and stop it, or move the daemon binary aside, before
+launching the rebuilt one. See [Installation Manual](Installation_Manual.md#migrating-from-the-old-data-directory)
+for the fail-closed rules if both locations end up holding a database.
 
 ## Lifecycle & Uninstall
 
@@ -57,5 +65,6 @@ On a first install, restart your shell (or run `export PATH="$HOME/.local/bin:$P
 
 - `OPENALPACA_DAEMON_BIN=/abs/path/openalpacad`
 - `OPENALPACA_GUI_APP=/abs/path/openalpaca-gui.app`
+- `OPENALPACA_HOME_STORE=/abs/path` — moves the whole data/config root (default `~/.openalpaca`). Must be an absolute path; empty or relative values are rejected and the daemon refuses to start.
 
 For full details, see [Installation Manual](Installation_Manual.md).

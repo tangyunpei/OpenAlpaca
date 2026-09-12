@@ -1,31 +1,24 @@
 //! Multimodal attachment handling for the orchestrator message pipeline.
 
 use super::{Orchestrator, wrap_untrusted_context};
-use crate::gateway::ResolvedAttachment;
-use crate::security::policy::{Principal, Scope};
+use crate::gateway::{HandleRequest, ResolvedAttachment};
 use base64::Engine as _;
 use openalpaca_llm::{ContentPart, ImageSource};
 use std::sync::Arc;
-use uuid::Uuid;
 
 impl Orchestrator {
     /// Handle a user message with file attachments.
     ///
     /// Injects attachment context as low-trust blocks before delegating to
     /// the standard `handle_message` pipeline.
-    #[allow(clippy::too_many_arguments)]
     pub async fn handle_message_with_attachments(
         &self,
-        request_id: Uuid,
-        source: String,
-        content: String,
+        request: HandleRequest,
         attachments: Vec<ResolvedAttachment>,
-        principal: Principal,
-        scope: Scope,
-        lane_key: String,
-        workspace_path: Option<String>,
-        stream_id: Option<String>,
     ) -> Result<String, String> {
+        // The request's own content is the intent source; the augmented string
+        // built below is what the model sees.
+        let content = &request.content;
         // 1. Build structured ContentParts from attachments
         let mut parts: Vec<ContentPart> = Vec::new();
         for att in &attachments {
@@ -95,24 +88,12 @@ impl Orchestrator {
             augmented.push_str(&wrapped);
             augmented.push('\n');
         }
-        augmented.push_str(&content);
+        augmented.push_str(content);
 
         let force_simple_query = content.trim().is_empty() && !attachments.is_empty();
 
         // 3. Pass BOTH the text augmented string AND the structured parts
-        self.handle_message_internal(
-            request_id,
-            source,
-            augmented,
-            content,
-            force_simple_query,
-            Some(parts),
-            principal,
-            scope,
-            lane_key,
-            workspace_path,
-            stream_id,
-        )
-        .await
+        self.handle_message_internal(request, augmented, force_simple_query, Some(parts))
+            .await
     }
 }
