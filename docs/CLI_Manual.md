@@ -50,7 +50,7 @@ Linux and Windows packaging/install scripts also exist under `scripts/release/` 
 
 ## Connection and Auth Model
 
-- The daemon writes discovery metadata to `discovery.json` under the OpenAlpaca app data directory.
+- The daemon writes discovery metadata to `~/.openalpaca/state/discovery.json`.
 - CLI reads base URL and token from discovery.
 - Protected endpoints use `Authorization: Bearer <token>`.
 - Streaming endpoints may use query-token auth (handled by CLI internals).
