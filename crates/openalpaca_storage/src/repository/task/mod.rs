@@ -29,8 +29,9 @@ pub struct NonTerminalRun {
 }
 
 /// How many ids [`TaskRepository::titles_for`] puts in one `IN (…)`. Well under
-/// SQLite's default variable limit (999), and one statement covers a full
-/// artifact page, whose own limit is smaller than this.
+/// SQLite's default variable limit (32 766 since 3.32; 999 in the releases
+/// before it), and one statement covers a full artifact page, whose own limit is
+/// smaller than this.
 const TITLES_FOR_CHUNK: usize = 500;
 
 /// Every column [`TaskRepository::row_to_task`] reads, in the order it reads

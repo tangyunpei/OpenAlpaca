@@ -31,6 +31,17 @@ const SESSION_COLUMNS: &str = "id, lane_key, source, title, message_count, last_
 const MESSAGE_COLUMNS: &str = "id, lane_key, role, content, source, model, tokens_in, \
      tokens_out, duration_ms, created_at, content_json, display_text, task_id, session_id";
 
+/// The page [`ConversationRepository::list_sessions`] serves when the caller
+/// asks for a non-positive one. `LIMIT -1` means *no limit* in SQLite, so an
+/// unclamped `?limit=-1` returned the whole table — and every id of it then fed
+/// the unchunked `IN (…)` lists of `task_counts_by_session` and the artifact
+/// link lookup.
+const SESSION_PAGE_DEFAULT: i64 = 100;
+/// The largest page it will serve, whatever the caller asks for. Chosen to match
+/// `TITLES_FOR_CHUNK`, so one page's ids always fit in one statement's bound
+/// variables.
+const SESSION_PAGE_MAX: i64 = 500;
+
 /// A session is live. Its lane may have exactly one of these.
 pub const SESSION_ACTIVE: &str = "active";
 /// A session is closed: fully readable, and re-activatable.
@@ -42,10 +53,26 @@ pub struct SessionFilter<'a> {
     pub workspace_id: Option<&'a str>,
     pub source: Option<&'a str>,
     pub status: Option<&'a str>,
-    /// Case-insensitive substring over title and lane key.
+    /// Case-insensitive substring over title and lane key. Matched literally:
+    /// `%` and `_` are the user's characters, not wildcards (see
+    /// [`escape_like`]).
     pub q: Option<&'a str>,
     pub limit: i64,
     pub offset: i64,
+}
+
+/// Escapes a user-supplied `LIKE` needle so `%`, `_` and the escape character
+/// itself match literally. Paired with `ESCAPE '\'` on every pattern built from
+/// it — without both halves a search for `100%` matches every row.
+fn escape_like(needle: &str) -> String {
+    let mut out = String::with_capacity(needle.len());
+    for ch in needle.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// Repository for conversation message CRUD operations
@@ -517,6 +544,15 @@ impl<'a> ConversationRepository<'a> {
     /// cascaded — the runs happened, and their rows outlive the transcript
     /// they were started from (the same posture 038 took for `task_id`).
     /// Returns `false` when the id is unknown.
+    ///
+    /// `tool_execution_log` is de-indexed rather than deleted, the
+    /// [`SkillExecutionRepository::clear_session_log_index`] posture (R51): that
+    /// a tool ran is still true and `GET /v1/tools`' `invocations_today` must
+    /// not change because a transcript went, but `session_id`, `log_seq` and
+    /// `result_ref` addressed a session and a `sessions/<id>/log.jsonl` that no
+    /// longer exist.
+    ///
+    /// [`SkillExecutionRepository::clear_session_log_index`]: crate::repository::SkillExecutionRepository::clear_session_log_index
     pub fn delete_session(&self, id: &str) -> Result<bool> {
         self.db.with_connection_mut(|conn| {
             let tx = conn.transaction()?;
@@ -537,6 +573,12 @@ impl<'a> ConversationRepository<'a> {
             )?;
             tx.execute(
                 "UPDATE lane_followups SET session_id = NULL WHERE session_id = ?1",
+                [id],
+            )?;
+            tx.execute(
+                "UPDATE tool_execution_log
+                    SET session_id = NULL, log_seq = NULL, result_ref = NULL
+                  WHERE session_id = ?1",
                 [id],
             )?;
             tx.execute("DELETE FROM session WHERE id = ?1", [id])?;
@@ -605,6 +647,11 @@ impl<'a> ConversationRepository<'a> {
 
     /// List sessions with the `GET /v1/sessions` filters, newest first, plus
     /// the total matching the same filters (before paging).
+    ///
+    /// The page is clamped here, not only at the route: a non-positive `limit`
+    /// serves [`SESSION_PAGE_DEFAULT`] and anything larger than
+    /// [`SESSION_PAGE_MAX`] serves that. `total` is the count before paging
+    /// either way, so a caller can still see how much it did not get.
     pub fn list_sessions(&self, filter: &SessionFilter<'_>) -> Result<(Vec<Conversation>, i64)> {
         let mut where_sql = String::from(" WHERE 1 = 1");
         let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -621,10 +668,18 @@ impl<'a> ConversationRepository<'a> {
             where_sql.push_str(&format!(" AND status = ?{}", params.len()));
         }
         if let Some(q) = filter.q {
-            params.push(Box::new(format!("%{}%", q.to_lowercase())));
+            // `to_ascii_lowercase`, not `to_lowercase`: the other side of the
+            // comparison is SQLite's `LOWER()`, which folds ASCII only. Rust's
+            // Unicode folding would lower-case a needle the column never
+            // lowers — 'İ' against a stored 'İ' — and match nothing.
+            params.push(Box::new(format!(
+                "%{}%",
+                escape_like(&q.to_ascii_lowercase())
+            )));
             let idx = params.len();
             where_sql.push_str(&format!(
-                " AND (LOWER(title) LIKE ?{idx} OR LOWER(lane_key) LIKE ?{idx})"
+                " AND (LOWER(title) LIKE ?{idx} ESCAPE '\\' \
+                    OR LOWER(lane_key) LIKE ?{idx} ESCAPE '\\')"
             ));
         }
 
@@ -639,8 +694,11 @@ impl<'a> ConversationRepository<'a> {
             )?;
 
             let mut paged = params_refs.clone();
-            let limit = filter.limit;
-            let offset = filter.offset;
+            let limit = match filter.limit {
+                n if n <= 0 => SESSION_PAGE_DEFAULT,
+                n => n.min(SESSION_PAGE_MAX),
+            };
+            let offset = filter.offset.max(0);
             paged.push(&limit);
             paged.push(&offset);
             let sql = format!(

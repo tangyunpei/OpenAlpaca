@@ -632,6 +632,12 @@ fn deleting_a_session_takes_its_messages_and_frees_its_runs() {
              VALUES ('task-1', 'A run', 'user1', 'user1:gui', ?1)",
             [&session.id],
         )?;
+        conn.execute(
+            "INSERT INTO tool_execution_log
+                (agent_id, tool_name, success, duration_ms, session_id, log_seq, result_ref)
+             VALUES ('a', 'file_read', 1, 3, ?1, 7, 'log:7')",
+            [&session.id],
+        )?;
         Ok(())
     })
     .unwrap();
@@ -649,6 +655,26 @@ fn deleting_a_session_takes_its_messages_and_frees_its_runs() {
         })
         .unwrap();
     assert!(orphaned.is_none());
+
+    // R51: the audit half of a tool-call row stays — that the tool ran is still
+    // true, and `invocations_today` must not move because a transcript went —
+    // but every pointer into the removed session and its log is cleared.
+    let (logged, still_indexed): (i64, i64) = db
+        .with_connection(|conn| {
+            Ok((
+                conn.query_row("SELECT COUNT(*) FROM tool_execution_log", [], |r| r.get(0))?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM tool_execution_log
+                      WHERE session_id IS NOT NULL OR log_seq IS NOT NULL
+                         OR result_ref IS NOT NULL",
+                    [],
+                    |r| r.get(0),
+                )?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(logged, 1, "the audit row outlives the transcript");
+    assert_eq!(still_indexed, 0, "nothing points at the removed session");
 
     assert!(!repo.delete_session("no-such-session").unwrap());
 }
@@ -734,6 +760,94 @@ fn list_sessions_filters_and_pages() {
     });
     assert_eq!((rows.len(), total), (1, 3));
     assert!(rows[0].id == archived.id || rows[0].id == gui.id || !rows[0].id.is_empty());
+}
+
+/// `?q=` is a literal substring, not a pattern: `%` and `_` are characters a
+/// title can contain, and `LIKE` without `ESCAPE` would have made the first
+/// match every row.
+#[test]
+fn a_session_search_matches_wildcard_characters_literally() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+
+    let percent = repo.create_session("alice:gui", "gui", None, Some("100% done")).unwrap();
+    let underscore = repo
+        .create_session("alice:gui", "gui", None, Some("draft_two"))
+        .unwrap();
+    repo.create_session("alice:gui", "gui", None, Some("plain title"))
+        .unwrap();
+
+    let search = |q: &str| {
+        repo.list_sessions(&SessionFilter {
+            q: Some(q),
+            limit: 50,
+            ..Default::default()
+        })
+        .unwrap()
+    };
+
+    let (rows, total) = search("%");
+    assert_eq!((rows.len(), total), (1, 1), "`%` is not a wildcard");
+    assert_eq!(rows[0].id, percent.id);
+
+    let (rows, _) = search("100%");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, percent.id);
+
+    let (rows, _) = search("draft_");
+    assert_eq!(rows.len(), 1, "`_` matches only an underscore");
+    assert_eq!(rows[0].id, underscore.id);
+
+    let (rows, _) = search("draftX");
+    assert!(rows.is_empty(), "`_` never stood for `X`");
+
+    // The escape character itself is a character too.
+    let (rows, _) = search("\\");
+    assert!(rows.is_empty());
+}
+
+/// `LIMIT -1` means *no limit* in SQLite, so an unclamped page served the whole
+/// table — and fed every id of it to the unchunked `IN (…)` lists that read a
+/// page's runs and artifact links.
+#[test]
+fn a_session_page_is_clamped_at_the_repository() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+    for n in 0..4 {
+        repo.create_session("alice:gui", "gui", None, Some(&format!("S{n}")))
+            .unwrap();
+    }
+
+    let page = |limit: i64| {
+        repo.list_sessions(&SessionFilter {
+            limit,
+            ..Default::default()
+        })
+        .unwrap()
+    };
+
+    // Four rows is fewer than the default page, so "the default" is observed as
+    // "everything, not a SQLite no-limit": the clamp is asserted on the bound
+    // value below.
+    let (rows, total) = page(-1);
+    assert_eq!((rows.len(), total), (4, 4));
+    assert_eq!(page(0).0.len(), 4);
+    assert_eq!(page(2).0.len(), 2, "a page the caller asked for is honoured");
+
+    // The clamp itself: more rows than the default page, asked for without one.
+    for n in 4..SESSION_PAGE_DEFAULT + 10 {
+        repo.create_session("alice:gui", "gui", None, Some(&format!("S{n}")))
+            .unwrap();
+    }
+    let (rows, total) = page(-1);
+    assert_eq!(rows.len(), SESSION_PAGE_DEFAULT as usize);
+    assert_eq!(total, SESSION_PAGE_DEFAULT + 10, "total ignores the window");
+    let (rows, _) = page(100_000);
+    assert_eq!(
+        rows.len(),
+        (SESSION_PAGE_DEFAULT + 10) as usize,
+        "an oversized ask is capped at SESSION_PAGE_MAX, here above the table"
+    );
 }
 
 #[test]
