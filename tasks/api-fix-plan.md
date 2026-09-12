@@ -1,6 +1,7 @@
-# Daemon Fix Plan — rev 3.1: single root, artifact store, sessions, the 23 GUI gaps
+# Daemon Fix Plan — rev 3.3: single root, artifact store, sessions, the 23 GUI gaps
 
-**Status:** design, rev 3.2 — **ready to implement; no carve-out.** D1–D5 and N1–N5 are resolved and carry no alternatives. N5's mechanism is `tasks/extension-enable-design.md` rev 15 (verified 2026-09-02) (design of record, ADR-030); this plan defers to it wherever the two overlap (§0 N5, Phase 0 A0–A3, Phase 8 items 2 and 9). The owner decisions the Claude Code lessons raised are **pending — listed in §0, decided nowhere, applied nowhere.** No production code written. · **Date:** 2026-09-02 · **Branch:** `feat/ui-rework`
+**Status:** **implemented — rev 3.3 is the record of what shipped.** Phases 0–8 all landed on `feat/ui-rework` (`2656a55..ab31299`; the per-phase ranges and their deviations are on the `### Phase N` headings in §6), and the extension design's C1–C8 landed with them between Phases 1 and 2 (`5c105b8..97740a5`; `tasks/extension-enable-design.md` rev 16). D1–D5 and N1–N5 stand as resolved and N5 was built from the design, never from the N5 table. Migration head is **040** (§11). Exactly one planned item was deliberately never built: Phase 0 item 6 (GAP-22), left alone under owner decision T14 and made moot by C7, which deleted the six `plugin_*` event variants it would have amended. The **owner decisions are still pending — T1–T17 in §0 below (twins at design §13 Q5–Q14) are recommendations, decided nowhere and applied nowhere**; they and merging this branch are what remains. · **Date:** 2026-09-11 · **Branch:** `feat/ui-rework`
+**Rev 3.3 changelog (one line), 2026-09-11:** the plan becomes the record — the status line says implemented; every `### Phase N` heading carries a `**Landed:**` line (git ranges, `base..tip`, base exclusive) naming the commits and the deviations the SDD ledger records; §11 names 034 by file and adds **040** (`040_llm_call_log_timestamp_index.sql`, ruling R63), and the 036 row's `file_assets` column count is corrected to **12** (counted in the migration); `similar` is **Apache-2.0** at 3.2.0, not MIT (§4.9, §9 — ruling R34 bumped it to 3.x); Phase 8 item 14 carries its landed note (design C6 plus the residual doc clause in `3694238`, ruling R69); and §0 gains owner decisions **T16** (scoping the unscoped task read/action routes) and **T17** (`.trash/` retention), both unadopted. No item text, gap row or argument was rewritten.
 **Rev 3 changelog (one line):** N5 → resolved to the extension-enable design; Phase 8 item 2 (GAP-18) re-specified as the design's read-only C6 `origin` shape; Phase 8 item 9 relabelled **GAP-24** per design §12.1; every plan-targeted adopt/adapt row of `tasks/research/claude-code-design-lessons.md` §5 applied at its named anchor (Phase 0 A0–A4, §1 reservations, §4.8 one-transaction rebase, §5.4 session-log records and sweep, Phase 8 items); four implementer pre-checks; surface-to-owner rows (T1, T3, T4, T9, T10, T11, T12, T13, T14, T15) collected in §0 and left unapplied. Re-verified 2026-09-02 against design rev 6's verification addendum: the N5 row now names §3.7 (`tools/list_changed`) beside the reaper; the lessons doc is cited at rev 4 (a re-verification with no change to any plan-targeted row); C-3 tagged beside P-3.
 **Rev 3.2 changelog (one line), 2026-09-05:** the extension design's C1–C8 landed (`tasks/extension-enable-design.md` rev 16) — §7 records the `/v1/extensions*` flat-envelope exception (R20), Phase 8 item 2's `GET /v1/tools` half is marked shipped in C6 (the `/v1/skills` half is what remains of GAP-18), and the per-tool deny key is purged as design §11.1 specified; no other plan row moved, and T1 (a per-tool deny rule) stays pending.
 **Rev 3.1 changelog (one line), 2026-09-05:** Phase 1 landed (the store module, the mover, the marker change, the purge, migration 035) — the documentation sweep is done; §3's P13 verdict changed from a legacy-parse deletion to **NOTHING TO PURGE** (`prune_backups` never parsed timestamps) and P15 now records that its normalising `UPDATE` shipped inside migration 035.
@@ -57,7 +58,7 @@ Four **implementer pre-checks** (verify, not decide):
 
 ### Owner decisions pending — listed here, decided nowhere, applied nowhere
 
-Raised by `tasks/research/claude-code-design-lessons.md` §6 against rules that are settled. Each carries the lessons' recommended default; **the default is a recommendation, not a decision, and this plan is written as if the answer were "no change" until the owner says otherwise.** Design-side twins (T1, T3, T4, T6(a), T6(c), T7, T8, T9, T14, T15) are also listed as `tasks/extension-enable-design.md` §13 Q5–Q14 and are unapplied there too.
+Raised by `tasks/research/claude-code-design-lessons.md` §6 against rules that are settled. Each carries the lessons' recommended default; **the default is a recommendation, not a decision, and this plan is written as if the answer were "no change" until the owner says otherwise.** Design-side twins (T1, T3, T4, T6(a), T6(c), T7, T8, T9, T14, T15) are also listed as `tasks/extension-enable-design.md` §13 Q5–Q14 and are unapplied there too. **T16 and T17 were raised during execution**, not by the lessons (ruling R40, and the uninstall verb of Phase 8 item 9); their recommendation column carries the recommendation recorded with the ruling, and like every other row it is **not adopted** — the shipped code is the "no change" answer.
 
 | # | Question | Recommended default (lessons §6) | If **yes** → what changes in this plan |
 |---|---|---|---|
@@ -71,6 +72,8 @@ Raised by `tasks/research/claude-code-design-lessons.md` §6 against rules that 
 | **T1** (P-28) | An owner-authored per-tool deny **rule** set (`[security.permissions] deny = [...]`, deny-class, gate-enforced) distinct from the S1 toggle? | No (record the rejection) | Phase 8 item 2's `/v1/tools` carries read-only `denied_by: "<rule>" \| null` — never a per-tool enable bit; design §11 becomes *migrate* rather than *purge*. |
 | **T15** (P-16) | A named, fixed *ambient* allow set (`{workspace_read, workspace_write}` today) appended by the policy constructor to every fail-closed allowlist — and may `read_result` join it? | Yes; A0 ships with today's two-name set regardless | §5.4's `read_result` builtin is constructor-appended so no `Only(empty)` policy can be left unable to page into its own spilled result. If **no**: `read_result` is listed per template/skill and the spill stub omits its paging hint on surfaces that lack it. |
 | **T3** (P-4) | A third LOADED axis — deferred extension-tool schemas — beside ALLOW and ENABLE? | Record the rule (load upfront when ≤ 10 % of the window, measured from real bytes — Phase 0 A4), build only when that threshold is observed crossed | An `extension_tool_loading = "auto" \| "always" \| "defer"` key documented beside `tool_selection` in `config/daemon.toml:74-81` — never a fourth meaning of `tool_selection`; design §6.2 #2 gains a bounded round-boundary exception. |
+| **T16** (R40, raised in execution) | Scope the task routes that are not scoped today — `GET /v1/tasks`, `GET /v1/tasks/{id}`, `GET /v1/tasks/{id}/timeline`, and the `cancel`/`pause`/un-pause-`resume` actions on `POST /v1/tasks/{id}/action` — to the local user, the way steer is? (`start` and S2's replay `resume` already are, via `owned_run` — `apps/openalpacad/src/routes/tasks.rs:509`.) | **Not adopted.** Recommendation: leave them unscoped until a multi-user lane admin flow exists — a steer injects text into somebody else's running agent, a read or a cancel does not | The `owned_run` predicate (404, never 403) is added to those handlers; `task.steerable`, which exists to make the asymmetry legible on the row, loses its reason to be special. If **no**: the asymmetry stays exactly as R40 landed it, stated in the route comments. |
+| **T17** (Phase 8 item 9, raised in execution) | A retention policy for `plugins/.trash/<name>-<ts>/`, where uninstall moves a plugin directory (`crates/openalpaca_plugins/src/install.rs:680`)? Nothing purges it today. | **Not adopted.** Recommendation: no auto-purge by default; an age sweep or a `store purge`-style verb is the owner's call | Either the boot retention sweep (§5.4) gains a `.trash/` age/size pass or `openalpaca store purge` (Phase 8 item 15) grows a trash target; uninstall keeps moving rather than deleting either way (§1.3 rule 3). If **no**: `.trash/` grows until the owner empties it by hand — `docs/CLI_Manual.md:290` is where that is stated for the uninstall verb. |
 
 ---
 
@@ -497,7 +500,7 @@ GET  /v1/files/{id}/content?token=<bearer>                 ← same ?token= chan
 
 `Artifact` is a **superset** of `unbacked.ts:39-56` (client type compiles unchanged); additive fields `origin`, `pinned`, `missing`, and the directive's payoff — `path`, `project_root`, `rel_path`. `ArtifactVersion`/`ArtifactDiff` match `unbacked.ts:62-77` field-for-field (route coalesces `note: NULL → ""`). Diffs are text-only: `kind ∈ {image, binary}` → 409 `NOT_DIFFABLE`. `added_lines`/`removed_lines` computed at **write** time and stored. `ArtifactKind`'s snake_case spellings match `unbacked.ts:28-38` exactly; extension precedence: allow-listed extension on the model-supplied name → `kind` map → `mime_type` map → `.bin`.
 
-**New workspace dependency: `similar`** (MIT, pure Rust, no build script) in `openalpaca_storage` — the workspace has no diff crate. Alternative: ~120-line hand-rolled LCS unified diff.
+**New workspace dependency: `similar`** (**Apache-2.0**, pure Rust, no build script) in `openalpaca_storage` — the workspace has no diff crate. Alternative: ~120-line hand-rolled LCS unified diff. *(Landed as `similar = "3.2.0"` — `Cargo.toml:121`, ruling R34; rev 3.2 and earlier said MIT, which was wrong.)*
 
 **New event** `ServerEvent::ArtifactWritten { artifact_id, task_id, agent_id, name, kind, version, path, ts, instance_id }` — carrying `ts`/`instance_id` from the start. Feeds the chat inline artifact card, the per-run event log (GAP-10), and the session log's `artifact_written` record (§5.5).
 
@@ -705,6 +708,8 @@ Order rationale: root move + purge first (everything else builds on the new path
 
 ### Phase 0 — Bugs and one-liners *(no migration; ship first)*
 
+**Landed:** `2656a55..b3523d8` — A0–A5 and items 1, 2, 3, 4, 5, 7. **Item 6 (GAP-22) was never started** (owner decision T14; the design's C7 then deleted the six `plugin_*` variants, so `crates/openalpaca_api/src/events/mod.rs` carries no `Plugin*` event to stamp); item 7 landed before items 1/3/4/5 so GAP-08b extended the typed `TaskSummaryResponse` rather than the ad-hoc JSON.
+
 Items 1–7 unchanged from rev 1; **A0–A4 added in rev 3** (lessons §4 and §8 Stream 1 — standalone, no design dependency, each its own commit, A0–A3 reviewed as security changes); **A5 added 2026-09-02** (the second half of lessons §8 Stream 1 item 5 — the C-3/P-3 fix the §0 N4 row records as adopted, which rev 3 left without a slot). Every item independently mergeable.
 
 - **A0 — empty allowlist fails closed (bug A; P-24).** `check_agent_capability` (`security/capabilities/mod.rs:106-113`) treats an *empty* allow list as unconstrained, and `invoke_plugin_skill` builds that list from whatever the skill's `requires_capabilities` resolve to (`orchestrator/skill/invocation.rs:952-976`) — or from `fm.tools.allow` when that is empty — so a plugin skill whose providing extension is absent or off may call **any** tool: disabling an extension *widens* reach. Fix the callee, in the type: `SandboxPolicy.allowed_capabilities: Vec<String>` → `enum Allowlist { Unrestricted, Only(Vec<String>) }` where `Only(vec![])` yields `CapabilityNotAllowed` for every non-ambient capability and `Unrestricted` must be spelled by the (currently zero) callers that mean it; minimum acceptable alternative `Option<Vec<String>>` with `Some(empty)` = deny-all plus an audit of the seven policy sites (`simple_query_handler.rs:229`, `invocation.rs:299`, `invocation.rs:976`, `invoke_executor.rs:377`, `lead_agent/mod.rs:314-321`, `SandboxPolicy::from_constraints`, the lead's append guard). Keep deny-first. Caller side: `invoke_plugin_skill` refuses up front with the S4 wording when `requires_capabilities` is non-empty but resolves to nothing, and passes `Only(resolved)` otherwise; the `fm.tools.allow` fallback passes `Only(allow)` too. **Ambient set:** `Only(v)` is evaluated after the constructor-side set that already exists — `{workspace_read, workspace_write}` for subagents (`agent/template/mod.rs:562-566`); A0 ships with exactly that set. Whether the set is acceptable at all, and whether `read_result` joins it, is **owner decision T15 (pending)** — A0 does not extend it. Tests: `empty_allowlist_denies_every_non_ambient_capability`, `deny_beats_allow` (a name in both lists is denied), `plugin_skill_total_loss_cannot_call_unrelated_builtin`, `plugin_skill_with_no_lists_cannot_call_any_tool`. XS; the design's C5 then completes availability filtering on top of it.
@@ -726,6 +731,8 @@ Items 1–7 unchanged from rev 1; **A0–A4 added in rev 3** (lessons §4 and §
 
 ### Phase 1 — Root move + legacy purge *(migration 035)*
 
+**Landed:** `b3523d8..5c105b8` — all four items as written. Two things the ledger records: pre-check **(d)** could not be run (no provider keys on the machine), so T13 is still open on an unmeasured question; and `docs/api/` became tracked here (`4c4d7e8`) after a pre-existing `.gitignore` gap had kept the generator output invisible. The mover has still never run against real legacy data — neither root existed on the development machine.
+
 **Depends on:** nothing. **Blocks:** everything after it (paths).
 
 1. `store/mod.rs` + `store/migrate.rs` (§1.4, §2): `home_root`, `state_dir`, `backups_dir`, `content_dir`/`ContentKind`, `ensure_store` seeding README (with the retention-class column)/.gitignore/.layout (line 2 `install_id=<uuid>` on the home root — pre-check (c)), the mover, `rebase_asset_paths`. `paths.rs` deleted (P1); consumer fan-out fixed mechanically (compiler-enumerated; inventory in appendix R §0). **Atomic three-binary rebuild in one commit** (§2.3).
@@ -736,6 +743,8 @@ Items 1–7 unchanged from rev 1; **A0–A4 added in rev 3** (lessons §4 and §
 *Verify:* mover unit tests — fresh install no-op; idempotent resume after a simulated kill between any two ledger entries; live-daemon guard aborts; per-child config merge preserves a GUI-pre-created `config/`; WAL/SHM+DB reunite before `Database::open`; `rebase_asset_paths` matches zero rows on second boot. Full workspace build + `cargo test --workspace` green with `paths.rs` gone. A dev-run from the repo still resolves `./config`.
 
 ### Phase 2 — Artifact store foundations *(migration 036)*
+
+**Landed:** `97740a5..ce98a7a` (after the extension design's C1–C8, `5c105b8..97740a5`, per ruling R1) — all six items as written; two addressing corrections were folded one phase forward rather than patched here: `ArtifactStore::put` resolves the project root through one canonicalising function (R24, with §4.9's rewrite) and the `PUT …/pin` route was built with the rest of §4.9 (R23), leaving Phase 3's pin item as the GUI opt-in.
 
 **Depends on:** Phase 1 (store module). **Blocks:** Phase 3, and the artifact half of Phase 6.
 
@@ -750,6 +759,8 @@ Items 1–7 unchanged from rev 1; **A0–A4 added in rev 3** (lessons §4 and §
 
 ### Phase 3 — Artifact API, previews, versions *(unblocks the Library)*
 
+**Landed:** `ce98a7a..bacbe4d` — all six items; the pin route arrived with item 1's router work (R23) and items 4–5 were built as one diff with the Library wiring (R31). Three bounds were added that the plan did not name: every content response carries `X-Content-Type-Options: nosniff` and HTML/SVG/XHTML bodies also carry `Content-Security-Policy: sandbox` (R27), a diff side above `MAX_DIFF_BYTES` (8 MiB) answers 409 `DIFF_TOO_LARGE` (R32), and `?limit=` clamps at 500 (R26). The deferral held: no artifact is framed (`frame-src` is untouched; the Library renders an HTML body through the client-side sanitiser it already had).
+
 **Depends on:** Phase 2. Unchanged from rev 1:
 
 1. §4.9 routes; content routes on the third merged sub-router with inline `?token=` (**GAP-11**).
@@ -762,6 +773,8 @@ Items 1–7 unchanged from rev 1; **A0–A4 added in rev 3** (lessons §4 and §
 *Verify:* `?token=` and `Authorization` both accepted; wrong token 401; other-owner artifact 404; 410 sets `missing_since`; `?task_id=` returns the run's files; Library renders end-to-end with GAP-04/05/11/12 deleted from `unavailable.ts`. **Deferred:** HTML artifact previews (`frame-src`/sandbox is a security review, not a CSP tweak).
 
 ### Phase 4 — Run observability *(migration 037)*
+
+**Landed:** `bacbe4d..70749b6` — migration 037, GAP-09, GAP-10 and the P8 exit criterion. Two recorded choices: the GUI reducer stopped producing rows from `dag_node_status` here while the daemon kept emitting it until Phase 8 item 10 deleted the variant (R35), and `TaskSummaryResponse` gained `subagent_count` from one grouped `subagent_span` query so a list row has a run indicator (R38, `apps/openalpacad/src/routes/tasks.rs:184-204`). GAP-20's run counts stayed the lifetime interim until Phase 8 item 5 (R39).
 
 **Depends on:** Phase 0 (GAP-07 bridge work). GAP-09 and GAP-10 share the sandbox `task_id` passthrough — do them together. Phase 7 reuses these exact instrumentation sites.
 
@@ -777,6 +790,8 @@ Migration 037 — `037_run_observability.sql`: `subagent_span` table (id = spawn
 
 ### Phase 5 — Run control *(no migration)*
 
+**Landed:** `70749b6..33a87e7` — GAP-02, GAP-03 and GAP-06. Enforcement landed on the injecting side only: steer, `rerun` and `start` are owner-scoped (404, never 403 — `owned_run`, `apps/openalpacad/src/routes/tasks.rs:509`) while reads and `cancel`/`pause` stay unscoped and every task row carries `steerable` so the refusal is legible (R40 → owner decision **T16**). Three shapes the items did not specify: `start` refuses a terminal row with 409 `TASK_NOT_STARTABLE` (R43) so the existing 422 became `TASK_NOT_DISPATCHABLE` (R44), `POST`/`DELETE` on the follow-up routes are lane-owner-scoped while `GET` is not (R42), and the cancellation token is now removed after `finalize_task_with_outcome` so "token registered" means "running through finalisation" (R45).
+
 **Depends on:** Phase 4 (`source_task_id`), Phase 2 (`workspace_id`). Unchanged from rev 1:
 
 1. **GAP-02 — `POST /v1/tasks/{id}/steer {message}`.** Pure reuse: `push_steering` (`runner/steering.rs:60-77`) is task-addressed and already emits `WorkflowSteered`. Lane from `task.source_lane` — the GUI addresses a run, not a lane. `200 {task_id, accepted, inbox_depth, lane_key}`; 409 `STEERING_INBOX_FULL` / `TASK_NOT_STEERABLE`; 503 `STEERING_DISABLED`. Leave the `/steer ` chat prefix alone (CLI/Telegram's only channel). Optional `workspace_path` defaulted from `task.workspace_id` so an `unprocessed_steering` leftover re-enters scoped to the same project.
@@ -786,6 +801,8 @@ Migration 037 — `037_run_observability.sql`: `subagent_span` table (id = spawn
 *Verify:* steering a running task injects at the next round boundary; steering a finished task is 409; DELETE after `claim_next` is 409 and the turn runs; `rerun` id survives restart; `start` on a dispatched row is 409.
 
 ### Phase 6 — Message → run links *(migration 038)*
+
+**Landed:** `33a87e7..a3898ce` — as written: migration 038, both links, and the `#[derive(Default)]` churn payment Phase 7 reused. No deviation recorded.
 
 **Depends on:** Phases 2 and 4.
 
@@ -802,6 +819,8 @@ UPDATE schema_version SET version = 38 WHERE version = 37;
 
 ### Phase 7 — Sessions *(migration 039)*
 
+**Landed:** `a3898ce..bb7a4be` — 7a and 7b both complete (the largest range in the plan, 50 commits). Rulings that fixed shapes the design left open: `GET /v1/sessions/{id}/events` was registered as 501 `SESSION_EVENTS_NOT_SERVED` in 7a and served in 7b (R47, now `get_session_events_handler`); a turn whose resolved project differs from its bound session archives that session and opens a new one, except when the request names a `session_id`, which always wins (R48/R49); the JSONL writer never blocks a tokio worker and the audit row stays an unconditional daemon INSERT the log only enriches (R51/R52); and every writer of `unprocessed_steering` goes through one guarded insert (R56). 7b's first cut of the §5.4 record set was approved with three recorded deviations and a fix round (the JSONL logged the already-truncated result, `cap_data` collapsed nested payloads, the audit row stood down for a best-effort channel); the fixes and three carried minors landed inside 7b.
+
 **Depends on:** Phase 6 (the `Default` churn payment), Phase 4 (sandbox passthrough + span ids, which the log references), Phase 1 (the `sessions/` dir lives under the moved root). Design: §5.
 
 **7a — schema + surface (S0):** migration 039 (§5.2); `get_or_create_active_session`; `/v1/sessions` family + `POST /v1/chat session_id` + `chat/history` retarget (§5.7); `task.session_id` at dispatch; completion report into the originating session; follow-up session pinning (§5.3); **`/v1/conversations` deleted (P19)** and GAP-21 built here once; GUI session sidebar; CLI `sessions`/`--resume` + `workspace_path` on `/v1/command`. Effort **L**.
@@ -811,6 +830,8 @@ UPDATE schema_version SET version = 38 WHERE version = 37;
 *Verify:* 7a — two sessions on one lane produce two clean transcripts; the partial unique index rejects a second `active`; a completion report lands in its originating (archived) session; follow-up autostart re-activates its session. 7b — a two-subagent run yields a well-formed log (seq gap-free; every `tool_call` matched by `tool_result` or the loop exit); a >64 KB result spills and `result_ref` resolves; `kill -9` mid-round leaves a parseable log (torn tail truncated on reopen), the sweep marks the task `interrupted` and recovers an undrained steering message into `lane_followups`.
 
 ### Phase 8 — Config, catalog, long tail
+
+**Landed:** `bb7a4be..ab31299` — all fifteen items. Item 14 needed no work of its own: the design's C6 had already shipped `openalpaca plugin config get` over the redacting `GET /v1/extensions/plugin/{id}/config` (R69 — see the item). Item 10 deleted `DagNodeStatus`, closing Phase 4's double emission. Three things the items did not anticipate: **migration 040** (`llm_call_log(timestamp)`) was added because the usage-summary query full-scanned the call log under the connection mutex on every Settings refetch (R63, §11); a disabled LLM provider contributes no models anywhere, including the CLI-backend fallback, and an unresolvable default model refuses the disable with 409 `DEFAULT_MODEL_UNRESOLVED` (R58/R61/R61a, item 4); and item 9's uninstall raised the `.trash/` retention question now recorded as owner decision **T17**. Item 15's purge takes its path literally, refusing 422 `WORKSPACE_NOT_A_ROOT` when the marker walk resolves to a different ancestor (R72).
 
 Independently orderable; each its own commit. Ordered by value per hour.
 
@@ -828,7 +849,7 @@ Independently orderable; each its own commit. Ordered by value per hour.
 11. **Artifact phase 2:** user-edit detection as a version with `author_agent_id = NULL`; `rebase_project` as the **one transaction** of §4.8 (file_assets + `session.workspace_id` + `task.workspace_id` + memory scope key) exposed as `PATCH /v1/workspaces {old_path,new_path}` and a CLI verb, and wired to the project picker (P-12).
 12. **S2 — replay resume** (§5.6c): the algorithm, `action:"resume"`, `resume_enabled` config, synthetic resume interjection. The only speculative piece in the plan; everything before it is useful without it. Day+.
 13. **S3 — snapshots** (§5.7 tail): `file_write` pre-edit images. M, deferrable indefinitely.
-14. **`openalpaca plugin config get` replaces the file hint (P-30).** Rev 2's premise was wrong: the config really lives at `<root>/plugins/.config/<name>.toml` (`main.rs:331`, `permission_gate.rs:23,37`), so the `.config` suffix in `plugin.rs:225,230` / `CLI_Manual.md:222` is correct and must stay. The actual problem is that a doc telling the owner to *read* that file is safe only while it is guaranteed secret-free — once the design's `sensitive` config fields land (X-29; default store is owner decision T9, pending) it holds references to secrets. Replace the hint with a real `openalpaca plugin config get <name>` backed by the design's redacting `GET` on the config route (C6 already lists both); keep the path mention only as "where non-sensitive values are stored".
+14. **`openalpaca plugin config get` replaces the file hint (P-30).** **Landed inside the extension design's C6** (T18 fix round 1, `5c1a356..c7e7be1`) — `openalpaca plugin config get <name> [<key>]` reads the redacting `GET /v1/extensions/plugin/{id}/config` (`apps/openalpaca/src/commands/plugin.rs:151-156` → `apps/openalpacad/src/routes/extensions.rs:693-698`, `plugin_config_redacted`), so this item needed no work of its own; the one residual doc clause — the path named only as where non-sensitive values live — landed in `3694238` (ruling R69). Rev 2's premise was wrong: the config really lives at `<root>/plugins/.config/<name>.toml` (`main.rs:331`, `permission_gate.rs:23,37`), so the `.config` suffix in `plugin.rs:225,230` / `CLI_Manual.md:222` is correct and must stay. The actual problem is that a doc telling the owner to *read* that file is safe only while it is guaranteed secret-free — once the design's `sensitive` config fields land (X-29; default store is owner decision T9, pending) it holds references to secrets. Replace the hint with a real `openalpaca plugin config get <name>` backed by the design's redacting `GET` on the config route (C6 already lists both); keep the path mention only as "where non-sensitive values are stored".
 15. **`openalpaca store purge <project>|--all [--dry-run]` (P-5, XS).** Prints the deletion plan in the README's retention-class terms — session dirs, DB rows, uploads — and names the entries it will *not* touch (`artifacts/`, `memory/`, `skills/`, unknown names); `--dry-run` is the default until `-y`. Claude Code's `claude project purge --dry-run` is the shape.
 
 ---
@@ -898,7 +919,7 @@ Three error envelopes plus a plain-text 401 coexist: `{error:{code,message}}` (`
 | **CSP loosening** | `blob:` + loopback origins widen the webview's image surface. | Land with the preview, never before; HTML previews are a separate review. |
 | **`?token=` in a URL** | Long-lived token in webview history / `Referer`. | Pre-existing posture (`/v1/chat/stream`); add `Referrer-Policy: no-referrer` on content responses; short-lived per-asset tokens deferred. |
 | **`start` id-injection** (D5) | The messiest code in the plan: create-or-update in the dispatcher's persist step. | Isolated in `TaskRepository::upsert_queued`, called out in review. |
-| **New `similar` dependency** | Workspace has no diff crate. | MIT, pure Rust, no build script, `openalpaca_storage` only; alternative: hand-rolled LCS. |
+| **New `similar` dependency** | Workspace has no diff crate. | **Apache-2.0** (not MIT, as rev 3.2 said), pure Rust, no build script, `openalpaca_storage` only; landed at 3.2.0 (R34); alternative: hand-rolled LCS. |
 | **`DagNodeStatus` double emission** | Two event families describe the same spawns for a phase. | Bounded: deleted in Phase 8 once the client switches (P9). |
 | **A0 flips the meaning of an empty allowlist** (Phase 0) | Any surface that today runs with a legitimately empty policy and relies on "empty = everything" starts denying every non-ambient tool. | The type change forces every policy site to spell `Unrestricted` or `Only(..)`; the seven sites are enumerated in A0 and the compiler finds the rest. The file-based and nested skill paths already dodge the hole via `policy_opt = None`, so the observable change is confined to plugin skills with unresolved requirements — exactly the escalation being closed. Review as a security change. |
 
@@ -930,12 +951,13 @@ One ledger, no conflicts. Each file ends with its own `UPDATE schema_version`; `
 
 | # | File | Phase | Contents |
 |---|---|---|---|
-| 034 | *(head today — verified)* | — | `drop_context_compaction_log` |
+| 034 | `034_drop_context_compaction_log.sql` | — | `drop_context_compaction_log` — the head this plan started from |
 | **035** | `035_drop_planner_telemetry.sql` | 1 | P7: `DROP COLUMN` `orchestrator_latency.planner_ms`/`dispatch_ms`, `dispatch_decisions.planner_requested_mode` (pre-check: SQLite ≥ 3.35, else 024-style rebuild) · optional P15 `event_log` timestamp normalise |
-| **036** | `036_artifact_store.sql` | 2 | 11 `file_assets` columns · 4 indexes · `artifact_versions` · `task.workspace_id` |
+| **036** | `036_artifact_store.sql` | 2 | **12** `file_assets` columns · 4 indexes · `artifact_versions` · `task.workspace_id` |
 | **037** | `037_run_observability.sql` | 4 | `subagent_span` · `event_log.task_id` · `task.source_task_id` |
 | **038** | `038_message_run_links.sql` | 6 | `conversation_messages.task_id` |
 | **039** | `039_sessions.sql` | 7a | `conversations` → `session` rebuild (drops `UNIQUE(lane_key)`; workspace + lifecycle; partial unique active index) · `session_id` on `conversation_messages`/`task`/`lane_followups` · `tool_execution_log` index columns |
+| **040** | `040_llm_call_log_timestamp_index.sql` | 8 | `llm_call_log(timestamp)` index (ruling R63: `GET /v1/usage/summary` full-scanned the append-only call log under the single connection mutex on every Settings poll — both existing indexes lead on `agent_id`/`task_id`). **Head today** (`crates/openalpaca_storage/src/migrations/mod.rs`; asserted at `database/tests.rs:11`); the next migration is 041 |
 
 Two **unnumbered boot-time fixups**, listed for completeness but explicitly not schema migrations: `move_app_root()` (filesystem, §2.2 — idempotent, resumable) and `rebase_asset_paths()` (runtime-prefix UPDATE, §2.2.6 — idempotent, zero rows after first boot).
 
