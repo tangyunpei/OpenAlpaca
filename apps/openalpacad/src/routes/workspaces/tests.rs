@@ -711,6 +711,39 @@ async fn a_root_holding_another_owners_rows_is_a_404_not_a_403() {
     assert!(body["error"]["message"].as_str().unwrap().contains("owner"));
 }
 
+/// Ruling R72: a destructive verb takes `path` almost literally — it never
+/// silently walks a subdirectory up to the project root the way a re-base's
+/// *old* path does. `purge /repo/src` must be refused naming `/repo`, not
+/// carried out against it.
+#[tokio::test]
+async fn a_path_inside_a_project_is_refused_naming_the_root_not_purged() {
+    let f = Fixture::new();
+    let root = f.project("mono");
+    f.session_with_log("s-mono", &root);
+
+    let inside = std::path::Path::new(&root).join("src");
+    std::fs::create_dir_all(&inside).expect("nested dir");
+    let inside = inside.to_string_lossy().into_owned();
+
+    let (status, body) = f.purge(Some(&inside), false, true).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(error_code(&body), "WORKSPACE_NOT_A_ROOT");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains(&root), "the project root is named: {message}");
+
+    // Refused before anything was counted, let alone deleted — even a `-y`
+    // real run must not carry this out.
+    let (status, _) = f.purge(Some(&inside), false, false).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(f.row_count("SELECT COUNT(*) FROM session"), 1);
+
+    // The root itself is exactly what `--all` and an explicit root are for,
+    // and still works.
+    let (status, body) = f.purge(Some(&root), false, false).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(f.row_count("SELECT COUNT(*) FROM session"), 0);
+}
+
 #[tokio::test]
 async fn a_run_in_flight_refuses_the_whole_purge() {
     let f = Fixture::new();
@@ -722,6 +755,22 @@ async fn a_run_in_flight_refuses_the_whole_purge() {
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(error_code(&body), "WORKSPACE_BUSY");
     // Refused before a row moved: the session is still there.
+    assert_eq!(f.row_count("SELECT COUNT(*) FROM session"), 1);
+}
+
+/// Minor #2: a `queued` run has not reached `running` yet, but it already
+/// named this root when it was dispatched — the purge's busy predicate is
+/// stricter than `active_tasks` for exactly this row.
+#[tokio::test]
+async fn a_queued_run_under_the_root_refuses_the_purge() {
+    let f = Fixture::new();
+    let root = f.project("queued-busy");
+    f.session_with_log("s-queued", &root);
+    f.task("t-queued", &root, "queued");
+
+    let (status, body) = f.purge(Some(&root), false, false).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(error_code(&body), "WORKSPACE_BUSY");
     assert_eq!(f.row_count("SELECT COUNT(*) FROM session"), 1);
 }
 
@@ -854,13 +903,18 @@ async fn purging_everything_lists_each_root_and_keeps_the_home_scope() {
         "{paths:?}"
     );
 
-    assert_eq!(body["home_scope"]["action"], "keep");
-    assert!(
-        body["home_scope"]["holds"]
-            .as_str()
-            .unwrap()
-            .contains("1 conversations")
-    );
+    let home = body["home_scope"].as_array().expect("home_scope is a list");
+    let no_project = home
+        .iter()
+        .find(|e| e["entry"] == "no project")
+        .expect("the home scope's own conversations are named");
+    assert_eq!(no_project["action"], "keep");
+    assert!(no_project["holds"].as_str().unwrap().contains("1 conversations"));
+    let state = home
+        .iter()
+        .find(|e| e["entry"] == "state/")
+        .expect("the home store's state/ is named as kept too");
+    assert_eq!(state["action"], "keep");
     // The projects' sessions went; the home scope's stayed.
     assert_eq!(
         f.row_count("SELECT COUNT(*) FROM session WHERE workspace_id IS NULL"),
@@ -870,6 +924,34 @@ async fn purging_everything_lists_each_root_and_keeps_the_home_scope() {
         f.row_count("SELECT COUNT(*) FROM session WHERE workspace_id IS NOT NULL"),
         0
     );
+}
+
+/// Minor #3: `state/` is never a purge target at all, and `--all` says so —
+/// on a dry run just as much as a real one, since the plan is what a reader
+/// checks before passing `-y`.
+#[tokio::test]
+async fn an_all_dry_run_names_the_home_stores_state_as_kept() {
+    let f = Fixture::new();
+    let root = f.project("proj");
+    f.session_with_log("s-1", &root);
+
+    let (status, body) = f.purge(None, true, true).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["dry_run"], true);
+    let home = body["home_scope"].as_array().expect("home_scope is a list");
+    let state = home
+        .iter()
+        .find(|e| e["entry"] == "state/")
+        .expect("the plan never mentions state/");
+    assert_eq!(state["action"], "keep");
+    assert!(
+        state["retention"]
+            .as_str()
+            .unwrap()
+            .contains("factory reset")
+    );
+    // Nothing happened — it is still a dry run.
+    assert_eq!(f.row_count("SELECT COUNT(*) FROM session"), 1);
 }
 
 #[tokio::test]

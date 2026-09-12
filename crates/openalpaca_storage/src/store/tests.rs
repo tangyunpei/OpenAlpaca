@@ -294,12 +294,39 @@ fn unknown_entries_names_only_what_the_store_did_not_create() {
     fs::write(root.join("todo.txt"), "mine").unwrap();
 
     assert_eq!(
-        unknown_entries(&root),
+        unknown_entries(&root, false),
         vec!["my-notes".to_string(), "todo.txt".to_string()],
         "the seeded metadata and every ContentKind are the store's own"
     );
     // A root with nothing in it, and one that does not exist, both say nothing.
-    assert!(unknown_entries(&tmp.path().join("no-such-store")).is_empty());
+    assert!(unknown_entries(&tmp.path().join("no-such-store"), false).is_empty());
+}
+
+#[test]
+fn unknown_entries_treats_state_config_and_plugins_as_home_only_names() {
+    let tmp = tempdir().unwrap();
+    let scope = StoreScope::Project(tmp.path().to_path_buf());
+    let root = ensure_store(&scope).unwrap();
+    fs::create_dir_all(root.join("state")).unwrap();
+    fs::create_dir_all(root.join("config")).unwrap();
+    fs::create_dir_all(root.join("plugins")).unwrap();
+
+    // Home-root names, so a project root does not get a pass on them: they
+    // are exactly the kind of name this list exists to report.
+    assert_eq!(
+        unknown_entries(&root, false),
+        vec![
+            "config".to_string(),
+            "plugins".to_string(),
+            "state".to_string()
+        ],
+        "under a project root, state/config/plugins are unknown like any other name"
+    );
+    // The same directory, read as the home root, waves all three through.
+    assert!(
+        unknown_entries(&root, true).is_empty(),
+        "the home root owns state/, config/ and plugins/ beside its content dirs"
+    );
 }
 
 #[test]

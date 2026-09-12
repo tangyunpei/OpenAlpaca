@@ -41,7 +41,12 @@
 //! store README already uses, saying `delete` or `keep` for each. `dry_run`
 //! defaults to **true** on the route as well as on the CLI — the daemon fails
 //! closed, so a caller that forgets the field gets the plan and not the
-//! deletion. Its refusals are the re-base's, for the same reasons.
+//! deletion. Its refusals are the re-base's, for the same reasons — with one
+//! difference: `path` is never walked up to an ancestor the way a re-base's
+//! *old* root is (`resolve_purge_root`, ruling R72). A destructive verb is the
+//! one place that walk must not run silently — `purge /repo/src` is a `422`
+//! `WORKSPACE_NOT_A_ROOT` naming `/repo` rather than a purge of the whole
+//! project for a path that named one file of it.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -135,6 +140,29 @@ fn resolve_root(input: &str) -> Result<String, Response> {
     Ok(request_project_root(Some(&literal)).unwrap_or(literal))
 }
 
+/// A canonicalized path, refused when the marker walk finds it sits *inside*
+/// another root's project rather than naming a root of its own — the shape
+/// [`resolve_destination`] and [`resolve_purge_root`] share, `describe`
+/// supplying the message that is specific to which of the two callers this is.
+///
+/// A path that resolves to itself — its own `.git`, its own `.openalpaca` (the
+/// P-12 shape, where the store is already there) — or to no marker anywhere,
+/// is taken as given.
+#[allow(clippy::result_large_err)]
+fn refuse_if_inside_another_root(
+    literal: String,
+    describe: impl FnOnce(&str, &str) -> String,
+) -> Result<String, Response> {
+    match request_project_root(Some(&literal)) {
+        Some(ancestor) if ancestor != literal => Err(api_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "WORKSPACE_NOT_A_ROOT",
+            describe(&literal, &ancestor),
+        )),
+        _ => Ok(literal),
+    }
+}
+
 /// The re-base **destination**, taken literally.
 ///
 /// The marker walk is right for a root a project came *from* and wrong for one
@@ -146,25 +174,43 @@ fn resolve_root(input: &str) -> Result<String, Response> {
 ///
 /// So the destination is canonicalized and then checked: a path that resolves
 /// to an **ancestor** is `422 WORKSPACE_NOT_A_ROOT`, naming the ancestor, and
-/// the caller decides which of the two roots they meant. A destination that
-/// resolves to itself — its own `.git`, its own `.openalpaca` (the P-12 shape,
-/// where the store is already there), or no marker anywhere — is taken as
-/// given.
+/// the caller decides which of the two roots they meant.
 #[allow(clippy::result_large_err)]
 fn resolve_destination(input: &str) -> Result<String, Response> {
     let literal = canonical_path(input)?;
-    match request_project_root(Some(&literal)) {
-        Some(ancestor) if ancestor != literal => Err(api_error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "WORKSPACE_NOT_A_ROOT",
-            format!(
-                "{literal} is inside the project rooted at {ancestor}, so re-basing onto it \
-                 would move everything onto {ancestor} instead. Re-base onto {ancestor} if that \
-                 is what you meant, or give {literal} a project marker of its own first"
-            ),
-        )),
-        _ => Ok(literal),
-    }
+    refuse_if_inside_another_root(literal, |literal, ancestor| {
+        format!(
+            "{literal} is inside the project rooted at {ancestor}, so re-basing onto it \
+             would move everything onto {ancestor} instead. Re-base onto {ancestor} if that \
+             is what you meant, or give {literal} a project marker of its own first"
+        )
+    })
+}
+
+/// The purge **target**, taken almost literally — ruling R72.
+///
+/// A destructive verb is the one place the old-root marker walk
+/// ([`resolve_root`]) must not run silently: `purge /repo/src` walking up to
+/// `/repo` would delete the whole project for a path that named one file of
+/// it, and the caller would only learn the resolved root from what the
+/// response deleted. So the given path is canonicalized and then checked
+/// exactly as a re-base destination is: a path that resolves to an
+/// **ancestor** is `422 WORKSPACE_NOT_A_ROOT`, naming that root, rather than
+/// purging it for a subdirectory the caller gave. A path that resolves to
+/// itself, or to no marker at all — a project already moved away, still
+/// purgeable by the root its rows recorded — is taken as given: `--all` and an
+/// explicit root cover every legitimate use, so there is nothing this walk
+/// would ever need to find on the caller's behalf.
+#[allow(clippy::result_large_err)]
+fn resolve_purge_root(input: &str) -> Result<String, Response> {
+    let literal = canonical_path(input)?;
+    refuse_if_inside_another_root(literal, |literal, ancestor| {
+        format!(
+            "purge names the project root itself; {literal} is inside the project rooted at \
+             {ancestor}. Purge {ancestor} if that is what you meant, or name {literal} directly \
+             once it has a project marker of its own"
+        )
+    })
 }
 
 /// The home store is not a project and never becomes one (R24, and the fold in
@@ -530,7 +576,11 @@ fn plan_entries(root: &str, plan: &PurgePlan) -> Vec<serde_json::Value> {
             "keep",
         ),
     ];
-    for name in store::unknown_entries(&Path::new(root).join(store::STORE_DIR_NAME)) {
+    // `false`: a purge is only ever a project root (the home store is refused
+    // long before this runs), so `state/`, `config/` and `plugins/` are not
+    // the store's own here — they are exactly the unknown names this list
+    // exists to report (Minor #4).
+    for name in store::unknown_entries(&Path::new(root).join(store::STORE_DIR_NAME), false) {
         entries.push(plan_entry(
             &name,
             "not created by OpenAlpaca",
@@ -559,10 +609,15 @@ fn purge_counts_json(counts: &openalpaca_storage::PurgeCounts) -> serde_json::Va
 /// Owner-scoped like the re-base and for the same reason: `session` and `task`
 /// carry no owner column, so a root holding somebody else's rows is a `404`
 /// rather than a transaction over rows the caller cannot see (R40 — never a
-/// `403`). The in-flight guard is two halves, because either alone has a hole:
-/// `active_tasks` catches a `running`/`paused` row whose session is already
-/// gone, and the lane registry catches a live run whose row has not reached
-/// `running` yet.
+/// `403`). The in-flight guard is two checks, because either alone has a hole:
+/// [`ArtifactStore::busy_tasks`] counts `queued`, `running` and `paused` rows
+/// under `root` directly — `queued` included, because a run that has not
+/// started yet already named this root and is about to resolve its store —
+/// and the lane registry
+/// ([`crate::routes::sessions::session_has_live_run`]) catches a live run
+/// whose task was dispatched with **no** `workspace_id` at all (no active
+/// session on its lane at spawn time, `dispatcher::lead_agent`) but whose
+/// `session_id` still names a conversation under `root`.
 #[allow(clippy::result_large_err)]
 fn preflight(deps: &PurgeDeps<'_>, root: &str) -> Result<PurgePlan, Response> {
     refuse_the_home_root("path", root)?;
@@ -589,14 +644,17 @@ fn preflight(deps: &PurgeDeps<'_>, root: &str) -> Result<PurgePlan, Response> {
             format!("nothing of yours is recorded under {root}"),
         ));
     }
-    if rows.active_tasks > 0 {
+    let busy = store
+        .busy_tasks(root)
+        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string()))?;
+    if busy > 0 {
         return Err(api_error(
             StatusCode::CONFLICT,
             "WORKSPACE_BUSY",
             format!(
-                "{} run(s) under {root} are still in flight; purging would delete the transcript \
-                 a run is about to write into",
-                rows.active_tasks
+                "{busy} run(s) under {root} are queued, running or paused; purging would delete \
+                 the transcript a run is about to write into, or is about to resolve this store \
+                 to start writing into"
             ),
         ));
     }
@@ -686,7 +744,7 @@ fn remove_purged_bytes(
 pub(crate) fn purge_workspaces(deps: &PurgeDeps<'_>, request: PurgeRequest) -> Response {
     let store = ArtifactStore::new(deps.db);
     let roots = match (request.path.as_deref(), request.all) {
-        (Some(path), false) => match resolve_root(path) {
+        (Some(path), false) => match resolve_purge_root(path) {
             Ok(root) => vec![root],
             Err(response) => return response,
         },
@@ -756,7 +814,10 @@ pub(crate) fn purge_workspaces(deps: &PurgeDeps<'_>, request: PurgeRequest) -> R
         "projects": projects,
     });
     // Only `--all` claims to have looked at everything, so only `--all` owes
-    // the reader the line about what it deliberately did not look at.
+    // the reader the lines about what it deliberately did not look at: the
+    // home scope's own conversations and uploads, and the home store's
+    // `state/` — never a purge target at all, named here rather than left for
+    // the reader to assume (Minor #3).
     if request.all {
         let home = match store.home_scope_rows() {
             Ok(home) => home,
@@ -764,16 +825,24 @@ pub(crate) fn purge_workspaces(deps: &PurgeDeps<'_>, request: PurgeRequest) -> R
                 return api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string());
             }
         };
-        body["home_scope"] = plan_entry(
-            "no project",
-            format!(
-                "{} conversations and {} uploads with no project — openalpaca sessions delete \
-                 handles those",
-                home.sessions, home.uploads
+        body["home_scope"] = serde_json::Value::Array(vec![
+            plan_entry(
+                "no project",
+                format!(
+                    "{} conversations and {} uploads with no project — openalpaca sessions \
+                     delete handles those",
+                    home.sessions, home.uploads
+                ),
+                "the home store is not a project",
+                "keep",
             ),
-            "the home store is not a project",
-            "keep",
-        );
+            plan_entry(
+                "state/",
+                "the machine's — the database, keys and logs",
+                "never swept; deleting it is a factory reset",
+                "keep",
+            ),
+        ]);
     }
     Json(body).into_response()
 }
@@ -796,14 +865,19 @@ pub async fn rebase_workspace_handler(
 
 /// Delete a project's conversations, runs and uploads, or report the plan.
 ///
-/// The flush comes first and unconditionally: a writer holding records for a
+/// The flush happens only when the call is going to delete something: a dry
+/// run changes nothing, so awaiting every live writer's fsync would be an
+/// fsync-per-writer's worth of latency for a call that has no rows to protect.
+/// A real run flushes first, unconditionally — a writer holding records for a
 /// transcript this call is about to delete would otherwise re-create the
 /// directory after it went. The same barrier `DELETE /v1/sessions/{id}` awaits.
 pub async fn purge_workspace_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<PurgeRequest>,
 ) -> Response {
-    crate::routes::sessions::flush_session_logs(&state).await;
+    if !request.dry_run {
+        crate::routes::sessions::flush_session_logs(&state).await;
+    }
     purge_workspaces(
         &PurgeDeps {
             db: &state.db,

@@ -309,22 +309,27 @@ pub fn ensure_store(scope: &StoreScope) -> Result<PathBuf> {
 /// §1.3 rule 3: unknown directories found in a store root are left untouched and
 /// never swept — the store never deletes what it did not create. `store purge`
 /// is the first caller that has to *say* so, entry by entry, and this is the
-/// list it names. Known names are the [`ContentKind`] directories, the three
-/// pieces of store metadata (`.layout`, `README.md`, `.gitignore`), and the
-/// three the **home** root owns beside its content dirs (`state/`, `config/`,
-/// `plugins/`) — so the answer is right for either scope, even though only a
-/// project root is ever purged.
+/// list it names. Known names are the [`ContentKind`] directories and the
+/// three pieces of store metadata (`.layout`, `README.md`, `.gitignore`) in
+/// either scope, plus — **only when `is_home` is true** — the three names the
+/// **home** root alone owns beside its content dirs (`state/`, `config/`,
+/// `plugins/`). Those three are home-root names, not store metadata: a
+/// project root has no `state/` of its own, so a user directory that happens
+/// to be called `state/` inside `<project>/.openalpaca/` is exactly the kind
+/// of name this list exists to report, not a known one to wave through.
 ///
 /// A root that does not exist, or cannot be read, has nothing to report: the
 /// answer is empty rather than an error, because "what else is in there" is a
 /// remark on a plan and never the reason to refuse one.
-pub fn unknown_entries(store_root: &Path) -> Vec<String> {
-    let known: Vec<&str> = ContentKind::ALL
+pub fn unknown_entries(store_root: &Path, is_home: bool) -> Vec<String> {
+    let mut known: Vec<&str> = ContentKind::ALL
         .iter()
         .map(|kind| kind.dir_name())
         .chain([LAYOUT_FILE, README_FILE, GITIGNORE_FILE])
-        .chain(["state", "config", "plugins"])
         .collect();
+    if is_home {
+        known.extend(["state", "config", "plugins"]);
+    }
     let Ok(entries) = fs::read_dir(store_root) else {
         return Vec::new();
     };

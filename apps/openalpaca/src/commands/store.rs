@@ -24,7 +24,11 @@
 //! `keep` for each — and prints it *instead of* purging unless you pass `-y`.
 //! Conversations, runs and uploads go; produced artifacts, workspace memories
 //! and anything OpenAlpaca did not create stay, and the plan says so by name
-//! rather than by omission.
+//! rather than by omission. Unlike `rebase`'s *old* path, `<project>` is never
+//! silently walked up to an ancestor root: `purge /repo/src` is refused
+//! (`422 WORKSPACE_NOT_A_ROOT`, naming `/repo`) rather than deleting the whole
+//! project for a path that named one file of it — a destructive verb takes the
+//! path it was given, or it takes nothing.
 //!
 //! Deliberately not a re-implementation of either transaction: everything below
 //! is `GET`/`PATCH /v1/workspaces` and `POST /v1/workspaces/purge`. The daemon
@@ -216,8 +220,12 @@ struct PurgeResult {
     applied: bool,
     #[serde(default)]
     projects: Vec<PurgeProject>,
+    /// `--all` only: what the home scope holds and never touches — its own
+    /// conversations and uploads, and the home store's `state/`, each its own
+    /// entry so both get the same "named, not omitted" treatment a project's
+    /// plan gives every member.
     #[serde(default)]
-    home_scope: Option<PlanEntry>,
+    home_scope: Vec<PlanEntry>,
 }
 
 pub async fn run(args: StoreArgs) -> Result<()> {
@@ -314,9 +322,9 @@ async fn purge(project: Option<&str>, all: bool, dry_run: bool) -> Result<()> {
             );
         }
     }
-    if let Some(home) = &result.home_scope {
+    if !result.home_scope.is_empty() {
         println!();
-        print_entries(std::slice::from_ref(home));
+        print_entries(&result.home_scope);
     }
     if !result.applied {
         println!();
@@ -335,11 +343,20 @@ async fn purge(project: Option<&str>, all: bool, dry_run: bool) -> Result<()> {
 /// are never garbage-collected" is the sentence that makes the delete lines
 /// trustworthy.
 fn print_entries(entries: &[PlanEntry]) {
+    print!("{}", render_entries(entries));
+}
+
+/// [`print_entries`]'s body, as a `String` — split out so the column layout
+/// can be asserted on directly instead of only by eye.
+fn render_entries(entries: &[PlanEntry]) -> String {
+    use std::fmt::Write as _;
+
     let width = entries
         .iter()
         .map(|e| e.entry.chars().count())
         .max()
         .unwrap_or(0);
+    let mut out = String::new();
     for entry in entries {
         // Padded before it is coloured: a width applied to a `ColoredString`
         // counts the escape bytes and the column stops lining up.
@@ -349,17 +366,20 @@ fn print_entries(entries: &[PlanEntry]) {
             true => padded.red().bold(),
             false => padded.green().bold(),
         };
-        println!(
+        let _ = writeln!(
+            out,
             "  {verdict}  {name:<width$}  {holds}",
             name = entry.entry,
             holds = entry.holds,
         );
-        println!(
+        let _ = writeln!(
+            out,
             "          {:<width$}  {}",
             "",
             format!("({})", entry.retention).dimmed(),
         );
     }
+    out
 }
 
 /// The ancestor a destination would be walked up to, when the daemon resolved
@@ -593,5 +613,73 @@ mod tests {
         );
         assert!(!counts.is_empty());
         assert!(Counts::default().is_empty());
+    }
+
+    /// Every `\x1b[...m` SGR sequence `colored` emits, dropped — so a rendered
+    /// plan can be asserted on by its visible columns regardless of whether
+    /// the process forces colour on or off.
+    fn strip_ansi(input: &str) -> String {
+        let mut out = String::with_capacity(input.len());
+        let mut chars = input.chars();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                for c2 in chars.by_ref() {
+                    if c2 == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// Minor #8: `print_entries` had no test, and the pad-before-colour trick
+    /// it depends on — padding the verdict to width *before* wrapping it in a
+    /// `ColoredString`, never after — is exactly the kind of thing that only a
+    /// test with colour actually turned on can catch: a `{:>6}` applied to an
+    /// already-coloured string counts escape bytes as part of the width and
+    /// silently breaks the column.
+    #[test]
+    fn render_entries_keeps_the_column_aligned_under_colour() {
+        colored::control::set_override(true);
+        let entries = vec![
+            PlanEntry {
+                entry: "a".to_string(),
+                holds: "holds-1".to_string(),
+                retention: "ret-1".to_string(),
+                action: "delete".to_string(),
+            },
+            PlanEntry {
+                entry: "bb".to_string(),
+                holds: "holds-2".to_string(),
+                retention: "ret-2".to_string(),
+                action: "keep".to_string(),
+            },
+        ];
+        let rendered = render_entries(&entries);
+        colored::control::unset_override();
+
+        assert!(
+            rendered.contains('\u{1b}'),
+            "forcing colour on should have added escape codes: {rendered:?}"
+        );
+
+        // Written out column by column rather than re-derived from the same
+        // format string, so a change to the layout has to be made twice and on
+        // purpose. The verdict is right-aligned in six columns — "delete" and
+        // "keep" share a right edge — and the name column is as wide as the
+        // widest entry ("bb"), which puts the retention line's text at
+        // 2 + 6 + 2 + 2 + 2 = 14 spaces. Both verdicts and both names differ in
+        // length, so padding applied *after* the colouring (counting escape
+        // bytes toward the width) would show up in every one of these lines.
+        let expected = concat!(
+            "  delete  a   holds-1\n",
+            "              (ret-1)\n",
+            "    keep  bb  holds-2\n",
+            "              (ret-2)\n",
+        );
+        assert_eq!(strip_ansi(&rendered), expected);
     }
 }

@@ -304,9 +304,12 @@ pub(crate) async fn flush_session_logs(state: &AppState) {
 ///
 /// The lane registry is the authority on what is live; the `task` row is what
 /// says which session a live run belongs to. A row that cannot be read counts
-/// as belonging elsewhere: `active_tasks` on
-/// [`WorkspaceRows`](openalpaca_storage::WorkspaceRows) is the other half of
-/// the guard a purge applies, and catches a `running`/`paused` row on its own.
+/// as belonging elsewhere, which is safe only because each caller pairs this
+/// check with a second one over the rows themselves: the purge counts
+/// `queued`/`running`/`paused` tasks under the root
+/// ([`ArtifactStore::busy_tasks`](openalpaca_storage::ArtifactStore::busy_tasks)),
+/// and `DELETE /v1/sessions/{id}` removes only the one conversation whose live
+/// run this is.
 pub(crate) fn session_has_live_run(
     db: &Database,
     ctx: &SharedContext,
