@@ -370,8 +370,11 @@ records the root it was seeded at, so a store standing at a path it does not
 name is a project that moved; the offer names the old path and counts the four
 things still addressed under it — artifacts, conversations, runs and workspace
 memories — and `Re-base` moves all four in one transaction
-(`PATCH /v1/workspaces`). Nothing re-bases on its own, and a re-base waits for
-runs still in flight there.
+(`PATCH /v1/workspaces`). Nothing re-bases on its own. A re-base does not wait
+for runs: while a run under the old root is still in flight the daemon refuses
+the call outright (`409 WORKSPACE_BUSY`) and changes nothing, so the panel says
+how many are in flight and holds the button until they finish — retry once they
+do.
 
 ### Models & keys
 
