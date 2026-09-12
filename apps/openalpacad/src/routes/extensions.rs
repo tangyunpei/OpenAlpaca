@@ -142,13 +142,17 @@ pub(crate) fn extension_error(error: &ExtensionError) -> Response {
 
 /// The status a failed plugin **config write** answers with. Same split as the
 /// legacy route: a write the daemon could not perform is `500`, an unreadable
-/// store is `409`, a caller mistake is `400`.
+/// store or a plugin whose declaration is not in hand is `409`, a caller
+/// mistake is `400`.
 pub(crate) fn plugin_error_status(error: &PluginError) -> StatusCode {
     match error {
         PluginError::Io(_) | PluginError::Json(_) | PluginError::StoreWriteFailed(_) => {
             StatusCode::INTERNAL_SERVER_ERROR
         }
-        PluginError::StoreUnreadable(_) => StatusCode::CONFLICT,
+        // Both are states, not requests: the store cannot be read, or the row
+        // has no manifest to judge the key against (an orphan, or a directory
+        // no scan has read).
+        PluginError::StoreUnreadable(_) | PluginError::NoDeclaration(_) => StatusCode::CONFLICT,
         _ => StatusCode::BAD_REQUEST,
     }
 }
@@ -707,7 +711,14 @@ pub async fn get_extension_config_handler(
     get_config(state.extensions.clone(), &kind, &id).await
 }
 
-/// `POST /v1/extensions/plugin/{id}/config`
+/// `POST /v1/extensions/plugin/{id}/config` — one key, one value.
+///
+/// **`"value": null` is `400 invalid_value`, and writes nothing.** TOML has no
+/// null, so a JSON one has no faithful spelling here: it used to be stored as
+/// the empty string, which is a *value* — the plugin then received `""` as its
+/// configuration and could not tell it from a deliberately empty setting.
+/// Dropping the key would be the other reading, and it is a different request
+/// (there is no remove verb yet), so neither is chosen for the caller.
 pub(crate) async fn set_config(
     extensions: Arc<Extensions>,
     kind: &str,
@@ -716,6 +727,24 @@ pub(crate) async fn set_config(
 ) -> Response {
     if let Err(refusal) = require_config_target(&extensions, kind, id).await {
         return refusal;
+    }
+    // The target exists; the payload is what is wrong. Checked before the
+    // conversion, because `json_to_toml` has to answer *something* for a null
+    // and the answer it had was a lie.
+    if request.value.is_null() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_value",
+                "message": format!(
+                    "'{}' was sent as null, which this route does not store: TOML has no null, \
+                     and the empty string it used to become is a value the plugin cannot tell \
+                     from a setting you meant. Send the value you want, or leave the key unset",
+                    request.key
+                ),
+            })),
+        )
+            .into_response();
     }
     let id = id.to_string();
     let value = json_to_toml(&request.value);

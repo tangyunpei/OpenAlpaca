@@ -850,6 +850,37 @@ async fn a_sensitive_key_is_a_400_and_writes_nothing() {
     );
 }
 
+/// **`"value": null` is `400 invalid_value` and writes nothing.**
+///
+/// TOML has no null, and the conversion answered with the empty string — so a
+/// null landed in `.config/<name>.toml` as `key = ""`, a value the plugin
+/// receives and cannot tell from a setting the owner meant.
+#[tokio::test]
+async fn a_null_config_value_is_a_400_and_writes_nothing() {
+    let h = Harness::new();
+    h.write_plugin("present");
+    h.plugins.start().await.expect("plugin scan");
+
+    let (status, body) = h
+        .set_config("plugin", "present", "endpoint", serde_json::Value::Null)
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(error_word(&body), "invalid_value");
+    assert!(
+        body["message"].as_str().unwrap_or_default().contains("endpoint"),
+        "the refusal should name the key: {body}"
+    );
+    assert!(
+        !h.plugin_config_path("present").exists(),
+        "the refused write created the file anyway"
+    );
+
+    // The GET agrees: the key was never stored.
+    let (status, body) = h.get_config("plugin", "present").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.get("endpoint").is_none(), "{body}");
+}
+
 /// **Design §8: the `GET` "redacts sensitive keys".** Both halves of the
 /// predicate: a stored secret *reference*, and a plaintext value under a key
 /// the manifest *declares* sensitive — which is what a hand-edited
