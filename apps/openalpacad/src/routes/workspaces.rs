@@ -43,10 +43,13 @@
 //! closed, so a caller that forgets the field gets the plan and not the
 //! deletion. Its refusals are the re-base's, for the same reasons — with one
 //! difference: `path` is never walked up to an ancestor the way a re-base's
-//! *old* root is (`resolve_purge_root`, ruling R72). A destructive verb is the
-//! one place that walk must not run silently — `purge /repo/src` is a `422`
-//! `WORKSPACE_NOT_A_ROOT` naming `/repo` rather than a purge of the whole
-//! project for a path that named one file of it.
+//! *old* root is (`resolve_purge_root`, ruling R72), unless nothing of the
+//! caller's is recorded under the literal path at all — rows are the proof of
+//! a root (R75), so a path any of the four members still names exactly is
+//! purgeable by that path outright, marker walk or no. A destructive verb is
+//! the one place that walk must not run silently on a path rows do not back —
+//! `purge /repo/src` is a `422` `WORKSPACE_NOT_A_ROOT` naming `/repo` rather
+//! than a purge of the whole project for a path that named one file of it.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -187,23 +190,34 @@ fn resolve_destination(input: &str) -> Result<String, Response> {
     })
 }
 
-/// The purge **target**, taken almost literally — ruling R72.
+/// The purge **target**, taken almost literally — ruling R72, refined by R75.
 ///
 /// A destructive verb is the one place the old-root marker walk
 /// ([`resolve_root`]) must not run silently: `purge /repo/src` walking up to
 /// `/repo` would delete the whole project for a path that named one file of
 /// it, and the caller would only learn the resolved root from what the
-/// response deleted. So the given path is canonicalized and then checked
-/// exactly as a re-base destination is: a path that resolves to an
-/// **ancestor** is `422 WORKSPACE_NOT_A_ROOT`, naming that root, rather than
-/// purging it for a subdirectory the caller gave. A path that resolves to
-/// itself, or to no marker at all — a project already moved away, still
-/// purgeable by the root its rows recorded — is taken as given: `--all` and an
-/// explicit root cover every legitimate use, so there is nothing this walk
-/// would ever need to find on the caller's behalf.
+/// response deleted. So the given path is canonicalized, and then — **rows
+/// are the proof of a root (R75)** — taken as given outright when any of the
+/// four members (`file_assets`, `session`, `task`, `memory`) still names that
+/// exact literal path, before the marker walk is even consulted: a project
+/// moved out from under a monorepo's `.git`, its own `.openalpaca` gone with
+/// it, stays purgeable by the root its rows recorded even though the walk
+/// would otherwise resolve it to the monorepo root. Only a path *nothing*
+/// names is subjected to the ancestor check, exactly as a re-base destination
+/// is: a path that resolves to an **ancestor** is `422 WORKSPACE_NOT_A_ROOT`,
+/// naming that root, rather than purging it for a subdirectory the caller
+/// gave; a path that resolves to itself, or to no marker at all, is taken as
+/// given — and from there the ordinary `404` follows if nothing is recorded
+/// under it after all.
 #[allow(clippy::result_large_err)]
-fn resolve_purge_root(input: &str) -> Result<String, Response> {
+fn resolve_purge_root(store: &ArtifactStore<'_>, input: &str) -> Result<String, Response> {
     let literal = canonical_path(input)?;
+    let rows = store
+        .workspace_rows(&literal, None)
+        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string()))?;
+    if !rows.counts.is_empty() {
+        return Ok(literal);
+    }
     refuse_if_inside_another_root(literal, |literal, ancestor| {
         format!(
             "purge names the project root itself; {literal} is inside the project rooted at \
@@ -744,7 +758,7 @@ fn remove_purged_bytes(
 pub(crate) fn purge_workspaces(deps: &PurgeDeps<'_>, request: PurgeRequest) -> Response {
     let store = ArtifactStore::new(deps.db);
     let roots = match (request.path.as_deref(), request.all) {
-        (Some(path), false) => match resolve_purge_root(path) {
+        (Some(path), false) => match resolve_purge_root(&store, path) {
             Ok(root) => vec![root],
             Err(response) => return response,
         },

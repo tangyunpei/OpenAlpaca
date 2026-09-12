@@ -744,6 +744,48 @@ async fn a_path_inside_a_project_is_refused_naming_the_root_not_purged() {
     assert_eq!(f.row_count("SELECT COUNT(*) FROM session"), 0);
 }
 
+/// Ruling R75: rows are the proof of a root. A project moved out from under
+/// a monorepo's `.git` — its own `.openalpaca` gone with it — is nested under
+/// another marker the ordinary walk would resolve it to, but a row still
+/// names it exactly, so `resolve_purge_root` takes the literal path as given
+/// before ever consulting the walk.
+#[tokio::test]
+async fn a_root_rows_still_name_purges_literally_under_anothers_marker() {
+    let f = Fixture::new();
+    let ancestor = f.projects.path().join("mono");
+    std::fs::create_dir_all(ancestor.join(".git")).expect(".git marker");
+    // No `.openalpaca` of its own: the marker walk would otherwise resolve
+    // this to `ancestor` through the `.git` it finds there.
+    let moved_away = f.bare_dir("mono/moved-away");
+    f.session_with_log("s-moved", &moved_away);
+
+    let (status, body) = f.purge(Some(&moved_away), false, false).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(f.row_count("SELECT COUNT(*) FROM session"), 0);
+}
+
+/// The same shape with nothing recorded under the nested path still gets the
+/// ordinary ancestor refusal — R75 only takes a row's word for a root rows
+/// actually name; a path nothing names is still subject to the walk.
+#[tokio::test]
+async fn a_path_under_anothers_marker_with_no_rows_is_still_refused_naming_the_ancestor() {
+    let f = Fixture::new();
+    let ancestor = f.projects.path().join("mono2");
+    std::fs::create_dir_all(ancestor.join(".git")).expect(".git marker");
+    let never_recorded = f.bare_dir("mono2/never-recorded");
+    let ancestor = ancestor
+        .canonicalize()
+        .expect("canonicalize ancestor")
+        .to_string_lossy()
+        .into_owned();
+
+    let (status, body) = f.purge(Some(&never_recorded), false, true).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(error_code(&body), "WORKSPACE_NOT_A_ROOT");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains(&ancestor), "the ancestor is named: {message}");
+}
+
 #[tokio::test]
 async fn a_run_in_flight_refuses_the_whole_purge() {
     let f = Fixture::new();
