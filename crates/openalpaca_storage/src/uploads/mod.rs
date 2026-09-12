@@ -40,6 +40,13 @@
 //! not an upload, and handing it back would put it under the upload quota and
 //! on the end of a chat message.
 //!
+//! A match is an answer only while its bytes are still there. When the matched
+//! row's file is gone, the upload is placed and written as usual and that row is
+//! **re-addressed in place** (`storage_path`, `rel_path`, `project_root`, and
+//! `missing_since` cleared) rather than duplicated: the id every
+//! `conversation_message_attachments` row already names goes on resolving, and
+//! the bytes the caller just handed over are not discarded (I7).
+//!
 //! ## Write protocol (§4.2)
 //!
 //! ```text
@@ -175,10 +182,12 @@ pub struct NewUpload<'a> {
 /// What [`UploadStore::put`] resolved to.
 #[derive(Debug, Clone)]
 pub struct StoredUpload {
-    /// The row — the *existing* one when `deduped`.
+    /// The row — the *existing* one when `deduped`, and also when a match whose
+    /// bytes were gone was re-addressed onto the bytes this call wrote.
     pub asset: FileAsset,
-    /// `true` when an owner-scoped sha256 match returned an existing row and
-    /// nothing was written to disk or to the database.
+    /// `true` when an owner-scoped sha256 match returned an existing row whose
+    /// bytes are on disk, and nothing was written to disk or to the database.
+    /// A match whose bytes were gone is `false`: bytes were written.
     pub deduped: bool,
 }
 
@@ -230,14 +239,23 @@ impl<'a> UploadStore<'a> {
             // Dedup: the owner- and origin-scoped sha256 query, never the path.
             // A pre-D2 content-addressed row answers it just as well as a new
             // one — it carries `origin = 'upload'` from 036's column default.
-            if let Some(existing) = load_by_sha256(&tx, &sha256, new.owner_id)? {
+            let existing = load_by_sha256(&tx, &sha256, new.owner_id)?;
+            // I7: a dedup hit is only an answer while its bytes are there. A row
+            // whose file is gone — marked `missing_since` or not; a removed
+            // project directory leaves no mark at all — would otherwise discard
+            // the bytes this call brought and keep answering 410. One `stat` on
+            // the normal path buys that.
+            if let Some(row) = &existing
+                && Path::new(&row.storage_path).exists()
+            {
                 return Ok(StoredUpload {
-                    asset: existing,
+                    asset: row.clone(),
                     deduped: true,
                 });
             }
             // Same content, another owner's — or produced, not uploaded. Fall
-            // through and create a new row.
+            // through and create a new row. A hit whose bytes are gone falls
+            // through too, and is re-addressed in place below.
 
             fs::create_dir_all(&dir)
                 .map_err(|e| io_error(format!("Failed to create storage directory: {e}")))?;
@@ -250,6 +268,38 @@ impl<'a> UploadStore<'a> {
                 // Only ever our own reservation: nothing else could have created it.
                 remove_best_effort(&head_path);
                 return Err(e);
+            }
+
+            // The row whose bytes were gone keeps its id: a new row would leave
+            // every `conversation_message_attachments.file_id` that names it
+            // pointing at a 410. Only the address moves — the sha matches by
+            // definition, and the filename the user first chose is the one the
+            // transcript already shows.
+            if let Some(row) = &existing {
+                let update = tx.execute(
+                    "UPDATE file_assets
+                        SET storage_path = ?1, rel_path = ?2, project_root = ?3,
+                            missing_since = NULL, updated_at = datetime('now')
+                      WHERE id = ?4",
+                    rusqlite::params![
+                        head_path.to_string_lossy(),
+                        rel_path,
+                        project_root,
+                        row.id,
+                    ],
+                );
+                if let Err(e) = update {
+                    remove_best_effort(&head_path);
+                    return Err(db_error(format!("Failed to re-address file record: {e}")));
+                }
+                let asset = load_by_id(&tx, &row.id)?.ok_or_else(|| {
+                    db_error(format!("Upload {} vanished inside its own transaction", row.id))
+                })?;
+                tx.commit()?;
+                return Ok(StoredUpload {
+                    asset,
+                    deduped: false,
+                });
             }
 
             let id = uuid::Uuid::new_v4().to_string();

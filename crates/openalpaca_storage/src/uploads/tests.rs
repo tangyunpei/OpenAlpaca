@@ -115,6 +115,33 @@ impl Fixture {
             .unwrap()
     }
 
+    /// Whether — and, if so, when — a row is marked `missing_since`.
+    fn missing_since(&self, id: &str) -> Option<String> {
+        self.db
+            .with_connection(|conn| {
+                Ok(conn.query_row(
+                    "SELECT missing_since FROM file_assets WHERE id = ?1",
+                    rusqlite::params![id],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap()
+    }
+
+    /// Stamps a row the way the read path does when it finds nothing at
+    /// `storage_path`.
+    fn mark_missing(&self, id: &str) {
+        self.db
+            .with_connection(|conn| {
+                conn.execute(
+                    "UPDATE file_assets SET missing_since = datetime('now') WHERE id = ?1",
+                    rusqlite::params![id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
     /// `file_assets.kind` — nullable in the schema, so the accessor is too.
     fn kind(&self, id: &str) -> Option<String> {
         self.db
@@ -502,6 +529,63 @@ fn a_produced_artifact_never_answers_an_upload_dedup() {
     assert_eq!(
         std::fs::read(&stored.asset.storage_path).unwrap(),
         b"report"
+    );
+}
+
+/// I7: a dedup hit is an answer only while its bytes are there. With the file
+/// gone — here with no mark at all, which is what a removed project directory
+/// leaves — the new bytes must land, and the row must be re-addressed onto them
+/// rather than duplicated: its id is what the transcript's attachment names.
+#[test]
+fn a_re_upload_after_the_bytes_were_deleted_writes_them_and_keeps_the_row() {
+    let fx = Fixture::new();
+    let first = fx.put("owner-1", "notes.txt", b"hello");
+    std::fs::remove_file(&first.asset.storage_path).unwrap();
+
+    let again = fx.put("owner-1", "notes.txt", b"hello");
+
+    assert!(
+        !again.deduped,
+        "the matched row had no bytes, so bytes were written"
+    );
+    assert_eq!(
+        again.asset.id, first.asset.id,
+        "the id every attachment names is kept"
+    );
+    assert_ne!(
+        again.asset.storage_path, first.asset.storage_path,
+        "the row is re-addressed onto the file this call placed"
+    );
+    assert_eq!(std::fs::read(&again.asset.storage_path).unwrap(), b"hello");
+    assert_eq!(
+        fx.address(&again.asset.id).1.as_deref(),
+        Some("2026-09-05/02-notes.txt")
+    );
+    assert_eq!(fx.missing_since(&again.asset.id), None);
+    assert_eq!(
+        fx.repo().total_storage_bytes().unwrap(),
+        5,
+        "one row, not two"
+    );
+}
+
+#[test]
+fn a_re_upload_heals_a_row_already_marked_missing() {
+    let fx = Fixture::new();
+    let first = fx.put("owner-1", "notes.txt", b"hello");
+    std::fs::remove_file(&first.asset.storage_path).unwrap();
+    fx.mark_missing(&first.asset.id);
+    assert!(fx.missing_since(&first.asset.id).is_some());
+
+    let again = fx.put("owner-1", "notes.txt", b"hello");
+
+    assert!(!again.deduped);
+    assert_eq!(again.asset.id, first.asset.id);
+    assert_eq!(std::fs::read(&again.asset.storage_path).unwrap(), b"hello");
+    assert_eq!(
+        fx.missing_since(&again.asset.id),
+        None,
+        "the mark described the address the re-write replaced"
     );
 }
 
