@@ -454,6 +454,103 @@ async fn test_confirmation_timeout() {
     );
 }
 
+/// ADR-030's S4 refusal is a governance decision, not a failure of the tool —
+/// and a `Failed` extension's refusal quotes the extension's own error detail,
+/// which routinely says "timed out". Counted as a transient failure, a handful
+/// of refused calls opened the breaker for this agent, and an open breaker
+/// outlives the reload that fixes the extension.
+#[tokio::test]
+async fn a_withheld_capability_never_opens_the_circuit_breaker() {
+    use crate::tools::extensions::{ExtensionId, ExtensionState, FailureReason, Transition};
+
+    let registry = Arc::new(ToolRegistry::default());
+    let ext = ExtensionId::mcp("github");
+    let generation = match registry
+        .extensions()
+        .begin(&ext, ExtensionState::Enabling, None)
+    {
+        Transition::Took(g) => g,
+        other => panic!("E0 refused: {other:?}"),
+    };
+    registry.extensions().restore(&ext);
+    registry
+        .extensions()
+        .record_tools(&ext, ["github__create_issue".to_string()]);
+    assert!(
+        registry
+            .extensions()
+            .commit(&ext, ExtensionState::Enabled)
+    );
+    // An MCP-backed tool: the gate is keyed on the backend's server name and
+    // the generation stamped into this handle.
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "github__create_issue".to_string(),
+                description: "Create an issue".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::Mcp {
+                client: Arc::new(openalpaca_mcp::McpClient::disconnected_for_tests("github")),
+                remote_name: "create_issue".to_string(),
+                server_name: "github".to_string(),
+                generation,
+            },
+            provides_capabilities: vec!["github__create_issue".to_string()],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "mcp:github".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+    // The child died on a handshake that timed out — the detail the S4 refusal
+    // quotes back to the model.
+    assert!(registry.extensions().mark_failed(
+        &ext,
+        generation,
+        FailureReason::Crashed,
+        "stdio handshake timed out after 10s",
+    ));
+
+    let sandbox = SandboxManager::new(
+        registry,
+        EventBus::default(),
+        &CircuitBreakerConfig::default(),
+    );
+    let policy = make_policy("agent-1");
+    let ctx = make_ctx_for_task("agent-1", "task-1");
+
+    // Well past the default failure_threshold of 5.
+    for attempt in 0..12 {
+        let err = sandbox
+            .execute_tool(&make_tool_call("github__create_issue"), &policy, &ctx)
+            .await
+            .expect_err("a failed extension's tool is withheld");
+        assert!(
+            crate::tools::extensions::is_withheld_refusal(&err),
+            "attempt {attempt} must be the S4 refusal, not a tool error: {err}"
+        );
+        assert!(
+            err.contains("timed out"),
+            "and it quotes the detail the breaker used to key on: {err}"
+        );
+    }
+
+    // The breaker is untouched: the next call is still refused by the gate, not
+    // by a breaker that has to time out before the owner's reload can help.
+    assert!(
+        sandbox
+            .circuit_breaker
+            .check("agent-1", "github__create_issue")
+            .is_ok(),
+        "a withheld capability must never open the breaker"
+    );
+}
+
 // ---------- Task 9: annotation-derived confirmation + approval cache ----------
 
 /// Build a registry that also has a tool with `destructive_hint=true`.

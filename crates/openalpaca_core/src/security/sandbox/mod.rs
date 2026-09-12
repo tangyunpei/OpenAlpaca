@@ -11,6 +11,7 @@ use crate::security::capabilities::{Allowlist, CapabilityManager};
 use crate::security::circuit_breaker::{ToolCircuitBreaker, is_transient_tool_error};
 use crate::security::confirmation::{ConfirmationBroker, ConfirmationRequest};
 use crate::security::sanitizer::InputSanitizer;
+use crate::tools::extensions::is_withheld_refusal;
 use crate::tools::registry::ToolContext;
 use crate::tools::ToolRegistry;
 use chrono::Utc;
@@ -365,7 +366,14 @@ impl SandboxManager {
             }
             Ok(Err(err)) => {
                 self.emit_tool_executed(agent_id, tool_call, false, duration_ms, task_id, session_id);
-                if is_transient_tool_error(&err) {
+                // A withheld capability is a governance decision, not a failure
+                // of the tool (ADR-030's S4). The refusal quotes the
+                // extension's own error detail, which routinely contains
+                // "timed out" — so counting it let a few refused calls open the
+                // breaker for this agent, and an open breaker outlives the
+                // reload that fixes the extension. Nothing here backs off into
+                // success.
+                if is_transient_tool_error(&err) && !is_withheld_refusal(&err) {
                     self.circuit_breaker
                         .record_failure_for_task(agent_id, &tool_call.name, task_id);
                 }

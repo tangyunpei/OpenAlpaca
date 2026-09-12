@@ -31,14 +31,37 @@ pub struct Described {
     pub remedy: Option<String>,
 }
 
+/// The opening of a model-facing refusal about one named tool.
+const WITHHELD_PREFIX: &str = "tool '";
+/// What follows the tool name in the same refusal.
+const WITHHELD_INFIX: &str = "' is unavailable: ";
+
+/// Whether `err` is one of this table's withheld-capability refusals about a
+/// named tool, as [`Described::render_model`] builds it.
+///
+/// A *recogniser* exists for one consumer: the tool circuit breaker must not
+/// count a governance decision as a failure of the tool. A `Failed`
+/// extension's refusal quotes the extension's own error `detail` — an MCP
+/// child's stderr, an HTTP body — which routinely says "timed out", which is
+/// exactly what
+/// [`is_transient_tool_error`](crate::security::circuit_breaker::is_transient_tool_error)
+/// keys on. Counted, a handful of refused calls opens the breaker for the agent
+/// and the open breaker then outlives the reload that fixes the extension:
+/// nothing about the tool failed, and nothing about it can be fixed by backing
+/// off.
+pub fn is_withheld_refusal(err: &str) -> bool {
+    err.starts_with(WITHHELD_PREFIX) && err.contains(WITHHELD_INFIX)
+}
+
 impl Described {
     /// `tool '<name>' is unavailable: <fact>. <instruction>. <prohibition>.`
     ///
     /// The tool name is omitted when the refusal is not about one particular
-    /// tool (a surface-assembly or run pre-flight refusal).
+    /// tool (a surface-assembly or run pre-flight refusal) — so only the named
+    /// form is recognisable later by [`is_withheld_refusal`].
     pub fn render_model(&self, tool: Option<&str>) -> String {
         let mut out = match tool {
-            Some(name) => format!("tool '{name}' is unavailable: {}", self.fact),
+            Some(name) => format!("{WITHHELD_PREFIX}{name}{WITHHELD_INFIX}{}", self.fact),
             None => self.fact.clone(),
         };
         for part in [self.instruction.as_ref(), self.prohibition.as_ref()]

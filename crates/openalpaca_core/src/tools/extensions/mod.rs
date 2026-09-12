@@ -23,7 +23,7 @@ pub mod scan;
 #[cfg(test)]
 mod scan_tests;
 
-pub use describe::{Audience, Described};
+pub use describe::{Audience, Described, is_withheld_refusal};
 pub use ledger::{CallGuard, ExtensionLedger, ExtensionRecord, ScopedRun, Transition};
 pub use scan::{DependentScan, PendingScan, ScanOutcome, WithdrawnSet};
 

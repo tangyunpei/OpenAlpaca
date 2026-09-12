@@ -174,6 +174,65 @@ impl DaemonConfig {
             );
             self.orchestrator.routing.tool_selection = "core_union".to_string();
         }
+        // ── Orchestrator > Sessions (§5.4) ──
+        clamp_val(
+            &mut self.orchestrator.sessions.log_max_session_bytes,
+            1024 * 1024,
+            64 * 1024 * 1024 * 1024,
+            "sessions.log_max_session_bytes",
+        );
+        clamp_val(
+            &mut self.orchestrator.sessions.log_max_total_bytes,
+            1024 * 1024,
+            64 * 1024 * 1024 * 1024,
+            "sessions.log_max_total_bytes",
+        );
+        // The global cap has to leave room for one session's own cap, or the
+        // boot sweep is permanently over budget against a writer that is
+        // permanently within its own (§5.4 protects an active session's log).
+        if self.orchestrator.sessions.log_max_total_bytes
+            < self.orchestrator.sessions.log_max_session_bytes
+        {
+            tracing::warn!(
+                "Config 'sessions.log_max_total_bytes': {} is below \
+                 sessions.log_max_session_bytes {}, raising it to match",
+                self.orchestrator.sessions.log_max_total_bytes,
+                self.orchestrator.sessions.log_max_session_bytes
+            );
+            self.orchestrator.sessions.log_max_total_bytes =
+                self.orchestrator.sessions.log_max_session_bytes;
+        }
+        // `0` disables the age sweep and is the default (T12), so the floor is
+        // zero; the ceiling only keeps a typo out of the arithmetic.
+        clamp_val(
+            &mut self.orchestrator.sessions.log_retention_days,
+            0,
+            3650,
+            "sessions.log_retention_days",
+        );
+        // The ceiling is the envelope cap (`session_log::ENVELOPE_DATA_CAP_BYTES`):
+        // above it a result would stay "inline" only to be cut to a 2 KB preview
+        // by the envelope instead of spilling, which is the outcome §5.4's
+        // threshold exists to prevent.
+        clamp_val(
+            &mut self.orchestrator.sessions.tool_result_inline_bytes,
+            4096,
+            crate::session_log::ENVELOPE_DATA_CAP_BYTES,
+            "sessions.tool_result_inline_bytes",
+        );
+        clamp_val(
+            &mut self.orchestrator.sessions.snapshot_max_bytes,
+            1024 * 1024,
+            1024 * 1024 * 1024,
+            "sessions.snapshot_max_bytes",
+        );
+        // ── Extensions ──
+        clamp_val(
+            &mut self.extensions.drain_timeout_secs,
+            1,
+            120,
+            "extensions.drain_timeout_secs",
+        );
         // ── Execution > Agent Defaults ──
         clamp_val(
             &mut self.execution.agent_defaults.max_rounds,

@@ -348,6 +348,73 @@ fn test_routing_validate_clamps() {
     assert_eq!(config.orchestrator.routing.tool_selection, "core_union");
 }
 
+/// Every `[orchestrator.sessions]` and `[extensions]` knob is clamped like the
+/// rest of the table — they shipped without ranges, so a hand-edited
+/// `daemon.toml` could set a 0-byte log cap (the sweep evicts everything it may
+/// touch on every boot), a 1-byte inline threshold (every result spills), or a
+/// 0-second drain (a disable kills in-flight calls outright).
+#[test]
+fn test_sessions_and_extensions_validate_clamps() {
+    // Below the floor.
+    let mut config = DaemonConfig::default();
+    config.orchestrator.sessions.log_max_session_bytes = 0;
+    config.orchestrator.sessions.log_max_total_bytes = 1;
+    config.orchestrator.sessions.tool_result_inline_bytes = 1;
+    config.orchestrator.sessions.snapshot_max_bytes = 0;
+    config.extensions.drain_timeout_secs = 0;
+    config.validate();
+    assert_eq!(
+        config.orchestrator.sessions.log_max_session_bytes,
+        1024 * 1024
+    );
+    assert_eq!(config.orchestrator.sessions.log_max_total_bytes, 1024 * 1024);
+    assert_eq!(config.orchestrator.sessions.tool_result_inline_bytes, 4096);
+    assert_eq!(config.orchestrator.sessions.snapshot_max_bytes, 1024 * 1024);
+    assert_eq!(config.extensions.drain_timeout_secs, 1);
+    // `0` is the documented "off" for the age sweep, and must survive.
+    assert_eq!(config.orchestrator.sessions.log_retention_days, 0);
+
+    // Above the ceiling.
+    let mut config = DaemonConfig::default();
+    config.orchestrator.sessions.log_max_session_bytes = u64::MAX;
+    config.orchestrator.sessions.log_max_total_bytes = u64::MAX;
+    config.orchestrator.sessions.log_retention_days = u32::MAX;
+    config.orchestrator.sessions.tool_result_inline_bytes = 8 * 1024 * 1024;
+    config.orchestrator.sessions.snapshot_max_bytes = u64::MAX;
+    config.extensions.drain_timeout_secs = 86_400;
+    config.validate();
+    assert_eq!(
+        config.orchestrator.sessions.log_max_session_bytes,
+        64 * 1024 * 1024 * 1024
+    );
+    assert_eq!(
+        config.orchestrator.sessions.log_max_total_bytes,
+        64 * 1024 * 1024 * 1024
+    );
+    assert_eq!(config.orchestrator.sessions.log_retention_days, 3650);
+    assert_eq!(
+        config.orchestrator.sessions.tool_result_inline_bytes,
+        crate::session_log::ENVELOPE_DATA_CAP_BYTES,
+        "the inline threshold may not exceed the record envelope it must fit"
+    );
+    assert_eq!(
+        config.orchestrator.sessions.snapshot_max_bytes,
+        1024 * 1024 * 1024
+    );
+    assert_eq!(config.extensions.drain_timeout_secs, 120);
+
+    // A global cap below one session's own is raised to match, not left to
+    // fight the writer.
+    let mut config = DaemonConfig::default();
+    config.orchestrator.sessions.log_max_session_bytes = 512 * 1024 * 1024;
+    config.orchestrator.sessions.log_max_total_bytes = 2 * 1024 * 1024;
+    config.validate();
+    assert_eq!(
+        config.orchestrator.sessions.log_max_total_bytes,
+        512 * 1024 * 1024
+    );
+}
+
 /// A hand-edited `daemon.toml` still carrying the purged
 /// `execution.skill_defaults.global_tool_deny` key loads clean — the key is
 /// ignored (and the loader warns once), and every other key in the file is
