@@ -591,9 +591,12 @@ fn plan_entries(root: &str, plan: &PurgePlan) -> Vec<serde_json::Value> {
         ),
     ];
     // `false`: a purge is only ever a project root (the home store is refused
-    // long before this runs), so `state/`, `config/` and `plugins/` are not
-    // the store's own here — they are exactly the unknown names this list
-    // exists to report (Minor #4).
+    // long before this runs), so `state/` and `plugins/` are not the store's
+    // own here — they are exactly the unknown names this list exists to
+    // report (Minor #4). `config` stays off this list in either scope: the
+    // project README reserves it too (the "reserved names" line above already
+    // names it, "skills/, config/"), and `unknown_entries` knows so — an
+    // existing `<project>/.openalpaca/config/` is named once, not twice.
     for name in store::unknown_entries(&Path::new(root).join(store::STORE_DIR_NAME), false) {
         entries.push(plan_entry(
             &name,

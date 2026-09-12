@@ -303,29 +303,68 @@ fn unknown_entries_names_only_what_the_store_did_not_create() {
 }
 
 #[test]
-fn unknown_entries_treats_state_config_and_plugins_as_home_only_names() {
+fn unknown_entries_treats_state_and_plugins_as_home_only_names() {
     let tmp = tempdir().unwrap();
     let scope = StoreScope::Project(tmp.path().to_path_buf());
     let root = ensure_store(&scope).unwrap();
     fs::create_dir_all(root.join("state")).unwrap();
-    fs::create_dir_all(root.join("config")).unwrap();
     fs::create_dir_all(root.join("plugins")).unwrap();
 
     // Home-root names, so a project root does not get a pass on them: they
     // are exactly the kind of name this list exists to report.
     assert_eq!(
         unknown_entries(&root, false),
-        vec![
-            "config".to_string(),
-            "plugins".to_string(),
-            "state".to_string()
-        ],
-        "under a project root, state/config/plugins are unknown like any other name"
+        vec!["plugins".to_string(), "state".to_string()],
+        "under a project root, state/plugins are unknown like any other name"
     );
-    // The same directory, read as the home root, waves all three through.
+    // The same directory, read as the home root, waves both through.
     assert!(
         unknown_entries(&root, true).is_empty(),
-        "the home root owns state/, config/ and plugins/ beside its content dirs"
+        "the home root owns state/ and plugins/ beside its content dirs"
+    );
+}
+
+/// The Minor #4 regression the round-2 findings caught: `config` is reserved
+/// by the *project* README too ("`memory/`, `skills/`, `config/` — reserved;
+/// not created until used"), even though it is not a [`ContentKind`] — so an
+/// existing `<project>/.openalpaca/config/` must be named once, by the plan's
+/// own `skills/, config/` keep line, and not a second time here.
+#[test]
+fn unknown_entries_treats_config_as_reserved_in_both_scopes() {
+    let tmp = tempdir().unwrap();
+    let scope = StoreScope::Project(tmp.path().to_path_buf());
+    let root = ensure_store(&scope).unwrap();
+    fs::create_dir_all(root.join("config")).unwrap();
+    fs::create_dir_all(root.join("notes")).unwrap();
+
+    assert_eq!(
+        unknown_entries(&root, false),
+        vec!["notes".to_string()],
+        "config/ is a reserved project name, not an unknown one — notes/ still is"
+    );
+    // The home root owns config/ too, but not notes/ — it is unknown to
+    // either scope, so it stays in both answers.
+    assert_eq!(
+        unknown_entries(&root, true),
+        vec!["notes".to_string()],
+        "config/ is known at the home root as well"
+    );
+}
+
+/// §1.3 rule 1: dot-prefixed names are reserved for store metadata forever.
+/// `.versions/` lives nested under `artifacts/**/` today and never at a store
+/// root, but the reservation holds regardless of whether anything currently
+/// writes there.
+#[test]
+fn unknown_entries_reserves_dot_versions_even_though_nothing_writes_it_at_the_root() {
+    let tmp = tempdir().unwrap();
+    let scope = StoreScope::Project(tmp.path().to_path_buf());
+    let root = ensure_store(&scope).unwrap();
+    fs::create_dir_all(root.join(".versions")).unwrap();
+
+    assert!(
+        unknown_entries(&root, false).is_empty(),
+        ".versions is reserved store metadata, not an unknown name"
     );
 }
 
