@@ -19,6 +19,21 @@ function invalidateRunLog(
   return taskId === null ? [] : [qk.tasks.eventLog(taskId)];
 }
 
+/**
+ * The four words a run stops on (§5.6b's `interrupted` included).
+ *
+ * Exported so the chat session and this map cannot drift: both decide the same
+ * question — has this run finished — off the same list.
+ */
+export function isTerminalRunStatus(status: string): boolean {
+  return (
+    status === "completed" ||
+    status === "failed" ||
+    status === "cancelled" ||
+    status === "interrupted"
+  );
+}
+
 /** Retry transport failures and 5xx; never retry a 4xx the daemon meant. */
 function shouldRetry(failureCount: number, error: unknown): boolean {
   if (error instanceof ApiError && !error.isRetryable) return false;
@@ -55,9 +70,29 @@ export function invalidationKeysFor(
   event: ServerEvent,
 ): readonly (readonly unknown[])[] {
   switch (event.type) {
+    /**
+     * A run reaching a terminal state also changed the **conversation**.
+     *
+     * `persist_completion_report` writes the model-authored report and its
+     * `role='artifact'` rows before the daemon publishes `TaskCompleted` /
+     * `TaskFailed`, and nothing else announces them: `chat_stream_ended` comes
+     * from the SSE worker and `session_changed` from a project switch or a
+     * follow-up claim. Without this the report — the run pill and the artifact
+     * chips of GAP-23 — waited for the user's next turn, a reconnect or a
+     * 30 s-stale remount. The session's `message_count`/`last_message_at`
+     * moved with it, so the sidebar's list is stale too.
+     *
+     * A non-terminal frame is only the run's own progress and stays narrow:
+     * `running` arrives many times per workflow and must not refetch the
+     * transcript on each one.
+     */
+    case "task_status":
+      return isTerminalRunStatus(event.status)
+        ? [qk.tasks.all(), qk.chat.all(), qk.sessions.all()]
+        : [qk.tasks.all()];
+
     // `["tasks"]` is a prefix of every task key, so one entry refreshes the
     // list, the detail, the timeline and the per-run event log together.
-    case "task_status":
     case "workflow_started":
     case "workflow_progress":
     case "workflow_steered":

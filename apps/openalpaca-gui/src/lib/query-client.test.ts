@@ -53,7 +53,9 @@ function invalidated(client: QueryClient, key: readonly unknown[]): boolean {
 
 describe("invalidationKeysFor", () => {
   it("refreshes every task key from one run-state frame", () => {
-    expect(invalidationKeysFor(event("task_status"))).toEqual([qk.tasks.all()]);
+    expect(
+      invalidationKeysFor(event("task_status", { status: "running" })),
+    ).toEqual([qk.tasks.all()]);
     expect(invalidationKeysFor(event("workflow_started"))).toEqual([
       qk.tasks.all(),
     ]);
@@ -63,6 +65,28 @@ describe("invalidationKeysFor", () => {
     expect(invalidationKeysFor(event("workflow_steered"))).toEqual([
       qk.tasks.all(),
     ]);
+  });
+
+  /**
+   * The persisted completion report is written before `TaskCompleted` is
+   * published and announced by nothing else, so a run that finishes has to
+   * refetch the transcript — and the session list, whose `message_count` and
+   * `last_message_at` moved with it.
+   */
+  it("refreshes the transcript when a run reaches a terminal state", () => {
+    for (const status of ["completed", "failed", "cancelled", "interrupted"]) {
+      expect(invalidationKeysFor(event("task_status", { status }))).toEqual([
+        qk.tasks.all(),
+        qk.chat.all(),
+        qk.sessions.all(),
+      ]);
+    }
+    // Progress is the run's alone: `running` arrives many times per workflow.
+    for (const status of ["queued", "running", "paused"]) {
+      expect(invalidationKeysFor(event("task_status", { status }))).toEqual([
+        qk.tasks.all(),
+      ]);
+    }
   });
 
   /**
