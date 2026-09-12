@@ -50,6 +50,26 @@ impl StreamResult {
     }
 }
 
+/// Percent-encode a path for a header value (R81) — non-ASCII, the control
+/// range, and `%` itself, nothing else.
+///
+/// Not `urlencoding::encode`: that escapes `/` too, which would turn every
+/// ordinary path in a request log into `%2FUsers%2F…` for no gain. What has to
+/// be escaped is what a header value cannot carry; `%` goes with it so that a
+/// directory literally named `50%20off` does not decode into `50 off` at the
+/// other end.
+fn encode_header_path(path: &str) -> String {
+    let mut encoded = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        if byte == b'%' || !(0x20..=0x7e).contains(&byte) {
+            encoded.push_str(&format!("%{byte:02X}"));
+        } else {
+            encoded.push(byte as char);
+        }
+    }
+    encoded
+}
+
 /// Where a CLI turn goes: which project it belongs to, and which conversation.
 ///
 /// **The project** is the CLI's own working directory, sent as
@@ -95,9 +115,15 @@ impl ChatTarget {
     }
 
     /// The extra request headers this turn carries. Empty is a real answer.
+    ///
+    /// The path is **percent-encoded UTF-8** (ruling R81): a header value is
+    /// bytes, and the daemon's read (`HeaderValue::to_str`) refuses anything
+    /// above `\x7f`, so a CJK project directory — an ordinary path — used to be
+    /// dropped in transit and the turn ran with no project at all. Only what
+    /// must be escaped is: a plain ASCII path is its own encoding.
     pub fn headers(&self) -> Vec<(&'static str, String)> {
         match &self.workspace_path {
-            Some(path) => vec![("x-workspace-path", path.clone())],
+            Some(path) => vec![("x-workspace-path", encode_header_path(path))],
             None => Vec::new(),
         }
     }

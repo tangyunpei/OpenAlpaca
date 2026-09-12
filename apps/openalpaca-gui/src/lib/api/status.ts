@@ -23,6 +23,7 @@
  */
 
 import { apiFetch } from "../http";
+import { workspaceHeader } from "../workspace-header";
 import type { DaemonStatus } from "./types";
 
 /**
@@ -37,10 +38,7 @@ export async function getDaemonStatus(
   signal?: AbortSignal,
 ): Promise<DaemonStatus> {
   return await apiFetch<DaemonStatus>("/v1/status", {
-    headers:
-      workspacePath === null
-        ? undefined
-        : { "x-workspace-path": workspacePath },
+    headers: workspaceHeader(workspacePath),
     signal,
   });
 }

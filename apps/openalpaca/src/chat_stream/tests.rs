@@ -221,6 +221,29 @@ fn a_turn_carries_the_working_directory_as_its_project() {
     );
 }
 
+/// R81: a header value cannot carry a non-ASCII byte, so a CJK project path —
+/// an ordinary one here — is percent-encoded UTF-8 and the daemon decodes it.
+/// Before this it was dropped in transit and the turn ran with no project.
+#[test]
+fn a_cjk_working_directory_is_sent_as_ascii() {
+    let target = ChatTarget::for_workspace(Some("/Users/jun/项目/openalpaca".to_string()));
+    let headers = target.headers();
+    let (name, value) = headers.first().expect("one header");
+    assert_eq!(*name, "x-workspace-path");
+    assert_eq!(value, "/Users/jun/%E9%A1%B9%E7%9B%AE/openalpaca");
+    assert!(
+        value.is_ascii(),
+        "a header value the daemon can read at all: {value}"
+    );
+
+    // A literal `%` is escaped too, so the daemon's decode gives the path back
+    // byte for byte rather than turning `50%20off` into `50 off`.
+    assert_eq!(
+        ChatTarget::for_workspace(Some("/tmp/50%20off".to_string())).headers()[0].1,
+        "/tmp/50%2520off",
+    );
+}
+
 /// A CWD the CLI could not canonicalize is no project at all: sending a
 /// relative or unresolvable path would be resolved against the *daemon's*
 /// directory, which is the bug R22 closed.

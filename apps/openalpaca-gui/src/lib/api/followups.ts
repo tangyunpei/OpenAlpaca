@@ -22,6 +22,7 @@
  */
 
 import { apiFetch, ApiError } from "../http";
+import { workspaceHeader } from "../workspace-header";
 
 export type FollowupKind = "followup" | "unprocessed_steering";
 export type FollowupStatus = "queued" | "running" | "done" | "cancelled";
@@ -90,7 +91,7 @@ export async function queueFollowup(
     },
     ...(workspacePath === undefined
       ? {}
-      : { headers: { "x-workspace-path": workspacePath } }),
+      : { headers: workspaceHeader(workspacePath) }),
   });
 }
 

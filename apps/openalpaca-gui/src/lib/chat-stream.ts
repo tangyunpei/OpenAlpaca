@@ -22,6 +22,7 @@
 import type { AttachmentRef, ChatSendResponse } from "./api/types";
 import { ensureConnection, sseUrl } from "./connection";
 import { apiFetch } from "./http";
+import { workspaceHeader } from "./workspace-header";
 
 // ── Payloads ────────────────────────────────────────────────────────────────
 
@@ -382,9 +383,7 @@ export async function sendChatMessage(
         ? {}
         : { session_id: options.sessionId }),
     },
-    headers: options.workspacePath
-      ? { "x-workspace-path": options.workspacePath }
-      : undefined,
+    headers: workspaceHeader(options.workspacePath),
     signal: options.signal,
   });
 }
