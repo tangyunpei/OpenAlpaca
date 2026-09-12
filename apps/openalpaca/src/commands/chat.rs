@@ -46,9 +46,10 @@ pub async fn run(args: ChatArgs) -> Result<()> {
 
     if args.resume || args.session.is_some() {
         let client = DaemonClient::connect()?;
+        let lane_key = sessions::default_lane_key(&client).await?;
         let session_id = match args.session.as_deref() {
-            Some(id) => id.to_string(),
-            None => pick_session(&client, interactive).await?,
+            Some(id) => named_session(&client, id, &lane_key).await?,
+            None => pick_session(&client, &lane_key, interactive).await?,
         };
         let resumed = resume(&client, &session_id).await?;
         print_transcript_tail(&client, &resumed.id).await?;
@@ -65,15 +66,72 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     pipe_mode(&target).await
 }
 
+/// The conversation `--session <id>` names — checked before anything is
+/// activated.
+///
+/// `POST /v1/sessions/{id}/activate` is owner-scoped, not lane-scoped: a
+/// conversation on another of this owner's lanes (a connector's, say) activates
+/// happily, **archiving whatever that lane had live**, and only then does
+/// `POST /v1/chat` refuse the turn with `409 SESSION_LANE_MISMATCH` — with
+/// nothing rolled back. So the lane is compared first, on a read that changes
+/// nothing. Reads are unscoped by design (R40), which is what makes this
+/// answerable locally rather than by attempting the write and undoing it.
+async fn named_session(client: &DaemonClient, id: &str, lane_key: &str) -> Result<String> {
+    let session: SessionItem = client
+        .get(&format!("/v1/sessions/{}", urlencoding::encode(id)))
+        .await
+        .with_context(|| format!("Could not read conversation {id}"))?;
+    refuse_foreign_lane(&session, lane_key)?;
+    Ok(session.id)
+}
+
+/// A conversation this CLI cannot continue, refused before it is disturbed.
+fn refuse_foreign_lane(session: &SessionItem, lane_key: &str) -> Result<()> {
+    if session.lane_key == lane_key {
+        return Ok(());
+    }
+    bail!(
+        "Conversation {} belongs to lane {}, and this CLI talks on {}. Resuming it here \
+         would archive {}'s own live conversation and the turn would still be refused \
+         (409 SESSION_LANE_MISMATCH), so nothing was touched. `openalpaca sessions --all` \
+         lists every lane's conversations.",
+        session.id,
+        session.lane_key,
+        lane_key,
+        session.lane_key
+    )
+}
+
+/// The project a `--resume` is scoped to (plan §5.7): the working directory's
+/// own project root, resolved exactly as the daemon resolves a turn's
+/// `x-workspace-path`, so the value filtered on is the one `workspace_id`
+/// holds.
+///
+/// `None` — a directory under no project marker, or one inside the home store
+/// — leaves the listing lane-wide, because "conversations with no project" is
+/// not a filter `GET /v1/sessions` can express: its `workspace_id` is an
+/// equality on a column that is NULL for exactly those rows. A turn from such a
+/// directory carries no project either, so the two agree.
+fn resume_workspace() -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    sessions::resolve_workspace_filter(&cwd.to_string_lossy()).ok()
+}
+
 /// Which conversation `--resume` continues.
 ///
-/// Interactively that is the user's choice from this lane's conversations,
-/// newest first. With no terminal to ask at, it is the most recent — the same
-/// row the picker would open on — because a prompt written to a pipe is a
-/// hang, not a question.
-async fn pick_session(client: &DaemonClient, interactive: bool) -> Result<String> {
-    let rows = sessions::lane_sessions(client, None, 25).await?;
-    let newest = sessions::require_one(&rows)?;
+/// **This project's conversations, not the lane's** (plan §5.7): the lane is
+/// shared with the GUI and with every other checkout, so a lane-wide list
+/// continued another project's conversation — and R49 then let that
+/// conversation's own project override the working directory, silently moving
+/// the turn to a project the caller was not in.
+///
+/// Interactively that is the user's choice from those, newest first. With no
+/// terminal to ask at, it is the most recent — the same row the picker would
+/// open on — because a prompt written to a pipe is a hang, not a question.
+async fn pick_session(client: &DaemonClient, lane_key: &str, interactive: bool) -> Result<String> {
+    let workspace_id = resume_workspace();
+    let rows = sessions::lane_sessions_on(client, lane_key, workspace_id.as_deref(), 25).await?;
+    let newest = sessions::require_one(&rows, workspace_id.as_deref())?;
     if !interactive {
         return Ok(newest.id.clone());
     }
@@ -325,6 +383,41 @@ mod tests {
             .args;
         assert_eq!(args.session.as_deref(), Some("sess-1"));
         assert_eq!(args.message.as_deref(), Some("hi"));
+    }
+
+    fn session_on(lane_key: &str) -> SessionItem {
+        SessionItem {
+            id: "0f2c9a41-3b7d-4e58-9a10-6c1f2d3e4b55".to_string(),
+            lane_key: lane_key.to_string(),
+            source: lane_key.rsplit(':').next().unwrap_or_default().to_string(),
+            title: "Connector audit".to_string(),
+            workspace_id: Some("/Users/dev/openalpaca".to_string()),
+            status: "archived".to_string(),
+            message_count: 12,
+            updated_at: "2026-09-06 10:00:00".to_string(),
+        }
+    }
+
+    /// The bug this closes: `--session <id>` on a connector's conversation
+    /// activated it there — archiving that lane's live conversation — and the
+    /// turn was then refused anyway, with nothing rolled back.
+    #[test]
+    fn a_conversation_on_another_lane_is_refused_before_it_is_activated() {
+        let err = refuse_foreign_lane(&session_on("alice:telegram"), "alice:gui")
+            .expect_err("a conversation on another lane is not resumable from here")
+            .to_string();
+        assert!(err.contains("alice:telegram"), "{err}");
+        assert!(err.contains("alice:gui"), "{err}");
+        assert!(
+            err.contains("nothing was touched"),
+            "the refusal says the conversation was left alone: {err}"
+        );
+        assert!(err.contains("sessions --all"), "{err}");
+    }
+
+    #[test]
+    fn a_conversation_on_this_lane_resumes() {
+        assert!(refuse_foreign_lane(&session_on("alice:gui"), "alice:gui").is_ok());
     }
 
     /// `turn 1` … `turn n`, alternating who said it, oldest first — the order

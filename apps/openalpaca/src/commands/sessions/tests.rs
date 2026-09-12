@@ -191,6 +191,63 @@ fn the_picker_label_says_enough_to_choose_by() {
 
 #[test]
 fn resuming_nothing_is_an_error_with_a_next_step() {
-    let err = require_one(&[]).unwrap_err().to_string();
+    let err = require_one(&[], None).unwrap_err().to_string();
     assert!(err.contains("send a message first"), "{err}");
+}
+
+/// `chat --resume` asks in one project (plan §5.7), so "none here" is a
+/// different answer from "none at all" and must not read as the lane being
+/// empty when the daemon is full of other projects' conversations.
+#[test]
+fn resuming_nothing_in_this_project_says_which_project() {
+    let err = require_one(&[], Some("/repo/one")).unwrap_err().to_string();
+    assert!(err.contains("/repo/one"), "{err}");
+    assert!(err.contains("sessions --all"), "{err}");
+    assert!(err.contains("--session <id>"), "{err}");
+}
+
+/// What `--resume` may continue: this lane's rows, and — since §5.7 scopes the
+/// resume to the working directory's project — only that project's.
+///
+/// The lane half was already client-side (the route has no lane filter); the
+/// project half is sent as `workspace_id=` *and* re-checked here, so a row
+/// bound to another project, or to none, never reaches the picker.
+#[test]
+fn only_this_lanes_conversations_in_this_project_are_resumable() {
+    let page = vec![
+        row(|item| item.id = "mine".to_string()),
+        row(|item| {
+            item.id = "other-project".to_string();
+            item.workspace_id = Some("/repo/two".to_string());
+        }),
+        row(|item| {
+            item.id = "no-project".to_string();
+            item.workspace_id = None;
+        }),
+        row(|item| {
+            item.id = "other-lane".to_string();
+            item.lane_key = "alice:telegram".to_string();
+        }),
+        row(|item| {
+            item.id = "another-owner".to_string();
+            item.lane_key = "bob:gui".to_string();
+        }),
+    ];
+
+    let here = rows_here(page.clone(), "alice:gui", Some("/Users/dev/openalpaca"));
+    assert_eq!(
+        here.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+        vec!["mine"]
+    );
+
+    // With no project to narrow by — a working directory under no marker —
+    // the lane is still the boundary, and every one of its rows is on offer.
+    let lane_wide = rows_here(page, "alice:gui", None);
+    assert_eq!(
+        lane_wide
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["mine", "other-project", "no-project"]
+    );
 }

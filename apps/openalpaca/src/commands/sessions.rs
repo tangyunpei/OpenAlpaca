@@ -186,6 +186,39 @@ pub(crate) fn resolve_workspace_filter(path: &str) -> Result<String> {
     })
 }
 
+/// The lane a CLI turn lands on, as the daemon reports it.
+///
+/// Read rather than assumed: `{user}:gui` is how the lane is named today, and
+/// the callers that compare against it (`chat --session`) must compare against
+/// the daemon's own answer, not a shape hard-coded here.
+pub(crate) async fn default_lane_key(client: &DaemonClient) -> Result<String> {
+    let me: MeResponse = client.get("/v1/me").await?;
+    Ok(me.default_lane_key)
+}
+
+/// The rows of a page that belong here: this lane, and — when a project was
+/// named — this project.
+///
+/// The lane half is client-side because `GET /v1/sessions` has no lane filter
+/// (its filters are workspace, source, status and a query). The project half
+/// *is* sent as `workspace_id=`; re-checking it here is what makes the promise
+/// local rather than a trust in the query string: a row bound to another
+/// project, or to none at all, is never offered as something to continue
+/// (plan §5.7).
+pub(crate) fn rows_here(
+    rows: Vec<SessionItem>,
+    lane_key: &str,
+    workspace_id: Option<&str>,
+) -> Vec<SessionItem> {
+    rows.into_iter()
+        .filter(|row| row.lane_key == lane_key)
+        .filter(|row| match workspace_id {
+            None => true,
+            Some(root) => row.workspace_id.as_deref() == Some(root),
+        })
+        .collect()
+}
+
 /// The conversations on the caller's own lane, newest first.
 ///
 /// Shared with `chat --resume`, whose picker is this list.
@@ -194,16 +227,22 @@ pub(crate) async fn lane_sessions(
     workspace_id: Option<&str>,
     limit: usize,
 ) -> Result<Vec<SessionItem>> {
-    let me: MeResponse = client.get("/v1/me").await?;
-    let source = lane_source(&me.default_lane_key);
+    let lane_key = default_lane_key(client).await?;
+    lane_sessions_on(client, &lane_key, workspace_id, limit).await
+}
+
+/// [`lane_sessions`] for a caller that already knows its lane — `chat` reads it
+/// once and uses it both to list and to refuse a conversation on another one.
+pub(crate) async fn lane_sessions_on(
+    client: &DaemonClient,
+    lane_key: &str,
+    workspace_id: Option<&str>,
+    limit: usize,
+) -> Result<Vec<SessionItem>> {
     let page: SessionsResponse = client
-        .get(&sessions_query(source, workspace_id, limit))
+        .get(&sessions_query(lane_source(lane_key), workspace_id, limit))
         .await?;
-    Ok(page
-        .sessions
-        .into_iter()
-        .filter(|row| row.lane_key == me.default_lane_key)
-        .collect())
+    Ok(rows_here(page.sessions, lane_key, workspace_id))
 }
 
 pub async fn run(args: SessionsArgs) -> Result<()> {
@@ -238,10 +277,23 @@ pub async fn run(args: SessionsArgs) -> Result<()> {
 }
 
 /// Guard for a verb that needs exactly one conversation to act on.
-pub(crate) fn require_one(sessions: &[SessionItem]) -> Result<&SessionItem> {
-    match sessions.first() {
-        Some(session) => Ok(session),
-        None => bail!("No stored conversations on this lane yet — send a message first"),
+///
+/// The two empties are different answers and are told apart: a lane with no
+/// conversations at all wants a first message, while a *project* with none —
+/// which is the scope `chat --resume` asks in (plan §5.7) — wants to know that
+/// other projects' conversations exist and are deliberately not on offer.
+pub(crate) fn require_one<'a>(
+    sessions: &'a [SessionItem],
+    workspace_id: Option<&str>,
+) -> Result<&'a SessionItem> {
+    match (sessions.first(), workspace_id) {
+        (Some(session), _) => Ok(session),
+        (None, Some(root)) => bail!(
+            "No stored conversations for {root} — this project's are the only ones \
+             --resume continues. `openalpaca sessions --all` lists every one the daemon \
+             holds, and `chat --session <id>` continues one by id"
+        ),
+        (None, None) => bail!("No stored conversations on this lane yet — send a message first"),
     }
 }
 
