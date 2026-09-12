@@ -42,6 +42,27 @@ impl KeyEncryptor {
         Self::from_hex(&Self::ensure_at(dir)?, "generated master key")
     }
 
+    /// The encryptor for a master key that **already exists** in `dir` — the
+    /// read-only twin of [`Self::load_or_generate_at`], for paths that only
+    /// *decrypt*. `Ok(None)` says there is no key yet.
+    ///
+    /// A decrypt path must not mint one: a freshly generated key cannot decrypt
+    /// anything that was encrypted with the old one, so the caller's outcome is
+    /// the same either way — and the key file is durable state in `state/`,
+    /// which a read has no business creating. `OPENALPACA_MASTER_KEY` still wins
+    /// when it is set, so a daemon and a CLI in the same environment agree.
+    pub fn load_at(dir: &Path) -> Result<Option<Self>, String> {
+        if let Some(encryptor) = Self::from_env_opt()? {
+            return Ok(Some(encryptor));
+        }
+        let key_path = dir.join(".master_key");
+        match std::fs::read_to_string(&key_path) {
+            Ok(contents) => Self::from_hex(contents.trim(), "master key").map(Some),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("Failed to read {}: {e}", key_path.display())),
+        }
+    }
+
     fn from_env_opt() -> Result<Option<Self>, String> {
         match std::env::var("OPENALPACA_MASTER_KEY") {
             Ok(hex_key) => Self::from_hex(&hex_key, "OPENALPACA_MASTER_KEY").map(Some),

@@ -206,3 +206,33 @@ fn load_or_generate_at_uses_the_directory_it_is_given() {
     let again = KeyEncryptor::load_or_generate_at(&state).unwrap();
     assert_eq!(again.decrypt(&encrypted).unwrap(), "sk-secret");
 }
+
+/// The **read-only** loader: a decrypt path asks whether a key exists and is
+/// told `None`, without one appearing on disk because it asked.
+#[test]
+fn load_at_never_mints_a_master_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _home = HomeSandbox::enter(tmp.path());
+
+    let state = tmp.path().join("home").join("state");
+    std::fs::create_dir_all(&state).unwrap();
+
+    assert!(
+        KeyEncryptor::load_at(&state).unwrap().is_none(),
+        "a read reported a key that does not exist"
+    );
+    assert!(
+        !state.join(".master_key").exists(),
+        "reading for the master key created it"
+    );
+
+    // With a key in place it reads that one, rather than a fresh one.
+    let encrypted = KeyEncryptor::load_or_generate_at(&state)
+        .unwrap()
+        .encrypt("sk-secret")
+        .unwrap();
+    let read = KeyEncryptor::load_at(&state)
+        .unwrap()
+        .expect("the key exists now");
+    assert_eq!(read.decrypt(&encrypted).unwrap(), "sk-secret");
+}

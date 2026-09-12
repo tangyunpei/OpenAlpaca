@@ -35,6 +35,17 @@ pub enum PluginError {
     HandleHeld(String),
     #[error("config missing required keys: {0:?}")]
     MissingConfig(Vec<String>),
+    /// A config write was asked for on a plugin whose **declaration the
+    /// supervisor does not hold** — an `Orphaned` row, or an id no scan has
+    /// read a `plugin.toml` for. The manifest is what says which keys are
+    /// `sensitive`, so without it the write cannot be refused on its merits and
+    /// is refused outright: `409`, because nothing is wrong with the request
+    /// (extension design §8, X-29).
+    #[error(
+        "plugin '{0}' has no declaration the daemon can read, so its configuration cannot be \
+         written"
+    )]
+    NoDeclaration(String),
     /// `.permissions.toml` does not parse. Fail-closed: nothing loads, nothing
     /// is written, and every verb on an affected row is `409 store_unreadable`
     /// (extension design §4, §5.1).

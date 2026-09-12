@@ -461,7 +461,21 @@ impl PluginManager {
         let mut vanished: std::collections::BTreeSet<String> =
             self.plugins.read().await.keys().cloned().collect();
         if let Ok(table) = table {
-            vanished.extend(table.names().into_iter().map(String::from));
+            // The entries are the one half of this set the daemon did not
+            // write: an `.permissions.toml` key is whatever text is in the
+            // file, and orphaning it would put it in the ledger, where
+            // `DELETE` turns it back into a path. Ids that are not plain names
+            // never enter ([`valid_plugin_id`]).
+            for name in table.names() {
+                if valid_plugin_id(name) {
+                    vanished.insert(name.to_string());
+                } else {
+                    warn!(
+                        plugin = %name,
+                        "ignoring a .permissions.toml entry whose name is not a plugin id"
+                    );
+                }
+            }
         }
 
         for name in vanished.into_iter().filter(|name| !live.contains(name)) {
@@ -485,11 +499,20 @@ impl PluginManager {
 
     /// Park one vanished plugin as `Orphaned`, tearing down anything it still
     /// holds first (§4.1's *declaration gone — plugin* column).
+    ///
+    /// Through [`teardown_held`](Self::teardown_held), which is the **whole**
+    /// teardown shape — T0's CAS, then T1/T2, then T3's drain, then T4 — and not
+    /// `teardown` + `t4`. From `Enabled` that difference is the gate and the
+    /// drain: without T0 the ledger still read `Enabled` while every
+    /// contribution was being withdrawn, so the announcement named the state the
+    /// row was leaving, and a tool call arriving mid-teardown was admitted
+    /// rather than refused; without T3 the child was killed under whatever
+    /// in-flight work it was running (design §3.2 T0/T3).
     async fn orphan(&self, name: &str, table: &Result<PermissionTable, PluginError>) {
         let ext = ExtensionId::plugin(name.to_string());
         let _lock = self.lock_for(name).await;
-        self.teardown(&ext, WithdrawalCause::DeclarationGone).await;
-        self.t4(name).await;
+        self.teardown_held(&ext, WithdrawalCause::DeclarationGone)
+            .await;
         let bit = table.as_ref().map(|t| t.enabled(name)).unwrap_or(true);
         self.ledger.upsert(&ext, bit, ExtensionState::Orphaned);
         self.plugins.write().await.remove(name);
@@ -1038,6 +1061,17 @@ impl PluginManager {
 
     /// E1 → E5 for one plugin, under a CAS that has already taken and an E-PRE
     /// that has already run. Commits the state it reached.
+    ///
+    /// **X-3 is re-checked here, not only in `reconcile_dir`.** Every load site
+    /// funnels through this one function, which is what makes the identity rule
+    /// hold on the *verb* path too (I3): `enable`, `reload` and `approve` reach
+    /// a load through [`declaration`](Self::declaration), whose `Ok(_)` arm
+    /// deliberately returns the **last-good** manifest with a warn — including
+    /// the mismatched one X-3 `track`ed under the directory id. Without the
+    /// check below those three verbs spawned a child design §2.2 / §10 case 19
+    /// say must never start, the row read `Enabled` until the next full scan,
+    /// and the first-load approval gate was skipped for the one `Failed`
+    /// row the owner never consented to.
     async fn load(
         &self,
         ext: &ExtensionId,
@@ -1050,6 +1084,23 @@ impl PluginManager {
         // This load owns the row's `hint`: whatever a previous attempt recorded
         // is cleared before this one can classify (design §8).
         self.set_hint(&id, None).await;
+
+        // ── X-3 — IDENTITY ────────────────────────────────────────────
+        if manifest.plugin.name != id {
+            warn!(
+                plugin = %id,
+                declared = %manifest.plugin.name,
+                "the manifest disagrees with the directory; refusing to load it"
+            );
+            self.commit(
+                ext,
+                self.failure(
+                    FailureReason::ConfigInvalid,
+                    "manifest name does not match directory",
+                ),
+            );
+            return;
+        }
 
         // ── E1 — CONSENT + DRIFT ──────────────────────────────────────
         //
@@ -1809,7 +1860,17 @@ impl PluginManager {
     /// Public because the config pair guards on it too (design §8): a `GET` on
     /// an unknown id would otherwise be indistinguishable from one on a plugin
     /// with no configuration.
+    ///
+    /// An id that is not a plain path component ([`valid_plugin_id`]) is
+    /// `NotFound` here — **404, never 403**: the daemon names no resource for
+    /// `../x`, and saying "forbidden" would confirm that something is there.
+    /// This is the gate every route and `uninstall` pass through before an id
+    /// becomes a path.
     pub async fn known(&self, ext: &ExtensionId) -> Result<(), ExtensionError> {
+        if !valid_plugin_id(&ext.name) {
+            warn!(plugin = %ext.name, "a plugin id that is not a plain name was refused");
+            return Err(ExtensionError::NotFound(ext.clone()));
+        }
         if self.plugins.read().await.contains_key(&ext.name) || self.ledger.record(ext).is_some() {
             Ok(())
         } else {
@@ -2169,12 +2230,32 @@ impl PluginManager {
     /// which of the two secret stores holds it instead is the caller's decision
     /// — §13 Q12 has not fixed a default, so nothing picks one by omission. Use
     /// [`set_plugin_secret`](Self::set_plugin_secret).
+    ///
+    /// That refusal can only be read off a **tracked manifest**, so a tracked
+    /// manifest is a precondition rather than an input:
+    /// [`is_sensitive`](Self::is_sensitive) answers `false` for a plugin the
+    /// supervisor holds no `PluginState` for, so without this guard an
+    /// `Orphaned` row — or any id whose `plugin.toml` no scan has read — took
+    /// *every* key in the clear, the sensitive ones included. Refused with
+    /// [`PluginError::NoDeclaration`] (`409`), and nothing is written.
     pub async fn set_plugin_config(
         &self,
         name: &str,
         key: &str,
         value: toml::Value,
     ) -> Result<(), PluginError> {
+        let tracked = self.plugins.read().await.contains_key(name);
+        let orphaned = matches!(
+            self.ledger.state(&ExtensionId::plugin(name.to_string())),
+            Some(ExtensionState::Orphaned)
+        );
+        if !tracked || orphaned {
+            warn!(
+                plugin = name,
+                key, orphaned, "a config write was refused: no declaration is in hand"
+            );
+            return Err(PluginError::NoDeclaration(name.to_string()));
+        }
         if self.is_sensitive(name, key).await {
             return Err(PluginError::PermissionDenied(format!(
                 "config key '{key}' of plugin '{name}' is declared sensitive; \
@@ -2302,7 +2383,23 @@ impl PluginManager {
     fn resolve_secret(&self, reference: &SecretReference) -> Option<String> {
         match reference {
             SecretReference::Keychain(key) => self.secret_store.as_ref()?.get(key).ok().flatten(),
-            SecretReference::Encrypted(ciphertext) => encryptor().ok()?.decrypt(ciphertext).ok(),
+            // Read-only: a resolve never mints a master key (see
+            // [`existing_encryptor`]). An absent one is an unresolved value,
+            // which the caller reports as `NeedsConfig`.
+            SecretReference::Encrypted(ciphertext) => match existing_encryptor() {
+                Ok(Some(encryptor)) => encryptor.decrypt(ciphertext).ok(),
+                Ok(None) => {
+                    warn!(
+                        "an encrypted plugin secret cannot be resolved: there is no master key \
+                         yet, and a read does not create one"
+                    );
+                    None
+                }
+                Err(e) => {
+                    warn!(error = %e, "the master key could not be read");
+                    None
+                }
+            },
         }
     }
 
@@ -2596,6 +2693,31 @@ fn unapproved(reason: UnapprovedReason) -> ExtensionState {
     ExtensionState::Unapproved { reason }
 }
 
+/// Is this a plugin id the supervisor will let become a **path**?
+///
+/// An id reaches the supervisor from three places, and only the first is text
+/// the daemon itself produced: a directory name under the plugins root, a key in
+/// `.permissions.toml`, and an HTTP path segment. Every one of them is then
+/// joined onto that root — the directory, `.config/<id>.toml`, `.data/<id>/`,
+/// and `uninstall`'s two trash moves — so an id that is not one plain path
+/// component is a traversal out of the root rather than a name. `../x` is the
+/// shape: it reads as a plugin the daemon has heard of and moves a directory
+/// that is not its to move.
+///
+/// Dot-prefixed names are refused with it: `.permissions.toml` and `.config`
+/// live beside the plugin directories, and the scan skips dotted entries, so an
+/// id that starts with `.` can only name the store's own furniture.
+fn valid_plugin_id(id: &str) -> bool {
+    use std::path::Component;
+
+    if id.is_empty() || id.starts_with('.') {
+        return false;
+    }
+    let mut components = Path::new(id).components();
+    matches!(components.next(), Some(Component::Normal(first)) if first == id)
+        && components.next().is_none()
+}
+
 /// A store failure, mapped to the supervisor-level refusal C6 turns into a
 /// status code. The code is the route's; this is the fact (design §4).
 fn store_error(e: PluginError) -> ExtensionError {
@@ -2651,11 +2773,31 @@ fn classify_bringup(error: &PluginError) -> (FailureReason, Option<String>) {
     }
 }
 
+/// The encryptor for the **write** path (`secret_encrypted` storage), which is
+/// where a first master key legitimately appears.
 fn encryptor() -> Result<KeyEncryptor, PluginError> {
-    let dir = openalpaca_storage::store::master_key_dir()
-        .map_err(|e| PluginError::Unavailable(format!("no master key directory: {e}")))?;
+    let dir = master_key_dir()?;
     KeyEncryptor::load_or_generate_at(&dir)
         .map_err(|e| PluginError::Unavailable(format!("no master key: {e}")))
+}
+
+/// The encryptor for the **resolve** path, which never generates one:
+/// `Ok(None)` means there is no key yet (design §8's secret resolution).
+///
+/// Resolving is a read. A key minted here could not decrypt the value that
+/// asked for it — it is a different key — so the caller's outcome is the same
+/// `NeedsConfig` either way; what generating one *does* change is `state/`, and
+/// a `secret_encrypted` value carried over from another machine (or a key file
+/// the owner moved aside) would have minted a file on every load.
+fn existing_encryptor() -> Result<Option<KeyEncryptor>, PluginError> {
+    let dir = master_key_dir()?;
+    KeyEncryptor::load_at(&dir)
+        .map_err(|e| PluginError::Unavailable(format!("the master key could not be read: {e}")))
+}
+
+fn master_key_dir() -> Result<PathBuf, PluginError> {
+    openalpaca_storage::store::master_key_dir()
+        .map_err(|e| PluginError::Unavailable(format!("no master key directory: {e}")))
 }
 
 /// Stop a plugin child: graceful shutdown RPC, then kill, then wait for it to

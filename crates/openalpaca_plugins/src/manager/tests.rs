@@ -1462,6 +1462,91 @@ mcp_compatible = true
         assert_eq!(spawn_count(&impostor), 0);
     }
 
+    /// Lay out one name-mismatched directory and park it through the scan, the
+    /// way X-3 does: `Failed{ConfigInvalid}`, no child, and a manifest with no
+    /// `[capabilities]` — so E1's drift compare passes and the *only* thing
+    /// between a verb and a spawn is the identity check (I3).
+    async fn parked_impostor(root: &Path) -> (Harness, PathBuf) {
+        let impostor = install_stub_plugin_named(root, "echo-copy", "echo-test", "[types]\ntools = true\n");
+        slow_the_entry(&impostor);
+
+        let h = Harness::new(root);
+        // The fixture the scan-only test had: consent already recorded against
+        // an empty capability list.
+        h.manager.permission_gate.approve("echo-copy", &[]).unwrap();
+        h.scan().await;
+
+        assert!(
+            matches!(
+                h.state("echo-copy").await,
+                ExtensionState::Failed {
+                    reason: FailureReason::ConfigInvalid,
+                    ..
+                }
+            ),
+            "the scan did not park the impostor"
+        );
+        assert_eq!(spawn_count(&impostor), 0);
+        (h, impostor)
+    }
+
+    fn assert_still_parked(row: &ExtensionRecord, impostor: &Path, verb: &str) {
+        assert!(
+            matches!(
+                &row.state,
+                ExtensionState::Failed {
+                    reason: FailureReason::ConfigInvalid,
+                    detail,
+                    ..
+                } if detail == "manifest name does not match directory"
+            ),
+            "{verb} left the name-mismatch row at {:?}",
+            row.state
+        );
+        assert_eq!(
+            spawn_count(impostor),
+            0,
+            "{verb} spawned a directory whose manifest lies about its name"
+        );
+    }
+
+    /// **`enable` on a name-mismatch row never spawns** (I3; design §2.2 X-3,
+    /// §10 case 19).
+    ///
+    /// The park is the scan's, but the verbs reach `load` through
+    /// `declaration()`, which hands back the last-good — mismatched — manifest
+    /// on purpose. `enable` short-circuits on the `Unapproved` *state* only, and
+    /// `begin(Enabling)` is legal from `Failed{..}`, so before the identity
+    /// check in `load` this started a child and read `Enabled` until the next
+    /// full scan.
+    #[tokio::test]
+    async fn enable_on_a_name_mismatch_row_never_spawns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (h, impostor) = parked_impostor(tmp.path()).await;
+
+        let row = h.manager.enable(&ext("echo-copy")).await.unwrap();
+
+        assert_still_parked(&row, &impostor, "enable");
+        assert!(!h.holds_process("echo-copy").await, "enable held a child");
+        assert!(!h.has_tool("echo-copy::echo"));
+        assert!(!h.has_tool("echo-test::echo"));
+    }
+
+    /// The `reload` twin: no T0 and no drain from `Failed{..}`, straight to
+    /// E0 → `load`, which is the same hole.
+    #[tokio::test]
+    async fn reload_on_a_name_mismatch_row_never_spawns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (h, impostor) = parked_impostor(tmp.path()).await;
+
+        let row = h.manager.reload(&ext("echo-copy")).await.unwrap();
+
+        assert_still_parked(&row, &impostor, "reload");
+        assert!(!h.holds_process("echo-copy").await, "reload held a child");
+        assert!(!h.has_tool("echo-copy::echo"));
+        assert!(!h.has_tool("echo-test::echo"));
+    }
+
     /// **A sweep-detected crash followed by the reaper's T4 produces no
     /// *"failed to kill plugin process"* line** (design §3.2 T4).
     ///
@@ -1802,6 +1887,208 @@ mcp_compatible = true
             !raw.contains("echo-test"),
             "the owner's explicit Remove should delete the entry: {raw}"
         );
+    }
+
+    /// **Resolving a `secret_encrypted` value never mints a master key.**
+    ///
+    /// The ciphertext travelled here from another machine (or the owner moved
+    /// the key file aside), so the value cannot be resolved either way and the
+    /// row parks on `NeedsConfig`. What must *not* happen is the read creating
+    /// `state/.master_key` on its way to that answer — a key minted here
+    /// decrypts nothing, and it is durable state in `state/`.
+    #[tokio::test]
+    async fn resolving_an_encrypted_secret_with_no_master_key_mints_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_stub_plugin(
+            tmp.path(),
+            "echo-test",
+            "[types]\ntools = true\n\n[config.token]\ntype = \"secret\"\nrequired = true\n\
+             sensitive = true\n",
+        );
+        std::fs::create_dir_all(tmp.path().join(".config")).unwrap();
+        std::fs::write(
+            tmp.path().join(".config").join("echo-test.toml"),
+            "token = { secret_encrypted = \"aes256:from-another-machine\" }\n",
+        )
+        .unwrap();
+
+        let h = Harness::new(tmp.path());
+        h.manager.permission_gate.approve("echo-test", &[]).unwrap();
+        h.scan().await;
+
+        assert!(
+            matches!(
+                h.state("echo-test").await,
+                ExtensionState::Failed {
+                    reason: FailureReason::NeedsConfig { .. },
+                    ..
+                }
+            ),
+            "expected the unresolved-secret park, got {:?}",
+            h.state("echo-test").await
+        );
+        let key = tmp.path().join(".home").join("state").join(".master_key");
+        assert!(
+            !key.exists(),
+            "the resolve path generated a master key at {}",
+            key.display()
+        );
+    }
+
+    /// **A config write on a row with no declaration in hand is refused, and
+    /// writes nothing** (design §8, X-29).
+    ///
+    /// The sensitive-key refusal reads the *manifest*, and `is_sensitive`
+    /// answers `false` for a plugin the supervisor tracks no `PluginState` for.
+    /// An `Orphaned` row is exactly that row — so before the guard, the very key
+    /// the manifest declares `sensitive` went into
+    /// `plugins/.config/<name>.toml` in the clear the moment the directory went
+    /// away.
+    #[tokio::test]
+    async fn a_config_write_on_an_orphaned_row_is_refused_and_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(
+            tmp.path(),
+            "echo-test",
+            "[types]\ntools = true\n\n[config.token]\ntype = \"secret\"\nsensitive = true\n",
+        );
+        let h = Harness::new(tmp.path());
+        load_running_stub(&h, "echo-test").await;
+        let config_path = tmp.path().join(".config").join("echo-test.toml");
+
+        // Loaded, the key is refused on its merits — the manifest is in hand.
+        let refused = h
+            .manager
+            .set_plugin_config("echo-test", "token", toml::Value::String("sk-live".into()))
+            .await;
+        assert!(
+            matches!(refused, Err(PluginError::PermissionDenied(_))),
+            "a sensitive key was accepted: {refused:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+        h.scan().await;
+        assert_eq!(h.state("echo-test").await, ExtensionState::Orphaned);
+
+        let refused = h
+            .manager
+            .set_plugin_config("echo-test", "token", toml::Value::String("sk-live".into()))
+            .await;
+        assert!(
+            matches!(refused, Err(PluginError::NoDeclaration(_))),
+            "a write with no declaration in hand was accepted: {refused:?}"
+        );
+        assert!(
+            !config_path.exists(),
+            "the refused write created {}",
+            config_path.display()
+        );
+
+        // …and a plain key is refused on the same ground: the guard is the
+        // declaration, not the key.
+        let refused = h
+            .manager
+            .set_plugin_config("echo-test", "endpoint", toml::Value::String("https://x".into()))
+            .await;
+        assert!(
+            matches!(refused, Err(PluginError::NoDeclaration(_))),
+            "{refused:?}"
+        );
+        assert!(!config_path.exists());
+    }
+
+    /// **An id that is not a plain name never becomes a path.**
+    ///
+    /// `.permissions.toml`'s keys are the one half of the vanished set the
+    /// daemon did not write, and the store is a file the owner edits. A key
+    /// like `../escape` used to be orphaned into the ledger, which is what
+    /// `DELETE /v1/extensions/plugin/{id}` and `uninstall` read before joining
+    /// the id onto the plugins root — `<root>/../escape`, two trash moves and a
+    /// `.config/<id>.toml` outside the root.
+    #[tokio::test]
+    async fn a_traversal_plugin_id_never_becomes_a_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        install_stub_plugin(tmp.path(), "echo-test", "[types]\ntools = true\n");
+        // A hand-edited store: one honest entry, one whose key is a traversal
+        // and whose "directory" is of course absent.
+        std::fs::write(
+            tmp.path().join(".permissions.toml"),
+            "[\"echo-test\"]\nenabled = true\napproved = true\n\n\
+             [\"../escape\"]\nenabled = true\napproved = true\n",
+        )
+        .unwrap();
+
+        let h = Harness::new(tmp.path());
+        h.scan().await;
+
+        // The honest directory is unaffected.
+        assert_eq!(h.state("echo-test").await, ExtensionState::Enabled);
+
+        // The traversal produced no record at all — nothing for `DELETE` or
+        // `uninstall` to turn back into a path.
+        let rows = ExtensionSupervisor::list(&*h.manager).await;
+        assert!(
+            rows.iter().all(|r| r.id != ext("../escape")),
+            "a traversal entry was orphaned into the ledger: {rows:?}"
+        );
+        // 404, never 403: the daemon names no resource for this id.
+        assert!(
+            matches!(
+                h.manager.known(&ext("../escape")).await,
+                Err(ExtensionError::NotFound(_))
+            ),
+            "a traversal id read as known"
+        );
+        assert!(
+            matches!(
+                h.manager.uninstall("../escape", true).await,
+                Err(InstallError::Extension(ExtensionError::NotFound(_)))
+            ),
+            "uninstall accepted a traversal id"
+        );
+    }
+
+    /// **Orphaning an `Enabled` plugin is a full teardown, T0 included**
+    /// (design §3.2 T0/T3, §4.1 *declaration gone — plugin*).
+    ///
+    /// `orphan` used to run `teardown` + `t4` directly, skipping the
+    /// `Enabled → Disabling` CAS and the drain: the child died and the tools
+    /// went, but the ledger still read `Enabled` while they did — so the gate
+    /// admitted a call arriving mid-teardown and the announcement named the
+    /// state the row was leaving rather than the transient one every other
+    /// teardown reports.
+    #[tokio::test]
+    async fn orphaning_an_enabled_plugin_tears_it_down_through_t0() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = install_stub_plugin(
+            tmp.path(),
+            "echo-test",
+            "[types]\ntools = true\n\n[capabilities]\nprovides = [\"net_read\"]\n",
+        );
+        let h = Harness::new(tmp.path());
+        load_running_stub_with_caps(&h, "echo-test", &["net_read"]).await;
+        h.agents.register_template(agent_template("reader", &["net_read"]));
+        let pid = h.child_pid("echo-test").await;
+
+        let mut events = h.bus.subscribe();
+        std::fs::remove_dir_all(&dir).unwrap();
+        h.scan().await;
+
+        assert_eq!(h.state("echo-test").await, ExtensionState::Orphaned);
+        assert!(!pid_alive(pid), "the orphaned plugin's child was left running");
+        assert!(!h.has_tool("echo-test::echo"), "the tool was not withdrawn");
+
+        let frames = withdrawn_frames(&mut events);
+        assert_eq!(frames.len(), 1, "one transition, one announcement: {frames:?}");
+        let (extension, state, cause, templates, _) = &frames[0];
+        assert_eq!(*extension, ext("echo-test"));
+        assert_eq!(
+            *state,
+            ExtensionState::Disabling,
+            "T0 was skipped: the withdrawal was announced against the state it was leaving"
+        );
+        assert_eq!(*cause, WithdrawalCause::DeclarationGone);
+        assert_eq!(templates, &vec!["reader".to_string()]);
     }
 
     /// **`Orphaned` at a cold start** — the state's only production trigger
