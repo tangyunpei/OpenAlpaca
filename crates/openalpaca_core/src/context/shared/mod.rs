@@ -273,7 +273,7 @@ impl SharedContext {
             .unwrap_or_else(|p| p.into_inner());
         tokens
             .entry(task_id.to_string())
-            .or_insert_with(CancellationToken::new)
+            .or_default()
             .clone()
     }
 
