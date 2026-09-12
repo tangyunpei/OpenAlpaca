@@ -286,7 +286,7 @@ The daemon runs periodic workers, all cancelled together on shutdown (intervals 
 ## Storage Model
 
 - SQLite location is resolved by `openalpaca_storage::store::database_path()` — `~/.openalpaca/state/openalpaca.db`. Every path in the layout comes from that module; no crate joins a literal directory name onto a store root.
-- Migrations are embedded and applied from `openalpaca_storage::migrations::MIGRATIONS`. The authoritative list is `crates/openalpaca_storage/src/migrations/` (currently `001` through `040`); `GET /v1/status` reports the version the open database is actually at.
+- Migrations are embedded and applied from `openalpaca_storage::migrations::MIGRATIONS`. The authoritative list is `crates/openalpaca_storage/src/migrations/` (currently `001` through `041`); `GET /v1/status` reports the version the open database is actually at.
 - Session logs live at `~/.openalpaca/sessions/<id>/` and are bounded by **size only**: `[orchestrator.sessions] log_max_session_bytes` per session (on exceed the writer drops whole oldest segments, never the live one, and records the seq range that went) and `log_max_total_bytes` across all of them, swept once at boot, oldest-touched archived session first, never an active one. `log_retention_days` is **reserved and does nothing**: the key is parsed, clamped and reported by `GET /v1/status`, and the daemon warns at boot when it is set to anything but its default — but no age-based sweep exists, so setting it to `90` expires nothing. Whether one is built, and at what default, is an owner decision (T12); until then a log leaves only by byte cap, by `DELETE /v1/sessions/{id}`, or by a purge.
 
 ## Logging and Operations

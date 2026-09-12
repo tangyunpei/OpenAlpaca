@@ -697,7 +697,7 @@ files only.
 | `plugins/` | plugin directories you dropped in, `.permissions.toml`, `.config/<name>.toml`, `.data/<name>/` | yours — never swept |
 | `artifacts/` | files produced by tasks that had no project | never garbage-collected |
 | `uploads/` | files you uploaded that carried no project signal | swept: an upload attached to no message is deleted once past the grace period |
-| `sessions/` | session event logs — all sessions live here, never in a project | size-capped, optional age sweep |
+| `sessions/` | session event logs — all sessions live here, never in a project | size-capped; no age sweep yet (owner decision T12) |
 | `scratch/`, `cache/` | reserved; agent working space and derived data | swept freely |
 | `memory/`, `skills/` | reserved; not created until used | yours — never swept |
 

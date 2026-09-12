@@ -131,9 +131,9 @@ pub struct RetentionStatus {
     /// Across all sessions — the denominator `sessions.last_sweep`'s
     /// `over_cap_after` is measured against.
     pub log_max_total_bytes: u64,
-    /// Age-based sweep of archived session logs; `0` means the sweep is
-    /// disabled (pending owner decision T12), not that the field was left
-    /// unset.
+    /// The configured age limit for archived session logs. No age sweep
+    /// exists yet (owner decision T12, ruling R85): the value is parsed,
+    /// clamped and served, and nothing consumes it; `0` is the default.
     pub log_retention_days: u32,
 }
 

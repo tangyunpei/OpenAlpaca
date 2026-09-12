@@ -355,8 +355,11 @@ export function orderExtensions(
  * the first and only place this window learns it, and it has to be turned into
  * an instruction rather than repeated verbatim.
  */
+// Searched, not anchored: the daemon passes `PluginError::PermissionDenied`
+// through verbatim, and its `Display` prefixes the sentence with
+// "permission denied: " (crates/openalpaca_plugins/src/error.rs).
 const SENSITIVE_CONFIG =
-  /^config key '([^']*)' of plugin '([^']*)' is declared sensitive/;
+  /config key '([^']*)' of plugin '([^']*)' is declared sensitive/;
 
 /**
  * The flat `{"error": "<word>"}` envelope (§8, R20) as row copy.

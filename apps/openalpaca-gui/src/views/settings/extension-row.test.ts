@@ -450,7 +450,7 @@ describe("extensionErrorCopy (§8's flat envelope)", () => {
    */
   it("turns the sensitive-key 400 into the hand-edit path, naming the key", () => {
     const copy = extensionErrorCopy(
-      "config key 'api_key' of plugin 'vault' is declared sensitive; " +
+      "permission denied: config key 'api_key' of plugin 'vault' is declared sensitive; " +
         "store it as a secret reference, not in the plugin's TOML",
     );
 

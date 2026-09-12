@@ -496,7 +496,7 @@ describe("ExtensionsSection (ADR-030 §9.2)", () => {
       }),
     ];
     state.configFail =
-      "config key 'api_key' of plugin 'vault' is declared sensitive; " +
+      "permission denied: config key 'api_key' of plugin 'vault' is declared sensitive; " +
       "store it as a secret reference, not in the plugin's TOML";
     render(<ExtensionsSection />);
     const user = userEvent.setup();
