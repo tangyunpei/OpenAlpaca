@@ -13,6 +13,13 @@
  * the Work list does not vanish once the detail request resolves; it reads
  * `cost —` only when neither source has one (e.g. opened outside the list's
  * fetched window).
+ *
+ * `fallbackRun` is a stand-in **while** the detail loads, and it used to be a
+ * stand-in forever: a failed `GET /v1/tasks/{id}` was invisible whenever the
+ * list row existed, so a stale row rendered exactly as a fresh fetch would.
+ * The column still draws — the run's id is all the other three cards need —
+ * but it now says which source the header came from, the way the Output and
+ * Timeline cards already name their own failures.
  */
 
 import { useMemo } from "react";
@@ -124,6 +131,13 @@ export function RunDetail({
     );
   }
 
+  // The list row stood in and the detail request is not coming back. Every
+  // card below still draws — the id is enough for artifacts, timeline and the
+  // event log — but the header's own facts are the list's, which is a weaker
+  // and possibly staler source than the one this view is named for. Saying so
+  // is the difference between a degraded view and a lie.
+  const detailFailed = task === undefined && detail.isError;
+
   const live = isLive(run.status);
   const actions = live
     ? liveRunActions(run.status, steerDisabledReason(run))
@@ -150,6 +164,13 @@ export function RunDetail({
           </span>
         )}
       </div>
+
+      {detailFailed && (
+        <p className="mt-[8px] mb-0 text-md text-muted-fg">
+          Showing the list row — the run detail could not be loaded:{" "}
+          {detail.error?.message ?? "the daemon did not say why"}
+        </p>
+      )}
 
       {live ? (
         <>

@@ -12,6 +12,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { Run } from "@/components/work/run-model";
 import { resetConnection } from "@/lib/connection";
 import { useUiStore } from "@/stores/ui";
 
@@ -116,16 +117,35 @@ beforeEach(() => {
   );
 });
 
-function renderDetail() {
+function renderDetail(fallbackRun: Run | null = null) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
   return render(
     <QueryClientProvider client={client}>
-      <RunDetail runId="task-1" onAction={vi.fn()} />
+      <RunDetail runId="task-1" fallbackRun={fallbackRun} onAction={vi.fn()} />
     </QueryClientProvider>,
   );
 }
+
+/** The Work list's own row for `task-1`, as `toRun` shapes it. */
+const listRow: Run = {
+  id: "task-1",
+  title: "connector audit",
+  status: "done",
+  meta: "11m 04s",
+  started: "10:00:00",
+  stamp: "10:30",
+  note: null,
+  laneKey: "user:gui",
+  artifactCount: 1,
+  artifacts: [],
+  finishedAt: new Date("2026-09-05T10:30:00Z"),
+  costUsd: 0.41,
+  subagentCount: 2,
+  steerable: false,
+  startedElsewhere: false,
+};
 
 describe("RunDetail — Output", () => {
   it("lists the run's own files and opens one in the side panel", async () => {
@@ -414,5 +434,53 @@ describe("RunDetail — §5.6c Resume", () => {
     // Never instead of `Re-run`: it is the fallback every resume refusal
     // points back at.
     expect(screen.getByRole("button", { name: "Re-run" })).toBeInTheDocument();
+  });
+});
+
+/**
+ * `fallbackRun` is the list's row, shown while the detail loads. When the
+ * detail never arrives it is shown **instead**, which used to be silent: a
+ * stale row rendered exactly as a fresh fetch would.
+ */
+describe("RunDetail — a detail read that failed", () => {
+  it("names the list row as the source rather than passing it off as the detail", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        requested.push(url);
+        if (url.includes("/v1/events/history")) return eventsReply();
+        if (url.includes("/v1/artifacts")) return artifactsReply();
+        if (url.includes("/timeline")) return json({ error: "x" }, 500);
+        if (url.includes("/v1/tasks/")) {
+          return json(
+            { error: { code: "DB_ERROR", message: "database is locked" } },
+            500,
+          );
+        }
+        return json({ error: "not found" }, 404);
+      }),
+    );
+    renderDetail(listRow);
+
+    // The column still draws off the row it has.
+    expect(screen.getByText("connector audit")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.getByText(/Showing the list row — the run detail/),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/database is locked/)).toBeInTheDocument();
+  });
+
+  it("says nothing of the sort once the detail answers", async () => {
+    renderDetail(listRow);
+
+    await waitFor(() =>
+      expect(requested.some((url) => url.includes("/v1/tasks/"))).toBe(true),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText(/Showing the list row/)).toBeNull(),
+    );
   });
 });
