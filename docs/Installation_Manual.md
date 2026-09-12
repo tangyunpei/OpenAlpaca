@@ -123,9 +123,14 @@ daemon refuses to start.
 ## Migrating From the Old Data Directory
 
 Older installs kept everything under `~/Library/Application Support/OpenAlpaca`
-(macOS) / `~/.local/share/openalpaca` (Linux). The first boot of a rebuilt
-daemon or CLI moves that directory's contents into the new `~/.openalpaca`
-layout automatically:
+(macOS) / `~/.local/share/openalpaca` (Linux). The rebuilt **daemon** moves
+that directory's contents into the new `~/.openalpaca` layout on its first
+boot, before it takes the singleton lock. On the CLI side exactly one command
+runs the same move itself — `openalpaca config` (in every form: `set`, `get`,
+`list`, `reset`, and the bare interactive editor), because it is the only one
+that opens the database directly instead of asking the daemon. Every other
+`openalpaca` subcommand talks to the running daemon over HTTP, so for those the
+move is whatever the daemon already did. It is one move either way:
 
 - The move is **idempotent and resumable** (a process killed mid-move
   finishes on the next boot) but **not reversible** — back up the old
@@ -134,9 +139,12 @@ layout automatically:
   daemon stop` against the old install, or kill the process holding
   `openalpacad.lock` in the old directory).
 - If **both** the old directory and `~/.openalpaca/state` end up holding an
-  `openalpaca.db`, the daemon (and any CLI command that opens the database
-  directly, e.g. `openalpaca config ...`) refuses to start until you move one
-  aside — the error names both paths.
+  `openalpaca.db`, the mover refuses to choose between them and aborts before
+  it renames anything: the daemon exits instead of starting, and `openalpaca
+  config` exits instead of reading the database. The error names both paths;
+  move one aside and start again. Every other CLI command is unaffected in
+  itself — it opens no database — but it needs a daemon that will not start
+  until the two are one.
 - Anything the mover doesn't recognize left behind in the old directory
   produces a boot warning (check the daemon log) rather than being deleted
   silently.
