@@ -1237,6 +1237,120 @@ async fn an_idle_writer_closes_and_the_next_emit_respawns_it() {
     assert_eq!(rows[1]["seq"], 2);
 }
 
+/// §5.5's idle-close must not wedge a handle a workflow captured at dispatch
+/// (final review I1): the writer exits after `idle_close`, which closes every
+/// clone of its sender forever, and before this fix the *same* handle's later
+/// records were counted as drops and lost — only a caller that asked the
+/// service for a new handle got a live writer. The repair is one respawn on
+/// the emit path, and the numbering resumes from the file.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_captured_handle_keeps_writing_after_its_writer_idled_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = service_with(
+        &dir,
+        None,
+        SessionLogLimits {
+            idle_close: Duration::from_millis(50),
+            ..SessionLogLimits::default()
+        },
+    )
+    .into_arc();
+    // Captured once, the way `dispatch_lead_agent` captures it for a whole run.
+    let handle = svc.handle_for("sess-stale");
+    handle.emit(Record::new(RecordType::UserMsg).with_data(serde_json::json!({})));
+    assert!(handle.flush().await);
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(handle.is_closed(), "the idle writer exited");
+
+    // The same handle, long after: the record must still reach disk.
+    assert!(
+        handle.emit(Record::new(RecordType::AssistantMsg).with_data(serde_json::json!({}))),
+        "an emit on the captured handle is accepted after the idle-out"
+    );
+    assert!(handle.flush().await, "and the barrier answers for it");
+
+    let rows = lines(&log_path(dir.path(), "sess-stale"));
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows[1]["seq"], 2, "the reopened writer resumes the numbering");
+    assert_eq!(rows[1]["type"], "assistant_msg");
+    assert_eq!(handle.dropped(), 0, "nothing was counted as lost");
+    assert_eq!(svc.dropped_total(), 0);
+}
+
+/// A service with no `Arc` around it (a plain `new()`, as several tests build)
+/// has no way to reopen anything, and must still count the drop rather than
+/// claim the record landed.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_idle_out_still_counts_a_drop_when_the_service_cannot_be_reached() {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = service_with(
+        &dir,
+        None,
+        SessionLogLimits {
+            idle_close: Duration::from_millis(50),
+            ..SessionLogLimits::default()
+        },
+    );
+    let handle = svc.handle_for("sess-orphan");
+    handle.emit(Record::new(RecordType::UserMsg).with_data(serde_json::json!({})));
+    assert!(handle.flush().await);
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    assert!(!handle.emit(Record::new(RecordType::AssistantMsg).with_data(serde_json::json!({}))));
+    assert_eq!(handle.dropped(), 1);
+}
+
+/// `forget` is what a caller runs before removing a session's directory: the
+/// writer finishes and exits, the slot goes, and a record emitted on a handle
+/// captured earlier must not re-create the directory that was just removed
+/// (T58 review Minor #1, and `DELETE /v1/sessions/{id}`).
+#[tokio::test(flavor = "multi_thread")]
+async fn forget_ends_the_writer_and_a_late_emit_re_creates_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = service(&dir).into_arc();
+    let handle = svc.handle_for("sess-gone");
+    handle.emit(Record::new(RecordType::UserMsg).with_data(serde_json::json!({})));
+    assert!(handle.flush().await);
+    let session_dir = dir.path().join("sess-gone");
+    assert!(session_dir.exists(), "the writer created it on its first record");
+
+    svc.forget("sess-gone").await;
+    assert!(
+        handle.is_closed(),
+        "`forget` returns only once the writer has gone"
+    );
+
+    // What the route does next.
+    fs::remove_dir_all(&session_dir).unwrap();
+
+    assert!(
+        !handle.emit(Record::new(RecordType::AssistantMsg).with_data(serde_json::json!({}))),
+        "a late emit on the old clone is refused, not reopened"
+    );
+    assert!(!handle.flush().await);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !session_dir.exists(),
+        "nothing re-created the removed session directory"
+    );
+}
+
+/// Forgetting a session this boot never wrote is a no-op, and forgetting one
+/// twice is not an error — a delete route must be able to call it blind.
+#[tokio::test(flavor = "multi_thread")]
+async fn forget_is_a_no_op_for_a_session_with_no_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = service(&dir).into_arc();
+    svc.forget("never-written").await;
+    let handle = svc.handle_for("sess-twice");
+    handle.emit(Record::new(RecordType::UserMsg).with_data(serde_json::json!({})));
+    assert!(handle.flush().await);
+    svc.forget("sess-twice").await;
+    svc.forget("sess-twice").await;
+    assert!(!dir.path().join("never-written").exists());
+}
+
 /// Retired writers' drops must not vanish from the total: `GET /v1/status`
 /// documents `dropped_records` as a per-boot count, so an idle respawn that
 /// resets a live handle's own counter to zero must not let the reported

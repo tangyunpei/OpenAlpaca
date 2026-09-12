@@ -759,6 +759,64 @@ mod tests {
         assert_eq!(rows[0].workspace_path.as_deref(), Some("/repo"));
     }
 
+    /// The fallback must not fire for §5.5's **idle-close**: the session log
+    /// reopens its writer on the emit path (final review I1), so the record
+    /// does reach disk and the crash-recovery scan can find it. Filing an
+    /// `unprocessed_steering` row here would surface the interjection twice —
+    /// once from the inbox it was accepted into, once from the row.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_idle_out_files_no_followup_because_the_record_still_lands() {
+        use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+        use openalpaca_storage::Database;
+        use openalpaca_storage::repository::FollowupRepository;
+
+        let ctx = SharedContext::new();
+        let bus = EventBus::default();
+        let log_dir = tempfile::tempdir().unwrap();
+        let service = SessionLogService::new(
+            log_dir.path().to_path_buf(),
+            None,
+            SessionLogLimits {
+                idle_close: Duration::from_millis(50),
+                ..SessionLogLimits::default()
+            },
+            "test".to_string(),
+        )
+        .into_arc();
+        // Captured once, the way a running workflow captures it.
+        let handle = service.handle_for("sess-1");
+        ctx.register_steering_inbox("task-1", Arc::new(SteeringInbox::default()));
+        ctx.register_task_session_log("task-1", handle.clone());
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&db_dir.path().join("test.db")).unwrap();
+
+        assert_eq!(
+            push_steering(&ctx, &bus, "task-1", "u:gui", msg("first"), Some(&db)),
+            Ok(1)
+        );
+        assert!(handle.flush().await);
+
+        // A quiet stretch — one degraded LLM round is enough in production.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(handle.is_closed(), "the idle writer exited");
+
+        assert_eq!(
+            push_steering(&ctx, &bus, "task-1", "u:gui", msg("second"), Some(&db)),
+            Ok(2)
+        );
+        assert!(handle.flush().await);
+
+        let records = read_records(&log_dir.path().join("sess-1")).unwrap();
+        assert_eq!(records.len(), 2, "both steering records are on disk: {records:?}");
+        assert_eq!(records[1].data["text"], "second");
+        let rows = FollowupRepository::new(&db).list_queued_by_lane("u:gui").unwrap();
+        assert!(
+            rows.is_empty(),
+            "a repaired idle-out files no unprocessed_steering row: {rows:?}"
+        );
+    }
+
     /// The core of this round's fix (R56): the dropped-record fallback above
     /// and the graceful-exit leftover conversion
     /// (`orchestrator/dispatcher/lead_agent.rs:502-542`) both file an

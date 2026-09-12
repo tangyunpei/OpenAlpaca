@@ -224,6 +224,42 @@ impl SessionLogService {
         }
     }
 
+    /// Stop tracking `session_id` and wait for its writer to go.
+    ///
+    /// Removing the slot is also what stops a late [`SessionLogHandle::emit`]
+    /// on a handle captured earlier from reopening this session: a handle
+    /// reopens only a session the service still tracks (see
+    /// [`SessionLogHandle::reopen`]). The writer is then told to finish what
+    /// it holds and exit, and this waits a bounded time for it — a writer
+    /// stuck on a disk must not hold up the caller.
+    ///
+    /// **Callers use this before removing a session's directory** (`DELETE
+    /// /v1/sessions/{id}`, the project purge). The writer creates
+    /// `sessions/<id>/` on its first record (P-22), so without this a record
+    /// emitted after the rows are gone re-creates the directory the caller
+    /// just removed — an empty session directory nothing owns.
+    pub async fn forget(&self, session_id: &str) {
+        self.started.remove(session_id);
+        let Some((_, handle)) = self.handles.remove(session_id) else {
+            return;
+        };
+        // Fold the retiring writer's drops in, exactly as `handle_for` does
+        // when it overwrites an idled-out slot: `dropped_total` is a per-boot
+        // number and must never go down (T44).
+        self.retired_dropped
+            .fetch_add(handle.dropped(), Ordering::Relaxed);
+        let (ack, exited) = oneshot::channel();
+        if handle.tx.send(Msg::Close(ack)).await.is_err() {
+            // The writer had already gone; nothing is appending.
+            return;
+        }
+        // The writer answers after its final sync, and it drops the receiver
+        // before answering — so once this returns, every clone of the handle
+        // reports `is_closed()` and none of them can reopen the session.
+        drop(handle);
+        let _ = tokio::time::timeout(FORGET_TIMEOUT, exited).await;
+    }
+
     /// Wait until every live writer has put what it holds on disk.
     ///
     /// The barrier §5.5's durability policy needs at the two points where a
@@ -392,21 +428,23 @@ impl SessionLogHandle {
     /// channel closed long before this call, and without this the refusal
     /// above would wedge every future overwrite in the run for no disk
     /// reason at all. So a closed channel first asks
-    /// [`SessionLogService::handle_for`] for a live writer under the same
-    /// id — exactly what [`SessionLogService::open`] already does on every
-    /// turn (`simple_query_handler.rs:230-238`) — and retries on it. Only
-    /// when that is also impossible (the service itself is gone, or the
-    /// fresh handle is closed too) does this refuse, naming the log path so
-    /// there is somewhere for a human to look.
+    /// [`reopen`](Self::reopen) for a live writer under the same id —
+    /// exactly what [`SessionLogService::open`] already does on every turn
+    /// (`simple_query_handler.rs:230-238`) — and retries on it. Only when
+    /// that is also impossible (the service is gone, the session has been
+    /// forgotten, or the fresh handle is closed too) does this refuse, naming
+    /// the log path so there is somewhere for a human to look.
     pub async fn snapshot(&self, spec: SnapshotSpec) -> Result<FileSnapshot, String> {
-        if let Some(outcome) = self.try_snapshot(spec.clone()).await {
+        // The spec comes back out of a refused send rather than being cloned
+        // for a retry that almost never happens (T56 minor).
+        let spec = match self.try_snapshot(spec).await {
+            Ok(outcome) => return outcome,
+            Err(returned) => returned,
+        };
+        if let Some(fresh) = self.reopen()
+            && let Ok(outcome) = fresh.try_snapshot(spec).await
+        {
             return outcome;
-        }
-        if let Some(service) = self.service.upgrade() {
-            let fresh = service.handle_for(&self.session_id);
-            if let Some(outcome) = fresh.try_snapshot(spec).await {
-                return outcome;
-            }
         }
         Err(format!(
             "the session log at {} could not be reopened",
@@ -415,19 +453,44 @@ impl SessionLogHandle {
     }
 
     /// Send one snapshot request on this handle's own channel and wait for
-    /// the writer's answer. `None` means this handle's writer is already
-    /// gone — the signal [`snapshot`](Self::snapshot) uses to try reopening
-    /// rather than treating it as the final answer.
-    async fn try_snapshot(&self, spec: SnapshotSpec) -> Option<Result<FileSnapshot, String>> {
+    /// the writer's answer. `Err(spec)` hands the request back because this
+    /// handle's writer is already gone — the signal
+    /// [`snapshot`](Self::snapshot) uses to try reopening rather than
+    /// treating it as the final answer.
+    async fn try_snapshot(
+        &self,
+        spec: SnapshotSpec,
+    ) -> Result<Result<FileSnapshot, String>, SnapshotSpec> {
         let (ack, wait) = oneshot::channel();
         let request = Box::new(writer::SnapshotRequest { spec, ack });
-        if self.tx.send(Msg::Snapshot(request)).await.is_err() {
-            return None;
+        if let Err(mpsc::error::SendError(undelivered)) =
+            self.tx.send(Msg::Snapshot(request)).await
+        {
+            let Msg::Snapshot(request) = undelivered else {
+                unreachable!("send hands back the message it was given");
+            };
+            return Err(request.spec);
         }
-        Some(match wait.await {
+        Ok(match wait.await {
             Ok(outcome) => outcome,
             Err(_) => Err("the session log writer did not answer".to_string()),
         })
+    }
+
+    /// A live handle for this session when the writer behind this one has
+    /// closed — the repair for §5.5's idle-close.
+    ///
+    /// `None` when the service is gone (a handle must never be what keeps it
+    /// alive, so it holds only a [`Weak`]), or when
+    /// [`SessionLogService::forget`] has removed the session's slot. That
+    /// second case is deliberate: a session whose directory is about to be
+    /// removed must not be re-created by a record emitted after the fact.
+    fn reopen(&self) -> Option<SessionLogHandle> {
+        let service = self.service.upgrade()?;
+        if !service.handles.contains_key(&*self.session_id) {
+            return None;
+        }
+        Some(service.handle_for(&self.session_id))
     }
 
     /// Where this session's live segment lives, for a refusal that has no
@@ -466,6 +529,14 @@ impl SessionLogHandle {
     }
 
     /// Queue one record. Returns whether it was accepted.
+    ///
+    /// A writer that has **idle-closed** (§5.5: the task exits after
+    /// `idle_close` with nothing left to do, which closes every clone of its
+    /// sender for good) is reopened here and the record retried once on the
+    /// fresh writer, which resumes the same numbering from the file. Without
+    /// that, the handle a workflow captures at dispatch goes stale after one
+    /// quiet round — a single degraded LLM round is enough — and every later
+    /// record of the run is lost (final review I1).
     pub fn emit(&self, record: Record) -> bool {
         match self.tx.try_send(Msg::Record(record)) {
             Ok(()) => true,
@@ -481,12 +552,26 @@ impl SessionLogHandle {
                 }
                 false
             }
-            // The writer is gone — it could not open its directory, or the
-            // service was dropped. Counted like a full channel: a record that
+            // The writer is gone — it idle-closed (§5.5), it could not open
+            // its directory, or the service was dropped. The first of those is
+            // both the common case and repairable, so it is repaired: one
+            // respawn through [`reopen`](Self::reopen), non-recursive because
+            // the fresh handle's channel is used directly. Anything still
+            // undeliverable is counted like a full channel — a record that
             // never reaches disk is a hole in the log either way, and the
             // "writer died" case being invisible was how it stayed unnoticed.
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                self.dropped.fetch_add(1, Ordering::Relaxed);
+            Err(mpsc::error::TrySendError::Closed(msg)) => {
+                if let Some(fresh) = self.reopen()
+                    && fresh.tx.try_send(msg).is_ok()
+                {
+                    return true;
+                }
+                let dropped = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                tracing::warn!(
+                    session_id = %self.session_id,
+                    dropped,
+                    "Session log writer is gone and could not be reopened — record dropped"
+                );
                 false
             }
         }
@@ -505,8 +590,23 @@ impl SessionLogHandle {
     /// Wait until everything queued before this call is on disk.
     ///
     /// A barrier for tests and for shutdown — never on the emit path, which
-    /// must not wait for the log.
+    /// must not wait for the log. An idle-closed writer is reopened once the
+    /// same way [`emit`](Self::emit) reopens it, so a barrier on a handle
+    /// captured earlier in the run answers for the live writer instead of
+    /// reporting a failure the disk had no part in.
     pub async fn flush(&self) -> bool {
+        if self.send_sync().await {
+            return true;
+        }
+        match self.reopen() {
+            Some(fresh) => fresh.send_sync().await,
+            None => false,
+        }
+    }
+
+    /// One sync request on this handle's own channel; `false` when the writer
+    /// behind it is gone.
+    async fn send_sync(&self) -> bool {
         let (ack, wait) = oneshot::channel();
         if self.tx.send(Msg::Sync(ack)).await.is_err() {
             return false;
@@ -514,6 +614,12 @@ impl SessionLogHandle {
         wait.await.is_ok()
     }
 }
+
+/// How long [`SessionLogService::forget`] waits for a writer to answer that it
+/// has finished. The work it is waiting for is one flush and one `sync_data`;
+/// the bound exists so a stuck disk delays a session delete rather than
+/// wedging it.
+const FORGET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Eight characters that identify the call a spill belongs to.
 ///

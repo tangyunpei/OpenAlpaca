@@ -72,6 +72,13 @@ pub(super) enum Msg {
     /// record, and answer — the one request whose sender waits, because it is
     /// about to overwrite the bytes it asked to be imaged (§5.7).
     Snapshot(Box<SnapshotRequest>),
+    /// Finish, sync, and exit: the service is forgetting this session because
+    /// its directory is about to be removed
+    /// ([`SessionLogService::forget`](super::SessionLogService::forget)).
+    /// Answered after the final sync and after the receiver is dropped, so a
+    /// caller that gets the answer knows nothing more will be written and no
+    /// handle can queue into this writer again.
+    Close(oneshot::Sender<()>),
 }
 
 /// A pre-edit image request and the channel its answer goes back on.
@@ -103,6 +110,9 @@ struct Writer {
     /// Set once the directory could not be opened: the writer is done, and
     /// dropping its receiver tells every handle so.
     gave_up: bool,
+    /// Set by [`Msg::Close`]: the answer owed to the caller that forgot this
+    /// session, sent by [`run`] once the final sync is done.
+    closing: Option<oneshot::Sender<()>>,
 }
 
 impl Writer {
@@ -155,6 +165,14 @@ impl Writer {
                     };
                     // The caller is waiting on this to decide whether to write.
                     let _ = ack.send(outcome);
+                }
+                Msg::Close(ack) => {
+                    // Nothing queued behind a close is written: the session's
+                    // directory is about to be removed, so a record that
+                    // arrived after the forget would only re-create it. The
+                    // answer goes out in `run`, after the final sync.
+                    self.closing = Some(ack);
+                    break;
                 }
             }
         }
@@ -232,6 +250,7 @@ pub(super) async fn run(
         pending: PendingCalls::default(),
         written_seq,
         gave_up: false,
+        closing: None,
     };
     let mut dirty = false;
 
@@ -271,10 +290,24 @@ pub(super) async fn run(
         if writer.gave_up {
             return;
         }
+        // The service has forgotten this session (`Msg::Close`): stop taking
+        // messages, sync what is written, and answer below.
+        if writer.closing.is_some() {
+            break;
+        }
         dirty = writer.dirty();
     }
 
-    let _ = pump(writer, Vec::new(), true).await;
+    // Dropped before the final sync, and so before a `Close` is answered:
+    // every handle reports `is_closed()` the moment `forget` returns, which is
+    // what keeps a late `emit` from reopening a session whose directory is
+    // being removed.
+    drop(rx);
+    if let Some(mut writer) = pump(writer, Vec::new(), true).await
+        && let Some(ack) = writer.closing.take()
+    {
+        let _ = ack.send(());
+    }
 }
 
 /// Hand the writer and its batch to a blocking thread and take it back.
