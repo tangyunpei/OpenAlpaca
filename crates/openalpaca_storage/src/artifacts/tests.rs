@@ -1001,6 +1001,90 @@ fn pruning_keeps_the_head_and_the_newest_versions() {
     );
 }
 
+/// C1: the head is removed by hand, then the same address is put again. v(N-1)'s
+/// row must stop naming the head path, or the prune that closes the put deletes
+/// the bytes the put just committed.
+#[test]
+fn a_put_over_a_removed_head_keeps_the_new_head_through_the_prune() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut first = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"v1\n");
+    first.created = at(1);
+    first.max_versions = Some(1);
+    let (v1, _) = f.store().put(first).unwrap();
+
+    fs::remove_file(&v1.storage_path).unwrap();
+
+    let mut second = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"v2\n");
+    second.created = at(1);
+    second.max_versions = Some(1);
+    let (v2, _) = f.store().put(second).unwrap();
+    assert_eq!(v2.id, v1.id, "the same artifact was superseded");
+
+    assert_eq!(
+        fs::read_to_string(&v2.storage_path).unwrap(),
+        "v2\n",
+        "the prune unlinked v1's empty version slot, not the live head"
+    );
+    assert_eq!(
+        fs::read_to_string(f.store().resolve_content(&v2.id, None).unwrap()).unwrap(),
+        "v2\n"
+    );
+}
+
+#[test]
+fn a_put_over_a_removed_head_repoints_the_previous_version_row() {
+    let f = Fixture::new();
+    let scope = f.scope();
+    let mut first = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"v1\n");
+    first.created = at(1);
+    first.max_versions = Some(3);
+    let (v1, _) = f.store().put(first).unwrap();
+
+    fs::remove_file(&v1.storage_path).unwrap();
+
+    let mut second = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"v2\n");
+    second.created = at(1);
+    second.max_versions = Some(3);
+    let (v2, _) = f.store().put(second).unwrap();
+
+    let versions = f.store().versions(&v2.id).unwrap();
+    let one = versions
+        .iter()
+        .find(|v| v.version == 1)
+        .expect("v1's row survives");
+    assert_eq!(
+        one.rel_path, "loose/2026-09-01/.versions/01-notes/v1.md",
+        "v1's row names its own (empty) version slot, never the head"
+    );
+    let two = versions.iter().find(|v| v.version == 2).unwrap();
+    assert_eq!(two.rel_path, "loose/2026-09-01/01-notes.md");
+
+    // v1's bytes really are gone — the row says so instead of serving v2's.
+    let err = f.store().resolve_content(&v2.id, Some(1)).unwrap_err();
+    assert_eq!(
+        err.downcast_ref::<ArtifactError>().unwrap().code(),
+        "ARTIFACT_GONE"
+    );
+
+    // Three more puts cross keep = 3, the path the default config takes.
+    for n in 3..=5u32 {
+        let body = format!("v{n}\n");
+        let mut new = NewArtifact::new(
+            OWNER,
+            &scope,
+            ArtifactKind::Markdown,
+            "Notes",
+            body.as_bytes(),
+        );
+        new.created = at(1);
+        new.max_versions = Some(3);
+        f.store().put(new).unwrap();
+    }
+    let head = f.store().get(&v2.id, OWNER).unwrap().unwrap();
+    assert_eq!(fs::read_to_string(&head.storage_path).unwrap(), "v5\n");
+}
+
 // ============================================================================
 // The produced row and the upload machinery (Verify: sweep + quota)
 // ============================================================================

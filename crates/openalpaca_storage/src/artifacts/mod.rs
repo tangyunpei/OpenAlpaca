@@ -2617,6 +2617,14 @@ fn write_bytes_steps(
             }
             fsync_dir(dir);
             rotated_rel = Some(relative_to(artifacts_root, &version_path)?);
+        } else {
+            // Neither place holds bytes: the head was removed by hand. v(N-1)'s
+            // row still names the head path, and the head about to be renamed
+            // into place belongs to v(N) — so report the empty version slot
+            // anyway. The row then tells the truth (reads answer
+            // `ARTIFACT_GONE`) and, decisively, a later prune of v(N-1) unlinks
+            // that empty slot instead of the live head.
+            rotated_rel = Some(relative_to(artifacts_root, &version_path)?);
         }
     }
     crash_point(WriteStep::Rotated)?;
