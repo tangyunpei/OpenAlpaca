@@ -15,7 +15,6 @@ use crate::runner::steering::{SteeringInbox, SteeringMsg, SteeringOrigin};
 use crate::session_log::replay::{ResumeHistory, ResumeSeed, resume_interjection};
 use chrono::Utc;
 use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 /// How a dispatch's persist step writes the run's row.
@@ -37,6 +36,17 @@ impl TaskDispatcher {
     /// Dispatch a task using the Lead Agent orchestration pattern.
     /// Spawns a lead agent instance from the "lead_agent" template (singleton),
     /// registers the task, and runs the lead agent execution loop.
+    ///
+    /// `session_id` is **the turn's** conversation, carried from the caller that
+    /// has one (§5.5 item 5: the main loop's `start_workflow` knows it, because
+    /// the gateway pinned it for this turn). It is used as given; `None` — a
+    /// scheduled skill, a `start`/`rerun` from the route, any caller with no
+    /// turn — falls back to the lane's active session, resolved at dispatch.
+    /// Without the carry, a `create_session`/`activate_session` landing during
+    /// the loop's LLM round re-homed the completion report, its artifact links
+    /// and the run's JSONL into whichever conversation happened to be active by
+    /// the time the dispatch ran.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn dispatch_lead_agent(
         &self,
         description: &str,
@@ -45,6 +55,7 @@ impl TaskDispatcher {
         lane_key: &str,
         source: &str,
         workspace: MemoryScopeContext,
+        session_id: Option<&str>,
     ) -> Result<DispatchOutcome, String> {
         self.dispatch_lead_agent_inner(
             Uuid::new_v4().to_string(),
@@ -57,6 +68,7 @@ impl TaskDispatcher {
             None,
             RowWrite::Create,
             None,
+            session_id,
         )
     }
 
@@ -89,6 +101,9 @@ impl TaskDispatcher {
             Some(source_task_id.to_string()),
             RowWrite::Create,
             None,
+            // A re-run comes from the route, not from a turn: the lane's
+            // active session is the only answer there is.
+            None,
         )
     }
 
@@ -119,6 +134,8 @@ impl TaskDispatcher {
             workspace,
             None,
             RowWrite::Relaunch,
+            None,
+            // `start` likewise has no turn behind it.
             None,
         )
     }
@@ -155,6 +172,8 @@ impl TaskDispatcher {
             None,
             RowWrite::Relaunch,
             Some(resume),
+            // The seed's own session wins above; nothing to carry here.
+            None,
         )
     }
 
@@ -171,6 +190,7 @@ impl TaskDispatcher {
         source_task_id: Option<String>,
         row_write: RowWrite,
         resume: Option<ResumeSeed>,
+        turn_session_id: Option<&str>,
     ) -> Result<DispatchOutcome, String> {
         let now = Utc::now();
         // Whether this dispatch is §5.6c's `resume`, asked before the seed is
@@ -240,16 +260,25 @@ impl TaskDispatcher {
             timestamp: now,
         });
 
-        // §5.1: the session this run was started from, resolved once at
-        // dispatch. It is what makes the completion report land in the
-        // conversation that asked for the work, even when the user has opened
-        // another one by the time the run finishes.
+        // §5.1: the session this run was started from. It is what makes the
+        // completion report land in the conversation that asked for the work,
+        // even when the user has opened another one by the time the run
+        // finishes.
         //
         // §5.6c: a resume keeps the run's **own** session — the conversation
         // whose log it was rebuilt from. Re-resolving the lane's current one
         // would re-home the row mid-recovery and point the run's log at a
         // transcript it has no history in.
-        let session_id = resume.as_ref().map(|r| r.session_id.clone()).or_else(|| {
+        //
+        // §5.5 item 5: otherwise the **turn's** session, carried from the
+        // caller that has one, because the lane's active session can change
+        // during the LLM round that decided to start this workflow. Only a
+        // caller with no turn at all falls back to reading the lane.
+        let session_id = resume
+            .as_ref()
+            .map(|r| r.session_id.clone())
+            .or_else(|| turn_session_id.map(str::to_string))
+            .or_else(|| {
             self.db.as_ref().and_then(|db| {
                 openalpaca_storage::ConversationRepository::new(db)
                     .active_session_id(lane_key)
@@ -416,9 +445,10 @@ impl TaskDispatcher {
         let context_manager = self.context_manager.clone();
         let compose_engine = self.compose_engine.clone();
 
-        // Create cancellation token for this task
-        let cancel_token = CancellationToken::new();
-        ctx.register_cancellation_token(&task_id, cancel_token.clone());
+        // This run's cancellation token — the one a `start`/`resume` claim
+        // already installed, if there was one, so a cancel issued in the window
+        // between the claim and here is observed instead of replaced away.
+        let cancel_token = ctx.run_cancellation_token(&task_id);
 
         // Routing V2: attach the workflow to its lane unconditionally — the
         // lane attachment backs the StartWorkflowTool per-lane cap and the

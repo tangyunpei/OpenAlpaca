@@ -130,6 +130,10 @@ impl BuiltInTool for StartWorkflowTool {
             // workflow: the memory-scoping id and the request-supplied root
             // that alone may place artifacts (R22).
             crate::memory::scope_context::MemoryScopeContext::from_tool_context(ctx),
+            // §5.5 item 5: the turn's own conversation, not whichever one the
+            // lane calls active by the time this dispatch runs — the LLM round
+            // that produced this tool call gave the user time to open another.
+            ctx.session_id.as_deref(),
         )?;
 
         // 3. Store the outcome in the result cell for the caller.

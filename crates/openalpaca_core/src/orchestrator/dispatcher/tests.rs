@@ -145,6 +145,7 @@ fn test_dispatch_lead_agent_marks_agent_busy() {
         "user1:cli",
         "cli",
         MemoryScopeContext::global_only(),
+        None,
     );
 
     assert!(result.is_ok());
@@ -181,6 +182,7 @@ fn test_dispatch_lead_agent_prefers_orchestration_capability() {
         "user1:cli",
         "cli",
         MemoryScopeContext::global_only(),
+        None,
     );
 
     assert!(result.is_ok());
@@ -218,6 +220,7 @@ fn test_dispatch_lead_agent_fallback_to_any_idle_agent() {
         "user1:cli",
         "cli",
         MemoryScopeContext::global_only(),
+        None,
     );
 
     assert!(result.is_ok());
@@ -252,6 +255,7 @@ fn test_dispatch_lead_agent_fails_no_agents() {
         "user1:cli",
         "cli",
         MemoryScopeContext::global_only(),
+        None,
     );
 
     assert!(result.is_err());
@@ -663,6 +667,87 @@ fn lifecycle_steering_msg(text: &str) -> crate::runner::steering::SteeringMsg {
     }
 }
 
+/// §5.5 item 5: the run's session is the **turn's**, carried in by the caller
+/// that has one, not whatever the lane calls active by the time the dispatch
+/// runs. The window is real — a `create_session` landing during the main loop's
+/// LLM round — and it used to re-home the completion report, the artifact links
+/// and the run's JSONL into the new, empty conversation.
+#[tokio::test]
+async fn a_dispatch_binds_the_turns_session_even_after_the_lane_moved_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    let turn_session = repo
+        .create_session("user1:cli", "cli", None, Some("the turn"))
+        .unwrap()
+        .id;
+
+    let dispatcher = setup_with_router_and_db(
+        vec![make_agent("lead-01", vec!["orchestration"])],
+        DaemonConfig::default(),
+        db.clone(),
+    );
+
+    // The user opens a new chat while the round that decided to start this
+    // workflow is still in flight: the lane's active session is no longer the
+    // turn's.
+    let newer = repo
+        .create_session("user1:cli", "cli", None, Some("a new chat"))
+        .unwrap()
+        .id;
+    assert_eq!(
+        repo.active_session_id("user1:cli").unwrap().as_deref(),
+        Some(newer.as_str())
+    );
+
+    let outcome = dispatcher
+        .dispatch_lead_agent(
+            "Long running task",
+            "Carried session".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            Some(&turn_session),
+        )
+        .unwrap();
+
+    let task = openalpaca_storage::repository::TaskRepository::new(&db)
+        .get(&outcome.task_id)
+        .unwrap()
+        .expect("the row is persisted at dispatch");
+    assert_eq!(
+        task.session_id.as_deref(),
+        Some(turn_session.as_str()),
+        "the carried session wins over the lane's current one"
+    );
+
+    // And with no turn to carry — a scheduled skill, `start`, `rerun` — the
+    // lane read is still the answer. A second dispatcher, because the first
+    // one's single lead instance is busy with the run above.
+    let second = setup_with_router_and_db(
+        vec![make_agent("lead-02", vec!["orchestration"])],
+        DaemonConfig::default(),
+        db.clone(),
+    );
+    let fallback = second
+        .dispatch_lead_agent(
+            "Another task",
+            "Lane fallback".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            None,
+        )
+        .unwrap();
+    let task = openalpaca_storage::repository::TaskRepository::new(&db)
+        .get(&fallback.task_id)
+        .unwrap()
+        .expect("the row is persisted at dispatch");
+    assert_eq!(task.session_id.as_deref(), Some(newer.as_str()));
+}
+
 #[tokio::test]
 async fn test_lead_agent_steering_attach_detach_and_leftover_conversion() {
     let mut config = DaemonConfig::default();
@@ -683,6 +768,7 @@ async fn test_lead_agent_steering_attach_detach_and_leftover_conversion() {
             "user1:cli",
             "cli",
             MemoryScopeContext::global_only(),
+            None,
         )
         .unwrap();
     let task_id = outcome.task_id;
@@ -779,6 +865,7 @@ async fn a_daemon_authored_leftover_is_dropped_not_filed_as_a_user_followup() {
             "user1:cli",
             "cli",
             MemoryScopeContext::global_only(),
+            None,
         )
         .unwrap();
     let task_id = outcome.task_id;
@@ -845,6 +932,7 @@ async fn test_lead_agent_lane_attachment_independent_of_steering_flag() {
             "user1:cli",
             "cli",
             MemoryScopeContext::global_only(),
+            None,
         )
         .unwrap();
 
@@ -942,6 +1030,7 @@ async fn test_lead_agent_completion_report_persists_final_content_verbatim() {
             "user1:cli",
             "cli",
             MemoryScopeContext::global_only(),
+            None,
         )
         .unwrap();
 
@@ -1119,6 +1208,7 @@ async fn test_lead_agent_completion_report_empty_falls_back_to_template_with_sta
             "user1:cli",
             "cli",
             MemoryScopeContext::global_only(),
+            None,
         )
         .unwrap();
 
@@ -1161,6 +1251,7 @@ fn dispatch_persists_the_requests_workspace_id() {
                 workspace_id: Some("/Users/dev/openalpaca".to_string()),
                 request_workspace_root: Some("/Users/dev/openalpaca".to_string()),
             },
+            None,
         )
         .unwrap();
 
@@ -1196,6 +1287,7 @@ fn dispatch_without_a_request_workspace_leaves_workspace_id_null() {
             "user1:telegram",
             "telegram",
             MemoryScopeContext::new(Some("/where/the/daemon/started".to_string())),
+            None,
         )
         .unwrap();
 
@@ -1247,6 +1339,7 @@ async fn the_run_slot_is_held_until_the_row_is_terminal() {
             "user1:cli",
             "cli",
             MemoryScopeContext::global_only(),
+            None,
         )
         .unwrap()
         .task_id;
@@ -1255,7 +1348,7 @@ async fn the_run_slot_is_held_until_the_row_is_terminal() {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         // Precisely what `Orchestrator::start_task` does at this instant.
-        if dispatcher.shared_context.claim_run_slot(&task_id) {
+        if dispatcher.shared_context.claim_run_slot(&task_id).is_some() {
             let row = repo.get(&task_id).unwrap().expect("the run's row");
             // Give the id back: nothing is running under our placeholder.
             dispatcher

@@ -347,7 +347,10 @@ async fn start_refuses_a_run_that_has_already_finished() {
         assert_eq!(after.state_version, before.state_version);
         assert_eq!(after.artifact_count, before.artifact_count);
         // …and nothing claimed the id on the way out.
-        assert!(ctx.claim_run_slot(id), "a refusal must not hold the slot");
+        assert!(
+            ctx.claim_run_slot(id).is_some(),
+            "a refusal must not hold the slot"
+        );
     }
     // No copy was dispatched either — `rerun` is what makes those.
     assert_eq!(TaskRepository::new(&db).list_recent(10).unwrap().len(), 3);
@@ -446,7 +449,7 @@ async fn a_start_that_could_not_dispatch_releases_the_run_slot() {
         Err(TaskLaunchError::Dispatch(_))
     ));
     assert!(
-        ctx.claim_run_slot("t1"),
+        ctx.claim_run_slot("t1").is_some(),
         "the slot must be free again after a dispatch that never started"
     );
 }
@@ -467,7 +470,7 @@ async fn a_start_with_no_router_releases_the_run_slot() {
     // then dies for want of a router.
     assert!(orchestrator.start_task("t1").is_ok());
     assert!(
-        ctx.claim_run_slot("t1"),
+        ctx.claim_run_slot("t1").is_some(),
         "a run that could never start must not hold the id"
     );
 }
@@ -640,7 +643,7 @@ async fn resume_relaunches_the_run_under_its_own_id() {
         "the run keeps the conversation it belonged to"
     );
     // The slot is claimed for the duration, exactly as `start` claims it.
-    assert!(!ctx.claim_run_slot("t1"));
+    assert!(ctx.claim_run_slot("t1").is_none());
 }
 
 /// The resumed run finishes claiming the files the crashed half wrote.

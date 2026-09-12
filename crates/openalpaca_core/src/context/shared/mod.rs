@@ -206,6 +206,10 @@ impl SharedContext {
     }
 
     /// Register a cancellation token for a task.
+    ///
+    /// A run takes its token from
+    /// [`run_cancellation_token`](Self::run_cancellation_token) instead, so that
+    /// a cancel which arrived against a claim is not replaced away.
     pub fn register_cancellation_token(&self, task_id: &str, token: CancellationToken) {
         let mut tokens = self
             .cancellation_tokens
@@ -233,24 +237,44 @@ impl SharedContext {
     /// this claim would succeed on a row that still says `running`, and the
     /// finishing run's result would land on the row the new one now owns.
     ///
-    /// The token registered here is a placeholder that nothing holds yet — the
-    /// dispatch replaces it with the run's real one a few lines later. A caller
-    /// that claims and then fails to dispatch must
-    /// [`remove_cancellation_token`](Self::remove_cancellation_token), or the
-    /// id stays claimed until the daemon restarts.
-    pub fn claim_run_slot(&self, task_id: &str) -> bool {
+    /// **The token this inserts is the run's own**, returned here and taken
+    /// again by the dispatch through
+    /// [`run_cancellation_token`](Self::run_cancellation_token). It used to be a
+    /// placeholder the dispatch replaced a few lines later, which swallowed any
+    /// `cancel` that landed in between — the row read `running`, `cancel_task`
+    /// answered `true`, and the cancelled token was then dropped on the floor
+    /// (final review, Minor). A caller that claims and then fails to dispatch
+    /// must [`remove_cancellation_token`](Self::remove_cancellation_token), or
+    /// the id stays claimed until the daemon restarts.
+    pub fn claim_run_slot(&self, task_id: &str) -> Option<CancellationToken> {
         use std::collections::hash_map::Entry;
         let mut tokens = self
             .cancellation_tokens
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         match tokens.entry(task_id.to_string()) {
-            Entry::Occupied(_) => false,
-            Entry::Vacant(slot) => {
-                slot.insert(CancellationToken::new());
-                true
-            }
+            Entry::Occupied(_) => None,
+            Entry::Vacant(slot) => Some(slot.insert(CancellationToken::new()).clone()),
         }
+    }
+
+    /// The token the run under `task_id` must watch: whatever a claim already
+    /// installed, or a fresh one registered now.
+    ///
+    /// This is the other half of [`claim_run_slot`](Self::claim_run_slot)'s
+    /// contract. A dispatch that minted its own token and registered it over the
+    /// claim's lost every cancel issued in the window between the two; taking
+    /// the claimed token means such a cancel is already set on the token the
+    /// agentic loop checks at the top of its first round.
+    pub fn run_cancellation_token(&self, task_id: &str) -> CancellationToken {
+        let mut tokens = self
+            .cancellation_tokens
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        tokens
+            .entry(task_id.to_string())
+            .or_insert_with(CancellationToken::new)
+            .clone()
     }
 
     /// Trigger cancellation for a task. Returns `true` if the token was found.

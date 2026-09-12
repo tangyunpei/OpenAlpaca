@@ -225,7 +225,7 @@ impl Orchestrator {
         }
         let plan = RunPlan::from_row(&row)?;
 
-        if !self.shared_context.claim_run_slot(&row.id) {
+        if self.shared_context.claim_run_slot(&row.id).is_none() {
             return Err(TaskLaunchError::AlreadyRunning);
         }
 
@@ -324,7 +324,7 @@ impl Orchestrator {
         let from_seq = replay.from_seq;
         let to_seq = replay.to_seq;
 
-        if !self.shared_context.claim_run_slot(&row.id) {
+        if self.shared_context.claim_run_slot(&row.id).is_none() {
             return Err(TaskLaunchError::AlreadyRunning);
         }
 
