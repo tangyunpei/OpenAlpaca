@@ -165,6 +165,16 @@ Auth behavior:
   moved off the middleware — the owner check is unchanged, and the metadata and
   `/open` routes stay header-only.
 
+Those three content routes also send `Content-Security-Policy: sandbox` on
+anything that could run script on the daemon's own origin, where the bearer sits
+in `?token=`: `text/html`, `image/svg+xml`, and **every XML essence** —
+`text/xml`, `application/xml` and any `*/*+xml` suffix, matched on the essence
+so a `;charset=` parameter or odd casing cannot slip past (ruling R83). An XML
+document whose root is XHTML or SVG, or one carrying an `xml-stylesheet` XSLT
+that produces either, is a script-bearing navigable document however its type is
+spelled. Bytes that are not one of those — an image, a PDF, plain text — are
+served without the header.
+
 ## API Route Groups
 
 Route table source of truth: `apps/openalpacad/src/router.rs` (see also the [API docs index](api/README.md)).
@@ -172,11 +182,11 @@ Route table source of truth: `apps/openalpacad/src/router.rs` (see also the [API
 Major groups:
 
 - Core: health, `/v1/command`, `/v1/events/history`, `GET /v1/me` (user id and default lane), `GET /v1/status` (uptime, schema version, store roots and sizes, `log_path` when the CLI manages the log)
-- Tasks: list/create/status/action, plus `GET /v1/tasks/{id}/timeline` — one lane per spawned subagent (label, template, state, start/end), which is where a run's agents are reported; the legacy `assigned_agents` (list) / `assignments` (detail) arrays were deleted, and a list row keeps only their count as `subagent_count`. `POST /v1/tasks/{id}/steer` pushes into the run's steering inbox (owner-scoped, `404` on a run that is not yours) and `POST /v1/tasks/{id}/rerun` answers `201` with a **new** id copied from a finished run's goal
+- Tasks: list/create/status/action, plus `GET /v1/tasks/{id}/timeline` — one lane per spawned subagent (label, template, state, start/end), which is where a run's agents are reported; the legacy `assigned_agents` (list) / `assignments` (detail) arrays were deleted, and a list row keeps only their count as `subagent_count`. `POST /v1/tasks/{id}/steer` pushes into the run's steering inbox (owner-scoped, `404` on a run that is not yours) and `POST /v1/tasks/{id}/rerun` answers `201` with a **new** id copied from a finished run's goal. `POST /v1/tasks` records the caller as `created_by` whatever the body claims, and refuses a `source_lane` the caller does not own with `404 LANE_NOT_FOUND` — never `403`; `start`, `rerun` and `resume` re-check the row's owner **and** its lane before dispatching, so a row parked on somebody else's lane never launches its completion report or its confirmation prompts there (ruling R79)
 - Lane follow-ups: `GET|POST /v1/lanes/{lane_key}/followups`, `DELETE /v1/lanes/{lane_key}/followups/{id}` (a cancel that lost the race to autostart answers `409`)
 - Agents: CRUD/action/config plus template CRUD (`/v1/agent-templates`) and a read-only instance list (`GET /v1/agent-instances`)
 - Chat: send/history/stream, message feedback (`PUT|GET|DELETE /v1/chat/messages/{message_id}/feedback`), tool confirmations (`POST /v1/chat/confirmations/{request_id}`)
-- Sessions: `GET|POST /v1/sessions`, `GET|PATCH|DELETE /v1/sessions/{id}`, `GET /v1/sessions/{id}/messages`, `GET /v1/sessions/{id}/events`, `POST /v1/sessions/{id}/activate|archive`. A lane holds many sessions with exactly one `active`; the old `/v1/conversations` family was deleted
+- Sessions: `GET|POST /v1/sessions`, `GET|PATCH|DELETE /v1/sessions/{id}`, `GET /v1/sessions/{id}/messages`, `GET /v1/sessions/{id}/events`, `POST /v1/sessions/{id}/activate|archive`. A lane holds many sessions with exactly one `active`; the old `/v1/conversations` family was deleted. `DELETE /v1/sessions/{id}` takes the transcript with the rows: the messages, the tool-call index rows and the queued follow-ups go in one transaction, then the session's writer is stood down and `~/.openalpaca/sessions/<id>/` is removed, so a record emitted afterwards on a handle captured earlier re-creates nothing. It answers `204`; a run still writing into the session is `409 SESSION_HAS_ACTIVE_WORKFLOWS` (cancel it first), and another owner's session is `404`. `POST /v1/workspaces/purge` removes the same directories for every session it purges
 - Files: `POST /v1/files/upload` (body limit 100 MiB), `GET /v1/files/{id}`, `GET /v1/files/{id}/content`, `POST /v1/files/{id}/open`
 - Artifacts: `GET /v1/artifacts` (filters and paging), `GET /v1/artifacts/{id}`, `…/versions`, `…/diff?from=&to=`, `PUT …/pin`, and the content routes `…/content` and `…/versions/{n}/content`
 - Workspaces: `GET|PATCH /v1/workspaces` (describe a project root; re-base everything addressed under it) and `POST /v1/workspaces/purge` (`dry_run` defaults to true)
@@ -277,6 +287,7 @@ The daemon runs periodic workers, all cancelled together on shutdown (intervals 
 
 - SQLite location is resolved by `openalpaca_storage::store::database_path()` — `~/.openalpaca/state/openalpaca.db`. Every path in the layout comes from that module; no crate joins a literal directory name onto a store root.
 - Migrations are embedded and applied from `openalpaca_storage::migrations::MIGRATIONS`. The authoritative list is `crates/openalpaca_storage/src/migrations/` (currently `001` through `040`); `GET /v1/status` reports the version the open database is actually at.
+- Session logs live at `~/.openalpaca/sessions/<id>/` and are bounded by **size only**: `[orchestrator.sessions] log_max_session_bytes` per session (on exceed the writer drops whole oldest segments, never the live one, and records the seq range that went) and `log_max_total_bytes` across all of them, swept once at boot, oldest-touched archived session first, never an active one. `log_retention_days` is **reserved and does nothing**: the key is parsed, clamped and reported by `GET /v1/status`, and the daemon warns at boot when it is set to anything but its default — but no age-based sweep exists, so setting it to `90` expires nothing. Whether one is built, and at what default, is an owner decision (T12); until then a log leaves only by byte cap, by `DELETE /v1/sessions/{id}`, or by a purge.
 
 ## Logging and Operations
 

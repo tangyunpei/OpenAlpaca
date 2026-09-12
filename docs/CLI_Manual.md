@@ -317,6 +317,26 @@ refused with `secret_literal_refused`; `--header-from HEADER=HOST_VAR` records
 the variable's *name* and the daemon reads it from its own environment each time
 it connects.
 
+It also covers the two places a credential hides outside `--env` and the
+headers, because `config/mcp.toml` cannot tell them apart:
+
+- **`--arg`.** An argument that *names* a credential — `--api-key sk-…`,
+  `--token=…`, `PASSWORD=…` — is refused with `secret_literal_refused` naming
+  the argument. The test is on the flag's name, and on both halves of a
+  `NAME=VALUE` pair; a bare positional value is never tested, because it has no
+  name to judge — `--port 8080` and a path like `/srv/keys/server.js` go in
+  unchanged. Use `--env-from` and let the server read the value from the
+  daemon's environment.
+- **`--url`.** A url whose authority carries userinfo
+  (`https://user:token@host`) or whose query carries a credential-shaped
+  parameter (`?api_key=…`, `&token=…`) is refused the same way, naming which
+  part tripped. `--bearer-env REMOTE_TOKEN` is the indirection that already
+  exists for it.
+
+Both refusals govern only what the daemon *writes*. A `config/mcp.toml` you
+edited by hand keeps whatever it says — the parser reads it unchanged; the rule
+is that this command never becomes the thing that wrote a secret down.
+
 ```bash
 export GITHUB_TOKEN=ghp_xxx            # in the daemon's environment
 openalpaca ext mcp add github --command npx \
