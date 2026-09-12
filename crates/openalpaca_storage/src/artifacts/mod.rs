@@ -1832,6 +1832,11 @@ impl<'a> ArtifactStore<'a> {
 
     /// The statements both purge entry points run, inside a transaction the
     /// caller owns and commits.
+    ///
+    /// The extra block keeps the body at the indentation it had inside
+    /// `with_connection`'s closure, so the extraction reads as a move rather
+    /// than a rewrite — every multi-line SQL literal below is byte for byte
+    /// what it was.
     fn purge_within(tx: &rusqlite::Transaction<'_>, root: &str) -> Result<PurgeOutcome> {
         {
             // Read what is about to go, inside the transaction: this list is
