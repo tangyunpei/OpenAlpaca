@@ -18,8 +18,9 @@
  *   * **It never pins the conversation it creates.** A pin is a deliberate
  *     resume — a row the user clicked — and it lasts only while the daemon
  *     still calls that row active. "New chat" therefore pins nothing, and a
- *     conversation archived elsewhere releases the pin rather than sending the
- *     next turn at an archived session.
+ *     conversation archived — or deleted — elsewhere releases the pin rather
+ *     than sending the next turn at a conversation that is no longer live, or
+ *     no longer there.
  *
  * Ordering is the controller's: the live conversation first, then the archived
  * ones by `updated_at`. The daemon already sorts `updated_at DESC, id DESC`,
@@ -29,6 +30,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useDaemonStatus } from "@/hooks/useConnection";
+import { useServerEvent } from "@/hooks/useDaemonEvents";
 import {
   useActivateSession,
   useArchiveSession,
@@ -47,6 +49,9 @@ const SESSION_PAGE = 100;
 
 /** The lane the GUI talks on is `{local_user}:gui`, so the source is the filter. */
 const GUI_SOURCE = "gui";
+
+/** Constant identity: `useServerEvent` keys its subscription off the list. */
+const SESSION_EVENTS = ["session_changed"] as const;
 
 export interface SessionSidebarState {
   sessions: Session[];
@@ -165,6 +170,25 @@ export function useSessionSidebar(
     if (pinned === undefined || pinned.status === "active") return;
     select(null);
   }, [selectedId, busyId, list.data, list.isFetching, select]);
+
+  /**
+   * A **deleted** conversation is the one case the rule above cannot see.
+   *
+   * That rule releases the pin on a row the refreshed list shows as no longer
+   * active, and deliberately leaves an *absent* row pinned — absent is "a later
+   * page", not "gone". A delete from another window makes the row absent
+   * forever, so the pin outlives the conversation and every send answers
+   * `404 SESSION_NOT_FOUND` for a user who did nothing but type. The frame is
+   * the only thing that can tell the two apart: `session_changed` with
+   * `status: "deleted"` (`routes/sessions.rs`) is the row going away, not a
+   * state it entered. Released, the pointer falls back to the lane's active
+   * session, which is where an unpinned turn was always going.
+   */
+  useServerEvent(SESSION_EVENTS, (event) => {
+    if (event.type !== "session_changed" || event.status !== "deleted") return;
+    if (event.session_id !== selectedId) return;
+    select(null);
+  });
 
   const sessions = useMemo(() => {
     const rows = (list.data?.sessions ?? []).filter(
