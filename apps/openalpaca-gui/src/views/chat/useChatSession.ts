@@ -70,6 +70,7 @@ import { sessionErrorMessage } from "@/lib/api/sessions";
 import { steerErrorMessage, steerTask } from "@/lib/api/tasks";
 import type { ApprovalScope } from "@/lib/api/types";
 import { ApiError } from "@/lib/http";
+import { isTerminalRunStatus } from "@/lib/query-client";
 import { useProjectStore, workspaceOption } from "@/stores/project";
 import { useSessionSelection } from "@/stores/session";
 import { useUiStore, type ComposerMode } from "@/stores/ui";
@@ -173,19 +174,14 @@ export interface ChatSession {
   cancellingFollowupId: number | null;
 }
 
-function isTerminal(
-  status: string,
-): status is "completed" | "failed" | "cancelled" | "interrupted" {
-  return (
-    status === "completed" ||
-    status === "failed" ||
-    status === "cancelled" ||
-    // The daemon went away mid-run (§5.6b). Terminal, so the report card is
-    // drawn — and it must not say "failed".
-    status === "interrupted"
-  );
-}
-
+/**
+ * The report card's word for a run that stopped.
+ *
+ * Which statuses stop a run is `isTerminalRunStatus`'s to say — the same list
+ * `query-client.ts` invalidates the transcript on, so a status added there
+ * cannot quietly stop carding here. `interrupted` (§5.6b, the daemon went away
+ * mid-run) is terminal and must not read as "failed".
+ */
 function reportStatus(status: string): RunReportData["status"] {
   if (status === "completed") return "done";
   if (status === "cancelled") return "cancelled";
@@ -328,7 +324,7 @@ export function useChatSession(): ChatSession {
       return;
     }
     if (event.type !== "task_status") return;
-    if (!isTerminal(event.status)) return;
+    if (!isTerminalRunStatus(event.status)) return;
 
     const origin = started.current.get(event.task_id);
     // Only report workflows this lane actually started — a foreign run's card
