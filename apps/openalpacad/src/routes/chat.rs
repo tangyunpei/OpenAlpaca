@@ -169,6 +169,23 @@ fn resolve_turn_target(
     Ok(bound.or(header_workspace))
 }
 
+/// The refusal for a lane that is not this caller's — `404`, never `403`.
+///
+/// R40's line, and the one thing the two history routes got wrong: they answered
+/// `403 FORBIDDEN` for a foreign lane while answering `404 SESSION_NOT_FOUND`
+/// for a foreign session a line later. A `403` on a lane key is an existence
+/// oracle for other users' lanes (and for the user-id half of the key), which is
+/// exactly what every sibling route — `followups.rs`' `lane_refusal`, the session
+/// writes, `steer` — refuses to give. `None` means the lane is the caller's.
+fn lane_refusal(lane_key: &str, owner_id: &str) -> Option<Response> {
+    if is_lane_owned_by(lane_key, owner_id) {
+        return None;
+    }
+    Some(
+        error_response(StatusCode::NOT_FOUND, "LANE_NOT_FOUND", "No such lane").into_response(),
+    )
+}
+
 /// Which session the two history routes act on: the one the query names, else
 /// the lane's active one. `Ok(None)` means the lane has never held a turn.
 ///
@@ -268,6 +285,94 @@ fn resolve_turn_model(
 
 // ── POST /v1/chat ───────────────────────────────────────────────────
 
+/// What one turn is going to run as, once everything that can refuse it has.
+struct TurnPlan {
+    /// The project root the turn runs in (R49/R48), already resolved.
+    workspace_path: Option<String>,
+    /// The model it will run on, echoed to the client as `model_used`.
+    model_used: Option<String>,
+}
+
+/// Everything `POST /v1/chat` can refuse, **in the order it must run** (D16).
+///
+/// The three pure checks come first — attachment count, the model id, and that
+/// every named attachment exists and belongs to this caller — because
+/// [`resolve_turn_target`] *changes the lane*: naming an archived session with
+/// `activate: true` re-activates it and archives whatever was live there, and a
+/// turn refused afterwards left the client's conversation re-homed for a request
+/// that never ran. Nothing above the activation writes anything, so a refusal
+/// from this function leaves the lane exactly as it was.
+///
+/// The attachment preflight is `openalpaca_core::chat::preflight_attachments` —
+/// the same function `ChatService::send_message` runs, not a second copy of the
+/// rule.
+#[allow(clippy::result_large_err)]
+fn plan_turn(
+    db: &openalpaca_storage::Database,
+    bus: &openalpaca_core::bus::EventBus,
+    principal: &str,
+    router: Option<&openalpaca_llm::LlmRouter>,
+    max_attachments: usize,
+    body: &ChatSendRequest,
+    header_workspace: Option<String>,
+) -> Result<TurnPlan, Response> {
+    if body.attachments.len() > max_attachments {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "TOO_MANY_ATTACHMENTS",
+            &format!(
+                "Too many attachments: {} provided, maximum is {max_attachments}",
+                body.attachments.len(),
+            ),
+        )
+        .into_response());
+    }
+
+    // GAP-13: which model this one turn runs on, refused here if the daemon
+    // cannot serve it. `model_used` is echoed so the client never has to guess
+    // whether its override took.
+    let model_used = resolve_turn_model(router, body.model.as_deref())?;
+
+    if let Err(e) = openalpaca_core::chat::preflight_attachments(db, &body.attachments, principal) {
+        return Err(attachment_refusal(&e.to_string()));
+    }
+
+    // Which conversation this turn belongs to, and which project it runs in.
+    // Naming a session is optional and the default is exactly today's
+    // behaviour — the lane's active session, created on demand by the
+    // persistence path below, in the project this header names. Naming one is
+    // how a client resumes, and R49 makes that resumed conversation's own
+    // project the turn's: see `resolve_turn_target`.
+    let workspace_path = resolve_turn_target(
+        db,
+        bus,
+        principal,
+        body.session_id.as_deref(),
+        body.activate,
+        header_workspace,
+    )?;
+
+    Ok(TurnPlan {
+        workspace_path,
+        model_used,
+    })
+}
+
+/// A bad or foreign attachment id is a client error, not a gateway failure — map
+/// it to 4xx so the GUI/CLI can tell report-from-retry instead of treating
+/// everything as a `500`. Shared by the preflight and by the send itself, which
+/// runs the same check a second time for its other callers.
+fn attachment_refusal(message: &str) -> Response {
+    let (status, code) = if message.starts_with("Attachment not found") {
+        (StatusCode::NOT_FOUND, "ATTACHMENT_NOT_FOUND")
+    } else if message.starts_with("Access denied to attachment") {
+        (StatusCode::FORBIDDEN, "ATTACHMENT_ACCESS_DENIED")
+    } else {
+        (StatusCode::INTERNAL_SERVER_ERROR, "GATEWAY_ERROR")
+    };
+    error_response(status, code, message).into_response()
+}
+
 pub async fn send_chat_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -285,58 +390,32 @@ pub async fn send_chat_handler(
         }
     };
 
-    // Validate attachment count
-    {
-        let config = state.daemon_config.load();
-        if body.attachments.len() > config.upload.max_files_per_message {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                "TOO_MANY_ATTACHMENTS",
-                &format!(
-                    "Too many attachments: {} provided, maximum is {}",
-                    body.attachments.len(),
-                    config.upload.max_files_per_message
-                ),
-            )
-            .into_response();
-        }
-    }
-
     let principal = &state.local_user_id;
 
-    // Which conversation this turn belongs to, and which project it runs in.
-    // Naming a session is optional and the default is exactly today's
-    // behaviour — the lane's active session, created on demand by the
-    // persistence path below, in the project this header names. Naming one is
-    // how a client resumes, and R49 makes that resumed conversation's own
-    // project the turn's: see `resolve_turn_target`.
-    let workspace_path = headers
+    // Percent-decoded (R81): a header value cannot carry a non-ASCII byte, so a
+    // CJK project path arrives encoded — see `routes::workspace_header`, whose
+    // decoder this shares.
+    let header_workspace = headers
         .get("x-workspace-path")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-    let workspace_path = match resolve_turn_target(
+        .map(super::decode_workspace_header);
+
+    let TurnPlan {
+        workspace_path,
+        model_used,
+    } = match plan_turn(
         &state.db,
         &state.gateway.bus,
         principal,
-        body.session_id.as_deref(),
-        body.activate,
-        workspace_path,
-    ) {
-        Ok(path) => path,
-        Err(response) => return response,
-    };
-
-    // GAP-13: which model this one turn runs on, refused here if the daemon
-    // cannot serve it. `model_used` is echoed so the client never has to guess
-    // whether its override took.
-    let model_used = match resolve_turn_model(
         state
             .llm_settings_service
             .as_ref()
             .map(|s| s.router().as_ref()),
-        body.model.as_deref(),
+        state.daemon_config.load().upload.max_files_per_message,
+        &body,
+        header_workspace,
     ) {
-        Ok(model) => model,
+        Ok(plan) => plan,
         Err(response) => return response,
     };
 
@@ -362,20 +441,9 @@ pub async fn send_chat_handler(
             })
             .into_response()
         }
-        Err(e) => {
-            // A bad/foreign attachment id is a client error, not a gateway
-            // failure — map it to 4xx so the GUI/CLI can distinguish
-            // report-vs-retry instead of treating everything as a 500.
-            let msg = e.to_string();
-            let (status, code) = if msg.starts_with("Attachment not found") {
-                (StatusCode::NOT_FOUND, "ATTACHMENT_NOT_FOUND")
-            } else if msg.starts_with("Access denied to attachment") {
-                (StatusCode::FORBIDDEN, "ATTACHMENT_ACCESS_DENIED")
-            } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, "GATEWAY_ERROR")
-            };
-            error_response(status, code, &msg).into_response()
-        }
+        // The preflight above has already answered for a bad attachment id; this
+        // is the send's own failure, mapped the same way.
+        Err(e) => attachment_refusal(&e.to_string()),
     }
 }
 
@@ -495,14 +563,10 @@ pub async fn get_chat_history_handler(
     let offset = query.offset.unwrap_or(0);
     let lane_key = query.lane_key.as_deref().unwrap_or(&state.default_lane_key);
 
-    // Verify the caller owns this lane (lane_key format: "{user_id}:{source_name}")
-    if !is_lane_owned_by(lane_key, &state.local_user_id) {
-        return error_response(
-            StatusCode::FORBIDDEN,
-            "FORBIDDEN",
-            "Access denied to this lane",
-        )
-        .into_response();
+    // The caller's own lane, or nothing exists here to read (lane_key format:
+    // "{user_id}:{source_name}").
+    if let Some(refusal) = lane_refusal(lane_key, &state.local_user_id) {
+        return refusal;
     }
 
     let session_id = match resolve_history_session(&state.db, lane_key, query.session_id.as_deref()) {
@@ -560,14 +624,10 @@ pub async fn delete_chat_history_handler(
 
     let lane_key = query.lane_key.as_deref().unwrap_or(&state.default_lane_key);
 
-    // Verify the caller owns this lane (lane_key format: "{user_id}:{source_name}")
-    if !is_lane_owned_by(lane_key, &state.local_user_id) {
-        return error_response(
-            StatusCode::FORBIDDEN,
-            "FORBIDDEN",
-            "Access denied to this lane",
-        )
-        .into_response();
+    // The caller's own lane, or nothing exists here to read (lane_key format:
+    // "{user_id}:{source_name}").
+    if let Some(refusal) = lane_refusal(lane_key, &state.local_user_id) {
+        return refusal;
     }
 
     let session_id = match resolve_history_session(&state.db, lane_key, query.session_id.as_deref()) {
@@ -725,6 +785,124 @@ mod tests {
         assert!(!is_lane_owned_by("", "user1"));
         assert!(!is_lane_owned_by("user1", "user1")); // no colon separator
         assert!(is_lane_owned_by("user1:", "user1")); // empty source, still valid format
+    }
+
+    /// D11: both history routes answered `403` for a foreign lane while
+    /// answering `404` for a foreign *session* one line later. R40's line is
+    /// `404` — a `403` on a lane key confirms that another user's lane exists.
+    #[tokio::test]
+    async fn a_foreign_lane_reads_as_a_lane_that_does_not_exist() {
+        assert!(lane_refusal("user1:gui", "user1").is_none());
+        assert!(lane_refusal("user1:telegram", "user1").is_none());
+
+        for lane in ["someone-else:gui", "user10:gui", "user1", ""] {
+            let response = lane_refusal(lane, "user1").expect("a refusal");
+            let (status, body) = refusal(response).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "lane {lane:?}");
+            assert_ne!(status, StatusCode::FORBIDDEN);
+            assert_eq!(body["error"]["code"], "LANE_NOT_FOUND");
+        }
+    }
+
+    /// D16: the pure checks run **before** the lane is touched. Naming an
+    /// archived session with `activate: true` re-homes the lane, so a turn
+    /// refused afterwards left the client's conversation switched for a request
+    /// that never ran.
+    #[tokio::test]
+    async fn a_refused_attachment_leaves_the_lanes_active_session_alone() {
+        const OWNER: &str = "user1";
+        let lane = format!("{OWNER}:gui");
+        let (_dir, db) = sessions_db();
+        let bus = openalpaca_core::bus::EventBus::default();
+        let repo = openalpaca_storage::ConversationRepository::new(&db);
+
+        // `archived` is the conversation the turn asks to re-open; `live` is the
+        // one the lane is on now. Created in that order, because opening a
+        // session archives the lane's incumbent — one active per lane.
+        let archived = repo
+            .create_session(&lane, "gui", None, Some("older"))
+            .expect("session");
+        assert!(repo.archive_session(&archived.id).expect("archive"));
+        let live = repo
+            .get_or_create_active_session(&lane, "gui", None)
+            .expect("session");
+        assert_eq!(
+            repo.active_session_id(&lane).expect("read").as_deref(),
+            Some(live.id.as_str()),
+        );
+
+        let body = ChatSendRequest {
+            content: "look at this".to_string(),
+            attachments: vec![openalpaca_storage::AttachmentRef {
+                file_id: "no-such-file".to_string(),
+                caption: None,
+            }],
+            session_id: Some(archived.id.clone()),
+            activate: true,
+            model: None,
+        };
+        let response = plan_turn(&db, &bus, OWNER, None, 10, &body, None)
+            .err()
+            .expect("the attachment is refused");
+        let (status, payload) = refusal(response).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(payload["error"]["code"], "ATTACHMENT_NOT_FOUND");
+
+        assert_eq!(
+            repo.active_session_id(&lane).expect("read").as_deref(),
+            Some(live.id.as_str()),
+            "a refused turn must not re-home the lane",
+        );
+
+        // The same request with a real attachment does activate it — the
+        // ordering is what changed, not the behaviour.
+        let ok = plan_turn(
+            &db,
+            &bus,
+            OWNER,
+            None,
+            10,
+            &ChatSendRequest {
+                attachments: Vec::new(),
+                ..body
+            },
+            None,
+        )
+        .expect("nothing left to refuse");
+        assert!(ok.model_used.is_none(), "no router, no model to name");
+        assert_eq!(
+            repo.active_session_id(&lane).expect("read").as_deref(),
+            Some(archived.id.as_str()),
+        );
+    }
+
+    /// The count and the model id are refused before the activation too.
+    #[tokio::test]
+    async fn too_many_attachments_is_a_400_before_anything_is_touched() {
+        let (_dir, db) = sessions_db();
+        let bus = openalpaca_core::bus::EventBus::default();
+        let body = ChatSendRequest {
+            content: "hi".to_string(),
+            attachments: vec![
+                openalpaca_storage::AttachmentRef {
+                    file_id: "a".to_string(),
+                    caption: None,
+                },
+                openalpaca_storage::AttachmentRef {
+                    file_id: "b".to_string(),
+                    caption: None,
+                },
+            ],
+            session_id: None,
+            activate: false,
+            model: None,
+        };
+        let response = plan_turn(&db, &bus, "user1", None, 1, &body, None)
+            .err()
+            .expect("two is more than one");
+        let (status, payload) = refusal(response).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(payload["error"]["code"], "TOO_MANY_ATTACHMENTS");
     }
 
     fn make_done(

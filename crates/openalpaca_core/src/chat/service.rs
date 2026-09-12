@@ -39,6 +39,38 @@ pub struct ChatService {
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
 }
 
+/// Every named attachment exists and belongs to `principal`.
+///
+/// One rule, one place: the route runs it as the last of its **pure** checks,
+/// before anything activates a session (D16), and
+/// [`ChatService::send_message`] runs it for the callers that do not come
+/// through the route. The message wording is part of the contract — the route
+/// maps `Attachment not found` to `404 ATTACHMENT_NOT_FOUND` and `Access denied
+/// to attachment` to `403 ATTACHMENT_ACCESS_DENIED`.
+pub fn preflight_attachments(
+    db: &Database,
+    attachment_refs: &[AttachmentRef],
+    principal: &str,
+) -> Result<()> {
+    let file_repo = FileAssetRepository::new(db);
+    for att_ref in attachment_refs {
+        match file_repo.get_by_id(&att_ref.file_id) {
+            Ok(Some(asset)) => {
+                if asset.owner_id != principal {
+                    anyhow::bail!("Access denied to attachment: {}", att_ref.file_id);
+                }
+            }
+            Ok(None) => {
+                anyhow::bail!("Attachment not found: {}", att_ref.file_id);
+            }
+            Err(e) => {
+                anyhow::bail!("Failed to resolve attachment {}: {}", att_ref.file_id, e);
+            }
+        }
+    }
+    Ok(())
+}
+
 impl ChatService {
     pub fn new(
         gateway: Arc<Gateway>,
@@ -80,23 +112,11 @@ impl ChatService {
         workspace_path: Option<String>,
         model_override: Option<String>,
     ) -> Result<ChatSendResponse> {
-        // Fast preflight check so invalid attachment IDs still fail the request immediately.
-        let file_repo = FileAssetRepository::new(&self.db);
-        for att_ref in &attachment_refs {
-            match file_repo.get_by_id(&att_ref.file_id) {
-                Ok(Some(asset)) => {
-                    if asset.owner_id != principal {
-                        anyhow::bail!("Access denied to attachment: {}", att_ref.file_id);
-                    }
-                }
-                Ok(None) => {
-                    anyhow::bail!("Attachment not found: {}", att_ref.file_id);
-                }
-                Err(e) => {
-                    anyhow::bail!("Failed to resolve attachment {}: {}", att_ref.file_id, e);
-                }
-            }
-        }
+        // Fast preflight check so invalid attachment IDs still fail the request
+        // immediately. `POST /v1/chat` runs the same function *before* it
+        // activates a session (D16), so a refused turn never re-homes a lane;
+        // this call is what covers every other caller of `send_message`.
+        preflight_attachments(&self.db, &attachment_refs, principal)?;
 
         let lane_key = format!("{principal}:gui");
 
