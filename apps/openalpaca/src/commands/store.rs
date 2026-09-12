@@ -91,6 +91,13 @@ struct WorkspaceView {
     rows: Counts,
     #[serde(default)]
     active_tasks: usize,
+    /// Runs under this root that are `queued` — named separately because the
+    /// two writers refuse on different sets: a re-base waits for
+    /// `running`/`paused` only, a purge refuses on `queued` as well. `None` is
+    /// a daemon that predates the field, which is why the plan prints the line
+    /// only when the number is actually reported.
+    #[serde(default)]
+    queued_tasks: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -435,22 +442,34 @@ fn destination_ancestor<'a>(requested: &str, resolved: &'a str) -> Option<&'a st
 }
 
 /// The `--dry-run` body: what is there, and what the re-base would do about it.
+fn print_plan(requested_new: &str, from: &WorkspaceView, to: &WorkspaceView) {
+    print!("{}", render_plan(requested_new, from, to));
+}
+
+/// [`print_plan`]'s body, as a `String` — split out for the same reason
+/// [`render_entries`] was: the lines a dry run owes its reader are assertable
+/// text, not something to check by eye.
 ///
 /// It reports rather than refuses — a dry run that exits non-zero on a
 /// condition the real call would also refuse tells the caller nothing the real
 /// call would not — except for the one case where there is simply nothing to
 /// re-base, which is a mistyped path far more often than it is a no-op.
-fn print_plan(requested_new: &str, from: &WorkspaceView, to: &WorkspaceView) {
-    println!(
+fn render_plan(requested_new: &str, from: &WorkspaceView, to: &WorkspaceView) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
         "{} {} → {}",
         "Would re-base".bold(),
         from.path.dimmed(),
         to.path
     );
-    println!("  {}", from.rows.describe());
+    let _ = writeln!(out, "  {}", from.rows.describe());
 
     if let Some(ancestor) = destination_ancestor(requested_new, &to.path) {
-        println!(
+        let _ = writeln!(
+            out,
             "  {}",
             format!(
                 "the destination is inside the project rooted at {ancestor}; the re-base would \
@@ -463,7 +482,8 @@ fn print_plan(requested_new: &str, from: &WorkspaceView, to: &WorkspaceView) {
     // the machine they share. The daemon is what actually refuses.
     for (label, view) in [("the old path", from), ("the new path", to)] {
         if resolves_to_the_home_store(std::path::Path::new(&view.path)) {
-            println!(
+            let _ = writeln!(
+                out,
                 "  {}",
                 format!(
                     "{label} resolves to {}, which is the home store rather than a project; \
@@ -476,13 +496,15 @@ fn print_plan(requested_new: &str, from: &WorkspaceView, to: &WorkspaceView) {
     }
 
     if from.rows.is_empty() {
-        println!(
+        let _ = writeln!(
+            out,
             "  {}",
             "nothing is recorded under that root — check the path".yellow()
         );
     }
     if from.active_tasks > 0 {
-        println!(
+        let _ = writeln!(
+            out,
             "  {}",
             format!(
                 "{} run(s) there are still in flight; the re-base would be refused until they finish",
@@ -491,8 +513,26 @@ fn print_plan(requested_new: &str, from: &WorkspaceView, to: &WorkspaceView) {
             .yellow()
         );
     }
+    // The other half of "in flight", and the reason `GET /v1/workspaces` names
+    // both numbers: a queued run is not what a re-base waits for (its row moves
+    // with the rest, and it has not resolved a store yet), but it *is* what a
+    // purge of the same root refuses on. A reader shown only `active_tasks`
+    // could not tell why the purge they tried next was refused with nothing
+    // running. Printed only when the daemon actually reports the number.
+    if let Some(queued) = from.queued_tasks.filter(|queued| *queued > 0) {
+        let _ = writeln!(
+            out,
+            "  {}",
+            format!(
+                "{queued} run(s) there are queued; the re-base takes their rows with it, but a \
+                 purge of that root would be refused until they finish"
+            )
+            .yellow()
+        );
+    }
     if !to.rows.is_empty() {
-        println!(
+        let _ = writeln!(
+            out,
             "  {}",
             format!(
                 "{} already has a store recorded against it ({}); the re-base would be refused",
@@ -502,22 +542,25 @@ fn print_plan(requested_new: &str, from: &WorkspaceView, to: &WorkspaceView) {
             .yellow()
         );
     }
-    match (from.store_present, to.store_present) {
-        (true, true) => println!(
+    let _ = match (from.store_present, to.store_present) {
+        (true, true) => writeln!(
+            out,
             "  {}",
             "both roots hold a store directory; the re-base would be refused".yellow()
         ),
-        (true, false) => println!("  the store directory would move too"),
-        (false, true) => println!("  the store directory is already at the new root"),
-        (false, false) => println!("  neither root holds a store directory"),
-    }
+        (true, false) => writeln!(out, "  the store directory would move too"),
+        (false, true) => writeln!(out, "  the store directory is already at the new root"),
+        (false, false) => writeln!(out, "  neither root holds a store directory"),
+    };
     if to.moved {
-        println!(
+        let _ = writeln!(
+            out,
             "  the store at {} records {}",
             to.path,
             to.recorded_root.as_deref().unwrap_or("nothing").dimmed()
         );
     }
+    out
 }
 
 #[cfg(test)]
@@ -671,6 +714,75 @@ mod tests {
             }
         }
         out
+    }
+
+    /// A workspace as `GET /v1/workspaces` describes it, with a store at the
+    /// root and rows under it — the ordinary source of a re-base.
+    fn view(path: &str, overrides: fn(&mut WorkspaceView)) -> WorkspaceView {
+        let mut view = WorkspaceView {
+            path: path.to_string(),
+            store_present: true,
+            recorded_root: Some(path.to_string()),
+            moved: false,
+            rows: Counts {
+                artifacts: 12,
+                sessions: 2,
+                tasks: 3,
+                memories: 7,
+            },
+            active_tasks: 0,
+            queued_tasks: Some(0),
+        };
+        overrides(&mut view);
+        view
+    }
+
+    /// D7's CLI half. The two numbers refuse different calls — a re-base waits
+    /// for `running`/`paused`, a purge refuses on `queued` as well — so a plan
+    /// that printed only `active_tasks` left the reader unable to explain the
+    /// purge they tried next.
+    #[test]
+    fn a_dry_run_names_the_queued_runs_a_purge_would_refuse_on() {
+        let from = view("/repo/one", |v| v.queued_tasks = Some(2));
+        let to = view("/repo/two", |v| {
+            v.store_present = false;
+            v.rows = Counts::default();
+        });
+
+        let rendered = strip_ansi(&render_plan("/repo/two", &from, &to));
+        assert!(
+            rendered.contains("2 run(s) there are queued"),
+            "the queued runs are named: {rendered}"
+        );
+        assert!(
+            rendered.contains("a purge of that root would be refused"),
+            "and what they actually refuse is said: {rendered}"
+        );
+        // A queued run is not what the re-base itself waits for, and the plan
+        // must not claim otherwise.
+        assert!(
+            !rendered.contains("still in flight"),
+            "nothing is running: {rendered}"
+        );
+    }
+
+    /// Zero queued runs is not a line, and a daemon that predates the field
+    /// (`None`) is not a line either — never "0 run(s) there are queued".
+    #[test]
+    fn a_dry_run_stays_silent_about_queued_runs_it_has_no_number_for() {
+        for queued in [Some(0), None] {
+            let from = view("/repo/one", |_| {});
+            let from = WorkspaceView {
+                queued_tasks: queued,
+                ..from
+            };
+            let to = view("/repo/two", |v| {
+                v.store_present = false;
+                v.rows = Counts::default();
+            });
+            let rendered = strip_ansi(&render_plan("/repo/two", &from, &to));
+            assert!(!rendered.contains("queued"), "{queued:?}: {rendered}");
+        }
     }
 
     /// Minor #8, corrected by ruling R74: `print_entries` had no test, and the
