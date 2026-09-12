@@ -119,6 +119,47 @@ describe("useGlobalKeys", () => {
     expect(onApprove).not.toHaveBeenCalled();
   });
 
+  /**
+   * The Deny button is a plain, Tab-reachable `<button>` with no key handler
+   * of its own: the browser's own Enter-activates-a-focused-button is what
+   * clicks it. The window binding's `preventDefault()` suppresses exactly that,
+   * so before this guard Tab-to-Deny + Enter ran `onApprove` — the inverse of
+   * what was pressed. jsdom cannot dispatch the synthesized click, so what is
+   * asserted is the half this hook owns: it keeps its hands off.
+   */
+  it("leaves Enter alone on a focused button, link or summary", () => {
+    const onApprove = vi.fn();
+    render(
+      <>
+        <Harness blocked onApprove={onApprove} />
+        <button type="button">Deny</button>
+        <a href="#deny">Deny</a>
+        <span role="button" tabIndex={0}>
+          Deny
+        </span>
+        <details>
+          <summary>More</summary>
+        </details>
+      </>,
+    );
+
+    for (const selector of [
+      "button",
+      "a[href]",
+      '[role="button"]',
+      "summary",
+    ]) {
+      const control = document.querySelector(selector);
+      expect(control).not.toBeNull();
+      fireEvent.keyDown(control as Element, { key: "Enter" });
+    }
+    expect(onApprove).not.toHaveBeenCalled();
+
+    // The binding still works from anywhere that is not a control.
+    fireEvent.keyDown(window, { key: "Enter" });
+    expect(onApprove).toHaveBeenCalledTimes(1);
+  });
+
   it("removes its listener on unmount", () => {
     const { unmount } = render(<Harness />);
     unmount();

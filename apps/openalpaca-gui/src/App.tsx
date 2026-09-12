@@ -74,7 +74,7 @@ export function AppFrame() {
   useCommandShortcuts(useCommandCatalog());
 
   return (
-    <AppShell>
+    <AppShell view={view}>
       <NavRail blockedRunId={pending?.runId ?? null} />
 
       <ViewBoundary resetKey={view}>

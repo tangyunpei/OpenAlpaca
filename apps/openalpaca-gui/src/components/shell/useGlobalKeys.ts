@@ -45,6 +45,21 @@ function isTextEntry(target: EventTarget | null): boolean {
   );
 }
 
+/**
+ * A focused control must keep Enter for **itself**, not have it stolen.
+ *
+ * Enter on a focused button is that button's activation: the browser turns the
+ * keypress into a click. The window binding's `preventDefault()` suppresses
+ * that, so without this guard Tab-ing to `Deny` and pressing Enter ran
+ * `onApprove()` — the exact inverse of what the user asked for. Anything the
+ * keyboard can activate counts, not only `<button>`: a link, an
+ * ARIA button, a `<summary>`.
+ */
+function isActivatableControl(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return target.closest('button, a[href], [role="button"], summary') !== null;
+}
+
 export function useGlobalKeys({
   blocked = false,
   onApprove,
@@ -81,8 +96,10 @@ export function useGlobalKeys({
         state.view === "chat" &&
         onApprove !== undefined &&
         // The composer is unmounted while blocked (§4.5), but the palette input
-        // and any other field must still get their own Enter.
-        !isTextEntry(event.target)
+        // and any other field must still get their own Enter — and so must a
+        // focused button, whose own Enter is its click.
+        !isTextEntry(event.target) &&
+        !isActivatableControl(event.target)
       ) {
         event.preventDefault();
         onApprove();
