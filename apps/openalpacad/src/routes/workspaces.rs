@@ -626,15 +626,29 @@ fn purge_counts_json(counts: &openalpaca_storage::PurgeCounts) -> serde_json::Va
 /// Owner-scoped like the re-base and for the same reason: `session` and `task`
 /// carry no owner column, so a root holding somebody else's rows is a `404`
 /// rather than a transaction over rows the caller cannot see (R40 — never a
-/// `403`). The in-flight guard is two checks, because either alone has a hole:
-/// [`ArtifactStore::busy_tasks`] counts `queued`, `running` and `paused` rows
-/// under `root` directly — `queued` included, because a run that has not
-/// started yet already named this root and is about to resolve its store —
-/// and the lane registry
-/// ([`crate::routes::sessions::session_has_live_run`]) catches a live run
-/// whose task was dispatched with **no** `workspace_id` at all (no active
-/// session on its lane at spawn time, `dispatcher::lead_agent`) but whose
-/// `session_id` still names a conversation under `root`.
+/// `403`). The in-flight guard is exactly two checks, each covering what the
+/// other cannot: [`ArtifactStore::busy_tasks`] counts `queued`, `running` and
+/// `paused` **rows** whose own `workspace_id` column equals `root` —
+/// `queued` included, because a run that has not started yet already named
+/// this root and is about to resolve its store — and the lane registry
+/// ([`crate::routes::sessions::session_has_live_run`]) separately catches a
+/// **lane** with a live workflow whose task was dispatched with no
+/// `workspace_id` of its own (no active session on its lane at spawn time,
+/// `dispatcher::lead_agent::dispatch`) but whose `session_id` still names a
+/// conversation under `root`.
+///
+/// This is what is checked, not everything that could be. A task row is
+/// inserted with `status = queued` (`dispatcher::lead_agent::dispatch`,
+/// ~`:297`) several statements before that same call registers its lane in
+/// the registry (`register_workflow_for_lane`, `:426`). A task dispatched
+/// with no `workspace_id` therefore exists, briefly, in a state neither check
+/// sees: not counted by `busy_tasks` (its `workspace_id` is not `root`, or
+/// anything) and not yet a live lane the registry knows about. A purge that
+/// lands in that window is not refused by either half of this guard. The
+/// window is one dispatch call — the row reaches `register_workflow_for_lane`
+/// within milliseconds — and is accepted rather than closed: nothing has
+/// written a transcript yet, and the very next purge attempt against `root`,
+/// once registration has caught up, refuses like any other in-flight run.
 #[allow(clippy::result_large_err)]
 fn preflight(deps: &PurgeDeps<'_>, root: &str) -> Result<PurgePlan, Response> {
     refuse_the_home_root("path", root)?;
