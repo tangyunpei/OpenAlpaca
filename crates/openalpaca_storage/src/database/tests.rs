@@ -829,15 +829,17 @@ fn factory_reset_runs_on_a_fully_migrated_database() {
              VALUES ('u:gui', 'followup', 'and then check the logs', '{}', 'queued')",
             [],
         )?;
+        seed_an_artifact_and_its_version(conn)?;
         Ok(())
     })
     .unwrap();
     db.factory_reset().expect("factory_reset must succeed on the current schema");
-    let (sessions, followups): (i64, i64) = db
+    let (sessions, followups, versions): (i64, i64, i64) = db
         .with_connection(|conn| {
             Ok((
                 conn.query_row("SELECT COUNT(*) FROM session", [], |r| r.get(0))?,
                 conn.query_row("SELECT COUNT(*) FROM lane_followups", [], |r| r.get(0))?,
+                conn.query_row("SELECT COUNT(*) FROM artifact_versions", [], |r| r.get(0))?,
             ))
         })
         .unwrap();
@@ -846,6 +848,49 @@ fn factory_reset_runs_on_a_fully_migrated_database() {
         followups, 0,
         "a queued follow-up must not outlive a factory reset"
     );
+    assert_eq!(versions, 0, "036's version history goes with the rows");
+}
+
+/// One produced artifact row and one `artifact_versions` row for it.
+fn seed_an_artifact_and_its_version(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "INSERT INTO file_assets \
+            (id, owner_id, sha256, filename, mime_type, size_bytes, storage_path, status, origin) \
+         VALUES ('f1', 'owner', 'sha', '01-notes.md', 'text/markdown', 4, \
+                 '/nowhere/01-notes.md', 'ready', 'produced')",
+        [],
+    )?;
+    conn.execute(
+        "INSERT INTO artifact_versions (artifact_id, version, rel_path, sha256, size_bytes) \
+         VALUES ('f1', 1, 'loose/2026-09-01/01-notes.md', 'sha', 4)",
+        [],
+    )?;
+    Ok(())
+}
+
+/// The reset names every table it empties rather than leaning on a cascade —
+/// the rule `subagent_span`'s line already states in as many words. Proven the
+/// only way it can be: with `foreign_keys` off, where an unnamed child table
+/// simply survives.
+#[test]
+fn factory_reset_empties_artifact_versions_without_the_cascade() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("reset-nofk.db")).unwrap();
+    db.with_connection(|conn| {
+        seed_an_artifact_and_its_version(conn)?;
+        conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
+        Ok(())
+    })
+    .unwrap();
+
+    db.factory_reset().unwrap();
+
+    let versions: i64 = db
+        .with_connection(|conn| {
+            Ok(conn.query_row("SELECT COUNT(*) FROM artifact_versions", [], |r| r.get(0))?)
+        })
+        .unwrap();
+    assert_eq!(versions, 0, "the DELETE is named, not inherited");
 }
 
 /// R63: `llm_call_log` had no index leading on `timestamp`, so

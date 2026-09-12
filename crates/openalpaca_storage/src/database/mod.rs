@@ -186,6 +186,10 @@ impl Database {
 
             // 0. File assets (FK: message_attachments -> file_assets, conversation_messages)
             tx.execute("DELETE FROM conversation_message_attachments", [])?;
+            // 036: versions reference file_assets (ON DELETE CASCADE) — named
+            // for the same reason `subagent_span` is below: the reset does not
+            // depend on foreign_keys being enabled.
+            tx.execute("DELETE FROM artifact_versions", [])?;
             tx.execute("DELETE FROM file_assets", [])?;
 
             // 0. Conversation history (children first: feedback -> messages -> conversations)
