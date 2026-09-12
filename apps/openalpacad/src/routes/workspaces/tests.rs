@@ -34,8 +34,13 @@ struct Fixture {
     /// The live lane registry the purge's in-flight guard consults. Empty
     /// unless a test says otherwise.
     ctx: SharedContext,
+    /// Where the purge's `session_changed{deleted}` frames land.
+    bus: openalpaca_core::bus::EventBus,
     /// The home store's `sessions/` — where a purged session's directory is.
     sessions_root: std::path::PathBuf,
+    /// The live writers, as the daemon holds them: the purge stands each purged
+    /// session's writer down before removing its directory.
+    log: std::sync::Arc<openalpaca_core::session_log::SessionLogService>,
 }
 
 impl Fixture {
@@ -56,6 +61,13 @@ impl Fixture {
         let db = Database::open(&db_dir.path().join("test.db")).expect("open db");
         let sessions_root = home_store.join("sessions");
         std::fs::create_dir_all(&sessions_root).expect("sessions root");
+        let log = openalpaca_core::session_log::SessionLogService::new(
+            sessions_root.clone(),
+            None,
+            openalpaca_core::session_log::SessionLogLimits::default(),
+            "test".to_string(),
+        )
+        .into_arc();
         Self {
             _home: home,
             _env: env,
@@ -63,7 +75,9 @@ impl Fixture {
             projects,
             db,
             ctx: SharedContext::new(),
+            bus: openalpaca_core::bus::EventBus::default(),
             sessions_root,
+            log,
         }
     }
 
@@ -241,8 +255,10 @@ impl Fixture {
         PurgeDeps {
             db: &self.db,
             ctx: &self.ctx,
+            bus: &self.bus,
             owner: OWNER,
             sessions_root: Some(self.sessions_root.clone()),
+            session_log: Some(self.log.clone()),
         }
     }
 
@@ -252,14 +268,17 @@ impl Fixture {
         all: bool,
         dry_run: bool,
     ) -> (StatusCode, serde_json::Value) {
-        split(purge_workspaces(
-            &self.purge_deps(),
-            PurgeRequest {
-                path: path.map(str::to_string),
-                all,
-                dry_run,
-            },
-        ))
+        split(
+            purge_workspaces(
+                &self.purge_deps(),
+                PurgeRequest {
+                    path: path.map(str::to_string),
+                    all,
+                    dry_run,
+                },
+            )
+            .await,
+        )
         .await
     }
 
@@ -394,6 +413,10 @@ async fn the_runs_in_flight_are_reported() {
     let (_, body) = f.get(Some(&root)).await;
     assert_eq!(body["rows"]["tasks"], 3);
     assert_eq!(body["active_tasks"], 1);
+    // D7: the purge refuses on `queued` as well, so the read that a client
+    // offers a purge from has to report that set too — otherwise a
+    // `WORKSPACE_BUSY` arrives with `active_tasks: 0` and nothing to explain it.
+    assert_eq!(body["queued_tasks"], 1);
 }
 
 // ============================================================================
@@ -612,6 +635,93 @@ async fn a_project_moved_by_hand_re_bases_its_four_members() {
     assert_eq!(old_after["rows"]["artifacts"], 0);
 }
 
+/// D5 — the PATCH twin of `a_root_rows_still_name_purges_literally_under_anothers_marker`:
+/// rows are the proof of a root on the **source** side too.
+///
+/// A project moved out from under a monorepo's `.git`, its own `.openalpaca`
+/// gone with it, is nested under a marker the ordinary walk resolves it to. The
+/// walk therefore used to answer `/mono` for `old_path`, and the re-base either
+/// refused ("nothing of yours is recorded under /mono" — the moved project could
+/// not be re-attached by the path it came from) or, with rows under `/mono`,
+/// re-addressed *those*. A row naming the literal path is the proof, so the
+/// literal path is what is re-based.
+#[tokio::test]
+async fn a_recorded_root_under_anothers_marker_re_bases_by_its_literal_path() {
+    let f = Fixture::new();
+    let ancestor = f.projects.path().join("mono-rebase");
+    std::fs::create_dir_all(ancestor.join(".git")).expect(".git marker");
+    // No marker of its own — and no artifact either, because putting one seeds
+    // a store (`.openalpaca`) at the root and the walk would then resolve the
+    // path to itself, which is not the shape under test. Session and task rows
+    // name it exactly; that is the proof R75 is about.
+    let moved_away = f.bare_dir("mono-rebase/moved-away");
+    f.session("session-moved", &moved_away);
+    f.task("task-moved", &moved_away, "completed");
+
+    // Its new home, outside the monorepo.
+    let new = f.bare_dir("re-homed");
+
+    let (status, body) = f.patch(&moved_away, &new).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["old_path"], moved_away,
+        "the literal path the rows name, not the monorepo root",
+    );
+    assert_eq!(body["new_path"], new);
+    assert_eq!(body["moved"]["sessions"], 1);
+    assert_eq!(body["moved"]["tasks"], 1);
+
+    let (_, after) = f.get(Some(&new)).await;
+    assert_eq!(after["rows"]["sessions"], 1);
+    assert_eq!(after["rows"]["tasks"], 1);
+}
+
+/// D6 — the `422`'s remediation has to be followable.
+///
+/// `WORKSPACE_NOT_A_ROOT` tells the caller to give the path a project marker of
+/// its own; the marker walk's process-lifetime cache used to pin the ancestor
+/// answer that the refusal's own lookup had just written, so the retry after
+/// `mkdir .openalpaca` answered the same `422` until the daemon restarted. Same
+/// process, same path, marker created in between.
+#[tokio::test]
+async fn a_marker_created_after_the_422_is_seen_by_the_next_request() {
+    let f = Fixture::new();
+    let root = f.project("mono-cached");
+    f.artifact(&root, "Notes");
+    let inside = f.bare_dir("mono-cached/sub");
+
+    let (status, body) = f.purge(Some(&inside), false, true).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(error_code(&body), "WORKSPACE_NOT_A_ROOT");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(&root),
+        "the refusal names the ancestor and says to give the path a marker",
+    );
+
+    // Exactly what the message asked for.
+    std::fs::create_dir_all(std::path::Path::new(&inside).join(store::STORE_DIR_NAME))
+        .expect("marker");
+
+    let (status, body) = f.purge(Some(&inside), false, true).await;
+    assert_ne!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "the ancestor answer was cached: {body}",
+    );
+    // It is its own root now — and nothing is recorded under it, which is the
+    // ordinary `404`, not a refusal to look.
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(error_code(&body), "WORKSPACE_NOT_FOUND");
+
+    // The GET resolves the same way, so a picker sees the new root too.
+    let (status, described) = f.get(Some(&inside)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(described["path"], inside);
+}
+
 /// The other shape: the caller is asking the daemon to *do* the move.
 #[tokio::test]
 async fn a_store_still_at_the_old_root_is_moved_after_the_transaction() {
@@ -708,7 +818,25 @@ async fn a_root_holding_another_owners_rows_is_a_404_not_a_403() {
     let (status, body) = f.purge(Some(&root), false, true).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(error_code(&body), "WORKSPACE_NOT_FOUND");
-    assert!(body["error"]["message"].as_str().unwrap().contains("owner"));
+    // D9: the message is fixed, and the same one an empty root gets. It used to
+    // read "1 row(s) under <root> belong to another owner", which disclosed both
+    // that someone else has a history there and how big it is — the two things a
+    // `404`-not-`403` exists to withhold. The count is in the debug log instead.
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert_eq!(message, format!("nothing of yours is recorded under {root}"));
+    assert!(
+        !message.contains("owner"),
+        "no hint of whose rows: {message}",
+    );
+
+    // An empty root is indistinguishable, which is the point.
+    let empty = f.project("empty-twin");
+    let (empty_status, empty_body) = f.purge(Some(&empty), false, true).await;
+    assert_eq!(empty_status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        empty_body["error"]["message"].as_str().unwrap_or_default(),
+        format!("nothing of yours is recorded under {empty}"),
+    );
 }
 
 /// Ruling R72: a destructive verb takes `path` almost literally — it never
@@ -913,6 +1041,124 @@ async fn a_real_purge_removes_the_rows_and_the_bytes_it_named() {
         .join(store::STORE_DIR_NAME)
         .join("artifacts");
     assert!(artifacts.is_dir());
+}
+
+/// D1's purge half: a live writer is stood down before its directory goes, so a
+/// record emitted afterwards on a handle a turn captured earlier cannot
+/// re-create it (`SessionLogWriter::open` does `create_dir_all`).
+#[tokio::test]
+async fn a_purge_stands_the_writers_down_so_a_late_record_re_creates_nothing() {
+    use openalpaca_core::session_log::{Record, RecordType};
+
+    let f = Fixture::new();
+    let root = f.project("narrated");
+    f.session("s-live", &root);
+    f.artifact(&root, "report.md");
+
+    let handle = f.log.open("s-live", Some("owner-1:gui"), Some("gui"), None);
+    assert!(handle.emit(Record::new(RecordType::UserMsg)));
+    assert!(handle.flush().await);
+    let dir = f
+        .sessions_root
+        .join(openalpaca_core::session_log::session_dir_name("s-live"));
+    assert!(dir.is_dir(), "the writer created {}", dir.display());
+
+    let (status, body) = f.purge(Some(&root), false, false).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["projects"][0]["removed"]["session_dirs"], 1);
+    assert!(!dir.exists());
+    assert!(
+        handle.is_closed(),
+        "the writer was not stood down, so its next record reopens the log",
+    );
+
+    handle.emit(Record::new(RecordType::AssistantMsg));
+    handle.flush().await;
+    assert!(
+        !dir.exists(),
+        "a record emitted after the purge re-created {}",
+        dir.display()
+    );
+}
+
+/// D8: every client's sidebar learns that a conversation is gone from
+/// `session_changed{status:"deleted"}` — the frame `DELETE /v1/sessions/{id}`
+/// publishes. The purge deletes conversations by the handful and used to say
+/// nothing at all.
+#[tokio::test]
+async fn a_purge_announces_every_conversation_it_deleted() {
+    let f = Fixture::new();
+    let root = f.project("announced");
+    f.session("s-a", &root);
+    f.session("s-b", &root);
+    f.artifact(&root, "report.md");
+    let mut rx = f.bus.subscribe();
+
+    // A dry run deletes nothing, so it announces nothing.
+    let (status, _) = f.purge(Some(&root), false, true).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(rx.try_recv().is_err(), "a dry run announced a deletion");
+
+    let (status, body) = f.purge(Some(&root), false, false).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let mut deleted: Vec<String> = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let openalpaca_core::events::SystemEvent::SessionChanged {
+            session_id,
+            lane_key,
+            status,
+            ..
+        } = event
+        {
+            assert_eq!(status, "deleted");
+            assert_eq!(lane_key, session_id, "the fixture's lane key is the id");
+            deleted.push(session_id);
+        }
+    }
+    deleted.sort();
+    assert_eq!(deleted, vec!["s-a".to_string(), "s-b".to_string()]);
+}
+
+/// D10: `--all` was all-or-nothing only for its refusals. A DB failure on the
+/// second root used to leave the first one purged and the `500` named neither.
+/// One transaction for every root's rows.
+#[tokio::test]
+async fn a_failure_on_the_second_root_leaves_the_first_untouched() {
+    let f = Fixture::new();
+    let first = f.project("first");
+    let second = f.project("second");
+    f.session("s-first", &first);
+    f.session("s-second", &second);
+    f.artifact(&first, "first.md");
+    f.artifact(&second, "second.md");
+
+    // The second root's session refuses to be deleted — the shape of any
+    // mid-loop DB failure, from a trigger rather than from luck.
+    f.db
+        .with_connection(|conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER refuse_second BEFORE DELETE ON session
+                   WHEN OLD.id = 's-second'
+                   BEGIN SELECT RAISE(ABORT, 'no'); END;",
+            )?;
+            Ok(())
+        })
+        .expect("trigger");
+
+    let (status, body) = f.purge(None, true, false).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(error_code(&body), "DB_ERROR");
+
+    assert_eq!(
+        f.row_count("SELECT COUNT(*) FROM session"),
+        2,
+        "the first root's rows were rolled back with the second's",
+    );
+    assert_eq!(
+        f.row_count("SELECT COUNT(*) FROM file_assets WHERE origin = 'produced'"),
+        2,
+    );
 }
 
 #[tokio::test]

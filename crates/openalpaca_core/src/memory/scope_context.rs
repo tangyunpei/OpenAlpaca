@@ -118,15 +118,46 @@ impl MemoryScopeContext {
         Self::for_request_with_cwd(workspace_path, || std::env::current_dir().ok())
     }
 
+    /// [`for_request`], answering from the filesystem rather than from the
+    /// marker walk's process-lifetime cache.
+    ///
+    /// Same rule, same fold — for the callers that answer *about* a directory
+    /// the user is changing rather than about the project a turn runs in: the
+    /// three `/v1/workspaces` routes. A cached answer there pins the ancestor
+    /// that a `422 WORKSPACE_NOT_A_ROOT` just told the caller to displace with a
+    /// marker of their own.
+    pub fn for_request_uncached(workspace_path: Option<&str>) -> Self {
+        Self::for_request_resolved(
+            workspace_path,
+            || std::env::current_dir().ok(),
+            crate::memory::workspace::resolve_workspace_id_uncached,
+        )
+    }
+
     /// [`for_request`] with the daemon's working directory injected, so the
     /// no-workspace branch is testable without moving the whole process.
     fn for_request_with_cwd(
         workspace_path: Option<&str>,
         cwd: impl FnOnce() -> Option<PathBuf>,
     ) -> Self {
+        Self::for_request_resolved(
+            workspace_path,
+            cwd,
+            crate::memory::workspace::resolve_workspace_id,
+        )
+    }
+
+    /// The one body behind [`for_request`] and [`for_request_uncached`]: the rule
+    /// (marker walk, canonicalisation, the home-store fold, CWD for memory
+    /// scoping only) written once, with the resolver as the single difference.
+    fn for_request_resolved(
+        workspace_path: Option<&str>,
+        cwd: impl FnOnce() -> Option<PathBuf>,
+        resolve: fn(&Path) -> Option<String>,
+    ) -> Self {
         match workspace_path {
             Some(path) => {
-                let root = crate::memory::workspace::resolve_workspace_id(Path::new(path))
+                let root = resolve(Path::new(path))
                     .filter(|r| !resolves_to_the_home_store(Path::new(r)));
                 Self {
                     workspace_id: root.clone(),
@@ -136,7 +167,7 @@ impl MemoryScopeContext {
             None => {
                 tracing::debug!("No workspace_path in request, falling back to daemon CWD");
                 let workspace_id = cwd()
-                    .and_then(|d| crate::memory::workspace::resolve_workspace_id(&d))
+                    .and_then(|d| resolve(&d))
                     .filter(|r| !resolves_to_the_home_store(Path::new(r)));
                 Self {
                     workspace_id,

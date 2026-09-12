@@ -625,6 +625,13 @@ pub struct WorkspaceRows {
     /// a purge *deletes* the row a queued run is about to resolve, rather than
     /// rewriting it.)
     pub active_tasks: usize,
+    /// Runs under this root that are `queued` — dispatched, not started. They
+    /// do not block a re-base (the row moves with the rest of one) and they *do*
+    /// block a purge ([`ArtifactStore::busy_tasks`] counts them), so a caller
+    /// reading this number can tell a root that is merely busy-soon from one
+    /// that is running. Reported rather than folded into `active_tasks`: the two
+    /// answer different questions.
+    pub queued_tasks: usize,
     /// Rows under this root that belong to **another** owner — `file_assets`
     /// and `memory`, the two members that carry an `owner_id` at all. Always
     /// `0` for an unscoped count.
@@ -1600,6 +1607,9 @@ impl<'a> ArtifactStore<'a> {
                     "SELECT COUNT(*) FROM task
                       WHERE workspace_id = ?1 AND status IN ('running', 'paused')",
                 )?,
+                queued_tasks: count(
+                    "SELECT COUNT(*) FROM task WHERE workspace_id = ?1 AND status = 'queued'",
+                )?,
                 other_owners,
             })
         })
@@ -1793,7 +1803,37 @@ impl<'a> ArtifactStore<'a> {
     pub fn purge_project(&self, root: &str) -> Result<PurgeOutcome> {
         self.db.with_connection(|conn| {
             let tx = conn.unchecked_transaction()?;
+            let outcome = Self::purge_within(&tx, root)?;
+            tx.commit()?;
+            Ok(outcome)
+        })
+    }
 
+    /// [`Self::purge_project`] for **several** roots in one transaction — what
+    /// `POST /v1/workspaces/purge {"all": true}` runs.
+    ///
+    /// `--all` was all-or-nothing only for its refusals: every root was checked
+    /// before the first deletion, and then each was purged in a transaction of
+    /// its own, so a failure on the third root left the first two purged and the
+    /// `500` named none of them. One transaction makes the verb's promise true
+    /// at both ends. The outcomes come back in the order the roots were given,
+    /// so the caller can still remove each root's bytes on its own.
+    pub fn purge_projects(&self, roots: &[String]) -> Result<Vec<PurgeOutcome>> {
+        self.db.with_connection(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let mut outcomes = Vec::with_capacity(roots.len());
+            for root in roots {
+                outcomes.push(Self::purge_within(&tx, root)?);
+            }
+            tx.commit()?;
+            Ok(outcomes)
+        })
+    }
+
+    /// The statements both purge entry points run, inside a transaction the
+    /// caller owns and commits.
+    fn purge_within(tx: &rusqlite::Transaction<'_>, root: &str) -> Result<PurgeOutcome> {
+        {
             // Read what is about to go, inside the transaction: this list is
             // what the caller will remove from disk, and a list gathered before
             // the transaction could name a session the transaction did not
@@ -1881,7 +1921,6 @@ impl<'a> ArtifactStore<'a> {
             };
             let uploads = tx.execute(&format!("DELETE FROM file_assets WHERE {UNLINKED}"), bind)?;
 
-            tx.commit()?;
             Ok(PurgeOutcome {
                 counts: PurgeCounts {
                     sessions,
@@ -1896,7 +1935,7 @@ impl<'a> ArtifactStore<'a> {
                 session_ids,
                 upload_paths,
             })
-        })
+        }
     }
 
     /// Re-stat every produced row under `project_root` (`Some("")` = the home

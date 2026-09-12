@@ -42,7 +42,7 @@ use openalpaca_storage::{
 };
 
 use super::chat_types::{is_lane_owned_by, with_artifacts};
-use super::{api_error, request_project_root, workspace_header};
+use super::{api_error, page_limit, page_offset, request_project_root, workspace_header};
 use crate::AppState;
 
 /// The status `task` rows carry while a run is interrupted (Phase 7b's sweep).
@@ -195,6 +195,12 @@ pub(super) struct Deps<'a> {
     /// daemon already warned about; the route then answers an empty page
     /// rather than inventing one.
     pub sessions_root: Option<std::path::PathBuf>,
+    /// The live writers, for `DELETE`'s `forget` — the writer whose handle is
+    /// still open has to be stood down before its directory is removed, or its
+    /// next record re-creates it (`SessionLogWriter::open` does
+    /// `create_dir_all`). `None` when no session store resolved at boot, which
+    /// is also when there is nothing on disk to remove.
+    pub session_log: Option<Arc<openalpaca_core::session_log::SessionLogService>>,
 }
 
 impl Deps<'_> {
@@ -330,6 +336,7 @@ pub(crate) fn session_has_live_run(
 }
 
 fn deps(state: &AppState) -> Deps<'_> {
+    let session_log = state.gateway.shared_context.session_log().cloned();
     Deps {
         db: &state.db,
         bus: &state.gateway.bus,
@@ -338,11 +345,10 @@ fn deps(state: &AppState) -> Deps<'_> {
         // The same root the writers use, taken from the service the daemon
         // built at boot so the route and the writer can never disagree about
         // where a session's log lives.
-        sessions_root: state
-            .gateway
-            .shared_context
-            .session_log()
+        sessions_root: session_log
+            .as_ref()
             .map(|service| service.root().to_path_buf()),
+        session_log,
     }
 }
 
@@ -384,8 +390,11 @@ pub(super) fn list_sessions(deps: &Deps<'_>, query: ListSessionsQuery) -> Respon
         source: query.source.as_deref(),
         status: query.status.as_deref(),
         q: query.q.as_deref().filter(|q| !q.trim().is_empty()),
-        limit: query.limit.unwrap_or(DEFAULT_LIMIT),
-        offset: query.offset.unwrap_or(0),
+        // Bounded at the route as well as at the repository: `?limit=-1` is
+        // SQLite's "no limit", and this page costs a query and a `COUNT(*)` on
+        // the connection every subsystem shares.
+        limit: page_limit(query.limit, DEFAULT_LIMIT),
+        offset: page_offset(query.offset),
     };
 
     match deps.repo().list_sessions(&filter) {
@@ -466,11 +475,13 @@ pub(super) fn get_session_messages(
         return response;
     }
     let repo = deps.repo();
-    let limit = query.limit.unwrap_or(DEFAULT_LIMIT);
+    // As on the list route: a non-positive `?limit=` is the default page, not
+    // the whole transcript, and an oversized one is capped.
+    let limit = page_limit(query.limit, DEFAULT_LIMIT);
 
     let messages = match query.before_id {
         Some(cursor) => repo.list_by_session_before(id, cursor, limit),
-        None => repo.list_by_session(id, limit, query.offset.unwrap_or(0)),
+        None => repo.list_by_session(id, limit, page_offset(query.offset)),
     };
     match messages {
         Ok(messages) => {
@@ -492,7 +503,7 @@ pub async fn get_session_events_handler(
     Path(id): Path<String>,
     Query(query): Query<SessionEventsQuery>,
 ) -> impl IntoResponse {
-    get_session_events(&deps(&state), &id, query)
+    get_session_events(&deps(&state), &id, query).await
 }
 
 /// The per-session JSONL event log (§5.4), paged by the `seq` cursor §5.4
@@ -515,7 +526,12 @@ pub async fn get_session_events_handler(
 /// * A page is bounded by `limit` **and** by [`MAX_EVENTS_BYTES`], because a
 ///   record count does not bound a response whose records carry whole tool
 ///   payloads. A page cut short by the budget still answers a cursor.
-pub(super) fn get_session_events(
+///
+/// The scan itself runs on [`tokio::task::spawn_blocking`], like
+/// `artifact_content`'s read: it is up to [`MAX_EVENTS_BYTES`] of file read and
+/// JSON parsed line by line, and a tokio worker thread blocked on that is a
+/// worker not serving the daemon's other requests.
+pub(super) async fn get_session_events(
     deps: &Deps<'_>,
     id: &str,
     query: SessionEventsQuery,
@@ -538,15 +554,23 @@ pub(super) fn get_session_events(
 
     let dir = root.join(openalpaca_core::session_log::session_dir_name(id));
     let limit = query.limit.unwrap_or(DEFAULT_EVENTS_LIMIT).clamp(1, MAX_EVENTS_LIMIT) as usize;
-    let scanned = match openalpaca_core::session_log::read_records_page(
-        &dir,
-        query.after_seq,
-        limit,
-        MAX_EVENTS_BYTES,
-    ) {
-        Ok(records) => records,
-        Err(e) => {
+    let after_seq = query.after_seq;
+    let read = tokio::task::spawn_blocking(move || {
+        openalpaca_core::session_log::read_records_page(&dir, after_seq, limit, MAX_EVENTS_BYTES)
+    })
+    .await;
+    let scanned = match read {
+        Ok(Ok(records)) => records,
+        Ok(Err(e)) => {
             tracing::warn!(session_id = id, "Failed to read the session log: {e}");
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "SESSION_LOG_UNREADABLE",
+                format!("Failed to read the session log: {e}"),
+            );
+        }
+        Err(e) => {
+            tracing::warn!(session_id = id, "The session log read task failed: {e}");
             return api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "SESSION_LOG_UNREADABLE",
@@ -714,10 +738,27 @@ pub async fn delete_session_handler(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     flush_session_logs(&state).await;
-    delete_session(&deps(&state), &id)
+    delete_session(&deps(&state), &id).await
 }
 
-pub(super) fn delete_session(deps: &Deps<'_>, id: &str) -> Response {
+/// Delete a conversation: its rows, and then the transcript on disk.
+///
+/// **Both halves, or the verb is a lie (§5.4:649).** The row delete takes the
+/// messages, the tool-call links and the session itself; `sessions/<id>/` holds
+/// the user's own message previews, every assistant turn verbatim, the `tool_use`
+/// inputs and payloads, the spills and the `snapshots/` of whole pre-edit files —
+/// which is exactly what a user deleting a conversation means to destroy. The
+/// sibling verb (`POST /v1/workspaces/purge`) already removed the same
+/// directories; this one answered `204` and left them.
+///
+/// Order: stand the writer down ([`SessionLogService::forget`]) *before* the
+/// directory goes. A writer whose handle a running turn still holds re-creates
+/// `sessions/<id>/` on its next record (`create_dir_all` in
+/// `SessionLogWriter::open`), so removing first would leave an empty directory
+/// nothing owns. An I/O failure on the removal is a `warn!` and still a `204`:
+/// the rows are gone, the client's request is done, and the leftover is a file
+/// on disk rather than a half-deleted conversation.
+pub(super) async fn delete_session(deps: &Deps<'_>, id: &str) -> Response {
     let session = match deps.load_for_write(id) {
         Ok(session) => session,
         Err(response) => return response,
@@ -735,11 +776,37 @@ pub(super) fn delete_session(deps: &Deps<'_>, id: &str) -> Response {
 
     match deps.repo().delete_session(id) {
         Ok(true) => {
+            remove_session_log(deps, id).await;
             deps.announce(&session.id, &session.lane_key, "deleted");
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(false) => not_found(),
         Err(e) => db_error(e),
+    }
+}
+
+/// Stand this session's writer down and remove its log directory.
+///
+/// Shared shape with the purge's `remove_purged_bytes`: a missing directory is
+/// nothing to do (a conversation that never narrated has none — P-22), and an
+/// I/O error is logged rather than raised, because the rows are already gone.
+pub(super) async fn remove_session_log(deps: &Deps<'_>, id: &str) {
+    if let Some(service) = deps.session_log.as_deref() {
+        service.forget(id).await;
+    }
+    let Some(root) = deps.sessions_root.as_deref() else {
+        return;
+    };
+    let dir = root.join(openalpaca_core::session_log::session_dir_name(id));
+    if !dir.exists() {
+        return;
+    }
+    if let Err(e) = std::fs::remove_dir_all(&dir) {
+        tracing::warn!(
+            session_id = id,
+            "Deleted the conversation but could not remove {}: {e}",
+            dir.display()
+        );
     }
 }
 

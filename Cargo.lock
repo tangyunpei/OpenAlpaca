@@ -4407,6 +4407,7 @@ dependencies = [
  "tracing-subscriber",
  "twilight-http",
  "twilight-model",
+ "urlencoding",
  "uuid",
  "zip",
 ]

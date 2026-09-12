@@ -15,7 +15,10 @@
 //! `ArtifactStore::rebase_project` is.
 //!
 //! **A root a project came *from* is resolved the way a turn's
-//! `x-workspace-path` is** (R22, `request_project_root`): up to the nearest
+//! `x-workspace-path` is** (R22, `request_project_root_uncached` — the same
+//! rule, answered from the filesystem rather than from the marker walk's cache,
+//! because these three routes answer *about* a directory the caller is
+//! changing): up to the nearest
 //! `.git`/`.openalpaca`, falling back to the path itself when there is no
 //! marker to walk to — which is the usual state of a root a project has already
 //! been moved *out of*. A re-base **destination** is taken literally instead
@@ -67,7 +70,7 @@ use serde::Deserialize;
 use openalpaca_core::context::SharedContext;
 use openalpaca_core::memory::scope_context::resolves_to_the_home_store;
 
-use super::{api_error, request_project_root};
+use super::{api_error, request_project_root_uncached};
 use crate::AppState;
 
 // ── Request types ────────────────────────────────────────────────
@@ -133,14 +136,30 @@ fn canonical_path(input: &str) -> Result<String, Response> {
 /// The canonical root string the four members hold, for a path a client named
 /// as somewhere a project **is or was**.
 ///
-/// Resolved through the same walk a turn's `x-workspace-path` takes (R22), and
-/// when that finds no marker — a project directory that has already been moved
-/// away, leaving nothing behind — the canonical path itself stands, because
-/// that is still exactly what the rows recorded.
+/// **Rows are the proof of a root (R75), here as well as on the purge.** A path
+/// any of the four members still names *exactly* is taken as given, before the
+/// marker walk is consulted: a project moved out from under a monorepo's `.git`,
+/// its own `.openalpaca` gone with it, would otherwise resolve to the monorepo
+/// root — and then `PATCH` answers "nothing of yours is recorded under /mono"
+/// (the moved project cannot be re-attached by the path it came from) or, if
+/// `/mono` has rows of its own, re-addresses *those* onto the new path. The
+/// count is unscoped for the same reason [`resolve_purge_root`]'s is: what is
+/// being established is that this path was a root, not whose rows they are —
+/// the owner check comes after, on the root this returns.
+///
+/// Only a path nothing names goes through the walk a turn's `x-workspace-path`
+/// takes (R22), and when *that* finds no marker the canonical path itself
+/// stands, because that is still exactly what the rows recorded.
 #[allow(clippy::result_large_err)]
-fn resolve_root(input: &str) -> Result<String, Response> {
+fn resolve_root(store: &ArtifactStore<'_>, input: &str) -> Result<String, Response> {
     let literal = canonical_path(input)?;
-    Ok(request_project_root(Some(&literal)).unwrap_or(literal))
+    let rows = store
+        .workspace_rows(&literal, None)
+        .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string()))?;
+    if !rows.counts.is_empty() {
+        return Ok(literal);
+    }
+    Ok(request_project_root_uncached(Some(&literal)).unwrap_or(literal))
 }
 
 /// A canonicalized path, refused when the marker walk finds it sits *inside*
@@ -151,12 +170,17 @@ fn resolve_root(input: &str) -> Result<String, Response> {
 /// A path that resolves to itself — its own `.git`, its own `.openalpaca` (the
 /// P-12 shape, where the store is already there) — or to no marker anywhere,
 /// is taken as given.
+///
+/// Resolved **uncached**: this refusal's own remediation is "give it a project
+/// marker of its own first", and the marker walk's process-lifetime cache used
+/// to pin the ancestor answer this very call wrote, so the retry after `mkdir
+/// .openalpaca` answered the same `422` until the daemon restarted.
 #[allow(clippy::result_large_err)]
 fn refuse_if_inside_another_root(
     literal: String,
     describe: impl FnOnce(&str, &str) -> String,
 ) -> Result<String, Response> {
-    match request_project_root(Some(&literal)) {
+    match request_project_root_uncached(Some(&literal)) {
         Some(ancestor) if ancestor != literal => Err(api_error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "WORKSPACE_NOT_A_ROOT",
@@ -227,6 +251,28 @@ fn resolve_purge_root(store: &ArtifactStore<'_>, input: &str) -> Result<String, 
     })
 }
 
+/// The `404` for a root holding somebody else's rows — the same words a root
+/// holding *nothing* of yours gets.
+///
+/// R40 answers a foreign row with `404` rather than `403` precisely so a caller
+/// learns nothing about it; a message that said "3 row(s) under /repo belong to
+/// another owner" handed back both the existence and the size of that history,
+/// which a `404` exists not to confirm. The count is still worth having — it is
+/// the one thing that distinguishes this refusal from an empty root when an
+/// operator reads the log — so it goes there, at `debug`.
+fn owner_mismatch(root: &str, other_owners: usize) -> Response {
+    tracing::debug!(
+        root,
+        other_owners,
+        "refusing a workspace write: rows under this root belong to another owner"
+    );
+    api_error(
+        StatusCode::NOT_FOUND,
+        "WORKSPACE_NOT_FOUND",
+        format!("nothing of yours is recorded under {root}"),
+    )
+}
+
 /// The home store is not a project and never becomes one (R24, and the fold in
 /// `memory::scope_context`): its artifacts directory is one identity space, and
 /// a project re-based onto it would share that directory with the home scope —
@@ -279,7 +325,8 @@ pub(crate) fn get_workspace(db: &Database, query: WorkspaceQuery) -> Response {
             "?path= is required: this route describes one workspace root",
         );
     };
-    let root = match resolve_root(&path) {
+    let store = ArtifactStore::new(db);
+    let root = match resolve_root(&store, &path) {
         Ok(root) => root,
         Err(response) => return response,
     };
@@ -300,7 +347,7 @@ pub(crate) fn get_workspace(db: &Database, query: WorkspaceQuery) -> Response {
     };
     let moved = matches!(&recorded_root, Some(recorded) if recorded != &root);
 
-    let rows = match ArtifactStore::new(db).workspace_rows(&root, None) {
+    let rows = match store.workspace_rows(&root, None) {
         Ok(rows) => rows,
         Err(e) => {
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string());
@@ -331,6 +378,13 @@ fn workspace_json(
         "moved": moved,
         "rows": counts_json(&rows.counts),
         "active_tasks": rows.active_tasks,
+        // Both numbers, because the two writers refuse on different sets: a
+        // re-base waits for `running`/`paused` (live in-process state a row
+        // rewrite cannot reach), a purge refuses on `queued` as well (the run
+        // has already named this root and is about to resolve its store). A
+        // caller shown only `active_tasks` could not tell why its purge was
+        // refused with nothing running.
+        "queued_tasks": rows.queued_tasks,
     })
 }
 
@@ -349,7 +403,8 @@ fn workspace_json(
 /// carry no owner column, which is precisely why the answer is a refusal and
 /// not a half-scoped update.
 pub(crate) fn rebase_workspace(db: &Database, owner_id: &str, request: RebaseRequest) -> Response {
-    let old_root = match resolve_root(&request.old_path) {
+    let store = ArtifactStore::new(db);
+    let old_root = match resolve_root(&store, &request.old_path) {
         Ok(root) => root,
         Err(response) => return response,
     };
@@ -370,21 +425,12 @@ pub(crate) fn rebase_workspace(db: &Database, owner_id: &str, request: RebaseReq
         );
     }
 
-    let store = ArtifactStore::new(db);
     let old_rows = match store.workspace_rows(&old_root, Some(owner_id)) {
         Ok(rows) => rows,
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string()),
     };
     if old_rows.other_owners > 0 {
-        return api_error(
-            StatusCode::NOT_FOUND,
-            "WORKSPACE_NOT_FOUND",
-            format!(
-                "{} row(s) under {old_root} belong to another owner; re-basing would rewrite \
-                 rows you cannot see",
-                old_rows.other_owners
-            ),
-        );
+        return owner_mismatch(&old_root, old_rows.other_owners);
     }
     if old_rows.counts.is_empty() {
         return api_error(
@@ -501,12 +547,23 @@ pub(crate) struct PurgeDeps<'a> {
     pub db: &'a Database,
     /// The live lane registry — half of the in-flight guard.
     pub ctx: &'a SharedContext,
+    /// Where the `session_changed{status:"deleted"}` frames go: a purge removes
+    /// conversations, and every client that renders a sidebar learns about a
+    /// deleted one from that event (`DELETE /v1/sessions/{id}` publishes the
+    /// same frame). Without it the purge left stale rows on screen until the
+    /// next unrelated refetch.
+    pub bus: &'a openalpaca_core::bus::EventBus,
     /// The local user; every write is scoped to it (R40).
     pub owner: &'a str,
     /// The home store's `sessions/`, where every session directory lives.
     /// `None` when the store could not be resolved at boot: the rows still go,
     /// and the directories are reported as not removed rather than guessed at.
     pub sessions_root: Option<std::path::PathBuf>,
+    /// The live writers, for the same reason `DELETE /v1/sessions/{id}` holds
+    /// them: a writer still tracked for a purged session re-creates its
+    /// directory on the next record, so each one is stood down before its
+    /// directory goes.
+    pub session_log: Option<Arc<openalpaca_core::session_log::SessionLogService>>,
 }
 
 /// One line of the plan: an entry of the store, what it holds here, the
@@ -658,15 +715,10 @@ fn preflight(deps: &PurgeDeps<'_>, root: &str) -> Result<PurgePlan, Response> {
         .workspace_rows(root, Some(deps.owner))
         .map_err(|e| api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string()))?;
     if rows.other_owners > 0 {
-        return Err(api_error(
-            StatusCode::NOT_FOUND,
-            "WORKSPACE_NOT_FOUND",
-            format!(
-                "{} row(s) under {root} belong to another owner; purging would delete rows you \
-                 cannot see",
-                rows.other_owners
-            ),
-        ));
+        // The same fixed message the re-base answers with: a `404` that named
+        // the foreign rows and counted them would disclose exactly what it
+        // exists not to confirm.
+        return Err(owner_mismatch(root, rows.other_owners));
     }
     if rows.counts.is_empty() {
         return Err(api_error(
@@ -721,7 +773,7 @@ fn preflight(deps: &PurgeDeps<'_>, root: &str) -> Result<PurgePlan, Response> {
 /// outside this project's own store is left alone and logged — the store never
 /// deletes what it did not create, and a row whose `storage_path` points
 /// somewhere else is exactly the ambiguity to fail closed on.
-fn remove_purged_bytes(
+async fn remove_purged_bytes(
     deps: &PurgeDeps<'_>,
     root: &str,
     outcome: &openalpaca_storage::PurgeOutcome,
@@ -729,6 +781,13 @@ fn remove_purged_bytes(
     let mut dirs = 0;
     if let Some(sessions_root) = deps.sessions_root.as_deref() {
         for id in &outcome.session_ids {
+            // Stand the writer down first: it creates the directory on its next
+            // record (`SessionLogWriter::open` does `create_dir_all`), so a
+            // removal with a live handle still out leaves an empty directory
+            // nothing owns.
+            if let Some(service) = deps.session_log.as_deref() {
+                service.forget(id).await;
+            }
             let dir = sessions_root.join(openalpaca_core::session_log::session_dir_name(id));
             if !dir.exists() {
                 continue;
@@ -766,13 +825,48 @@ fn remove_purged_bytes(
     (dirs, files)
 }
 
+/// Announce every conversation the purge deleted, one frame each — the same
+/// `session_changed{status:"deleted"}` `DELETE /v1/sessions/{id}` publishes.
+///
+/// A client's sidebar learns that a conversation is gone from this event and
+/// nothing else: the purge used to delete rows and directories in silence, so
+/// every open window kept rendering conversations that no longer existed until
+/// some unrelated refetch. Driven by `outcome.session_ids` — what the
+/// transaction actually deleted — with the lane read from the plan that named
+/// the same sessions a moment earlier; a session the plan somehow did not name
+/// is announced with an empty lane rather than dropped, because the deletion is
+/// the fact clients need.
+fn announce_purged_sessions(
+    deps: &PurgeDeps<'_>,
+    plan: &PurgePlan,
+    outcome: &openalpaca_storage::PurgeOutcome,
+) {
+    for id in &outcome.session_ids {
+        let lane_key = plan
+            .sessions
+            .iter()
+            .find(|session| &session.id == id)
+            .map(|session| session.lane_key.clone())
+            .unwrap_or_default();
+        let _ = deps
+            .bus
+            .publish(openalpaca_core::events::SystemEvent::SessionChanged {
+                session_id: id.clone(),
+                lane_key,
+                status: "deleted".to_string(),
+                task_id: None,
+                timestamp: chrono::Utc::now(),
+            });
+    }
+}
+
 /// Delete one project's conversations, runs and uploads — or report what that
 /// would delete, which is what happens unless the caller says `dry_run: false`.
 ///
 /// The plan is the answer in both cases, with `applied` saying which call this
 /// was: a dry run whose shape differs from the real one is a plan nobody can
 /// check against the outcome.
-pub(crate) fn purge_workspaces(deps: &PurgeDeps<'_>, request: PurgeRequest) -> Response {
+pub(crate) async fn purge_workspaces(deps: &PurgeDeps<'_>, request: PurgeRequest) -> Response {
     let store = ArtifactStore::new(deps.db);
     let roots = match (request.path.as_deref(), request.all) {
         (Some(path), false) => match resolve_purge_root(&store, path) {
@@ -806,8 +900,26 @@ pub(crate) fn purge_workspaces(deps: &PurgeDeps<'_>, request: PurgeRequest) -> R
         }
     }
 
+    // Every root's rows in **one** transaction, before any bytes move: a DB
+    // failure on the third root must not leave the first two purged, which is
+    // what a transaction per root did — and the `500` named none of them.
+    let outcomes = if request.dry_run {
+        Vec::new()
+    } else {
+        match store.purge_projects(&roots) {
+            Ok(outcomes) => outcomes,
+            Err(e) => {
+                return api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "DB_ERROR",
+                    format!("purging {}: {e}", roots.join(", ")),
+                );
+            }
+        }
+    };
+
     let mut projects = Vec::with_capacity(roots.len());
-    for (root, plan) in roots.iter().zip(plans.iter()) {
+    for (index, (root, plan)) in roots.iter().zip(plans.iter()).enumerate() {
         let entries = plan_entries(root, plan);
         let mut project = serde_json::json!({
             "path": root,
@@ -818,18 +930,9 @@ pub(crate) fn purge_workspaces(deps: &PurgeDeps<'_>, request: PurgeRequest) -> R
                 "memories": plan.kept.memories,
             },
         });
-        if !request.dry_run {
-            let outcome = match store.purge_project(root) {
-                Ok(outcome) => outcome,
-                Err(e) => {
-                    return api_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "DB_ERROR",
-                        format!("purging {root}: {e}"),
-                    );
-                }
-            };
-            let (dirs, files) = remove_purged_bytes(deps, root, &outcome);
+        if let Some(outcome) = outcomes.get(index) {
+            let (dirs, files) = remove_purged_bytes(deps, root, outcome).await;
+            announce_purged_sessions(deps, plan, outcome);
             project["counts"] = purge_counts_json(&outcome.counts);
             project["removed"] = serde_json::json!({
                 "session_dirs": dirs,
@@ -909,19 +1012,21 @@ pub async fn purge_workspace_handler(
     if !request.dry_run {
         crate::routes::sessions::flush_session_logs(&state).await;
     }
+    let session_log = state.gateway.shared_context.session_log().cloned();
     purge_workspaces(
         &PurgeDeps {
             db: &state.db,
             ctx: &state.gateway.shared_context,
+            bus: &state.gateway.bus,
             owner: &state.local_user_id,
-            sessions_root: state
-                .gateway
-                .shared_context
-                .session_log()
+            sessions_root: session_log
+                .as_ref()
                 .map(|service| service.root().to_path_buf()),
+            session_log,
         },
         request,
     )
+    .await
 }
 
 #[cfg(test)]

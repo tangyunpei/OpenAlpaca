@@ -16,6 +16,10 @@ struct Harness {
     /// Where `GET …/events` reads the JSONL from — the home store's
     /// `sessions/` in production, a tempdir here.
     sessions_root: std::path::PathBuf,
+    /// The live writers, as the daemon holds them: `DELETE` stands the one for
+    /// the deleted session down before removing its directory, so the service
+    /// has to be the *same* one a test emitted through.
+    log: Arc<openalpaca_core::session_log::SessionLogService>,
 }
 
 impl Harness {
@@ -23,12 +27,20 @@ impl Harness {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = Database::open(&dir.path().join("test.db")).expect("open db");
         let sessions_root = dir.path().join("sessions");
+        let log = openalpaca_core::session_log::SessionLogService::new(
+            sessions_root.clone(),
+            None,
+            openalpaca_core::session_log::SessionLogLimits::default(),
+            "test".to_string(),
+        )
+        .into_arc();
         Self {
             _dir: dir,
             db,
             bus: EventBus::default(),
             ctx: SharedContext::new(),
             sessions_root,
+            log,
         }
     }
 
@@ -39,6 +51,7 @@ impl Harness {
             ctx: &self.ctx,
             owner: OWNER,
             sessions_root: Some(self.sessions_root.clone()),
+            session_log: Some(self.log.clone()),
         }
     }
 
@@ -270,12 +283,57 @@ async fn an_unknown_session_is_404_everywhere() {
         activate_session(&deps, "no-such-session"),
         archive_session(&deps, "no-such-session"),
         patch_session(&deps, "no-such-session", PatchSessionRequest::default()),
-        delete_session(&deps, "no-such-session"),
+        delete_session(&deps, "no-such-session").await,
     ] {
         let (status, body) = split(response).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body["error"]["code"], "SESSION_NOT_FOUND");
     }
+}
+
+/// `?limit=-1` used to reach SQLite as `LIMIT -1` — "no limit" — so one request
+/// could read a whole transcript (and, on the list route, the whole table).
+/// Non-positive is the default page; oversized is capped.
+#[tokio::test]
+async fn a_non_positive_limit_serves_the_default_page_not_the_whole_transcript() {
+    let h = Harness::new();
+    let session = h
+        .repo()
+        .get_or_create_active_session(LANE, "gui", None)
+        .expect("session");
+    for i in 0..(DEFAULT_LIMIT + 1) {
+        h.repo()
+            .insert(&ConversationMessage {
+                lane_key: LANE.to_string(),
+                role: "user".to_string(),
+                content: format!("message {i}"),
+                ..Default::default()
+            })
+            .expect("insert");
+    }
+
+    for limit in [Some(-1), Some(0)] {
+        let (status, body) = split(get_session_messages(
+            &h.deps(),
+            &session.id,
+            SessionMessagesQuery {
+                limit,
+                ..Default::default()
+            },
+        ))
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["total"], DEFAULT_LIMIT + 1);
+        assert_eq!(
+            body["messages"].as_array().expect("messages").len() as i64,
+            DEFAULT_LIMIT,
+            "limit={limit:?} must serve the default page",
+        );
+    }
+
+    // The 500-row cap on an oversized `?limit=` is pinned where the bound lives
+    // (`routes::tests::a_page_limit_defaults_on_non_positive_and_caps_on_oversized`):
+    // proving it here would need 501 rows to observe one number.
 }
 
 #[tokio::test]
@@ -535,7 +593,7 @@ async fn the_event_log_pages_by_seq_and_answers_a_cursor() {
         &h.deps(),
         &session.id,
         SessionEventsQuery { limit: Some(4), ..Default::default() },
-    ))
+    ).await)
     .await;
     assert_eq!(status, StatusCode::OK);
     let events = body["events"].as_array().expect("events");
@@ -549,7 +607,7 @@ async fn the_event_log_pages_by_seq_and_answers_a_cursor() {
         &h.deps(),
         &session.id,
         SessionEventsQuery { after_seq: Some(4), limit: Some(4), ..Default::default() },
-    ))
+    ).await)
     .await;
     assert_eq!(body["events"][0]["seq"], 5);
     assert_eq!(body["next_after_seq"], 8);
@@ -559,7 +617,7 @@ async fn the_event_log_pages_by_seq_and_answers_a_cursor() {
         &h.deps(),
         &session.id,
         SessionEventsQuery { after_seq: Some(10), ..Default::default() },
-    ))
+    ).await)
     .await;
     assert!(body["events"].as_array().expect("events").is_empty());
     assert_eq!(body["next_after_seq"], 10);
@@ -587,7 +645,7 @@ async fn the_event_log_filters_without_stalling_the_cursor() {
         &h.deps(),
         &session.id,
         SessionEventsQuery { types: Some("tool_call,tool_result".into()), ..Default::default() },
-    ))
+    ).await)
     .await;
     let events = body["events"].as_array().expect("events");
     assert_eq!(events.len(), 2);
@@ -599,7 +657,7 @@ async fn the_event_log_filters_without_stalling_the_cursor() {
         &h.deps(),
         &session.id,
         SessionEventsQuery { agent: Some("research_agent::b2".into()), ..Default::default() },
-    ))
+    ).await)
     .await;
     assert_eq!(body["events"].as_array().expect("events").len(), 2);
 
@@ -608,7 +666,7 @@ async fn the_event_log_filters_without_stalling_the_cursor() {
         &h.deps(),
         &session.id,
         SessionEventsQuery { types: Some("compaction".into()), ..Default::default() },
-    ))
+    ).await)
     .await;
     assert!(body["events"].as_array().expect("events").is_empty());
     assert_eq!(body["next_after_seq"], 4);
@@ -637,7 +695,7 @@ async fn a_torn_final_line_ends_the_log_instead_of_failing_the_route() {
         &h.deps(),
         &session.id,
         SessionEventsQuery::default(),
-    ))
+    ).await)
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["events"].as_array().expect("events").len(), 2);
@@ -669,7 +727,7 @@ async fn the_event_log_page_stops_at_its_byte_budget() {
         &h.deps(),
         &session.id,
         SessionEventsQuery { limit: Some(500), ..Default::default() },
-    ), 16 << 20)
+    ).await, 16 << 20)
     .await;
     assert_eq!(status, StatusCode::OK);
     let events = body["events"].as_array().expect("events");
@@ -693,7 +751,7 @@ async fn the_event_log_page_stops_at_its_byte_budget() {
             limit: Some(500),
             ..Default::default()
         },
-    ), 16 << 20)
+    ).await, 16 << 20)
     .await;
     assert_eq!(body["events"][0]["seq"], events.len() as u64 + 1);
 }
@@ -746,7 +804,7 @@ async fn the_event_log_pages_past_a_payload_seq_without_skipping_a_record() {
             &h.deps(),
             &session.id,
             SessionEventsQuery { after_seq: cursor, limit: Some(6), ..Default::default() },
-        ))
+        ).await)
         .await;
         assert_eq!(status, StatusCode::OK);
         let events = body["events"].as_array().expect("events").clone();
@@ -777,7 +835,7 @@ async fn a_session_with_no_log_answers_an_empty_page() {
         &h.deps(),
         &session.id,
         SessionEventsQuery::default(),
-    ))
+    ).await)
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(body["events"].as_array().expect("events").is_empty());
@@ -824,7 +882,7 @@ async fn the_event_log_serves_a_file_snapshot_record() {
         &h.deps(),
         &session.id,
         SessionEventsQuery { types: Some("file_snapshot".into()), ..Default::default() },
-    ))
+    ).await)
     .await;
     assert_eq!(status, StatusCode::OK);
     let events = body["events"].as_array().expect("events");
@@ -847,7 +905,7 @@ async fn an_unknown_session_still_answers_404() {
         &h.deps(),
         "no-such-session",
         SessionEventsQuery::default(),
-    ))
+    ).await)
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"]["code"], "SESSION_NOT_FOUND");
@@ -868,7 +926,7 @@ async fn the_event_log_clamps_its_page_size() {
         &h.deps(),
         &session.id,
         SessionEventsQuery { limit: Some(10_000), ..Default::default() },
-    ))
+    ).await)
     .await;
     assert_eq!(
         body["events"].as_array().expect("events").len(),
@@ -878,8 +936,14 @@ async fn the_event_log_clamps_its_page_size() {
 
 // ── DELETE ───────────────────────────────────────────────────────────
 
+/// I9: the rows **and** the JSONL. `sessions/<id>/` holds the message
+/// previews, the assistant text, the verbatim tool payloads and the
+/// `snapshots/` of whole pre-edit files — the content a user deleting a
+/// conversation means to destroy. It used to survive the `204` indefinitely.
 #[tokio::test]
 async fn deleting_answers_204_and_takes_the_transcript_with_it() {
+    use openalpaca_core::session_log::{Record, RecordType};
+
     let h = Harness::new();
     let session = h
         .repo()
@@ -893,12 +957,41 @@ async fn deleting_answers_204_and_takes_the_transcript_with_it() {
             ..Default::default()
         })
         .expect("insert");
-    let mut rx = h.bus.subscribe();
 
-    let response = delete_session(&h.deps(), &session.id);
+    // A narrated conversation: one record on disk, through the same service the
+    // route will stand down.
+    let handle = h.log.open(&session.id, Some(LANE), Some("gui"), None);
+    assert!(handle.emit(Record::new(RecordType::UserMsg)));
+    assert!(handle.flush().await);
+    let dir = h
+        .sessions_root
+        .join(openalpaca_core::session_log::session_dir_name(&session.id));
+    assert!(dir.is_dir(), "the writer created the log directory");
+
+    let mut rx = h.bus.subscribe();
+    let response = delete_session(&h.deps(), &session.id).await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert!(h.repo().get_session(&session.id).unwrap().is_none());
     assert_eq!(h.repo().count_by_lane(LANE).unwrap(), 0);
+    assert!(
+        !dir.exists(),
+        "the transcript went with the rows: {}",
+        dir.display()
+    );
+    assert!(
+        handle.is_closed(),
+        "the writer was not stood down, so its next record reopens the log",
+    );
+
+    // A late emit on the handle a running turn captured earlier must not bring
+    // the directory back (`forget` is what closes that door).
+    handle.emit(Record::new(RecordType::AssistantMsg));
+    handle.flush().await;
+    assert!(
+        !dir.exists(),
+        "a record emitted after the delete re-created {}",
+        dir.display()
+    );
 
     assert!(matches!(
         rx.try_recv(),
@@ -925,7 +1018,7 @@ async fn deleting_a_session_with_a_run_in_flight_is_409() {
         .expect("seed the run");
     h.ctx.register_workflow_for_lane(LANE, "task-1");
 
-    let (status, body) = split(delete_session(&h.deps(), &session.id)).await;
+    let (status, body) = split(delete_session(&h.deps(), &session.id).await).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["error"]["code"], "SESSION_HAS_ACTIVE_WORKFLOWS");
     assert!(h.repo().get_session(&session.id).unwrap().is_some());
@@ -956,7 +1049,7 @@ async fn a_run_in_another_conversation_on_the_lane_does_not_block_the_delete() {
         .expect("seed the run");
     h.ctx.register_workflow_for_lane(LANE, "task-1");
 
-    let response = delete_session(&h.deps(), &idle.id);
+    let response = delete_session(&h.deps(), &idle.id).await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 }
 
@@ -987,7 +1080,7 @@ async fn writes_on_another_owners_session_answer_404() {
                 workspace_path: None,
             },
         ),
-        delete_session(&deps, &theirs.id),
+        delete_session(&deps, &theirs.id).await,
     ] {
         let (status, body) = split(response).await;
         assert_eq!(status, StatusCode::NOT_FOUND);

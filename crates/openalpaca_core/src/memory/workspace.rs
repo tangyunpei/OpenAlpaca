@@ -38,6 +38,27 @@ pub fn detect_workspace_root(start_dir: &Path) -> Option<PathBuf> {
     result
 }
 
+/// [`detect_workspace_root`] without the cache — the walk, every time.
+///
+/// The cache is right for a chat turn (a project's markers do not move while the
+/// daemon runs) and wrong for the routes that answer *about* a directory the
+/// user is changing: `/v1/workspaces`' `422 WORKSPACE_NOT_A_ROOT` tells the
+/// caller to give the path a project marker of its own, and the refusal's own
+/// lookup used to cache the ancestor answer that made following that
+/// instruction impossible until the daemon restarted. This neither reads nor
+/// writes the cache, so a marker created a moment ago is seen.
+pub fn detect_workspace_root_uncached(start_dir: &Path) -> Option<PathBuf> {
+    let canonical = start_dir
+        .canonicalize()
+        .unwrap_or_else(|_| start_dir.to_path_buf());
+    walk_up_for_marker(&canonical)
+}
+
+/// [`resolve_workspace_id`] over [`detect_workspace_root_uncached`].
+pub fn resolve_workspace_id_uncached(start_dir: &Path) -> Option<String> {
+    detect_workspace_root_uncached(start_dir).map(|root| workspace_id_from_root(&root))
+}
+
 /// Walk up from `start` looking for project root markers.
 /// Prefers `.openalpaca` over `.git` at the same level.
 fn walk_up_for_marker(start: &Path) -> Option<PathBuf> {
@@ -152,6 +173,39 @@ mod tests {
         // where we know there's no marker between isolated and tmp root.
         // The important thing is it doesn't panic and returns a valid Option.
         let _ = result; // At minimum, doesn't panic
+    }
+
+    /// The cache pins an answer for the process lifetime; the uncached pair does
+    /// not, which is what lets a route tell a caller to create a marker and mean
+    /// it.
+    #[test]
+    fn the_uncached_walk_sees_a_marker_created_after_the_first_look() {
+        clear_cache();
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        // Both agree while `sub` has no marker of its own: the ancestor.
+        let ancestor = tmp.path().canonicalize().unwrap();
+        assert_eq!(detect_workspace_root(&sub), Some(ancestor.clone()));
+        assert_eq!(detect_workspace_root_uncached(&sub), Some(ancestor));
+
+        std::fs::create_dir(sub.join(".openalpaca")).unwrap();
+        let sub_canonical = sub.canonicalize().unwrap();
+        // The cached half is deliberately not asserted here: `clear_cache` is
+        // process-global and this module's other tests call it, so "the cache
+        // still says the ancestor" would race them. What the cache costs a
+        // *caller* is pinned where it is visible —
+        // `routes/workspaces/tests.rs`' 422-then-404 case.
+        assert_eq!(
+            detect_workspace_root_uncached(&sub),
+            Some(sub_canonical.clone()),
+        );
+        assert_eq!(
+            resolve_workspace_id_uncached(&sub).as_deref(),
+            Some(sub_canonical.to_string_lossy().as_ref()),
+        );
     }
 
     #[test]

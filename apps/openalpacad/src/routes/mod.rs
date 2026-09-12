@@ -187,6 +187,14 @@ pub(crate) fn invalid_token() -> Response {
 /// Compared on the essence, so a `;charset=` parameter or an odd case cannot
 /// slip past. `image/svg+xml` belongs here: an SVG document can carry a
 /// `<script>`, and an uploaded one is user-supplied bytes.
+///
+/// **Every XML essence counts (ruling R83).** `text/xml` and `application/xml`
+/// are rendered as documents, and an XML document whose root is XHTML or SVG —
+/// or one carrying an `xml-stylesheet` XSLT that produces either — runs script
+/// on the daemon origin with the bearer token sitting in `?token=`. The `+xml`
+/// suffix is matched for the same reason, so a structured syntax nobody has
+/// enumerated here (`application/mathml+xml`, `image/svg+xml`) is covered by the
+/// rule rather than by this list being complete.
 fn is_script_bearing_document(mime_type: &str) -> bool {
     let essence = mime_type
         .split(';')
@@ -194,10 +202,57 @@ fn is_script_bearing_document(mime_type: &str) -> bool {
         .unwrap_or(mime_type)
         .trim()
         .to_ascii_lowercase();
-    matches!(
-        essence.as_str(),
-        "text/html" | "application/xhtml+xml" | "image/svg+xml"
-    )
+    matches!(essence.as_str(), "text/html" | "text/xml" | "application/xml")
+        || essence.ends_with("+xml")
+}
+
+/// `inline; filename="…"`, plus RFC 5987's `filename*=UTF-8''…` whenever the
+/// name is not plain ASCII.
+///
+/// A `HeaderValue` is bytes, and `HeaderValue::from_str`/`parse` refuses any
+/// char above `\x7f` — so a CJK (or accented, or emoji) filename used to drop
+/// the whole `Content-Disposition` header on the floor, and the browser fell
+/// back to the last path segment of the URL: the artifact's id. The ASCII
+/// fallback keeps a value every client can read, and `filename*` carries the
+/// real name for the ones that implement RFC 6266 (all of them, since 2011).
+///
+/// The fallback substitutes `_` for anything outside printable ASCII and for the
+/// two characters that would end the quoted string early (`"` and `\`), plus
+/// CR/LF, which is the header-injection guard this used to do on its own.
+fn inline_disposition(filename: &str) -> String {
+    let fallback: String = filename
+        .chars()
+        .map(|c| match c {
+            '"' | '\\' => '_',
+            c if c.is_ascii_graphic() || c == ' ' => c,
+            _ => '_',
+        })
+        .collect();
+    let fallback = match fallback.trim() {
+        "" => "file".to_string(),
+        trimmed => trimmed.to_string(),
+    };
+    let mut value = format!("inline; filename=\"{fallback}\"");
+    if filename != fallback {
+        value.push_str("; filename*=UTF-8''");
+        value.push_str(&percent_encode_attr(filename));
+    }
+    value
+}
+
+/// Percent-encode everything outside RFC 5987's `attr-char` set — the encoding
+/// `filename*` takes, over the name's UTF-8 bytes.
+fn percent_encode_attr(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        let c = *byte as char;
+        if c.is_ascii_alphanumeric() || matches!(c, '!' | '#' | '$' | '&' | '+' | '-' | '.' | '^' | '_' | '`' | '|' | '~') {
+            out.push(c);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
 }
 
 /// Stream a file as a content response: its MIME type, an inline
@@ -210,7 +265,8 @@ fn is_script_bearing_document(mime_type: &str) -> bool {
 /// - `X-Content-Type-Options: nosniff` — the response is what it says it is; a
 ///   `text/plain` artifact is never sniffed into a document.
 /// - `Content-Security-Policy: sandbox` for a document a browser executes
-///   script from (R27). `?token=` made these routes reachable by navigation,
+///   script from (R27, widened to every XML essence by R83). `?token=` made
+///   these routes reachable by navigation,
 ///   and an `html` artifact is agent output — possibly assembled from
 ///   untrusted web content — rendered on the daemon origin, where its own
 ///   script could read the token straight out of `location.search` and drive
@@ -239,11 +295,7 @@ pub(crate) async fn content_response(
     if let Ok(value) = mime_type.parse() {
         headers.insert(axum::http::header::CONTENT_TYPE, value);
     }
-    let safe_filename: String = filename
-        .chars()
-        .filter(|c| *c != '"' && *c != '\\' && *c != '\r' && *c != '\n')
-        .collect();
-    if let Ok(value) = format!("inline; filename=\"{safe_filename}\"").parse() {
+    if let Ok(value) = inline_disposition(filename).parse() {
         headers.insert(axum::http::header::CONTENT_DISPOSITION, value);
     }
     headers.insert(
@@ -273,11 +325,28 @@ pub(crate) async fn content_response(
 
 /// The `x-workspace-path` header `/v1/chat` reads (`routes/chat.rs`), and the
 /// same value the CLI sends as `workspace_path` on `/v1/command`.
+///
+/// **Percent-encoded UTF-8 on the wire (ruling R81).** A header value is bytes
+/// and `HeaderValue::to_str` refuses anything above `\x7f`, so a CJK project
+/// path — an ordinary path here — used to be dropped silently: the turn ran
+/// with no project at all. Clients encode (`apps/openalpaca/src/chat_stream`,
+/// the GUI's `lib/api`) and this decodes. A plain ASCII value carrying no `%`
+/// decodes to itself, so nothing that worked before changes; a value whose
+/// escapes are not valid UTF-8 is taken as written rather than refused, because
+/// a path the daemon cannot resolve is already answered downstream.
 pub(crate) fn workspace_header(headers: &HeaderMap) -> Option<String> {
     headers
         .get("x-workspace-path")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
+        .map(decode_workspace_header)
+}
+
+/// The decoding half of [`workspace_header`], shared with `/v1/chat`'s own read
+/// of the same header (`routes/chat.rs`).
+pub(crate) fn decode_workspace_header(raw: &str) -> String {
+    urlencoding::decode(raw)
+        .map(|decoded| decoded.into_owned())
+        .unwrap_or_else(|_| raw.to_string())
 }
 
 /// Resolve a client-sent workspace path the way a chat turn would.
@@ -291,4 +360,195 @@ pub(crate) fn workspace_header(headers: &HeaderMap) -> Option<String> {
 pub(crate) fn request_project_root(workspace_path: Option<&str>) -> Option<String> {
     let path = workspace_path?;
     MemoryScopeContext::for_request(Some(path)).request_workspace_root
+}
+
+/// [`request_project_root`], answering from the filesystem every time.
+///
+/// The marker walk behind it memoises `canonical start path → root` for the
+/// process lifetime (`memory::workspace`), which is right for a chat turn — a
+/// project's markers do not move while the daemon runs — and wrong for the three
+/// `/v1/workspaces` routes, whose whole job is to answer about a directory the
+/// user is *changing*. `422 WORKSPACE_NOT_A_ROOT` tells the caller to "give it a
+/// project marker of its own first"; the cached answer made that instruction
+/// impossible to follow until the daemon restarted, because the refusal's own
+/// call wrote the entry. Same rule, same fold — no cache.
+pub(crate) fn request_project_root_uncached(workspace_path: Option<&str>) -> Option<String> {
+    let path = workspace_path?;
+    MemoryScopeContext::for_request_uncached(Some(path)).request_workspace_root
+}
+
+// ── Paging bounds, shared (R26) ──────────────────────────────────────────
+//
+// `artifacts.rs` keeps its own `page_limit`: its `None` means "the store's
+// default", a contract these routes do not have (they pass an integer straight
+// into SQL, where a non-positive value means *no limit* — the whole table).
+
+/// The largest page any list route will build, whatever `?limit=` asks for.
+pub(crate) const MAX_PAGE_LIMIT: i64 = 500;
+
+/// `?limit=`, resolved against the route's default and [`MAX_PAGE_LIMIT`].
+///
+/// A non-positive value is the default rather than SQLite's "no limit": `-1`
+/// must not be the way to read every row of a table over the one connection
+/// every subsystem shares. An oversized value is *clamped* rather than refused —
+/// the caller gets a smaller page and an exact `total`, which is how it learns
+/// there is more to fetch.
+pub(crate) fn page_limit(requested: Option<i64>, default: i64) -> i64 {
+    requested
+        .filter(|n| *n > 0)
+        .unwrap_or(default)
+        .min(MAX_PAGE_LIMIT)
+}
+
+/// `?offset=`, floored at zero — a negative offset is not a page anyone can
+/// serve, and SQLite silently reads it as none.
+pub(crate) fn page_offset(requested: Option<i64>) -> i64 {
+    requested.unwrap_or(0).max(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R83: every XML essence is a document a browser may run script from.
+    #[test]
+    fn the_sandbox_covers_html_svg_and_every_xml_essence() {
+        for mime in [
+            "text/html",
+            "text/html; charset=utf-8",
+            "TEXT/HTML",
+            "application/xhtml+xml",
+            "image/svg+xml",
+            "text/xml",
+            "application/xml",
+            "application/xml; charset=utf-8",
+            "application/mathml+xml",
+        ] {
+            assert!(
+                is_script_bearing_document(mime),
+                "{mime} must be sandboxed"
+            );
+        }
+        for mime in [
+            "image/png",
+            "text/plain",
+            "application/pdf",
+            "application/json",
+            "text/xmlish",
+        ] {
+            assert!(
+                !is_script_bearing_document(mime),
+                "{mime} is not a script-bearing document"
+            );
+        }
+    }
+
+    /// The sandbox and the disposition are on the shared body, so the assertion
+    /// is about a real response rather than about the predicate alone.
+    #[tokio::test]
+    async fn a_content_response_sandboxes_xml_and_not_an_image() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("doc.xml");
+        std::fs::write(&path, b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>").expect("write");
+
+        let xml = content_response(&path, "application/xml", "doc.xml").await;
+        assert_eq!(
+            xml.headers()
+                .get(axum::http::header::CONTENT_SECURITY_POLICY)
+                .map(|v| v.to_str().unwrap()),
+            Some("sandbox"),
+        );
+
+        let png = content_response(&path, "image/png", "shot.png").await;
+        assert!(
+            png.headers()
+                .get(axum::http::header::CONTENT_SECURITY_POLICY)
+                .is_none(),
+            "an image is not a document; the sandbox is not a blanket",
+        );
+    }
+
+    /// A non-ASCII filename used to drop the whole header (a `HeaderValue`
+    /// refuses those bytes), leaving the browser to name the file after the id
+    /// in the URL. RFC 5987: an ASCII fallback *and* the real name.
+    #[test]
+    fn a_non_ascii_filename_is_sent_in_both_forms() {
+        let value = inline_disposition("季度报告.pdf");
+        assert_eq!(
+            value,
+            "inline; filename=\"____.pdf\"; filename*=UTF-8''%E5%AD%A3%E5%BA%A6%E6%8A%A5%E5%91%8A.pdf"
+        );
+        assert!(
+            value.parse::<axum::http::HeaderValue>().is_ok(),
+            "the whole point: the header is sendable",
+        );
+
+        // Plain ASCII keeps exactly the value it had before R83's sibling fix —
+        // one form, no `filename*` noise.
+        assert_eq!(
+            inline_disposition("notes.md"),
+            "inline; filename=\"notes.md\""
+        );
+        // Header injection and quote-escaping are still handled.
+        assert_eq!(
+            inline_disposition("a\"b\\c\r\n.txt"),
+            "inline; filename=\"a_b_c__.txt\"; filename*=UTF-8''a%22b%5Cc%0D%0A.txt"
+        );
+        // A name with nothing ASCII in it keeps one placeholder per character,
+        // and a name that is nothing but blanks still has a usable fallback.
+        assert_eq!(
+            inline_disposition("报告"),
+            "inline; filename=\"__\"; filename*=UTF-8''%E6%8A%A5%E5%91%8A"
+        );
+        assert_eq!(
+            inline_disposition("  "),
+            "inline; filename=\"file\"; filename*=UTF-8''%20%20"
+        );
+    }
+
+    /// R81: the header is percent-encoded UTF-8, and a plain ASCII value with no
+    /// escapes is its own encoding.
+    #[test]
+    fn a_cjk_workspace_path_round_trips_through_the_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-workspace-path",
+            "%2FUsers%2Fjun%2F%E9%A1%B9%E7%9B%AE%2Fopenalpaca"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            workspace_header(&headers).as_deref(),
+            Some("/Users/jun/项目/openalpaca")
+        );
+
+        let mut plain = HeaderMap::new();
+        plain.insert("x-workspace-path", "/Users/jun/repo".parse().unwrap());
+        assert_eq!(
+            workspace_header(&plain).as_deref(),
+            Some("/Users/jun/repo"),
+            "a value with no escapes is unchanged",
+        );
+
+        // An escape that is not valid UTF-8 is taken as written rather than
+        // dropping the header: the path simply will not resolve.
+        let mut broken = HeaderMap::new();
+        broken.insert("x-workspace-path", "/tmp/%FF".parse().unwrap());
+        assert_eq!(workspace_header(&broken).as_deref(), Some("/tmp/%FF"));
+    }
+
+    /// `?limit=-1` must not be the way to read a whole table.
+    #[test]
+    fn a_page_limit_defaults_on_non_positive_and_caps_on_oversized() {
+        assert_eq!(page_limit(None, 50), 50);
+        assert_eq!(page_limit(Some(-1), 50), 50);
+        assert_eq!(page_limit(Some(0), 50), 50);
+        assert_eq!(page_limit(Some(20), 50), 20);
+        assert_eq!(page_limit(Some(100_000), 50), MAX_PAGE_LIMIT);
+        assert_eq!(page_limit(Some(i64::MAX), 50), MAX_PAGE_LIMIT);
+
+        assert_eq!(page_offset(None), 0);
+        assert_eq!(page_offset(Some(-5)), 0);
+        assert_eq!(page_offset(Some(7)), 7);
+    }
 }
