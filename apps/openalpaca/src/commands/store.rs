@@ -346,9 +346,50 @@ fn print_entries(entries: &[PlanEntry]) {
     print!("{}", render_entries(entries));
 }
 
+/// Whether a plan entry deletes something or keeps it — the one fact a
+/// verdict cell's colour depends on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    Delete,
+    Keep,
+}
+
+impl Verdict {
+    fn of(entry: &PlanEntry) -> Self {
+        match entry.action == "delete" {
+            true => Verdict::Delete,
+            false => Verdict::Keep,
+        }
+    }
+}
+
+/// The real painter: red for a delete, green for a keep, both bold. `colored`
+/// decides at call time whether that becomes escape codes or plain text.
+fn paint_verdict(padded: &str, verdict: Verdict) -> String {
+    match verdict {
+        Verdict::Delete => padded.red().bold().to_string(),
+        Verdict::Keep => padded.green().bold().to_string(),
+    }
+}
+
 /// [`print_entries`]'s body, as a `String` — split out so the column layout
 /// can be asserted on directly instead of only by eye.
 fn render_entries(entries: &[PlanEntry]) -> String {
+    render_entries_with(entries, paint_verdict)
+}
+
+/// `render_entries`, with the verdict cell's colouring supplied by the caller
+/// instead of reaching for `colored` directly.
+///
+/// The split exists for one reason: `colored::control`'s override is a
+/// process-global `AtomicBool`, and this bin crate's `#[cfg(test)]` modules
+/// all share one test binary running on parallel threads — `chat.rs`,
+/// `tasks.rs` and `sessions/tests.rs` each pin it to `false` around their own
+/// assertions. A test that flipped it to `true` to exercise the coloured path
+/// would race every one of them. Injecting the painter lets a test prove
+/// "padding happens before painting" with a marker that has nothing to do
+/// with that global, so nothing here ever calls `colored::control` at all.
+fn render_entries_with(entries: &[PlanEntry], paint: impl Fn(&str, Verdict) -> String) -> String {
     use std::fmt::Write as _;
 
     let width = entries
@@ -358,14 +399,11 @@ fn render_entries(entries: &[PlanEntry]) -> String {
         .unwrap_or(0);
     let mut out = String::new();
     for entry in entries {
-        // Padded before it is coloured: a width applied to a `ColoredString`
-        // counts the escape bytes and the column stops lining up.
-        let deletes = entry.action == "delete";
+        // Padded before it is painted: a width applied after painting counts
+        // a wrapper's own characters (escape bytes, a test's marker, whatever
+        // it adds) as part of the column, and the column stops lining up.
         let padded = format!("{:>6}", entry.action);
-        let verdict = match deletes {
-            true => padded.red().bold(),
-            false => padded.green().bold(),
-        };
+        let verdict = paint(&padded, Verdict::of(entry));
         let _ = writeln!(
             out,
             "  {verdict}  {name:<width$}  {holds}",
@@ -635,15 +673,19 @@ mod tests {
         out
     }
 
-    /// Minor #8: `print_entries` had no test, and the pad-before-colour trick
-    /// it depends on — padding the verdict to width *before* wrapping it in a
-    /// `ColoredString`, never after — is exactly the kind of thing that only a
-    /// test with colour actually turned on can catch: a `{:>6}` applied to an
-    /// already-coloured string counts escape bytes as part of the width and
-    /// silently breaks the column.
+    /// Minor #8, corrected by ruling R74: `print_entries` had no test, and the
+    /// pad-before-paint trick it depends on — padding the verdict to width
+    /// *before* it is coloured, never after — needs proving without racing
+    /// `colored::control`'s process-global override against the four
+    /// pre-existing tests in this binary that pin it to `false`
+    /// (`chat.rs`, `tasks.rs`, `sessions/tests.rs`). So the painter is
+    /// injected: a marker that wraps the cell in `<`/`>` and nothing else,
+    /// which proves the same thing a real `ColoredString` would break on — a
+    /// width applied after wrapping, rather than before, would make the
+    /// "delete" and "keep" rows different widths — without this test ever
+    /// calling `set_override` in either direction.
     #[test]
-    fn render_entries_keeps_the_column_aligned_under_colour() {
-        colored::control::set_override(true);
+    fn render_entries_pads_the_verdict_before_it_is_painted() {
         let entries = vec![
             PlanEntry {
                 entry: "a".to_string(),
@@ -658,26 +700,36 @@ mod tests {
                 action: "keep".to_string(),
             },
         ];
-        let rendered = render_entries(&entries);
-        colored::control::unset_override();
 
-        assert!(
-            rendered.contains('\u{1b}'),
-            "forcing colour on should have added escape codes: {rendered:?}"
-        );
+        let rendered = render_entries_with(&entries, |padded, verdict| {
+            // (a) the cell handed to the painter is already the fixed-width
+            // column, for both verdicts — proof that padding precedes
+            // painting rather than the other way around.
+            assert_eq!(
+                padded.chars().count(),
+                6,
+                "the verdict cell must already be padded to its column width \
+                 before a painter ever sees it: {padded:?}"
+            );
+            let tag = match verdict {
+                Verdict::Delete => "D",
+                Verdict::Keep => "K",
+            };
+            format!("<{tag}:{padded}>")
+        });
 
-        // Written out column by column rather than re-derived from the same
-        // format string, so a change to the layout has to be made twice and on
-        // purpose. The verdict is right-aligned in six columns — "delete" and
-        // "keep" share a right edge — and the name column is as wide as the
-        // widest entry ("bb"), which puts the retention line's text at
-        // 2 + 6 + 2 + 2 + 2 = 14 spaces. Both verdicts and both names differ in
-        // length, so padding applied *after* the colouring (counting escape
-        // bytes toward the width) would show up in every one of these lines.
+        // (b) every marker is the same width (1 + 1 + 1 + 6 + 1 = 10 chars)
+        // regardless of whether the underlying action was "delete" or
+        // "keep", so the name column that follows starts at the same offset
+        // on every line — the thing padding-before-painting exists to
+        // guarantee, asserted here on the unpainted (marker, not colour)
+        // width instead of on `colored`'s escape codes. The retention line
+        // does not run through the painter at all, so its indent is the
+        // same 14 spaces (2 + 6 + 2 + 2 + 2) as ever.
         let expected = concat!(
-            "  delete  a   holds-1\n",
+            "  <D:delete>  a   holds-1\n",
             "              (ret-1)\n",
-            "    keep  bb  holds-2\n",
+            "  <K:  keep>  bb  holds-2\n",
             "              (ret-2)\n",
         );
         assert_eq!(strip_ansi(&rendered), expected);
