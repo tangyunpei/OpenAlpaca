@@ -619,8 +619,11 @@ pub struct WorkspaceRows {
     /// Runs under this root that are `running` or `paused`. Both hold live
     /// in-process state — a loop, a steering inbox, a resolved store — that a
     /// row rewrite cannot reach, so a rebase waits for them. A `queued` run
-    /// does not count: it has not resolved anything yet, and its row moves with
-    /// the rest.
+    /// does not count here: it has not resolved anything yet, and its row
+    /// moves with the rest of a re-base. (A purge's own busy predicate is
+    /// stricter than this field — see [`ArtifactStore::busy_tasks`] — because
+    /// a purge *deletes* the row a queued run is about to resolve, rather than
+    /// rewriting it.)
     pub active_tasks: usize,
     /// Rows under this root that belong to **another** owner — `file_assets`
     /// and `memory`, the two members that carry an `owner_id` at all. Always
@@ -680,7 +683,9 @@ pub struct PurgeKept {
 /// `store purge --all` names them as kept rather than sweeping them up.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HomeScopeRows {
-    /// `session` rows with `workspace_id IS NULL`.
+    /// `session` rows with `workspace_id IS NULL` or `workspace_id = ''` —
+    /// together with [`ArtifactStore::project_roots`]'s `root <> ''`, the two
+    /// partition every session in the table.
     pub sessions: usize,
     /// `file_assets` upload rows with no `project_root`.
     pub uploads: usize,
@@ -1594,6 +1599,26 @@ impl<'a> ArtifactStore<'a> {
         })
     }
 
+    /// Runs under `root` that are `queued`, `running` or `paused` — the
+    /// purge's own busy predicate, stricter than
+    /// [`WorkspaceRows::active_tasks`] on purpose: a `queued` run has not
+    /// reached `running` yet, but it already named this root when it was
+    /// dispatched and is about to resolve the project's store the moment it
+    /// starts, so purging out from under it would delete the transcript it is
+    /// about to write into. The re-base predicate stays `active_tasks` —
+    /// `running`/`paused` only — because a queued run's row moves with the
+    /// rest of the transaction and loses nothing by being rewritten.
+    pub fn busy_tasks(&self, root: &str) -> Result<usize> {
+        self.db.with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM task
+                  WHERE workspace_id = ?1 AND status IN ('queued', 'running', 'paused')",
+                rusqlite::params![root],
+                |row| row.get::<_, i64>(0),
+            )? as usize)
+        })
+    }
+
     /// Every distinct project root any of the four members names, sorted.
     ///
     /// `store purge --all` iterates this; the home scope is deliberately absent
@@ -1618,13 +1643,23 @@ impl<'a> ArtifactStore<'a> {
 
     /// What the home scope holds of the two kinds a project purge removes —
     /// the "and these stay where they are" line of `--all`.
+    ///
+    /// `session.workspace_id` is counted as home-scope on `NULL` **or** `''`:
+    /// [`Self::project_roots`] excludes `''` from every root it names
+    /// (`root <> ''`), and the two must partition the table between them —
+    /// nothing today ever writes `''` (the column is an `Option<String>`), but
+    /// a row that did should read as "no project" rather than falling into
+    /// neither half of a `--all` plan.
     pub fn home_scope_rows(&self) -> Result<HomeScopeRows> {
         self.db.with_connection(|conn| {
             let count = |sql: &str| -> Result<usize> {
                 Ok(conn.query_row(sql, [], |row| row.get::<_, i64>(0))? as usize)
             };
             Ok(HomeScopeRows {
-                sessions: count("SELECT COUNT(*) FROM session WHERE workspace_id IS NULL")?,
+                sessions: count(
+                    "SELECT COUNT(*) FROM session
+                      WHERE workspace_id IS NULL OR workspace_id = ''",
+                )?,
                 uploads: count(
                     "SELECT COUNT(*) FROM file_assets
                       WHERE origin = 'upload' AND (project_root IS NULL OR project_root = '')",

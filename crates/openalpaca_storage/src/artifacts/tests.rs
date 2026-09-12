@@ -1455,6 +1455,37 @@ fn workspace_rows_counts_the_members_and_the_runs_in_flight() {
 }
 
 #[test]
+fn busy_tasks_counts_queued_running_and_paused_but_not_a_finished_run() {
+    let f = Fixture::new();
+    let root = f.project_root().to_string_lossy().to_string();
+    let other = "/some-other-root";
+
+    assert_eq!(f.store().busy_tasks(&root).unwrap(), 0);
+
+    f.task_in("done", &root, "completed");
+    f.task_in("failed", &root, "failed");
+    assert_eq!(
+        f.store().busy_tasks(&root).unwrap(),
+        0,
+        "a finished run is not busy, whichever way it finished"
+    );
+
+    // Unlike `active_tasks`, a queued run counts here — it already named this
+    // root and is about to resolve the store the moment it starts.
+    f.task_in("queued", &root, "queued");
+    assert_eq!(f.store().busy_tasks(&root).unwrap(), 1);
+
+    f.task_in("live", &root, "running");
+    f.task_in("held", &root, "paused");
+    f.task_in("elsewhere", other, "running");
+    assert_eq!(
+        f.store().busy_tasks(&root).unwrap(),
+        3,
+        "a run under another root is not this root's business"
+    );
+}
+
+#[test]
 fn workspace_rows_scopes_the_two_members_that_have_an_owner() {
     let f = Fixture::new();
     let root = f.project_root().to_string_lossy().to_string();
@@ -1687,12 +1718,19 @@ fn project_roots_lists_every_root_the_four_members_name() {
     f.session("session-1", &root);
     f.task_in("task-1", "/b-root", "completed");
     f.memory("a fact", "/a-root");
-    // The home scope is not a project and never appears.
+    // The home scope is not a project and never appears, whether it is
+    // recorded as `NULL` or as `''` — nothing writes `''` today, but the two
+    // halves of a `--all` plan must still partition the table.
     f.session("session-home", "");
 
     assert_eq!(
         f.store().project_roots().unwrap(),
         vec!["/a-root".to_string(), "/b-root".to_string(), root]
+    );
+    assert_eq!(
+        f.store().home_scope_rows().unwrap().sessions,
+        1,
+        "the '' session is home scope, not a missing root"
     );
 }
 
