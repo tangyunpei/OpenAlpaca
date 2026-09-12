@@ -680,9 +680,23 @@ mod tests {
         );
     }
 
-    /// The last component of a write path may still be a symlink out of the
-    /// workspace. That file is not this session's to copy, so it is not imaged
-    /// — the write behaves exactly as it did before §5.7.
+    /// A **known confinement hole, not a decision**: the final component of a
+    /// write path is followed even when it is a symlink out of the workspace, so
+    /// the write below lands outside and succeeds. `resolve_workspace_path_for_write`
+    /// (`helpers/mod.rs`) canonicalizes the *parent* and re-appends the leaf
+    /// verbatim, so nothing resolves the leaf — unlike the store writers'
+    /// `confine_to_root` (`openalpaca_storage::store::artifact`), which
+    /// canonicalizes the nearest *existing* ancestor and therefore catches an
+    /// escaping symlink leaf. The plan's symlink claim (Phase 2 *Verify:*,
+    /// "`confine_to_root` rejects symlinked-parent escapes") is about those
+    /// writers; this helper predates it and no phase changed it. Carried as a
+    /// follow-up from §5.7's own review (T56: "a symlinked target outside the
+    /// workspace is still overwritten unimaged (pre-existing)").
+    ///
+    /// What §5.7 adds is only the second assertion: such a file is not this
+    /// session's to copy, so no pre-edit image is taken. This test therefore
+    /// pins today's behaviour rather than blessing it — closing the hole must
+    /// flip the `is_ok` below deliberately.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_symlink_out_of_the_workspace_is_not_imaged() {

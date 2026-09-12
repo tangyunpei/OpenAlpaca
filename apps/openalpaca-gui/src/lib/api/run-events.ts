@@ -12,11 +12,12 @@
  * - **Nothing is invented.** A row whose `detail` is missing the field a
  *   sentence would name falls back to the raw `event_type` rather than to a
  *   plausible-looking phrase.
- * - **Nothing is silently dropped, except a known duplicate.**
- *   `dag_node_status` fires for the same moment as `subagent_span` (P9 /
- *   Phase 8 deletes the emitter), so rendering both would fill the card with
- *   pairs of the same transition; `subagent_span` is the single source of
- *   `spawn` rows.
+ * - **Nothing is silently dropped, except a known duplicate.** No daemon emits
+ *   `dag_node_status` any more — P9 deleted the variant in Phase 8 (T53) — but
+ *   rows an older one wrote still read back from `event_log`, and each mirrors
+ *   the `subagent_span` for the same moment. They are dropped so history does
+ *   not render pairs of the same transition; `subagent_span` is the single
+ *   source of `spawn` rows.
  */
 
 import type { EventLogRecord } from "./types";
@@ -41,7 +42,8 @@ export interface RunEventPage {
  * `event_type` values a live `ServerEvent` can carry a `task_id` for and
  * that are *not* already covered by the `["tasks"]` prefix group (i.e. not
  * `task_status` / `workflow_started` / `workflow_progress` /
- * `workflow_steered`) or dropped as a duplicate (`dag_node_status`).
+ * `workflow_steered`) or dropped as a legacy duplicate (`dag_node_status`,
+ * which no daemon emits any more).
  * `tool_auto_approved` is excluded too: it renders on this card but has no
  * `ServerEvent` variant, so nothing live ever needs to invalidate for it.
  *
@@ -182,6 +184,8 @@ export function runEventsFromLog(
     // The server filters by run; this guards a caller that hands over a
     // mixed page rather than trusting the label on the box.
     if (record.task_id !== taskId) continue;
+    // Legacy rows only (the emitter is gone): a mirror of this run's own
+    // `subagent_span`, so rendering it would double the spawn row.
     if (record.event_type === "dag_node_status") continue;
     rows.push({
       id: record.id,

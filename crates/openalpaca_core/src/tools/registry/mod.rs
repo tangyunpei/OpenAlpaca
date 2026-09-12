@@ -23,6 +23,29 @@ pub use capabilities::{
 /// Lightweight — no DB handles: identity values plus one cheap-to-clone
 /// event-bus handle (`event_bus`), filled in by the sandbox funnel so a
 /// builtin can announce what it produced.
+///
+/// **Three fields are three views of one input, and are to be collapsed**
+/// (follow-up, not done here). All three descend from the workspace the request
+/// carried — `x-workspace-path` on `/v1/chat`, `workspace_path` on
+/// `/v1/command` — and each consumer reads exactly one of them:
+///
+/// - `workspace_id` — the resolved root for **memory scoping**, CWD-derived when
+///   the request carried none (`memory/scope_context.rs`,
+///   `MemoryScopeContext::for_request`). Read by `memory_search`
+///   (`tools/builtins/memory_search.rs`) and by the paths that rebuild a
+///   `MemoryScopeContext` out of this one (`memory_ops`, `start_workflow`).
+/// - `request_workspace_root` — the same resolution, but only on the
+///   client-sent branch and never the home store (R22). Read by `artifact_write`
+///   and its `workspace_write` spill, and by nothing else: it is the only one of
+///   the three that may place bytes on disk.
+/// - `workspace_path` — the path **as sent**, unresolved, threaded only on the
+///   tool-mode main loop. Read by `steer_workflow` and `queue_followup`
+///   (`runner/lead_agent/tools.rs`), which persist it on the row so the re-entry
+///   turn resolves the same workspace again.
+///
+/// Collapsing them means one resolved root plus the two bits that actually
+/// differ (did a client send it; is it CWD-derived), so a new consumer cannot
+/// pick the wrong view — which is what R22 fixed once already.
 #[derive(Debug, Clone, Default)]
 pub struct ToolContext {
     /// The id capability violations are reported against — the template id

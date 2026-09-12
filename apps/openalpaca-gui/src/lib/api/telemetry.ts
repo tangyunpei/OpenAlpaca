@@ -45,9 +45,10 @@ export async function getEventHistory(
 /**
  * One run's event log (GAP-10, closed).
  *
- * Over-fetches relative to the six rows the run detail draws: the page still
- * carries `dag_node_status` rows, which the projection drops as duplicates of
- * `subagent_span`, so asking for exactly six could answer with none.
+ * Over-fetches relative to the six rows the run detail draws: a page can still
+ * carry `dag_node_status` rows written before P9 deleted the emitter (T53), and
+ * the projection drops them as duplicates of `subagent_span`, so asking for
+ * exactly six could answer with none.
  */
 export async function getRunEventLog(
   taskId: string,

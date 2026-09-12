@@ -89,7 +89,7 @@ export function RunDetail({
   }, [task, steerable, fallbackRun]);
 
   // The design draws up to six rows (§5.2); the query fetches a wider page so
-  // the dropped `dag_node_status` duplicates cannot empty the card.
+  // the dropped legacy `dag_node_status` duplicates cannot empty the card.
   const events = useMemo(
     () => (eventLog.data?.events ?? []).slice(0, 6),
     [eventLog.data],
