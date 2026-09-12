@@ -373,6 +373,8 @@ openalpaca sessions --workspace .          # only this project's conversations
 openalpaca sessions --workspace /repo/one
 openalpaca sessions --all                  # every lane, connectors included
 openalpaca sessions --limit 10 --format json
+
+openalpaca sessions delete <id>            # rows and transcript, both
 ```
 
 Notes:
@@ -380,6 +382,8 @@ Notes:
 - With no flags the list is the lane the CLI and the GUI share (`{user}:gui`) — the lane a `openalpaca chat` turn lands on, read from `GET /v1/me`. `--all` widens to every lane the daemon holds.
 - `--workspace <path>` narrows to one project. The path is resolved the same way a turn's project is — up to the nearest `.openalpaca`/`.git` — so `--workspace .` works from anywhere inside a repository. A directory under no such marker is an error, not a filter that matches nothing.
 - An empty result says which kind of empty it is: no conversations at all, or none in the project that was filtered for.
+- `delete <id>` deletes one conversation through `DELETE /v1/sessions/{id}`: its messages, its tool-call index rows and its queued follow-ups, then its log directory under `~/.openalpaca/sessions/`. It prints what went — title, id, message count and project. This is the counterpart to the GUI sidebar's delete, and the way to remove a conversation with no project, which `store purge` deliberately never touches.
+- There is no `-y` on it: the one thing a confirmation could protect — the transcript a run is still writing into — the daemon already refuses (`409 SESSION_HAS_ACTIVE_WORKFLOWS`, cancel the run first), and another owner's conversation answers `404`.
 
 ### `store`
 

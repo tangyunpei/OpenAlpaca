@@ -34,6 +34,47 @@ fn row(overrides: fn(&mut SessionItem)) -> SessionItem {
     item
 }
 
+/// The list is what `openalpaca sessions` does with no verb, and `delete` is
+/// the only verb it takes — the ids it prints are what that verb addresses.
+#[test]
+fn delete_takes_one_id_and_listing_stays_the_default() {
+    assert!(parse(&["sessions"]).command.is_none());
+    assert!(parse(&["sessions", "--all"]).command.is_none());
+
+    let args = parse(&["sessions", "delete", "sess-1"]);
+    assert!(matches!(
+        args.command,
+        Some(SessionsCommands::Delete { ref id }) if id == "sess-1"
+    ));
+
+    // An id is required, and exactly one of them.
+    assert!(Harness::try_parse_from(["sessions", "delete"]).is_err());
+    assert!(Harness::try_parse_from(["sessions", "delete", "a", "b"]).is_err());
+}
+
+/// The id is a path segment of the route, never a second path.
+#[test]
+fn a_conversation_id_is_encoded_into_its_path() {
+    assert_eq!(session_path("sess-1"), "/v1/sessions/sess-1");
+    assert!(session_path("a/b").contains("a%2Fb"));
+}
+
+/// A delete names what it took: an id alone is not enough to notice that the
+/// wrong conversation was named.
+#[test]
+fn a_delete_says_which_conversation_went() {
+    plain();
+    let line = deleted_line(&row(|_| {}));
+    assert!(line.starts_with("Deleted "), "{line}");
+    assert!(line.contains("Connector audit"), "{line}");
+    assert!(line.contains("0f2c9a41-3b7d-4e58-9a10-6c1f2d3e4b55"), "{line}");
+    assert!(line.contains("12 messages"), "{line}");
+    assert!(line.contains("openalpaca"), "{line}");
+
+    let unnamed = deleted_line(&row(|item| item.title = String::new()));
+    assert!(unnamed.contains("(untitled)"), "{unnamed}");
+}
+
 #[test]
 fn the_flags_parse_and_default_to_this_lane() {
     let args = parse(&["sessions"]);

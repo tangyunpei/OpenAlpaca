@@ -3,7 +3,10 @@
 //! Migration 039 made a lane hold many conversations with exactly one `active`
 //! at a time. `openalpaca sessions` is the read-back: the ids `chat --session`
 //! takes, which of them is live, the project each is bound to and when it last
-//! moved.
+//! moved. `openalpaca sessions delete <id>` is the one verb over that list —
+//! `DELETE /v1/sessions/{id}`, rows and transcript — and the counterpart to the
+//! GUI sidebar's delete, for conversations with no project that a
+//! `store purge` deliberately never touches.
 //!
 //! Two flags, and they pull in opposite directions on purpose:
 //!   * `--workspace <path>` **narrows** to one project. The path is resolved
@@ -20,7 +23,7 @@
 //! exact lane a CLI turn lands on, not an assumption about how lanes are named.
 
 use anyhow::{Context, Result, bail};
-use clap::Args;
+use clap::{Args, Subcommand};
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
 
@@ -29,6 +32,10 @@ use crate::output::{OutputFormat, TableRow, print_list, status_color};
 
 #[derive(Args)]
 pub struct SessionsArgs {
+    /// What to do with a conversation; listing is the default
+    #[command(subcommand)]
+    pub command: Option<SessionsCommands>,
+
     /// Only conversations bound to this project (`.` for the working directory)
     #[arg(long, value_name = "PATH")]
     pub workspace: Option<String>,
@@ -44,6 +51,15 @@ pub struct SessionsArgs {
     /// Output format
     #[arg(long, value_enum, default_value = "table")]
     pub format: OutputFormat,
+}
+
+#[derive(Subcommand)]
+pub enum SessionsCommands {
+    /// Delete a conversation: its rows and its transcript on disk
+    Delete {
+        /// The conversation's id (`openalpaca sessions` lists them)
+        id: String,
+    },
 }
 
 /// One row of `GET /v1/sessions` — the daemon's `SessionView`.
@@ -246,6 +262,60 @@ pub(crate) async fn lane_sessions_on(
 }
 
 pub async fn run(args: SessionsArgs) -> Result<()> {
+    match args.command {
+        Some(SessionsCommands::Delete { ref id }) => delete(id).await,
+        None => list(args).await,
+    }
+}
+
+/// The path of one conversation — an id is a path segment, never a second path.
+fn session_path(id: &str) -> String {
+    format!("/v1/sessions/{}", urlencoding::encode(id))
+}
+
+/// Delete one conversation, rows and transcript.
+///
+/// `DELETE /v1/sessions/{id}` is the whole of it: the daemon owns the database
+/// and the session-log writers, so the CLI never removes either itself. The
+/// route takes the messages, the tool-call index rows and the queued
+/// follow-ups with the session, stands the log writer down and removes
+/// `~/.openalpaca/sessions/<id>/`.
+///
+/// No `-y`. The one thing a confirmation could protect — deleting the
+/// transcript a run is still writing into — the route already refuses
+/// (`409 SESSION_HAS_ACTIVE_WORKFLOWS`), and this verb names a single id that
+/// `openalpaca sessions` had to list first. The conversation is read before it
+/// goes so the line printed afterwards says *what* went, not just which id:
+/// the read is unscoped (R40) while the delete is owner-scoped, so a
+/// conversation this owner cannot delete answers `404` and nothing is printed.
+async fn delete(id: &str) -> Result<()> {
+    let client = DaemonClient::connect()?;
+    let path = session_path(id);
+    let session: SessionItem = client
+        .get(&path)
+        .await
+        .with_context(|| format!("Could not read conversation {id}"))?;
+    client
+        .delete_no_content(&path)
+        .await
+        .with_context(|| format!("Could not delete conversation {id}"))?;
+    println!("{}", deleted_line(&session));
+    Ok(())
+}
+
+/// What a delete says it took.
+fn deleted_line(session: &SessionItem) -> String {
+    format!(
+        "{} {} ({}) · {} messages · {}",
+        "Deleted".red().bold(),
+        display_title(&session.title),
+        session.id,
+        session.message_count,
+        display_workspace(session.workspace_id.as_deref()),
+    )
+}
+
+async fn list(args: SessionsArgs) -> Result<()> {
     let client = DaemonClient::connect()?;
 
     let workspace_id = match args.workspace.as_deref() {

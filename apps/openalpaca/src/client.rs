@@ -130,6 +130,18 @@ impl DaemonClient {
         Ok(resp.json().await?)
     }
 
+    /// DELETE against a route that answers `204 No Content`.
+    ///
+    /// [`Self::delete_req`] deserializes the body, and a 204 has none — calling
+    /// it against one fails *after* the row is gone, which reads as a delete
+    /// that did not happen.
+    pub async fn delete_no_content(&self, path: &str) -> Result<()> {
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self.http.delete(&url).send().await?;
+        check_response(resp).await?;
+        Ok(())
+    }
+
     /// GET for SSE streams (token passed as query parameter, not header).
     pub async fn get_sse_stream(&self, path_with_token: &str) -> Result<Response> {
         let url = format!("{}{}", self.base_url, path_with_token);

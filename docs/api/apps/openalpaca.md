@@ -206,7 +206,8 @@
 ### `sessions`
 
 - Source: `apps/openalpaca/src/commands/sessions.rs`
-- No `Subcommand` enum found in module.
+- Enum `SessionsCommands` variants:
+  - `delete` (fields: `id`)
 - Parsed flags: `--total`
 
 ### `status`
