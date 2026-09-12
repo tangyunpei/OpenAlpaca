@@ -14,6 +14,13 @@ batch_spawn_enabled = true
 # superseded version beyond this bound is pruned; the head is never pruned.
 # max_versions_per_artifact = 20
 
+[extensions]
+# How long a disable, reload or shutdown waits for an extension's in-flight tool
+# calls (a plugin's out-of-process skill and agent runs included) to finish
+# before it is torn down anyway. New calls are already refused by then; on
+# expiry the supervisor warns with the straggler count and proceeds.
+# drain_timeout_secs = 10
+
 [orchestrator.routing]
 # Routing V2: everything past the deterministic tier (slash task control,
 # skills, /steer) and the social fast path enters the main loop, where

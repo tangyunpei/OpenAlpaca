@@ -29,6 +29,13 @@ compaction_target_ratio = 0.50
 # compaction_model = "claude-haiku-4-5-20251001"
 min_recent_messages = 4
 
+[extensions]
+# How long a disable, reload or shutdown waits for an extension's in-flight tool
+# calls (a plugin's out-of-process skill and agent runs included) to finish
+# before it is torn down anyway. New calls are already refused by then; on
+# expiry the supervisor warns with the straggler count and proceeds.
+# drain_timeout_secs = 10
+
 [orchestrator.costs]
 extract_every_n_turns = 5
 extract_max_daily_cost_usd = 0.25
