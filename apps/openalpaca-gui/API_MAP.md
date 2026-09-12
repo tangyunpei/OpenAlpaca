@@ -6,23 +6,23 @@ daemon's real HTTP/SSE/WS surface.
 
 **Sources verified (all field names below are read from these files, not inferred):**
 
-| What                          | File                                                                                         |
-| ----------------------------- | -------------------------------------------------------------------------------------------- |
-| All routes                    | `apps/openalpacad/src/router.rs`                                                             |
-| Chat req/resp                 | `apps/openalpacad/src/routes/chat.rs`, `chat_types.rs`                                       |
-| Tasks                         | `apps/openalpacad/src/routes/tasks.rs`, `tasks_types.rs`                                     |
-| Settings/LLM/usage/models     | `apps/openalpacad/src/routes/settings.rs`, `settings_types.rs`                               |
-| Agents/templates/instances    | `apps/openalpacad/src/routes/agents.rs`, `agents_types.rs`                                   |
-| Files                         | `apps/openalpacad/src/routes/files.rs`, `files_types.rs`                                     |
-| Plugins / connectors / skills | `routes/plugins.rs`, `routes/connectors.rs`, `routes/skills.rs`                              |
-| Telemetry                     | `routes/events_history.rs`, `routes/orchestrator_latency.rs`, `routes/dispatch_decisions.rs` |
-| WS event union                | `crates/openalpaca_api/src/events/mod.rs` (`ServerEvent`)                                    |
-| Internal→WS bridge            | `apps/openalpacad/src/event_bridge.rs`                                                       |
-| SSE event union               | `crates/openalpaca_core/src/chat/stream_manager/mod.rs` (`ChatStreamEvent`)                  |
-| SSE lifecycle                 | `crates/openalpaca_core/src/chat/service.rs`, `apps/openalpacad/src/background.rs`           |
-| Storage models                | `crates/openalpaca_storage/src/models/*.rs`, `src/repository/*`                              |
-| Existing client               | `apps/openalpaca-gui/src/lib/daemon.ts`, `src/lib/api/*.ts`                                  |
-| Tauri host                    | `apps/openalpaca-gui/src-tauri/src/lib.rs`, `crates/openalpaca_storage/src/discovery/mod.rs` |
+| What                                     | File                                                                                                                                              |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| All routes                               | `apps/openalpacad/src/router.rs`                                                                                                                  |
+| Chat req/resp                            | `apps/openalpacad/src/routes/chat.rs`, `chat_types.rs`                                                                                            |
+| Tasks                                    | `apps/openalpacad/src/routes/tasks.rs`, `tasks_types.rs`                                                                                          |
+| Settings/LLM/usage/models                | `apps/openalpacad/src/routes/settings.rs`, `settings_types.rs`                                                                                    |
+| Agents/templates/instances               | `apps/openalpacad/src/routes/agents.rs`, `agents_types.rs`                                                                                        |
+| Files                                    | `apps/openalpacad/src/routes/files.rs`, `files_types.rs`                                                                                          |
+| Extensions / connectors / skills / tools | `routes/extensions.rs`, `routes/connectors.rs`, `routes/skills.rs`, `routes/tools.rs` (`routes/plugins.rs` was deleted with `/v1/plugins*` in C7) |
+| Telemetry                                | `routes/events_history.rs`, `routes/orchestrator_latency.rs`, `routes/dispatch_decisions.rs`                                                      |
+| WS event union                           | `crates/openalpaca_api/src/events/mod.rs` (`ServerEvent`)                                                                                         |
+| Internal→WS bridge                       | `apps/openalpacad/src/event_bridge.rs`                                                                                                            |
+| SSE event union                          | `crates/openalpaca_core/src/chat/stream_manager/mod.rs` (`ChatStreamEvent`)                                                                       |
+| SSE lifecycle                            | `crates/openalpaca_core/src/chat/service.rs`, `apps/openalpacad/src/background.rs`                                                                |
+| Storage models                           | `crates/openalpaca_storage/src/models/*.rs`, `src/repository/*`                                                                                   |
+| Existing client                          | `apps/openalpaca-gui/src/lib/daemon.ts`, `src/lib/api/*.ts`                                                                                       |
+| Tauri host                               | `apps/openalpaca-gui/src-tauri/src/lib.rs`, `crates/openalpaca_storage/src/discovery/mod.rs`                                                      |
 
 > **Security note.** The design file was read as _data only_. It contains no text
 > directed at the agent; all strings in it are UI copy and mock fixtures. Nothing in it
@@ -275,9 +275,19 @@ belong on the daemon:
 Ordered by how hard they block the design. Each entry states **what the UI needs**,
 **why nothing fits** (with the file checked), and **a concrete proposal**.
 
+**Outcomes.** Every heading below now carries one: the task that closed the gap, or
+`OPEN`. The sketches underneath are kept as written — they are the argument the
+work was done from, not a description of what shipped, and where the shipped
+shape differs the heading's blockquote says so. Two gaps are still open, **GAP-17**
+(no route adds a connector) and **GAP-20** (a template has no `enabled` flag);
+those two, and only those two, are the entries in
+`apps/openalpaca-gui/src/lib/unavailable.ts`, which is what the UI's "not yet
+available" notes are generated from. If this section and that registry ever
+disagree, the registry is right — it is compiled.
+
 ---
 
-### GAP-01 — "Always allow" cannot be expressed _(trivial fix, high value)_ — **RESOLVED**
+### GAP-01 — "Always allow" cannot be expressed _(trivial fix, high value)_ — **CLOSED (Phase 0, T7)**
 
 Landed `88e8a3b` (Phase 0): `ConfirmationBody` gained `#[serde(default)] approval_scope:
 Option<ApprovalScope>`, forwarded verbatim into `ConfirmationResponse` instead of the
@@ -316,7 +326,7 @@ and pass it through. One-line-ish change.
 
 ---
 
-### GAP-02 — No first-class steering endpoint
+### GAP-02 — No first-class steering endpoint — **CLOSED (Phase 5 item 1, T35)**
 
 > **Closed in Phase 5.** `POST /v1/tasks/{id}/steer` ships — one more producer on the existing `SteeringInbox` rail (`push_steering`), not a second mechanism: no new inbox, no new cap, no new event. It is addressed at a _run_, and the lane it stamps comes from that row's `source_lane`, never from the request. `200 { task_id, accepted, inbox_depth, lane_key }`; `409 STEERING_INBOX_FULL` / `409 TASK_NOT_STEERABLE`, `503 STEERING_DISABLED`, `400 EMPTY_MESSAGE`, `404 NOT_FOUND` — `accepted` is not a promise the workflow _read_ the message (the rail drains at the next round boundary), so `inbox_depth` is the receipt. The route is owner-scoped, and the only task route that is, so every task row now carries `steerable: bool` (R40 — the local user's run, not terminal, live inbox) and the GUI disables `Steer` with a stated reason instead of letting the user discover the answer by sending. The `grep … router.rs` line below is the state at filing; `router.rs:70-75` matches it now.
 
@@ -350,7 +360,7 @@ Emits the existing `ServerEvent::WorkflowSteered`. This is a thin wrapper over t
 
 ---
 
-### GAP-03 — No follow-up queue API (write or read)
+### GAP-03 — No follow-up queue API (write or read) — **CLOSED (Phase 5 item 2, T36)**
 
 > **Closed in Phase 5.** All three verbs ship on the existing `lane_followups` queue — no new table, no second mechanism: `GET /v1/lanes/{lane_key}/followups` (bare array of the lane's **queued** rows, oldest first, both kinds — terminal rows are history and live in the event log), `POST` (`{ content, kind?, source_task_id? }` → `201` with the stored row) and `DELETE /v1/lanes/{lane_key}/followups/{id}` (`200 { id, status:"cancelled" }`). The wire shape drops `principal_json` and `workspace_path`; the principal is stamped as the local user and the workspace comes from `x-workspace-path`, never from the body. Cancel is a CAS on `status = 'queued'` against the autostart's own `claim_next`, so a cancel that lost is `409 FOLLOWUP_NOT_QUEUED` rather than a lie — the turn it tried to stop is running. Other codes: `400 EMPTY_CONTENT` / `INVALID_KIND` (a client cannot mint `unprocessed_steering`; `claim_next` never claims one) / `INVALID_LANE_KEY`, `404 NOT_FOUND`. **`POST` and `DELETE` are owner-scoped** (R42) — a lane whose `user_id` is not the local user's is `404`, because a follow-up is later _run as a turn_ on the lane it names; `GET` is not, per the read/list line. The event is the specific `followup_cancelled` the requirement named, not the generic `followup_status_changed` floated below, and it is published only when the CAS won; `followup_queued` is reused unchanged. The `grep … routes/` line below is the state at filing — it matches `routes/followups.rs` and `router.rs:81,85,89` now.
 
@@ -384,7 +394,7 @@ pending chip when `followup_autostart` fires it.
 
 ---
 
-### GAP-04 — No artifact/output API _(the Library view is entirely unbacked)_
+### GAP-04 — No artifact/output API _(the Library view is entirely unbacked)_ — **CLOSED (Phase 3: routes T27, Library T31)**
 
 > **Closed in Phase 3.** `GET /v1/artifacts` (list, `?task_id=&kind=&origin=&project_root=&pinned=&q=&include_missing=&limit=&offset=` → `{artifacts,total}`), `GET /v1/artifacts/{id}` and the `artifact_written` event all ship. The Library, the run's Output card, the chat inline card and the palette's `Find` rows read them.
 
@@ -432,13 +442,13 @@ Artifact {
 }
 ```
 
-Plus a `ServerEvent::ArtifactWritten { artifact_id, task_id, agent_id, name, kind, version, ts, instance_id }`
+Plus a `ServerEvent::ArtifactWritten { artifact_id, task_id, agent_id, name, kind, version, path, ts, instance_id }`
 so the chat transcript can render the card the moment it lands (the design's
 `artifact` event-log tag and the `connector-audit-findings.md v2 written` line).
 
 ---
 
-### GAP-05 — No artifact versioning, history, or diff
+### GAP-05 — No artifact versioning, history, or diff — **CLOSED (Phase 3 item 3, T29)**
 
 > **Closed in Phase 3.** `GET /v1/artifacts/{id}/versions` and `…/diff?from=&to=` ship, over migration 036's `artifact_versions` and a `similar` unified patch. The History and Diff tabs render them; a non-text or oversized pair is a 409 the tab names (`NOT_DIFFABLE`, `DIFF_TOO_LARGE`).
 
@@ -476,7 +486,7 @@ artifact row pointing at the head version.
 
 ---
 
-### GAP-06 — Task actions are missing `rerun` and `start`
+### GAP-06 — Task actions are missing `rerun` and `start` — **CLOSED (Phase 5 item 3, T37)**
 
 > **Closed in Phase 5.** Both verbs ship, and not in the single shape proposed
 > below — the asymmetry the proposal noticed turned out to run deeper than the
@@ -553,7 +563,7 @@ can actually check.
 
 ---
 
-### GAP-07 — `task_status` drops `title` and `agent_status` drops `name` — **RESOLVED**
+### GAP-07 — `task_status` drops `title` and `agent_status` drops `name` — **CLOSED (Phase 0, T8)**
 
 Landed `298bad3` (Phase 0): `title`/`name` are now filled at all ten producer sites
 (`task_ops.rs`, `dispatcher/lead_agent.rs`, `dispatcher/outcome.rs`, `dispatcher/mod.rs`,
@@ -590,7 +600,7 @@ fix.**
 
 ---
 
-### GAP-08 — Cost is not served anywhere the UI can use it
+### GAP-08 — Cost is not served anywhere the UI can use it — **CLOSED in two parts (Phase 0, T7; the rollup and the cap continued as GAP-08c, T50)**
 
 **UI needs:** `$0.41` per run, `{{ spend }} today` in the chat footer and Work rail,
 `$0.0184 of $5.00 cap` in Settings → Connection, and `41k tok today` per provider.
@@ -623,7 +633,7 @@ GET /v1/llm/usage?task_id=b41c8e02&limit=200   → LlmCallLog[]
 
 ---
 
-### GAP-08c — No usage-summary rollup or served cost cap
+### GAP-08c — No usage-summary rollup or served cost cap — **CLOSED (Phase 8 item 7, T50)**
 
 > **Closed in Phase 8 (item 7, T50).** `GET /v1/usage/summary?window=today` serves today's total, its per-provider breakdown and the two caps that actually bound spend. Per **N4** there is no daily budget and none is coming, so the total ships with no denominator and the design's progress bar stays undrawn _by decision_ — which is what the panel now says.
 
@@ -674,7 +684,7 @@ Plan reference: `tasks/api-fix-plan.md` §Phase 8 item 7.
 
 ---
 
-### GAP-09 — No subagent timeline (the `Parallel work` swimlanes)
+### GAP-09 — No subagent timeline (the `Parallel work` swimlanes) — **CLOSED (Phase 4, T32)**
 
 > **Closed in Phase 4.** `GET /v1/tasks/{id}/timeline` and the `subagent_span` event ship, over migration 037's `subagent_span` table. The swimlanes render the real per-lane start/end/state; `blocked`/`cancelled`(`"interrupted"`) are derived at read time, never stored.
 
@@ -755,7 +765,7 @@ Minimum storage change: add `started_at` (and optionally `detail`) to
 
 ---
 
-### GAP-10 — No per-run event log
+### GAP-10 — No per-run event log — **CLOSED (Phase 4, T33)**
 
 > **Closed in Phase 4.** Migration 037’s `event_log.task_id` is filled by every persistence arm that knows its run, the five security/tool `SystemEvent`/`ServerEvent` variants carry `task_id`, and `GET /v1/events/history?task_id=&agent_id=&event_type=&before=&limit=` answers `{ events, next_before }` — **always the envelope** (P20; the bare array is gone, and the one CLI consumer moved with it). Paging walks the autoincrement `id`, not the dual-format `timestamp`.
 
@@ -803,7 +813,7 @@ invocation is not a workflow, so there is no run to attribute one to.
 
 ---
 
-### GAP-11 — Artifact content cannot be rendered by the browser
+### GAP-11 — Artifact content cannot be rendered by the browser — **CLOSED (Phase 3, T27)**
 
 > **Closed in Phase 3.** The three content routes moved out of the auth middleware and check `?token=` inline, exactly as this section proposed. Image previews are `<img src={artifactContentUrl(id)}>`; `tauri.conf.json`'s `img-src` gained `blob:` and the loopback origins. **HTML previews stay deferred** — rendering agent markup is a security review, so HTML and SVG are shown as source.
 
@@ -832,7 +842,7 @@ if query-string tokens are unwanted.
 
 ---
 
-### GAP-12 — No pin state for artifacts
+### GAP-12 — No pin state for artifacts — **CLOSED (Phase 3, T30)**
 
 > **Closed in Phase 3.** The server won: migration 036 added the `pinned` column and `PUT /v1/artifacts/{id}/pin` is the writer, so a pin survives a reinstall and is visible to every client. `oa-pins` remains only as the optimistic cache, overwritten by every row the server returns.
 
@@ -851,7 +861,7 @@ field on `Artifact` and a `?pinned=true` filter.
 
 ---
 
-### GAP-13 — Per-chat model override is a global mutation
+### GAP-13 — Per-chat model override is a global mutation — **CLOSED (Phase 8 item 8, T51)**
 
 > **Closed in Phase 8 (item 8, T51).** `POST /v1/chat` takes an optional `model`. It runs **that one turn** and is persisted nowhere, so the composer's picker is conversation-scoped and no longer rewrites `llm.toml` for every other client. The id is refused before dispatch, and the response echoes `model_used`.
 
@@ -907,7 +917,7 @@ Plan reference: `tasks/api-fix-plan.md` §Phase 8 item 8.
 
 ---
 
-### GAP-14 — Connection panel: no uptime, schema version, or log path
+### GAP-14 — Connection panel: no uptime, schema version, or log path — **CLOSED (Phase 8 item 1, T44)**
 
 > **Closed in Phase 8.** `GET /v1/status` — already the protected route that names
 > the store roots (§4.7 item 4) — carries the rest:
@@ -990,7 +1000,7 @@ daemon that is up but slow to answer.
 
 ---
 
-### GAP-15 — No provider enable/disable — **RESOLVED**
+### GAP-15 — No provider enable/disable — **CLOSED (Phase 8 item 4, T47)**
 
 > **Closed in Phase 8.** The bit was already on the wire — `ProviderInfo.enabled`
 > in `GET /v1/settings/llm`, and the boot builder has always skipped a provider
@@ -1061,7 +1071,7 @@ daemon that is up but slow to answer.
 
 ---
 
-### GAP-16 — The default lane key is not discoverable — **RESOLVED**
+### GAP-16 — The default lane key is not discoverable — **CLOSED (Phase 0, T7)**
 
 Landed `26b3eaf` (Phase 0): `GET /v1/me` now serves `{ user_id, default_lane_key,
 sources }` — `sources` is the distinct `session.source` values for the owner,
@@ -1091,7 +1101,7 @@ GET /v1/me
 
 ---
 
-### GAP-17 — Connectors: no `Connect service` add flow
+### GAP-17 — Connectors: no `Connect service` add flow — **OPEN** (narrowed by Phase 8 item 6, T49; one of the two entries left in `lib/unavailable.ts`)
 
 **Narrowed by Phase 8 item 6 (T49).** The detail half is served and the `unwired`
 badge was never a daemon gap; what is left is adding a connector.
@@ -1148,7 +1158,7 @@ the two are no longer one piece of work.
 
 ---
 
-### GAP-18 — No skill catalog endpoint
+### GAP-18 — No skill catalog endpoint — **CLOSED** (tool half with design C6/C7, skill half Phase 8 item 2, T45)
 
 > **Closed in Phase 8**, in two halves. The tool half was `GET /v1/tools` (below).
 > The skill half is `GET /v1/skills` — a bare array, sorted by id:
@@ -1225,7 +1235,7 @@ A bare array, like `/v1/tools` and `/v1/extensions`. Embedding (or linking) the 
 
 ---
 
-### GAP-20 — Agent templates have no enabled state (counts closed; toggle still missing)
+### GAP-20 — Agent templates have no enabled state — **OPEN** (the counts closed: T34's lifetime interim, then T48's windowed, completed-only figure; the toggle is not served — the other entry left in `lib/unavailable.ts`)
 
 **UI needs:** `12 runs 7d` per template row (**served**) and the per-template on/off
 toggle in Settings → Agents (**still missing**, P-31).
@@ -1271,7 +1281,7 @@ PUT /v1/agent-templates/{id}/enabled
 
 ---
 
-### GAP-21 — Conversations cannot be renamed or deleted
+### GAP-21 — Conversations cannot be renamed or deleted — **CLOSED (Phase 7a: daemon T39, sidebar T40)**
 
 > **Closed in Phase 7a.** Migration 039 turned `conversations` into `session` — a lane
 > now holds many conversations with exactly one `active`, enforced by a partial unique
@@ -1323,7 +1333,7 @@ DELETE /v1/conversations/{id}                                → 200 { "id", "de
 
 ---
 
-### GAP-22 — CLOSED (C7)
+### GAP-22 — Plugin lifecycle events carried no `ts` or `instance_id` — **CLOSED (design C7, T19)**
 
 Six `ServerEvent` variants — `PluginLoaded`, `PluginUnloaded`, `PluginCrashed`,
 `PluginDisabled`, `PluginPendingApproval`, `PluginNeedsConfig` — carried neither
@@ -1336,7 +1346,7 @@ the defect has no way back.
 
 ---
 
-### GAP-23 — Chat messages are not linked to the runs or artifacts they produced
+### GAP-23 — Chat messages are not linked to the runs or artifacts they produced — **CLOSED (Phase 6, T38)**
 
 > **Closed in Phase 6.** Migration 038 adds nullable `conversation_messages.task_id`
 > (plus `idx_conv_msg_task`), and **two** messages write it, because a turn cannot know
@@ -1380,7 +1390,7 @@ schema change, but a typed field is far easier for the client to rely on.
 
 ---
 
-### GAP-24 — No extension install / uninstall route — **RESOLVED (Phase 8 item 9)**
+### GAP-24 — No extension install / uninstall route — **CLOSED (Phase 8 item 9, T52)**
 
 _(Was GAP-19, "no plugin install route", widened in ADR-030 §9.1 to both extension kinds:
 the same mechanism was missing for an MCP server, which had no gap id at all.)_
@@ -1455,44 +1465,46 @@ row's overflow menu grows `Update…` and `Uninstall…`.
 
 ### Summary table
 
-Gaps 01, 07, 08.1, 08.2 and 16 shipped in Phase 0 (`88e8a3b`, `298bad3`, `a827dcf`,
-`7dbb988`, `26b3eaf`) and are removed from this table; see their now-**RESOLVED**
-sections above. GAP-08's remaining piece (the cap and a real usage-summary rollup)
-continued as GAP-08c, **closed in Phase 8 item 7** by
-`GET /v1/usage/summary?window=today` — its row is struck below too. **GAP-22 closed in C7** (the six `plugin_*` variants were
-deleted, and their replacements carry `ts`/`instance_id`), **GAP-19 became GAP-24**
-(widened to both extension kinds), and **GAP-18 closed in both halves** —
-`GET /v1/tools` took the tool one and `GET /v1/skills` the skill one. **GAP-15
-closed** with `PUT /v1/settings/llm/providers/{provider}/enabled`, which writes
-the bit and then unloads or reloads the provider — its row is struck below too.
-**GAP-24 closed in Phase 8 item 9**: `POST /v1/extensions/{kind}` installs a
-plugin from a local path or declares an MCP server, `PUT …/plugin/{id}`
-replaces a plugin's tree, and `DELETE …?uninstall=true` removes either for
-good — its row is struck below too; fifteen remain.
+Every gap is accounted for below: the task that closed it, or `OPEN`. The last
+column is the estimate this table carried **where it carried one** — the rows
+that shipped in Phase 0, and the ones the table never listed, have no recorded
+estimate and say so with `—`; nothing here was estimated after the fact.
+**Two rows are open**, and they are the two entries in `src/lib/unavailable.ts`.
 
-| #      | Gap                                   | Blocks                          | Fix size                         |
-| ------ | ------------------------------------- | ------------------------------- | -------------------------------- |
-| 11     | content route is header-auth only     | image/html preview              | **S** (query token)              |
-| 14     | uptime / schema / log path            | Connection panel                | **S**                            |
-| 06     | no `rerun` / `start` action           | Re-run, Start now               | **S**                            |
-| 02     | no steer endpoint                     | Steer button                    | **S–M**                          |
-| 03     | no follow-up API                      | Queue follow-up                 | **M**                            |
-| 21     | no conversation rename/delete         | Conversations rows              | **S**                            |
-| 13     | per-chat model override is global     | model picker                    | **M**                            |
-| 20     | no template run counts / enabled      | Agents section                  | **M**                            |
-| 17     | no `Connect service` add flow         | Connectors section's Add button | **M**                            |
-| ~~24~~ | ~~no extension install / uninstall~~  | ~~Add extension~~               | ~~**M**~~ — **closed (T52)**     |
-| 10     | event log has no `task_id`            | per-run event log               | **M** (migration)                |
-| 23     | messages not linked to runs/artifacts | transcript recap cards          | **M** (migration)                |
-| 09     | no subagent timeline                  | **Parallel work swimlanes**     | **L** (migration + events)       |
-| 04     | no artifact list / attribution        | **entire Library view**         | **L** (migration + routes)       |
-| 05     | no artifact versions / diff           | History + Diff tabs             | **L** (migration + routes)       |
-| 12     | no pin state                          | ★ Pin                           | **XS** — do it in `localStorage` |
+| #   | Gap                                    | Blocks                          | Outcome                                                           | Est. was                         |
+| --- | -------------------------------------- | ------------------------------- | ----------------------------------------------------------------- | -------------------------------- |
+| 01  | no "Always allow" scope on the wire    | third confirmation button       | closed T7 (Phase 0, `88e8a3b`)                                    | —                                |
+| 02  | no steer endpoint                      | Steer button                    | closed T35 — `POST /v1/tasks/{id}/steer`, owner-scoped            | **S–M**                          |
+| 03  | no follow-up API                       | Queue follow-up                 | closed T36 — `/v1/lanes/{lane_key}/followups` ×3                  | **M**                            |
+| 04  | no artifact list / attribution         | **entire Library view**         | closed T27 (routes) + T31 (Library), migration 036                | **L** (migration + routes)       |
+| 05  | no artifact versions / diff            | History + Diff tabs             | closed T29 — `…/versions`, `…/diff`                               | **L** (migration + routes)       |
+| 06  | no `rerun` / `start` action            | Re-run, Start now               | closed T37 — `rerun` is its own route, `201` with a new id        | **S**                            |
+| 07  | `task_status`/`agent_status` drop text | run cards, agent rows           | closed T8 (Phase 0, `298bad3`)                                    | —                                |
+| 08  | cost served nowhere usable             | per-run cost, today's spend     | closed T7 for the per-run and daily halves; the rest became 08c   | —                                |
+| 08c | no usage rollup, no served cap         | Connection spend panel          | closed T50 — `GET /v1/usage/summary?window=today`                 | —                                |
+| 09  | no subagent timeline                   | **Parallel work swimlanes**     | closed T32 — `…/timeline` + `subagent_span`, migration 037        | **L** (migration + events)       |
+| 10  | event log has no `task_id`             | per-run event log               | closed T33 — `event_log.task_id` + the history envelope           | **M** (migration)                |
+| 11  | content route is header-auth only      | image/html preview              | closed T27 — `?token=` checked inline on the three content routes | **S** (query token)              |
+| 12  | no pin state                           | ★ Pin                           | closed T30 — `PUT /v1/artifacts/{id}/pin`, server state not local | **XS** — do it in `localStorage` |
+| 13  | per-chat model override is global      | model picker                    | closed T51 — `POST /v1/chat { model }`, request-scoped            | **M**                            |
+| 14  | uptime / schema / log path             | Connection panel                | closed T44 — `GET /v1/status`                                     | **S**                            |
+| 15  | no provider enable/disable             | Models section switches         | closed T47 — `PUT …/providers/{provider}/enabled`                 | —                                |
+| 16  | default lane key undiscoverable        | every lane-scoped call          | closed T7 (Phase 0, `26b3eaf`) — `GET /v1/me`                     | —                                |
+| 17  | no `Connect service` add flow          | Connectors section's Add button | **OPEN** — narrowed by T49 (the detail half is served)            | **M**                            |
+| 18  | no tool / skill catalog                | Tools and Skills rows           | closed — `GET /v1/tools` (C6/C7) and `GET /v1/skills` (T45)       | —                                |
+| 19  | no plugin install route                | Add extension                   | became GAP-24 (widened to both kinds, ADR-030 §9.1)               | —                                |
+| 20  | no template run counts / enabled       | Agents section                  | **OPEN** for the toggle; counts closed T34 → T48                  | **M**                            |
+| 21  | no conversation rename/delete          | Conversations rows              | closed T39 (daemon) + T40 (sidebar), migration 039                | **S**                            |
+| 22  | `plugin_*` events lacked `ts`/id       | Event log dedupe                | closed T19 (design C7) — the variants were deleted                | —                                |
+| 23  | messages not linked to runs/artifacts  | transcript recap cards          | closed T38 — migration 038                                        | **M** (migration)                |
+| 24  | no extension install / uninstall       | Add extension                   | closed T52 — install, validate, update, `?uninstall=true`         | **M**                            |
 
-**Recommended order:** the XS/S column first (11, 14, 06, 02, 21) unblocks roughly two-thirds of the design for a handful of one-file changes. Then
-04 + 05 + 09 as one "run observability + artifacts" milestone, since they share the
-same storage work and are what the Work and Library views are actually built around.
-Ship the UI with those three surfaces feature-flagged/empty-stated until then.
+**Recommended order** (kept as written, and followed): the XS/S column first
+(11, 14, 06, 02, 21), then 04 + 05 + 09 as one "run observability + artifacts"
+milestone, since they share the same storage work and are what the Work and
+Library views are built around. That is the order Phases 0–8 ran in; the UI
+shipped with the unserved surfaces empty-stated rather than feature-flagged,
+through the `unavailable.ts` registry.
 
 ---
 
@@ -1619,6 +1631,12 @@ the query string.
   fix, `298bad3`, closed that one; a dropped frame is still possible.)
 - `RecvError::Closed` breaks the loop and closes the socket.
 - No subscription/filtering protocol: every client gets every event.
+- The client's own union of the frames it handles is
+  `apps/openalpaca-gui/src/lib/events.ts`, and the one place a frame becomes a
+  refetch is `lib/query-client.ts` — a frame is **never** rendered from its
+  payload, which is why a late, dropped or reordered one cannot show a state the
+  daemon is not in. `dag_node_status` was deleted in Phase 8 (T53); the daemon
+  has no `plugin_*` frame either (C7).
 
 **Client lifecycle to reproduce (matches `daemon.ts`):**
 
@@ -1642,9 +1660,12 @@ the query string.
 | Work list / run cards   | `task_status`, `workflow_started`, `workflow_progress`, `workflow_steered`, `followup_queued`                                                                                                                                                                                                                                            |
 | Swimlanes               | `subagent_span` (**GAP-09, closed**) invalidates the run's timeline query; `agent_status` is weak (see the closed GAP-09 section). `dag_node_status` used to fire alongside from the same spawn sites but was never rendered — it was **deleted in Phase 8 (P9)**, so `subagent_span` is now the only event describing a lane transition |
 | Chat confirmation card  | `tool_confirmation_requested` (dedupe with the SSE frame by `request_id`)                                                                                                                                                                                                                                                                |
+| Library                 | `artifact_written` (**GAP-04, closed**) invalidates the artifact keys — list, versions and diff — and the producing run's own log. Carries `path`                                                                                                                                                                                        |
+| Conversation sidebar    | `session_changed` (**GAP-21, closed**) invalidates the session list and the transcript; a `status: "interrupted"` frame names a run, so it invalidates the run keys too                                                                                                                                                                  |
+| Pending follow-ups      | `followup_queued`, `followup_cancelled` (**GAP-03, closed**)                                                                                                                                                                                                                                                                             |
 | Event log               | `tool_executed`, `llm_call_completed`, `security_violation`, `circuit_breaker_tripped`, `skill_invocation_started`/`skill_completed`/`skill_failed`, `command_received`, `wake`                                                                                                                                                          |
 | Settings → Connectors   | `connector_status`                                                                                                                                                                                                                                                                                                                       |
-| Settings → Plugins      | `plugin_loaded`/`plugin_unloaded`/`plugin_crashed`/`plugin_disabled`/`plugin_pending_approval`/`plugin_needs_config`                                                                                                                                                                                                                     |
+| Settings → Extensions   | `extension_state_changed` (invalidate and re-read the row — never render the payload), `extension_capability_withheld`, `extension_capability_withdrawn`. The six `plugin_*` variants this row used to name were **deleted in C7** with `/v1/plugins*`                                                                                   |
 | Settings → Models       | `key_status_changed`, `orchestrator_config_changed`, `daemon_config_changed`                                                                                                                                                                                                                                                             |
 | Settings → Skills       | `skill_catalog_updated`                                                                                                                                                                                                                                                                                                                  |
 | Settings → Agents       | `agent_config_changed`, `agent_status`                                                                                                                                                                                                                                                                                                   |
@@ -1691,3 +1712,8 @@ the query string.
   for tasks, agents, templates, instances, settings, usage, plugins, files, skills,
   latency, decisions, sessions and feedback. Port those call signatures verbatim
   into the React data layer — only the store/reactivity wrapper needs rewriting.
+  _(Done. That directory is now the React data layer itself, and the `plugins`
+  module named above is `extensions.ts` — the `/v1/plugins*` routes it wrapped were
+  deleted in C7. `artifacts.ts`, `followups.ts`, `run-events.ts`, `sessions.ts`,
+  `status.ts`, `tools.ts`, `usage.ts` and `workspaces.ts` are the modules the closed
+  gaps above added.)_
