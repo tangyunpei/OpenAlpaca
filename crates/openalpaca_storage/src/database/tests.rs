@@ -8,7 +8,7 @@ fn test_database_creation() {
 
     let db = Database::open(&db_path).unwrap();
     assert!(db_path.exists());
-    assert_eq!(db.schema_version().unwrap(), 40);
+    assert_eq!(db.schema_version().unwrap(), 41);
 }
 
 #[test]
@@ -20,14 +20,14 @@ fn test_migrations_idempotent() {
     let _db1 = Database::open(&db_path).unwrap();
     let db2 = Database::open(&db_path).unwrap();
 
-    assert_eq!(db2.schema_version().unwrap(), 40);
+    assert_eq!(db2.schema_version().unwrap(), 41);
 }
 
 #[test]
 fn test_migration_035_drops_planner_telemetry() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 40);
+    assert_eq!(db.schema_version().unwrap(), 41);
 
     db.with_connection(|conn| {
         let columns = |table: &str| -> rusqlite::Result<Vec<String>> {
@@ -183,7 +183,7 @@ fn insert_asset(
 fn test_migration_036_adds_artifact_columns() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 40);
+    assert_eq!(db.schema_version().unwrap(), 41);
 
     db.with_connection(|conn| {
         let columns = |table: &str| -> rusqlite::Result<Vec<String>> {
@@ -365,7 +365,7 @@ fn test_migration_036_artifact_versions_cascade() {
 fn test_migration_037_run_observability_schema() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 40);
+    assert_eq!(db.schema_version().unwrap(), 41);
 
     db.with_connection(|conn| {
         let columns = |table: &str| -> rusqlite::Result<Vec<String>> {
@@ -450,7 +450,7 @@ fn test_migration_037_run_observability_schema() {
 fn test_migration_038_message_run_links() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 40);
+    assert_eq!(db.schema_version().unwrap(), 41);
 
     db.with_connection(|conn| {
         let columns: Vec<String> = conn
@@ -901,7 +901,7 @@ fn factory_reset_empties_artifact_versions_without_the_cascade() {
 fn test_migration_040_adds_llm_call_log_timestamp_index() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 40);
+    assert_eq!(db.schema_version().unwrap(), 41);
 
     db.with_connection(|conn| {
         let exists: bool = conn.query_row(
@@ -918,4 +918,76 @@ fn test_migration_040_adds_llm_call_log_timestamp_index() {
         Ok(())
     })
     .unwrap();
+}
+
+/// R80: `GET /v1/tools`' and `GET /v1/skills`' "today" counts are
+/// `WHERE timestamp >= ?1 GROUP BY <name>` over append-only logs, and 030's
+/// indexes lead on the grouping column — the only plan was a full covering scan
+/// of a log that never stops growing. Migration 041 adds the timestamp-leading
+/// pair; the plan is what the fix is, so the plan is what the test reads.
+#[test]
+fn test_migration_041_indexes_the_execution_logs_by_timestamp() {
+    let dir = tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    assert_eq!(db.schema_version().unwrap(), 41);
+
+    db.with_connection(|conn| {
+        let plan = |sql: &str| -> rusqlite::Result<String> {
+            let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+            let steps = stmt
+                .query_map(["2026-09-11 00:00:00"], |row| row.get::<_, String>(3))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            Ok(steps.join(" | "))
+        };
+
+        let tools = plan(
+            "SELECT tool_name, COUNT(*) FROM tool_execution_log \
+             INDEXED BY idx_tel_timestamp \
+             WHERE timestamp >= ?1 GROUP BY tool_name",
+        )?;
+        assert!(
+            tools.contains("SEARCH") && tools.contains("idx_tel_timestamp"),
+            "the tool counts must search the new index, not scan the log: {tools}"
+        );
+
+        let skills = plan(
+            "SELECT skill_id, COUNT(*) FROM skill_execution_log \
+             INDEXED BY idx_sel_timestamp \
+             WHERE timestamp >= ?1 GROUP BY skill_id",
+        )?;
+        assert!(
+            skills.contains("SEARCH") && skills.contains("idx_sel_timestamp"),
+            "and so must the skill counts: {skills}"
+        );
+
+        // Yesterday and today, so the range bound is doing something.
+        conn.execute(
+            "INSERT INTO tool_execution_log (agent_id, tool_name, success, duration_ms, timestamp)
+             VALUES ('a', 'file_read', 1, 2, '2026-09-10 23:00:00'),
+                    ('a', 'file_read', 1, 2, '2026-09-11 09:00:00')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO skill_execution_log
+                (request_id, skill_id, agent_id, status, duration_ms, timestamp)
+             VALUES ('r1', 'summarise', 'a', 'complete', 2, '2026-09-10 23:00:00'),
+                    ('r2', 'summarise', 'a', 'complete', 2, '2026-09-11 09:00:00')",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    // The hinted statements are the repository's own: they must prepare against
+    // the index the migration created, and answer the same counts.
+    let repo = crate::repository::SkillExecutionRepository::new(&db);
+    let since = "2026-09-11 00:00:00";
+    assert_eq!(
+        repo.tool_invocations_since(since).unwrap().get("file_read"),
+        Some(&1)
+    );
+    assert_eq!(
+        repo.skill_invocations_since(since).unwrap().get("summarise"),
+        Some(&1)
+    );
 }

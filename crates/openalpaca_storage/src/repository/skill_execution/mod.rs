@@ -177,8 +177,17 @@ impl<'a> SkillExecutionRepository<'a> {
     /// `since_utc` is **already UTC** in the table's own `%Y-%m-%d %H:%M:%S`
     /// text form: `timestamp` defaults to `datetime('now')`, which is UTC, so a
     /// bare `date('now')` predicate would be off by the daemon's UTC offset.
-    /// The caller converts local midnight; the index `idx_tel_tool_ts
-    /// (tool_name, timestamp DESC)` serves the predicate.
+    /// The caller converts local midnight.
+    ///
+    /// `INDEXED BY idx_tel_timestamp` (migration 041) because the planner does
+    /// not choose it on its own: 030's `idx_tel_tool_ts (tool_name, timestamp
+    /// DESC)` satisfies the `GROUP BY` in index order, so an unhinted plan
+    /// trades a temp B-tree for a **full covering scan of an append-only log**
+    /// — work that grows for ever, under the daemon's one connection lock
+    /// (review R80). Today's rows are a vanishing fraction of the log, so the
+    /// range search plus the sort is the plan that stays bounded. The hint is
+    /// safe by construction: the index is created by the migration, not by a
+    /// tuning pass, and SQLite refuses to prepare the statement if it is gone.
     ///
     /// One grouped query rather than one per tool: the registry has hundreds of
     /// names and the route renders all of them.
@@ -186,6 +195,7 @@ impl<'a> SkillExecutionRepository<'a> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT tool_name, COUNT(*) FROM tool_execution_log
+                 INDEXED BY idx_tel_timestamp
                  WHERE timestamp >= ?1 GROUP BY tool_name",
             )?;
             let rows = stmt.query_map([since_utc], |row| {
@@ -205,9 +215,10 @@ impl<'a> SkillExecutionRepository<'a> {
     ///
     /// The tool-log sibling above, one table over: `skill_execution_log`
     /// carries the same `datetime('now')` UTC text `timestamp` (migration 030),
-    /// so the caller converts local midnight to UTC exactly the same way and
-    /// the predicate is the same plain text comparison. `idx_sel_skill_ts
-    /// (skill_id, timestamp DESC)` serves it as a covering scan.
+    /// so the caller converts local midnight to UTC exactly the same way, the
+    /// predicate is the same plain text comparison, and 041's
+    /// `idx_sel_timestamp` is named for the same reason — `idx_sel_skill_ts
+    /// (skill_id, timestamp DESC)` would otherwise be scanned whole.
     ///
     /// Deliberately **not** the `all_skill_health` query: that one is lifetime
     /// totals per skill, and the catalog wants today's.
@@ -215,6 +226,7 @@ impl<'a> SkillExecutionRepository<'a> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT skill_id, COUNT(*) FROM skill_execution_log
+                 INDEXED BY idx_sel_timestamp
                  WHERE timestamp >= ?1 GROUP BY skill_id",
             )?;
             let rows = stmt.query_map([since_utc], |row| {

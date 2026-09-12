@@ -6,7 +6,7 @@
 
 - DB path resolver: `openalpaca_storage::paths::database_path()`
 - Migrations entrypoint: `openalpaca_storage::migrations::MIGRATIONS`
-- Registered migrations: 40
+- Registered migrations: 41
 
 ## Tables
 
@@ -599,6 +599,7 @@ result_ref TEXT
 | `idx_sel_response_msg` | `skill_execution_log` | `INDEX` | `response_message_id` | `031_message_feedback.sql` |
 | `idx_sel_skill_ts` | `skill_execution_log` | `INDEX` | `skill_id, timestamp DESC` | `030_skill_tool_execution_log.sql` |
 | `idx_sel_status` | `skill_execution_log` | `INDEX` | `skill_id, status` | `030_skill_tool_execution_log.sql` |
+| `idx_sel_timestamp` | `skill_execution_log` | `INDEX` | `timestamp, skill_id` | `041_execution_log_timestamp_indexes.sql` |
 | `idx_subagent_span_label` | `subagent_span` | `UNIQUE` | `task_id, label` | `037_run_observability.sql` |
 | `idx_subagent_span_state` | `subagent_span` | `INDEX` | `state` | `037_run_observability.sql` |
 | `idx_subagent_span_task` | `subagent_span` | `INDEX` | `task_id, started_at` | `037_run_observability.sql` |
@@ -611,6 +612,7 @@ result_ref TEXT
 | `idx_tel_request` | `tool_execution_log` | `INDEX` | `request_id` | `030_skill_tool_execution_log.sql` |
 | `idx_tel_session` | `tool_execution_log` | `INDEX` | `session_id, id` | `039_sessions.sql` |
 | `idx_tel_task` | `tool_execution_log` | `INDEX` | `task_id, id` | `039_sessions.sql` |
+| `idx_tel_timestamp` | `tool_execution_log` | `INDEX` | `timestamp, tool_name` | `041_execution_log_timestamp_indexes.sql` |
 | `idx_tel_tool_ts` | `tool_execution_log` | `INDEX` | `tool_name, timestamp DESC` | `030_skill_tool_execution_log.sql` |
 
 ## Triggers

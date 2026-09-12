@@ -4,7 +4,7 @@
 
 ## Overview
 
-- Total registered migrations: 40
+- Total registered migrations: 41
 - Migration SQL directory: `crates/openalpaca_storage/src/migrations`
 
 ## Files
@@ -51,3 +51,4 @@
 | 38 | `message_run_links` | `038_message_run_links.sql` | Migration 038: message → run links (GAP-23). |
 | 39 | `sessions` | `039_sessions.sql` | Migration 039: sessions. Rebuilds `conversations` as `session` |
 | 40 | `llm_call_log_timestamp_index` | `040_llm_call_log_timestamp_index.sql` | Migration 040: index llm_call_log(timestamp) for the usage-summary query. |
+| 41 | `execution_log_timestamp_indexes` | `041_execution_log_timestamp_indexes.sql` | Migration 041: timestamp-leading indexes on the two execution logs. |
