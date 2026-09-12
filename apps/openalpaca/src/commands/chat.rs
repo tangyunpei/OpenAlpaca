@@ -317,6 +317,28 @@ async fn upload_files(
     Ok(attachments)
 }
 
+/// The label printed before a piped reply — when there is somebody there to
+/// read it.
+///
+/// A pipe's stdout is usually another program's stdin:
+/// `openalpaca chat < question.txt > answer.txt` wrote `Alpaca: ` into the
+/// answer, and `| jq` choked on it. A terminal is the one place the label earns
+/// its keep, so that is the only place it is printed. `colored` makes the same
+/// call about the escape codes; this is about the six characters underneath
+/// them.
+fn reply_prefix(stdout_is_terminal: bool) -> String {
+    match stdout_is_terminal {
+        true => format!("{} ", "Alpaca:".cyan().bold()),
+        false => String::new(),
+    }
+}
+
+/// stdin piped: the whole of it is one message, and the reply is the output.
+///
+/// Empty input is an error rather than an empty turn — `openalpaca chat` with a
+/// pipe that produced nothing is a mistake upstream, not a request to send
+/// nothing — so nothing is sent and the process exits non-zero (documented in
+/// `docs/CLI_Manual.md`).
 async fn pipe_mode(target: &ChatTarget) -> Result<()> {
     use std::io::Read;
 
@@ -328,7 +350,10 @@ async fn pipe_mode(target: &ChatTarget) -> Result<()> {
     }
 
     let client = DaemonClient::connect()?;
-    print!("{} ", "Alpaca:".cyan().bold());
+    print!(
+        "{}",
+        reply_prefix(std::io::IsTerminal::is_terminal(&std::io::stdout()))
+    );
     std::io::stdout().flush()?;
     let result = chat_stream::send_and_stream_with_attachments(
         &client,
@@ -383,6 +408,16 @@ mod tests {
             .args;
         assert_eq!(args.session.as_deref(), Some("sess-1"));
         assert_eq!(args.message.as_deref(), Some("hi"));
+    }
+
+    /// The piped reply is somebody else's input; a label in front of it is
+    /// corruption, not courtesy.
+    #[test]
+    fn a_piped_reply_carries_no_label_and_a_terminals_does() {
+        colored::control::set_override(false);
+
+        assert_eq!(reply_prefix(false), "");
+        assert_eq!(reply_prefix(true), "Alpaca: ");
     }
 
     fn session_on(lane_key: &str) -> SessionItem {
