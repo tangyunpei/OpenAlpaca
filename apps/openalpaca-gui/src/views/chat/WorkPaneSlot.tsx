@@ -23,6 +23,11 @@ export interface WorkPaneSlotProps {
   blocked: boolean;
   /** The run holding it, or `null` when the mapping is unknown. */
   blockedRunId: string | null;
+  /**
+   * The tool that run is waiting on, so the card can say what is wanted
+   * instead of staying on `RUNNING` behind a red dot (G1).
+   */
+  blockedOn: string | null;
   /** `Full view` — switches to the Work view. */
   onFullView: () => void;
   /** `›` — collapses the aside entirely. */

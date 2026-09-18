@@ -69,11 +69,16 @@ export interface ChatStreamState {
   /** `done.content` once it lands, otherwise the buffer. Render this. */
   content: string;
   result: ChatStreamDone | null;
-  /** Unresolved confirmations, deduped by `request_id`, in arrival order. */
+  /**
+   * Unresolved confirmations, deduped by `request_id`, in arrival order.
+   *
+   * Session-level, not turn-level: a run's prompt arrives after its turn is
+   * terminal, and this list is what keeps it answerable (G1).
+   */
   pendingConfirmations: ChatConfirmationRequest[];
   error: ChatStreamError | null;
   deltaCount: number;
-  /** Once terminal, every later frame is ignored. */
+  /** Once terminal, every later frame of the *answer* is ignored. */
   terminal: boolean;
 }
 
@@ -82,6 +87,7 @@ export type ChatStreamAction =
   | { type: "thinking" }
   | { type: "delta"; content: string }
   | { type: "confirmation"; request: ChatConfirmationRequest }
+  /** Answered, timed out, or its run finished — drop the card. */
   | { type: "confirmation_resolved"; requestId: string }
   | { type: "done"; data: ChatStreamDone }
   | { type: "server_error"; message: string }
@@ -102,8 +108,17 @@ export const initialChatStreamState: ChatStreamState = {
 };
 
 /**
- * Pure reducer. Terminal states absorb every frame except confirmation
- * resolutions, which stay live so a card can be dismissed after `done`.
+ * Pure reducer. Terminal states absorb every frame of the **answer** —
+ * deltas, another `done`, a late error — but not the confirmations, which are
+ * not part of it.
+ *
+ * A confirmation is a question addressed to the person, and the run that asks
+ * it usually outlives the turn that started it: a workflow's
+ * `artifact_write` prompt arrives minutes after that turn went `done`, and
+ * dropping it here left the daemon waiting on a card nobody ever saw, for the
+ * whole 300 s timeout (G1). So `confirmation` and `confirmation_resolved` both
+ * stay live past `terminal`; `reset` — a new conversation — is what clears
+ * them.
  */
 export function chatStreamReducer(
   state: ChatStreamState,
@@ -147,7 +162,7 @@ export function chatStreamReducer(
     }
 
     case "confirmation": {
-      if (state.terminal) return state;
+      // Deliberately not gated on `terminal`: see the note above.
       const seen = state.pendingConfirmations.some(
         (c) => c.request_id === action.request.request_id,
       );

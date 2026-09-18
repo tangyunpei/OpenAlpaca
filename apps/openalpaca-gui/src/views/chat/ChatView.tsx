@@ -287,6 +287,7 @@ export default function ChatView({
             renderWorkPane({
               blocked: session.blocked,
               blockedRunId: session.blockedRunId,
+              blockedOn: session.pendingToolName,
               onFullView: () => setView("work"),
               onCollapse: closeWorkPane,
             })

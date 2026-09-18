@@ -21,6 +21,7 @@ function renderPane(props: Partial<WorkPaneSlotProps> = {}) {
   const slotProps: WorkPaneSlotProps = {
     blocked: false,
     blockedRunId: null,
+    blockedOn: null,
     onFullView: vi.fn(),
     onCollapse: vi.fn(),
     ...props,

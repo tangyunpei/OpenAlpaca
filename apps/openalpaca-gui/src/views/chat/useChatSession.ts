@@ -52,9 +52,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   executedResolutionNote,
   formatDurationMs,
-  pendingResolutionNote,
+  resolutionNote,
+  settlingRun,
   shortTitle,
   type Resolution,
+  type ToolRun,
 } from "@/components/chat";
 import { toUiStatus, type UiStatus } from "@/components/ui";
 import { useChatHistory, useChatStream } from "@/hooks/useChat";
@@ -245,6 +247,12 @@ export function useChatSession(): ChatSession {
   const started = useRef(new Map<string, StartedRun>());
   /** `agent_id → { name, current_task_id }` — the only run mapping on the wire. */
   const agents = useRef(new Map<string, AgentRecord>());
+  /**
+   * The last few `tool_executed` frames, for the card that has not been drawn
+   * yet (G6). The broker releases the tool the moment the answer is posted, so
+   * the outcome regularly beats this client's own `onSuccess`.
+   */
+  const toolRuns = useRef<ToolRun[]>([]);
 
   const stream = useChatStream({
     accepts: (event, streamId) => {
@@ -325,6 +333,15 @@ export function useChatSession(): ChatSession {
     }
     if (event.type !== "task_status") return;
     if (!isTerminalRunStatus(event.status)) return;
+
+    // A finished run is not waiting on anything any more (G1). The daemon
+    // publishes no frame for a prompt that timed out or was answered
+    // elsewhere, so this is what retires a card the run has moved past —
+    // before the `started` check below, because a card can outlive this
+    // client's memory of who started the run.
+    for (const [requestId, meta] of Object.entries(confirmationMeta)) {
+      if (meta.taskId === event.task_id) stream.dismissConfirmation(requestId);
+    }
 
     const origin = started.current.get(event.task_id);
     // Only report workflows this lane actually started — a foreign run's card
@@ -434,6 +451,18 @@ export function useChatSession(): ChatSession {
 
   useServerEvent(TOOL_EVENTS, (event) => {
     if (event.type !== "tool_executed") return;
+    // Remembered whether or not a card is waiting for it: the card may not
+    // exist yet, and when it is made it looks back here (G6). Bounded — this
+    // is a settling window, not a log.
+    toolRuns.current = [
+      ...toolRuns.current.slice(-19),
+      {
+        toolName: event.tool_name,
+        success: event.success,
+        duration: formatDurationMs(event.duration_ms),
+        atMs: Date.now(),
+      },
+    ];
     setResolutions((current) =>
       current.map((entry) =>
         entry.resolution === "approved" &&
@@ -767,6 +796,9 @@ export function useChatSession(): ChatSession {
     (resolution: Resolution, scope?: ApprovalScope) => {
       const target = firstConfirmation;
       if (target === null) return;
+      // When the answer went out — the earliest a `tool_executed` for it can
+      // be this one's (G6).
+      const answeredAtMs = Date.now();
 
       respondRef.current.mutate(
         {
@@ -781,7 +813,14 @@ export function useChatSession(): ChatSession {
               {
                 requestId: target.requestId,
                 resolution,
-                note: pendingResolutionNote(resolution, target.toolName),
+                // The tool may already have run and reported: the daemon
+                // releases it as soon as the answer lands, and that frame
+                // routinely arrives before this callback does.
+                note: resolutionNote(
+                  resolution,
+                  target.toolName,
+                  settlingRun(toolRuns.current, target.toolName, answeredAtMs),
+                ),
                 at: new Date().toISOString(),
               },
             ]);

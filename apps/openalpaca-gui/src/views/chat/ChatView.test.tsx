@@ -114,6 +114,12 @@ let sessionListReply: (url: string) => Response;
 let statusReply: (headers: Headers) => Response;
 /** What the five `/v1/sessions` write verbs answer; swapped per test to refuse. */
 let sessionWriteReply: () => Response;
+/**
+ * What `POST /v1/chat/confirmations/{id}` answers. Swappable so a test can
+ * hold the answer open and let the daemon's `tool_executed` win the race it
+ * usually wins in practice (G6).
+ */
+let confirmationReply: () => Response | Promise<Response>;
 
 /** `limit`/`offset`, exactly as the route pages. */
 function pageOfSessions(url: string): Response {
@@ -171,7 +177,7 @@ function installFetch() {
       return historyReply(url);
     }
     if (url.includes("/v1/chat/confirmations/")) {
-      return new Response("", { status: 200 });
+      return await confirmationReply();
     }
     if (url.includes("/v1/chat")) {
       return chatSendReply();
@@ -325,6 +331,7 @@ beforeEach(() => {
   sessionRows = [];
   sessionListReply = pageOfSessions;
   sessionWriteReply = () => json(sessionRow());
+  confirmationReply = () => new Response("", { status: 200 });
   statusReply = (headers) =>
     json(daemonStatus(headers.get("x-workspace-path")));
   steerReply = () =>
@@ -585,6 +592,200 @@ describe("ChatView — tool confirmation (§3.14, §3.16a)", () => {
       );
       expect(posted?.body).toEqual({ approved: false });
     });
+  });
+});
+
+/**
+ * G1 — a background run's confirmation, which is the only kind a workflow
+ * raises.
+ *
+ * The prompt is raised by the *run*, minutes after the turn that started it
+ * went `done`, and it arrives on the daemon-wide socket rather than on that
+ * turn's closed SSE stream. The reducer used to drop every frame once the
+ * stream was terminal, so the card was never drawn: the daemon sat waiting
+ * for an answer nobody had been asked for, and the Work pane went on saying
+ * the run was running.
+ */
+describe("ChatView — a confirmation raised after the turn finished (G1)", () => {
+  async function blockedByARun(): Promise<void> {
+    renderChat();
+    const source = await sendMessage("write up the alpaca facts");
+    await act(async () => {
+      source.emit("done", {
+        content: "Started a run.",
+        model: "claude-sonnet-4-6",
+        tokens_in: 12,
+        tokens_out: 4,
+        duration_ms: 900,
+        delegation: { task_id: "run-1", title: "Alpaca facts" },
+      });
+    });
+    // …and the run asks, long after the stream it was started from is gone.
+    await act(async () => {
+      emitServerEvent({
+        type: "tool_confirmation_requested",
+        request_id: "req-late",
+        agent_id: "lead_agent",
+        tool_name: "artifact_write",
+        tool_arguments: { name: "01-alpaca-facts.md" },
+        stream_id: null,
+        lane_key: null,
+        task_id: "run-1",
+      });
+    });
+  }
+
+  it("renders the card, and Approve posts to the route", async () => {
+    await blockedByARun();
+
+    expect(
+      await screen.findByText("Confirmation required · artifact_write"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("artifact_write is waiting on you"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Approve/ }));
+
+    await waitFor(() => {
+      const posted = requests.find((request) =>
+        request.url.includes("/v1/chat/confirmations/req-late"),
+      );
+      expect(posted?.method).toBe("POST");
+      expect(posted?.body).toEqual({ approved: true });
+    });
+  });
+
+  it("names the blocked run and the tool to the work pane", async () => {
+    await blockedByARun();
+
+    await waitFor(() => {
+      const pending = useConfirmationStore.getState().pending;
+      expect(pending?.runId).toBe("run-1");
+      expect(pending?.toolName).toBe("artifact_write");
+    });
+  });
+
+  /**
+   * The daemon publishes nothing for a prompt that timed out, so a finished
+   * run is what retires its card — otherwise it sits on screen for ever.
+   */
+  it("clears the card when the run it belongs to finishes", async () => {
+    await blockedByARun();
+    expect(
+      await screen.findByText("Confirmation required · artifact_write"),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      emitServerEvent({
+        type: "task_status",
+        task_id: "run-1",
+        title: "Alpaca facts",
+        status: "completed",
+        progress_current: null,
+        progress_total: null,
+        result_summary: "done",
+        outcome_kind: "artifact_only",
+        artifact_count: 1,
+        outcome_summary: null,
+      });
+    });
+
+    await waitFor(() =>
+      expect(
+        screen.queryByText("Confirmation required · artifact_write"),
+      ).toBeNull(),
+    );
+    expect(await screen.findByLabelText("Message")).toBeInTheDocument();
+  });
+});
+
+/**
+ * G6 — a resolved card still reading "approved · waiting for the tool to run…"
+ * minutes after the tool had run and the turn had finished.
+ *
+ * The frames race, and the order that loses is the usual one: the broker
+ * releases the tool the moment the answer is posted, so `tool_executed`
+ * arrives before this client's own `onSuccess` has put the card on screen, and
+ * the upgrade pass runs over a list that does not contain it yet.
+ */
+describe("ChatView — a confirmation whose tool reported first (G6)", () => {
+  it("settles the card with the outcome it already saw", async () => {
+    // Hold the answer open, exactly as a slow round trip would.
+    let release = (): void => {};
+    confirmationReply = () =>
+      new Promise<Response>((resolve) => {
+        release = () => resolve(new Response("", { status: 200 }));
+      });
+
+    renderChat();
+    const source = await sendMessage("write the notes");
+    await act(async () => {
+      source.emit("confirmation_requested", {
+        request_id: "req-1",
+        tool_name: "artifact_write",
+        tool_arguments: { name: "notes.md" },
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Approve/ }));
+
+    // The daemon runs the tool and says so — before our POST has answered.
+    await act(async () => {
+      emitServerEvent({
+        type: "tool_executed",
+        agent_id: "lead_agent",
+        tool_name: "artifact_write",
+        success: true,
+        duration_ms: 1400,
+        task_id: null,
+      });
+    });
+    await act(async () => {
+      release();
+    });
+
+    expect(
+      await screen.findByText(
+        "artifact_write approved · returned in 1.4s, the agent resumed.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/waiting for the tool to run/)).toBeNull();
+  });
+
+  /** The other order still works: the card is drawn, then upgraded in place. */
+  it("upgrades a card that was drawn before the tool reported", async () => {
+    renderChat();
+    const source = await sendMessage("write the notes");
+    await act(async () => {
+      source.emit("confirmation_requested", {
+        request_id: "req-1",
+        tool_name: "artifact_write",
+        tool_arguments: { name: "notes.md" },
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Approve/ }));
+    expect(
+      await screen.findByText(/artifact_write approved · waiting/),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      emitServerEvent({
+        type: "tool_executed",
+        agent_id: "lead_agent",
+        tool_name: "artifact_write",
+        success: false,
+        duration_ms: 9000,
+        task_id: null,
+      });
+    });
+
+    expect(
+      await screen.findByText(
+        "artifact_write approved · failed after 9.0s, the agent continued without it.",
+      ),
+    ).toBeInTheDocument();
   });
 });
 

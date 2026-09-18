@@ -95,6 +95,14 @@ export interface ChatStreamController {
   send: (options: SendChatOptions) => Promise<void>;
   /** Approve/deny the oldest pending confirmation, or a named one. */
   respond: UseMutationResult<void, Error, RespondToConfirmationInput>;
+  /**
+   * Drop a pending confirmation this client is not going to answer (G1).
+   *
+   * The daemon publishes no "this prompt expired" frame, so a prompt whose run
+   * has finished — it timed out, or somebody else answered it — would sit on
+   * screen for ever. The caller that knows the run is over says so.
+   */
+  dismissConfirmation: (requestId: string) => void;
   /** Drop the local stream state (new lane, cleared transcript). */
   reset: () => void;
 }
@@ -183,6 +191,10 @@ export function useChatStream(
     },
   });
 
+  const dismissConfirmation = useCallback((requestId: string) => {
+    dispatch({ type: "confirmation_resolved", requestId });
+  }, []);
+
   const reset = useCallback(() => {
     handleRef.current?.close();
     handleRef.current = null;
@@ -195,6 +207,7 @@ export function useChatStream(
     active: isStreamActive(state),
     send,
     respond,
+    dismissConfirmation,
     reset,
   };
 }

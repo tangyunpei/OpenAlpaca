@@ -143,6 +143,52 @@ describe("chatStreamReducer", () => {
     expect(state.pendingConfirmations).toHaveLength(1);
   });
 
+  /**
+   * G1 — the serious one. A workflow's confirmation *always* arrives after the
+   * turn that started it went `done`, so the terminal guard on this case
+   * dropped every background run's prompt on the floor: no card, the Work pane
+   * still reading RUNNING, and the daemon waiting out its 300 s timeout.
+   */
+  it("accepts a confirmation raised after the turn finished", () => {
+    const state = run([
+      open,
+      { type: "done", data: doneData },
+      {
+        type: "confirmation",
+        request: {
+          request_id: "r-late",
+          tool_name: "artifact_write",
+          tool_arguments: { name: "notes.md" },
+        },
+      },
+    ]);
+
+    expect(state.pendingConfirmations).toHaveLength(1);
+    expect(state.pendingConfirmations[0]?.tool_name).toBe("artifact_write");
+    expect(isBlocked(state)).toBe(true);
+    // The answer itself is still finished — the prompt is not part of it.
+    expect(state.terminal).toBe(true);
+    expect(state.content).toBe(doneData.content);
+  });
+
+  /** A new conversation is the one thing that clears an unanswered prompt. */
+  it("drops pending confirmations on reset", () => {
+    const state = run([
+      open,
+      { type: "done", data: doneData },
+      {
+        type: "confirmation",
+        request: {
+          request_id: "r-late",
+          tool_name: "artifact_write",
+          tool_arguments: null,
+        },
+      },
+      { type: "reset" },
+    ]);
+    expect(state.pendingConfirmations).toHaveLength(0);
+  });
+
   it("clears a resolved confirmation even after the stream finished", () => {
     const state = run([
       open,

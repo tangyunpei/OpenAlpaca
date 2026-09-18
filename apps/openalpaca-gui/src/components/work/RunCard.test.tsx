@@ -134,6 +134,33 @@ describe("RunCard (§3.19)", () => {
     expect(resolved.container.querySelector(".bg-green")).not.toBeNull();
   });
 
+  /**
+   * G1 — the pane read `RUNNING` for a run the daemon had stopped to ask
+   * about. A red dot beside a note the model happened to write is not a
+   * report; the card has to say what is wanted and from whom.
+   */
+  it("says what a blocked run is waiting on, and on whom", () => {
+    const { unmount } = card(
+      { status: "running", note: null },
+      { blocked: true, blockedOn: "artifact_write" },
+    );
+    expect(
+      screen.getByText(/Waiting on you: artifact_write/),
+    ).toBeInTheDocument();
+    unmount();
+
+    // The lane knows a prompt is pending but not which tool: still said.
+    const unnamed = card(
+      { status: "running", note: null },
+      { blocked: true, blockedOn: null },
+    );
+    expect(screen.getByText(/Waiting on you —/)).toBeInTheDocument();
+    unnamed.unmount();
+
+    card({ status: "running" }, { blocked: false, blockedOn: null });
+    expect(screen.queryByText(/Waiting on you/)).toBeNull();
+  });
+
   it("hides the parallel-work block on a run that is not running or paused", () => {
     card({ status: "queued" });
     expect(screen.queryByText("Parallel work")).not.toBeInTheDocument();

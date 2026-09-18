@@ -50,6 +50,15 @@ export interface RunCardProps {
   timelineError?: string | null;
   /** This run holds the pending tool confirmation. */
   blocked?: boolean;
+  /**
+   * The tool it is waiting on, when the lane knows it (G1).
+   *
+   * A blocked run used to be a red dot beside whatever note it already had,
+   * so the card still read `RUNNING` while the daemon sat waiting for an
+   * answer nobody had been asked for. With the name, the card says what is
+   * wanted.
+   */
+  blockedOn?: string | null;
   dense?: boolean;
   busy?: RunActionId | null;
   onAction: (action: RunActionId, run: Run) => void;
@@ -72,6 +81,7 @@ export function RunCard({
   timeline,
   timelineError = null,
   blocked = false,
+  blockedOn = null,
   dense = false,
   busy = null,
   onAction,
@@ -132,6 +142,22 @@ export function RunCard({
               error={timelineError}
               blocked={blocked}
             />
+            {blocked && (
+              <p
+                role="status"
+                className="mt-[10px] flex items-start gap-[7px] text-sm-plus leading-[1.45] text-red-ink"
+              >
+                <span
+                  aria-hidden
+                  className="mt-[5px] h-[6px] w-[6px] shrink-0 rounded-full bg-red"
+                />
+                <span>
+                  {blockedOn === null
+                    ? "Waiting on you — approve or deny it in the chat."
+                    : `Waiting on you: ${blockedOn} — approve or deny it in the chat.`}
+                </span>
+              </p>
+            )}
             {run.note !== null && (
               <div className="mt-[10px] flex items-start gap-[7px]">
                 <span

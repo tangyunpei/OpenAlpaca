@@ -69,6 +69,8 @@ export interface WorkPaneProps {
    * an arbitrary card would be a guess.
    */
   blocked?: boolean;
+  /** The tool that run is waiting on, when the lane knows it (G1). */
+  blockedOn?: string | null;
   /** `Full view`. Defaults to switching the app to the Work view. */
   onFullView?: () => void;
   /** `›`. Defaults to collapsing the aside. */
@@ -79,6 +81,7 @@ export interface WorkPaneProps {
 export function WorkPane({
   blockedRunId = null,
   blocked,
+  blockedOn = null,
   onFullView,
   onCollapse,
   className,
@@ -149,6 +152,7 @@ export function WorkPane({
               run={run}
               dense={dense}
               blocked={blockedRunId !== null && blockedRunId === run.id}
+              blockedOn={blockedOn}
               controller={controller}
               resumeEnabled={resumeEnabled}
               onOpenFile={openFile}
@@ -164,6 +168,7 @@ interface RunCardSlotProps {
   run: Run;
   dense: boolean;
   blocked: boolean;
+  blockedOn: string | null;
   controller: RunController;
   resumeEnabled: boolean;
   onOpenFile: (artifact: OutcomeArtifact) => void;
@@ -178,6 +183,7 @@ function RunCardSlot({
   run,
   dense,
   blocked,
+  blockedOn,
   controller,
   resumeEnabled,
   onOpenFile,
@@ -194,6 +200,7 @@ function RunCardSlot({
       timelineError={timeline.error !== null ? timeline.error.message : null}
       dense={dense}
       blocked={blocked}
+      blockedOn={blockedOn}
       busy={controller.busyFor(run.id)}
       onAction={controller.perform}
       onOpenFile={(artifact) => onOpenFile(artifact)}
