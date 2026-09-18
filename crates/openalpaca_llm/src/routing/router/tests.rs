@@ -417,6 +417,35 @@ async fn the_effective_default_prefers_the_configured_model() {
     );
 }
 
+/// M8: an install that has never named a default carries `""`, which is not a
+/// model id. The router says so — `GET /v1/status` serialised the empty string
+/// as if it were the owner's choice — and the ladder still resolves a model.
+#[tokio::test]
+async fn an_unset_default_model_is_absent_not_empty() {
+    let provider = Arc::new(MockProvider::new("anthropic", vec![]));
+    let router = make_router_with_mock(
+        provider,
+        ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929",
+    );
+
+    router.set_default_model(String::new());
+    assert_eq!(router.configured_default_model(), None);
+    assert!(
+        router.effective_default_model().is_some(),
+        "an unset default still resolves through the ladder"
+    );
+
+    router.set_default_model("   ".to_string());
+    assert_eq!(router.configured_default_model(), None, "nor is whitespace");
+
+    router.set_default_model("claude-sonnet-4-5-20250929".to_string());
+    assert_eq!(
+        router.configured_default_model().as_deref(),
+        Some("claude-sonnet-4-5-20250929")
+    );
+}
+
 /// `[orchestrator] fallback_models` is consulted for a model that is not the
 /// orchestrator's own, which the pre-L3 chain lookup never did.
 #[tokio::test]

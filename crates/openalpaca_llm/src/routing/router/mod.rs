@@ -298,6 +298,18 @@ impl LlmRouter {
             .filter(|m| self.is_routable(m))
     }
 
+    /// The default model the owner actually configured, if they configured one.
+    ///
+    /// `[orchestrator] model` is a `String`, and an install that has never
+    /// named a default carries `""` — which is not a model id, and must not be
+    /// shown or serialised as if it were one (M8). The router itself treats the
+    /// empty string as "unset" and falls through the L3 ladder;
+    /// [`Self::default_model`] stays the raw reading for the code that does
+    /// that resolution.
+    pub fn configured_default_model(&self) -> Option<String> {
+        Some(self.default_model()).filter(|m| !m.trim().is_empty())
+    }
+
     /// The model a request that names none will actually reach.
     ///
     /// `None` means nothing at all is routable — no enabled provider offers a
