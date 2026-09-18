@@ -162,12 +162,12 @@
   - `status` (fields: `format`)
   - `keys`
   - `usage` (fields: `agent`, `date`, `key`, `daily`, `format`)
-  - `models` (fields: `format`)
+  - `models` (fields: `refresh`, `format`)
   - `strategy` (fields: `provider`, `strategy`)
   - `credentials` (fields: `format`)
   - `backends` (fields: `format`)
   - `provider-usage` (fields: `format`)
-- Parsed flags: `--agent`, `--daily`, `--date`, `--format`, `--key`, `--provider`
+- Parsed flags: `--agent`, `--daily`, `--date`, `--format`, `--key`, `--provider`, `--refresh`
 
 ### `llm_keys`
 
