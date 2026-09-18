@@ -48,4 +48,6 @@ tokio-util.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
+# `net`/`io-util` are for `src/test_support.rs`'s loopback HTTP server — the
+# crate has no HTTP-mock dependency and tests must never reach a real provider.
+tokio = { workspace = true, features = ["test-util", "net", "io-util"] }

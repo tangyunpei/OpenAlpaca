@@ -53,6 +53,25 @@ impl OllamaProvider {
             &self.base_url
         }
     }
+
+    /// The root Ollama serves its own API from — `base_url` without the
+    /// OpenAI-compatibility `/v1` suffix.
+    fn native_base(&self) -> &str {
+        self.base_url().trim_end_matches('/').trim_end_matches("/v1")
+    }
+
+    /// The shared HTTP client, so discovery reuses the router's connection
+    /// pool instead of standing up a new one per call.
+    fn client(&self) -> &reqwest::Client {
+        #[cfg(feature = "openai")]
+        {
+            self.inner.http_client()
+        }
+        #[cfg(not(feature = "openai"))]
+        {
+            &self.client
+        }
+    }
 }
 
 #[async_trait]
@@ -65,15 +84,17 @@ impl LlmProvider for OllamaProvider {
         true
     }
 
+    /// Ollama runs on the owner's machine and authenticates nothing (L1).
+    fn requires_key(&self) -> bool {
+        false
+    }
+
     async fn list_models_with_key(&self, _key: &str) -> Result<Vec<String>, LlmError> {
         // Ollama uses native /api/tags endpoint (no auth needed)
-        // Strip /v1 suffix from base_url to get native base
-        let base = self.base_url();
-        let native_base = base.trim_end_matches("/v1");
-        let url = format!("{}/api/tags", native_base);
+        let url = format!("{}/api/tags", self.native_base());
 
-        let client = reqwest::Client::new();
-        let response = client
+        let response = self
+            .client()
             .get(&url)
             .send()
             .await

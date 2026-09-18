@@ -18,6 +18,12 @@ pub struct ProviderInfo {
     pub enabled: bool,
     pub key_selection_strategy: String,
     pub keys: Vec<KeyInfo>,
+    /// Whether this provider needs an API key at all.
+    ///
+    /// `false` for a provider that runs on the owner's machine (Ollama): an
+    /// empty `keys` list there means "no key needed", not "unconfigured", and
+    /// must never be rendered as a failure (L1).
+    pub requires_key: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

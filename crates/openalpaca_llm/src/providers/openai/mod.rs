@@ -76,6 +76,14 @@ impl OpenAiProvider {
         }
     }
 
+    /// The shared `reqwest::Client` this provider was built with.
+    ///
+    /// Ollama wraps this provider and needs the same connection pool for its
+    /// native `/api/*` discovery calls.
+    pub(crate) fn http_client(&self) -> &reqwest::Client {
+        &self.client
+    }
+
     pub(crate) fn build_request_body(&self, request: &ChatRequest) -> serde_json::Value {
         request::build_request_body(&self.model, self.max_tokens, request)
     }

@@ -7,6 +7,8 @@ pub mod keys;
 pub mod providers;
 pub mod routing;
 pub mod streaming;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod types;
 
 pub use cli_backend::{
@@ -58,6 +60,17 @@ pub trait LlmProvider: Send + Sync {
     fn name(&self) -> &str;
     fn supports_tools(&self) -> bool;
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError>;
+
+    /// Whether a call to this provider needs an API key at all.
+    ///
+    /// A provider that runs on the owner's own machine does not (Ollama). The
+    /// router serves such a provider through a synthetic internal slot rather
+    /// than failing on an empty key pool, and its discovery is not gated on the
+    /// pool either — no placeholder key is ever written to config or shown to
+    /// the owner (L1).
+    fn requires_key(&self) -> bool {
+        true
+    }
 
     /// Chat using a specific API key. Default delegates to `chat()`.
     /// Providers override this to inject the key into their HTTP requests.

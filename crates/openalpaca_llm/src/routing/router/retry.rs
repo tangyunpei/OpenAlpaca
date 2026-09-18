@@ -24,6 +24,13 @@ impl LlmRouter {
         }
 
         let pool = entry.key_pool.load();
+        // A provider that needs no key has an empty pool by design, and an
+        // empty pool refuses every acquire. Serve it through the synthetic
+        // slot instead, so the call is made and still gets a rate limiter of
+        // its own (L1). A keyless provider that *does* have keys configured
+        // (an authenticating proxy in front of Ollama) keeps using them.
+        let keyless = (pool.is_empty() && !entry.provider.requires_key())
+            .then(|| super::keyless_slot(entry.provider.name()));
         let rate_config = self.rate_limiter_registry.config();
         let max_retries = pool.len().max(rate_config.max_transient_retries);
         let estimated_tokens = estimate_request_tokens(request);
@@ -40,6 +47,7 @@ impl LlmRouter {
             for attempt in 0..max_retries {
                 let key_guard = match pool.acquire().await {
                     Ok(guard) => guard,
+                    Err(_) if keyless.is_some() => keyless.clone().expect("checked above"),
                     Err(KeyPoolError::NoApiCompatibleKeys) => {
                         return Err(LlmRouterError::NoApiCompatibleKeys);
                     }

@@ -15,7 +15,7 @@ pub use types::{
 use crate::LlmProvider;
 use crate::config::LlmRuntimeConfig;
 use crate::keys::key_pool::{
-    ApiKey, KeyPool, KeyStatus, ProviderType, SelectionStrategy,
+    ApiKey, KeyGuard, KeyPool, KeyStatus, ProviderType, SelectionStrategy,
 };
 use crate::routing::cost_tracker::CostTracker;
 use crate::routing::model_registry::ModelRegistry;
@@ -33,6 +33,20 @@ use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
+
+/// The slot a keyless provider's calls are accounted to.
+///
+/// It is **not** a key: it carries no secret, it is never written to config,
+/// and it never appears in [`LlmRouter::key_statuses`]. It exists so a provider
+/// that needs no key still gets a rate limiter and a circuit-breaker report of
+/// its own instead of being refused by an empty pool (L1).
+pub(super) fn keyless_slot(provider_name: &str) -> KeyGuard {
+    KeyGuard {
+        id: format!("{provider_name}:keyless"),
+        secret: String::new(),
+        rate_limit: None,
+    }
+}
 
 /// The LLM Router — routes requests to providers with key rotation and fallback.
 pub struct LlmRouter {
@@ -201,6 +215,17 @@ impl LlmRouter {
         self.providers.contains_key(provider_type)
     }
 
+    /// Does this provider need an API key? `None` when it is not loaded.
+    ///
+    /// The one honest answer for "key health" on a local provider: a `false`
+    /// here means "no key needed", not "unhealthy" and not "no key configured"
+    /// (L1). Callers that render key state ask this before they render a ✗.
+    pub fn provider_requires_key(&self, provider_type: &ProviderType) -> Option<bool> {
+        self.providers
+            .get(provider_type)
+            .map(|e| e.value().provider.requires_key())
+    }
+
     /// Get list of configured providers.
     pub fn configured_providers(&self) -> Vec<ProviderType> {
         self.providers.iter().map(|entry| entry.key().clone()).collect()
@@ -274,3 +299,6 @@ impl LlmRouter {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "ollama", feature = "openai"))]
+mod ollama_tests;

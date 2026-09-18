@@ -34,11 +34,23 @@ impl LlmRouter {
             .ok_or_else(|| LlmRouterError::ProviderNotConfigured(provider_type.to_string()))?;
 
         let pool = entry.key_pool.load();
-        let max_attempts = pool.len().min(3);
+        // Same as the non-streaming ladder: an empty pool on a provider that
+        // needs no key is served through the synthetic slot, and there is
+        // exactly one of those to rotate through (L1). Without this the loop
+        // body never ran — `pool.len().min(3)` is 0 — and the owner saw
+        // "All keys are rate-limited" for a provider that has no keys to limit.
+        let keyless = (pool.is_empty() && !entry.provider.requires_key())
+            .then(|| super::keyless_slot(entry.provider.name()));
+        let max_attempts = if keyless.is_some() {
+            1
+        } else {
+            pool.len().min(3)
+        };
 
         for attempt in 0..max_attempts {
             let key_guard = match pool.acquire().await {
                 Ok(guard) => guard,
+                Err(_) if keyless.is_some() => keyless.clone().expect("checked above"),
                 Err(KeyPoolError::NoApiCompatibleKeys) => {
                     return Err(LlmRouterError::NoApiCompatibleKeys);
                 }

@@ -273,12 +273,20 @@ impl LlmSettingsService {
                 provider_config.and_then(|p| p.enabled).unwrap_or(false)
             };
 
+            // A loaded provider answers for itself; an unloaded one is judged
+            // by what it is — a local provider never needs a key (L1).
+            let requires_key = self
+                .router
+                .provider_requires_key(provider_type)
+                .unwrap_or(!provider_type.is_local());
+
             providers.insert(
                 provider_name,
                 ProviderInfo {
                     enabled,
                     key_selection_strategy: strategy,
                     keys,
+                    requires_key,
                 },
             );
         }

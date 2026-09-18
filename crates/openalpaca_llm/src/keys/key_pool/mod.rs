@@ -28,6 +28,15 @@ impl ProviderType {
         ];
         &BUILTINS
     }
+
+    /// Whether this provider runs on the owner's own machine.
+    ///
+    /// Two facts follow and nothing else does: a local provider needs no API
+    /// key (the router serves it through a keyless slot, L1) and its calls cost
+    /// nothing (the tracker prices them at 0, L8).
+    pub fn is_local(&self) -> bool {
+        matches!(self, Self::Ollama)
+    }
 }
 
 impl std::fmt::Display for ProviderType {
