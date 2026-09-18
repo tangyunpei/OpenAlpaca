@@ -11,6 +11,8 @@
  * on the machine's locale.
  */
 
+import { parseTimestamp } from "@/lib/time";
+
 /** Vendor prefixes the design strips: `claude-sonnet-4-6` reads as `sonnet-4-6`. */
 const VENDOR_PREFIXES = ["claude-", "anthropic-", "openai-", "gpt-oss-"];
 
@@ -31,13 +33,19 @@ function pad2(value: number): string {
   return value < 10 ? `0${value}` : String(value);
 }
 
-/** `2026-08-31T14:22:41Z` → `14:22`. Invalid input yields `null`, never a guess. */
+/**
+ * `2026-08-31T14:22:41Z` → `14:22`, in the reader's own timezone. Invalid input
+ * yields `null`, never a guess.
+ *
+ * The parse is `lib/time`'s: a persisted message carries SQLite's zone-less
+ * `2026-08-31 14:22:41`, which is UTC, and reading it as local time printed
+ * every stored row seven hours out in California (G3).
+ */
 export function formatClock(
   value: string | Date | null | undefined,
 ): string | null {
-  if (value === null || value === undefined) return null;
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
+  const date = value instanceof Date ? value : parseTimestamp(value);
+  if (date === null || Number.isNaN(date.getTime())) return null;
   return `${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
 }
 
@@ -67,9 +75,8 @@ export function formatHeaderDate(value: Date = new Date()): string {
  * an `Invalid Date`.
  */
 export function formatDayMonth(iso: string | null | undefined): string {
-  if (iso === null || iso === undefined) return "—";
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "—";
+  const date = parseTimestamp(iso);
+  if (date === null) return "—";
   const months = [
     "Jan",
     "Feb",
@@ -105,10 +112,9 @@ export function formatElapsed(
   fromIso: string | null | undefined,
   toIso: string | null | undefined,
 ): string | null {
-  if (!fromIso || !toIso) return null;
-  const from = new Date(fromIso).getTime();
-  const to = new Date(toIso).getTime();
-  if (Number.isNaN(from) || Number.isNaN(to) || to < from) return null;
+  const from = parseTimestamp(fromIso)?.getTime();
+  const to = parseTimestamp(toIso)?.getTime();
+  if (from === undefined || to === undefined || to < from) return null;
   return formatDurationMs(to - from);
 }
 
@@ -120,13 +126,25 @@ export interface AssistantMeta {
    */
   model?: string | null;
   durationMs?: number;
-  tokensIn?: number;
-  tokensOut?: number;
+  /**
+   * `null` is the daemon saying it has no count for this row — a slash
+   * command, or anything that never ran a model. Absent is the field not
+   * being served at all. Neither is zero (G4).
+   */
+  tokensIn?: number | null;
+  tokensOut?: number | null;
 }
 
 /**
  * The assistant header's meta line. Segments are omitted, never zeroed: the
  * daemon leaves fields off a `done` frame it has nothing to say about.
+ *
+ * The token segment has a third case. `tokens_in`/`tokens_out` are served as
+ * an explicit `null` for a row with no counts, and `null ?? 0` printed
+ * `0/0 tok` under every assistant row in the transcript — a measurement that
+ * was never taken, rendered as one that came out zero. A row the daemon has
+ * counts for prints them; a row it explicitly has none for prints `— tok`; a
+ * row that carries no such field at all prints no segment.
  */
 export function assistantMetaLine(meta: AssistantMeta): string | null {
   const parts: string[] = [];
@@ -136,8 +154,12 @@ export function assistantMetaLine(meta: AssistantMeta): string | null {
   if (meta.durationMs !== undefined) {
     parts.push(formatDurationMs(meta.durationMs));
   }
-  if (meta.tokensIn !== undefined || meta.tokensOut !== undefined) {
+  const counted =
+    typeof meta.tokensIn === "number" || typeof meta.tokensOut === "number";
+  if (counted) {
     parts.push(`${meta.tokensIn ?? 0}/${meta.tokensOut ?? 0} tok`);
+  } else if (meta.tokensIn !== undefined || meta.tokensOut !== undefined) {
+    parts.push("— tok");
   }
   return parts.length === 0 ? null : parts.join(" · ");
 }

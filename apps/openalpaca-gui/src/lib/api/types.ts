@@ -199,8 +199,14 @@ export interface ChatMessage {
    * path's no-router echo) that never ran a model at all.
    */
   model?: string | null;
-  tokens_in?: number;
-  tokens_out?: number;
+  /**
+   * The turn's token counts, summed over every round of the loop that
+   * answered it (G4, `gateway/persistence.rs`). An explicit `null` is the
+   * daemon saying this row has none — a slash command, or any answer that
+   * never ran a model — and is rendered as `—`, never as `0`.
+   */
+  tokens_in?: number | null;
+  tokens_out?: number | null;
   duration_ms?: number;
   created_at: string;
   attachments?: AttachmentDisplay[];

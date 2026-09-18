@@ -31,22 +31,17 @@ import {
   type UiStatus,
 } from "@/components/ui";
 import type { ParsedOutcome, Task } from "@/lib/api/types";
+import { parseTimestamp } from "@/lib/time";
 
 // ── Timestamps ──────────────────────────────────────────────────────────────
 
 /**
- * The daemon serializes `DateTime<Utc>`, i.e. RFC 3339 with a `Z`. Older rows
- * written as `"YYYY-MM-DD HH:MM:SS"` have no timezone and would be parsed as
- * local time by `Date`, so they are normalised to UTC first.
+ * Re-exported so this module's own callers keep their import (`ParallelWork`,
+ * the run rows). The parser itself is `lib/time.ts` now — every clock in the
+ * window shares it, because a zone-less daemon stamp read as local time is the
+ * same bug wherever it is read (G3).
  */
-export function parseTimestamp(value: string | null | undefined): Date | null {
-  if (value === null || value === undefined || value.trim() === "") return null;
-  let text = value.trim();
-  if (!text.includes("T") && text.includes(" ")) text = text.replace(" ", "T");
-  if (!/(Z|[+-]\d{2}:?\d{2})$/.test(text)) text = `${text}Z`;
-  const date = new Date(text);
-  return Number.isNaN(date.getTime()) ? null : date;
-}
+export { parseTimestamp };
 
 const pad2 = (n: number): string => String(Math.floor(n)).padStart(2, "0");
 

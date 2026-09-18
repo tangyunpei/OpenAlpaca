@@ -29,6 +29,7 @@ import type {
   MessageArtifact,
 } from "@/lib/api/types";
 import type { ChatStreamState } from "@/lib/chat-stream";
+import { timestampMs } from "@/lib/time";
 
 /**
  * The chat prefix the orchestrator strips. This client no longer *sends* it —
@@ -193,10 +194,18 @@ interface Slot {
   item: TranscriptItem;
 }
 
+/**
+ * Where a row sorts. Unreadable or absent sorts last, which is where a row
+ * with no time belongs in a transcript.
+ *
+ * `timestampMs` and not `Date.parse`: a persisted message carries SQLite's
+ * zone-less UTC, and reading it as local time put every stored row *hours
+ * ahead* of the `Z`-stamped rows this client makes itself — so the message the
+ * user had just sent sorted above the entire conversation and read as lost
+ * until the turn finished (G5, a symptom of G3).
+ */
 function timestamp(value: string | null | undefined): number {
-  if (!value) return Number.MAX_SAFE_INTEGER;
-  const parsed = new Date(value).getTime();
-  return Number.isNaN(parsed) ? Number.MAX_SAFE_INTEGER : parsed;
+  return timestampMs(value) ?? Number.MAX_SAFE_INTEGER;
 }
 
 function toAttachments(

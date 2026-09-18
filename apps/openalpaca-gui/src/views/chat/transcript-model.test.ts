@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import {
   chatStreamReducer,
@@ -511,5 +511,70 @@ describe("the run link and artifact chips (GAP-23)", () => {
       }),
     );
     expect(items[0]).toMatchObject({ kind: "assistant", runId: null });
+  });
+});
+
+/**
+ * G5 — the just-sent message was invisible while the turn was in flight.
+ *
+ * It was never dropped: a persisted row carries SQLite's zone-less UTC, which
+ * `new Date` read as *local* time, so in Los Angeles every stored row sorted
+ * seven hours ahead of the `Z`-stamped pending row this client makes itself.
+ * The optimistic bubble was therefore rendered above the whole conversation,
+ * off screen, and appeared "only when the turn finished" — when history caught
+ * up and the bubble was retired.
+ *
+ * Runs off UTC, because on UTC the bug does not exist.
+ */
+describe("a turn in flight, read from a timezone (G5)", () => {
+  beforeAll(() => {
+    vi.stubEnv("TZ", "America/Los_Angeles");
+  });
+  afterAll(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("puts the message the user just sent at the end of the transcript", () => {
+    const items = buildTranscript(
+      input({
+        history: [
+          // Two persisted turns, as `GET /v1/chat/history` serves them.
+          message({
+            id: 1,
+            role: "user",
+            content: "…60",
+            created_at: "2026-09-18 17:05:12",
+          }),
+          message({
+            id: 2,
+            role: "assistant",
+            content: "sixty",
+            created_at: "2026-09-18 17:05:20",
+          }),
+        ],
+        // …and the turn being sent right now, a client-made ISO stamp.
+        pending: {
+          text: "and the next one?",
+          sent: "and the next one?",
+          at: "2026-09-18T17:06:00.000Z",
+          steer: null,
+        },
+        stream: drive(OPEN),
+      }),
+    );
+
+    expect(items.map((item) => item.kind)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "assistant",
+    ]);
+    const pendingRow = items[2];
+    expect(pendingRow?.kind === "user" && pendingRow.text).toBe(
+      "and the next one?",
+    );
+    // The live assistant row is last, which is what the user watches.
+    const live = items[3];
+    expect(live?.kind === "assistant" && live.streamPhase).toBe("thinking");
   });
 });

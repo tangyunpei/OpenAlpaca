@@ -5,11 +5,18 @@
  * `lib/unavailable.ts`.
  */
 
-/** The design's `29 Aug` conversation stamp. */
+import { parseTimestamp } from "@/lib/time";
+
+/**
+ * The design's `29 Aug` conversation stamp.
+ *
+ * Parsed through `lib/time`: a conversation row's `updated_at` is SQLite's
+ * zone-less UTC, and reading it as local time moved it a day for anyone west
+ * of Greenwich after 16:00 UTC (G3).
+ */
 export function shortDate(iso: string | null | undefined): string {
-  if (iso === null || iso === undefined) return "—";
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "—";
+  const date = parseTimestamp(iso);
+  if (date === null) return "—";
   return `${date.getDate()} ${date.toLocaleString("en-GB", { month: "short" })}`;
 }
 
@@ -19,15 +26,14 @@ export function shortDate(iso: string | null | undefined): string {
  * daemon's start; the stamp says so by carrying the day as well as the clock.
  */
 export function whenStamp(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "—";
+  if (parseTimestamp(iso) === null) return "—";
   return `${shortDate(iso)} ${timeOfDay(iso)}`;
 }
 
 /** `14:22:41` — the design's time-of-day stamp for log rows. */
 export function timeOfDay(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "—";
+  const date = parseTimestamp(iso);
+  if (date === null) return "—";
   return date.toLocaleTimeString("en-GB", { hour12: false });
 }
 

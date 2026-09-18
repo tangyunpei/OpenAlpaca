@@ -55,6 +55,31 @@ describe("assistantMetaLine — 1:1 with the SSE `done` payload", () => {
     expect(assistantMetaLine({})).toBeNull();
   });
 
+  /**
+   * G4 — every assistant row in the transcript read `0/0 tok`. The counts are
+   * served as an explicit `null` for a row that has none, and `null ?? 0`
+   * turned "not measured" into "measured zero" under every answer on screen.
+   */
+  it("prints a dash for counts the daemon says it does not have", () => {
+    expect(
+      assistantMetaLine({
+        model: "qwen3:8b",
+        durationMs: 4200,
+        tokensIn: null,
+        tokensOut: null,
+      }),
+    ).toBe("qwen3:8b · 4.2s · — tok");
+
+    // A real count is still a count, zero included: a turn that really used
+    // no input tokens is not the same fact as one nobody counted.
+    expect(assistantMetaLine({ tokensIn: 0, tokensOut: 0 })).toBe("0/0 tok");
+    expect(assistantMetaLine({ tokensIn: 2279, tokensOut: null })).toBe(
+      "2279/0 tok",
+    );
+    // A daemon that serves no such field at all still gets no segment.
+    expect(assistantMetaLine({ model: "qwen3:8b" })).toBe("qwen3:8b");
+  });
+
   it("does not throw on `model: null` (every row before GAP-13, and every template answer) — omits the segment", () => {
     expect(
       assistantMetaLine({
