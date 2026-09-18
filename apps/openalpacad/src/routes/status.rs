@@ -116,10 +116,18 @@ pub struct StatusResponse {
 /// of showing a picker that disagrees with every answer.
 #[derive(Debug, Serialize)]
 pub struct LlmStatus {
-    /// `[orchestrator] model`, as the router holds it.
-    pub default_model: String,
+    /// `[orchestrator] model` when the owner configured one (M8).
+    ///
+    /// `null` — never `""` — on an install that has never named a default,
+    /// which is every Ollama-only install: the seeded template leaves
+    /// `[orchestrator] model` empty on purpose (L4), and an empty string is
+    /// not a model id. A client that renders this verbatim would show a
+    /// picker set to nothing; `null` is the fact it can act on, and
+    /// `effective_default_model` says what will really answer.
+    pub default_model: Option<String>,
     /// Whether that model is routable right now: a provider is loaded, holds
-    /// it, and is enabled.
+    /// it, and is enabled. `false` when nothing is configured — nothing
+    /// configured is nothing routable.
     pub default_model_routable: bool,
     /// What a request naming no model would actually be answered by — the
     /// configured default when it is routable, otherwise the first rung of the
@@ -310,9 +318,13 @@ fn status_response(inputs: &StatusInputs<'_>, headers: &HeaderMap) -> Response {
         },
         routing: RoutingStatus::from(&inputs.routing_config),
         llm: inputs.llm_router.map(|router| {
-            let default_model = router.default_model();
+            // M8: the *configured* default, which an install that named none
+            // does not have. `default_model()` would answer `""` there.
+            let default_model = router.configured_default_model();
             LlmStatus {
-                default_model_routable: router.is_routable(&default_model),
+                default_model_routable: default_model
+                    .as_deref()
+                    .is_some_and(|m| router.is_routable(m)),
                 effective_default_model: router.effective_default_model(),
                 default_model,
             }

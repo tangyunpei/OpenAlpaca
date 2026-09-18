@@ -469,3 +469,49 @@ enabled = false
     assert_eq!(body["llm"]["default_model_routable"], false);
     assert!(body["llm"]["effective_default_model"].is_null());
 }
+
+/// **M8.** An Ollama-only install has never named `[orchestrator] model` —
+/// the seeded template leaves it empty (L4) — and the empty string is not a
+/// model id. It is reported as `null`, with `effective_default_model` naming
+/// the discovered model that will actually answer.
+#[tokio::test]
+async fn an_unset_default_model_is_null_not_an_empty_string() {
+    let tmp = TempDir::new().unwrap();
+    let _guard = HomeStoreGuard::set(&tmp.path().join(".openalpaca"));
+    let db = test_db(&tmp);
+
+    let config_path = tmp.path().join("llm.toml");
+    std::fs::write(
+        &config_path,
+        r#"[orchestrator]
+model = ""
+
+[providers.ollama]
+enabled = true
+base_url = "http://127.0.0.1:1/v1"
+
+[models."qwen3:8b"]
+provider = "ollama"
+context = 32768
+"#,
+    )
+    .unwrap();
+    let router = openalpaca_llm::build_router(&config_path).expect("router");
+
+    let mut ins = inputs(&db, Utc::now());
+    ins.llm_router = Some(&router);
+    let body = body_of(status_response(&ins, &headers_with(None))).await;
+
+    assert!(
+        body["llm"]["default_model"].is_null(),
+        "an install with no configured default must not serialise \"\": {body}"
+    );
+    assert_eq!(
+        body["llm"]["default_model_routable"], false,
+        "nothing configured is nothing routable"
+    );
+    assert_eq!(
+        body["llm"]["effective_default_model"], "qwen3:8b",
+        "…and the ladder still says what will answer: {body}"
+    );
+}
