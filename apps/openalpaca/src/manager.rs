@@ -295,6 +295,7 @@ fn resolve_daemon_launch_from_inputs(
         return Ok(DaemonLaunch::Binary(path));
     }
 
+    let current_exe = real_path(current_exe);
     let exe_dir = current_exe
         .parent()
         .context("Current executable has no parent directory")?;
@@ -319,7 +320,7 @@ fn resolve_daemon_launch_from_inputs(
         return Ok(DaemonLaunch::Binary(path));
     }
 
-    if let Some(workspace_root) = find_workspace_root(current_exe, "apps/openalpacad/Cargo.toml") {
+    if let Some(workspace_root) = find_workspace_root(&current_exe, "apps/openalpacad/Cargo.toml") {
         return Ok(DaemonLaunch::CargoRun { workspace_root });
     }
 
@@ -361,7 +362,7 @@ fn resolve_gui_launch_from_inputs(
     }
 
     if let Some(workspace_root) =
-        find_workspace_root(current_exe, "apps/openalpaca-gui/package.json")
+        find_workspace_root(&real_path(current_exe), "apps/openalpaca-gui/package.json")
     {
         return Ok(GuiLaunch::DevTauri { workspace_root });
     }
@@ -370,6 +371,23 @@ fn resolve_gui_launch_from_inputs(
         "Unable to locate GUI app bundle. Checked {}, ~/Applications, and /Applications.",
         GUI_APP_ENV
     );
+}
+
+/// The executable's own path, with every symlink on the way followed (L10).
+///
+/// `std::env::current_exe()` answers with the path the process was *launched
+/// through*, symlink and all. `install.sh` puts nothing but a link in
+/// `~/.local/bin` and leaves the real CLI in `$PREFIX/bin`, beside
+/// `$PREFIX/libexec/openalpacad` — so resolving from the link's own directory,
+/// every probe below (colocated, `../libexec`, the workspace walk-up) looks in
+/// `~/.local/bin`, finds nothing, and `openalpaca daemon start` fails on an
+/// installation that is perfectly correct.
+///
+/// A path that cannot be canonicalized — deleted under us, or a permission the
+/// process does not have — is used exactly as it came: worse resolution is a
+/// better answer than none.
+fn real_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn daemon_binary_name() -> &'static str {
@@ -567,11 +585,14 @@ mod tests {
     #[test]
     fn daemon_resolution_prefers_env_then_colocated_then_libexec_then_path() {
         let root = tempfile::TempDir::new().unwrap();
-        let current_exe = root.path().join("bin/openalpaca");
-        let env_daemon = root.path().join("env/openalpacad");
-        let colocated = root.path().join("bin/openalpacad");
-        let libexec = root.path().join("libexec/openalpacad");
-        let path_daemon = root.path().join("path/openalpacad");
+        // Canonical, because the resolution follows symlinks now (L10) and a
+        // macOS temp root lives under one (`/var` → `/private/var`).
+        let root = root.path().canonicalize().unwrap();
+        let current_exe = root.join("bin/openalpaca");
+        let env_daemon = root.join("env/openalpacad");
+        let colocated = root.join("bin/openalpacad");
+        let libexec = root.join("libexec/openalpacad");
+        let path_daemon = root.join("path/openalpacad");
 
         touch_executable(&current_exe);
         touch_executable(&env_daemon);
@@ -608,13 +629,13 @@ mod tests {
     #[test]
     fn daemon_resolution_uses_dev_fallback_when_workspace_exists() {
         let root = tempfile::TempDir::new().unwrap();
-        let current_exe = root.path().join("target/debug/openalpaca");
+        let root = root.path().canonicalize().unwrap();
+        let current_exe = root.join("target/debug/openalpaca");
         touch_executable(&current_exe);
-        fs::write(root.path().join("Cargo.toml"), "[workspace]\n")
-            .expect("write workspace manifest");
-        fs::create_dir_all(root.path().join("apps/openalpacad")).expect("apps dir");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write workspace manifest");
+        fs::create_dir_all(root.join("apps/openalpacad")).expect("apps dir");
         fs::write(
-            root.path().join("apps/openalpacad/Cargo.toml"),
+            root.join("apps/openalpacad/Cargo.toml"),
             "[package]\nname=\"openalpacad\"\n",
         )
         .expect("write daemon manifest");
@@ -624,7 +645,72 @@ mod tests {
         assert_eq!(
             launch,
             DaemonLaunch::CargoRun {
-                workspace_root: root.path().to_path_buf()
+                workspace_root: root
+            }
+        );
+    }
+
+    /// L10: `install.sh` symlinks only the CLI into `~/.local/bin` and leaves
+    /// the daemon in `$PREFIX/libexec`. Resolving from the *link's* directory,
+    /// every probe misses and `openalpaca daemon start` fails on a correct
+    /// installation — the failure a probe compiled on this Mac confirmed.
+    #[test]
+    fn the_daemon_is_found_through_the_symlink_the_installer_puts_on_path() {
+        let root = tempfile::TempDir::new().unwrap();
+        let root = root.path().canonicalize().unwrap();
+
+        // The installer's layout: the real CLI and the daemon under $PREFIX,
+        // and nothing in ~/.local/bin but a link.
+        let real_cli = root.join("prefix/bin/openalpaca");
+        let libexec = root.join("prefix/libexec/openalpacad");
+        touch_executable(&real_cli);
+        touch_executable(&libexec);
+
+        let path_bin = root.join("local/bin");
+        fs::create_dir_all(&path_bin).expect("PATH dir");
+        let linked_cli = path_bin.join("openalpaca");
+        std::os::unix::fs::symlink(&real_cli, &linked_cli).expect("symlink the CLI");
+
+        let launch = resolve_daemon_launch_from_inputs(&linked_cli, None, None)
+            .expect("the daemon is beside the CLI the link points at");
+        assert_eq!(launch, DaemonLaunch::Binary(libexec));
+    }
+
+    /// The same link, for the GUI's own walk-up: a dev checkout reached
+    /// through a symlinked CLI still finds its workspace.
+    #[test]
+    fn the_gui_workspace_is_found_through_a_symlinked_cli() {
+        let root = tempfile::TempDir::new().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        // The checkout is *not* an ancestor of the link, so the walk-up only
+        // reaches it by following the link first.
+        let checkout = root.join("checkout");
+        let real_cli = checkout.join("target/debug/openalpaca");
+        touch_executable(&real_cli);
+        fs::write(checkout.join("Cargo.toml"), "[workspace]\n").expect("write workspace manifest");
+        fs::create_dir_all(checkout.join("apps/openalpaca-gui")).expect("gui dir");
+        fs::write(
+            checkout.join("apps/openalpaca-gui/package.json"),
+            "{ \"name\": \"openalpaca-gui\" }\n",
+        )
+        .expect("write gui package");
+
+        let path_bin = root.join("local/bin");
+        fs::create_dir_all(&path_bin).expect("PATH dir");
+        let linked_cli = path_bin.join("openalpaca");
+        std::os::unix::fs::symlink(&real_cli, &linked_cli).expect("symlink the CLI");
+
+        let launch = resolve_gui_launch_from_inputs(
+            &linked_cli,
+            None,
+            Some(root.join("home")),
+            &root.join("system/openalpaca-gui.app"),
+        )
+        .expect("dev fallback through the link");
+        assert_eq!(
+            launch,
+            GuiLaunch::DevTauri {
+                workspace_root: checkout
             }
         );
     }
@@ -667,13 +753,13 @@ mod tests {
     #[test]
     fn gui_resolution_uses_dev_fallback_when_workspace_exists() {
         let root = tempfile::TempDir::new().unwrap();
-        let current_exe = root.path().join("target/debug/openalpaca");
+        let root = root.path().canonicalize().unwrap();
+        let current_exe = root.join("target/debug/openalpaca");
         touch_executable(&current_exe);
-        fs::write(root.path().join("Cargo.toml"), "[workspace]\n")
-            .expect("write workspace manifest");
-        fs::create_dir_all(root.path().join("apps/openalpaca-gui")).expect("gui dir");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write workspace manifest");
+        fs::create_dir_all(root.join("apps/openalpaca-gui")).expect("gui dir");
         fs::write(
-            root.path().join("apps/openalpaca-gui/package.json"),
+            root.join("apps/openalpaca-gui/package.json"),
             "{ \"name\": \"openalpaca-gui\" }\n",
         )
         .expect("write gui package");
@@ -681,14 +767,14 @@ mod tests {
         let launch = resolve_gui_launch_from_inputs(
             &current_exe,
             None,
-            Some(root.path().join("home")),
-            &root.path().join("system/openalpaca-gui.app"),
+            Some(root.join("home")),
+            &root.join("system/openalpaca-gui.app"),
         )
         .expect("dev fallback");
         assert_eq!(
             launch,
             GuiLaunch::DevTauri {
-                workspace_root: root.path().to_path_buf()
+                workspace_root: root
             }
         );
     }
