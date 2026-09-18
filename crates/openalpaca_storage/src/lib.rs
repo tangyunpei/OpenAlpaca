@@ -40,6 +40,7 @@ pub use repository::{
     FileAssetRepository, FollowupRecord, FollowupRepository, IdentityRepository,
     LlmUsageRepository, MemoryRepository,
     MessageFeedbackRepository, OrchestratorLatencyRepository, PreferenceRepository,
+    ProducedArtifact,
     SESSION_ACTIVE, SESSION_ARCHIVED, SessionFilter, SkillExecutionRepository, StorageBytes,
     SubAgentRepository, SubagentSpanRepository, TaskRepository, resolve_skill_key,
 };

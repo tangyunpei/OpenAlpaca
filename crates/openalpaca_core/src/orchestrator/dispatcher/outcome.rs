@@ -71,6 +71,71 @@ pub(super) async fn update_state_with_retry(
     false
 }
 
+/// Add the artifacts the run really produced to an outcome, and reclassify it
+/// (M4).
+///
+/// `TaskState.steps[].artifact_pointers` only ever knew about the pipeline
+/// shapes that wrote them; the lead-agent topology writes files through
+/// `artifact_write`, which records them in `file_assets` under the run's
+/// `task_id` — for the lead itself and for every subagent of the run alike.
+/// A run that produced three files therefore reported `artifact_count: 0`,
+/// `outcome_kind: "text_only"` and "No artifacts were produced.".
+///
+/// The store is the authority: anything it holds for the run that the state
+/// did not already name is appended, in the order it was written. Kept pure —
+/// no DB, no clock — so the classification rules are testable on their own.
+fn merge_produced_artifacts(
+    outcome: &mut TaskOutcome,
+    produced: Vec<openalpaca_storage::ProducedArtifact>,
+    has_text_summary: bool,
+) {
+    for file in produced {
+        let already_named = outcome
+            .artifacts
+            .iter()
+            .any(|a| a.file_asset_id.as_deref() == Some(file.id.as_str()));
+        if already_named {
+            continue;
+        }
+        outcome.artifacts.push(crate::orchestrator::task_state::ArtifactPointer {
+            key: file.filename.clone(),
+            label: file.filename,
+            agent_id: file.agent_id.unwrap_or_default(),
+            // Not a pipeline step: the lead-agent topology has none.
+            step_order: -1,
+            file_asset_id: Some(file.id),
+        });
+    }
+
+    if outcome.artifacts.is_empty() {
+        return;
+    }
+    outcome.no_artifact_reason = None;
+    // A failed run keeps saying so — it may well have produced something
+    // before it failed, and that is not what the reader needs to know first.
+    if outcome.outcome_kind != OutcomeKind::Failed {
+        outcome.outcome_kind = if has_text_summary {
+            OutcomeKind::Mixed
+        } else {
+            OutcomeKind::ArtifactOnly
+        };
+    }
+}
+
+/// The artifacts `file_assets` holds for this run, or none when it cannot be
+/// read — a failed read costs the count, never the finalisation.
+fn produced_artifacts(
+    db: &openalpaca_storage::Database,
+    task_id: &str,
+) -> Vec<openalpaca_storage::ProducedArtifact> {
+    openalpaca_storage::FileAssetRepository::new(db)
+        .produced_for_task(task_id)
+        .unwrap_or_else(|e| {
+            tracing::warn!(task_id, "Failed to read the run's produced artifacts: {e}");
+            Vec::new()
+        })
+}
+
 /// Build a structured TaskOutcome from the current task state.
 ///
 /// Reads the task's state_json from the DB (if available), uses it to collect
@@ -78,6 +143,11 @@ pub(super) async fn update_state_with_retry(
 ///
 /// If state_json is unavailable (lead agent with no state, legacy tasks),
 /// falls back to constructing a minimal outcome from the provided content.
+///
+/// Either way the files the run recorded in `file_assets` are merged in
+/// (M4) — the state's pointers are what the *pipeline* shapes wrote down, and
+/// on the lead-agent topology they are empty however many artifacts the run
+/// produced.
 pub(super) fn build_task_outcome(
     db: Option<&openalpaca_storage::Database>,
     task_id: &str,
@@ -104,6 +174,14 @@ pub(super) fn build_task_outcome(
                                 format!("{}\n\n{}", final_content, outcome.summary);
                         }
                     }
+                    let has_summary = !outcome.summary.is_empty()
+                        && outcome.summary != "Task completed."
+                        && outcome.summary != "Task failed.";
+                    merge_produced_artifacts(
+                        &mut outcome,
+                        produced_artifacts(db, task_id),
+                        has_summary,
+                    );
                     return outcome;
                 }
             }
@@ -117,7 +195,7 @@ pub(super) fn build_task_outcome(
         final_content.to_string()
     };
 
-    if success {
+    let mut outcome = if success {
         TaskOutcome {
             summary,
             outcome_kind: OutcomeKind::TextOnly,
@@ -131,7 +209,14 @@ pub(super) fn build_task_outcome(
             artifacts: Vec::new(),
             no_artifact_reason: None,
         }
+    };
+    if let Some(db) = db {
+        // The lead agent's ordinary path: no `state_json`, a report as the
+        // summary, and every artifact of the run in the store.
+        let has_summary = !final_content.trim().is_empty();
+        merge_produced_artifacts(&mut outcome, produced_artifacts(db, task_id), has_summary);
     }
+    outcome
 }
 
 /// Log warnings for inconsistent terminal task states.

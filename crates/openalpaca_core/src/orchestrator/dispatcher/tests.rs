@@ -351,6 +351,135 @@ fn test_build_task_outcome_empty_content_failure() {
     assert_eq!(outcome.summary, "Task failed.");
 }
 
+// ── M4: a run's artifacts are the ones it recorded ──────────────────
+
+/// A run row plus one file `artifact_write` recorded against it. The columns
+/// are set the way the artifact store sets them — `origin = 'produced'` and
+/// the run's `task_id` — because those two are what the accounting reads.
+fn run_with_produced_file(db: &Database, task_id: &str, file_id: &str, agent_id: &str) {
+    db.with_connection(|conn| {
+        conn.execute(
+            "INSERT OR IGNORE INTO task (id, title, created_by, source_lane)
+             VALUES (?1, 'A run', 'user1', 'user1:cli')",
+            [task_id],
+        )?;
+        conn.execute(
+            "INSERT INTO file_assets
+                (id, owner_id, sha256, filename, mime_type, size_bytes, storage_path,
+                 status, origin, kind, task_id, agent_id)
+             VALUES (?1, 'user1', 'sha', ?2, 'text/markdown', 12, '/tmp/x.md',
+                     'ready', 'produced', 'markdown', ?3, ?4)",
+            [
+                file_id,
+                format!("{file_id}.md").as_str(),
+                task_id,
+                agent_id,
+            ],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// **M4.** A lead-agent run has no `state_json` artifact pointers — the
+/// topology writes files through `artifact_write`, which records them in
+/// `file_assets`. The outcome used to say `text_only`, `artifact_count: 0`
+/// and "No artifacts were produced." for a run whose artifact was sitting in
+/// the store under its own task id.
+#[test]
+fn a_runs_own_artifact_is_counted_at_finalisation() {
+    use super::build_task_outcome;
+    use openalpaca_storage::OutcomeKind;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    run_with_produced_file(&db, "task-1", "01-alpaca-facts", "lead_agent::a1");
+
+    let outcome = build_task_outcome(Some(&db), "task-1", "Here is the report.", true);
+
+    assert_eq!(outcome.artifacts.len(), 1, "{outcome:?}");
+    assert_eq!(
+        outcome.artifacts[0].file_asset_id.as_deref(),
+        Some("01-alpaca-facts")
+    );
+    assert_eq!(outcome.artifacts[0].label, "01-alpaca-facts.md");
+    assert_eq!(
+        outcome.outcome_kind,
+        OutcomeKind::Mixed,
+        "a report plus a file is both"
+    );
+    assert!(
+        outcome.no_artifact_reason.is_none(),
+        "…and nothing claims none were produced"
+    );
+}
+
+/// **M4 addendum.** The same when a *subagent* of the run wrote it: the file
+/// carries the run's task id whichever lane produced it.
+#[test]
+fn a_subagents_artifact_is_counted_too() {
+    use super::build_task_outcome;
+    use openalpaca_storage::OutcomeKind;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    run_with_produced_file(&db, "task-1", "01-notes", "writing_agent::b2");
+
+    let outcome = build_task_outcome(Some(&db), "task-1", "", true);
+
+    assert_eq!(outcome.artifacts.len(), 1);
+    assert_eq!(outcome.artifacts[0].agent_id, "writing_agent::b2");
+    assert_eq!(
+        outcome.outcome_kind,
+        OutcomeKind::ArtifactOnly,
+        "no report of its own, but a file: {outcome:?}"
+    );
+}
+
+/// A run that produced nothing still says so — the merge adds facts, it does
+/// not invent them.
+#[test]
+fn a_run_that_produced_nothing_still_says_so() {
+    use super::build_task_outcome;
+    use openalpaca_storage::OutcomeKind;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    db.with_connection(|conn| {
+        conn.execute(
+            "INSERT INTO task (id, title, created_by, source_lane)
+             VALUES ('task-1', 'A run', 'user1', 'user1:cli')",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let outcome = build_task_outcome(Some(&db), "task-1", "Answered in chat.", true);
+    assert!(outcome.artifacts.is_empty());
+    assert_eq!(outcome.outcome_kind, OutcomeKind::TextOnly);
+    assert_eq!(
+        outcome.no_artifact_reason.as_deref(),
+        Some("No artifacts were produced.")
+    );
+}
+
+/// A failed run keeps saying it failed, even when it produced a file before
+/// it did.
+#[test]
+fn a_failed_run_with_a_file_is_still_failed() {
+    use super::build_task_outcome;
+    use openalpaca_storage::OutcomeKind;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    run_with_produced_file(&db, "task-1", "01-partial", "lead_agent::a1");
+
+    let outcome = build_task_outcome(Some(&db), "task-1", "Network timeout", false);
+    assert_eq!(outcome.outcome_kind, OutcomeKind::Failed);
+    assert_eq!(outcome.artifacts.len(), 1, "what it made is still recorded");
+}
+
 // ── Pipeline end-to-end: non-singleton agent + workspace artifact ────
 
 /// Mock LLM provider for e2e pipeline tests.

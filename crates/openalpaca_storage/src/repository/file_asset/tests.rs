@@ -346,3 +346,62 @@ fn produced_ids_for_task_skips_uploads_and_other_runs() {
     );
     assert!(repo.produced_ids_for_task("task-none").unwrap().is_empty());
 }
+
+/// **M4.** The same rows, with the fields an outcome pointer needs — and the
+/// same two exclusions: an upload the user attached during the run, and
+/// another run's output.
+#[test]
+fn produced_for_task_reads_the_runs_own_output() {
+    let db = test_db();
+    let repo = FileAssetRepository::new(&db);
+    repo.insert(&asset("produced-1", 10)).unwrap();
+    repo.insert(&asset("elsewhere", 20)).unwrap();
+    repo.insert(&asset("upload-1", 30)).unwrap();
+    produced_by(&db, "produced-1", "task-1", "markdown");
+    produced_by(&db, "elsewhere", "task-2", "markdown");
+    db.with_connection(|conn| {
+        conn.execute(
+            "UPDATE file_assets SET task_id = 'task-1' WHERE id = 'upload-1'",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE file_assets SET agent_id = 'writing_agent::a1' WHERE id = 'produced-1'",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let produced = repo.produced_for_task("task-1").unwrap();
+    assert_eq!(produced.len(), 1, "{produced:?}");
+    assert_eq!(produced[0].id, "produced-1");
+    assert_eq!(produced[0].filename, "produced-1.md");
+    assert_eq!(produced[0].agent_id.as_deref(), Some("writing_agent::a1"));
+    assert!(repo.produced_for_task("task-none").unwrap().is_empty());
+}
+
+/// **M4.** The grouped count a page of runs is read with: one query, a run
+/// with nothing produced simply absent.
+#[test]
+fn produced_counts_cover_a_page_of_runs() {
+    let db = test_db();
+    let repo = FileAssetRepository::new(&db);
+    repo.insert(&asset("produced-1", 10)).unwrap();
+    repo.insert(&asset("produced-2", 20)).unwrap();
+    repo.insert(&asset("elsewhere", 30)).unwrap();
+    produced_by(&db, "produced-1", "task-1", "markdown");
+    produced_by(&db, "produced-2", "task-1", "code");
+    produced_by(&db, "elsewhere", "task-2", "markdown");
+
+    let counts = repo
+        .produced_counts_for_tasks(&[
+            "task-1".to_string(),
+            "task-2".to_string(),
+            "task-3".to_string(),
+        ])
+        .unwrap();
+    assert_eq!(counts.get("task-1"), Some(&2));
+    assert_eq!(counts.get("task-2"), Some(&1));
+    assert_eq!(counts.get("task-3"), None, "a run with no output is absent");
+    assert!(repo.produced_counts_for_tasks(&[]).unwrap().is_empty());
+}

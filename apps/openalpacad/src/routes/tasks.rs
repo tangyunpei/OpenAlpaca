@@ -31,14 +31,15 @@ use openalpaca_core::context::SharedContext;
 use openalpaca_core::daemon_config::RoutingConfig;
 use openalpaca_core::events::SystemEvent;
 use openalpaca_core::orchestrator::{
-    Orchestrator, TaskActionError, TaskLaunchError, apply_task_action, parse_outcome,
+    Orchestrator, ParsedOutcomeFields, TaskActionError, TaskLaunchError, apply_task_action,
+    parse_outcome,
 };
 use openalpaca_core::runner::steering::{SteeringMsg, SteeringOrigin, SteeringPushError, push_steering};
 use openalpaca_core::security::confirmation::ConfirmationBroker;
 use openalpaca_core::security::policy::{Principal, Scope};
 use openalpaca_storage::{
-    Database, LlmUsageRepository, SPAN_DETAIL_INTERRUPTED, SubagentSpanRepository, Task,
-    TaskRepository, TaskStatus,
+    Database, FileAssetRepository, LlmUsageRepository, SPAN_DETAIL_INTERRUPTED,
+    SubagentSpanRepository, Task, TaskRepository, TaskStatus,
 };
 
 use super::chat_types::is_lane_owned_by;
@@ -234,10 +235,20 @@ pub async fn list_tasks_handler(
                     tracing::warn!("Failed to read subagent counts for task list: {e}");
                     Default::default()
                 });
+            // M4, the same shape again: one grouped query for the page, so a
+            // row's artifact count is what the store holds for that run.
+            let produced_counts = FileAssetRepository::new(&state.db)
+                .produced_counts_for_tasks(&task_ids)
+                .unwrap_or_else(|e| {
+                    tracing::warn!("Failed to read produced artifact counts for task list: {e}");
+                    Default::default()
+                });
             let summaries: Vec<TaskSummaryResponse> = tasks
                 .into_iter()
-                .map(|t| {
-                    let outcome = parse_outcome(&t);
+                .map(|mut t| {
+                    let mut outcome = parse_outcome(&t);
+                    let produced = produced_counts.get(&t.id).copied().unwrap_or(0);
+                    reconcile_artifact_count(&mut t, outcome.as_mut(), produced);
                     let cost_usd = costs.get(&t.id).copied().unwrap_or(0.0);
                     let subagent_count = subagent_counts.get(&t.id).copied().unwrap_or(0);
                     // R40 — an in-memory lookup per row (the registered inbox),
@@ -273,8 +284,19 @@ pub async fn get_task_handler(
     let repo = TaskRepository::new(&state.db);
 
     match repo.get(&id) {
-        Ok(Some(task)) => {
-            let outcome = parse_outcome(&task);
+        Ok(Some(mut task)) => {
+            let mut outcome = parse_outcome(&task);
+            // M4: what the run produced is what `file_assets` holds for it,
+            // whoever wrote it — the lead or a subagent — and whether or not
+            // the row's stored count was ever right.
+            let produced = FileAssetRepository::new(&state.db)
+                .produced_for_task(&id)
+                .map(|p| p.len() as i64)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(task_id = %id, "Failed to count produced artifacts: {e}");
+                    0
+                });
+            reconcile_artifact_count(&mut task, outcome.as_mut(), produced);
             let steerable =
                 is_steerable(&task, &state.gateway.shared_context, &state.local_user_id);
             (
@@ -297,6 +319,36 @@ pub async fn get_task_handler(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
         ),
+    }
+}
+
+/// Correct a run's artifact count against the store (M4).
+///
+/// `task.artifact_count` and the parsed outcome's copy of it are written at
+/// finalisation, from whatever the run's outcome knew then. A run still in
+/// flight has written none of it yet, and a run finalized by a build that
+/// counted only `TaskState`'s pointers wrote a zero although `file_assets`
+/// holds its output. Both are answered by counting the rows — the same rows
+/// the completion report links its chips from — at read time.
+///
+/// The stored number is never *lowered*: a finalisation that recorded
+/// artifacts the store no longer holds (a purged project) still describes what
+/// the run produced, and a read is not the place to erase that.
+fn reconcile_artifact_count(
+    task: &mut Task,
+    outcome: Option<&mut ParsedOutcomeFields>,
+    produced: i64,
+) {
+    let produced = i32::try_from(produced).unwrap_or(i32::MAX);
+    if produced <= task.artifact_count {
+        return;
+    }
+    task.artifact_count = produced;
+    if let Some(outcome) = outcome {
+        outcome.artifact_count = produced;
+        // The run produced something, so "No artifacts were produced." is no
+        // longer the truth about it.
+        outcome.no_artifact_reason = None;
     }
 }
 
@@ -1023,6 +1075,60 @@ mod tests {
             source_task_id: None,
             session_id: None,
         }
+    }
+
+    // ── M4: the read is corrected against the store ─────────────────
+
+    /// **M4.** A run finalized before the artifacts were counted — or one
+    /// still in flight — reports what `file_assets` holds for it, not the
+    /// zero its row was written with.
+    #[test]
+    fn a_read_counts_the_artifacts_the_store_holds() {
+        let mut task = make_test_task();
+        task.outcome_kind = Some(OutcomeKind::TextOnly);
+        task.artifact_count = 0;
+        task.outcome_json = Some(
+            serde_json::json!({
+                "summary": "Here is the report.",
+                "outcome_kind": "text_only",
+                "artifacts": [],
+                "no_artifact_reason": "No artifacts were produced."
+            })
+            .to_string(),
+        );
+        let mut outcome = parse_outcome(&task).expect("should parse");
+
+        reconcile_artifact_count(&mut task, Some(&mut outcome), 2);
+
+        assert_eq!(task.artifact_count, 2, "the row's count is corrected");
+        assert_eq!(outcome.artifact_count, 2, "and so is the outcome's");
+        assert!(
+            outcome.no_artifact_reason.is_none(),
+            "a run that produced two files did not produce none"
+        );
+    }
+
+    /// The stored number is never lowered: a finalisation that recorded three
+    /// artifacts still describes the run after a purge removed the rows.
+    #[test]
+    fn a_read_never_lowers_a_recorded_count() {
+        let mut task = make_test_task();
+        task.outcome_kind = Some(OutcomeKind::Mixed);
+        task.artifact_count = 3;
+        task.outcome_json = Some(
+            serde_json::json!({
+                "summary": "Three files.",
+                "outcome_kind": "mixed",
+                "artifacts": [{"key": "a", "label": "a", "agent_id": "x", "step_order": -1}]
+            })
+            .to_string(),
+        );
+        let mut outcome = parse_outcome(&task).expect("should parse");
+
+        reconcile_artifact_count(&mut task, Some(&mut outcome), 0);
+
+        assert_eq!(task.artifact_count, 3);
+        assert_eq!(outcome.artifact_count, 3);
     }
 
     #[test]

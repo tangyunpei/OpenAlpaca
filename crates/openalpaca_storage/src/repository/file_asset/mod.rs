@@ -46,6 +46,20 @@ pub struct FileAssetRepository<'a> {
     db: &'a Database,
 }
 
+/// One file a run produced, as the run's outcome accounting reads it (M4).
+///
+/// Three fields, because that is what an outcome pointer is made of: the id
+/// the Library opens, the name it shows, and the agent instance that wrote it
+/// — `NULL` for a row written by no agent in particular.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProducedArtifact {
+    pub id: String,
+    /// `file_assets.filename` — the head file's own name (`01-notes.md`).
+    pub filename: String,
+    /// The runtime instance that wrote it ("writing_agent::a1b2c3d4").
+    pub agent_id: Option<String>,
+}
+
 /// The two totals of §4.8's size accounting, read together.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct StorageBytes {
@@ -299,6 +313,63 @@ impl<'a> FileAssetRepository<'a> {
             }
             Ok(ids)
         })
+    }
+
+    /// What a run *produced*, oldest first — id, name and agent (M4).
+    ///
+    /// The same rows [`Self::produced_ids_for_task`] counts, with the two
+    /// fields an outcome pointer needs beside the id. This is the answer to
+    /// "what did this run make": `file_assets.task_id` is written by the one
+    /// artifact writer, for the lead and for every subagent of the run alike,
+    /// so it does not matter which lane produced the file.
+    pub fn produced_for_task(&self, task_id: &str) -> Result<Vec<ProducedArtifact>> {
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, filename, agent_id FROM file_assets
+                 WHERE task_id = ?1 AND origin != 'upload'
+                 ORDER BY created_at ASC, rowid ASC",
+            )?;
+            let mut produced = Vec::new();
+            let mut rows = stmt.query(rusqlite::params![task_id])?;
+            while let Some(row) = rows.next()? {
+                produced.push(ProducedArtifact {
+                    id: row.get(0)?,
+                    filename: row.get(1)?,
+                    agent_id: row.get(2)?,
+                });
+            }
+            Ok(produced)
+        })
+    }
+
+    /// How many artifacts each of these runs produced, in one query (M4).
+    ///
+    /// The grouped shape the task list needs: a page of runs costs one query,
+    /// not one per row. A run with no produced file is absent from the map,
+    /// which the caller reads as zero.
+    pub fn produced_counts_for_tasks(&self, task_ids: &[String]) -> Result<HashMap<String, i64>> {
+        let mut counts = HashMap::new();
+        if task_ids.is_empty() {
+            return Ok(counts);
+        }
+        // rusqlite has no array binding: one `?` per id, all bound. The page
+        // limit (`page_limit`) keeps this under SQLite's 999-variable cap.
+        let placeholders = std::iter::repeat_n("?", task_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.db.with_connection(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT task_id, COUNT(*) FROM file_assets
+                 WHERE origin != 'upload' AND task_id IN ({placeholders})
+                 GROUP BY task_id"
+            ))?;
+            let mut rows = stmt.query(rusqlite::params_from_iter(task_ids.iter()))?;
+            while let Some(row) = rows.next()? {
+                counts.insert(row.get(0)?, row.get(1)?);
+            }
+            Ok(())
+        })?;
+        Ok(counts)
     }
 
     /// List file assets by status, ordered by creation date (oldest first).
