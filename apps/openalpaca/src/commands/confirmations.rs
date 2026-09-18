@@ -229,12 +229,17 @@ fn answer_path(request_id: &str) -> String {
 }
 
 /// What an answered prompt prints.
+///
+/// It reports the **answer**, not the outcome: the tool runs on the daemon
+/// after this returns, and whether it then succeeded is the run's to say.
 fn answered_line(approved: bool, entire_tool: bool, tool_name: Option<&str>) -> String {
     let what = tool_name.unwrap_or("the tool call");
     match (approved, entire_tool) {
-        (true, true) => format!("Approved — {what}, and every later call of it this session."),
-        (true, false) => format!("Approved — {what} ran."),
-        (false, _) => format!("Denied — {what} was skipped and the agent was told so."),
+        (true, true) => {
+            format!("Approved — {what}, and every later call of it this session. The run continues.")
+        }
+        (true, false) => format!("Approved — {what} is allowed to run. The run continues."),
+        (false, _) => format!("Denied — {what} will be skipped and the agent told so."),
     }
 }
 
@@ -552,9 +557,15 @@ mod tests {
         assert!(other.contains("CONFIRMATION_NOT_CONFIGURED"), "{other}");
     }
 
+    /// The line reports the answer, never the outcome: the tool has not run
+    /// yet when this prints, and claiming it did would be a result this
+    /// command cannot know.
     #[test]
-    fn the_answer_line_names_what_happened() {
-        assert!(answered_line(true, false, Some("file_write")).starts_with("Approved — file_write"));
+    fn the_answer_line_names_the_answer_not_the_outcome() {
+        let approved = answered_line(true, false, Some("file_write"));
+        assert!(approved.starts_with("Approved — file_write"), "{approved}");
+        assert!(approved.contains("allowed to run"), "{approved}");
+        assert!(!approved.contains("ran."), "{approved}");
         assert!(answered_line(true, true, None).contains("every later call"));
         assert!(answered_line(false, false, Some("file_write")).contains("skipped"));
     }

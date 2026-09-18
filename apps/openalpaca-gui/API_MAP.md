@@ -1544,7 +1544,15 @@ Keep-alive comments every `server.sse_keep_alive_secs` (default **15 s**).
    terminate the stream; the same stream continues after
    `POST /v1/chat/confirmations/{request_id}` resolves. The identical information also
    arrives on the WS as `tool_confirmation_requested` (with `agent_id`, `stream_id`,
-   `lane_key`) — dedupe by `request_id`.
+   `lane_key`, `task_id`) — dedupe by `request_id`.
+   **A workflow's prompt arrives after that turn's `done`**, on the WS only: the run
+   outlives the turn that started it, and the SSE stream is closed and GC'd by then.
+   So the pending list is **session state, not turn state** — a client that drops
+   frames once its stream is terminal never shows a background run's prompt, and the
+   daemon waits out its whole `confirmation_timeout_secs` (default 300) for an answer
+   nobody was asked for. Nothing announces a prompt that timed out or was answered
+   elsewhere, so the honest way to retire a card is a terminal `task_status` for the
+   run named on the frame.
 6. **Terminal:** exactly one of
    - `done` — `{ content, model, tokens_in, tokens_out, duration_ms, attachments_used?, delegation? }`.
      `content` is the **full** text (not the tail) — prefer it over the accumulated

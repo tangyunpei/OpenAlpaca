@@ -159,6 +159,10 @@ openalpaca tasks create [description] [--priority <n>]
 openalpaca tasks cancel <task_id>
 openalpaca tasks pause <task_id>
 openalpaca tasks resume <task_id>
+openalpaca tasks confirmations list [--limit <n>] [--format table|json]
+openalpaca tasks confirmations watch
+openalpaca tasks confirmations approve <request_id> [--entire-tool]
+openalpaca tasks confirmations deny <request_id>
 ```
 
 Notes:
@@ -180,6 +184,27 @@ Notes:
   that finds no usable transcript (the sweep took the log) answers
   `RESUME_LOG_MISSING` and leaves the row exactly as it was. When it succeeds the
   command names how much came back: `replayed 3 rounds from session <id>`.
+- **`confirmations`** answers the approval prompts a run stops on. A tool on the
+  confirm list suspends its run and asks; in the GUI the card is there, and from
+  a terminal these are the way:
+  - `watch` sits on the daemon's event socket and prompts for each one as it is
+    raised — `y` allows this call, `a` allows every later call of that tool for
+    the rest of the session, anything else (Enter included) denies. This is what
+    answers a **background workflow's** prompt: that run raises it long after the
+    `openalpaca chat` turn that started it has finished, so nothing else is
+    listening. Ctrl+C leaves every unanswered prompt exactly as it was.
+  - `approve` / `deny` answer one by id. An id the daemon is not holding — it was
+    answered already, it timed out, or the daemon restarted — is said plainly and
+    changes nothing.
+  - `list` reads the prompts the daemon has *raised* out of the event log. It
+    cannot say which are still waiting (the daemon keeps that in memory and
+    publishes no list and no resolution event), and it says so rather than
+    implying otherwise; answering is what settles it.
+
+  A prompt is never auto-approved, and `--entire-tool` is the only thing that
+  widens one. See also `chat`'s note below: a one-shot or piped turn declares
+  that it *cannot* answer, and its confirm-listed tools are refused immediately
+  rather than waiting for an answer that cannot come.
 
 ### `agents`
 
@@ -523,6 +548,7 @@ Notes:
 - If stdin is piped, the CLI reads all of stdin, sends it as one message, and streams the reply. Stdin that is empty (or only whitespace) sends nothing and exits **1** with `No input on stdin` — a pipe that produced nothing is a mistake upstream, not a request to send an empty turn.
 - **One label rule for both one-shot paths.** The `Alpaca: ` label is printed only when stdout is a terminal, for `--message` exactly as for a pipe, so `openalpaca chat --message q > answer.txt`, `openalpaca chat < question.txt > answer.txt` and `... | jq` all get the answer and nothing else.
 - **A failed turn fails the command.** When the daemon reports an error (no routable model, a provider that cannot be reached, a broken stream), the message goes to **stderr** and the process exits non-zero — in the `--message` path and the piped path alike. It used to print `Error: …` on stdout and exit 0, which no script could tell from an answer. The interactive REPL prints the failure on stderr and keeps the prompt open.
+- **A one-shot or piped turn declares that it cannot answer an approval prompt.** Both paths end with the process, so a confirmation raised by the workflow they started — minutes later, long after the stream they were watching said `done` — would reach nobody, and the run used to sit on it for the whole `confirmation_timeout_secs` (default 300 s) per tool call. They now send `unattended: true` on `POST /v1/chat`, and the daemon **refuses** a confirm-listed tool at once, telling the model where it can be approved. It is a declaration, not an approval: nothing is auto-allowed, and the interactive REPL is unaffected — it is the one form that is still there to answer, and its body carries no such field. To run work that needs an approval from a terminal, use the interactive `openalpaca chat`, and answer its background runs' prompts with `openalpaca tasks confirmations watch` (or `approve`/`deny <request_id>`) from another one.
 - Routing is decided by the daemon: the model answers directly or starts a background workflow via a tool call. When a reply delegates work to a workflow, the daemon returns structured delegation metadata (task id + title) and the CLI polls that task by id, printing the result when it completes (Ctrl-C stops waiting; the task keeps running — check it later with `openalpaca tasks status <task_id>`).
 - The daemon also recognizes chat-level commands with no LLM call: `/status [task_id]`, `/tasks`, `/cancel`/`/pause`/`/resume` (bare forms target the lane's active workflows, or pass an explicit task id), `/steer <text>` (inject a correction into the running workflow), and `/<skill>` invocations. In the interactive REPL, only the client-side commands listed above are handled locally; every other slash line — the daemon commands here and anything unrecognized (which may be a skill command) — is forwarded to the daemon as a chat message, so `/steer focus on the tests` works directly at the prompt. One-shot mode works too: `openalpaca chat --message "/steer focus on the tests"`.
 

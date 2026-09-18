@@ -206,7 +206,11 @@ Two rules the sidebar displays rather than enforces:
   row says which one wins.
 
 **Transcript.** Mono speaker labels over plain paragraphs — no avatars, no
-bubbles. Besides messages it carries the run-report card for a background
+bubbles. A body is rendered from a small fixed vocabulary — paragraphs, bullet
+and numbered lists, `**bold**`, `*italic*` and inline code — which is what a
+completion report is written in; anything richer (headings, links, tables)
+belongs to a file, and the Library's renderers show it there. Times are the
+reader's own: the daemon stores UTC, and every clock in the window converts it. Besides messages it carries the run-report card for a background
 workflow that finished in this session, session-local rows for a steer or a
 queued follow-up (neither is a chat turn, so neither is persisted), the tool
 confirmation banner, and chips for the files a turn carried in and the files its
@@ -220,6 +224,15 @@ textarea is **not rendered at all** — `Approve`, `Deny` and `Always allow`
 replace it, which is why ↵ can never mean both "send" and "approve".
 `Always allow` sends `approval_scope: "entire_tool"`, which the daemon honours
 for the rest of the session.
+
+**A confirmation outlives the turn that started it.** A workflow asks for
+approval minutes after the chat turn that launched it has finished, so the
+prompt is held against the *conversation*, not against that turn's stream: the
+card appears whenever the daemon raises it, the run card in the Work pane says
+`Waiting on you: <tool>` while it waits, and the card is cleared when you
+answer it or when the run it belongs to finishes (the daemon announces nothing
+when a prompt times out, so a finished run is the signal). A confirmation
+raised on another lane never blocks this composer.
 
 The composer can also be *aimed*: `Steer` on a run card points it at that run
 (`POST /v1/tasks/{id}/steer`, which answers `accepted` and the inbox depth),
