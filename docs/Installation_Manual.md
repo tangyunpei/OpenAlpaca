@@ -192,11 +192,18 @@ Enabling it is the only action required — the seeded `llm.toml` ships
 - **GUI**: Settings → Models & keys, the `ollama` row's switch. The row reads
   `no key needed` instead of offering a key editor, and the toast reports how
   many models the daemon found.
+- **CLI**: `openalpaca config set ai.ollama.enabled true`. It is the same
+  switch, written through the config schema
+  (`ai.<provider>.enabled`, backend `llm.toml`), so it is validated rather
+  than hand-typed — and Ollama is exempt from the key-format check, so no key
+  is asked for. The interactive `openalpaca config` TUI has the same row under
+  API-Keys → Ollama.
 - **By hand**: set `enabled = true` under `[providers.ollama]` in
-  `~/.openalpaca/config/llm.toml` and save. The config watcher registers any
-  provider the file enables that the router is not already holding — one that
-  was disabled or missing at boot — discovery included, so no restart is
-  needed. (There is no CLI verb for the provider switch today.)
+  `~/.openalpaca/config/llm.toml` and save.
+
+All three write the same file, and the config watcher registers any provider
+the file enables that the router is not already holding — one that was
+disabled or missing at boot — discovery included, so no restart is needed.
 
 ### 3. What discovery does
 
@@ -266,10 +273,36 @@ All in `~/.openalpaca/config/llm.toml`:
 | `[providers.ollama] request_timeout_secs` | `600` | Wall clock for one **non-streaming** call to this provider. |
 | `[timeouts] llm_request_timeout_secs` | `120` | The same budget for any provider that sets no override. |
 
-A **streamed** reply is not bound by those: the HTTP layer bounds the connect
-and the gap between chunks, not the total, so a long generation is never cut
-mid-answer. What gives up on a stalled stream is the loop's idle bound — 90
-seconds with no chunk.
+You should not need a `[models]` row at all — discovery fills the catalogue —
+but one you write by hand still overrides what was discovered, field by field:
+
+| Key under `[models."<tag>"]` | What it overrides |
+|---|---|
+| `provider` | Which provider serves the tag. Required in the row. |
+| `input_price` / `output_price` | Dollars per million tokens. Discovery says `0`; say otherwise if you are costing your own hardware. |
+| `context` | The context window. Discovery uses `/api/show`, or `8192` when it does not say. |
+| `supports_image` | Discovery reads it from the `vision` capability. |
+| `supports_tools` | **Defaults to true when omitted**, here and in discovery, and is *recorded, not enforced*: nothing withholds tools from a call because of it. What it changes is the effective-model ladder, which prefers a tool-capable model when it has to choose one for you (L3). Set `false` on a tag that cannot take tools so the ladder stops picking it. |
+| `supports_audio` / `supports_document` / `supports_reasoning` | Declared capabilities for the same row. |
+
+A **streamed** reply is not bound by the timeouts above: the HTTP layer bounds
+the connect (30 s) and the gap between reads, not the total, so a long
+generation is never cut mid-answer. Two idle bounds then sit over a stalled
+stream, and the tighter one always wins:
+
+- the loop's **90 s** with no SSE chunk (`STREAM_IDLE_TIMEOUT`,
+  `crates/openalpaca_llm/src/streaming.rs`). This is the one that fires. The
+  turn is not lost: the loop logs the stall and retries it **without**
+  streaming, where the per-provider total (600 s for the seeded Ollama) then
+  applies from the start;
+- the HTTP read timeout, which *is* `request_timeout_secs` — 600 s for Ollama.
+  At ten minutes it is far past the 90 s, so it is only reached if the loop is
+  not the one consuming the stream.
+
+A model that is still loading into memory can exceed 90 s before its first
+token. That is the case to watch: warm the model once (`ollama run <tag>` and
+one prompt) before a long agent run, or raise the ceiling in the source
+constant — it is not configuration today.
 
 ### 6. The embedding model
 

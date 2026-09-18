@@ -65,9 +65,10 @@ pub enum LlmRouterError {
     /// fallback models failed" an owner used to see for a daemon that simply
     /// had no provider switched on (L3).
     #[error(
-        "No model is available: no enabled provider offers one. Enable a provider in \
-         Settings → Models, or check `openalpaca llm status` — a local Ollama needs no \
-         API key, only `ollama pull <model>`."
+        "No model is available: no enabled provider offers one. Turn one on — Settings → \
+         Models in the GUI, or `openalpaca config set ai.<provider>.enabled true` — then \
+         `openalpaca llm status` says what is loaded. A local Ollama needs no API key, only \
+         `ollama pull <model>`."
     )]
     NoRoutableModel,
 

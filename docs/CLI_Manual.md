@@ -236,11 +236,16 @@ Notes:
   needed` under `Key Health`, and gets a row saying the same in `llm keys
   list`. A keyed provider with an empty pool still reads `✗ … — no key
   configured`.
-- There is **no CLI verb for the provider ENABLE bit**. Turn a provider on in
-  the GUI (Settings → Models & keys) or by setting `enabled = true` under
-  `[providers.<name>]` in `~/.openalpaca/config/llm.toml` — the daemon's
-  watcher registers any provider the file enables that the router is not
-  already holding, discovery included, so no restart is needed. See
+- The provider ENABLE bit is **`openalpaca config set ai.<provider>.enabled
+  true`** — under `config`, not `llm`, because it writes `llm.toml` through
+  the config schema like every other `ai.*` key (`ai.ollama.enabled`,
+  `ai.anthropic.enabled`, `ai.openai.enabled`). Ollama is exempt from the
+  key-format check, so enabling it asks for no key. The same row is in the
+  interactive `openalpaca config` TUI under API-Keys → `<provider>`, and the
+  GUI's switch (Settings → Models & keys) and a hand edit write the same
+  field. Whichever writes it, the daemon's watcher registers any provider the
+  file enables that the router is not already holding, discovery included, so
+  no restart is needed. See
   [Installation Manual → Local Models (Ollama)](Installation_Manual.md#local-models-ollama).
 - `--format json` echoes the daemon's own field names. For `llm models` those
   are `id`, `input_price_per_million`, `output_price_per_million` and
@@ -248,8 +253,9 @@ Notes:
   the wire and always came out null); for `llm keys list` the row carries the
   daemon's `priority` string and a `keyless` flag instead of the old
   always-false `is_primary`.
-- `llm keys validate` posts a secret and is meaningless for a keyless
-  provider — it will report the key invalid. Nothing needs validating there.
+- `llm keys validate --provider <keyless provider>` answers `no key needed`
+  and posts nothing: a provider that needs no key has no key to validate, and
+  sending one to be graded produced a meaningless `✗ Key is invalid`.
 
 ### `ext`
 

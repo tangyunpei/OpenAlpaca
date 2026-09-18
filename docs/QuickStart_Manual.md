@@ -46,14 +46,14 @@ The first daemon start also seeds `~/.openalpaca/config` with the agent template
 
 ```bash
 ollama pull <model>                       # whatever you want to run
-# then turn the provider on, either way:
-#   GUI:     Settings → Models & keys → the `ollama` switch
-#   by hand: [providers.ollama] enabled = true in ~/.openalpaca/config/llm.toml
+openalpaca config set ai.ollama.enabled true   # turn the provider on
+#   or the GUI:  Settings → Models & keys → the `ollama` switch
+#   or by hand:  [providers.ollama] enabled = true in ~/.openalpaca/config/llm.toml
 openalpaca llm models --refresh           # your installed tags, priced 0
 openalpaca chat --message "say hello in five words"
 ```
 
-Enabling the provider is the only action: the daemon then asks the running Ollama what is installed (its own `/api/tags` and `/api/show`) and registers every chat model it reports — **no API key, no `[models]` rows**, real context lengths, prices `0`, and replies that stream token by token. A hand edit to `llm.toml` is picked up live; there is no CLI verb for the provider switch. `openalpaca llm models --refresh` is what you run after a later `ollama pull`.
+Enabling the provider is the only action: the daemon then asks the running Ollama what is installed (its own `/api/tags` and `/api/show`) and registers every chat model it reports — **no API key, no `[models]` rows**, real context lengths, prices `0`, and replies that stream token by token. All three ways in write the same `enabled` field in `llm.toml`, and the daemon picks it up live — no restart. `openalpaca llm models --refresh` is what you run after a later `ollama pull`.
 
 Two things to expect: the seeded default model and every shipped agent template name a Claude id, so on an Ollama-only machine the router substitutes and says so (`openalpaca llm status` reads `configured: X — not available, using Y`); and the first boot downloads about 1 GB of local embedding model into `~/.openalpaca/state/cache/fastembed` unless you set `[embeddings] enabled = false`.
 

@@ -121,9 +121,13 @@ A file watcher reloads configuration without restart:
 ## LLM Providers and Local Models
 
 Providers are declared in `config/llm.toml` under `[providers.<name>]` and each
-carries its own ENABLE bit. Two facts shape the rest of this section: **a
-provider may need no API key** (Ollama is the one that does not), and **a model
-the router cannot reach is substituted, never silently**.
+carries its own ENABLE bit. Three ways write it and they all write the same
+field: `PUT /v1/settings/llm/providers/{provider}/enabled` (the GUI's switch),
+`openalpaca config set ai.<provider>.enabled true` (the config schema's
+`ai.*` key, backend `llm.toml`), and a hand edit the watcher picks up. Two
+facts shape the rest of this section: **a provider may need no API key**
+(Ollama is the one that does not), and **a model the router cannot reach is
+substituted, never silently**.
 
 ### Keyless providers
 
@@ -210,13 +214,27 @@ never bite.
 | `[providers.<name>] default_max_tokens` | 4096 (8192 for the seeded Ollama) | Output ceiling for one answer; a request-level `max_tokens` still wins. |
 
 The HTTP client carries **no total deadline**: it bounds the connect (30 s,
-never longer than the budget) and the idle gap between chunks, so a healthy
-long stream is never cut by a wall clock. The non-streaming total is applied
-per request instead. Both provider-construction paths — the boot builder and
-the registration a toggle or a hot reload performs — resolve the budget through
-the same function, so they cannot disagree. Note there are two idle bounds and
-the tighter one is the loop's: a stalled stream is given up on after 90 s with
-no chunk, before the HTTP read timeout is reached.
+never longer than the budget) and the idle gap between reads, so a healthy long
+stream is never cut by a wall clock. The non-streaming total is applied per
+request instead. Both provider-construction paths — the boot builder and the
+registration a toggle or a hot reload performs — resolve the budget through the
+same function, so they cannot disagree.
+
+Three bounds sit over a **streamed** turn, and it is worth knowing which one
+fires:
+
+| Bound | Value | Where | What happens |
+|---|---|---|---|
+| Idle between SSE chunks | **90 s**, not configurable | `STREAM_IDLE_TIMEOUT`, `crates/openalpaca_llm/src/streaming.rs` | The stream errors, the loop logs it and **retries the turn without streaming**. |
+| Streaming wall clock | 600 s, not configurable | `LoopConfig::max_stream_duration` | Same fallback: the collection is cancelled and the turn is retried non-streaming. |
+| HTTP read gap | `request_timeout_secs` (600 s for the seeded Ollama, else `[timeouts] llm_request_timeout_secs`) | `build_http_client` | The request fails at the transport. |
+
+The first is by far the tightest, so on a local model it is the one that fires,
+and the symptom is a turn that stalls and then answers un-streamed rather than
+one that fails. The case that reaches it in practice is a model still being
+loaded into memory: warm the tag once before a long run. The read timeout at
+600 s is ten minutes of silence and is effectively unreachable while the loop
+is the consumer.
 
 Streaming for Ollama is real (the provider forwards to the OpenAI-compatible
 streaming client), and every OpenAI-compatible base is asked for

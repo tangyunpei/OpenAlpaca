@@ -50,14 +50,14 @@ pub enum KeysCommands {
         /// Key ID
         key_id: String,
     },
-    /// Validate an API key
+    /// Validate an API key. A provider that needs none says so instead
     Validate {
         /// Provider name
         #[arg(long)]
         provider: String,
-        /// Secret key to validate
+        /// Secret key to validate. Not needed for a keyless provider
         #[arg(long)]
-        secret: String,
+        secret: Option<String>,
     },
     /// Set a key as primary for its provider
     SetPrimary {
@@ -183,7 +183,9 @@ pub(super) async fn run_keys(args: KeysArgs) -> Result<()> {
             notes,
         } => keys_add(provider, secret, priority, source, notes).await,
         KeysCommands::Remove { provider, key_id } => keys_remove(&provider, &key_id).await,
-        KeysCommands::Validate { provider, secret } => keys_validate(&provider, &secret).await,
+        KeysCommands::Validate { provider, secret } => {
+            keys_validate(&provider, secret.as_deref()).await
+        }
         KeysCommands::SetPrimary { provider, key_id } => keys_set_primary(&provider, &key_id).await,
         KeysCommands::Reorder { key_ids } => keys_reorder(key_ids).await,
     }
@@ -344,8 +346,66 @@ async fn keys_remove(provider: &str, key_id: &str) -> Result<()> {
     Ok(())
 }
 
-async fn keys_validate(provider: &str, secret: &str) -> Result<()> {
+/// What `llm keys validate` should do, before it does anything (M7).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum ValidatePlan {
+    /// The provider needs no key. Nothing is posted and nothing is graded.
+    NoKeyNeeded,
+    /// Ask the daemon to grade this secret.
+    Grade,
+    /// A keyed provider with nothing to grade.
+    MissingSecret,
+}
+
+/// `requires_key` is the daemon's own word (L1); a provider it did not
+/// describe is assumed keyed, which is what every cloud provider is.
+pub(super) fn validate_plan(requires_key: Option<bool>, secret: Option<&str>) -> ValidatePlan {
+    if requires_key == Some(false) {
+        return ValidatePlan::NoKeyNeeded;
+    }
+    match secret {
+        Some(secret) if !secret.trim().is_empty() => ValidatePlan::Grade,
+        _ => ValidatePlan::MissingSecret,
+    }
+}
+
+/// What a keyless provider is told, in place of a verdict on a key it has not
+/// got.
+pub(super) fn no_key_needed_line(provider: &str) -> String {
+    format!(
+        "{provider} needs no API key, so there is nothing to validate. It is reached over its \
+         own endpoint; `openalpaca llm models` lists what it can serve, and `openalpaca llm \
+         status` says whether it is loaded."
+    )
+}
+
+/// Validate a key — or say that this provider has none to validate.
+///
+/// Posting a secret to a keyless provider used to print `✗ Key is invalid`,
+/// which is a verdict on a key that does not exist and should not be sent:
+/// the one provider designed to need nothing was the one reported broken.
+async fn keys_validate(provider: &str, secret: Option<&str>) -> Result<()> {
     let client = DaemonClient::connect()?;
+    // A daemon that refuses the settings route tells us nothing about the
+    // provider, and "keyed" is the safe reading of nothing.
+    let settings: crate::commands::llm_status::LlmSettingsSnapshot = client
+        .get("/v1/settings/llm")
+        .await
+        .unwrap_or_default();
+    let requires_key = settings.requires_key_map().get(provider).copied();
+
+    let secret = match validate_plan(requires_key, secret) {
+        ValidatePlan::NoKeyNeeded => {
+            println!("{} {}", "·".dimmed(), no_key_needed_line(provider));
+            return Ok(());
+        }
+        ValidatePlan::MissingSecret => anyhow::bail!(
+            "{provider} needs an API key: pass the one to check as `--secret <key>`."
+        ),
+        // Checked non-empty by the plan.
+        ValidatePlan::Grade => secret.unwrap_or_default(),
+    };
+
     let body = serde_json::json!({
         "provider": provider,
         "secret": secret,
@@ -406,6 +466,45 @@ mod tests {
 
     fn plain() {
         colored::control::set_override(false);
+    }
+
+    /// M7: `llm keys validate --provider ollama` used to post a secret and
+    /// print `✗ Key is invalid` — a verdict on a key the provider is designed
+    /// not to have. Nothing is sent now, and the answer says why.
+    #[test]
+    fn a_keyless_provider_has_nothing_to_validate() {
+        assert_eq!(
+            validate_plan(Some(false), None),
+            ValidatePlan::NoKeyNeeded,
+            "no key needed, and none was asked for"
+        );
+        assert_eq!(
+            validate_plan(Some(false), Some("sk-whatever")),
+            ValidatePlan::NoKeyNeeded,
+            "a secret typed at a keyless provider is still not posted"
+        );
+
+        let line = no_key_needed_line("ollama");
+        assert!(line.contains("needs no API key"), "{line}");
+        assert!(line.contains("nothing to validate"), "{line}");
+    }
+
+    /// A keyed provider is unaffected, and a provider the daemon did not
+    /// describe is treated as keyed — the safe reading of silence.
+    #[test]
+    fn a_keyed_provider_is_still_graded_and_still_needs_the_key() {
+        assert_eq!(validate_plan(Some(true), Some("sk-1")), ValidatePlan::Grade);
+        assert_eq!(validate_plan(None, Some("sk-1")), ValidatePlan::Grade);
+        assert_eq!(
+            validate_plan(Some(true), None),
+            ValidatePlan::MissingSecret,
+            "nothing to grade"
+        );
+        assert_eq!(
+            validate_plan(None, Some("   ")),
+            ValidatePlan::MissingSecret,
+            "whitespace is not a key"
+        );
     }
 
     /// L12: KEY_ID printed blank and PRIORITY always said `Fallback` — the CLI

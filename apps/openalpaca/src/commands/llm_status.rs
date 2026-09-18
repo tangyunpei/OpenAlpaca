@@ -60,6 +60,20 @@ fn requires_key_default() -> bool {
     true
 }
 
+impl LlmSettingsSnapshot {
+    /// `provider → does it need an API key at all` (L1).
+    ///
+    /// The one fact two commands need off this route: `llm status` paints key
+    /// health with it, and `llm keys validate` refuses to post a secret to a
+    /// provider that has no use for one.
+    pub(super) fn requires_key_map(&self) -> BTreeMap<String, bool> {
+        self.providers
+            .iter()
+            .map(|(name, info)| (name.clone(), info.requires_key))
+            .collect()
+    }
+}
+
 /// `GET /v1/status`'s `llm` block (L3) — absent on a daemon that has no router,
 /// and on one built before the field existed.
 #[derive(Debug, Deserialize)]
@@ -393,10 +407,16 @@ pub(super) fn model_line(configured: &str, llm: Option<&LlmStatusInfo>) -> Strin
         Some(status) if status.default_model_routable => configured.to_string(),
         Some(status) => match status.effective_default_model.as_deref() {
             Some(effective) => format!("{configured} — not available, using {effective}"),
+            // The fix is a verb, not a hint: `config set` is the CLI's own way
+            // to turn a provider on (the `ai.*` keys write `llm.toml` through
+            // the config schema, and the daemon picks the edit up live), and
+            // saying "enable a provider" without naming it sent an owner
+            // hunting for a verb under `llm` that is not there.
             None => format!(
-                "{configured} — not available, and no model is. \
-                 Enable a provider (`openalpaca llm models --refresh`, \
-                 or Settings → Models), or `ollama pull` one."
+                "{configured} — not available, and no model is. Turn one on: \
+                 `openalpaca config set ai.ollama.enabled true` (a local Ollama needs \
+                 no key — `ollama pull <model>` first), or Settings → Models in the GUI. \
+                 `openalpaca llm models --refresh` re-reads the catalogue."
             ),
         },
     }
@@ -464,11 +484,7 @@ pub(super) async fn llm_status(format: OutputFormat) -> Result<()> {
     // daemon that refuses it — or is too old for the block — leaves the
     // configured id standing on its own, which is what this printed before.
     let daemon_status: DaemonStatusSnapshot = client.get("/v1/status").await.unwrap_or_default();
-    let requires_key: BTreeMap<String, bool> = settings
-        .providers
-        .iter()
-        .map(|(name, info)| (name.clone(), info.requires_key))
-        .collect();
+    let requires_key: BTreeMap<String, bool> = settings.requires_key_map();
 
     match format {
         OutputFormat::Json => {
@@ -808,6 +824,12 @@ mod tests {
         assert!(line.contains("no model is"), "{line}");
         assert!(line.contains("ollama pull"), "{line}");
         assert!(line.contains("Settings → Models"), "{line}");
+        // M7: the CLI's own way to turn a provider on is a verb that exists,
+        // and this is where an owner with no routable model reads it.
+        assert!(
+            line.contains("openalpaca config set ai.ollama.enabled true"),
+            "{line}"
+        );
     }
 
     /// A daemon with no LLM block says nothing, and neither does this.
