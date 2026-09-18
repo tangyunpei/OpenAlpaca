@@ -3,6 +3,7 @@ pub mod ai_config;
 mod ai_config_helpers;
 pub mod chat;
 pub mod config;
+pub mod confirmations;
 mod config_handlers;
 mod config_tui;
 pub mod connector;

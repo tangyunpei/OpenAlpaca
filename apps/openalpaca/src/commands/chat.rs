@@ -56,6 +56,11 @@ pub async fn run(args: ChatArgs) -> Result<()> {
         target = target.resuming(resumed.id);
     }
 
+    // M6: say so before the turn starts, not after a run has hung on a prompt.
+    if !can_answer_prompts(args.message.is_some(), interactive) {
+        target = target.unattended();
+    }
+
     if let Some(ref msg) = args.message {
         return single_message(msg, &args.files, &target).await;
     }
@@ -64,6 +69,20 @@ pub async fn run(args: ChatArgs) -> Result<()> {
         return session.run().await;
     }
     pipe_mode(&target).await
+}
+
+/// Whether this invocation can answer a tool-approval prompt (M6).
+///
+/// Only the REPL can: it is the one form that is still here, with a terminal,
+/// after the turn it started has finished — which is when a workflow's
+/// confirmations arrive. The one-shot and the pipe both exit with their turn,
+/// so a prompt raised by the run they started reaches nobody; declaring that
+/// up front is what turns a five-minute hang into an immediate, honest refusal.
+///
+/// A declaration, never a detection: what is asserted is the *shape* of the
+/// invocation, not a guess at whether somebody is watching.
+fn can_answer_prompts(one_shot: bool, stdin_is_terminal: bool) -> bool {
+    !one_shot && stdin_is_terminal
 }
 
 /// The conversation `--session <id>` names — checked before anything is
@@ -461,6 +480,48 @@ mod tests {
             );
         }
         assert_eq!(reply_prefix(false), "", "redirected: no label in the file");
+    }
+
+    /// M6: the two ways in that end with the process cannot answer a prompt
+    /// their run raises minutes later. The REPL can, and must keep today's
+    /// behaviour — it is the one client that is still there.
+    #[test]
+    fn only_the_repl_is_left_to_answer_an_approval_prompt() {
+        // `--message`, terminal or not: the process is gone when the workflow
+        // it started asks.
+        assert!(!can_answer_prompts(true, true));
+        assert!(!can_answer_prompts(true, false));
+        // A pipe: nobody was ever there.
+        assert!(!can_answer_prompts(false, false));
+        // The REPL, which prompts on stdin and stays open.
+        assert!(can_answer_prompts(false, true));
+    }
+
+    /// The declaration reaches the daemon as `POST /v1/chat`'s `unattended`,
+    /// and is **absent** — not `false` — from a turn that can answer, so an
+    /// interactive turn's body is byte-for-byte what it was.
+    #[test]
+    fn the_one_shot_declares_itself_unable_to_answer_and_the_repl_does_not() {
+        let attended = ChatTarget::for_workspace(None);
+        assert_eq!(
+            attended.body("hi", &[]),
+            serde_json::json!({ "content": "hi" }),
+            "an attended turn carries no declaration at all"
+        );
+
+        let unattended = ChatTarget::for_workspace(None).unattended();
+        assert_eq!(
+            unattended.body("hi", &[]),
+            serde_json::json!({ "content": "hi", "unattended": true })
+        );
+
+        // It rides alongside the conversation, not instead of it.
+        let resumed = ChatTarget::for_workspace(Some("/tmp/p".to_string()))
+            .resuming("sess-1".to_string())
+            .unattended();
+        let body = resumed.body("hi", &[]);
+        assert_eq!(body["session_id"], "sess-1");
+        assert_eq!(body["unattended"], true);
     }
 
     /// L12: a turn that failed exits non-zero. It used to print

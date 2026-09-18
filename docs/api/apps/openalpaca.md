@@ -105,6 +105,16 @@
 - No `Subcommand` enum found in module.
 - Parsed flags: none
 
+### `confirmations`
+
+- Source: `apps/openalpaca/src/commands/confirmations.rs`
+- Enum `ConfirmationCommands` variants:
+  - `list` (fields: `limit`, `format`)
+  - `watch`
+  - `approve` (fields: `request_id`, `entire_tool`)
+  - `deny` (fields: `request_id`)
+- Parsed flags: `--entire-tool`, `--format`, `--limit`
+
 ### `connector`
 
 - Source: `apps/openalpaca/src/commands/connector.rs`
@@ -241,4 +251,5 @@
   - `cancel` (fields: `task_id`)
   - `pause` (fields: `task_id`)
   - `resume` (fields: `task_id`)
+  - `confirmations` (fields: `command`)
 - Parsed flags: `--format`, `--limit`, `--priority`, `--status`

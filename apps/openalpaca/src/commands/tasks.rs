@@ -78,6 +78,11 @@ pub enum TasksCommands {
         /// Task ID
         task_id: String,
     },
+    /// List or answer the tool-approval prompts a run is waiting on
+    Confirmations {
+        #[command(subcommand)]
+        command: crate::commands::confirmations::ConfirmationCommands,
+    },
 }
 
 // ── Local deserialization structs ────────────────────────────────
@@ -265,6 +270,9 @@ pub async fn run(args: TasksArgs) -> Result<()> {
         TasksCommands::Cancel { task_id } => task_action(&task_id, "cancel").await,
         TasksCommands::Pause { task_id } => task_action(&task_id, "pause").await,
         TasksCommands::Resume { task_id } => task_action(&task_id, "resume").await,
+        TasksCommands::Confirmations { command } => {
+            crate::commands::confirmations::run(command).await
+        }
     }
 }
 

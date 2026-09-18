@@ -106,6 +106,7 @@ fn encode_header_path(path: &str) -> String {
 pub struct ChatTarget {
     workspace_path: Option<String>,
     session_id: Option<String>,
+    unattended: bool,
 }
 
 impl ChatTarget {
@@ -123,12 +124,29 @@ impl ChatTarget {
         Self {
             workspace_path,
             session_id: None,
+            unattended: false,
         }
     }
 
     /// Address a stored conversation from here on.
     pub fn resuming(mut self, session_id: String) -> Self {
         self.session_id = Some(session_id);
+        self
+    }
+
+    /// Declare that nobody will be here to answer a tool-approval prompt (M6).
+    ///
+    /// The one-shot (`--message`) and the pipe are the two ways in that end
+    /// with the process: a workflow they start raises its confirmations long
+    /// after the stream they were watching is `done`, so the prompt reaches
+    /// nobody and the run sits on it until the 300 s timeout — five and a half
+    /// minutes per tool call, which is what the acceptance run measured.
+    ///
+    /// This is a **declaration, not an approval**: the daemon refuses a
+    /// confirm-listed tool at once and tells the model where it *can* be
+    /// approved. Nothing is auto-allowed, here or there.
+    pub fn unattended(mut self) -> Self {
+        self.unattended = true;
         self
     }
 
@@ -147,7 +165,9 @@ impl ChatTarget {
     }
 
     /// The `POST /v1/chat` body. Absent fields are absent, not null: the
-    /// daemon's `session_id` is `Option`, and `attachments` defaults to empty.
+    /// daemon's `session_id` is `Option`, `attachments` defaults to empty, and
+    /// `unattended` defaults to false — a client that says nothing is taken to
+    /// be one that can answer, which is exactly today's behaviour.
     pub fn body(&self, content: &str, attachments: &[serde_json::Value]) -> serde_json::Value {
         let mut body = serde_json::json!({ "content": content });
         if !attachments.is_empty() {
@@ -155,6 +175,9 @@ impl ChatTarget {
         }
         if let Some(session_id) = &self.session_id {
             body["session_id"] = serde_json::json!(session_id);
+        }
+        if self.unattended {
+            body["unattended"] = serde_json::json!(true);
         }
         body
     }
