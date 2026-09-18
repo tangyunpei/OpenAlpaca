@@ -586,7 +586,7 @@ fn test_lead_agent_registry_exposes_command_backend_tools() {
 #[test]
 fn test_lead_agent_prompt_includes_batch_spawn_instruction() {
     let engine = crate::compose::ComposeEngine::new(16);
-    let prompt = build_lead_agent_prompt_from_templates(&engine, "Test persona", &[]);
+    let prompt = build_lead_agent_prompt_from_templates(&engine, "Test persona", &[], 200_000);
     assert!(
         prompt.contains("spawn_subagents_batch"),
         "Lead agent prompt should mention spawn_subagents_batch tool"
@@ -1891,4 +1891,99 @@ async fn the_resume_record_names_the_trim_and_the_rounds_it_dropped() {
         resume.data
     );
     assert_eq!(resume.data["dropped_incomplete_rounds"], 2);
+}
+
+// ── M5: the run is budgeted against the model that answers ──────────────
+
+/// A router shaped like an Ollama-only install: the configured default is the
+/// Claude id every shipped template pins, Anthropic is **not** loaded, and the
+/// one loaded provider holds a local 8 192-token model.
+fn ollama_only_router(provider: Arc<ScriptedProvider>) -> Arc<LlmRouter> {
+    let router = LlmRouter::single_provider(
+        provider,
+        openalpaca_llm::ProviderType::Ollama,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+    router.model_registry().register(
+        "qwen3:8b".to_string(),
+        openalpaca_llm::routing::model_registry::ModelInfo {
+            provider: openalpaca_llm::ProviderType::Ollama,
+            input_price_per_million: 0.0,
+            output_price_per_million: 0.0,
+            context_window: 8192,
+            discovered: true,
+            supports_image: false,
+            supports_audio: false,
+            supports_document: false,
+            supports_reasoning: false,
+            supports_tools: true,
+            declared: false,
+        },
+    );
+    Arc::new(router)
+}
+
+/// **M5.** The lead's own prompt budget used to be the pinned model's window
+/// — 200 000 for a Claude id no local install can reach — so the loop never
+/// compacted and the provider refused the overflowing request. The budget is
+/// now the window of the model that actually answers, and the telemetry names
+/// that model rather than the pin.
+#[tokio::test]
+async fn the_lead_is_budgeted_against_the_model_that_answers() {
+    let provider = ScriptedProvider::new(vec![scripted_response("done", vec![])]);
+    let bus = EventBus::default();
+    let mut events = bus.subscribe();
+
+    let result = run_lead_agent(
+        &lead_subagent(),
+        "do the thing",
+        ollama_only_router(provider),
+        Arc::new(ToolRegistry::default()),
+        Arc::new(SharedContext::new()),
+        bus.clone(),
+        None,
+        None,
+        "task-1",
+        "user-1",
+        "user-1:cli",
+        "cli",
+        &Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
+    )
+    .await;
+    assert!(
+        result.success,
+        "finish: {:?}",
+        result.loop_result.finish_reason
+    );
+
+    let mut budget = None;
+    while let Ok(event) = events.try_recv() {
+        if let crate::events::SystemEvent::ContextBudgetComputed {
+            model, window_size, ..
+        } = event
+        {
+            budget = Some((model, window_size));
+            break;
+        }
+    }
+    let (model, window_size) = budget.expect("the lead publishes its context budget");
+    assert_eq!(
+        window_size, 8192,
+        "the budget is the local model's window, not the unroutable pin's 200 000"
+    );
+    assert_eq!(
+        model, "qwen3:8b",
+        "…and the event names the model the window came from"
+    );
 }

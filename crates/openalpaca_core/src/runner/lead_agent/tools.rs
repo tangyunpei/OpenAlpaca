@@ -406,14 +406,17 @@ impl BuiltInTool for SpawnSubagentTool {
             .sessions
             .tool_result_inline_bytes;
 
-        // 8. Build messages with context distillation via PromptBuilder
-        let default_model = self.router.default_model();
-        let model_id = agent.llm_config.model.as_deref()
-            .unwrap_or(&default_model);
-        let model_window = self.router.model_registry()
-            .get_model_info(model_id)
-            .map(|info| info.context_window as usize)
-            .unwrap_or(200_000);
+        // 8. Build messages with context distillation via PromptBuilder.
+        // The window is the *answering* model's (M5): a subagent template
+        // pinned to Claude on an Ollama-only install is distilled against the
+        // local model's window, not against 200 000 it will never get. A
+        // registry with no window for it — and a window of 0 — keeps the
+        // default below.
+        let model_window = crate::runner::routed_context_window(
+            self.router.as_ref(),
+            agent.llm_config.model.as_deref(),
+        )
+        .unwrap_or(200_000);
 
         // Distill parent context for this sub-agent
         let context_package = self.context_manager.distill(

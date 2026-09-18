@@ -366,11 +366,18 @@ pub async fn run_lead_agent(
         }
     }
 
-    // 6. Build system prompt from templates
+    // 6. Build system prompt from templates, sized against the window of the
+    // model that will answer (M5) rather than a hard-coded 200 000.
+    let prompt_window = crate::runner::routed_context_window(
+        router.as_ref(),
+        lead_agent.llm_config.model.as_deref(),
+    )
+    .unwrap_or(200_000);
     let system_prompt = build_lead_agent_prompt_from_templates(
         compose_engine.as_ref(),
         &lead_agent.preset.persona,
         &worker_templates,
+        prompt_window,
     );
     let tool_guidance = format_tool_guidance(&tools);
     let connector_suffix = if !connector_guidance.is_empty() {
@@ -435,18 +442,17 @@ pub async fn run_lead_agent(
             }
 
             let mut block = String::from("### RETRIEVED MEMORY ###\n");
-            // Derive memory budget from the model's context window so it scales
-            // with the available context (context_budget is not yet constructed).
-            let model_window = {
-                let default_model = router.default_model();
-                let mid = lead_agent.llm_config.model.as_deref()
-                    .unwrap_or(&default_model);
-                router.model_registry()
-                    .get_model_info(mid)
-                    .map(|i| i.context_window)
-                    .unwrap_or(128_000)
-            };
-            let mut budget = (model_window as usize / 20).max(500).min(8000);
+            // Derive memory budget from the context window of the model that
+            // will actually answer (M5) so it scales with the available
+            // context (context_budget is not yet constructed). A registry
+            // that knows no window — and a window of 0, which must never
+            // divide anything — keeps this site's own default.
+            let model_window = crate::runner::routed_context_window(
+                router.as_ref(),
+                lead_agent.llm_config.model.as_deref(),
+            )
+            .unwrap_or(128_000);
+            let mut budget = (model_window / 20).clamp(500, 8000);
             for m in &memories {
                 let entry = format!(
                     "- [{}] {}\n",
@@ -567,15 +573,17 @@ pub async fn run_lead_agent(
         .sessions
         .tool_result_inline_bytes;
 
-    // Instantiate ContextBudgetManager for budget-aware compaction
+    // Instantiate ContextBudgetManager for budget-aware compaction, against
+    // the window of the model that will answer (M5): the template's pin when
+    // it is routable, otherwise whatever L3 substitutes for it. A lead pinned
+    // to Claude on an Ollama-only install is budgeted at the local model's
+    // window, so the loop compacts before the provider refuses the request.
     let context_budget = {
-        let default_model = router.default_model();
-        let model_id = lead_agent.llm_config.model.as_deref()
-            .unwrap_or(&default_model);
-        let context_window = router.model_registry()
-            .get_model_info(model_id)
-            .map(|info| info.context_window as usize)
-            .unwrap_or(200_000);
+        let context_window = crate::runner::routed_context_window(
+            router.as_ref(),
+            lead_agent.llm_config.model.as_deref(),
+        )
+        .unwrap_or(200_000);
         crate::context_budget::ContextBudgetManager::new(
             context_window,
             &daemon_config.load().execution.context,
@@ -584,9 +592,22 @@ pub async fn run_lead_agent(
 
     // --- Context Budget Telemetry ---
     {
+        // The model the window was read from, which is the model that will
+        // answer — naming the unroutable pin beside a local model's window
+        // (M5) would make the event a lie.
         let default_model = router.default_model();
-        let model_id = lead_agent.llm_config.model.as_deref()
-            .unwrap_or(&default_model);
+        let model_id = crate::runner::routed_model(
+            router.as_ref(),
+            lead_agent.llm_config.model.as_deref(),
+        )
+        .unwrap_or_else(|| {
+            lead_agent
+                .llm_config
+                .model
+                .clone()
+                .unwrap_or_else(|| default_model.clone())
+        });
+        let model_id = model_id.as_str();
         let model_window = context_budget.model_context_window();
         let request_id = uuid::Uuid::new_v4();
         // Estimate system prompt tokens (chars / 4 heuristic)
