@@ -272,6 +272,11 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoRespons
 }
 
 /// POST /v1/models/refresh — refresh models from provider APIs
+///
+/// Every **loaded** provider is asked, and a provider that needs no key is
+/// asked exactly like one that does (L1/L2): discovery is not gated on the key
+/// pool, so this is the route that makes a local Ollama's installed models
+/// appear without anything being written to `llm.toml`.
 pub async fn refresh_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let service = match &state.llm_settings_service {
         Some(s) => s,
@@ -285,6 +290,14 @@ pub async fn refresh_models(State(state): State<Arc<AppState>>) -> impl IntoResp
         }
     };
 
+    refresh_models_response(service).await
+}
+
+/// The route's body, minus the `AppState` lookup — an `AppState` is not
+/// constructible in a unit test and the lookup decides only the 503.
+pub(crate) async fn refresh_models_response(
+    service: &openalpaca_llm::LlmSettingsService,
+) -> Response {
     service.refresh_models().await;
     let models = service.available_models();
     (StatusCode::OK, Json(serde_json::to_value(models).unwrap())).into_response()
@@ -671,12 +684,21 @@ pub async fn get_provider_usage(State(state): State<Arc<AppState>>) -> impl Into
 /// which is precisely what the second could not establish. The guard fails
 /// closed: it never allows a disable on a guess.
 ///
-/// The 200 body is `{id, enabled, loaded, warning}`. `enabled` is the
-/// disposition now on disk; `loaded` is whether the router holds the provider.
-/// An enable that could not register — no usable key, or the provider is not
-/// compiled in — is still a 200, because the write happened and a restart
-/// reaches the same state, but it answers `loaded: false` and carries the
-/// daemon's reason in `warning` rather than leaving it in the log.
+/// The 200 body is
+/// `{id, enabled, loaded, discovered_models, discovery_error, warning}`.
+/// `enabled` is the disposition now on disk; `loaded` is whether the router
+/// holds the provider. An enable that could not register — no usable key, or
+/// the provider is not compiled in — is still a 200, because the write
+/// happened and a restart reaches the same state, but it answers
+/// `loaded: false` and carries the daemon's reason in `warning` rather than
+/// leaving it in the log.
+///
+/// **`discovered_models` is the enable's own answer about the catalogue**
+/// (L2): an enable asks the provider what it can serve and reports the count,
+/// so turning Ollama on says in one call whether the daemon can see the
+/// models the owner has installed. A provider that loaded but could not be
+/// asked answers `0` with the reason in `discovery_error` — not a failure of
+/// the toggle, and never a silent zero.
 pub async fn set_provider_enabled(
     State(state): State<Arc<AppState>>,
     Path(provider): Path<String>,
@@ -704,12 +726,23 @@ pub(crate) async fn provider_enabled_response(
             if let Some(warning) = &outcome.warning {
                 tracing::warn!(provider = %outcome.id, warning = %warning, "provider toggled but not loaded");
             }
+            if let Some(error) = &outcome.discovery_error
+                && outcome.loaded
+            {
+                tracing::warn!(
+                    provider = %outcome.id,
+                    error = %error,
+                    "provider loaded but its model list could not be read"
+                );
+            }
             (
                 StatusCode::OK,
                 Json(ProviderEnabledResponse {
                     id: outcome.id,
                     enabled: outcome.enabled,
                     loaded: outcome.loaded,
+                    discovered_models: outcome.discovered_models,
+                    discovery_error: outcome.discovery_error,
                     warning: outcome.warning,
                 }),
             )

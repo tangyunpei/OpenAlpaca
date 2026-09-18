@@ -66,3 +66,67 @@ impl Drop for HomeStoreGuard {
         }
     }
 }
+
+/// A stand-in for a locally installed Ollama, on a loopback port.
+///
+/// Discovery speaks Ollama's **native** API — `GET /api/tags` for what is
+/// installed, `POST /api/show` per tag for its context length and capabilities
+/// — so a test of the daemon's discovery paths has to answer both. Never the
+/// real Ollama: a developer's machine has whatever it has, and a test that
+/// read it would assert a different thing on every machine.
+pub(crate) struct MockOllama {
+    /// `http://127.0.0.1:<port>/v1` — the `base_url` an `llm.toml` names.
+    pub(crate) base_url: String,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for MockOllama {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+impl MockOllama {
+    /// Serve `tags` as the installed list; every `/api/show` answers with
+    /// `context_length` and the `capabilities` given.
+    pub(crate) async fn start(tags: &[&str], context_length: u64) -> Self {
+        let installed: Vec<serde_json::Value> = tags
+            .iter()
+            .map(|name| serde_json::json!({ "name": name }))
+            .collect();
+        let tags_body = serde_json::json!({ "models": installed });
+        let show_body = serde_json::json!({
+            "capabilities": ["completion", "tools"],
+            "model_info": { "qwen3.context_length": context_length },
+        });
+
+        let app = axum::Router::new()
+            .route(
+                "/api/tags",
+                axum::routing::get(move || {
+                    let body = tags_body.clone();
+                    async move { axum::Json(body) }
+                }),
+            )
+            .route(
+                "/api/show",
+                axum::routing::post(move || {
+                    let body = show_body.clone();
+                    async move { axum::Json(body) }
+                }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a loopback port");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        Self {
+            base_url: format!("http://{addr}/v1"),
+            server,
+        }
+    }
+}

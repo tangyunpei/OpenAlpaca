@@ -16,7 +16,7 @@ use axum::body::to_bytes;
 use openalpaca_llm::ProviderType;
 use tempfile::TempDir;
 
-use crate::test_util::HomeStoreGuard;
+use crate::test_util::{HomeStoreGuard, MockOllama};
 
 /// Anthropic is the default model's provider (so it is the 409 case), Ollama
 /// is off and keyless (so it is the enable case). Neither carries a key, and
@@ -59,7 +59,7 @@ struct Harness {
     _env: HomeStoreGuard,
     _config: TempDir,
     path: std::path::PathBuf,
-    seed: &'static str,
+    seed: String,
     service: Arc<openalpaca_llm::LlmSettingsService>,
 }
 
@@ -68,12 +68,13 @@ impl Harness {
         Self::with_config(CONFIG)
     }
 
-    fn with_config(seed: &'static str) -> Self {
+    fn with_config(seed: impl Into<String>) -> Self {
+        let seed = seed.into();
         let home = TempDir::new().expect("home");
         let env = HomeStoreGuard::set_with_master_key(home.path());
         let config = TempDir::new().expect("config");
         let path = config.path().join("llm.toml");
-        std::fs::write(&path, seed).expect("seed llm.toml");
+        std::fs::write(&path, &seed).expect("seed llm.toml");
 
         let router = Arc::new(openalpaca_llm::build_router(&path).expect("router"));
         let secret_store: Arc<dyn openalpaca_llm::SecretStore> =
@@ -139,14 +140,16 @@ async fn turning_a_keyless_provider_on_answers_the_row_and_loads_it() {
     let (status, body) = h.put("ollama", true).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        body,
-        serde_json::json!({
-            "id": "ollama",
-            "enabled": true,
-            "loaded": true,
-            "warning": null,
-        })
+    assert_eq!(body["id"], "ollama");
+    assert_eq!(body["enabled"], true);
+    assert_eq!(body["loaded"], true);
+    assert_eq!(body["warning"], serde_json::Value::Null);
+    // Nothing is listening on port 1, so discovery finds nothing — and says
+    // why rather than reporting a bare zero (L2).
+    assert_eq!(body["discovered_models"], 0);
+    assert!(
+        body["discovery_error"].is_string(),
+        "an unreachable provider names its reason: {body}"
     );
     assert!(
         h.service
@@ -156,6 +159,84 @@ async fn turning_a_keyless_provider_on_answers_the_row_and_loads_it() {
         "an enable re-registers — a keyless provider needs no key to load"
     );
     assert!(h.text().contains("enabled = true"));
+}
+
+/// L2 + the daemon's half: an enable asks the provider's own API what is
+/// installed and the 200 body carries the count, so switching Ollama on says
+/// in one call whether the daemon can see the owner's models.
+#[tokio::test]
+async fn turning_a_local_provider_on_reports_what_it_discovered() {
+    let ollama = MockOllama::start(&["qwen3:8b", "llama3.2:3b"], 262_144).await;
+    let h = Harness::with_config(format!(
+        r#"[orchestrator]
+model = "claude-haiku-4-5-20251001"
+
+[providers.anthropic]
+enabled = true
+strategy = "round_robin"
+
+[providers.ollama]
+enabled = false
+base_url = "{}"
+"#,
+        ollama.base_url
+    ));
+
+    let (status, body) = h.put("ollama", true).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["loaded"], true);
+    assert_eq!(
+        body["discovered_models"], 2,
+        "both installed tags were found: {body}"
+    );
+    assert_eq!(body["discovery_error"], serde_json::Value::Null);
+
+    // …and they are really in the catalogue, priced at nothing, with the
+    // context length /api/show reported.
+    let models = h.service.available_models();
+    let qwen = models
+        .iter()
+        .find(|m| m.id == "qwen3:8b")
+        .unwrap_or_else(|| panic!("qwen3:8b is not in the catalogue: {models:?}"));
+    assert_eq!(qwen.provider, "ollama");
+    assert_eq!(qwen.input_price_per_million, 0.0);
+    assert_eq!(qwen.output_price_per_million, 0.0);
+    assert_eq!(qwen.context_window, 262_144);
+}
+
+/// `POST /v1/models/refresh` for a provider that needs no key. Discovery used
+/// to acquire a key first and give up on an empty pool, so the refresh button
+/// did nothing at all for a local install (L1/L2).
+#[tokio::test]
+async fn the_refresh_route_lists_a_keyless_provider_s_models() {
+    let ollama = MockOllama::start(&["qwen3:8b"], 32_768).await;
+    let h = Harness::with_config(format!(
+        r#"[orchestrator]
+model = "qwen3:8b"
+
+[providers.ollama]
+enabled = true
+base_url = "{}"
+"#,
+        ollama.base_url
+    ));
+
+    let response = crate::routes::settings::refresh_models_response(&h.service).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 64 * 1024).await.expect("body");
+    let models: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+
+    let ids: Vec<&str> = models
+        .as_array()
+        .expect("an array of models")
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
+    assert!(
+        ids.contains(&"qwen3:8b"),
+        "the refresh route found nothing for a keyless provider: {models}"
+    );
 }
 
 #[tokio::test]
@@ -189,6 +270,8 @@ async fn a_disable_strips_the_models_and_a_second_enable_puts_them_back() {
             "id": "ollama",
             "enabled": false,
             "loaded": false,
+            "discovered_models": 0,
+            "discovery_error": null,
             "warning": null,
         }),
         "a disable is not loaded — that is the point of it"

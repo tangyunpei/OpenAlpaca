@@ -36,6 +36,14 @@ pub(super) struct ProviderEnabledResponse {
     pub id: String,
     pub enabled: bool,
     pub loaded: bool,
+    /// How many models the provider's own API reported when this enable asked
+    /// it (L2) — the number that tells an owner who just switched Ollama on
+    /// whether the daemon can see their installed models. Always `0` on a
+    /// disable.
+    pub discovered_models: usize,
+    /// Why that count is `0` although the provider loaded: discovery failed,
+    /// rather than nothing being installed. The toggle still succeeded.
+    pub discovery_error: Option<String>,
     pub warning: Option<String>,
 }
 

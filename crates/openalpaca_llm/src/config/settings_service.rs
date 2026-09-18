@@ -69,6 +69,16 @@ pub struct ProviderEnabledOutcome {
     /// Catalogue entries an enable put back after an earlier disable stripped
     /// them. Zero on a disable.
     pub restored_models: usize,
+    /// How many models the provider's own API reported when the enable asked
+    /// it (L2). Zero on a disable, and zero on an enable whose provider could
+    /// not be reached — which [`Self::discovery_error`] then names. This is
+    /// the number that tells an owner who has just switched Ollama on whether
+    /// the daemon can see their installed models, without a second call.
+    pub discovered_models: usize,
+    /// Why discovery found nothing, when that is because it failed rather than
+    /// because nothing is installed. Not a failure of the toggle: the provider
+    /// stays registered and the next refresh tries again (L2).
+    pub discovery_error: Option<String>,
     /// Set when the file was written but the router could not load the
     /// provider — no usable key, or the provider is not compiled in. The
     /// disposition is still the owner's, and a restart would reach the same
@@ -872,6 +882,8 @@ impl LlmSettingsService {
             loaded: false,
             removed_models: Vec::new(),
             restored_models: 0,
+            discovered_models: 0,
+            discovery_error: None,
             warning: None,
         };
 
@@ -895,7 +907,13 @@ impl LlmSettingsService {
                 tracing::warn!(provider = %provider, error = %e, "provider enabled in config but not loaded");
                 outcome.warning = Some(e);
             } else {
-                self.router.refresh_models().await;
+                // Just this provider, not the whole router: the owner asked
+                // about one, the answer is about one, and the count goes back
+                // in the response (L2). A cloud provider's refresh is not
+                // re-run as a side effect of turning a local one on.
+                let discovery = self.router.refresh_models_for(&provider_type).await;
+                outcome.discovered_models = discovery.models;
+                outcome.discovery_error = discovery.error;
             }
         } else {
             outcome.removed_models = self.router.deregister_provider(&provider_type);
