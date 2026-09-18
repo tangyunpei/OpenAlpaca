@@ -9,16 +9,20 @@ impl LlmRouter {
         original_model: &str,
         request: &RouterRequest,
     ) -> Result<ChatResponse, LlmRouterError> {
-        // 1. Try model-level fallback chains.
-        //    Per-request fallback_models override the global chain when non-empty.
-        let chain = if !request.fallback_models.is_empty() {
-            request.fallback_models.clone()
-        } else {
-            self.fallback_chains.get(original_model).cloned().unwrap_or_default()
-        };
-        for fallback_model in &chain {
-            match self.try_model(fallback_model, request).await {
-                Ok(response) => return Ok(response),
+        // 1. Walk the ladder (L3): the request's own chain, then the model's
+        //    configured chain, then `[orchestrator] fallback_models`, then the
+        //    effective default model. A rung nothing can serve is skipped
+        //    rather than attempted, and the model that does answer is
+        //    announced — the caller asked for a different one.
+        for fallback_model in self.substitution_ladder(original_model, &request.fallback_models) {
+            if !self.is_routable(&fallback_model) {
+                continue;
+            }
+            match self.try_model(&fallback_model, request).await {
+                Ok(response) => {
+                    self.note_substitution(original_model, &fallback_model);
+                    return Ok(response);
+                }
                 Err(_) => continue,
             }
         }
@@ -84,6 +88,11 @@ impl LlmRouter {
             }
         }
 
+        // Nothing on the ladder was even routable: this is not "the fallbacks
+        // failed", it is "no provider is switched on". Say which it is (L3).
+        if self.effective_default_model().is_none() {
+            return Err(LlmRouterError::NoRoutableModel);
+        }
         Err(LlmRouterError::AllFallbacksFailed)
     }
 }

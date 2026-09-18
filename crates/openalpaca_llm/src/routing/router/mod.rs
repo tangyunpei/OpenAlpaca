@@ -29,7 +29,7 @@ use crate::error::LlmError;
 use crate::keys::key_pool::CallResult;
 #[cfg(test)]
 use crate::types::*;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -67,6 +67,17 @@ pub struct LlmRouter {
     /// What the last discovery pass learned about each provider, so an empty
     /// model list can be told apart from a provider that could not be reached.
     pub(super) discovery: DashMap<ProviderType, crate::routing::model_registry::ProviderDiscovery>,
+    /// (requested → effective) pairs already announced, so a substitution is
+    /// visible once per pair instead of once per round (L3).
+    pub(super) substitutions_logged: DashSet<(String, String)>,
+}
+
+/// Append `candidate` unless it is the model we are already replacing, or is
+/// already on the ladder.
+fn push_unique(chain: &mut Vec<String>, requested: &str, candidate: &str) {
+    if candidate != requested && !chain.iter().any(|m| m == candidate) {
+        chain.push(candidate.to_string());
+    }
 }
 
 impl LlmRouter {
@@ -93,6 +104,7 @@ impl LlmRouter {
             concurrency_limiter: Arc::new(Semaphore::new(rate_config.global_concurrency)),
             rate_limiter_registry: Arc::new(RateLimiterRegistry::new(rate_config)),
             discovery: DashMap::new(),
+            substitutions_logged: DashSet::new(),
         }
     }
 
@@ -121,6 +133,7 @@ impl LlmRouter {
             concurrency_limiter: Arc::new(Semaphore::new(rate_limit_config.global_concurrency)),
             rate_limiter_registry: Arc::new(RateLimiterRegistry::new(rate_limit_config)),
             discovery: DashMap::new(),
+            substitutions_logged: DashSet::new(),
         }
     }
 
@@ -163,6 +176,7 @@ impl LlmRouter {
             concurrency_limiter: Arc::new(Semaphore::new(rate_config.global_concurrency)),
             rate_limiter_registry: Arc::new(RateLimiterRegistry::new(rate_config)),
             discovery: DashMap::new(),
+            substitutions_logged: DashSet::new(),
         }
     }
 
@@ -219,6 +233,158 @@ impl LlmRouter {
     /// and it loaded" looks like from inside (R58c, R60).
     pub fn has_provider(&self, provider_type: &ProviderType) -> bool {
         self.providers.contains_key(provider_type)
+    }
+
+    // ── L3: which model a request actually reaches ──────────────────────────
+
+    /// Can a call naming this model be made at all — is the id in the
+    /// catalogue *and* its provider loaded?
+    pub fn is_routable(&self, model_id: &str) -> bool {
+        self.model_registry
+            .resolve_provider(model_id)
+            .is_some_and(|pt| self.has_provider(&pt))
+    }
+
+    /// Loaded providers, in the order the ladder prefers them.
+    ///
+    /// `llm.toml`'s `[providers]` table parses into a `HashMap`, so the file's
+    /// declaration order does not survive parsing. The built-in order is used
+    /// instead — anthropic, openai, ollama — which is the order the seeded
+    /// template declares. Anything else loaded (a plugin provider) follows,
+    /// sorted by name, so the answer does not move between runs.
+    fn provider_preference_order(&self) -> Vec<ProviderType> {
+        let mut ordered: Vec<ProviderType> = ProviderType::all()
+            .iter()
+            .filter(|pt| self.has_provider(pt))
+            .cloned()
+            .collect();
+        let mut rest: Vec<ProviderType> = self
+            .providers
+            .iter()
+            .map(|e| e.key().clone())
+            .filter(|pt| !ordered.contains(pt))
+            .collect();
+        rest.sort_by_key(|pt| pt.to_string());
+        ordered.append(&mut rest);
+        ordered
+    }
+
+    /// The model this provider would answer with, if it had to answer.
+    ///
+    /// Its configured `default_model` when that is routable; otherwise what the
+    /// owner actually has — Ollama's `default_model` names a tag that may never
+    /// have been pulled, and the catalogue knows which ones were.
+    fn provider_default_model(&self, provider_type: &ProviderType) -> Option<String> {
+        let configured = self
+            .runtime_config()
+            .provider_defaults
+            .get(&provider_type.to_string())
+            .map(|d| d.default_model.clone());
+        if let Some(model) = configured
+            && self.is_routable(&model)
+        {
+            return Some(model);
+        }
+        self.model_registry
+            .first_model_for_provider(provider_type)
+            .filter(|m| self.is_routable(m))
+    }
+
+    /// The model a request that names none will actually reach.
+    ///
+    /// `None` means nothing at all is routable — no enabled provider offers a
+    /// model — which is the one condition [`LlmRouterError::NoRoutableModel`]
+    /// reports. Callers that display configuration (status, the models route)
+    /// show this beside the configured default, so "configured: X — not
+    /// available, using Y" is sayable.
+    pub fn effective_default_model(&self) -> Option<String> {
+        let configured = self.default_model();
+        if self.is_routable(&configured) {
+            return Some(configured);
+        }
+        self.provider_preference_order()
+            .into_iter()
+            .find_map(|pt| self.provider_default_model(&pt))
+    }
+
+    /// Everything the ladder would try in place of `requested`, in order.
+    ///
+    /// The request's own chain, then the model's configured chain, then
+    /// `[orchestrator] fallback_models` (stored under the configured default
+    /// model), then the effective default. Deduped, and never containing
+    /// `requested` itself.
+    pub(super) fn substitution_ladder(
+        &self,
+        requested: &str,
+        request_chain: &[String],
+    ) -> Vec<String> {
+        let mut chain: Vec<String> = Vec::new();
+        for model in request_chain {
+            push_unique(&mut chain, requested, model);
+        }
+        if let Some(models) = self.fallback_chains.get(requested) {
+            for model in models {
+                push_unique(&mut chain, requested, model);
+            }
+        }
+        let configured_default = self.default_model();
+        if let Some(models) = self.fallback_chains.get(&configured_default) {
+            for model in models {
+                push_unique(&mut chain, requested, model);
+            }
+        }
+        if let Some(effective) = self.effective_default_model() {
+            push_unique(&mut chain, requested, &effective);
+        }
+        chain
+    }
+
+    /// The model a request naming `requested` will be sent as.
+    ///
+    /// `requested` itself when it is routable — the ordinary case, unchanged.
+    /// Otherwise the first rung of the ladder that is, announced once. `None`
+    /// when nothing is routable.
+    ///
+    /// This is what keeps the shipped agent templates working: their Claude
+    /// pins are right when Anthropic is configured, and fall through here when
+    /// it is not, instead of dying on `UnknownModel` before the fallback chain
+    /// was ever consulted.
+    pub(super) fn resolve_routable(
+        &self,
+        requested: &str,
+        request_chain: &[String],
+    ) -> Option<String> {
+        if self.is_routable(requested) {
+            return Some(requested.to_string());
+        }
+        let effective = self
+            .substitution_ladder(requested, request_chain)
+            .into_iter()
+            .find(|m| self.is_routable(m))?;
+        self.note_substitution(requested, &effective);
+        Some(effective)
+    }
+
+    /// Say, once per distinct pair, that an answer came from another model.
+    ///
+    /// A substitution is never silent: the owner asked for one model and got
+    /// another, and the call log carries the model that actually answered.
+    pub(super) fn note_substitution(&self, requested: &str, effective: &str) {
+        if requested == effective {
+            return;
+        }
+        if self
+            .substitutions_logged
+            .insert((requested.to_string(), effective.to_string()))
+        {
+            tracing::warn!(
+                requested = requested,
+                effective = effective,
+                "Requested model is not available — answering with another model. \
+                 Enable its provider, or pin a different model in the agent template \
+                 or [orchestrator] model."
+            );
+        }
     }
 
     /// Does this provider need an API key? `None` when it is not loaded.

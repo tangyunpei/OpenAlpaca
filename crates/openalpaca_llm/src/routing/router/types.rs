@@ -57,6 +57,17 @@ pub enum LlmRouterError {
     #[error("All fallback models failed")]
     AllFallbacksFailed,
 
+    /// Nothing in the catalogue belongs to a provider that is loaded, so no
+    /// model can be called at all. Replaces the "Unknown model: …" and "All
+    /// fallback models failed" an owner used to see for a daemon that simply
+    /// had no provider switched on (L3).
+    #[error(
+        "No model is available: no enabled provider offers one. Enable a provider in \
+         Settings → Models, or check `openalpaca llm status` — a local Ollama needs no \
+         API key, only `ollama pull <model>`."
+    )]
+    NoRoutableModel,
+
     #[error("No fallback chain configured for model: {0}")]
     NoFallbackAvailable(String),
 

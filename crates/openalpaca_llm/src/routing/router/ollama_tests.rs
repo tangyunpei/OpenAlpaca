@@ -388,6 +388,65 @@ async fn an_unreachable_ollama_leaves_the_provider_registered() {
     );
 }
 
+// ── L3: a Claude-pinned template still runs on an Ollama-only machine ───────
+
+/// The shipped templates all pin Claude ids. On a machine with only Ollama the
+/// ladder ends at "the default model of the first enabled provider" — and for
+/// Ollama that is `default_model` when installed, else the first installed
+/// tools-capable model.
+#[tokio::test]
+async fn a_claude_pin_falls_through_to_an_installed_ollama_model() {
+    let server = MockHttpServer::start(|req| match req.path.as_str() {
+        "/api/tags" => MockResponse::json(tags_body(&["a-no-tools", "b-with-tools"])),
+        "/api/show" if req.body.contains("b-with-tools") => {
+            MockResponse::json(show_body("qwen3", 262_144, &["completion", "tools"]))
+        }
+        "/api/show" => MockResponse::json(show_body("gemma", 8192, &["completion"])),
+        "/v1/chat/completions" => MockResponse::json(completion_body("b-with-tools", "local pong")),
+        _ => MockResponse::not_found(),
+    })
+    .await;
+
+    let router = empty_catalogue_router(&server.base_url);
+    // The configured default is the seeded template's Claude id, and
+    // `[providers.ollama] default_model` names a tag nobody pulled.
+    router.set_default_model("claude-sonnet-4-6".to_string());
+    router.refresh_models_for(&ProviderType::Ollama).await;
+
+    assert_eq!(
+        router.effective_default_model().as_deref(),
+        Some("b-with-tools"),
+        "the tools-capable installed model wins over the alphabetically first"
+    );
+
+    let response = router
+        .complete(request("claude-sonnet-4-6"))
+        .await
+        .expect("a Claude pin still runs when only Ollama is enabled");
+    assert_eq!(response.content, "local pong");
+}
+
+/// Ollama enabled but nothing pulled: one error that names the fix.
+#[tokio::test]
+async fn an_ollama_with_no_models_installed_says_what_to_do() {
+    let server = MockHttpServer::start(|req| match req.path.as_str() {
+        "/api/tags" => MockResponse::json(tags_body(&[])),
+        _ => MockResponse::not_found(),
+    })
+    .await;
+
+    let router = empty_catalogue_router(&server.base_url);
+    router.refresh_models_for(&ProviderType::Ollama).await;
+
+    assert_eq!(router.effective_default_model(), None);
+    let err = router
+        .complete(request("claude-sonnet-4-6"))
+        .await
+        .expect_err("nothing is installed");
+    assert!(matches!(err, LlmRouterError::NoRoutableModel), "{err:?}");
+    assert!(err.to_string().contains("ollama pull"), "{err}");
+}
+
 /// The fact the CLI and GUI render as "no key needed".
 #[tokio::test]
 async fn the_router_reports_a_local_provider_as_needing_no_key() {

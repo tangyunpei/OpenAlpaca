@@ -21,7 +21,14 @@ impl LlmRouter {
             .map_err(|_| LlmRouterError::MaxRetriesExceeded)?;
 
         let default = self.default_model();
-        let model = request.model.as_deref().unwrap_or(&default);
+        let requested = request.model.as_deref().unwrap_or(&default);
+        // L3: an id nothing can serve no longer dies here. Resolve it against
+        // the ladder first — the caller's chain, the model's, the
+        // orchestrator's, the effective default — and say so when it moves.
+        let model = self
+            .resolve_routable(requested, &request.fallback_models)
+            .ok_or(LlmRouterError::NoRoutableModel)?;
+        let model = model.as_str();
 
         let provider_type = self
             .model_registry
@@ -119,7 +126,14 @@ impl LlmRouter {
     /// Complete a request: resolve provider, acquire key, call, handle retries/fallbacks.
     pub async fn complete(&self, request: RouterRequest) -> Result<ChatResponse, LlmRouterError> {
         let default = self.default_model();
-        let model = request.model.as_deref().unwrap_or(&default);
+        let requested = request.model.as_deref().unwrap_or(&default);
+        // See `complete_streaming`: the ladder runs before the call, so an
+        // unroutable pin is answered by a routable model instead of failing
+        // past the fallback chain entirely (L3).
+        let model = self
+            .resolve_routable(requested, &request.fallback_models)
+            .ok_or(LlmRouterError::NoRoutableModel)?;
+        let model = model.as_str();
 
         // Acquire concurrency permit — limits parallel in-flight API calls
         // to prevent rate-limit stampedes from parallel subagents.
@@ -150,6 +164,16 @@ impl LlmRouter {
                 tracing::warn!(
                     model = model,
                     "Max retries exceeded across all keys. Trying fallback chain."
+                );
+                self.try_fallback(model, &request).await
+            }
+            // The provider was unloaded between the ladder and the call — a
+            // disable landing mid-request. Take the ladder's next rung rather
+            // than handing the caller a bare "Unknown model".
+            Err(LlmRouterError::UnknownModel(_)) | Err(LlmRouterError::ProviderNotConfigured(_)) => {
+                tracing::warn!(
+                    model = model,
+                    "Model became unroutable during the call. Trying fallback chain."
                 );
                 self.try_fallback(model, &request).await
             }
