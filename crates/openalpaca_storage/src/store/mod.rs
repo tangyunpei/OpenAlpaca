@@ -156,6 +156,28 @@ const DAEMON_LOG_FILE: &str = "daemon.log";
 /// be sitting there (T44 fix round 1, Important #3).
 pub const MANAGED_LOG_ENV: &str = "OPENALPACA_MANAGED_LOG";
 
+/// `state/cache/fastembed` — the local embedding model's own cache, created if
+/// missing (L11).
+///
+/// fastembed defaults its cache to `./.fastembed_cache`, **relative to the
+/// process's working directory**: the daemon's ~1 GB model download landed
+/// wherever it happened to be started from, outside the store, and was
+/// downloaded again the next time that differed. Regenerable — deleting it
+/// costs one download and nothing else — so it belongs in `state/`, with the
+/// rest of what the machine can rebuild.
+pub fn embedding_cache_dir() -> Result<PathBuf> {
+    let dir = state_dir()?.join(CACHE_DIR).join("fastembed");
+    fs::create_dir_all(&dir).with_context(|| {
+        format!(
+            "Failed to create the embedding cache directory: {}",
+            dir.display()
+        )
+    })?;
+    Ok(dir)
+}
+
+const CACHE_DIR: &str = "cache";
+
 /// `state/backups` — created if missing. The atomic config writer's rotation target.
 pub fn backups_dir() -> Result<PathBuf> {
     let dir = state_dir()?.join("backups");
@@ -693,6 +715,7 @@ files only.
 | `state/` | database (+ WAL/SHM), `discovery.json`, `openalpacad.lock`, `.master_key` | never swept — deleting it is a factory reset |
 | `state/backups/` | rotated copies of hand-edited config (`<name>.bak.<ts>`, `<name>.unparseable-<ts>`) | regenerable — swept freely; never user-edited |
 | `state/logs/` | `daemon.log`, `gui.log` | regenerable — swept freely |
+| `state/cache/` | derived data the machine can rebuild — `fastembed/` holds the local embedding model (~1 GB) | regenerable — deleting it costs a re-download |
 | `config/` | your runtime config: `llm.toml`, `daemon.toml`, `mcp.toml`, `agents/`, `skills/`, `orchestrator/`, `tools/` | yours — never swept |
 | `plugins/` | plugin directories you dropped in, `.permissions.toml`, `.config/<name>.toml`, `.data/<name>/` | yours — never swept |
 | `artifacts/` | files produced by tasks that had no project | never garbage-collected |

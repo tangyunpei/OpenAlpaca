@@ -1,6 +1,7 @@
 //! Embedder trait and backends for generating vector embeddings.
 
 use async_trait::async_trait;
+use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -141,7 +142,32 @@ pub struct LocalEmbedder {
 
 #[cfg(feature = "local-embeddings")]
 impl LocalEmbedder {
-    pub fn new(model_name: Option<&str>, dimensions: u32) -> Result<Self, EmbedError> {
+    /// `cache_dir` is where the model's weights live — roughly 1 GB, downloaded
+    /// once. `None` leaves fastembed's own default, which is
+    /// `./.fastembed_cache` **relative to the process's working directory**;
+    /// the daemon always names a directory inside the store instead (L11).
+    pub fn new(
+        model_name: Option<&str>,
+        dimensions: u32,
+        cache_dir: Option<&Path>,
+    ) -> Result<Self, EmbedError> {
+        let opts = Self::init_options(model_name, cache_dir)?;
+        let model = fastembed::TextEmbedding::try_new(opts).map_err(|e| {
+            EmbedError::Config(format!("Failed to load local embedding model: {e}"))
+        })?;
+        Ok(Self {
+            model,
+            dims: dimensions,
+        })
+    }
+
+    /// Everything about the model *except* loading it — separated so the one
+    /// thing that has to be right before a gigabyte moves, the cache
+    /// directory, is checkable without downloading anything.
+    fn init_options(
+        model_name: Option<&str>,
+        cache_dir: Option<&Path>,
+    ) -> Result<fastembed::InitOptions, EmbedError> {
         let default_model = "intfloat/multilingual-e5-base";
         let name = model_name.unwrap_or(default_model);
         let model_enum: fastembed::EmbeddingModel = name
@@ -151,13 +177,10 @@ impl LocalEmbedder {
         let mut opts = fastembed::InitOptions::default();
         opts.model_name = model_enum;
         opts.show_download_progress = true;
-        let model = fastembed::TextEmbedding::try_new(opts).map_err(|e| {
-            EmbedError::Config(format!("Failed to load local embedding model: {e}"))
-        })?;
-        Ok(Self {
-            model,
-            dims: dimensions,
-        })
+        if let Some(dir) = cache_dir {
+            opts.cache_dir = dir.to_path_buf();
+        }
+        Ok(opts)
     }
 }
 
@@ -194,12 +217,17 @@ impl Embedder for LocalEmbedder {
 
 // ── Factory ─────────────────────────────────────────────────────────────
 
+/// `cache_dir` is where a local model's weights are kept; it is ignored by
+/// every remote backend. The daemon passes `store::embedding_cache_dir()`
+/// (L11) — `None` means "wherever the library puts it", which for fastembed is
+/// a directory relative to the process's working directory.
 pub fn build_embedder(
     config: &EmbeddingsConfig,
     secret_store: Option<&dyn crate::keys::secret_store::SecretStore>,
     provider_config: Option<&crate::config::ProviderConfig>,
+    cache_dir: Option<&Path>,
 ) -> Result<Arc<dyn Embedder>, EmbedError> {
-    build_embedder_with_runtime(config, secret_store, provider_config, None)
+    build_embedder_with_runtime(config, secret_store, provider_config, None, cache_dir)
 }
 
 pub fn build_embedder_with_runtime(
@@ -207,6 +235,7 @@ pub fn build_embedder_with_runtime(
     _secret_store: Option<&dyn crate::keys::secret_store::SecretStore>,
     _provider_config: Option<&crate::config::ProviderConfig>,
     _runtime_config: Option<&crate::config::LlmRuntimeConfig>,
+    _cache_dir: Option<&Path>,
 ) -> Result<Arc<dyn Embedder>, EmbedError> {
     let _dimensions = config.dimensions.unwrap_or(768);
 
@@ -231,7 +260,7 @@ pub fn build_embedder_with_runtime(
         #[cfg(feature = "local-embeddings")]
         "local" => {
             let model_name = config.model.as_deref();
-            let embedder = LocalEmbedder::new(model_name, _dimensions)?;
+            let embedder = LocalEmbedder::new(model_name, _dimensions, _cache_dir)?;
             Ok(Arc::new(embedder))
         }
         other => Err(EmbedError::Config(format!(
@@ -278,7 +307,7 @@ mod tests {
             model: None,
             dimensions: None,
         };
-        let result = build_embedder(&config, None, None);
+        let result = build_embedder(&config, None, None, None);
         // Should fail because provider is unknown, not because of dimensions
         assert!(result.is_err());
         match result {
@@ -297,11 +326,31 @@ mod tests {
             dimensions: Some(768),
         };
         // Without any key source, should fail
-        let result = build_embedder(&config, None, None);
+        let result = build_embedder(&config, None, None, None);
         // May succeed if OPENAI_API_KEY is set in env, otherwise fails
         if std::env::var("OPENAI_API_KEY").is_err() {
             assert!(result.is_err());
         }
+    }
+
+    /// L11. fastembed's default cache is `./.fastembed_cache`, resolved
+    /// against the process's working directory — so the daemon's ~1 GB model
+    /// landed wherever it was started from and was fetched again whenever that
+    /// changed. The caller names the directory; the library's default is only
+    /// the fallback.
+    #[cfg(feature = "local-embeddings")]
+    #[test]
+    fn a_named_cache_directory_is_where_the_model_goes() {
+        let dir = std::path::Path::new("/somewhere/state/cache/fastembed");
+
+        let named = LocalEmbedder::init_options(None, Some(dir)).expect("default model parses");
+        assert_eq!(named.cache_dir, dir);
+
+        let unnamed = LocalEmbedder::init_options(None, None).expect("default model parses");
+        assert_ne!(
+            unnamed.cache_dir, dir,
+            "with no directory named, the library's own default stands"
+        );
     }
 
     #[test]
@@ -312,7 +361,7 @@ mod tests {
             model: None,
             dimensions: Some(768),
         };
-        let result = build_embedder(&config, None, None);
+        let result = build_embedder(&config, None, None, None);
         assert!(result.is_err());
         match result {
             Err(e) => assert!(e.to_string().contains("Unknown")),

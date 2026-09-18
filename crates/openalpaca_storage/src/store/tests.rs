@@ -123,10 +123,14 @@ fn test_paths_are_consistent() {
     let assets = interim_assets_dir().unwrap();
     let logs = logs_dir().unwrap();
     let backups = backups_dir().unwrap();
+    // L11: the embedding model's ~1 GB of weights is regenerable machine
+    // state, so it belongs under `state/` — not in the daemon's CWD, which is
+    // where the library puts it when nobody says otherwise.
+    let embeddings = embedding_cache_dir().unwrap();
 
     assert_eq!(state, tmp.path().join("state"));
     assert!(state.is_dir(), "state_dir() creates the directory");
-    for p in [&discovery, &lock, &db, &assets, &logs, &backups] {
+    for p in [&discovery, &lock, &db, &assets, &logs, &backups, &embeddings] {
         assert!(p.starts_with(&state), "{} is not under state/", p.display());
     }
     assert!(discovery.ends_with("discovery.json"));
@@ -135,6 +139,11 @@ fn test_paths_are_consistent() {
     assert!(assets.ends_with("assets"));
     assert!(logs.is_dir() && logs.ends_with("logs"));
     assert!(backups.is_dir() && backups.ends_with("backups"));
+    assert_eq!(embeddings, state.join("cache").join("fastembed"));
+    assert!(
+        embeddings.is_dir(),
+        "embedding_cache_dir() creates it on demand"
+    );
     assert_eq!(master_key_dir().unwrap(), state);
 
     // The human's half of the root sits beside state/, not inside it.
