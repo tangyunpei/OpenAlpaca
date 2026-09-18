@@ -973,6 +973,15 @@ impl LlmSettingsService {
             .and_then(|pc| pc.base_url.clone());
 
         let rt = self.router.runtime_config();
+        // The same two facts the boot builder reads for this provider: the
+        // client's connect/idle bounds and the non-streaming deadline. A
+        // provider registered here used to get a bare `reqwest::Client` with no
+        // timeout at all, so the same provider behaved differently depending on
+        // whether it was enabled before or after startup (L7).
+        #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
+        let request_timeout = rt.request_timeout_for(&provider_name);
+        #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
+        let client = crate::providers::build_http_client(request_timeout);
         let provider: Option<Arc<dyn crate::LlmProvider>> = match &provider_type {
             #[cfg(feature = "anthropic")]
             ProviderType::Anthropic => {
@@ -985,11 +994,13 @@ impl LlmSettingsService {
                     .get("anthropic")
                     .map(|d| d.default_max_tokens);
                 Some(Arc::new(
-                    crate::providers::anthropic::AnthropicProvider::new(
+                    crate::providers::anthropic::AnthropicProvider::with_client(
+                        client,
                         require_key()?,
                         model,
                         max_tokens,
-                    ),
+                    )
+                    .with_request_timeout(request_timeout),
                 ))
             }
             #[cfg(feature = "openai")]
@@ -1002,12 +1013,16 @@ impl LlmSettingsService {
                     .provider_defaults
                     .get("openai")
                     .map(|d| d.default_max_tokens);
-                Some(Arc::new(crate::providers::openai::OpenAiProvider::new(
-                    require_key()?,
-                    model,
-                    base_url,
-                    max_tokens,
-                )))
+                Some(Arc::new(
+                    crate::providers::openai::OpenAiProvider::with_client(
+                        client,
+                        require_key()?,
+                        model,
+                        base_url,
+                        max_tokens,
+                    )
+                    .with_request_timeout(request_timeout),
+                ))
             }
             #[cfg(feature = "ollama")]
             ProviderType::Ollama => {
@@ -1016,9 +1031,19 @@ impl LlmSettingsService {
                     .get("ollama")
                     .map(|d| d.default_model.clone())
                     .unwrap_or_else(|| "llama3".to_string());
-                Some(Arc::new(crate::providers::ollama::OllamaProvider::new(
-                    model, base_url,
-                )))
+                // The same output ceiling the boot builder reads — a provider
+                // toggled on at runtime must not answer differently from one
+                // that was on at startup (L6).
+                let max_tokens = rt
+                    .provider_defaults
+                    .get("ollama")
+                    .map(|d| d.default_max_tokens);
+                Some(Arc::new(
+                    crate::providers::ollama::OllamaProvider::with_client(
+                        client, model, base_url, max_tokens,
+                    )
+                    .with_request_timeout(request_timeout),
+                ))
             }
             #[allow(unreachable_patterns)]
             _ => None,

@@ -71,6 +71,11 @@ pub struct ProviderConfig {
     pub keys: Option<Vec<KeyConfig>>,
     pub default_model: Option<String>,
     pub default_max_tokens: Option<u32>,
+    /// This provider's own non-streaming wall clock, in seconds. Omitted means
+    /// `[timeouts] llm_request_timeout_secs` (120). See
+    /// [`LlmRuntimeConfig::request_timeout_for`](super::runtime::LlmRuntimeConfig::request_timeout_for).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

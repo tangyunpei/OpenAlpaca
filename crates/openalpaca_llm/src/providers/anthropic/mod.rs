@@ -41,6 +41,10 @@ pub struct AnthropicProvider {
     api_key: String,
     model: String,
     max_tokens: u32,
+    /// Total deadline for one non-streaming call, from
+    /// [`with_request_timeout`](Self::with_request_timeout). `None` leaves the
+    /// bound to the client's connect and idle timeouts alone (L7).
+    request_timeout: Option<std::time::Duration>,
 }
 
 impl AnthropicProvider {
@@ -60,6 +64,24 @@ impl AnthropicProvider {
             api_key,
             model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
             max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+            request_timeout: None,
+        }
+    }
+
+    /// Give one non-streaming call this much wall clock, and no more.
+    ///
+    /// Streaming deliberately does not carry it — see
+    /// [`crate::providers::build_http_client`] (L7).
+    pub fn with_request_timeout(mut self, request_timeout: std::time::Duration) -> Self {
+        self.request_timeout = Some(request_timeout);
+        self
+    }
+
+    /// The per-request deadline, applied to every non-streaming request.
+    fn deadline(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self.request_timeout {
+            Some(timeout) => builder.timeout(timeout),
+            None => builder,
         }
     }
 
@@ -93,10 +115,12 @@ impl LlmProvider for AnthropicProvider {
 
     async fn list_models_with_key(&self, key: &str) -> Result<Vec<String>, LlmError> {
         let response = self
-            .client
-            .get("https://api.anthropic.com/v1/models")
-            .header("x-api-key", key)
-            .header("anthropic-version", API_VERSION)
+            .deadline(
+                self.client
+                    .get("https://api.anthropic.com/v1/models")
+                    .header("x-api-key", key)
+                    .header("anthropic-version", API_VERSION),
+            )
             .send()
             .await
             .map_err(|e| LlmError::Http(e.to_string()))?;
@@ -130,12 +154,13 @@ impl LlmProvider for AnthropicProvider {
         let body = request::build_request_body(&self.model, self.max_tokens, &request);
         let model_id = request.model.as_deref().unwrap_or(&self.model);
 
-        let mut req_builder = self
-            .client
-            .post(API_URL)
-            .header("x-api-key", key)
-            .header("anthropic-version", API_VERSION)
-            .header("content-type", "application/json");
+        let mut req_builder = self.deadline(
+            self.client
+                .post(API_URL)
+                .header("x-api-key", key)
+                .header("anthropic-version", API_VERSION)
+                .header("content-type", "application/json"),
+        );
 
         // Add anthropic-beta header when beta features are in use
         let beta_flags = build_beta_header(&request);

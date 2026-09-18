@@ -27,6 +27,10 @@ pub struct OpenAiProvider {
     model: String,
     pub(crate) base_url: String,
     max_tokens: u32,
+    /// Total deadline for one non-streaming call, from
+    /// [`with_request_timeout`](Self::with_request_timeout). `None` leaves the
+    /// bound to the client's connect and idle timeouts alone (L7).
+    request_timeout: Option<std::time::Duration>,
 }
 
 impl OpenAiProvider {
@@ -53,26 +57,50 @@ impl OpenAiProvider {
             model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
             base_url: base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
             max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+            request_timeout: None,
         }
     }
 
     /// Create a provider without auth (for OpenAI-compatible APIs like Ollama).
-    pub fn new_without_auth(model: String, base_url: String) -> Self {
-        Self::new_without_auth_with_client(reqwest::Client::new(), model, base_url)
+    pub fn new_without_auth(model: String, base_url: String, max_tokens: Option<u32>) -> Self {
+        Self::new_without_auth_with_client(reqwest::Client::new(), model, base_url, max_tokens)
     }
 
     /// Create a provider without auth, using a shared client.
+    ///
+    /// `max_tokens` is the output ceiling the caller's config asked for; `None`
+    /// keeps the 4096 default. It used to be hard-coded here, which is how
+    /// `[providers.ollama] default_max_tokens` came to be silently ignored (L6).
     pub fn new_without_auth_with_client(
         client: reqwest::Client,
         model: String,
         base_url: String,
+        max_tokens: Option<u32>,
     ) -> Self {
         Self {
             client,
             api_key: None,
             model,
             base_url,
-            max_tokens: DEFAULT_MAX_TOKENS,
+            max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+            request_timeout: None,
+        }
+    }
+
+    /// Give one non-streaming call this much wall clock, and no more.
+    ///
+    /// Streaming deliberately does not carry it — see
+    /// [`crate::providers::build_http_client`] (L7).
+    pub fn with_request_timeout(mut self, request_timeout: std::time::Duration) -> Self {
+        self.request_timeout = Some(request_timeout);
+        self
+    }
+
+    /// The per-request deadline, applied to every non-streaming request.
+    fn deadline(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self.request_timeout {
+            Some(timeout) => builder.timeout(timeout),
+            None => builder,
         }
     }
 
@@ -115,7 +143,7 @@ impl LlmProvider for OpenAiProvider {
 
     async fn list_models_with_key(&self, key: &str) -> Result<Vec<String>, LlmError> {
         let url = format!("{}/models", self.base_url);
-        let mut req_builder = self.client.get(&url);
+        let mut req_builder = self.deadline(self.client.get(&url));
 
         if !key.is_empty() {
             req_builder = req_builder.header("Authorization", format!("Bearer {}", key));
@@ -156,10 +184,11 @@ impl LlmProvider for OpenAiProvider {
         let url = format!("{}/chat/completions", self.base_url);
         let model_id = request.model.as_deref().unwrap_or(&self.model);
 
-        let mut req_builder = self
-            .client
-            .post(&url)
-            .header("content-type", "application/json");
+        let mut req_builder = self.deadline(
+            self.client
+                .post(&url)
+                .header("content-type", "application/json"),
+        );
 
         if !key.is_empty() {
             req_builder = req_builder.header("Authorization", format!("Bearer {}", key));
@@ -231,9 +260,11 @@ impl LlmProvider for OpenAiProvider {
     ) -> Result<ChatStream, LlmError> {
         let mut body = self.build_request_body(&request);
         body["stream"] = serde_json::json!(true);
-        if self.base_url == DEFAULT_BASE_URL {
-            body["stream_options"] = serde_json::json!({"include_usage": true});
-        }
+        // Asked of every OpenAI-compatible base, not just api.openai.com: a
+        // streamed turn that reports no usage is booked at zero tokens and zero
+        // cost, so the caps and the usage screen see nothing (L5). Ollama
+        // honours the flag; a base that does not simply ignores it.
+        body["stream_options"] = serde_json::json!({"include_usage": true});
         let url = format!("{}/chat/completions", self.base_url);
 
         let mut req_builder = self

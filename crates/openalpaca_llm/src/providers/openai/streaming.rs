@@ -2,6 +2,27 @@ use crate::error::LlmError;
 use crate::types::*;
 use futures_util::StreamExt;
 
+/// The `usage` object of one SSE frame, when it has one.
+///
+/// `None` means the frame said nothing about tokens — which is not the same as
+/// "zero tokens", so the caller decides what an absent count means.
+fn parse_usage(frame: &serde_json::Value) -> Option<Usage> {
+    let u = frame["usage"].as_object()?;
+    Some(Usage {
+        input_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+        output_tokens: u
+            .get("completion_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32,
+        cache_read_input_tokens: u
+            .get("prompt_tokens_details")
+            .and_then(|d| d.get("cached_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32,
+        ..Default::default()
+    })
+}
+
 /// Parse an OpenAI SSE byte stream into a stream of `StreamEvent`s.
 pub(super) fn parse_openai_sse(
     byte_stream: impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
@@ -92,29 +113,10 @@ pub(super) fn parse_openai_sse(
                     }
 
                     if let Some(finish_reason_str) = choice["finish_reason"].as_str() {
-                        let usage = if let Some(u) = json["usage"].as_object() {
-                            Usage {
-                                input_tokens: u
-                                    .get("prompt_tokens")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0)
-                                    as u32,
-                                output_tokens: u
-                                    .get("completion_tokens")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0)
-                                    as u32,
-                                cache_read_input_tokens: u
-                                    .get("prompt_tokens_details")
-                                    .and_then(|d| d.get("cached_tokens"))
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0)
-                                    as u32,
-                                ..Default::default()
-                            }
-                        } else {
-                            Usage::default()
-                        };
+                        // Ollama puts usage on this frame when
+                        // `stream_options.include_usage` was asked for; when it
+                        // is absent the frame below carries it instead.
+                        let usage = parse_usage(&json).unwrap_or_default();
 
                         let done_line = format!(
                             "data: {}\n",
@@ -126,6 +128,16 @@ pub(super) fn parse_openai_sse(
                             Ok(StreamEvent::Usage(usage)),
                             (stream, buffer),
                         ));
+                    }
+
+                    // The usage-only frame: OpenAI sends totals in a trailing
+                    // chunk whose `choices` is empty, after the one that
+                    // carried `finish_reason`. Without this arm those tokens
+                    // are dropped and the turn is booked at zero (L5).
+                    if choice.is_null()
+                        && let Some(usage) = parse_usage(&json)
+                    {
+                        return Some((Ok(StreamEvent::Usage(usage)), (stream, buffer)));
                     }
 
                     if let Some(fr_str) = json["_done"].as_str() {

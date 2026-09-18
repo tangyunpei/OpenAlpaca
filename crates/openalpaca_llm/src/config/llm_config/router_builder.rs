@@ -51,16 +51,6 @@ fn build_router_from_hierarchical(
     let disabled = super::disabled_providers(&config);
     let mut providers_map: HashMap<ProviderType, ProviderEntry> = HashMap::new();
 
-    // Shared HTTP client for all providers (connection pool reuse).
-    // Only built when at least one provider feature is enabled (requires reqwest).
-    #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
-    let shared_client = reqwest::Client::builder()
-        .pool_max_idle_per_host(10)
-        .pool_idle_timeout(std::time::Duration::from_secs(90))
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-
     // Build provider entries
     if let Some(ref providers) = config.providers {
         for (provider_name, provider_config) in providers {
@@ -181,6 +171,14 @@ fn build_router_from_hierarchical(
             // Build the actual provider.
             // Skip providers that require keys but have none resolved.
             let prov_defaults = runtime_config.provider_defaults.get(provider_name);
+            // One client per provider, carrying that provider's own timeouts —
+            // the same resolution the runtime registration path performs, so
+            // the two cannot disagree (L7). Clients pool per host, and each
+            // provider has its own, so nothing is lost by not sharing one.
+            #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
+            let request_timeout = runtime_config.request_timeout_for(provider_name);
+            #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
+            let client = crate::providers::build_http_client(request_timeout);
             let provider: Box<dyn LlmProvider> = match &provider_type {
                 #[cfg(feature = "anthropic")]
                 ProviderType::Anthropic => {
@@ -198,12 +196,12 @@ fn build_router_from_hierarchical(
                     let max_tokens = provider_config
                         .default_max_tokens
                         .or_else(|| prov_defaults.map(|d| d.default_max_tokens));
-                    Box::new(crate::providers::anthropic::AnthropicProvider::with_client(
-                        shared_client.clone(),
-                        key,
-                        model,
-                        max_tokens,
-                    ))
+                    Box::new(
+                        crate::providers::anthropic::AnthropicProvider::with_client(
+                            client, key, model, max_tokens,
+                        )
+                        .with_request_timeout(request_timeout),
+                    )
                 }
                 #[cfg(feature = "openai")]
                 ProviderType::OpenAI => {
@@ -225,13 +223,12 @@ fn build_router_from_hierarchical(
                     let max_tokens = provider_config
                         .default_max_tokens
                         .or_else(|| prov_defaults.map(|d| d.default_max_tokens));
-                    Box::new(crate::providers::openai::OpenAiProvider::with_client(
-                        shared_client.clone(),
-                        key,
-                        model,
-                        base_url,
-                        max_tokens,
-                    ))
+                    Box::new(
+                        crate::providers::openai::OpenAiProvider::with_client(
+                            client, key, model, base_url, max_tokens,
+                        )
+                        .with_request_timeout(request_timeout),
+                    )
                 }
                 #[cfg(feature = "ollama")]
                 ProviderType::Ollama => {
@@ -244,11 +241,17 @@ fn build_router_from_hierarchical(
                         .base_url
                         .clone()
                         .or_else(|| prov_defaults.and_then(|d| d.base_url.clone()));
-                    Box::new(crate::providers::ollama::OllamaProvider::with_client(
-                        shared_client.clone(),
-                        model,
-                        base_url,
-                    ))
+                    // Read like the other two arms: the file's output ceiling
+                    // reaches the request body instead of the 4096 default (L6).
+                    let max_tokens = provider_config
+                        .default_max_tokens
+                        .or_else(|| prov_defaults.map(|d| d.default_max_tokens));
+                    Box::new(
+                        crate::providers::ollama::OllamaProvider::with_client(
+                            client, model, base_url, max_tokens,
+                        )
+                        .with_request_timeout(request_timeout),
+                    )
                 }
                 #[allow(unreachable_patterns)]
                 _ => {

@@ -7,6 +7,7 @@
 //! `/api/tags`, `/api/show` and `/v1/chat/completions` at once.
 
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -25,6 +26,16 @@ pub struct MockResponse {
     pub status: u16,
     pub content_type: String,
     pub body: String,
+    /// When set, the body is sent as chunked frames with [`Self::frame_delay`]
+    /// between them instead of one `content-length` write — the only way a test
+    /// can tell a real stream from a completed response replayed as events
+    /// (L5). `body` is then unused.
+    pub frames: Option<Vec<String>>,
+    /// How long the server waits before answering at all — a slow provider, for
+    /// the timeout proofs (L7).
+    pub delay: Duration,
+    /// The pause between streamed frames.
+    pub frame_delay: Duration,
 }
 
 impl MockResponse {
@@ -33,6 +44,9 @@ impl MockResponse {
             status: 200,
             content_type: "application/json".to_string(),
             body: body.into(),
+            frames: None,
+            delay: Duration::ZERO,
+            frame_delay: Duration::ZERO,
         }
     }
 
@@ -41,11 +55,42 @@ impl MockResponse {
             status,
             content_type: "application/json".to_string(),
             body: body.into(),
+            frames: None,
+            delay: Duration::ZERO,
+            frame_delay: Duration::ZERO,
         }
     }
 
     pub fn not_found() -> Self {
         Self::error(404, r#"{"error":"not found"}"#)
+    }
+
+    /// A `text/event-stream` answer written one frame at a time, chunked.
+    ///
+    /// Each frame is flushed on its own, so the client sees it before the next
+    /// is written: a test that reads events as they arrive is reading a real
+    /// stream, not a body that was complete before the first byte moved.
+    pub fn sse(frames: Vec<String>) -> Self {
+        Self {
+            status: 200,
+            content_type: "text/event-stream".to_string(),
+            body: String::new(),
+            frames: Some(frames),
+            delay: Duration::ZERO,
+            frame_delay: Duration::from_millis(20),
+        }
+    }
+
+    /// Answer only after `delay` — a provider that is thinking, not a dead one.
+    pub fn after(mut self, delay: Duration) -> Self {
+        self.delay = delay;
+        self
+    }
+
+    /// The pause between streamed frames (ignored unless [`Self::sse`]).
+    pub fn every(mut self, frame_delay: Duration) -> Self {
+        self.frame_delay = frame_delay;
+        self
     }
 }
 
@@ -93,15 +138,44 @@ impl MockHttpServer {
                     };
                     recorder.lock().await.push(request.clone());
                     let response = handler(&request);
-                    let head = format!(
-                        "HTTP/1.1 {} {}\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                        response.status,
-                        reason(response.status),
-                        response.content_type,
-                        response.body.len(),
-                    );
-                    let _ = socket.write_all(head.as_bytes()).await;
-                    let _ = socket.write_all(response.body.as_bytes()).await;
+                    if !response.delay.is_zero() {
+                        tokio::time::sleep(response.delay).await;
+                    }
+                    match response.frames {
+                        Some(ref frames) => {
+                            let head = format!(
+                                "HTTP/1.1 {} {}\r\ncontent-type: {}\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n",
+                                response.status,
+                                reason(response.status),
+                                response.content_type,
+                            );
+                            let _ = socket.write_all(head.as_bytes()).await;
+                            let _ = socket.flush().await;
+                            for frame in frames {
+                                let chunk =
+                                    format!("{:x}\r\n{}\r\n", frame.len(), frame);
+                                if socket.write_all(chunk.as_bytes()).await.is_err() {
+                                    return;
+                                }
+                                let _ = socket.flush().await;
+                                if !response.frame_delay.is_zero() {
+                                    tokio::time::sleep(response.frame_delay).await;
+                                }
+                            }
+                            let _ = socket.write_all(b"0\r\n\r\n").await;
+                        }
+                        None => {
+                            let head = format!(
+                                "HTTP/1.1 {} {}\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                                response.status,
+                                reason(response.status),
+                                response.content_type,
+                                response.body.len(),
+                            );
+                            let _ = socket.write_all(head.as_bytes()).await;
+                            let _ = socket.write_all(response.body.as_bytes()).await;
+                        }
+                    }
                     let _ = socket.flush().await;
                     let _ = socket.shutdown().await;
                 });

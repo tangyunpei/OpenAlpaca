@@ -16,31 +16,68 @@ pub struct OllamaProvider {
     model: String,
     #[cfg(not(feature = "openai"))]
     base_url: String,
+    /// Deadline for the native `/api/*` calls; the chat calls carry the inner
+    /// provider's copy of it (L7).
+    request_timeout: Option<std::time::Duration>,
 }
 
 impl OllamaProvider {
-    pub fn new(model: String, base_url: Option<String>) -> Self {
-        Self::with_client(reqwest::Client::new(), model, base_url)
+    pub fn new(model: String, base_url: Option<String>, max_tokens: Option<u32>) -> Self {
+        Self::with_client(reqwest::Client::new(), model, base_url, max_tokens)
     }
 
     /// Create with a shared `reqwest::Client` (for connection pool reuse).
-    pub fn with_client(client: reqwest::Client, model: String, base_url: Option<String>) -> Self {
+    ///
+    /// `max_tokens` is `[providers.ollama] default_max_tokens`. Both
+    /// construction paths pass it: it was dropped on the floor here, so a local
+    /// model was capped at 4096 output tokens whatever the file said (L6).
+    pub fn with_client(
+        client: reqwest::Client,
+        model: String,
+        base_url: Option<String>,
+        max_tokens: Option<u32>,
+    ) -> Self {
         let url = base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
         #[cfg(feature = "openai")]
         {
             Self {
                 inner: super::openai::OpenAiProvider::new_without_auth_with_client(
-                    client, model, url,
+                    client, model, url, max_tokens,
                 ),
+                request_timeout: None,
             }
         }
         #[cfg(not(feature = "openai"))]
         {
+            let _ = max_tokens;
             Self {
                 client,
                 model,
                 base_url: url,
+                request_timeout: None,
             }
+        }
+    }
+
+    /// Give one non-streaming call — a chat completion, `/api/tags`,
+    /// `/api/show` — this much wall clock, and no more.
+    ///
+    /// A streamed completion deliberately does not carry it: see
+    /// [`crate::providers::build_http_client`] (L7).
+    pub fn with_request_timeout(mut self, request_timeout: std::time::Duration) -> Self {
+        self.request_timeout = Some(request_timeout);
+        #[cfg(feature = "openai")]
+        {
+            self.inner = self.inner.with_request_timeout(request_timeout);
+        }
+        self
+    }
+
+    /// The per-request deadline, applied to the native discovery calls.
+    fn deadline(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self.request_timeout {
+            Some(timeout) => builder.timeout(timeout),
+            None => builder,
         }
     }
 
@@ -84,8 +121,7 @@ impl OllamaProvider {
     async fn show_model(&self, id: &str) -> Result<Option<DiscoveredModel>, LlmError> {
         let url = format!("{}/api/show", self.native_base());
         let response = self
-            .client()
-            .post(&url)
+            .deadline(self.client().post(&url))
             .json(&serde_json::json!({ "model": id }))
             .send()
             .await
@@ -153,8 +189,7 @@ impl LlmProvider for OllamaProvider {
         let url = format!("{}/api/tags", self.native_base());
 
         let response = self
-            .client()
-            .get(&url)
+            .deadline(self.client().get(&url))
             .send()
             .await
             .map_err(|e| LlmError::Http(e.to_string()))?;
@@ -208,6 +243,30 @@ impl LlmProvider for OllamaProvider {
             }
         }
         Ok(models)
+    }
+
+    /// Ollama's `/v1` surface streams like any OpenAI-compatible one (L5).
+    ///
+    /// Without these three forwards the trait defaults applied: the whole
+    /// answer was awaited and then replayed as one event, so a 27B model's
+    /// reply landed in a single burst after a long silence.
+    #[cfg(feature = "openai")]
+    fn supports_streaming(&self) -> bool {
+        self.inner.supports_streaming()
+    }
+
+    #[cfg(feature = "openai")]
+    async fn chat_streaming(&self, request: ChatRequest) -> Result<ChatStream, LlmError> {
+        self.inner.chat_streaming(request).await
+    }
+
+    #[cfg(feature = "openai")]
+    async fn chat_streaming_with_key(
+        &self,
+        key: &str,
+        request: ChatRequest,
+    ) -> Result<ChatStream, LlmError> {
+        self.inner.chat_streaming_with_key(key, request).await
     }
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
@@ -297,7 +356,7 @@ mod tests {
 
     #[test]
     fn test_default_base_url() {
-        let provider = OllamaProvider::new("llama3".to_string(), None);
+        let provider = OllamaProvider::new("llama3".to_string(), None, None);
         assert_eq!(provider.base_url(), DEFAULT_BASE_URL);
     }
 
@@ -306,6 +365,7 @@ mod tests {
         let provider = OllamaProvider::new(
             "codellama".to_string(),
             Some("http://192.168.1.100:11434/v1".to_string()),
+            None,
         );
         assert_eq!(provider.base_url(), "http://192.168.1.100:11434/v1");
     }

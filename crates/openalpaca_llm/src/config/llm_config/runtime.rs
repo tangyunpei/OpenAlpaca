@@ -12,6 +12,15 @@ fn default_usage_fetch_timeout() -> u64 {
 fn default_cli_timeout() -> u64 {
     120
 }
+fn default_llm_request_timeout() -> u64 {
+    120
+}
+
+/// The range [`LlmRuntimeConfig::request_timeout_for`] will accept: below a
+/// second no call can finish, and a day is already past any wall clock a caller
+/// has. A value outside it is clamped and said out loud, never taken as meant.
+const MIN_REQUEST_TIMEOUT_SECS: u64 = 1;
+const MAX_REQUEST_TIMEOUT_SECS: u64 = 86_400;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimeoutsConfig {
@@ -21,6 +30,15 @@ pub struct TimeoutsConfig {
     pub usage_fetch_timeout_secs: u64,
     #[serde(default = "default_cli_timeout")]
     pub cli_backend_timeout_secs: u64,
+    /// Wall-clock budget for one **non-streaming** LLM HTTP call, in seconds
+    /// (default 120 — what the client was hard-coded to). A streamed call is
+    /// not bounded by it: the HTTP layer bounds the connect and the idle gap
+    /// between chunks, and the wall clock belongs to the loop's
+    /// `max_stream_duration` (L7). `[providers.<name>] request_timeout_secs`
+    /// overrides it for one provider — a local model generating at 20 tok/s
+    /// needs minutes where a cloud call needs seconds.
+    #[serde(default = "default_llm_request_timeout")]
+    pub llm_request_timeout_secs: u64,
 }
 
 impl Default for TimeoutsConfig {
@@ -29,6 +47,7 @@ impl Default for TimeoutsConfig {
             usage_cache_ttl_secs: default_usage_cache_ttl(),
             usage_fetch_timeout_secs: default_usage_fetch_timeout(),
             cli_backend_timeout_secs: default_cli_timeout(),
+            llm_request_timeout_secs: default_llm_request_timeout(),
         }
     }
 }
@@ -93,6 +112,9 @@ pub struct ProviderDefaults {
     pub default_model: String,
     pub default_max_tokens: u32,
     pub base_url: Option<String>,
+    /// `[providers.<name>] request_timeout_secs` — this provider's own
+    /// non-streaming budget. `None` means the `[timeouts]` default applies.
+    pub request_timeout_secs: Option<u64>,
 }
 
 /// Runtime representation of all externalized LLM configuration.
@@ -114,6 +136,7 @@ impl Default for LlmRuntimeConfig {
                 default_model: "claude-sonnet-4-5-20250929".to_string(),
                 default_max_tokens: 4096,
                 base_url: None,
+                request_timeout_secs: None,
             },
         );
         provider_defaults.insert(
@@ -122,6 +145,7 @@ impl Default for LlmRuntimeConfig {
                 default_model: "gpt-4o".to_string(),
                 default_max_tokens: 4096,
                 base_url: Some("https://api.openai.com/v1".to_string()),
+                request_timeout_secs: None,
             },
         );
         provider_defaults.insert(
@@ -130,6 +154,7 @@ impl Default for LlmRuntimeConfig {
                 default_model: "llama3".to_string(),
                 default_max_tokens: 4096,
                 base_url: Some("http://localhost:11434/v1".to_string()),
+                request_timeout_secs: None,
             },
         );
         Self {
@@ -138,6 +163,34 @@ impl Default for LlmRuntimeConfig {
             env_vars: EnvVarsConfig::default(),
             provider_defaults,
         }
+    }
+}
+
+impl LlmRuntimeConfig {
+    /// How long one **non-streaming** call to `provider` may take in total.
+    ///
+    /// `[providers.<name>] request_timeout_secs` when the file names one, else
+    /// `[timeouts] llm_request_timeout_secs`, else 120 s — the value the HTTP
+    /// client used to be built with, so a cloud provider that configures
+    /// nothing behaves exactly as before (L7). Both provider-construction
+    /// paths — the boot builder and the runtime registration a toggle performs
+    /// — resolve it here, so they cannot disagree.
+    pub fn request_timeout_for(&self, provider: &str) -> std::time::Duration {
+        let configured = self
+            .provider_defaults
+            .get(provider)
+            .and_then(|d| d.request_timeout_secs)
+            .unwrap_or(self.timeouts.llm_request_timeout_secs);
+        let clamped = configured.clamp(MIN_REQUEST_TIMEOUT_SECS, MAX_REQUEST_TIMEOUT_SECS);
+        if clamped != configured {
+            tracing::warn!(
+                provider,
+                configured,
+                used = clamped,
+                "request_timeout_secs is outside {MIN_REQUEST_TIMEOUT_SECS}..={MAX_REQUEST_TIMEOUT_SECS}s — clamped"
+            );
+        }
+        std::time::Duration::from_secs(clamped)
     }
 }
 
@@ -166,6 +219,9 @@ impl From<&LlmRouterConfig> for LlmRuntimeConfig {
                         .base_url
                         .clone()
                         .or_else(|| existing.and_then(|e| e.base_url.clone())),
+                    request_timeout_secs: pc
+                        .request_timeout_secs
+                        .or_else(|| existing.and_then(|e| e.request_timeout_secs)),
                 };
                 provider_defaults.insert(name.clone(), defaults);
             }

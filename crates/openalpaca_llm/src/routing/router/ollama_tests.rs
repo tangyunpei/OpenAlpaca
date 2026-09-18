@@ -21,6 +21,32 @@ fn completion_body(model: &str, content: &str) -> String {
     .to_string()
 }
 
+/// An OpenAI-shaped SSE stream — Ollama's `/v1` dialect: one frame per delta,
+/// then the frame that carries `finish_reason` and, because
+/// `stream_options.include_usage` was asked for, the token counts.
+fn sse_frames(deltas: &[&str], prompt_tokens: u32, completion_tokens: u32) -> Vec<String> {
+    let mut frames: Vec<String> = deltas
+        .iter()
+        .map(|text| {
+            format!(
+                "data: {}\n\n",
+                serde_json::json!({
+                    "choices": [{"index": 0, "delta": {"content": text}}]
+                })
+            )
+        })
+        .collect();
+    frames.push(format!(
+        "data: {}\n\n",
+        serde_json::json!({
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}
+        })
+    ));
+    frames.push("data: [DONE]\n\n".to_string());
+    frames
+}
+
 fn request(model: &str) -> RouterRequest {
     RouterRequest {
         model: Some(model.to_string()),
@@ -61,6 +87,7 @@ fn keyless_router(base_url: &str, model_id: &str) -> LlmRouter {
     let provider = Arc::new(OllamaProvider::new(
         model_id.to_string(),
         Some(format!("{base_url}/v1")),
+        None,
     ));
 
     let mut providers = HashMap::new();
@@ -125,7 +152,7 @@ async fn a_keyless_provider_completes_through_the_non_streaming_path() {
 async fn a_keyless_provider_completes_through_the_streaming_path() {
     let server = MockHttpServer::start(|req| {
         if req.path == "/v1/chat/completions" {
-            MockResponse::json(completion_body("local-model", "streamed pong"))
+            MockResponse::sse(sse_frames(&["streamed ", "pong"], 11, 3))
         } else {
             MockResponse::not_found()
         }
@@ -187,6 +214,126 @@ async fn an_empty_pool_still_refuses_a_provider_that_needs_a_key() {
     assert_eq!(server.hits("/v1/chat/completions").await, 0);
 }
 
+// ── L5: tokens arrive as they are produced, with real usage ─────────────────
+
+/// Drain a stream into the events it actually emitted, in order.
+async fn drain(mut stream: ChatStream) -> Vec<StreamEvent> {
+    use futures_util::StreamExt;
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event.expect("no stream error"));
+    }
+    events
+}
+
+/// Before the fix `OllamaProvider` forwarded no streaming method, so the trait
+/// default awaited the whole answer and replayed it as **one** `TextDelta` —
+/// and the request never carried `"stream": true`.
+#[tokio::test]
+async fn a_streamed_local_turn_arrives_as_separate_events_with_usage() {
+    let server = MockHttpServer::start(|req| {
+        if req.path == "/v1/chat/completions" {
+            MockResponse::sse(sse_frames(&["Hel", "lo", " there"], 11, 3))
+                .every(std::time::Duration::from_millis(20))
+        } else {
+            MockResponse::not_found()
+        }
+    })
+    .await;
+
+    let router = keyless_router(&server.base_url, "local-model");
+    let events = drain(
+        router
+            .complete_streaming(request("local-model"))
+            .await
+            .expect("a keyless provider must be able to stream"),
+    )
+    .await;
+
+    let deltas: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        deltas,
+        vec!["Hel", "lo", " there"],
+        "each frame is its own event, not one burst at the end: {events:?}"
+    );
+
+    let usage = events
+        .iter()
+        .find_map(|e| match e {
+            StreamEvent::Usage(u) => Some(u),
+            _ => None,
+        })
+        .expect("the stream reports usage");
+    assert_eq!((usage.input_tokens, usage.output_tokens), (11, 3));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::Done { finish_reason: FinishReason::Stop })),
+        "the stream finishes: {events:?}"
+    );
+
+    let seen = server.requests().await;
+    assert_eq!(seen.len(), 1);
+    let body: serde_json::Value = serde_json::from_str(&seen[0].body).expect("a JSON body");
+    assert_eq!(body["stream"], serde_json::json!(true), "{}", seen[0].body);
+    assert_eq!(
+        body["stream_options"]["include_usage"],
+        serde_json::json!(true),
+        "usage is asked for on every OpenAI-compatible base, not just OpenAI's: {}",
+        seen[0].body
+    );
+}
+
+/// The other shape: OpenAI puts the totals in a trailing frame whose `choices`
+/// is empty, after the one carrying `finish_reason`. Those tokens were dropped.
+#[tokio::test]
+async fn a_trailing_usage_frame_is_not_dropped() {
+    let server = MockHttpServer::start(|req| {
+        if req.path == "/v1/chat/completions" {
+            MockResponse::sse(vec![
+                format!(
+                    "data: {}\n\n",
+                    serde_json::json!({"choices": [{"index": 0, "delta": {"content": "hi"}}]})
+                ),
+                format!(
+                    "data: {}\n\n",
+                    serde_json::json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
+                ),
+                format!(
+                    "data: {}\n\n",
+                    serde_json::json!({
+                        "choices": [],
+                        "usage": {"prompt_tokens": 42, "completion_tokens": 7}
+                    })
+                ),
+                "data: [DONE]\n\n".to_string(),
+            ])
+        } else {
+            MockResponse::not_found()
+        }
+    })
+    .await;
+
+    let router = keyless_router(&server.base_url, "local-model");
+    let stream = router
+        .complete_streaming(request("local-model"))
+        .await
+        .expect("the stream starts");
+    let collected = crate::streaming::collect_stream(stream, "local-model".to_string())
+        .await
+        .expect("the stream completes");
+
+    assert_eq!(collected.content, "hi");
+    assert_eq!(collected.usage.input_tokens, 42);
+    assert_eq!(collected.usage.output_tokens, 7);
+}
+
 // ── L2: installed models come from Ollama's own API ─────────────────────────
 
 /// `/api/tags` naming two models, `/api/show` describing them.
@@ -214,6 +361,7 @@ fn empty_catalogue_router(base_url: &str) -> LlmRouter {
     let provider = Arc::new(OllamaProvider::new(
         "unset".to_string(),
         Some(format!("{base_url}/v1")),
+        None,
     ));
     let mut providers = HashMap::new();
     providers.insert(

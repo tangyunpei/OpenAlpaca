@@ -628,3 +628,172 @@ async fn the_default_model_refusal_is_read_under_the_write_lock() {
         "and nothing was unloaded"
     );
 }
+
+// ── The runtime registration path's local-provider arm (L6, L7) ─────────────
+//
+// The other half of "both construction paths must agree": a provider the owner
+// toggles on after boot is built here, not by `build_router`. Feature-gated for
+// the reason given at the top of this file — these drive a real
+// `OllamaProvider` against a loopback mock server.
+#[cfg(all(feature = "ollama", feature = "openai"))]
+mod local_provider_registration {
+    use super::*;
+    use crate::config::llm_config::LlmRuntimeConfig;
+    use crate::routing::rate_limiter::RateLimitConfig;
+    use crate::routing::router::{RequestContext, RouterRequest};
+    use crate::test_support::{MockHttpServer, MockResponse};
+    use crate::types::ChatMessage;
+
+    const MODEL: &str = "local-model";
+
+    /// Answers everything the enable does: discovery, then the call.
+    async fn ollama_server() -> MockHttpServer {
+        MockHttpServer::start(|req| match req.path.as_str() {
+            "/api/tags" => MockResponse::json(
+                serde_json::json!({"models": [{"name": MODEL}]}).to_string(),
+            ),
+            "/api/show" => MockResponse::json(
+                serde_json::json!({
+                    "capabilities": ["completion", "tools"],
+                    "model_info": {"qwen3.context_length": 262_144}
+                })
+                .to_string(),
+            ),
+            "/v1/chat/completions" => MockResponse::json(
+                serde_json::json!({
+                    "model": MODEL,
+                    "choices": [{"message": {"role": "assistant", "content": "pong"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 11, "completion_tokens": 3}
+                })
+                .to_string(),
+            ),
+            _ => MockResponse::not_found(),
+        })
+        .await
+    }
+
+    /// An llm.toml with Ollama declared but **off** — the state the toggle acts
+    /// on — plus whatever provider keys the test is about.
+    fn config_text(base_url: &str, provider_lines: &str) -> String {
+        format!(
+            r#"[orchestrator]
+model = "{MODEL}"
+
+[providers.ollama]
+enabled = false
+base_url = "{base_url}/v1"
+{provider_lines}
+"#
+        )
+    }
+
+    /// Router, service and the config they share — built the way the daemon
+    /// builds them, with the file's own runtime config loaded.
+    fn harness(
+        dir: &std::path::Path,
+        text: &str,
+    ) -> (Arc<LlmRouter>, LlmSettingsService) {
+        let path = dir.join("llm.toml");
+        std::fs::write(&path, text).unwrap();
+        let config: LlmRouterConfig = toml::from_str(text).unwrap();
+
+        let router = Arc::new(LlmRouter::new_with_runtime(
+            HashMap::new(),
+            ModelRegistry::new(HashMap::new()),
+            HashMap::new(),
+            Arc::new(CostTracker::new(ModelRegistry::with_defaults())),
+            MODEL.to_string(),
+            LlmRuntimeConfig::from(&config),
+            RateLimitConfig::default(),
+        ));
+        let encryptor = KeyEncryptor::load_or_generate_at(dir).unwrap();
+        let service = LlmSettingsService::for_tests(router.clone(), path, encryptor);
+        (router, service)
+    }
+
+    fn request() -> RouterRequest {
+        RouterRequest {
+            model: Some(MODEL.to_string()),
+            messages: Arc::new(vec![ChatMessage::user("ping")]),
+            tools: Arc::new(vec![]),
+            temperature: None,
+            max_tokens: None,
+            context: RequestContext::default(),
+            tool_choice: None,
+            tools_token_estimate: None,
+            enable_caching: false,
+            thinking: None,
+            context_management: None,
+            fallback_models: Vec::new(),
+            ephemeral_system_notice: None,
+        }
+    }
+
+    /// L6, the second path: a provider enabled after boot honoured neither the
+    /// configured ceiling nor anything else — it was built with the OpenAI
+    /// provider's hard-coded 4096.
+    #[tokio::test]
+    async fn an_enabled_ollama_is_built_with_the_configured_output_ceiling() {
+        let server = ollama_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let (router, service) = harness(
+            dir.path(),
+            &config_text(&server.base_url, "default_max_tokens = 8192"),
+        );
+
+        let outcome = service.set_provider_enabled("ollama", true).await.unwrap();
+        assert!(outcome.loaded, "the toggle loads the provider: {outcome:?}");
+
+        router.complete(request()).await.expect("a local answer");
+        let body: serde_json::Value = serde_json::from_str(
+            &server
+                .requests()
+                .await
+                .into_iter()
+                .find(|r| r.path == "/v1/chat/completions")
+                .expect("the call reached the provider")
+                .body,
+        )
+        .unwrap();
+        assert_eq!(body["max_tokens"], serde_json::json!(8192), "{body}");
+    }
+
+    /// L7, the second construction path: a provider registered here was built
+    /// with a bare `reqwest::Client` — no connect timeout, no read timeout, no
+    /// deadline of any kind — so the same `llm.toml` behaved differently
+    /// depending on whether the provider was on at boot or toggled on after it.
+    #[tokio::test]
+    async fn an_enabled_ollama_is_built_with_the_configured_timeout() {
+        let server = MockHttpServer::start(|req| match req.path.as_str() {
+            "/api/tags" => MockResponse::json(
+                serde_json::json!({"models": [{"name": MODEL}]}).to_string(),
+            ),
+            "/api/show" => MockResponse::json(
+                serde_json::json!({"capabilities": ["completion", "tools"]}).to_string(),
+            ),
+            // The chat call, and only it, is slower than the configured budget.
+            "/v1/chat/completions" => MockResponse::json("{}")
+                .after(std::time::Duration::from_secs(5)),
+            _ => MockResponse::not_found(),
+        })
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let (router, service) = harness(
+            dir.path(),
+            &config_text(&server.base_url, "request_timeout_secs = 1"),
+        );
+
+        let outcome = service.set_provider_enabled("ollama", true).await.unwrap();
+        assert!(outcome.loaded, "the toggle loads the provider: {outcome:?}");
+
+        let result = router.complete(request()).await;
+        assert!(
+            result.is_err(),
+            "a provider slower than its own budget is given up on"
+        );
+        assert!(
+            server.hits("/v1/chat/completions").await >= 1,
+            "and the failure is the deadline, not a routing miss"
+        );
+    }
+}
