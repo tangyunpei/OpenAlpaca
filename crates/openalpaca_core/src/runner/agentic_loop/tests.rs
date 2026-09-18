@@ -624,6 +624,7 @@ fn test_context_threshold_custom() {
             supports_audio: false,
             supports_document: false,
             supports_reasoning: false,
+            supports_tools: true,
         },
     );
     let registry = ModelRegistry::new(models);

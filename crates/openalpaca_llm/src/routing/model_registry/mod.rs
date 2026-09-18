@@ -20,6 +20,55 @@ pub struct ModelEntry {
     pub context_window: u32,
     pub input_price_per_million: f64,
     pub output_price_per_million: f64,
+    /// Whether the model can be given tools. Every agent path needs them, so a
+    /// picker has to be able to say which installed model cannot serve one.
+    pub supports_tools: bool,
+}
+
+/// A model as a provider's own API describes it.
+///
+/// What a discovery pass hands the registry: the id to call it by, plus
+/// whatever metadata the provider volunteered. Everything optional is
+/// genuinely optional — a provider that only lists names produces
+/// [`DiscoveredModel::bare`] rows.
+#[derive(Debug, Clone)]
+pub struct DiscoveredModel {
+    pub id: String,
+    /// The context length the provider reports, when it reports one.
+    pub context_window: Option<u32>,
+    /// The model accepts image content natively.
+    pub supports_image: bool,
+    /// The model can be given tools.
+    pub supports_tools: bool,
+}
+
+impl DiscoveredModel {
+    /// A model the provider named and said nothing else about.
+    ///
+    /// Tool support is assumed: every agent path needs tools, and a provider
+    /// that does not describe its models has not said this one lacks them.
+    /// Ollama, which does describe them, says so explicitly.
+    pub fn bare(id: String) -> Self {
+        Self {
+            id,
+            context_window: None,
+            supports_image: false,
+            supports_tools: true,
+        }
+    }
+}
+
+/// What the last discovery pass learned about one provider.
+///
+/// Kept so the daemon can say, on the provider's status, that Ollama was
+/// unreachable rather than leaving an empty model list to be read as "none
+/// installed" (L2).
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderDiscovery {
+    /// Models the provider's API reported.
+    pub models: usize,
+    /// Why the provider's API was not read, when it was not.
+    pub error: Option<String>,
 }
 
 /// Information about a registered model.
@@ -41,6 +90,12 @@ pub struct ModelInfo {
     pub supports_document: bool,
     /// Whether this model supports reasoning (OpenAI o-series).
     pub supports_reasoning: bool,
+    /// Whether this model can be given tools.
+    ///
+    /// Recorded, not enforced: nothing withholds tools from a call on the
+    /// strength of this flag. It orders the effective-model ladder, which
+    /// prefers a tool-capable model when it has to pick one for the owner (L3).
+    pub supports_tools: bool,
 }
 
 /// Registry mapping model IDs to their provider and pricing metadata.
@@ -82,6 +137,7 @@ impl ModelRegistry {
                     supports_audio: false,
                     supports_document: true,
                     supports_reasoning: false,
+                    supports_tools: true,
                 },
             );
         }
@@ -98,6 +154,7 @@ impl ModelRegistry {
                     supports_audio: false,
                     supports_document: true,
                     supports_reasoning: false,
+                    supports_tools: true,
                 },
             );
         }
@@ -113,6 +170,7 @@ impl ModelRegistry {
                 supports_audio: false,
                 supports_document: true,
                 supports_reasoning: false,
+                supports_tools: true,
             },
         );
 
@@ -129,6 +187,7 @@ impl ModelRegistry {
                 supports_audio: true,
                 supports_document: false,
                 supports_reasoning: false,
+                supports_tools: true,
             },
         );
         models.insert(
@@ -143,6 +202,7 @@ impl ModelRegistry {
                 supports_audio: true,
                 supports_document: false,
                 supports_reasoning: false,
+                supports_tools: true,
             },
         );
         models.insert(
@@ -157,6 +217,7 @@ impl ModelRegistry {
                 supports_audio: true,
                 supports_document: false,
                 supports_reasoning: false,
+                supports_tools: true,
             },
         );
 
@@ -186,6 +247,7 @@ impl ModelRegistry {
                     supports_audio: false,
                     supports_document: false,
                     supports_reasoning: true,
+                    supports_tools: true,
                 },
             );
         }
@@ -241,6 +303,12 @@ impl ModelRegistry {
                         supports_audio: entry.supports_audio.unwrap_or(false),
                         supports_document: entry.supports_document.unwrap_or(false),
                         supports_reasoning: entry.supports_reasoning.unwrap_or(false),
+                        // The one flag that defaults on. The others withhold a
+                        // content kind when omitted; this one only orders the
+                        // ladder's preference, and a row the owner wrote for a
+                        // model they mean to run agents on is tool-capable
+                        // until they say otherwise.
+                        supports_tools: entry.supports_tools.unwrap_or(true),
                     },
                 );
             }
@@ -318,6 +386,75 @@ impl ModelRegistry {
             .unwrap_or(false)
     }
 
+    /// Check if a model can be given tools.
+    ///
+    /// Unknown ids answer `true`: nothing is withheld on the strength of this
+    /// flag, so the safe direction is "assume it works" rather than steering
+    /// the owner away from a model the registry simply has not met.
+    pub fn supports_tools(&self, model_id: &str) -> bool {
+        self.models
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(model_id)
+            .map(|info| info.supports_tools)
+            .unwrap_or(true)
+    }
+
+    /// A model this provider can serve, preferring a tool-capable one.
+    ///
+    /// The last rung of the effective-model ladder (L3): when a provider's
+    /// configured `default_model` names something that is not there — an
+    /// Ollama tag that was never pulled, say — this is what the owner
+    /// actually has. Ties break on the id, so the answer does not move
+    /// between runs.
+    pub fn first_model_for_provider(&self, provider: &ProviderType) -> Option<String> {
+        let models = self.models.read().unwrap_or_else(|p| p.into_inner());
+        let mut candidates: Vec<(&String, &ModelInfo)> = models
+            .iter()
+            .filter(|(_, info)| &info.provider == provider)
+            .collect();
+        candidates.sort_by(|(a_id, a), (b_id, b)| {
+            b.supports_tools.cmp(&a.supports_tools).then(a_id.cmp(b_id))
+        });
+        candidates.first().map(|(id, _)| (*id).clone())
+    }
+
+    /// Drop the models a provider no longer reports, returning what went.
+    ///
+    /// Only meaningful where the provider's API is the ground truth for what
+    /// exists — a local one (L2). A tag that is no longer installed cannot be
+    /// served, and a catalogue entry the call cannot serve is exactly what
+    /// R58b refuses to keep. The caller logs the ids, so nothing disappears
+    /// quietly.
+    pub fn withdraw_absent_for_provider(
+        &self,
+        provider: &ProviderType,
+        present: &HashSet<String>,
+    ) -> Vec<String> {
+        let mut models = self.models.write().unwrap_or_else(|p| p.into_inner());
+        let gone: Vec<String> = models
+            .iter()
+            .filter(|(id, info)| &info.provider == provider && !present.contains(*id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &gone {
+            models.remove(id);
+        }
+        gone
+    }
+
+    /// Whether every model in the catalogue belongs to a provider that runs on
+    /// this machine.
+    ///
+    /// The cost tracker's last resort (L8): on a local-only install no call can
+    /// have cost money, so an id the registry has never met is priced at 0
+    /// rather than at the conservative cloud rate. An empty catalogue answers
+    /// `false` — it proves nothing.
+    pub fn is_local_only(&self) -> bool {
+        let models = self.models.read().unwrap_or_else(|p| p.into_inner());
+        !models.is_empty() && models.values().all(|info| info.provider.is_local())
+    }
+
     /// Register or update a model entry.
     pub fn register(&self, model_id: String, info: ModelInfo) {
         self.models.write().unwrap_or_else(|p| p.into_inner()).insert(model_id, info);
@@ -377,6 +514,13 @@ impl ModelRegistry {
         match models.get_mut(&model_id) {
             Some(existing) => {
                 existing.discovered = true;
+                // A zero window is not a declaration, it is the absence of one
+                // — and the lead agent reads it verbatim. Fill it in when the
+                // provider has now told us the real length; everything a
+                // `[models]` row does declare still wins (L2).
+                if existing.context_window == 0 && info.context_window > 0 {
+                    existing.context_window = info.context_window;
+                }
             }
             None => {
                 let mut new_info = info;
@@ -416,6 +560,7 @@ impl ModelRegistry {
                 context_window: info.context_window,
                 input_price_per_million: info.input_price_per_million,
                 output_price_per_million: info.output_price_per_million,
+                supports_tools: info.supports_tools,
             })
             .collect();
         entries.sort_by(|a, b| a.provider.cmp(&b.provider).then(a.id.cmp(&b.id)));
@@ -436,6 +581,7 @@ impl ModelRegistry {
                 context_window: info.context_window,
                 input_price_per_million: info.input_price_per_million,
                 output_price_per_million: info.output_price_per_million,
+                supports_tools: info.supports_tools,
             })
             .collect();
         entries.sort_by(|a, b| a.provider.cmp(&b.provider).then(a.id.cmp(&b.id)));

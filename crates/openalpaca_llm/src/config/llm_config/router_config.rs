@@ -105,5 +105,9 @@ pub struct ModelConfigEntry {
     pub supports_document: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_reasoning: Option<bool>,
+    /// Whether the model can be given tools. Omitted means yes — see
+    /// [`crate::routing::model_registry::ModelInfo::supports_tools`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_tools: Option<bool>,
 }
 

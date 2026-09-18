@@ -64,6 +64,9 @@ pub struct LlmRouter {
     pub(super) concurrency_limiter: Arc<Semaphore>,
     /// Per-key rate limiters (RPM/TPM token buckets + concurrency) and circuit breaker.
     pub(super) rate_limiter_registry: Arc<RateLimiterRegistry>,
+    /// What the last discovery pass learned about each provider, so an empty
+    /// model list can be told apart from a provider that could not be reached.
+    pub(super) discovery: DashMap<ProviderType, crate::routing::model_registry::ProviderDiscovery>,
 }
 
 impl LlmRouter {
@@ -89,6 +92,7 @@ impl LlmRouter {
             runtime_config: ArcSwap::from_pointee(LlmRuntimeConfig::default()),
             concurrency_limiter: Arc::new(Semaphore::new(rate_config.global_concurrency)),
             rate_limiter_registry: Arc::new(RateLimiterRegistry::new(rate_config)),
+            discovery: DashMap::new(),
         }
     }
 
@@ -116,6 +120,7 @@ impl LlmRouter {
             runtime_config: ArcSwap::from_pointee(runtime_config),
             concurrency_limiter: Arc::new(Semaphore::new(rate_limit_config.global_concurrency)),
             rate_limiter_registry: Arc::new(RateLimiterRegistry::new(rate_limit_config)),
+            discovery: DashMap::new(),
         }
     }
 
@@ -157,6 +162,7 @@ impl LlmRouter {
             runtime_config: ArcSwap::from_pointee(LlmRuntimeConfig::default()),
             concurrency_limiter: Arc::new(Semaphore::new(rate_config.global_concurrency)),
             rate_limiter_registry: Arc::new(RateLimiterRegistry::new(rate_config)),
+            discovery: DashMap::new(),
         }
     }
 

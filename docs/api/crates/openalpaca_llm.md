@@ -31,7 +31,7 @@
 - `pub use keys::key_pool::{ ApiKey, CallResult, KeyGuard, KeyHealthStatus, KeyPool, KeyPoolError, KeyPriority, KeySource, KeyStatus, ProviderType, SelectionStrategy, mask_secret, };`
 - `pub use keys::secret_store::{ CachingSecretStore, KeyringSecretStore, MemorySecretStore, SecretStore, };`
 - `pub use routing::cost_tracker::{ CacheStats, CallRecord, CostSnapshot, CostTracker, ModelUsageStats, UsageStats, };`
-- `pub use routing::model_registry::{ModelEntry, ModelInfo, ModelRegistry, PricingInfo};`
+- `pub use routing::model_registry::{ DiscoveredModel, ModelEntry, ModelInfo, ModelRegistry, PricingInfo, ProviderDiscovery, };`
 - `pub use routing::provider_usage::{ExternalUsage, ProviderUsageSummary, ProviderUsageTracker};`
 - `pub use routing::rate_limiter::{ CircuitState, RateLimitConfig, RateLimiterRegistry, backoff_with_jitter, };`
 - `pub use routing::router::{ LlmCapacityInfo, LlmRouter, LlmRouterError, ProviderEntry, RequestContext, RouterRequest, };`

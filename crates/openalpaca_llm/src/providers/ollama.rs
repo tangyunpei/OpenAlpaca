@@ -1,5 +1,6 @@
 use crate::LlmProvider;
 use crate::error::LlmError;
+use crate::routing::model_registry::DiscoveredModel;
 use crate::types::*;
 use async_trait::async_trait;
 
@@ -72,6 +73,64 @@ impl OllamaProvider {
             &self.client
         }
     }
+
+    /// `POST /api/show` for one installed tag.
+    ///
+    /// `Ok(None)` means the tag is not a chat model: an embedding-only model
+    /// reports capabilities without `completion`, and registering it would
+    /// offer the owner a model no turn can use. A build old enough to report no
+    /// capabilities at all is taken at face value as a chat model rather than
+    /// hidden.
+    async fn show_model(&self, id: &str) -> Result<Option<DiscoveredModel>, LlmError> {
+        let url = format!("{}/api/show", self.native_base());
+        let response = self
+            .client()
+            .post(&url)
+            .json(&serde_json::json!({ "model": id }))
+            .send()
+            .await
+            .map_err(|e| LlmError::Http(e.to_string()))?;
+
+        let status = response.status().as_u16();
+        if !response.status().is_success() {
+            return Err(LlmError::Api {
+                status,
+                message: format!("/api/show refused '{id}'"),
+            });
+        }
+
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| LlmError::Serialization(e.to_string()))?;
+
+        let capabilities: Vec<&str> = body["capabilities"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|c| c.as_str()).collect())
+            .unwrap_or_default();
+        if !capabilities.is_empty() && !capabilities.contains(&"completion") {
+            return Ok(None);
+        }
+
+        // Ollama namespaces the key by architecture — "qwen3.context_length",
+        // "llama.context_length" — so match on the suffix, not a fixed name.
+        let context_window = body["model_info"]
+            .as_object()
+            .and_then(|info| {
+                info.iter()
+                    .find(|(k, _)| k.ends_with(".context_length"))
+                    .and_then(|(_, v)| v.as_u64())
+            })
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|w| *w > 0);
+
+        Ok(Some(DiscoveredModel {
+            id: id.to_string(),
+            context_window,
+            supports_image: capabilities.contains(&"vision"),
+            supports_tools: capabilities.contains(&"tools"),
+        }))
+    }
 }
 
 #[async_trait]
@@ -118,6 +177,36 @@ impl LlmProvider for OllamaProvider {
             })
             .unwrap_or_default();
 
+        Ok(models)
+    }
+
+    /// Every installed chat model, described by Ollama's own API (L2).
+    ///
+    /// `/api/tags` names what is installed; one `/api/show` per tag gives the
+    /// context length and the capability list. Both are unauthenticated —
+    /// `key` is ignored, and discovery works with no key configured.
+    async fn discover_models(&self, _key: &str) -> Result<Vec<DiscoveredModel>, LlmError> {
+        let tags = self.list_models_with_key("").await?;
+        let mut models = Vec::with_capacity(tags.len());
+        for id in tags {
+            match self.show_model(&id).await {
+                Ok(Some(model)) => models.push(model),
+                Ok(None) => {
+                    tracing::info!(
+                        model = %id,
+                        "Ollama model cannot complete (embedding-only) — not registered as a chat model"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        model = %id,
+                        error = %e,
+                        "Ollama /api/show failed — registering the model without its context length or capabilities"
+                    );
+                    models.push(DiscoveredModel::bare(id));
+                }
+            }
+        }
         Ok(models)
     }
 

@@ -7,9 +7,12 @@ pub mod keys;
 pub mod providers;
 pub mod routing;
 pub mod streaming;
+pub mod types;
+
+/// Loopback HTTP server used by the crate's own tests. Test-only: nothing in a
+/// shipped binary can reach it.
 #[cfg(test)]
 pub(crate) mod test_support;
-pub mod types;
 
 pub use cli_backend::{
     ClaudeCodeCliProvider, CliBackendConfig, CliBackendStatus, CliBackendsConfig, CodexCliProvider,
@@ -42,7 +45,9 @@ pub use keys::secret_store::{
 pub use routing::cost_tracker::{
     CacheStats, CallRecord, CostSnapshot, CostTracker, ModelUsageStats, UsageStats,
 };
-pub use routing::model_registry::{ModelEntry, ModelInfo, ModelRegistry, PricingInfo};
+pub use routing::model_registry::{
+    DiscoveredModel, ModelEntry, ModelInfo, ModelRegistry, PricingInfo, ProviderDiscovery,
+};
 pub use routing::provider_usage::{ExternalUsage, ProviderUsageSummary, ProviderUsageTracker};
 pub use routing::rate_limiter::{
     CircuitState, RateLimitConfig, RateLimiterRegistry, backoff_with_jitter,
@@ -86,6 +91,24 @@ pub trait LlmProvider: Send + Sync {
     /// Default returns empty. Providers override with real API calls.
     async fn list_models_with_key(&self, _key: &str) -> Result<Vec<String>, LlmError> {
         Ok(vec![])
+    }
+
+    /// The provider's models, with whatever metadata its API volunteers.
+    ///
+    /// The default knows only the ids [`Self::list_models_with_key`] returns.
+    /// A provider that can say more — context length, image and tool support —
+    /// overrides this so the registry does not have to guess (L2). `key` is
+    /// empty for a provider that [needs none](Self::requires_key).
+    async fn discover_models(
+        &self,
+        key: &str,
+    ) -> Result<Vec<crate::routing::model_registry::DiscoveredModel>, LlmError> {
+        Ok(self
+            .list_models_with_key(key)
+            .await?
+            .into_iter()
+            .map(crate::routing::model_registry::DiscoveredModel::bare)
+            .collect())
     }
 
     /// Whether this provider supports streaming responses.
