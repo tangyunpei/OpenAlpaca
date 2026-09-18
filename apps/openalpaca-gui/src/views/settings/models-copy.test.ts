@@ -109,6 +109,23 @@ describe("the note about the model that would really answer", () => {
     expect(note).toContain("needs no key");
   });
 
+  /**
+   * M8: an install that never set a default sends `default_model: null`, not
+   * `""`. "configured: null — not available" would be a sentence about a
+   * setting that does not exist.
+   */
+  it("does not report an unconfigured default as an unavailable one", () => {
+    expect(effectiveModelNote(llm({ default_model: null }))).toBe(
+      "No chat model is configured — using qwen3:8b",
+    );
+    const nothing = effectiveModelNote(
+      llm({ default_model: null, effective_default_model: null }),
+    );
+    expect(nothing).toContain("No chat model is configured");
+    expect(nothing).toContain("needs no key");
+    expect(nothing).not.toContain("null");
+  });
+
   /** A daemon with no router, or one too old for the block, is not guessed at. */
   it("is silent about a daemon that does not say", () => {
     expect(effectiveModelNote(null)).toBeNull();

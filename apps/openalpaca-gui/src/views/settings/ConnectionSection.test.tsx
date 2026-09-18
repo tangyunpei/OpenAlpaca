@@ -10,7 +10,11 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { DaemonStatus, SessionSweep } from "@/lib/api/types";
 
-import { ConnectionSection, StorageCard } from "./ConnectionSection";
+import {
+  ConnectionSection,
+  StorageCard,
+  homeStoreLabel,
+} from "./ConnectionSection";
 
 /**
  * The Today card reads `GET /v1/usage/summary` (GAP-08c, T50). Every hook it
@@ -48,6 +52,9 @@ vi.mock("@/hooks/useWorkspaces", () => ({
   }),
 }));
 
+/** What `GET /v1/status` has answered, per test. */
+const daemon = vi.hoisted(() => ({ data: undefined as unknown }));
+
 vi.mock("@/hooks/useConnection", () => ({
   useConnectionStatus: () => ({
     info: null,
@@ -58,7 +65,7 @@ vi.mock("@/hooks/useConnection", () => ({
     endpoint: "127.0.0.1:51823",
     reconnect: vi.fn(),
   }),
-  useDaemonStatus: () => ({ data: undefined, isPending: false, error: null }),
+  useDaemonStatus: () => ({ data: daemon.data, isPending: false, error: null }),
 }));
 
 vi.mock("@/hooks/useTasks", () => ({
@@ -216,5 +223,32 @@ describe("the Today card (GAP-08c, T50)", () => {
         caps: { workflow_max_cost_usd: 5.0, agent_max_cost_usd: 1.0 },
       };
     }
+  });
+});
+
+/**
+ * G7 — the card printed the literal `~/.openalpaca` as where a project-less
+ * run's files go. `OPENALPACA_HOME_STORE` moves that root, and the daemon
+ * reports where it really is (`GET /v1/status`'s `home_root`), so printing the
+ * default was a confident answer to a question this side cannot answer.
+ */
+describe("where a project-less run's files go (G7)", () => {
+  it("names the daemon's own root, and stays generic until it has said", () => {
+    expect(homeStoreLabel("/Volumes/work/store")).toBe(
+      "the home store (/Volumes/work/store)",
+    );
+    expect(homeStoreLabel(null)).toBe("the home store");
+    expect(homeStoreLabel("  ")).toBe("the home store");
+  });
+
+  it("prints the overridden root in the project card", () => {
+    daemon.data = status({ home_root: "/Volumes/work/store" });
+    render(<ConnectionSection />);
+
+    expect(
+      screen.getByText(/files go to the home store \(\/Volumes\/work\/store\)/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/~\/\.openalpaca/)).toBeNull();
+    daemon.data = undefined;
   });
 });

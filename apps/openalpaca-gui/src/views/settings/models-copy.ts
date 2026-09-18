@@ -36,6 +36,10 @@ export function providerKeyLine(info: ProviderInfo): string {
  * every shipped agent template pins a Claude id, and on a machine with only a
  * local provider the ladder answers with something else. A picker that shows
  * the configured id alone is then a picker that disagrees with every reply.
+ *
+ * It is also allowed to name **nothing**: an install that has never set one
+ * sends `default_model: null` (M8), which is not the same sentence — there is
+ * no configured id to report as unavailable, only whatever the ladder found.
  */
 export function effectiveModelNote(
   llm: DaemonLlmStatus | null | undefined,
@@ -44,6 +48,11 @@ export function effectiveModelNote(
   // is not second-guessed.
   if (llm === null || llm === undefined) return null;
   if (llm.default_model_routable) return null;
+  if (llm.default_model === null || llm.default_model === "") {
+    return llm.effective_default_model === null
+      ? "No chat model is configured, and none is available. Turn a provider on below; a local one needs no key."
+      : `No chat model is configured — using ${llm.effective_default_model}`;
+  }
   if (llm.effective_default_model !== null) {
     return `configured: ${llm.default_model} — not available, using ${llm.effective_default_model}`;
   }

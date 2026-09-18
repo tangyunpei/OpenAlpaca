@@ -201,6 +201,11 @@ export function useSetProviderEnabled(): UseMutationResult<
     onSettled: () => {
       void client.invalidateQueries({ queryKey: qk.settings.all() });
       void client.invalidateQueries({ queryKey: qk.models.all() });
+      // …and the daemon's own verdict on the default model, which this write
+      // can have just changed: turning a provider on is exactly what makes an
+      // unroutable configured model routable (G2). On *settle*, so the refetch
+      // asks after the write landed rather than racing it.
+      void client.invalidateQueries({ queryKey: qk.statusAll() });
     },
   });
 }
@@ -235,6 +240,12 @@ export function useRefreshModels(): UseMutationResult<
     mutationFn: () => refreshModels(),
     onSuccess: (models) => {
       client.setQueryData(qk.models.list(), models);
+    },
+    // A refresh can discover the first model this install can route — which
+    // changes `GET /v1/status`'s answer and nothing else this client holds
+    // (G2).
+    onSettled: () => {
+      void client.invalidateQueries({ queryKey: qk.statusAll() });
     },
   });
 }

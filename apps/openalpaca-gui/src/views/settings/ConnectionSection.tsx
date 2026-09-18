@@ -157,7 +157,7 @@ export function ConnectionSection() {
         )}
       </StatCard>
 
-      <ProjectCard />
+      <ProjectCard homeRoot={status.data?.home_root ?? null} />
     </div>
   );
 }
@@ -231,6 +231,16 @@ export function StorageCard({ status }: { status: DaemonStatus | undefined }) {
 }
 
 /**
+ * How the home store is named in prose: the daemon's own root when it has
+ * said, the generic phrase when it has not (G7).
+ */
+export function homeStoreLabel(homeRoot: string | null): string {
+  return homeRoot === null || homeRoot.trim() === ""
+    ? "the home store"
+    : `the home store (${homeRoot})`;
+}
+
+/**
  * The chosen project — one absolute path, kept on this machine.
  *
  * What it changes is concrete, so the copy says it: runs started from here
@@ -239,8 +249,13 @@ export function StorageCard({ status }: { status: DaemonStatus | undefined }) {
  * all and the daemon puts everything in the home store — stated plainly rather
  * than left for the owner to discover from a file that appeared in the wrong
  * place.
+ *
+ * The home store is named from `GET /v1/status`'s `home_root`, never from the
+ * literal `~/.openalpaca` (G7): `OPENALPACA_HOME_STORE` moves the root, and a
+ * path printed from this side would then be a confident lie about where the
+ * owner's files went. A daemon that has not answered yet is "the home store".
  */
-function ProjectCard() {
+function ProjectCard({ homeRoot }: { homeRoot: string | null }) {
   const path = useProjectStore((s) => s.path);
   const setPath = useProjectStore((s) => s.setPath);
   const showToast = useUiStore((s) => s.showToast);
@@ -308,7 +323,7 @@ function ProjectCard() {
         {invalid
           ? "An absolute path, please — a relative one would be read against the daemon's own directory, not this one."
           : path === null
-            ? "No project: runs are recorded without one and their files go to the home store (~/.openalpaca)."
+            ? `No project: runs are recorded without one and their files go to ${homeStoreLabel(homeRoot)}.`
             : "Runs started here record this project; files they produce land in <project>/.openalpaca/."}
       </GapNote>
     </Card>

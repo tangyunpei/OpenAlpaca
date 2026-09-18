@@ -99,6 +99,34 @@ describe("AssistantMessage (§3.10, §3.11)", () => {
     expect(code).toHaveTextContent("cargo tree");
   });
 
+  /**
+   * G8 — a completion report, as the daemon's own template writes one. The
+   * transcript printed `- **Research:** …` verbatim while the Library's
+   * preview of the same bytes rendered properly.
+   */
+  it("renders a completion report's emphasis and bullets", () => {
+    const { container } = render(
+      <AssistantMessage
+        text={[
+          "Here is what the run found:",
+          "- **Research:** three connectors are stale",
+          "- **Next:** re-run the audit with `--refresh`",
+        ].join("\n")}
+      />,
+    );
+
+    const strong = [...container.querySelectorAll("strong")].map(
+      (node) => node.textContent,
+    );
+    expect(strong).toEqual(["Research:", "Next:"]);
+    expect(container.querySelectorAll("ul li")).toHaveLength(2);
+    expect(container.querySelector("code")).toHaveTextContent("--refresh");
+
+    // Nothing of the markup is left on screen as characters.
+    expect(container.textContent).not.toContain("**");
+    expect(container.textContent).toContain("three connectors are stale");
+  });
+
   // GAP-23: the pill is the way back to the run a stored turn belongs to.
   it("shows the run pill only for a message that names a run", () => {
     const onOpen = vi.fn();

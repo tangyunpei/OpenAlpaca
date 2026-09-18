@@ -21,6 +21,13 @@ export const qk = {
    * `x-workspace-path` is a different answer, not a stale one.
    */
   status: (workspacePath: string | null) => ["status", workspacePath] as const,
+  /**
+   * Every window's `GET /v1/status`, whatever project it asked about — what a
+   * write that changes the daemon's answer invalidates (G2). A toggle, a model
+   * refresh and a new default model all move `llm.effective_default_model`,
+   * and the banner that reads it was a poll behind them.
+   */
+  statusAll: () => ["status"] as const,
 
   chat: {
     all: () => ["chat"] as const,

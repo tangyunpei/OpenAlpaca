@@ -53,6 +53,12 @@ export function useUpdateOrchestratorConfig(): UseMutationResult<
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: qk.orchestrator.all() });
     },
+    // The new default model is what `GET /v1/status` answers with, so the
+    // substitution banner reads it from the same write (G2) — on settle, after
+    // the daemon has it.
+    onSettled: () => {
+      void client.invalidateQueries({ queryKey: qk.statusAll() });
+    },
   });
 }
 

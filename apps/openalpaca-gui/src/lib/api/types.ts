@@ -1079,8 +1079,14 @@ export interface DaemonStatus {
  * disagrees with every answer.
  */
 export interface DaemonLlmStatus {
-  /** `[orchestrator] model`, as the router holds it. */
-  default_model: string;
+  /**
+   * `[orchestrator] model`, as the router holds it — or `null` when nothing is
+   * configured at all (M8). The daemon serialises an explicit `null` rather
+   * than `""`, so "no default" and "a default named the empty string" are not
+   * the same reading; `default_model_routable` is then `false`, because
+   * nothing configured is nothing routable.
+   */
+  default_model: string | null;
   /** Whether a provider is loaded, enabled, and holds that model right now. */
   default_model_routable: boolean;
   /**
