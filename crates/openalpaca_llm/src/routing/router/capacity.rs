@@ -175,6 +175,7 @@ impl LlmRouter {
                             supports_document: false,
                             supports_reasoning: false,
                             supports_tools: model.supports_tools,
+                            declared: false,
                         },
                     );
                 }

@@ -1,7 +1,9 @@
 //! Cost tracking: per-agent and per-task usage and budget enforcement.
 
 use crate::routing::model_registry::ModelRegistry;
+use arc_swap::ArcSwap;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// A record of a single LLM API call.
@@ -42,7 +44,16 @@ pub struct ModelUsageStats {
 
 /// Tracks costs across agents, tasks, and providers.
 pub struct CostTracker {
-    model_registry: ModelRegistry,
+    /// The catalogue prices are read from.
+    ///
+    /// Swappable because the router hands the tracker *its own* registry at
+    /// construction: one source of truth — compiled defaults, `[models]` rows
+    /// and discovered models — so a free local model is billed at 0 and a
+    /// registry reload reaches billing without a second copy to keep in step
+    /// (L8). Before that, the tracker owned a `with_defaults()` registry no
+    /// config or discovery ever touched, and a local turn was billed at
+    /// Sonnet rates against the $1 per-turn and $5 per-workflow caps.
+    model_registry: ArcSwap<ModelRegistry>,
     agent_usage: RwLock<HashMap<String, UsageStats>>,
     task_usage: RwLock<HashMap<String, UsageStats>>,
     provider_usage: RwLock<HashMap<String, UsageStats>>,
@@ -51,27 +62,46 @@ pub struct CostTracker {
 impl CostTracker {
     pub fn new(model_registry: ModelRegistry) -> Self {
         Self {
-            model_registry,
+            model_registry: ArcSwap::from_pointee(model_registry),
             agent_usage: RwLock::new(HashMap::new()),
             task_usage: RwLock::new(HashMap::new()),
             provider_usage: RwLock::new(HashMap::new()),
         }
     }
 
+    /// Price from this registry from now on.
+    ///
+    /// Called by every `LlmRouter` constructor with the router's own registry,
+    /// so the tracker and the routing decision always read the same catalogue.
+    pub fn use_registry(&self, model_registry: Arc<ModelRegistry>) {
+        self.model_registry.store(model_registry);
+    }
+
+    /// The (input, output) price per million tokens to bill this model at.
+    fn pricing_for(&self, model: &str) -> (f64, f64) {
+        let registry = self.model_registry.load();
+        if let Some(pricing) = registry.get_pricing(model) {
+            return (
+                pricing.input_price_per_million,
+                pricing.output_price_per_million,
+            );
+        }
+        // An id the catalogue has never met. Where the whole catalogue is
+        // local, no call can have cost money, and billing this one at cloud
+        // rates would abort a free run on fictional spend.
+        if registry.is_local_only() {
+            return (0.0, 0.0);
+        }
+        // Otherwise stay conservative: $3/1M input, $15/1M output (Sonnet-like).
+        (3.0, 15.0)
+    }
+
     /// Calculate the cost for a given model and token counts.
     /// Falls back to default pricing if model is unknown.
     pub fn calculate_cost(&self, model: &str, input_tokens: u32, output_tokens: u32) -> f64 {
-        match self.model_registry.get_pricing(model) {
-            Some(pricing) => {
-                (input_tokens as f64 * pricing.input_price_per_million / 1_000_000.0)
-                    + (output_tokens as f64 * pricing.output_price_per_million / 1_000_000.0)
-            }
-            None => {
-                // Fallback: $3/1M input, $15/1M output (Sonnet-like)
-                (input_tokens as f64 * 3.0 / 1_000_000.0)
-                    + (output_tokens as f64 * 15.0 / 1_000_000.0)
-            }
-        }
+        let (input_price, output_price) = self.pricing_for(model);
+        (input_tokens as f64 * input_price / 1_000_000.0)
+            + (output_tokens as f64 * output_price / 1_000_000.0)
     }
 
     /// Calculate cost including Anthropic prompt-cache pricing.
@@ -88,14 +118,7 @@ impl CostTracker {
         cache_creation_tokens: u32,
         cache_read_tokens: u32,
     ) -> f64 {
-        let (input_price, output_price) = match self.model_registry.get_pricing(model) {
-            Some(pricing) => (
-                pricing.input_price_per_million,
-                pricing.output_price_per_million,
-            ),
-            // Fallback: $3/1M input, $15/1M output (Sonnet-like)
-            None => (3.0, 15.0),
-        };
+        let (input_price, output_price) = self.pricing_for(model);
         let cached = cache_creation_tokens as u64 + cache_read_tokens as u64;
         let non_cached_input = (input_tokens as u64).saturating_sub(cached);
         (non_cached_input as f64 * input_price / 1_000_000.0)
@@ -150,6 +173,7 @@ impl CostTracker {
         {
             let provider_name = self
                 .model_registry
+                .load()
                 .resolve_provider_name(&record.model)
                 .unwrap_or_else(|| "unknown".to_string());
 

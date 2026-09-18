@@ -48,6 +48,7 @@ fn test_custom_registry() {
             supports_document: false,
             supports_reasoning: false,
             supports_tools: true,
+            declared: true,
         },
     );
     let registry = ModelRegistry::new(models);
@@ -74,6 +75,7 @@ fn test_register_model() {
             supports_document: false,
             supports_reasoning: false,
             supports_tools: true,
+            declared: true,
         },
     );
     assert_eq!(
@@ -99,6 +101,7 @@ fn test_register_if_absent() {
             supports_document: false,
             supports_reasoning: false,
             supports_tools: true,
+            declared: true,
         },
     );
     assert_eq!(
@@ -120,6 +123,7 @@ fn test_register_if_absent() {
             supports_document: false,
             supports_reasoning: false,
             supports_tools: true,
+            declared: true,
         },
     );
     assert_eq!(
@@ -150,6 +154,7 @@ fn test_register_discovered() {
             supports_document: false,
             supports_reasoning: false,
             supports_tools: true,
+            declared: true,
         },
     );
     let info = registry.get_model_info("gpt-5.2").unwrap();
@@ -171,6 +176,7 @@ fn test_register_discovered() {
             supports_document: false,
             supports_reasoning: false,
             supports_tools: true,
+            declared: true,
         },
     );
     let info = registry.get_model_info("new-api-model").unwrap();
@@ -199,6 +205,7 @@ fn test_list_discovered_models() {
             supports_document: false,
             supports_reasoning: false,
             supports_tools: true,
+            declared: true,
         },
     );
 

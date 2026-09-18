@@ -51,7 +51,10 @@ pub(super) fn keyless_slot(provider_name: &str) -> KeyGuard {
 /// The LLM Router — routes requests to providers with key rotation and fallback.
 pub struct LlmRouter {
     pub(super) providers: DashMap<ProviderType, ProviderEntry>,
-    pub(super) model_registry: ModelRegistry,
+    /// The one catalogue this router routes from — shared with
+    /// [`Self::cost_tracker`], so what is routable and what it costs are read
+    /// from the same place (L8).
+    pub(super) model_registry: Arc<ModelRegistry>,
     pub(super) fallback_chains: HashMap<String, Vec<String>>,
     pub cost_tracker: Arc<CostTracker>,
     default_model: ArcSwap<String>,
@@ -93,6 +96,8 @@ impl LlmRouter {
         for (k, v) in providers {
             dm.insert(k, v);
         }
+        let model_registry = Arc::new(model_registry);
+        cost_tracker.use_registry(Arc::clone(&model_registry));
         Self {
             providers: dm,
             model_registry,
@@ -122,6 +127,8 @@ impl LlmRouter {
         for (k, v) in providers {
             dm.insert(k, v);
         }
+        let model_registry = Arc::new(model_registry);
+        cost_tracker.use_registry(Arc::clone(&model_registry));
         Self {
             providers: dm,
             model_registry,
@@ -161,8 +168,9 @@ impl LlmRouter {
             },
         );
 
-        let model_registry = ModelRegistry::with_defaults();
+        let model_registry = Arc::new(ModelRegistry::with_defaults());
         let cost_tracker = Arc::new(CostTracker::new(ModelRegistry::with_defaults()));
+        cost_tracker.use_registry(Arc::clone(&model_registry));
         let rate_config = RateLimitConfig::default();
 
         Self {
@@ -457,6 +465,13 @@ impl LlmRouter {
     /// Get a reference to the model registry.
     pub fn model_registry(&self) -> &ModelRegistry {
         &self.model_registry
+    }
+
+    /// The registry itself, for a component that must read the same catalogue
+    /// rather than a copy of it (the cost tracker does, via
+    /// [`CostTracker::use_registry`]).
+    pub fn model_registry_shared(&self) -> Arc<ModelRegistry> {
+        Arc::clone(&self.model_registry)
     }
 
     /// Get key statuses for a provider.

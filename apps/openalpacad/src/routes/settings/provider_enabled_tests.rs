@@ -19,8 +19,11 @@ use tempfile::TempDir;
 use crate::test_util::HomeStoreGuard;
 
 /// Anthropic is the default model's provider (so it is the 409 case), Ollama
-/// is off and keyless (so it is the enable case). Neither carries a key, so
-/// nothing here can reach a provider's API.
+/// is off and keyless (so it is the enable case). Neither carries a key, and
+/// Ollama's `base_url` is a loopback port nothing can bind (port 1 needs
+/// root), so an enable's model discovery — which since L2 is no longer gated
+/// on a key — fails to connect instead of reaching a real Ollama on the
+/// developer's machine.
 const CONFIG: &str = r#"[orchestrator]
 model = "claude-haiku-4-5-20251001"
 
@@ -30,7 +33,7 @@ strategy = "round_robin"
 
 [providers.ollama]
 enabled = false
-base_url = "http://localhost:11434/v1"
+base_url = "http://127.0.0.1:1/v1"
 
 [models."llama3.1"]
 provider = "ollama"
@@ -48,7 +51,7 @@ strategy = "round_robin"
 
 [providers.ollama]
 enabled = false
-base_url = "http://localhost:11434/v1"
+base_url = "http://127.0.0.1:1/v1"
 "#;
 
 struct Harness {

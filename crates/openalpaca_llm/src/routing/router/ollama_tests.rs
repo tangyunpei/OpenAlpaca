@@ -51,6 +51,7 @@ fn local_model_info() -> ModelInfo {
         supports_document: false,
         supports_reasoning: false,
         supports_tools: true,
+        declared: true,
     }
 }
 
@@ -323,6 +324,59 @@ async fn a_model_that_disappears_from_tags_is_withdrawn() {
     assert_eq!(ids, vec!["kept".to_string()]);
 }
 
+/// A declared row survives a withdrawal — it only leaves the picker.
+///
+/// The settings service re-applies `[models]` on every provider enable, so a
+/// refresh that deleted those rows would undo the enable's own work. It is
+/// un-discovered instead: gone from the picker, still the owner's declaration.
+#[tokio::test]
+async fn a_declared_model_that_is_not_installed_is_un_discovered_not_deleted() {
+    let server = MockHttpServer::start(|req| match req.path.as_str() {
+        "/api/tags" => MockResponse::json(tags_body(&["installed"])),
+        "/api/show" => MockResponse::json(show_body("llama", 8192, &["completion", "tools"])),
+        _ => MockResponse::not_found(),
+    })
+    .await;
+
+    let router = empty_catalogue_router(&server.base_url);
+    let mut declared = std::collections::HashMap::new();
+    declared.insert(
+        "never-pulled".to_string(),
+        crate::config::ModelConfigEntry {
+            provider: "ollama".to_string(),
+            input_price: Some(0.0),
+            output_price: Some(0.0),
+            context: Some(4096),
+            supports_image: None,
+            supports_audio: None,
+            supports_document: None,
+            supports_reasoning: None,
+            supports_tools: None,
+        },
+    );
+    router
+        .model_registry()
+        .reload_from_config(&declared, &std::collections::HashSet::new());
+
+    router.refresh_models_for(&ProviderType::Ollama).await;
+
+    assert!(
+        router.model_registry().get_model_info("never-pulled").is_some(),
+        "the owner's declaration is not deleted behind their back"
+    );
+    let offered: Vec<String> = router.available_models().into_iter().map(|m| m.id).collect();
+    assert_eq!(
+        offered,
+        vec!["installed".to_string()],
+        "but it is not offered as installed"
+    );
+    assert_eq!(
+        router.effective_default_model().as_deref(),
+        Some("installed"),
+        "and the ladder picks the one that is really there"
+    );
+}
+
 /// A `[models]` row wins over what discovery reports, and is never required.
 #[tokio::test]
 async fn a_declared_row_overrides_the_discovered_metadata() {
@@ -445,6 +499,38 @@ async fn an_ollama_with_no_models_installed_says_what_to_do() {
         .expect_err("nothing is installed");
     assert!(matches!(err, LlmRouterError::NoRoutableModel), "{err:?}");
     assert!(err.to_string().contains("ollama pull"), "{err}");
+}
+
+// ── L8: a local turn is billed at 0, end to end ─────────────────────────────
+
+/// The whole path: discovery registers the model, the router calls it, and the
+/// cost recorded against the turn is zero — not the $3/$15 Sonnet rate the
+/// tracker's private registry used to fall back to.
+#[tokio::test]
+async fn a_discovered_local_model_is_recorded_at_zero_cost() {
+    let server = MockHttpServer::start(|req| match req.path.as_str() {
+        "/api/tags" => MockResponse::json(tags_body(&["free-model"])),
+        "/api/show" => MockResponse::json(show_body("qwen3", 262_144, &["completion", "tools"])),
+        "/v1/chat/completions" => MockResponse::json(completion_body("free-model", "cheap")),
+        _ => MockResponse::not_found(),
+    })
+    .await;
+
+    let router = empty_catalogue_router(&server.base_url);
+    router.refresh_models_for(&ProviderType::Ollama).await;
+
+    let mut req = request("free-model");
+    req.context.agent_id = Some("agent1".to_string());
+    router.complete(req).await.expect("the local model answers");
+
+    let usage = router
+        .cost_tracker
+        .get_agent_usage("agent1")
+        .await
+        .expect("the turn was recorded");
+    assert_eq!(usage.total_requests, 1);
+    assert_eq!(usage.total_input_tokens, 11, "real tokens, not zero");
+    assert_eq!(usage.total_cost_usd, 0.0, "a local model is free");
 }
 
 /// The fact the CLI and GUI render as "no key needed".

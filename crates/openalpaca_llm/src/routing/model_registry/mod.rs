@@ -96,6 +96,14 @@ pub struct ModelInfo {
     /// strength of this flag. It orders the effective-model ladder, which
     /// prefers a tool-capable model when it has to pick one for the owner (L3).
     pub supports_tools: bool,
+    /// Whether this entry has a source other than API discovery — a compiled
+    /// default or a `[models]` row the owner wrote.
+    ///
+    /// Only discovery's own rows are *removed* when a local provider stops
+    /// reporting them; a declared row is un-discovered instead, so it leaves
+    /// the picker without the owner's declaration being deleted behind their
+    /// back (L2).
+    pub declared: bool,
 }
 
 /// Registry mapping model IDs to their provider and pricing metadata.
@@ -138,6 +146,7 @@ impl ModelRegistry {
                     supports_document: true,
                     supports_reasoning: false,
                     supports_tools: true,
+                    declared: true,
                 },
             );
         }
@@ -155,6 +164,7 @@ impl ModelRegistry {
                     supports_document: true,
                     supports_reasoning: false,
                     supports_tools: true,
+                    declared: true,
                 },
             );
         }
@@ -171,6 +181,7 @@ impl ModelRegistry {
                 supports_document: true,
                 supports_reasoning: false,
                 supports_tools: true,
+                declared: true,
             },
         );
 
@@ -188,6 +199,7 @@ impl ModelRegistry {
                 supports_document: false,
                 supports_reasoning: false,
                 supports_tools: true,
+                declared: true,
             },
         );
         models.insert(
@@ -203,6 +215,7 @@ impl ModelRegistry {
                 supports_document: false,
                 supports_reasoning: false,
                 supports_tools: true,
+                declared: true,
             },
         );
         models.insert(
@@ -218,6 +231,7 @@ impl ModelRegistry {
                 supports_document: false,
                 supports_reasoning: false,
                 supports_tools: true,
+                declared: true,
             },
         );
 
@@ -248,6 +262,7 @@ impl ModelRegistry {
                     supports_document: false,
                     supports_reasoning: true,
                     supports_tools: true,
+                    declared: true,
                 },
             );
         }
@@ -309,6 +324,7 @@ impl ModelRegistry {
                         // model they mean to run agents on is tool-capable
                         // until they say otherwise.
                         supports_tools: entry.supports_tools.unwrap_or(true),
+                        declared: true,
                     },
                 );
             }
@@ -400,13 +416,14 @@ impl ModelRegistry {
             .unwrap_or(true)
     }
 
-    /// A model this provider can serve, preferring a tool-capable one.
+    /// A model this provider can serve, preferring a confirmed tool-capable one.
     ///
     /// The last rung of the effective-model ladder (L3): when a provider's
     /// configured `default_model` names something that is not there — an
-    /// Ollama tag that was never pulled, say — this is what the owner
-    /// actually has. Ties break on the id, so the answer does not move
-    /// between runs.
+    /// Ollama tag that was never pulled, say — this is what the owner actually
+    /// has. A model the provider's API confirmed wins over one only declared,
+    /// then a tool-capable one over one that is not, then the id — so the
+    /// answer does not move between runs.
     pub fn first_model_for_provider(&self, provider: &ProviderType) -> Option<String> {
         let models = self.models.read().unwrap_or_else(|p| p.into_inner());
         let mut candidates: Vec<(&String, &ModelInfo)> = models
@@ -414,33 +431,55 @@ impl ModelRegistry {
             .filter(|(_, info)| &info.provider == provider)
             .collect();
         candidates.sort_by(|(a_id, a), (b_id, b)| {
-            b.supports_tools.cmp(&a.supports_tools).then(a_id.cmp(b_id))
+            b.discovered
+                .cmp(&a.discovered)
+                .then(b.supports_tools.cmp(&a.supports_tools))
+                .then(a_id.cmp(b_id))
         });
         candidates.first().map(|(id, _)| (*id).clone())
     }
 
-    /// Drop the models a provider no longer reports, returning what went.
+    /// Withdraw the models a provider no longer reports, returning what went.
     ///
     /// Only meaningful where the provider's API is the ground truth for what
     /// exists — a local one (L2). A tag that is no longer installed cannot be
     /// served, and a catalogue entry the call cannot serve is exactly what
-    /// R58b refuses to keep. The caller logs the ids, so nothing disappears
-    /// quietly.
+    /// R58b refuses to offer.
+    ///
+    /// Two outcomes, because two kinds of entry: a row **discovery created** is
+    /// removed, since discovery is all it ever was; a row the owner
+    /// **declared** in `[models]` (or a compiled default) is only
+    /// un-discovered, so it leaves the picker while their declaration stays —
+    /// deleting it would also undo the config rows the settings service
+    /// re-applies on every provider enable. The caller logs the ids, so
+    /// nothing disappears quietly.
     pub fn withdraw_absent_for_provider(
         &self,
         provider: &ProviderType,
         present: &HashSet<String>,
     ) -> Vec<String> {
         let mut models = self.models.write().unwrap_or_else(|p| p.into_inner());
-        let gone: Vec<String> = models
-            .iter()
-            .filter(|(id, info)| &info.provider == provider && !present.contains(*id))
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in &gone {
+        let mut withdrawn = Vec::new();
+        let mut remove = Vec::new();
+        for (id, info) in models.iter_mut() {
+            if &info.provider != provider || present.contains(id) {
+                continue;
+            }
+            if info.declared {
+                if info.discovered {
+                    info.discovered = false;
+                    withdrawn.push(id.clone());
+                }
+            } else {
+                remove.push(id.clone());
+            }
+        }
+        for id in &remove {
             models.remove(id);
         }
-        gone
+        withdrawn.extend(remove);
+        withdrawn.sort();
+        withdrawn
     }
 
     /// Whether every model in the catalogue belongs to a provider that runs on

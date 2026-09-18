@@ -26,6 +26,105 @@ fn test_calculate_cost_unknown_model_fallback() {
     assert!((cost - expected).abs() < 0.01);
 }
 
+// ── L8: one catalogue, shared with the router ───────────────────────────────
+
+use crate::keys::key_pool::ProviderType;
+use crate::routing::model_registry::ModelInfo;
+use std::sync::Arc;
+
+fn local_model(context_window: u32) -> ModelInfo {
+    ModelInfo {
+        provider: ProviderType::Ollama,
+        input_price_per_million: 0.0,
+        output_price_per_million: 0.0,
+        context_window,
+        discovered: true,
+        supports_image: false,
+        supports_audio: false,
+        supports_document: false,
+        supports_reasoning: false,
+        supports_tools: true,
+        declared: true,
+    }
+}
+
+/// A discovered local model is free, and the caps are not spent on fiction.
+#[test]
+fn a_discovered_local_model_costs_nothing() {
+    let registry = Arc::new(ModelRegistry::new(std::collections::HashMap::new()));
+    registry.register("qwen3:27b".to_string(), local_model(262_144));
+
+    let tracker = make_tracker();
+    tracker.use_registry(Arc::clone(&registry));
+
+    assert_eq!(tracker.calculate_cost("qwen3:27b", 1_000_000, 100_000), 0.0);
+    assert_eq!(
+        tracker.calculate_cost_with_cache("qwen3:27b", 1_000_000, 100_000, 0, 0),
+        0.0
+    );
+}
+
+/// A `[models]` price is honoured — the tracker used to own a registry that
+/// config rows never reached.
+#[test]
+fn a_declared_price_is_honoured() {
+    let registry = Arc::new(ModelRegistry::new(std::collections::HashMap::new()));
+    let mut declared = std::collections::HashMap::new();
+    declared.insert(
+        "priced-local".to_string(),
+        crate::config::ModelConfigEntry {
+            provider: "ollama".to_string(),
+            input_price: Some(0.5),
+            output_price: Some(1.5),
+            context: Some(8192),
+            supports_image: None,
+            supports_audio: None,
+            supports_document: None,
+            supports_reasoning: None,
+            supports_tools: None,
+        },
+    );
+    registry.reload_from_config(&declared, &std::collections::HashSet::new());
+
+    let tracker = make_tracker();
+    tracker.use_registry(registry);
+
+    let cost = tracker.calculate_cost("priced-local", 1_000_000, 1_000_000);
+    assert!((cost - 2.0).abs() < 1e-9, "cost={cost}");
+}
+
+/// A model registered after the tracker was built is priced correctly: the
+/// registry is shared, not copied.
+#[test]
+fn a_registry_reload_reaches_the_tracker() {
+    let registry = Arc::new(ModelRegistry::new(std::collections::HashMap::new()));
+    let tracker = make_tracker();
+    tracker.use_registry(Arc::clone(&registry));
+
+    // Nothing in the catalogue yet: the conservative fallback applies.
+    let before = tracker.calculate_cost("late-model", 1_000_000, 0);
+    assert!((before - 3.0).abs() < 1e-9, "before={before}");
+
+    registry.register("late-model".to_string(), local_model(8192));
+    assert_eq!(tracker.calculate_cost("late-model", 1_000_000, 0), 0.0);
+}
+
+/// An id the catalogue has never met costs nothing on a local-only install and
+/// keeps the conservative rate anywhere else.
+#[test]
+fn an_unknown_model_is_free_only_where_every_model_is_local() {
+    let local_only = Arc::new(ModelRegistry::new(std::collections::HashMap::new()));
+    local_only.register("qwen3:27b".to_string(), local_model(262_144));
+    let tracker = make_tracker();
+    tracker.use_registry(local_only);
+    assert_eq!(tracker.calculate_cost("never-seen", 1_000_000, 100_000), 0.0);
+
+    // A catalogue with a cloud model in it keeps today's conservative fallback.
+    let tracker = make_tracker(); // with_defaults(): Anthropic + OpenAI
+    let cost = tracker.calculate_cost("never-seen", 1_000_000, 100_000);
+    assert!((cost - 4.5).abs() < 0.01, "cost={cost}");
+}
+
 #[tokio::test]
 async fn test_record_agent_usage() {
     let tracker = make_tracker();

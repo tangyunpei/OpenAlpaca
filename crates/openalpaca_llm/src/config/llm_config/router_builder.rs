@@ -297,6 +297,10 @@ fn build_router_from_hierarchical(
             .or_insert_with(|| fallbacks.clone());
     }
 
+    // The registry handed in here is a placeholder: every `LlmRouter`
+    // constructor replaces it with the router's own, so pricing reads the same
+    // catalogue routing does — `[models]` rows and discovered models included
+    // (L8, `CostTracker::use_registry`).
     let cost_tracker = Arc::new(CostTracker::new(ModelRegistry::with_defaults()));
     let rate_limit_config = config.rate_limits.unwrap_or_default();
 
