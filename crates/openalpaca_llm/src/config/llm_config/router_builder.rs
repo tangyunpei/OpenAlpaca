@@ -232,10 +232,16 @@ fn build_router_from_hierarchical(
                 }
                 #[cfg(feature = "ollama")]
                 ProviderType::Ollama => {
+                    // An empty `default_model` is the seeded template's way of
+                    // saying "whatever is installed" (L4) — the catalogue
+                    // answers that, so it must never become a tag on the wire.
+                    // The router names the model on every request; this is only
+                    // the instance-level fallback for a caller that names none.
                     let model = provider_config
                         .default_model
                         .clone()
                         .or_else(|| prov_defaults.map(|d| d.default_model.clone()))
+                        .filter(|m| !m.trim().is_empty())
                         .unwrap_or_else(|| "llama3".to_string());
                     let base_url = provider_config
                         .base_url

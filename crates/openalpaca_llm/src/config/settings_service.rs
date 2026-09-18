@@ -1026,10 +1026,13 @@ impl LlmSettingsService {
             }
             #[cfg(feature = "ollama")]
             ProviderType::Ollama => {
+                // An empty `default_model` means "whatever is installed"
+                // (L4), not a tag — same reading as the boot builder's.
                 let model = rt
                     .provider_defaults
                     .get("ollama")
                     .map(|d| d.default_model.clone())
+                    .filter(|m| !m.trim().is_empty())
                     .unwrap_or_else(|| "llama3".to_string());
                 // The same output ceiling the boot builder reads — a provider
                 // toggled on at runtime must not answer differently from one

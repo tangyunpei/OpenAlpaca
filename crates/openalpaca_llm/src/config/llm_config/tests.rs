@@ -118,6 +118,53 @@ context = 128000
     );
 }
 
+// ── L4: the seeded template ────────────────────────────────────────────────
+
+/// The file a fresh install parses before anything else. Its `[providers.ollama]`
+/// section is the whole local-model story: turn it on and nothing else is
+/// needed — no key, no `[models]` row, no hand-picked tag.
+#[test]
+fn the_seeded_template_describes_a_discoverable_ollama() {
+    const TEMPLATE: &str =
+        include_str!("../../../../../scripts/release/templates/config/llm.toml");
+
+    let config: LlmRouterConfig = toml::from_str(TEMPLATE).expect("the seeded template parses");
+    let ollama = &config.providers.as_ref().expect("providers")["ollama"];
+
+    assert_eq!(
+        ollama.enabled,
+        Some(false),
+        "enabling stays the owner's one action (auto-enable is owner decision T20, not adopted)"
+    );
+    assert_eq!(
+        ollama.default_model.as_deref(),
+        Some(""),
+        "empty means 'whatever is installed', not a tag nobody pulled"
+    );
+    assert_eq!(ollama.default_max_tokens, Some(8192));
+    assert_eq!(ollama.request_timeout_secs, Some(600));
+    assert!(
+        config.models.is_none(),
+        "discovery writes the catalogue; the owner writes no [models] rows"
+    );
+    assert!(
+        ollama.keys.is_none(),
+        "and no key, placeholder or otherwise"
+    );
+
+    let runtime = LlmRuntimeConfig::from(&config);
+    assert_eq!(
+        runtime.request_timeout_for("ollama"),
+        std::time::Duration::from_secs(600),
+        "the local provider's own budget"
+    );
+    assert_eq!(
+        runtime.request_timeout_for("anthropic"),
+        std::time::Duration::from_secs(120),
+        "and the cloud default is untouched"
+    );
+}
+
 // ── L7: the request timeout is configuration, not a constant ───────────────
 
 /// The default is the number the HTTP client used to be hard-coded with, so a

@@ -18,11 +18,26 @@ strategy = "round_robin"
 default_model = "gpt-4o-mini"
 default_max_tokens = 4096
 
+# Local models, served by the Ollama you run yourself.
+# Turning this on is the only action needed: the daemon then asks the running
+# Ollama what is installed (its own /api/tags and /api/show) and registers every
+# chat model it reports — no API key, and no [models] rows to write by hand.
+# A local model costs nothing, so its prices are 0 and the caps never bite.
 [providers.ollama]
 enabled = false
 base_url = "http://localhost:11434/v1"
 strategy = "round_robin"
-default_model = "llama3.1"
+# Empty means "whatever is installed": the router picks a discovered model,
+# preferring one that can use tools. Name a tag here to pin one instead.
+default_model = ""
+# The output ceiling for one answer. A local model bills nothing, and a
+# reasoning model spends tokens thinking before it answers, so this is more
+# generous than the cloud default of 4096.
+default_max_tokens = 8192
+# How long one non-streaming call to this provider may take. A large model on a
+# laptop answers in minutes, not seconds. A streamed call is not bound by this:
+# it is cut only if the tokens stop coming.
+request_timeout_secs = 600
 
 [web_search]
 api_key = ""
@@ -38,6 +53,9 @@ dimensions = 768
 usage_cache_ttl_secs = 300
 usage_fetch_timeout_secs = 10
 cli_backend_timeout_secs = 120
+# Wall clock for one non-streaming LLM call, for any provider that does not set
+# its own request_timeout_secs.
+llm_request_timeout_secs = 120
 
 [env_vars]
 anthropic_api_key = "ANTHROPIC_API_KEY"
