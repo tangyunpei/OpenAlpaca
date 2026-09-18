@@ -40,6 +40,25 @@ openalpaca gui start
 
 On a first install, restart your shell (or run `export PATH="$HOME/.local/bin:$PATH"`) so `openalpaca` is found — the installer adds `~/.local/bin` to your PATH via `~/.zshrc` / `~/.bashrc`.
 
+The first daemon start also seeds `~/.openalpaca/config` with the agent templates, skills and tool config it carries in its binary, alongside `llm.toml`, `daemon.toml` and `mcp.toml`. A directory that already exists is left alone.
+
+## 4) Run on a Local Model (Ollama, no API key)
+
+```bash
+ollama pull <model>                       # whatever you want to run
+# then turn the provider on, either way:
+#   GUI:     Settings → Models & keys → the `ollama` switch
+#   by hand: [providers.ollama] enabled = true in ~/.openalpaca/config/llm.toml
+openalpaca llm models --refresh           # your installed tags, priced 0
+openalpaca chat --message "say hello in five words"
+```
+
+Enabling the provider is the only action: the daemon then asks the running Ollama what is installed (its own `/api/tags` and `/api/show`) and registers every chat model it reports — **no API key, no `[models]` rows**, real context lengths, prices `0`, and replies that stream token by token. A hand edit to `llm.toml` is picked up live; there is no CLI verb for the provider switch. `openalpaca llm models --refresh` is what you run after a later `ollama pull`.
+
+Two things to expect: the seeded default model and every shipped agent template name a Claude id, so on an Ollama-only machine the router substitutes and says so (`openalpaca llm status` reads `configured: X — not available, using Y`); and the first boot downloads about 1 GB of local embedding model into `~/.openalpaca/state/cache/fastembed` unless you set `[embeddings] enabled = false`.
+
+Full details, including the output-ceiling and timeout knobs: [Installation Manual → Local Models (Ollama)](Installation_Manual.md#local-models-ollama).
+
 ## Default Install Locations
 
 - CLI: `~/.local/bin/openalpaca` (symlink)

@@ -212,12 +212,44 @@ openalpaca llm keys validate --provider <name> --secret <key>
 openalpaca llm keys set-primary <provider> <key_id>
 openalpaca llm keys reorder <key_id>...
 openalpaca llm usage [--agent <id>] [--key <key_id>] [--daily [--date YYYY-MM-DD]] [--format table|json]
-openalpaca llm models [--format table|json]
+openalpaca llm models [--refresh] [--format table|json]
 openalpaca llm strategy --provider <name> <strategy>
 openalpaca llm credentials [--format table|json]
 openalpaca llm backends [--format table|json]
 openalpaca llm provider-usage [--format table|json]
 ```
+
+Notes:
+- `llm models --refresh` asks every loaded provider what it can serve before
+  listing (`POST /v1/models/refresh`). Providers that need no key are asked
+  exactly like the ones that do, so a model you just installed with `ollama
+  pull` appears without restarting the daemon or editing `llm.toml`. Without
+  the flag the catalogue is read as it stands. The table carries a `TOOLS`
+  column (a `-` means the daemon did not say, not "no"), and an empty
+  catalogue names the fix instead of printing `No items found.`
+- `llm status` reads the daemon's own verdict on the default model. Its
+  `Model:` line can read `X — not available, using Y` when the configured
+  model is not routable and the fallback ladder answers with another, or name
+  the fix when nothing is routable at all. A daemon too old to serve that fact
+  is not second-guessed — the configured id is printed alone.
+- A provider that **needs no API key** (Ollama) reads `· <provider> — no key
+  needed` under `Key Health`, and gets a row saying the same in `llm keys
+  list`. A keyed provider with an empty pool still reads `✗ … — no key
+  configured`.
+- There is **no CLI verb for the provider ENABLE bit**. Turn a provider on in
+  the GUI (Settings → Models & keys) or by setting `enabled = true` under
+  `[providers.<name>]` in `~/.openalpaca/config/llm.toml` — the daemon's
+  watcher registers any provider the file enables that the router is not
+  already holding, discovery included, so no restart is needed. See
+  [Installation Manual → Local Models (Ollama)](Installation_Manual.md#local-models-ollama).
+- `--format json` echoes the daemon's own field names. For `llm models` those
+  are `id`, `input_price_per_million`, `output_price_per_million` and
+  `supports_tools` (the older `model_id` / `*_per_1m` spellings were never on
+  the wire and always came out null); for `llm keys list` the row carries the
+  daemon's `priority` string and a `keyless` flag instead of the old
+  always-false `is_primary`.
+- `llm keys validate` posts a secret and is meaningless for a keyless
+  provider — it will report the key invalid. Nothing needs validating there.
 
 ### `ext`
 
@@ -482,7 +514,9 @@ Notes:
 - Resuming **re-opens** the conversation (`POST /v1/sessions/{id}/activate`) before anything is sent. A lane holds exactly one live conversation, so resuming an archived one archives whatever was live; the CLI prints the conversation it resumed, and its project, so that is visible rather than discovered later. The last few turns are printed before the prompt opens.
 - A resumed conversation's own project governs the turn, overriding the working directory: one conversation belongs to one project. A conversation that has no project yet takes the working directory's and is bound by it.
 - With no `--message` and a TTY on stdin, an interactive REPL opens: streaming replies, tab completion, and client-side slash commands (`/help`, `/model`, `/models`, `/agents`, `/keys`, `/usage`, `/clear`, `/verbose`). Exit with `exit`, `quit`, or Ctrl-D.
-- If stdin is piped, the CLI reads all of stdin, sends it as one message, and streams the reply. The reply is the whole of stdout: the `Alpaca: ` label is printed only when stdout is a terminal, so `openalpaca chat < question.txt > answer.txt` and `... | jq` get the answer and nothing else. Stdin that is empty (or only whitespace) sends nothing and exits **1** with `No input on stdin` — a pipe that produced nothing is a mistake upstream, not a request to send an empty turn.
+- If stdin is piped, the CLI reads all of stdin, sends it as one message, and streams the reply. Stdin that is empty (or only whitespace) sends nothing and exits **1** with `No input on stdin` — a pipe that produced nothing is a mistake upstream, not a request to send an empty turn.
+- **One label rule for both one-shot paths.** The `Alpaca: ` label is printed only when stdout is a terminal, for `--message` exactly as for a pipe, so `openalpaca chat --message q > answer.txt`, `openalpaca chat < question.txt > answer.txt` and `... | jq` all get the answer and nothing else.
+- **A failed turn fails the command.** When the daemon reports an error (no routable model, a provider that cannot be reached, a broken stream), the message goes to **stderr** and the process exits non-zero — in the `--message` path and the piped path alike. It used to print `Error: …` on stdout and exit 0, which no script could tell from an answer. The interactive REPL prints the failure on stderr and keeps the prompt open.
 - Routing is decided by the daemon: the model answers directly or starts a background workflow via a tool call. When a reply delegates work to a workflow, the daemon returns structured delegation metadata (task id + title) and the CLI polls that task by id, printing the result when it completes (Ctrl-C stops waiting; the task keeps running — check it later with `openalpaca tasks status <task_id>`).
 - The daemon also recognizes chat-level commands with no LLM call: `/status [task_id]`, `/tasks`, `/cancel`/`/pause`/`/resume` (bare forms target the lane's active workflows, or pass an explicit task id), `/steer <text>` (inject a correction into the running workflow), and `/<skill>` invocations. In the interactive REPL, only the client-side commands listed above are handled locally; every other slash line — the daemon commands here and anything unrecognized (which may be a skill command) — is forwarded to the daemon as a chat message, so `/steer focus on the tests` works directly at the prompt. One-shot mode works too: `openalpaca chat --message "/steer focus on the tests"`.
 

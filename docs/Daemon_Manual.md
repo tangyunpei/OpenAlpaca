@@ -51,6 +51,12 @@ root is the human's:
 - rotated copies of hand-edited config: `~/.openalpaca/state/backups/`
 - plugins: `~/.openalpaca/plugins/` (plus `.permissions.toml`, `.config/<name>.toml`, and `.trash/` for uninstalled ones)
 - content, home scope: one directory per content kind under the root, created on first use — `artifacts/`, `uploads/`, `sessions/`, `memory/`, `skills/`, `scratch/`, `cache/`
+- embedding model cache: `~/.openalpaca/state/cache/fastembed` — where the
+  local embedding backend puts the ~1 GB model it downloads on first use
+  (`store::embedding_cache_dir()`, created on demand). Regenerable: deleting it
+  costs one re-download. A store that cannot be created falls back to the
+  library default with a `WARN` naming it, rather than dropping a gigabyte
+  under the daemon's working directory
 - a project's own store: `<project>/.openalpaca/` — the same content shape, so an artifact of a project lives beside the project
 - daemon log (CLI-managed startup): `~/.openalpaca/state/logs/daemon.log` —
   appended across restarts and rotated by `openalpaca daemon start` when it is
@@ -98,7 +104,8 @@ Important runtime files:
 
 ## Secrets and First Run
 
-- On first startup the daemon seeds missing `llm.toml` and `daemon.toml` from templates embedded in the binary (sourced from `scripts/release/templates/config/`).
+- On first startup the daemon seeds missing `llm.toml`, `daemon.toml` and `mcp.toml` from templates embedded in the binary (sourced from `scripts/release/templates/config/`).
+- The same step seeds the **content** the daemon also carries in its binary: `config/agents/` (the nine templates), `config/skills/` (helper scripts included, written executable) and `config/tools/`. The rule is per directory — a directory that exists is skipped whole, including one the owner emptied, and inside a directory being filled an existing file is never overwritten. One `info!` per directory names the count and the path; a per-file failure is a `warn!` and does not stop the rest. Without this an installed daemon had no agent templates at all, and the first workflow request failed in the lead dispatcher — which now distinguishes "no agent templates are installed" from "every lead agent is busy".
 - The AES-256-GCM master key lives at `~/.openalpaca/state/.master_key` (`store::master_key_dir()`); a key left in a legacy app directory is moved there by the boot-time mover. The daemon exports it as `OPENALPACA_MASTER_KEY` for its own process; startup fails hard if the key cannot be ensured.
 - Persona documents (`SOUL.md`, `USER.md`, `IDENTITY.md`, and conditionally `BOOTSTRAP.md`) are written into `<config>/orchestrator/` from templates if absent.
 
@@ -107,9 +114,114 @@ Important runtime files:
 A file watcher reloads configuration without restart:
 
 - `config/orchestrator/SOUL.md`, `USER.md`, `IDENTITY.md`, `BOOTSTRAP.md` (parse failures keep the last valid version)
-- `config/llm.toml` and `config/daemon.toml`
+- `config/llm.toml` and `config/daemon.toml`. An `llm.toml` edit reloads the runtime config first and **then** registers every provider the file enables that the router does not already hold — the same registration, discovery included, that the toggle route performs — so turning a provider on by hand no longer needs a restart. Nothing is unloaded on this path: a disable arrives through the toggle. The daemon's own writes are swallowed by a hash ring.
 - the `config/skills/` and `config/agents/` directories
 - `config/mcp.toml` — that file **is** the MCP declaration and toggle store, so a hand edit is authoritative: the supervisor diffs desired against actual on presence, the `enabled` bit and a config fingerprint, and loads or unloads only what changed. An unparseable save keeps the last good set rather than tearing servers down, and the daemon's own writes are swallowed by a hash ring so a toggle does not reconcile twice.
+
+## LLM Providers and Local Models
+
+Providers are declared in `config/llm.toml` under `[providers.<name>]` and each
+carries its own ENABLE bit. Two facts shape the rest of this section: **a
+provider may need no API key** (Ollama is the one that does not), and **a model
+the router cannot reach is substituted, never silently**.
+
+### Keyless providers
+
+`LlmProvider::requires_key()` is the fact. For a provider that answers `false`,
+an empty key pool is not an error: both router paths — the non-streaming retry
+ladder and the streaming one — issue the call with no key, using an internal
+rate-limiter slot that is never written to config and never appears in key
+health. `GET /v1/settings/llm` carries `requires_key` per provider so the CLI
+and the GUI can say "no key needed" instead of marking the provider broken. A
+keyed provider with an empty pool is still refused, and a keyless provider that
+*does* have keys configured (an authenticating proxy in front of it) still uses
+them.
+
+### Model discovery
+
+For Ollama the daemon uses Ollama's **own** API, not the OpenAI-compatible one:
+`GET {root}/api/tags` for the installed tags (root = `base_url` without the
+`/v1` suffix), then `POST {root}/api/show` per tag for its context length
+(`model_info.*.context_length`) and its capabilities. Each chat model is
+registered with:
+
+- input and output price `0`
+- the context window `/api/show` reported, or 8192 when it reports none
+- `supports_image` from the `vision` capability, tool support from `tools`
+- `discovered = true`
+
+A model whose capabilities omit `completion` — embedding-only — is not
+registered. A tag that disappears from `/api/tags` is withdrawn at the next
+refresh; a row the owner declared in `[models]` only stops being offered —
+the declaration itself is left alone, so a later `ollama pull` of that tag
+brings it back with the owner's own fields. Discovery needs no key, is not gated on
+the key pool, and runs whenever the provider is registered (boot, the enable
+toggle, a hot reload) and on `POST /v1/models/refresh`. An Ollama that cannot
+be reached leaves the provider registered with zero models, one `WARN`, and the
+reason on its discovery status — never a boot failure. `PUT
+/v1/settings/llm/providers/{provider}/enabled` answers with
+`discovered_models` and `discovery_error` so a zero always has a stated cause.
+
+### The effective model
+
+A requested model that is not routable (unknown id, provider not loaded,
+provider disabled) walks a ladder instead of failing: the request's
+`fallback_models` → the model's own chain → `[orchestrator] fallback_models` →
+the **effective default** — the configured default when it is routable,
+otherwise the default model of the first loaded provider that has a routable
+one. Providers are walked in the built-in order (anthropic, openai, ollama,
+then anything else by name); `llm.toml` is parsed into a map, so its own
+declaration order is not recoverable. For a provider whose `default_model` is
+empty or names a tag that is not installed, "its default" is the first
+discovered model, preferring one that can use tools and then the lowest id, so
+the answer does not move between runs. Every substitution is announced — one `WARN`
+per distinct (requested → effective) pair, and the call log carries the model
+actually used. `GET /v1/status` serves the pair:
+
+```jsonc
+"llm": {
+  "default_model": "claude-haiku-4-5-20251001",
+  "default_model_routable": false,
+  "effective_default_model": "qwen3:8b"   // null = nothing is routable
+}
+```
+
+`llm: null` means this daemon has no LLM router at all. When nothing is
+routable, the next request fails with one error naming the fix (enable a
+provider in Settings → Models, `openalpaca llm status`, `ollama pull`) rather
+than "Unknown model".
+
+### Cost
+
+The cost tracker prices from the router's live registry — compiled defaults
+plus `[models]` rows plus discovered models — so a discovered local model costs
+`0`, a declared price is honoured, and a registry reload reaches the tracker.
+An unknown model is free only where every model on the daemon is local;
+otherwise the conservative cloud fallback still applies. The caps are unchanged
+(per workflow and per turn; there is no daily budget), and at price `0` they
+never bite.
+
+### Timeouts and output ceiling
+
+| Key | Default | Scope |
+|---|---|---|
+| `[timeouts] llm_request_timeout_secs` | 120 | Wall clock for one **non-streaming** LLM call, any provider that sets no override. Clamped to 1…86400 s with a `WARN`. |
+| `[providers.<name>] request_timeout_secs` | unset | Per-provider override of the above. The seeded template sets **600** for Ollama. |
+| `[providers.<name>] default_max_tokens` | 4096 (8192 for the seeded Ollama) | Output ceiling for one answer; a request-level `max_tokens` still wins. |
+
+The HTTP client carries **no total deadline**: it bounds the connect (30 s,
+never longer than the budget) and the idle gap between chunks, so a healthy
+long stream is never cut by a wall clock. The non-streaming total is applied
+per request instead. Both provider-construction paths — the boot builder and
+the registration a toggle or a hot reload performs — resolve the budget through
+the same function, so they cannot disagree. Note there are two idle bounds and
+the tighter one is the loop's: a stalled stream is given up on after 90 s with
+no chunk, before the HTTP read timeout is reached.
+
+Streaming for Ollama is real (the provider forwards to the OpenAI-compatible
+streaming client), and every OpenAI-compatible base is asked for
+`stream_options.include_usage`, so a streamed local turn records real token
+counts.
 
 ## MCP Servers
 
@@ -191,7 +303,7 @@ Major groups:
 - Artifacts: `GET /v1/artifacts` (filters and paging), `GET /v1/artifacts/{id}`, `…/versions`, `…/diff?from=&to=`, `PUT …/pin`, and the content routes `…/content` and `…/versions/{n}/content`
 - Workspaces: `GET|PATCH /v1/workspaces` (describe a project root; re-base everything addressed under it) and `POST /v1/workspaces/purge` (`dry_run` defaults to true)
 - Connectors + auth link token (`POST /v1/auth/link`)
-- LLM settings/models/usage, key management (delete/reorder/priority/validate/status), credential discovery (`GET /v1/settings/llm/credentials`, `POST /v1/settings/llm/credentials/rescan`), CLI backends (`GET /v1/settings/llm/cli-backends`), the provider ENABLE bit (`PUT /v1/settings/llm/providers/{provider}/enabled`), and `GET /v1/usage/summary` (today's spend, its per-provider breakdown, and the two caps that bound it)
+- LLM settings/models/usage, key management (delete/reorder/priority/validate/status), credential discovery (`GET /v1/settings/llm/credentials`, `POST /v1/settings/llm/credentials/rescan`), CLI backends (`GET /v1/settings/llm/cli-backends`), the provider ENABLE bit (`PUT /v1/settings/llm/providers/{provider}/enabled` — its `200` carries `discovered_models` and `discovery_error`), the catalogue (`GET /v1/models`, whose rows carry `supports_tools`) and its re-read (`POST /v1/models/refresh`, which asks keyless providers too), and `GET /v1/usage/summary` (today's spend, its per-provider breakdown, and the two caps that bound it)
 - Orchestrator: metrics (latency and decisions) and config (`GET|PUT /v1/orchestrator/config`)
 - Daemon provider config endpoints (`GET /v1/daemon/config/providers`, `PUT /v1/daemon/config/providers/web-search`)
 - Skills: `GET /v1/skills` (read-only catalog), `GET /v1/skills/health`

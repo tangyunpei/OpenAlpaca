@@ -234,7 +234,9 @@ is shown to the lead on the lane's next turn and never auto-run).
 `POST /v1/chat` as `model` and persisted nowhere, so it governs this
 conversation only; changing the daemon-wide default is a separate action in
 Settings → Models & keys. A disabled provider contributes no models, so it
-simply has no row here.
+simply has no row here — and a model discovered from a local Ollama is listed
+like any other, so picking one is how you chat on-device for a conversation
+without changing the default.
 
 **The aside** is one slot with two modes, never both: the Work pane (run cards
 for every run that is not `done`) or the file panel (one artifact, with the
@@ -391,6 +393,30 @@ back. Disabling the provider that serves the default model is refused with a
 `409` naming it. A `200` is not always a load — enabling a provider with no
 usable key writes the bit and leaves the router with nothing — so the row
 carries the daemon's warning beneath the switch.
+
+**A provider that needs no key.** A local provider (Ollama) is designed to hold
+no key at all, so its row reads `no key needed · <strategy>` where a cloud
+provider counts its keys, and the switch is the whole setup: there is nothing
+to type first. The enable's own answer says what the daemon then found —
+`ollama on — found 3 models`, or `it reported no models`, or `its model list
+could not be read (<reason>)`. A zero is never left to speak for itself. (A key
+you wrote by hand for a local provider is still counted; the line reports what
+is there.)
+
+**Refresh models.** The card header carries a `Refresh models` button
+(`POST /v1/models/refresh`): every loaded provider is asked what it can serve,
+keyless ones included, and the toast reports the catalogue size or the refusal.
+This is what to press after `ollama pull` — the new model appears without
+restarting the daemon.
+
+**When the configured model is not the one answering.** `[orchestrator] model`
+may name a model this install cannot serve — the shipped default is a Claude
+id, and on a machine with only a local provider the router's fallback ladder
+answers with something else. Above the card, a status banner says so in the
+daemon's own terms, off `GET /v1/status`'s `llm` block: `configured: X — not
+available, using Y`, or a line saying nothing is routable and that a local
+provider needs no key. When the configured model is routable, or the daemon
+does not serve the block, there is no banner.
 
 ### Connectors
 
@@ -558,8 +584,11 @@ refetch path.
 
 **No models, or a provider that will not load.** Settings → Models & keys
 shows the daemon's own reason under the switch — a `200` that wrote the bit
-without loading the provider says so. `config/llm.toml` is seeded on first
-daemon start and holds no keys until you add them.
+without loading the provider says so, and an enable that loaded but found
+nothing to serve says that instead. `config/llm.toml` is seeded on first daemon
+start and holds no keys until you add them; a **local** provider needs none —
+turn `ollama` on, and `Refresh models` after a later `ollama pull`. See
+[Installation Manual → Local Models (Ollama)](Installation_Manual.md#local-models-ollama).
 
 **Library previews do not render.** Owner note, verbatim: "the Library's inline
 previews were verified in the browser preview, not in the Tauri shell; if images

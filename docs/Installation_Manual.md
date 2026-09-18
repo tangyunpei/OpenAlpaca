@@ -158,6 +158,127 @@ openalpaca daemon status
 openalpaca gui start
 ```
 
+A first boot also writes the content the daemon carries in its own binary into
+`~/.openalpaca/config`: `llm.toml`, `daemon.toml`, `mcp.toml`, the nine agent
+templates (`agents/`), the skills (`skills/`) and the tool config (`tools/`).
+The rule is per directory: a directory that already exists is left
+alone entirely, even one you emptied on purpose, and inside a directory being
+filled an existing file is never overwritten. Without the templates the first
+workflow request has no lead agent to run and says so.
+
+## Local Models (Ollama)
+
+OpenAlpaca can run entirely on models served by an [Ollama](https://ollama.com)
+you run yourself. **No API key is involved anywhere**, and a local model is
+priced at zero, so the cost caps never bite.
+
+### 1. Install Ollama and pull a model
+
+```bash
+ollama pull <model>          # e.g. a tools-capable chat model
+ollama list                  # the tags the daemon will discover
+```
+
+Ollama serves on `http://localhost:11434`; the daemon's default `base_url` is
+that address plus the OpenAI-compatibility suffix,
+`http://localhost:11434/v1`. Change `[providers.ollama] base_url` in
+`~/.openalpaca/config/llm.toml` if yours listens elsewhere.
+
+### 2. Turn the provider on
+
+Enabling it is the only action required — the seeded `llm.toml` ships
+`[providers.ollama] enabled = false` and everything else already set.
+
+- **GUI**: Settings → Models & keys, the `ollama` row's switch. The row reads
+  `no key needed` instead of offering a key editor, and the toast reports how
+  many models the daemon found.
+- **By hand**: set `enabled = true` under `[providers.ollama]` in
+  `~/.openalpaca/config/llm.toml` and save. The config watcher registers any
+  provider the file enables that the router is not already holding — one that
+  was disabled or missing at boot — discovery included, so no restart is
+  needed. (There is no CLI verb for the provider switch today.)
+
+### 3. What discovery does
+
+When the provider is registered — at boot, on the enable, on a hot reload, on a
+refresh — the daemon asks the running Ollama what is installed, using Ollama's
+own API rather than the OpenAI-compatible one:
+
+- `GET /api/tags` for the list of installed tags.
+- `POST /api/show` per tag for its real context length and its capabilities.
+
+Each **chat** model it reports is registered with input and output price `0`,
+the context window `/api/show` gave (8192 when it does not say), image support
+from the `vision` capability and tool support from `tools`. A model whose
+capabilities omit `completion` — an embedding-only model — is deliberately not
+registered: it is not something a turn could use. Nothing needs an API key and
+nothing needs a `[models]` row; a `[models."<id>"]` row you write by hand still
+overrides the discovered fields.
+
+```bash
+openalpaca llm models                 # the catalogue as it stands
+openalpaca llm models --refresh       # ask every provider again, then list
+```
+
+`--refresh` is the command for "I just pulled a model and it is not in the
+list": it reaches keyless providers too, so the new tag appears without
+restarting the daemon or editing a line of config. The GUI's `Refresh models`
+button in Settings → Models & keys does the same. A model you removed from
+Ollama is withdrawn at the next refresh (a row you declared in `[models]` is
+kept on disk — it simply stops being offered).
+
+If Ollama is not running, the provider still registers, with zero models and
+one `WARN`; the enable's answer carries the reason rather than a bare zero, so
+an empty list is never mistaken for "nothing installed".
+
+### 4. What you should see
+
+```bash
+openalpaca llm status     # Key Health: · ollama — no key needed
+openalpaca llm models     # your tags, provider ollama, prices 0, TOOLS column
+openalpaca chat --message "say hello in five words"
+```
+
+- **No key.** `llm status` prints `· ollama — no key needed` for a keyless
+  provider, never a `✗`, and `llm keys list` gives it a row saying the same.
+- **Cost 0.** Prices come from the router's live catalogue, so a discovered
+  local model costs nothing: usage shows real token counts against `$0.00`.
+- **Streaming.** A local reply arrives token by token, and the token counts
+  come back on the stream itself.
+- **The configured model may not be yours.** Every shipped agent template, and
+  the seeded `[orchestrator] model`, names a Claude id. Those are right when
+  Anthropic is configured and fall through a fallback ladder when it is not:
+  the request ends up on the first routable model, preferring one that can use
+  tools. The substitution is never silent — `openalpaca llm status` reads
+  `configured: X — not available, using Y`, Settings → Models & keys shows the
+  same sentence, and the daemon logs one `WARN` per pair. Set `[orchestrator] model`
+  to one of your local tags to stop substituting. With nothing routable at all,
+  one error names the fix instead of "Unknown model".
+
+### 5. Knobs worth knowing
+
+All in `~/.openalpaca/config/llm.toml`:
+
+| Key | Default (seeded) | What it does |
+|---|---|---|
+| `[providers.ollama] default_model` | `""` | Empty means "whatever is installed" — the router picks a discovered model, preferring a tools-capable one. Name a tag to pin it. |
+| `[providers.ollama] default_max_tokens` | `8192` | The output ceiling for one answer (the cloud default is 4096). A request that names its own `max_tokens` still wins. |
+| `[providers.ollama] request_timeout_secs` | `600` | Wall clock for one **non-streaming** call to this provider. |
+| `[timeouts] llm_request_timeout_secs` | `120` | The same budget for any provider that sets no override. |
+
+A **streamed** reply is not bound by those: the HTTP layer bounds the connect
+and the gap between chunks, not the total, so a long generation is never cut
+mid-answer. What gives up on a stalled stream is the loop's idle bound — 90
+seconds with no chunk.
+
+### 6. The embedding model
+
+Memory search embeds locally by default (`[embeddings] provider = "local"`),
+and the first boot downloads about 1 GB of model before the daemon reports
+ready. It is cached at `~/.openalpaca/state/cache/fastembed` — inside the
+store, regenerable, safe to delete at the cost of one re-download. Set
+`[embeddings] enabled = false` if you would rather skip it.
+
 ## Runtime Overrides
 
 - Override daemon binary path:
