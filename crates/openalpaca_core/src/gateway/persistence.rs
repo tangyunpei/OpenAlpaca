@@ -254,6 +254,14 @@ impl GatewayPersistence {
     /// now run on a model the picker is not showing. It stays `None` on the
     /// non-LLM paths, which is honest — a slash command was answered by no
     /// model at all.
+    ///
+    /// `tokens_in`/`tokens_out` are the **turn's** usage, summed over every
+    /// round of the main loop (`LoopResult::total_input_tokens`, carried here
+    /// through `LlmMetadata`), not the last round's. They used to be dropped,
+    /// so every reloaded assistant row read `0/0` while `llm_call_log` held the
+    /// real numbers (G4). `None` on the non-LLM paths — a slash command spent
+    /// no tokens, which is a different fact from "spent none that we counted",
+    /// and the column stays NULL so a client can tell them apart.
     pub fn persist_assistant_message(
         &self,
         lane_key: &str,
@@ -274,6 +282,8 @@ impl GatewayPersistence {
             content: content.to_string(),
             source: Some(source.to_string()),
             model: result.model.clone(),
+            tokens_in: result.tokens_in.map(i64::from),
+            tokens_out: result.tokens_out.map(i64::from),
             duration_ms,
             task_id: result.delegation.as_ref().map(|d| d.task_id.clone()),
             session_id: session_id.map(str::to_string),
@@ -431,5 +441,68 @@ mod tests {
             parts[1]["extracted_text"],
             "Candidate has 5 years experience"
         );
+    }
+
+    /// **G4.** The turn's usage — summed over every round of the main loop by
+    /// the time it reaches `HandleResult` — is written to the row, so a
+    /// reloaded transcript shows what the turn cost instead of `0/0`.
+    #[test]
+    fn an_assistant_row_keeps_the_turns_token_counts() {
+        let (_tmp, db) = make_db();
+        let persistence = GatewayPersistence::new(db.clone());
+
+        let id = persistence
+            .persist_assistant_message(
+                "user4:gui",
+                &super::super::HandleResult {
+                    content: "the answer".to_string(),
+                    model: Some("qwen3:8b".to_string()),
+                    // Two rounds' worth: 2 279 + 5 342 in, 209 + 129 out.
+                    tokens_in: Some(7621),
+                    tokens_out: Some(338),
+                    attachments_used: Vec::new(),
+                    delegation: None,
+                },
+                Some(1234),
+                "gui",
+                None,
+            )
+            .expect("persist assistant message");
+        assert!(id > 0);
+
+        let repo = ConversationRepository::new(&db);
+        let msgs = repo
+            .list_recent_by_lane("user4:gui", 10)
+            .expect("load recent messages");
+        let msg = msgs.iter().find(|m| m.role == "assistant").expect("row");
+        assert_eq!(msg.tokens_in, Some(7621), "input tokens are persisted");
+        assert_eq!(msg.tokens_out, Some(338), "output tokens are persisted");
+        assert_eq!(msg.model.as_deref(), Some("qwen3:8b"));
+    }
+
+    /// A turn no model answered (a slash command) records no usage: NULL, not
+    /// a zero that would read as "the model spent nothing".
+    #[test]
+    fn a_non_llm_answer_records_no_token_counts() {
+        let (_tmp, db) = make_db();
+        let persistence = GatewayPersistence::new(db.clone());
+
+        persistence
+            .persist_assistant_message(
+                "user5:gui",
+                &super::super::HandleResult::text("3 tasks are running".to_string()),
+                None,
+                "cli",
+                None,
+            )
+            .expect("persist assistant message");
+
+        let repo = ConversationRepository::new(&db);
+        let msgs = repo
+            .list_recent_by_lane("user5:gui", 10)
+            .expect("load recent messages");
+        let msg = msgs.iter().find(|m| m.role == "assistant").expect("row");
+        assert_eq!(msg.tokens_in, None);
+        assert_eq!(msg.tokens_out, None);
     }
 }
