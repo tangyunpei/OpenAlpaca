@@ -2568,6 +2568,7 @@ async fn auto_approve_cannot_undo_the_extension_gate_on_either_arm() {
         lane_key: None,
         confirmation_timeout_secs: None,
         auto_approve: config.security.auto_approve_confirmations,
+        unattended: false,
     };
     assert!(policy.auto_approve);
 

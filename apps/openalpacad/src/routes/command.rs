@@ -95,6 +95,9 @@ pub async fn command_handler(
                     stream_id: None,
                     lane_override: None,
                     model_override: None,
+                    // M6: `/v1/command` does not carry the declaration —
+                    // today's behaviour until a client asks for it.
+                    unattended: false,
                 })
                 .await;
 

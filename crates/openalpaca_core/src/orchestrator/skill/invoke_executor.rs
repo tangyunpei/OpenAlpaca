@@ -438,6 +438,10 @@ impl SkillInvocationToolExecutor {
                 lane_key: child_tool_ctx.lane_key.clone(),
                 confirmation_timeout_secs: Some(self.confirmation_timeout_secs),
                 auto_approve: self.auto_approve,
+                // A nested skill invocation has no confirmation broker at all
+                // (see `auto_approve` above), so it is already fail-closed;
+                // M6's early refusal is for the paths that do have one.
+                unattended: false,
             })
         };
 

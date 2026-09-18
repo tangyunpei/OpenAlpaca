@@ -24,6 +24,22 @@ pub struct ChatSendRequest {
     /// next turn on the lane is back on the default. Absent — the default.
     #[serde(default)]
     pub model: Option<String>,
+    /// M6 — **this client cannot answer a tool confirmation.** The CLI's
+    /// one-shot (`--message`) and piped paths set it: they exit when the turn
+    /// ends, and a workflow's `artifact_write` asks for approval minutes
+    /// later, with nobody on the other end. Today that cost 300 seconds per
+    /// tool call and then failed anyway.
+    ///
+    /// Declared, never detected: a client that says nothing keeps today's
+    /// behaviour (the prompt is raised and waited on), and a GUI or an
+    /// interactive `openalpaca chat` should not set it. It is not an
+    /// approval of anything — a tool needing one is refused, with a message
+    /// naming where it can be approved.
+    ///
+    /// It applies to this turn's own tools *and* to any workflow the turn
+    /// starts, because the run outlives the turn.
+    #[serde(default)]
+    pub unattended: bool,
 }
 
 #[derive(Serialize)]

@@ -86,6 +86,9 @@ pub struct HandleRequest {
     /// daemon default in place. Request-scoped by construction: nothing is
     /// persisted, so the next turn on the same lane is back on the default.
     pub model_override: Option<String>,
+    /// M6 — see [`GatewayRequest::unattended`]. `false` for every caller that
+    /// does not set it, which is today's behaviour.
+    pub unattended: bool,
 }
 
 impl HandleRequest {
@@ -110,6 +113,7 @@ impl HandleRequest {
             workspace_path: None,
             stream_id: None,
             model_override: None,
+            unattended: false,
         }
     }
 }
@@ -155,6 +159,19 @@ pub struct GatewayRequest {
     /// accepted it (`POST /v1/chat`). `None` — every other entry point —
     /// leaves the daemon default in place.
     pub model_override: Option<String>,
+    /// M6 — the client sending this turn declares that it cannot answer a
+    /// tool confirmation: the one-shot and piped `openalpaca chat` paths
+    /// (`unattended: true` on `POST /v1/chat`), and the scheduled-skill
+    /// runner, which has no client at all.
+    ///
+    /// It travels with the turn and with any workflow the turn starts, so a
+    /// tool needing approval is refused at once with a message saying where
+    /// it *can* be approved, instead of waiting out the 300-second
+    /// confirmation timeout for an answer nobody is there to give. Never an
+    /// approval — fail-closed stays.
+    ///
+    /// `false` is every client that says nothing, and is today's behaviour.
+    pub unattended: bool,
 }
 
 /// Response from the gateway after handling a message.
@@ -336,6 +353,7 @@ impl Gateway {
             workspace_path: req.workspace_path,
             stream_id: req.stream_id,
             model_override: req.model_override,
+            unattended: req.unattended,
         };
         let handler_result = if req.attachments.is_empty() {
             self.handler.handle(handle_request).await

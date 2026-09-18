@@ -211,6 +211,11 @@ pub fn spawn_timer_turn(
                 // "{user}:internal" lane EventSource::Internal would derive.
                 lane_override: Some(lane_key),
                 model_override: None,
+                // M6: a scheduled skill has no client at all. A tool that
+                // needs approval is refused at once, with a message saying
+                // where it can be approved, rather than holding the run for
+                // the confirmation timeout at whatever hour the cron fired.
+                unattended: true,
             })
             .await;
         if response.is_error {

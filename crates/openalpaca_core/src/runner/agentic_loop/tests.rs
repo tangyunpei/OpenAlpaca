@@ -322,6 +322,7 @@ async fn test_sandbox_execution() {
         lane_key: None,
         confirmation_timeout_secs: None,
         auto_approve: false,
+        unattended: false,
     };
 
     let provider = MockProvider::new(vec![
@@ -397,6 +398,7 @@ async fn test_sandbox_denied_tool() {
         lane_key: None,
         confirmation_timeout_secs: None,
         auto_approve: false,
+        unattended: false,
     };
 
     let provider = MockProvider::new(vec![
@@ -577,6 +579,7 @@ async fn test_cancellation_during_tool_execution() {
         lane_key: None,
         confirmation_timeout_secs: None,
         auto_approve: false,
+        unattended: false,
     };
 
     let provider = MockProvider::new(vec![
@@ -2533,6 +2536,7 @@ async fn the_loop_narrates_rounds_tools_and_its_exit_into_the_session_log() {
         lane_key: None,
         confirmation_timeout_secs: None,
         auto_approve: false,
+        unattended: false,
     };
 
     let provider = Arc::new(MockRouterProvider::new(vec![
@@ -2720,6 +2724,7 @@ async fn a_result_over_the_inline_threshold_spills_and_the_model_gets_the_stub()
         lane_key: None,
         confirmation_timeout_secs: None,
         auto_approve: false,
+        unattended: false,
     };
 
     let provider = Arc::new(MockRouterProvider::new(vec![
@@ -2891,6 +2896,7 @@ async fn a_large_err_result_spills_while_the_model_keeps_head_and_tail() {
         lane_key: None,
         confirmation_timeout_secs: None,
         auto_approve: false,
+        unattended: false,
     };
 
     let provider = Arc::new(MockRouterProvider::new(vec![
@@ -3134,6 +3140,7 @@ async fn a_writer_that_gave_up_leaves_the_model_an_inline_head_not_a_reference()
         lane_key: None,
         confirmation_timeout_secs: None,
         auto_approve: false,
+        unattended: false,
     };
 
     let provider = Arc::new(MockRouterProvider::new(vec![

@@ -104,6 +104,13 @@ pub async fn run_lead_agent(
     // session log, to be spliced in behind the objective. `None` for every
     // ordinary dispatch — this is the only thing a resume does differently.
     resume: Option<crate::session_log::replay::ResumeHistory>,
+    // M6 — the client that started this run said it cannot answer a tool
+    // confirmation (a one-shot or piped `openalpaca chat`, a scheduled
+    // skill). The lead and every subagent it spawns then refuse a tool that
+    // needs approval at once, with a message naming where it can be
+    // approved, instead of holding the run for the confirmation timeout with
+    // no responder. Never an approval: fail-closed stays.
+    unattended: bool,
 ) -> LeadAgentResult {
     tracing::info!(
         lead_agent = %lead_agent.id,
@@ -236,6 +243,8 @@ pub async fn run_lead_agent(
         context_manager,
         parent_bundle,
         compose_engine.clone(),
+        // M6: every subagent of this run inherits the run's answer.
+        unattended,
     ));
 
     let check_status_tool = Arc::new(CheckSubagentStatusTool {
@@ -347,6 +356,9 @@ pub async fn run_lead_agent(
     if daemon_config.load().security.auto_approve_confirmations {
         sandbox_policy.auto_approve = true;
     }
+    // M6: read after `auto_approve`, so an owner who switched that on still
+    // gets what they asked for.
+    sandbox_policy.unattended = unattended;
     // The lead's tool surface is assembled here, not in its template — so the
     // allowlist must admit the final defs (extension tools, invoke_skill,
     // memory_search), mirroring how the main loop derives its policy from the

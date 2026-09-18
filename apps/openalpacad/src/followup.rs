@@ -48,6 +48,10 @@ impl FollowupRunner for GatewayFollowupRunner {
                     // lane EventSource::Internal would derive.
                     lane_override: Some(item.lane_key),
                     model_override: None,
+                    // M6: a follow-up re-enters the originating lane, where
+                    // the client that queued it is still watching — today's
+                    // behaviour, and the honest one.
+                    unattended: false,
                 })
                 .await;
             if response.is_error {

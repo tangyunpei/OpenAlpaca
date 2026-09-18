@@ -63,6 +63,7 @@ fn test_lead_agent_registry_contains_coordination_tools() {
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
+        false,
     ));
     let check_status_tool = Arc::new(CheckSubagentStatusTool {
         tracker: tracker.clone(),
@@ -373,6 +374,7 @@ fn test_batch_spawn_tool_hidden_when_disabled() {
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
+        false,
     ));
     let check_tool = Arc::new(CheckSubagentStatusTool {
         tracker: tracker.clone(),
@@ -429,6 +431,7 @@ fn test_batch_spawn_tool_present_when_enabled() {
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
+        false,
     ));
     let batch_tool = Some(Arc::new(SpawnSubagentsBatchTool::new(spawn_tool.clone())));
     let check_tool = Arc::new(CheckSubagentStatusTool {
@@ -484,6 +487,7 @@ async fn test_batch_spawn_empty_array_error() {
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
+        false,
     ));
     let batch_tool = SpawnSubagentsBatchTool::new(spawn_tool);
 
@@ -524,6 +528,7 @@ async fn test_batch_spawn_exceeds_max_error() {
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
+        false,
     ));
     let batch_tool = SpawnSubagentsBatchTool::new(spawn_tool);
 
@@ -1034,6 +1039,7 @@ async fn test_spawn_subagent_executes_plugin_backed_template() {
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
+        false,
     );
 
     let msg = spawn_tool
@@ -1306,6 +1312,7 @@ async fn run_lead_for_test(
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
         None,
+        false,
     )
     .await
 }
@@ -1596,6 +1603,7 @@ async fn a_subagent_lane_is_narrated_into_the_runs_session_log() {
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
+        false,
     );
 
     spawn_tool
@@ -1725,6 +1733,7 @@ async fn a_resumed_run_is_primed_with_its_replayed_rounds_and_the_interjection()
             plan: replayed_round(),
             inline_note: None,
         }),
+        false,
     )
     .await;
 
@@ -1803,6 +1812,7 @@ async fn with_no_steering_rail_the_resume_note_is_still_an_interjection() {
             plan: replayed_round(),
             inline_note: Some(note),
         }),
+        false,
     )
     .await;
 
@@ -1872,6 +1882,7 @@ async fn the_resume_record_names_the_trim_and_the_rounds_it_dropped() {
             plan,
             inline_note: None,
         }),
+        false,
     )
     .await;
     assert!(handle.flush().await);
@@ -1959,6 +1970,7 @@ async fn the_lead_is_budgeted_against_the_model_that_answers() {
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
         None,
+        false,
     )
     .await;
     assert!(
@@ -1985,5 +1997,94 @@ async fn the_lead_is_budgeted_against_the_model_that_answers() {
     assert_eq!(
         model, "qwen3:8b",
         "…and the event names the model the window came from"
+    );
+}
+
+/// **M6.** The declaration travels with the run: a workflow started by a
+/// client that cannot answer a confirmation refuses the tool at once, and the
+/// model reads the refusal as its tool result — which is how it reaches the
+/// completion report.
+#[tokio::test]
+async fn an_unattended_run_tells_the_model_the_tool_cannot_be_approved() {
+    let registry = Arc::new(ToolRegistry::default());
+    register_extension_tool(&registry, "srv__echo", mcp_backend());
+
+    // A lead whose template makes that tool confirm-listed.
+    let lead = {
+        let agent = crate::test_util::make_agent("lead_agent", vec!["orchestration", "srv__echo"]);
+        let template = crate::test_util::template_from_agent(&agent);
+        let mut lead = template.to_subagent("lead-1", "task-1");
+        lead.constraints.require_confirmation_for = vec!["srv__echo".to_string()];
+        lead
+    };
+
+    let provider = ScriptedProvider::new(vec![
+        scripted_response(
+            "",
+            vec![openalpaca_llm::ToolCall {
+                id: "tc_1".to_string(),
+                name: "srv__echo".to_string(),
+                arguments: serde_json::json!({}),
+            }],
+        ),
+        scripted_response("I could not do that without approval.", vec![]),
+    ]);
+
+    let started = std::time::Instant::now();
+    let result = run_lead_agent(
+        &lead,
+        "do the thing",
+        scripted_router(provider.clone()),
+        registry,
+        Arc::new(SharedContext::new()),
+        EventBus::default(),
+        None,
+        None,
+        "task-1",
+        "user-1",
+        "user-1:cli",
+        "cli",
+        &Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        // A broker *is* attached — this is not the no-broker fail-closed path.
+        Some(Arc::new(
+            crate::security::confirmation::ConfirmationBroker::new(),
+        )),
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
+        true,
+    )
+    .await;
+    let elapsed = started.elapsed();
+
+    assert!(
+        result.success,
+        "the run finishes and reports; it does not hang: {:?}",
+        result.loop_result.finish_reason
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "the refusal is immediate, took {elapsed:?}"
+    );
+
+    // Round 2's messages carry the tool result the model actually read.
+    let second_round = provider.seen_messages.lock().unwrap()[1].clone();
+    let saw_refusal = second_round
+        .iter()
+        .any(|m| m.content.contains("needs your approval"));
+    assert!(
+        saw_refusal,
+        "the model must read why the tool did not run: {:?}",
+        second_round
+            .iter()
+            .map(|m| m.content.clone())
+            .collect::<Vec<_>>()
     );
 }

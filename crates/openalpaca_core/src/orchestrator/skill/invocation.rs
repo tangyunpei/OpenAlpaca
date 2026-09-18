@@ -361,6 +361,9 @@ impl Orchestrator {
                     .load()
                     .security
                     .auto_approve_confirmations,
+                // A slash-command skill answers inside the turn, where the
+                // client that sent it is still listening (M6).
+                unattended: false,
             });
             let skill_cfg = &self.daemon_config.load().execution.skill_defaults;
             config_for_loop = LoopConfig {
@@ -1058,6 +1061,8 @@ impl Orchestrator {
                 .load()
                 .security
                 .auto_approve_confirmations,
+            // As above: a plugin skill runs inside the turn that invoked it.
+            unattended: false,
         };
 
         let mut sandbox = SandboxManager::new(

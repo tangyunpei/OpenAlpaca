@@ -38,6 +38,20 @@ pub struct SandboxPolicy {
     pub confirmation_timeout_secs: Option<u64>,
     /// When true, skip interactive confirmations (from global config or per-agent).
     pub auto_approve: bool,
+    /// The client behind this work said it cannot answer a confirmation
+    /// prompt (M6): a one-shot or piped `openalpaca chat`, a scheduled skill.
+    ///
+    /// Such a prompt has no responder, so raising one means waiting out the
+    /// 300-second timeout for an answer that was never coming — five and a
+    /// half minutes per tool call, and then a failure. The tool is refused
+    /// immediately instead, in words the model and the completion report can
+    /// both act on. Fail-closed either way: this never approves anything, and
+    /// it is read *after* `auto_approve`, which is the owner's own explicit
+    /// decision.
+    ///
+    /// `false` — the default, and every client that says nothing — is
+    /// today's behaviour exactly: raise the prompt and wait.
+    pub unattended: bool,
 }
 
 impl SandboxPolicy {
@@ -54,6 +68,9 @@ impl SandboxPolicy {
             lane_key: None,
             confirmation_timeout_secs: None,
             auto_approve: constraints.auto_approve,
+            // Set by the caller that knows where the work came from; an agent
+            // template says nothing about it.
+            unattended: false,
         }
     }
 }
@@ -225,6 +242,26 @@ impl SandboxManager {
                     }
                 }
                 // Fall through to circuit breaker + execution
+            } else if policy.unattended {
+                // M6: nobody is listening. Say so now, in words the model can
+                // act on and the completion report can carry, instead of
+                // holding the run for the confirmation timeout and then
+                // failing anyway. Still fail-closed — nothing is approved.
+                let reason = format!(
+                    "Tool '{}' needs your approval, and this run cannot ask for it: \
+                     the client that started it said it cannot answer approval \
+                     prompts (a one-shot or piped `openalpaca chat`, or a scheduled \
+                     skill). Nothing was executed. Run this from the GUI, or from an \
+                     interactive `openalpaca chat`, and approve it there.",
+                    tool_call.name
+                );
+                tracing::info!(
+                    agent_id,
+                    tool = %tool_call.name,
+                    "Tool blocked: the originating client cannot answer confirmations"
+                );
+                self.emit_security_violation(agent_id, &tool_call.name, &reason, task_id);
+                return Err(reason);
             } else if let Some(ref broker) = self.confirmation_broker {
                 let request_id = uuid::Uuid::new_v4().to_string();
                 let request = ConfirmationRequest {

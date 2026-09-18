@@ -146,6 +146,7 @@ fn test_dispatch_lead_agent_marks_agent_busy() {
         "cli",
         MemoryScopeContext::global_only(),
         None,
+        false,
     );
 
     assert!(result.is_ok());
@@ -183,6 +184,7 @@ fn test_dispatch_lead_agent_prefers_orchestration_capability() {
         "cli",
         MemoryScopeContext::global_only(),
         None,
+        false,
     );
 
     assert!(result.is_ok());
@@ -221,6 +223,7 @@ fn test_dispatch_lead_agent_fallback_to_any_idle_agent() {
         "cli",
         MemoryScopeContext::global_only(),
         None,
+        false,
     );
 
     assert!(result.is_ok());
@@ -258,6 +261,7 @@ fn test_dispatch_lead_agent_says_no_templates_are_installed() {
         "cli",
         MemoryScopeContext::global_only(),
         None,
+        false,
     );
 
     let err = result.unwrap_err();
@@ -286,6 +290,7 @@ fn test_dispatch_lead_agent_fails_when_the_only_lead_is_busy() {
             "cli",
             MemoryScopeContext::global_only(),
             None,
+            false,
         )
         .expect("the first dispatch claims the lead");
 
@@ -298,6 +303,7 @@ fn test_dispatch_lead_agent_fails_when_the_only_lead_is_busy() {
             "cli",
             MemoryScopeContext::global_only(),
             None,
+            false,
         )
         .unwrap_err();
 
@@ -883,6 +889,7 @@ async fn a_dispatch_binds_the_turns_session_even_after_the_lane_moved_on() {
             "cli",
             MemoryScopeContext::global_only(),
             Some(&turn_session),
+            false,
         )
         .unwrap();
 
@@ -913,6 +920,7 @@ async fn a_dispatch_binds_the_turns_session_even_after_the_lane_moved_on() {
             "cli",
             MemoryScopeContext::global_only(),
             None,
+            false,
         )
         .unwrap();
     let task = openalpaca_storage::repository::TaskRepository::new(&db)
@@ -943,6 +951,7 @@ async fn test_lead_agent_steering_attach_detach_and_leftover_conversion() {
             "cli",
             MemoryScopeContext::global_only(),
             None,
+            false,
         )
         .unwrap();
     let task_id = outcome.task_id;
@@ -1040,6 +1049,7 @@ async fn a_daemon_authored_leftover_is_dropped_not_filed_as_a_user_followup() {
             "cli",
             MemoryScopeContext::global_only(),
             None,
+            false,
         )
         .unwrap();
     let task_id = outcome.task_id;
@@ -1107,6 +1117,7 @@ async fn test_lead_agent_lane_attachment_independent_of_steering_flag() {
             "cli",
             MemoryScopeContext::global_only(),
             None,
+            false,
         )
         .unwrap();
 
@@ -1205,6 +1216,7 @@ async fn test_lead_agent_completion_report_persists_final_content_verbatim() {
             "cli",
             MemoryScopeContext::global_only(),
             None,
+            false,
         )
         .unwrap();
 
@@ -1383,6 +1395,7 @@ async fn test_lead_agent_completion_report_empty_falls_back_to_template_with_sta
             "cli",
             MemoryScopeContext::global_only(),
             None,
+            false,
         )
         .unwrap();
 
@@ -1426,6 +1439,7 @@ fn dispatch_persists_the_requests_workspace_id() {
                 request_workspace_root: Some("/Users/dev/openalpaca".to_string()),
             },
             None,
+            false,
         )
         .unwrap();
 
@@ -1462,6 +1476,7 @@ fn dispatch_without_a_request_workspace_leaves_workspace_id_null() {
             "telegram",
             MemoryScopeContext::new(Some("/where/the/daemon/started".to_string())),
             None,
+            false,
         )
         .unwrap();
 
@@ -1514,6 +1529,7 @@ async fn the_run_slot_is_held_until_the_row_is_terminal() {
             "cli",
             MemoryScopeContext::global_only(),
             None,
+            false,
         )
         .unwrap()
         .task_id;

@@ -29,6 +29,12 @@ pub struct StartWorkflowTool {
     shared_context: Arc<SharedContext>,
     bus: EventBus,
     routing: RoutingConfig,
+    /// M6 — the client that sent this turn said it cannot answer a tool
+    /// confirmation. Carried into the workflow this turn starts: the run
+    /// outlives the turn, so the fact has to travel with it or the first
+    /// `artifact_write` blocks for the whole confirmation timeout with
+    /// nobody to answer.
+    unattended: bool,
     /// Result cell: the outcome of the (single) successful dispatch this
     /// request made, if any.
     outcome: Arc<Mutex<Option<DispatchOutcome>>>,
@@ -40,12 +46,14 @@ impl StartWorkflowTool {
         shared_context: Arc<SharedContext>,
         bus: EventBus,
         routing: RoutingConfig,
+        unattended: bool,
     ) -> Self {
         Self {
             task_dispatcher,
             shared_context,
             bus,
             routing,
+            unattended,
             outcome: Arc::new(Mutex::new(None)),
         }
     }
@@ -134,6 +142,9 @@ impl BuiltInTool for StartWorkflowTool {
             // lane calls active by the time this dispatch runs — the LLM round
             // that produced this tool call gave the user time to open another.
             ctx.session_id.as_deref(),
+            // M6: the run inherits the turn's answer to "can anyone approve a
+            // tool here?".
+            self.unattended,
         )?;
 
         // 3. Store the outcome in the result cell for the caller.
@@ -274,6 +285,7 @@ mod tests {
             shared.clone(),
             bus.clone(),
             routing_with_cap(3),
+false,
         );
         assert!(tool.outcome().is_none());
 
@@ -322,7 +334,7 @@ mod tests {
     async fn test_start_workflow_generates_title_when_omitted() {
         let (shared, dispatcher, bus) = setup();
         let tool =
-            StartWorkflowTool::new(dispatcher, shared, bus, routing_with_cap(3));
+            StartWorkflowTool::new(dispatcher, shared, bus, routing_with_cap(3), false);
 
         tool.execute_with_context(
             &serde_json::json!({"goal": "please research the Rust borrow checker"}),
@@ -347,6 +359,7 @@ mod tests {
             shared.clone(),
             bus.clone(),
             routing_with_cap(1),
+false,
         );
 
         // Lane already at the cap.
@@ -392,6 +405,7 @@ mod tests {
             shared,
             bus.clone(),
             routing_with_cap(3),
+false,
         );
 
         tool.execute_with_context(
@@ -437,7 +451,7 @@ mod tests {
     async fn test_start_workflow_requires_lane_context() {
         let (shared, dispatcher, bus) = setup();
         let tool =
-            StartWorkflowTool::new(dispatcher, shared.clone(), bus, routing_with_cap(3));
+            StartWorkflowTool::new(dispatcher, shared.clone(), bus, routing_with_cap(3), false);
 
         let err = tool
             .execute_with_context(

@@ -149,6 +149,14 @@ impl Orchestrator {
             event_bus: None,
         };
 
+        // M6: whether the client behind this turn can answer a confirmation
+        // at all. Only the main loop carries the declaration — every other
+        // path keeps today's behaviour.
+        let unattended = matches!(
+            &loop_overrides,
+            Some(super::LoopOverrides::MainLoop { unattended: true, .. })
+        );
+
         // Apply loop overrides if provided (main loop)
         let (tool_defs, override_max_rounds, override_max_tools, main_loop_set) =
             match &loop_overrides {
@@ -173,6 +181,7 @@ impl Orchestrator {
                         &self.tool_registry,
                         lane_key,
                         &tool_ctx,
+                        unattended,
                     );
                     // Base surface: suggested picks ("core_union", default) or
                     // the whole registry ("full"). Either way
@@ -292,6 +301,9 @@ impl Orchestrator {
                         .confirmation_timeout_secs,
                 ),
                 auto_approve: self.daemon_config.load().security.auto_approve_confirmations,
+                // M6: the turn's own tools, refused at once rather than left
+                // waiting when the client said it cannot answer.
+                unattended,
             });
             config_for_loop = LoopConfig {
                 max_rounds: override_max_rounds.unwrap_or(4),

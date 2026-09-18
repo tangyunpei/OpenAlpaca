@@ -77,6 +77,7 @@ async fn test_handle_event_echo() {
             stream_id: None,
             lane_override: None,
             model_override: None,
+            unattended: false,
         })
         .await;
     assert_eq!(resp.lane_key.user_id, "user1");
@@ -108,6 +109,7 @@ async fn test_handle_event_propagates_delegation() {
             stream_id: None,
             lane_override: None,
             model_override: None,
+            unattended: false,
         })
         .await;
     assert!(!resp.is_error);
@@ -142,6 +144,7 @@ async fn test_delegating_turn_persists_its_task_id() {
         stream_id: None,
         lane_override: None,
         model_override: None,
+        unattended: false,
     })
     .await;
 
@@ -182,6 +185,7 @@ async fn test_plain_turn_persists_no_task_id() {
         stream_id: None,
         lane_override: None,
         model_override: None,
+        unattended: false,
     })
     .await;
 
@@ -210,6 +214,7 @@ async fn test_handle_event_creates_lane() {
         stream_id: None,
         lane_override: None,
         model_override: None,
+        unattended: false,
     })
     .await;
     assert_eq!(gw.lane_manager.conversation_count(), 1);
@@ -228,6 +233,7 @@ async fn test_handle_event_creates_lane() {
         stream_id: None,
         lane_override: None,
         model_override: None,
+        unattended: false,
     })
     .await;
     assert_eq!(gw.lane_manager.conversation_count(), 1);
@@ -249,6 +255,7 @@ async fn test_handle_event_error_propagation() {
             stream_id: None,
             lane_override: None,
             model_override: None,
+            unattended: false,
         })
         .await;
     assert!(resp.is_error);
@@ -272,6 +279,7 @@ async fn test_handle_event_records_message_on_lane() {
         stream_id: None,
         lane_override: None,
         model_override: None,
+        unattended: false,
     })
     .await;
     gw.handle_event(GatewayRequest {
@@ -287,6 +295,7 @@ async fn test_handle_event_records_message_on_lane() {
         stream_id: None,
         lane_override: None,
         model_override: None,
+        unattended: false,
     })
     .await;
 
@@ -316,6 +325,7 @@ async fn test_principal_aware_lane_derivation() {
             stream_id: None,
             lane_override: None,
             model_override: None,
+            unattended: false,
         })
         .await;
     assert_eq!(resp.lane_key.user_id, "global1");
@@ -340,6 +350,7 @@ async fn test_principal_aware_lane_derivation() {
             stream_id: None,
             lane_override: None,
             model_override: None,
+            unattended: false,
         })
         .await;
     assert_eq!(resp2.lane_key.user_id, "tg_user_456");
@@ -360,6 +371,7 @@ async fn test_principal_aware_lane_derivation() {
             stream_id: None,
             lane_override: None,
             model_override: None,
+            unattended: false,
         })
         .await;
     assert_eq!(resp3.lane_key.user_id, "tg_user_789");
@@ -397,6 +409,7 @@ async fn test_gateway_persists_messages() {
         stream_id: None,
         lane_override: None,
         model_override: None,
+        unattended: false,
     })
     .await;
 
@@ -452,6 +465,7 @@ async fn test_full_gateway_stack_integration() {
             stream_id: None,
             lane_override: None,
             model_override: None,
+            unattended: false,
         })
         .await;
     let r2 = gw
@@ -467,6 +481,7 @@ async fn test_full_gateway_stack_integration() {
             stream_id: None,
             lane_override: None,
             model_override: None,
+            unattended: false,
         })
         .await;
     let r3 = gw
@@ -483,6 +498,7 @@ async fn test_full_gateway_stack_integration() {
             stream_id: None,
             lane_override: None,
             model_override: None,
+            unattended: false,
         })
         .await;
 
@@ -542,6 +558,7 @@ async fn test_handle_event_lane_override_pins_originating_lane() {
             stream_id: None,
             lane_override: Some("junpei:cli".to_string()),
             model_override: None,
+            unattended: false,
         })
         .await;
     assert_eq!(resp.lane_key.user_id, "junpei");
@@ -565,6 +582,7 @@ async fn test_handle_event_malformed_lane_override_falls_back() {
             stream_id: None,
             lane_override: Some("no_colon".to_string()),
             model_override: None,
+            unattended: false,
         })
         .await;
     // Malformed override → derived lane (principal + internal source).
@@ -617,6 +635,7 @@ async fn test_a_new_chat_mid_turn_keeps_the_turn_in_one_session() {
         stream_id: None,
         lane_override: None,
         model_override: None,
+        unattended: false,
     })
     .await;
 
@@ -687,6 +706,7 @@ async fn test_changing_project_opens_a_new_session() {
         stream_id: None,
         lane_override: None,
         model_override: None,
+        unattended: false,
     };
 
     gw.handle_event(turn(Some(project_path(&one)))).await;
@@ -775,6 +795,7 @@ async fn a_turn_writes_its_two_halves_and_its_delegation_to_the_session_log() {
         stream_id: None,
         lane_override: None,
         model_override: None,
+        unattended: false,
     })
     .await;
 
@@ -838,6 +859,7 @@ async fn a_gateway_without_a_session_log_still_persists_its_turn() {
             stream_id: None,
             lane_override: None,
             model_override: None,
+            unattended: false,
         })
         .await;
     assert!(!resp.is_error);
@@ -897,6 +919,7 @@ fn turn(model_override: Option<String>) -> GatewayRequest {
         stream_id: None,
         lane_override: None,
         model_override,
+        unattended: false,
     }
 }
 
@@ -1000,4 +1023,33 @@ async fn the_answering_model_is_stored_on_the_assistant_row() {
             Some("the-default".to_string())
         ]
     );
+}
+
+/// **M6.** The client's declaration that it cannot answer a confirmation
+/// reaches the handler on the turn, where the main loop puts it on the
+/// sandbox policy and on any workflow the turn starts.
+#[tokio::test]
+async fn the_unattended_declaration_reaches_the_handler() {
+    let (gw, seen) = recording_gateway();
+
+    gw.handle_event(GatewayRequest {
+        unattended: true,
+        ..turn(None)
+    })
+    .await;
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert!(seen[0].unattended, "the declaration must survive the gateway");
+}
+
+/// …and a client that says nothing gets today's behaviour.
+#[tokio::test]
+async fn a_turn_that_says_nothing_is_attended() {
+    let (gw, seen) = recording_gateway();
+
+    gw.handle_event(turn(None)).await;
+
+    let seen = seen.lock().unwrap();
+    assert!(!seen[0].unattended);
 }

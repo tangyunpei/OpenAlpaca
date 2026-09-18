@@ -119,6 +119,10 @@ pub fn main_loop_tool_set(
     global_registry: &Arc<ToolRegistry>,
     lane_key: &str,
     ctx: &ToolContext,
+    // M6 — the client behind this turn cannot answer a confirmation prompt,
+    // so a workflow it starts must refuse a tool that needs one instead of
+    // blocking on a prompt nobody will see.
+    unattended: bool,
 ) -> MainLoopToolSet {
     let mut definitions: Vec<ToolDefinition> = Vec::new();
     let mut instances: Vec<(ToolDefinition, Arc<dyn BuiltInTool>)> = Vec::new();
@@ -129,6 +133,7 @@ pub fn main_loop_tool_set(
         shared_context.clone(),
         bus.clone(),
         routing.clone(),
+        unattended,
     ));
     let start_def = start_workflow_tool_definition();
     definitions.push(start_def.clone());
@@ -360,6 +365,7 @@ mod tests {
                 lane_key: Some(lane_key.to_string()),
                 ..Default::default()
             },
+            false,
         )
     }
 

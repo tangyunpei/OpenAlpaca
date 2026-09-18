@@ -104,6 +104,11 @@ impl ChatService {
     /// route validated the id against the model registry before calling —
     /// this path only carries it — and nothing persists it, so the next turn
     /// on the lane is back on the daemon default.
+    /// `unattended` (M6) is the caller's declaration that it cannot answer a
+    /// tool confirmation — the CLI's one-shot and piped paths. It reaches the
+    /// turn's sandbox policy and any workflow the turn starts, where a tool
+    /// needing approval is refused at once instead of waiting out the
+    /// confirmation timeout with no responder. `false` is today's behaviour.
     pub fn send_message(
         &self,
         content: String,
@@ -111,6 +116,7 @@ impl ChatService {
         principal: &str,
         workspace_path: Option<String>,
         model_override: Option<String>,
+        unattended: bool,
     ) -> Result<ChatSendResponse> {
         // Fast preflight check so invalid attachment IDs still fail the request
         // immediately. `POST /v1/chat` runs the same function *before* it
@@ -184,6 +190,7 @@ impl ChatService {
                     stream_id: Some(sid.clone()),
                     lane_override: None,
                     model_override,
+                    unattended,
                 })
                 .await;
 

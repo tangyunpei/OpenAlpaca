@@ -173,6 +173,7 @@ async fn test_simple_query_echo() {
             workspace_path: None,
             stream_id: None,
             model_override: None,
+            unattended: false,
         })
         .await;
     assert!(result.is_ok());
@@ -195,6 +196,7 @@ async fn test_task_query_empty() {
             workspace_path: None,
             stream_id: None,
             model_override: None,
+            unattended: false,
         })
         .await;
     assert!(result.is_ok());
@@ -221,6 +223,7 @@ async fn test_task_control_cancel() {
             workspace_path: None,
             stream_id: None,
             model_override: None,
+            unattended: false,
         })
         .await;
     assert!(result.is_ok());
@@ -245,6 +248,7 @@ async fn test_permission_denied_external() {
             workspace_path: None,
             stream_id: None,
             model_override: None,
+            unattended: false,
         })
         .await;
     assert!(result.is_err());
@@ -323,6 +327,7 @@ async fn test_simple_query_with_mock_llm() {
             workspace_path: None,
             stream_id: None,
             model_override: None,
+            unattended: false,
         })
         .await;
     assert!(result.is_ok());
@@ -345,6 +350,7 @@ async fn test_input_sanitization_blocks_null_bytes() {
             workspace_path: None,
             stream_id: None,
             model_override: None,
+            unattended: false,
         })
         .await;
     assert!(result.is_err());
@@ -369,6 +375,7 @@ async fn test_security_gate_replaces_trust_gate() {
             workspace_path: None,
             stream_id: None,
             model_override: None,
+            unattended: false,
         })
         .await;
     assert!(result.is_err());
@@ -496,6 +503,7 @@ async fn test_slash_commands_bypass_llm() {
             workspace_path: None,
             stream_id: None,
             model_override: None,
+            unattended: false,
         })
         .await;
 
@@ -705,6 +713,7 @@ mod request_workspace_threading {
             workspace_path,
             stream_id: None,
             model_override: None,
+            unattended: false,
         })
         .await
         .expect("turn should succeed");
@@ -826,6 +835,7 @@ async fn test_tool_intent_detected_and_executes() {
             workspace_path: None,
             stream_id: None,
             model_override: None,
+            unattended: false,
         })
         .await;
 
@@ -910,6 +920,7 @@ async fn test_tool_max_rounds_enforcement() {
             workspace_path: None,
             stream_id: None,
             model_override: None,
+            unattended: false,
         })
         .await;
 
@@ -940,6 +951,7 @@ async fn test_tool_intent_but_not_in_registry() {
             workspace_path: None,
             stream_id: None,
             model_override: None,
+            unattended: false,
         })
         .await;
 
@@ -979,6 +991,7 @@ async fn test_attachment_text_does_not_change_intent_classification() {
                 workspace_path: None,
                 stream_id: None,
                 model_override: None,
+                unattended: false,
             },
             attachments,
         )
@@ -1012,6 +1025,7 @@ async fn test_empty_content_with_attachments_forces_simple_query() {
                 workspace_path: None,
                 stream_id: None,
                 model_override: None,
+                unattended: false,
             },
             attachments,
         )
@@ -1083,6 +1097,7 @@ async fn test_attachment_image_is_converted_to_base64_part() {
                 workspace_path: None,
                 stream_id: None,
                 model_override: None,
+                unattended: false,
             },
             attachments,
         )
@@ -1142,6 +1157,7 @@ async fn test_attachment_image_read_failure_inserts_placeholder_text() {
                 workspace_path: None,
                 stream_id: None,
                 model_override: None,
+                unattended: false,
             },
             attachments,
         )
@@ -1192,6 +1208,7 @@ async fn test_attachment_document_pending_adds_pending_text_part() {
                 workspace_path: None,
                 stream_id: None,
                 model_override: None,
+                unattended: false,
             },
             attachments,
         )
@@ -1287,6 +1304,7 @@ async fn test_attachment_context_does_not_trigger_file_write_tool() {
                 workspace_path: None,
                 stream_id: None,
                 model_override: None,
+                unattended: false,
             },
             attachments,
         )
@@ -1812,6 +1830,7 @@ async fn test_slash_skill_takes_deterministic_tier_with_router() {
             workspace_path: None,
             stream_id: None,
             model_override: None,
+            unattended: false,
         })
         .await;
 
@@ -1878,6 +1897,7 @@ async fn test_slash_skill_no_router_still_invokes_skill() {
             workspace_path: None,
             stream_id: None,
             model_override: None,
+            unattended: false,
         })
         .await;
 
@@ -2027,6 +2047,7 @@ async fn test_plugin_skill_invoked_via_executor_with_sandboxed_tool_callback() {
             workspace_path: None,
             stream_id: None,
             model_override: None,
+            unattended: false,
         })
         .await;
 
@@ -2090,6 +2111,7 @@ async fn send_steer(orch: &Orchestrator, content: &str) -> String {
         workspace_path: None,
         stream_id: None,
         model_override: None,
+        unattended: false,
     })
     .await
     .unwrap()
@@ -2389,6 +2411,7 @@ async fn send_tool_mode(orch: &Orchestrator, request_id: Uuid, content: &str) ->
         workspace_path: None,
         stream_id: None,
         model_override: None,
+        unattended: false,
     })
     .await
     .unwrap()
@@ -2985,6 +3008,7 @@ async fn a_legacy_tools_allow_skill_is_attributed_on_both_the_top_level_and_the_
             workspace_path: None,
             stream_id: None,
             model_override: None,
+            unattended: false,
         })
         .await;
 
@@ -3295,6 +3319,7 @@ async fn an_explicit_slash_for_a_withheld_skill_returns_the_named_error_as_ok() 
             workspace_path: None,
             stream_id: None,
             model_override: None,
+            unattended: false,
         })
         .await
         .expect("the refusal is the reply, returned as Ok — never as Err");
@@ -3325,6 +3350,7 @@ async fn an_explicit_slash_for_a_withheld_skill_returns_the_named_error_as_ok() 
             workspace_path: None,
             stream_id: None,
             model_override: None,
+            unattended: false,
         })
         .await
         .expect("the legacy branch refuses as Ok(reply) too");
@@ -3748,6 +3774,7 @@ async fn a_withdrawn_plugin_skill_is_attributed_to_its_plugin_on_slash() {
             workspace_path: None,
             stream_id: None,
             model_override: None,
+            unattended: false,
         })
         .await
         .expect("the tombstone answer is the reply");
@@ -3868,6 +3895,7 @@ async fn a_named_model_reaches_the_loop_config_for_that_turn() {
 
     orch.handle_message(HandleRequest {
         model_override: Some("claude-opus-4-6".to_string()),
+        unattended: false,
         ..HandleRequest::new(
             Uuid::new_v4(),
             "cli",
@@ -3906,6 +3934,7 @@ async fn the_override_dies_with_its_request() {
 
     let turn = |model: Option<&str>| HandleRequest {
         model_override: model.map(str::to_string),
+        unattended: false,
         ..HandleRequest::new(
             Uuid::new_v4(),
             "cli",
@@ -3958,6 +3987,7 @@ async fn a_bootstrap_turn_still_gets_the_named_model() {
 
     orch.handle_message(HandleRequest {
         model_override: Some("claude-opus-4-6".to_string()),
+        unattended: false,
         ..HandleRequest::new(
             Uuid::new_v4(),
             "cli",
@@ -3993,6 +4023,7 @@ async fn an_attachment_only_turn_still_gets_the_named_model() {
     orch.handle_message_with_attachments(
         HandleRequest {
             model_override: Some("claude-opus-4-6".to_string()),
+            unattended: false,
             ..HandleRequest::new(
                 Uuid::new_v4(),
                 "cli",
@@ -4028,6 +4059,7 @@ async fn the_social_fast_path_still_gets_the_named_model() {
 
     orch.handle_message(HandleRequest {
         model_override: Some("claude-opus-4-6".to_string()),
+        unattended: false,
         ..HandleRequest::new(
             Uuid::new_v4(),
             "cli",

@@ -425,6 +425,9 @@ pub async fn send_chat_handler(
         principal,
         workspace_path,
         body.model,
+        // M6: the client's own declaration that nobody here can answer a
+        // confirmation prompt.
+        body.unattended,
     ) {
         Ok(resp) => {
             // Publish to EventBus; bridge forwards to WebSocket clients
@@ -768,6 +771,20 @@ pub async fn confirm_tool(
 mod tests {
     use super::*;
 
+    /// **M6.** The declaration is opt-in and absent by default: an existing
+    /// client that knows nothing about it keeps today's behaviour, and one
+    /// that sets it is taken at its word.
+    #[test]
+    fn unattended_defaults_to_false_and_is_read_when_sent() {
+        let quiet: ChatSendRequest =
+            serde_json::from_str(r#"{"content": "hi"}"#).expect("parse");
+        assert!(!quiet.unattended, "a client that says nothing is attended");
+
+        let declared: ChatSendRequest =
+            serde_json::from_str(r#"{"content": "hi", "unattended": true}"#).expect("parse");
+        assert!(declared.unattended);
+    }
+
     #[test]
     fn test_is_lane_owned_by_exact_match() {
         assert!(is_lane_owned_by("user1:gui", "user1"));
@@ -840,6 +857,7 @@ mod tests {
             session_id: Some(archived.id.clone()),
             activate: true,
             model: None,
+            unattended: false,
         };
         let response = plan_turn(&db, &bus, OWNER, None, 10, &body, None)
             .err()
@@ -896,6 +914,7 @@ mod tests {
             session_id: None,
             activate: false,
             model: None,
+            unattended: false,
         };
         let response = plan_turn(&db, &bus, "user1", None, 1, &body, None)
             .err()

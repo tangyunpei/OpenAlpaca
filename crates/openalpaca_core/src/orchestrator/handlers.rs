@@ -46,6 +46,7 @@ impl Orchestrator {
             workspace_path,
             stream_id,
             model_override,
+            unattended,
         } = request;
         let ack_start = Instant::now();
 
@@ -265,6 +266,9 @@ impl Orchestrator {
                 Some(super::query_handler::LoopOverrides::MainLoop {
                     workspace_path: workspace_path.clone(),
                     model_override: model_override.clone(),
+                    // M6: the turn's own declaration, carried into the tools
+                    // it may call and the workflow it may start.
+                    unattended,
                 }),
             )
             .await

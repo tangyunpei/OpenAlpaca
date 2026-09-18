@@ -75,6 +75,7 @@ impl TaskDispatcher {
         source: &str,
         workspace: MemoryScopeContext,
         session_id: Option<&str>,
+        unattended: bool,
     ) -> Result<DispatchOutcome, String> {
         self.dispatch_lead_agent_inner(
             Uuid::new_v4().to_string(),
@@ -88,6 +89,7 @@ impl TaskDispatcher {
             RowWrite::Create,
             None,
             session_id,
+            unattended,
         )
     }
 
@@ -123,6 +125,8 @@ impl TaskDispatcher {
             // A re-run comes from the route, not from a turn: the lane's
             // active session is the only answer there is.
             None,
+            // …and no turn means no client declaration: today's behaviour.
+            false,
         )
     }
 
@@ -156,6 +160,7 @@ impl TaskDispatcher {
             None,
             // `start` likewise has no turn behind it.
             None,
+            false,
         )
     }
 
@@ -193,6 +198,7 @@ impl TaskDispatcher {
             Some(resume),
             // The seed's own session wins above; nothing to carry here.
             None,
+            false,
         )
     }
 
@@ -210,6 +216,12 @@ impl TaskDispatcher {
         row_write: RowWrite,
         resume: Option<ResumeSeed>,
         turn_session_id: Option<&str>,
+        // M6 — the client that started this run cannot answer a tool
+        // confirmation, so the run refuses a tool that needs one instead of
+        // blocking on a prompt nobody will see. `false` for every dispatch
+        // with no turn behind it (`rerun`, `start`, `resume`), which is
+        // today's behaviour.
+        unattended: bool,
     ) -> Result<DispatchOutcome, String> {
         let now = Utc::now();
         // Whether this dispatch is §5.6c's `resume`, asked before the seed is
@@ -415,6 +427,7 @@ impl TaskDispatcher {
             workspace,
             session_id,
             resume,
+            unattended,
         );
 
         let ack = format!(
@@ -445,6 +458,9 @@ impl TaskDispatcher {
         workspace: MemoryScopeContext,
         session_id: Option<String>,
         resume: Option<ResumeSeed>,
+        // M6 — carried into `run_lead_agent`, which puts it on the run's
+        // sandbox policy.
+        unattended: bool,
     ) {
         let Some(router) = self.require_router(&task_id) else {
             // Nothing will run, so nothing will clean up after it: release the
@@ -648,6 +664,7 @@ impl TaskDispatcher {
                 context_manager,
                 compose_engine,
                 resume,
+                unattended,
             )
             .await;
 

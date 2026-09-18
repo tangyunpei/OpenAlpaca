@@ -119,6 +119,10 @@ pub struct SpawnSubagentTool {
     /// system-prompt + message-list assembly through `ComposeEngine::compose`
     /// with `PersonaMode::Skip` + `StaticPromptMode::SubagentMinimal`.
     compose_engine: Arc<crate::compose::ComposeEngine>,
+    /// M6 — the run's answer to "can anyone approve a tool here?", inherited
+    /// by every subagent this lead spawns. A subagent's confirmation has
+    /// exactly the same responder as the lead's: none.
+    unattended: bool,
 }
 
 impl SpawnSubagentTool {
@@ -152,6 +156,7 @@ impl SpawnSubagentTool {
         context_manager: Arc<ContextManager>,
         parent_bundle: Arc<ContextBundle>,
         compose_engine: Arc<crate::compose::ComposeEngine>,
+        unattended: bool,
     ) -> Self {
         let prompt_template = "\
             <identity>\n{PERSONA}\n</identity>\n\n\
@@ -192,6 +197,7 @@ impl SpawnSubagentTool {
             context_manager,
             parent_bundle,
             compose_engine,
+            unattended,
         }
     }
 
@@ -549,6 +555,9 @@ impl BuiltInTool for SpawnSubagentTool {
         let messages: Vec<ChatMessage> = composed.messages.as_ref().clone();
 
         let mut sandbox_policy = SandboxPolicy::from_constraints(&instance_id, &agent.constraints);
+        // M6: inherited from the run — a subagent's confirmation reaches the
+        // same (absent) responder as the lead's.
+        sandbox_policy.unattended = self.unattended;
         sandbox_policy.confirmation_timeout_secs = Some(
             self.daemon_config
                 .load()

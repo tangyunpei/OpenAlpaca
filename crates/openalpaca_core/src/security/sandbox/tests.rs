@@ -78,6 +78,7 @@ fn make_policy(agent_id: &str) -> SandboxPolicy {
         lane_key: None,
         confirmation_timeout_secs: None,
         auto_approve: false,
+        unattended: false,
     }
 }
 
@@ -310,6 +311,99 @@ async fn tool_confirmation_requested_carries_the_run_it_belonged_to() {
         }
         other => panic!("Expected ToolConfirmationRequested, got: {:?}", other),
     }
+}
+
+// ── M6: a client that cannot answer is told at once ─────────────────
+
+/// **M6.** A workflow started from a client that declared it cannot answer
+/// confirmations used to raise the prompt anyway and sit on it for the whole
+/// 300-second timeout — five and a half minutes per tool call, then a
+/// failure. It is refused immediately instead, in words that name the fix,
+/// and nothing is executed.
+#[tokio::test]
+async fn an_unattended_run_is_refused_at_once_instead_of_waiting() {
+    let mut sandbox = make_sandbox();
+    sandbox.set_confirmation_broker(Arc::new(ConfirmationBroker::new()));
+    let mut policy = make_policy("agent1");
+    policy.require_confirmation_for = vec!["web_search".to_string()];
+    // Long enough that a test which waited for it would hang the suite.
+    policy.confirmation_timeout_secs = Some(300);
+    policy.unattended = true;
+    let tc = make_tool_call("web_search");
+    let ctx = make_ctx_for_task("agent1", "t-1");
+
+    let started = std::time::Instant::now();
+    let result = sandbox.execute_tool(&tc, &policy, &ctx).await;
+    let elapsed = started.elapsed();
+
+    let err = result.expect_err("fail-closed: the tool must not run");
+    assert!(
+        err.contains("needs your approval") && err.contains("cannot ask for it"),
+        "the refusal must say what happened: {err}"
+    );
+    assert!(
+        err.contains("GUI") && err.contains("openalpaca chat"),
+        "…and where it can be approved: {err}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "the refusal must be immediate, took {elapsed:?}"
+    );
+}
+
+/// The declaration never approves anything: with `auto_approve` off it
+/// refuses, and it also does not leave a prompt behind for someone to answer.
+#[tokio::test]
+async fn an_unattended_run_leaves_no_pending_confirmation() {
+    let mut sandbox = make_sandbox();
+    let broker = Arc::new(ConfirmationBroker::new());
+    sandbox.set_confirmation_broker(broker.clone());
+    let mut policy = make_policy("agent1");
+    policy.require_confirmation_for = vec!["web_search".to_string()];
+    policy.unattended = true;
+    let ctx = make_ctx_for_task("agent1", "t-1");
+
+    let _ = sandbox
+        .execute_tool(&make_tool_call("web_search"), &policy, &ctx)
+        .await;
+
+    assert_eq!(
+        broker.pending_count(),
+        0,
+        "nothing was raised, so nothing is waiting"
+    );
+}
+
+/// `auto_approve` is the owner's own explicit decision and still wins: the
+/// declaration is about who can answer a prompt, not about what is allowed.
+#[tokio::test]
+async fn auto_approve_still_wins_over_the_declaration() {
+    let mut sandbox = make_sandbox();
+    sandbox.set_confirmation_broker(Arc::new(ConfirmationBroker::new()));
+    let mut policy = make_policy("agent1");
+    policy.require_confirmation_for = vec!["web_search".to_string()];
+    policy.unattended = true;
+    policy.auto_approve = true;
+    let ctx = make_ctx_for_task("agent1", "t-1");
+
+    let result = sandbox
+        .execute_tool(&make_tool_call("web_search"), &policy, &ctx)
+        .await;
+    assert!(result.is_ok(), "auto_approve runs the tool: {result:?}");
+}
+
+/// A tool that needs no confirmation is untouched by the declaration.
+#[tokio::test]
+async fn an_unattended_run_still_runs_tools_that_need_no_approval() {
+    let sandbox = make_sandbox();
+    let mut policy = make_policy("agent1");
+    policy.unattended = true;
+    let ctx = make_ctx_for_task("agent1", "t-1");
+
+    let result = sandbox
+        .execute_tool(&make_tool_call("web_search"), &policy, &ctx)
+        .await;
+    assert!(result.is_ok(), "{result:?}");
 }
 
 #[tokio::test]

@@ -1064,6 +1064,7 @@ mod read_result {
             lane_key: None,
             confirmation_timeout_secs: None,
             auto_approve: false,
+            unattended: false,
         };
         let call = openalpaca_llm::ToolCall {
             id: "tu-denied".to_string(),
@@ -1114,6 +1115,7 @@ mod read_result {
             lane_key: None,
             confirmation_timeout_secs: None,
             auto_approve: false,
+            unattended: false,
         };
         let call = openalpaca_llm::ToolCall {
             id: "tu-ambient".to_string(),
