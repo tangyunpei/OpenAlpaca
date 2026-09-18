@@ -44,6 +44,7 @@ fn inputs<'a>(db: &'a Database, started_at: DateTime<Utc>) -> StatusInputs<'a> {
         managed_log: true,
         sessions_config: SessionsConfig::default(),
         routing_config: RoutingConfig::default(),
+        llm_router: None,
     }
 }
 
@@ -377,4 +378,94 @@ fn asset(id: &str, size_bytes: i64) -> FileAsset {
         created_at: String::new(),
         updated_at: String::new(),
     }
+}
+
+// ── L3's daemon half: which model would actually answer ─────────────────
+
+/// A daemon with no LLM configured says so with `null`, not with an invented
+/// model name.
+#[tokio::test]
+async fn no_router_means_no_llm_block() {
+    let tmp = TempDir::new().unwrap();
+    let _guard = HomeStoreGuard::set(&tmp.path().join(".openalpaca"));
+    let db = test_db(&tmp);
+
+    let body = body_for(&db, &headers_with(None)).await;
+
+    assert!(body.get("llm").is_some(), "the key is present, not omitted");
+    assert!(body["llm"].is_null());
+}
+
+/// **L3.** `[orchestrator] model` names a Claude id — right when Anthropic is
+/// configured, and exactly what every shipped agent template pins — while the
+/// only enabled provider is a local Ollama. The ladder substitutes, and the
+/// substitution is reported rather than left in the log: a client can say
+/// "configured: X — not available, using Y".
+#[tokio::test]
+async fn the_status_reports_the_model_that_would_really_answer() {
+    let tmp = TempDir::new().unwrap();
+    let _guard = HomeStoreGuard::set(&tmp.path().join(".openalpaca"));
+    let db = test_db(&tmp);
+
+    let config_path = tmp.path().join("llm.toml");
+    std::fs::write(
+        &config_path,
+        r#"[orchestrator]
+model = "claude-sonnet-4-6"
+
+[providers.ollama]
+enabled = true
+base_url = "http://127.0.0.1:1/v1"
+
+[models."qwen3:8b"]
+provider = "ollama"
+context = 32768
+"#,
+    )
+    .unwrap();
+    let router = openalpaca_llm::build_router(&config_path).expect("router");
+
+    let mut ins = inputs(&db, Utc::now());
+    ins.llm_router = Some(&router);
+    let body = body_of(status_response(&ins, &headers_with(None))).await;
+
+    assert_eq!(body["llm"]["default_model"], "claude-sonnet-4-6");
+    assert_eq!(
+        body["llm"]["default_model_routable"], false,
+        "Anthropic is not enabled, so the configured default cannot be reached"
+    );
+    assert_eq!(
+        body["llm"]["effective_default_model"], "qwen3:8b",
+        "…and the ladder says what would answer instead: {body}"
+    );
+}
+
+/// Nothing routable at all is a different answer from "the default is fine":
+/// `null`, which is the state `LlmRouterError::NoRoutableModel` reports on the
+/// next request.
+#[tokio::test]
+async fn nothing_routable_is_reported_as_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let _guard = HomeStoreGuard::set(&tmp.path().join(".openalpaca"));
+    let db = test_db(&tmp);
+
+    let config_path = tmp.path().join("llm.toml");
+    std::fs::write(
+        &config_path,
+        r#"[orchestrator]
+model = "claude-sonnet-4-6"
+
+[providers.ollama]
+enabled = false
+"#,
+    )
+    .unwrap();
+    let router = openalpaca_llm::build_router(&config_path).expect("router");
+
+    let mut ins = inputs(&db, Utc::now());
+    ins.llm_router = Some(&router);
+    let body = body_of(status_response(&ins, &headers_with(None))).await;
+
+    assert_eq!(body["llm"]["default_model_routable"], false);
+    assert!(body["llm"]["effective_default_model"].is_null());
 }

@@ -588,6 +588,7 @@
 | `retention` | `RetentionStatus` |
 | `sessions` | `SessionsStatus` |
 | `routing` | `RoutingStatus` |
+| `llm` | `Option<LlmStatus>` |
 
 ## Streaming
 

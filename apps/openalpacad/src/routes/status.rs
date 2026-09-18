@@ -98,6 +98,34 @@ pub struct StatusResponse {
     /// The routing switches a client has to know about to decide what to
     /// offer. Today that is one: the experimental replay resume of §5.6c.
     pub routing: RoutingStatus,
+    /// Which model a request that names none would really reach, and whether
+    /// that is the one the owner configured (L3). `null` when this daemon has
+    /// no LLM router at all.
+    pub llm: Option<LlmStatus>,
+}
+
+/// The configured default model against the one that would actually answer
+/// (L3).
+///
+/// The fallback ladder is allowed to substitute — a `[orchestrator] model`
+/// naming a Claude id is right when Anthropic is configured and falls through
+/// to whatever *is* routable when it is not — and a substitution is never
+/// silent. The log carries one WARN per pair and the call log carries the
+/// model actually used; this is the same fact where a client can read it, so
+/// Settings → Models can say "configured: X — not available, using Y" instead
+/// of showing a picker that disagrees with every answer.
+#[derive(Debug, Serialize)]
+pub struct LlmStatus {
+    /// `[orchestrator] model`, as the router holds it.
+    pub default_model: String,
+    /// Whether that model is routable right now: a provider is loaded, holds
+    /// it, and is enabled.
+    pub default_model_routable: bool,
+    /// What a request naming no model would actually be answered by — the
+    /// configured default when it is routable, otherwise the first rung of the
+    /// ladder that is. `null` means **nothing** is routable and the next
+    /// request will fail; the error names the fix.
+    pub effective_default_model: Option<String>,
 }
 
 /// The `[orchestrator.routing]` flags a client renders against.
@@ -209,6 +237,9 @@ pub(crate) struct StatusInputs<'a> {
     pub sessions_config: SessionsConfig,
     /// `orchestrator.routing`, likewise.
     pub routing_config: RoutingConfig,
+    /// The live router, for the effective-model question (L3). `None` when the
+    /// daemon has no LLM configured — the echo-stub boot.
+    pub llm_router: Option<&'a openalpaca_llm::LlmRouter>,
 }
 
 /// `GET /v1/status`
@@ -222,6 +253,10 @@ pub async fn status_handler(State(state): State<Arc<AppState>>, headers: HeaderM
             managed_log: state.managed_log,
             sessions_config: state.daemon_config.load().orchestrator.sessions.clone(),
             routing_config: state.daemon_config.load().orchestrator.routing.clone(),
+            llm_router: state
+                .llm_settings_service
+                .as_ref()
+                .map(|service| service.router().as_ref()),
         },
         &headers,
     )
@@ -274,6 +309,14 @@ fn status_response(inputs: &StatusInputs<'_>, headers: &HeaderMap) -> Response {
                 .unwrap_or(0),
         },
         routing: RoutingStatus::from(&inputs.routing_config),
+        llm: inputs.llm_router.map(|router| {
+            let default_model = router.default_model();
+            LlmStatus {
+                default_model_routable: router.is_routable(&default_model),
+                effective_default_model: router.effective_default_model(),
+                default_model,
+            }
+        }),
     };
     (StatusCode::OK, Json(body)).into_response()
 }
