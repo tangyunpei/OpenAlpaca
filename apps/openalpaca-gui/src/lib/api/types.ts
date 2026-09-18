@@ -388,6 +388,13 @@ export interface ProviderInfo {
   enabled: boolean;
   key_selection_strategy: string;
   keys: KeyInfo[];
+  /**
+   * Whether this provider needs an API key at all (L1). `false` for one that
+   * runs on the owner's own machine (Ollama): an empty `keys` list there means
+   * "no key needed", not "unconfigured", and must never be drawn as a gap to
+   * fill.
+   */
+  requires_key: boolean;
 }
 
 export interface OrchestratorInfo {
@@ -408,11 +415,19 @@ export interface LlmSettingsResponse {
  * could not register — no usable key, or the provider is not compiled in — and
  * `warning` is then the daemon's own sentence about why. A disable is
  * `loaded: false` with no warning: that is what it asked for.
+ *
+ * `discovered_models` is the enable's own answer about the catalogue (L2): the
+ * daemon asks the provider what it can serve and counts it, so turning a local
+ * provider on says in one call whether it can see the models the owner has
+ * installed. A provider that loaded but could not be asked answers `0` with
+ * the reason in `discovery_error` — never a silent zero.
  */
 export interface ProviderEnabledResponse {
   id: string;
   enabled: boolean;
   loaded: boolean;
+  discovered_models: number;
+  discovery_error: string | null;
   warning: string | null;
 }
 
@@ -495,6 +510,12 @@ export interface ModelEntry {
   context_window: number;
   input_price_per_million: number;
   output_price_per_million: number;
+  /**
+   * Whether the model can be given tools. Every agent path needs them, so a
+   * picker has to be able to say which installed model cannot serve one —
+   * `ollama pull` will happily fetch a model that has none.
+   */
+  supports_tools: boolean;
 }
 
 // ── Usage ───────────────────────────────────────────────────────────────────
@@ -1032,6 +1053,35 @@ export interface DaemonStatus {
    * `Resume` control whose only possible answer is `409 RESUME_DISABLED`.
    */
   routing: DaemonRoutingStatus;
+  /**
+   * Which model a request that names none would really reach, against the one
+   * the owner configured (L3). `null` when this daemon has no LLM router at
+   * all — and absent from a daemon built before the block existed, which is
+   * why every reader treats it as optional.
+   */
+  llm?: DaemonLlmStatus | null;
+}
+
+/**
+ * The configured default model against the one that would actually answer.
+ *
+ * The fallback ladder is allowed to substitute — `[orchestrator] model` naming
+ * a Claude id is right when Anthropic is configured and falls through to
+ * whatever *is* routable when it is not — and a substitution is never silent.
+ * This is that fact where a client can read it, so Settings → Models can say
+ * "configured: X — not available, using Y" instead of showing a picker that
+ * disagrees with every answer.
+ */
+export interface DaemonLlmStatus {
+  /** `[orchestrator] model`, as the router holds it. */
+  default_model: string;
+  /** Whether a provider is loaded, enabled, and holds that model right now. */
+  default_model_routable: boolean;
+  /**
+   * What a request naming no model would be answered by. `null` means nothing
+   * is routable and the next request will fail.
+   */
+  effective_default_model: string | null;
 }
 
 export interface DaemonRoutingStatus {

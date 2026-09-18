@@ -13,8 +13,14 @@ const settings: LlmSettingsResponse = {
       enabled: true,
       key_selection_strategy: "round_robin",
       keys: [],
+      requires_key: true,
     },
-    ollama: { enabled: false, key_selection_strategy: "round_robin", keys: [] },
+    ollama: {
+      enabled: false,
+      key_selection_strategy: "round_robin",
+      keys: [],
+      requires_key: false,
+    },
   },
 };
 

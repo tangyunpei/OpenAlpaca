@@ -23,7 +23,19 @@ const state = vi.hoisted(() => ({
     id: string;
     enabled: boolean;
     loaded: boolean;
+    discovered_models: number;
+    discovery_error: string | null;
     warning: string | null;
+  } | null,
+  /** How many times `POST /v1/models/refresh` was asked for, and its answer. */
+  refreshes: 0,
+  refreshResult: [] as Array<Record<string, unknown>>,
+  refreshFail: null as Error | null,
+  /** `GET /v1/status`'s `llm` block (L3). */
+  daemonLlm: null as {
+    default_model: string;
+    default_model_routable: boolean;
+    effective_default_model: string | null;
   } | null,
   /** `GET /v1/models` — the catalogue the chips are drawn from. */
   models: [] as Array<Record<string, unknown>>,
@@ -64,6 +76,8 @@ vi.mock("@/hooks/useSettings", async (importOriginal) => ({
           id: string;
           enabled: boolean;
           loaded: boolean;
+          discovered_models: number;
+          discovery_error: string | null;
           warning: string | null;
         }) => void;
         onError?: (error: Error) => void;
@@ -77,10 +91,34 @@ vi.mock("@/hooks/useSettings", async (importOriginal) => ({
             id: input.provider,
             enabled: input.enabled,
             loaded: input.enabled,
+            discovered_models: input.enabled ? 1 : 0,
+            discovery_error: null,
             warning: null,
           },
         );
     },
+  }),
+  useRefreshModels: () => ({
+    isPending: false,
+    mutate: (
+      _input: undefined,
+      options?: {
+        onSuccess?: (rows: Array<Record<string, unknown>>) => void;
+        onError?: (error: Error) => void;
+      },
+    ) => {
+      state.refreshes += 1;
+      if (state.refreshFail !== null) options?.onError?.(state.refreshFail);
+      else options?.onSuccess?.(state.refreshResult);
+    },
+  }),
+}));
+
+vi.mock("@/hooks/useConnection", () => ({
+  useDaemonStatus: () => ({
+    data: { llm: state.daemonLlm },
+    isPending: false,
+    error: null,
   }),
 }));
 
@@ -115,10 +153,11 @@ vi.mock("@/hooks/useOrchestrator", async (importOriginal) => ({
   }),
 }));
 
-const provider = (enabled: boolean) => ({
+const provider = (enabled: boolean, requiresKey = true) => ({
   enabled,
   key_selection_strategy: "round_robin",
   keys: [],
+  requires_key: requiresKey,
 });
 
 beforeEach(() => {
@@ -126,6 +165,10 @@ beforeEach(() => {
   state.calls = [];
   state.fail = null;
   state.result = null;
+  state.refreshes = 0;
+  state.refreshResult = [];
+  state.refreshFail = null;
+  state.daemonLlm = null;
   state.models = [];
   state.llmOrchestrator = {
     model: "claude-haiku-4-5",
@@ -150,7 +193,7 @@ describe("the provider switch", () => {
     await userEvent.click(ollama);
 
     expect(state.calls).toEqual([{ provider: "ollama", enabled: true }]);
-    expect(useUiStore.getState().toast).toBe("ollama on");
+    expect(useUiStore.getState().toast).toBe("ollama on — found 1 model");
   });
 
   it("turns a live provider off", async () => {
@@ -189,6 +232,8 @@ describe("the provider switch", () => {
       id: "anthropic",
       enabled: true,
       loaded: false,
+      discovered_models: 0,
+      discovery_error: null,
       warning: "No keys for Anthropic, cannot register provider",
     };
     state.providers = { anthropic: provider(false) };
@@ -329,6 +374,141 @@ describe("an enabled provider the router loaded nothing from", () => {
 
     expect(screen.queryByText("On, but no models loaded")).toBeNull();
     expect(screen.getByText("off")).toBeInTheDocument();
+  });
+});
+
+/**
+ * The local-model story on this screen (L1/L2/L3): a provider that needs no
+ * key, a catalogue that can be re-asked, and a default model that may not be
+ * the one answering.
+ */
+describe("a provider that needs no key", () => {
+  const installed = {
+    id: "qwen3:8b",
+    provider: "ollama",
+    context_window: 262_144,
+    input_price_per_million: 0,
+    output_price_per_million: 0,
+    supports_tools: true,
+  };
+
+  it("says so instead of counting the keys it does not have", () => {
+    state.providers = { ollama: provider(true, false) };
+    state.models = [installed];
+    render(<ModelsSection />);
+
+    expect(screen.getByText(/no key needed/)).toBeInTheDocument();
+    expect(screen.queryByText(/0 keys/)).toBeNull();
+  });
+
+  it("can be switched on with no key editor, and is told what that found", async () => {
+    state.providers = { ollama: provider(false, false) };
+    state.result = {
+      id: "ollama",
+      enabled: true,
+      loaded: true,
+      discovered_models: 3,
+      discovery_error: null,
+      warning: null,
+    };
+    render(<ModelsSection />);
+
+    const toggle = screen.getByRole("switch", { name: "Enable ollama" });
+    expect(toggle).toBeEnabled();
+    await userEvent.click(toggle);
+
+    expect(state.calls).toEqual([{ provider: "ollama", enabled: true }]);
+    expect(useUiStore.getState().toast).toBe("ollama on — found 3 models");
+  });
+
+  it("lists its installed models and lets one become the chat model", async () => {
+    state.providers = { ollama: provider(true, false) };
+    state.models = [installed];
+    render(<ModelsSection />);
+
+    await userEvent.click(screen.getByRole("button", { name: "qwen3:8b" }));
+
+    expect(state.writes).toEqual([
+      { model: "qwen3:8b", fallback_models: ["claude-sonnet-4-6"] },
+    ]);
+  });
+});
+
+/**
+ * `useRefreshModels` existed and was imported by no view — so a model pulled
+ * after boot could not reach the picker without restarting the daemon.
+ */
+describe("refreshing the catalogue", () => {
+  it("asks the daemon and reports what came back", async () => {
+    state.refreshResult = [
+      { id: "qwen3:8b", provider: "ollama" },
+      { id: "llama3.1", provider: "ollama" },
+    ];
+    render(<ModelsSection />);
+
+    await userEvent.click(
+      screen.getByRole("button", { name: /refresh models/i }),
+    );
+
+    expect(state.refreshes).toBe(1);
+    expect(useUiStore.getState().toast).toBe("2 models in the catalogue");
+  });
+
+  it("says an empty answer is empty rather than saying nothing", async () => {
+    state.refreshResult = [];
+    render(<ModelsSection />);
+
+    await userEvent.click(
+      screen.getByRole("button", { name: /refresh models/i }),
+    );
+
+    expect(useUiStore.getState().toast).toMatch(/No models/);
+  });
+
+  it("surfaces a refusal", async () => {
+    state.refreshFail = new Error("daemon unreachable");
+    render(<ModelsSection />);
+
+    await userEvent.click(
+      screen.getByRole("button", { name: /refresh models/i }),
+    );
+
+    expect(useUiStore.getState().toast).toBe(
+      "Could not refresh — daemon unreachable",
+    );
+  });
+});
+
+/**
+ * L3: the shipped templates pin Claude ids, so on a local-only install the
+ * ladder answers with something else. Showing only the configured id is a
+ * silent substitution.
+ */
+describe("when the configured model is not the one that answers", () => {
+  it("names both", () => {
+    state.daemonLlm = {
+      default_model: "claude-haiku-4-5",
+      default_model_routable: false,
+      effective_default_model: "qwen3:8b",
+    };
+    render(<ModelsSection />);
+
+    expect(
+      screen.getByText(
+        "configured: claude-haiku-4-5 — not available, using qwen3:8b",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("says nothing when the configured model is routable", () => {
+    state.daemonLlm = {
+      default_model: "claude-haiku-4-5",
+      default_model_routable: true,
+      effective_default_model: "claude-haiku-4-5",
+    };
+    render(<ModelsSection />);
+
+    expect(screen.queryByText(/not available/)).toBeNull();
   });
 });
 

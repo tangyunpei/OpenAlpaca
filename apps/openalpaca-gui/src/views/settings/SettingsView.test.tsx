@@ -115,6 +115,7 @@ vi.mock("@/hooks/useSettings", () => ({
           enabled: true,
           key_selection_strategy: "round_robin",
           keys: [{ id: "k1" }],
+          requires_key: true,
         },
       },
     }),
@@ -126,6 +127,7 @@ vi.mock("@/hooks/useSettings", () => ({
         context_window: 200_000,
         input_price_per_million: 3,
         output_price_per_million: 15,
+        supports_tools: true,
       },
     ]),
   useProviderUsage: () =>
@@ -140,6 +142,7 @@ vi.mock("@/hooks/useSettings", () => ({
       },
     ]),
   useSetProviderEnabled: () => mutation(),
+  useRefreshModels: () => mutation(),
 }));
 
 vi.mock("@/hooks/useOrchestrator", async (importOriginal) => ({

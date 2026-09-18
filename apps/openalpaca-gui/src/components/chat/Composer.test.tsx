@@ -12,6 +12,7 @@ const MODELS: ModelEntry[] = [
     context_window: 200_000,
     input_price_per_million: 3,
     output_price_per_million: 15,
+    supports_tools: true,
   },
   {
     id: "gpt-5",
@@ -19,6 +20,7 @@ const MODELS: ModelEntry[] = [
     context_window: 128_000,
     input_price_per_million: 2,
     output_price_per_million: 8,
+    supports_tools: true,
   },
 ];
 

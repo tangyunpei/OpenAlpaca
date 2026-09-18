@@ -183,6 +183,12 @@ export interface ListCardProps {
   addLabel?: string;
   onAdd?: () => void;
   /**
+   * Controls that sit to the *left* of the add button in the same bar — a
+   * section's own verbs, such as Models' Refresh. Rendered on its own when
+   * there is no add action.
+   */
+  actions?: React.ReactNode;
+  /**
    * A closing line under the rows, for a list that is one **page** of a longer
    * one. Omit it on a list the daemon serves whole: a footer on a complete list
    * would send the reader looking for rows that do not exist.
@@ -191,14 +197,23 @@ export interface ListCardProps {
   children: React.ReactNode;
 }
 
-export function ListCard({ addLabel, onAdd, footer, children }: ListCardProps) {
+export function ListCard({
+  addLabel,
+  onAdd,
+  actions,
+  footer,
+  children,
+}: ListCardProps) {
   return (
     <div className="overflow-hidden rounded-3xl border border-line bg-raised">
-      {addLabel !== undefined && (
-        <div className="flex justify-end border-b border-line-hair-2 bg-sunken px-[14px] py-[10px]">
-          <Button variant="primarySm" onClick={onAdd}>
-            {addLabel}
-          </Button>
+      {(addLabel !== undefined || actions !== undefined) && (
+        <div className="flex items-center justify-end gap-[8px] border-b border-line-hair-2 bg-sunken px-[14px] py-[10px]">
+          {actions}
+          {addLabel !== undefined && (
+            <Button variant="primarySm" onClick={onAdd}>
+              {addLabel}
+            </Button>
+          )}
         </div>
       )}
       {children}

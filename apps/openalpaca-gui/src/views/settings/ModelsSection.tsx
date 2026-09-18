@@ -32,11 +32,22 @@
  * reads the catalogue instead — enabled, `GET /v1/models` answered, and not a
  * model from this provider in it is "on, but no models loaded", every time the
  * page is drawn.
+ *
+ * The local-model story (L1/L2/L3) is three more facts on the same screen:
+ * a provider that needs no key says so instead of counting zero keys; the
+ * enable's `discovered_models` is what the toast reports, so switching Ollama
+ * on answers "found 3 models" or names why it could not ask; and `Refresh`
+ * (`POST /v1/models/refresh`) re-asks every enabled provider, which is how a
+ * model pulled after boot reaches the picker. Above the card, when the
+ * configured default is not routable, the daemon's own `effective_default_model`
+ * is shown — a picker that disagrees with every reply is the worst kind of
+ * silent substitution.
  */
 
 import { useState } from "react";
 
 import { Button, Tag, chipVariant } from "@/components/ui";
+import { useDaemonStatus } from "@/hooks/useConnection";
 import {
   useOrchestratorConfig,
   useUpdateOrchestratorConfig,
@@ -44,22 +55,34 @@ import {
 import {
   useLlmSettings,
   useModels,
+  useRefreshModels,
   useSetProviderEnabled,
 } from "@/hooks/useSettings";
 import { formatSpend, useUsageSummary } from "@/hooks/useUsage";
+import { useProjectStore } from "@/stores/project";
 import { useUiStore } from "@/stores/ui";
 
 import { GapNote, ListCard, ListRow, ListState, Toggle } from "./primitives";
 import { compactCount } from "./format";
+import {
+  effectiveModelNote,
+  providerKeyLine,
+  providerToggleToast,
+} from "./models-copy";
 import { providerToggleErrorCopy } from "./provider-toggle";
 
 export function ModelsSection() {
   const llm = useLlmSettings();
   const models = useModels();
+  const refreshModels = useRefreshModels();
   const usage = useUsageSummary();
   const orchestrator = useOrchestratorConfig();
   const updateOrchestrator = useUpdateOrchestratorConfig();
   const setProviderEnabled = useSetProviderEnabled();
+  const projectPath = useProjectStore((s) => s.path);
+  // `GET /v1/status` is where the daemon reports the pair (L3); it is already
+  // this window's polling query, so reading it here costs a cache hit.
+  const daemonStatus = useDaemonStatus(projectPath);
   const setModel = useUiStore((s) => s.setModel);
   const showToast = useUiStore((s) => s.showToast);
   // Per provider, the daemon's reason for a write that did not load. It comes
@@ -70,6 +93,19 @@ export function ModelsSection() {
 
   const providers = Object.entries(llm.data?.providers ?? {});
   const activeModel = orchestrator.data?.model ?? llm.data?.orchestrator.model;
+  const substitution = effectiveModelNote(daemonStatus.data?.llm);
+
+  const refresh = () => {
+    refreshModels.mutate(undefined, {
+      onSuccess: (rows) =>
+        showToast(
+          rows.length === 0
+            ? "No models — every provider is off, or none could be asked"
+            : `${rows.length} ${rows.length === 1 ? "model" : "models"} in the catalogue`,
+        ),
+      onError: (error) => showToast(`Could not refresh — ${error.message}`),
+    });
+  };
 
   const toggleProvider = (provider: string, next: boolean) => {
     setProviderEnabled.mutate(
@@ -82,11 +118,7 @@ export function ModelsSection() {
               ? rest
               : { ...rest, [row.id]: row.warning };
           });
-          showToast(
-            row.loaded || !row.enabled
-              ? `${row.id} ${row.enabled ? "on" : "off"}`
-              : `${row.id} on, but the daemon could not load it`,
-          );
+          showToast(providerToggleToast(row));
         },
         // `activeModel` is the daemon's `[orchestrator] model` — the very field
         // the 409 guard resolves — so the unresolved-default refusal can name
@@ -126,12 +158,30 @@ export function ModelsSection() {
 
   return (
     <>
+      {substitution !== null && (
+        <p
+          role="status"
+          className="mt-0 mb-[10px] rounded-2xl border border-amber-line bg-amber-surface px-[12px] py-[9px] text-base leading-[1.5] text-amber-ink"
+        >
+          {substitution}
+        </p>
+      )}
+
       <ListCard
         addLabel="Add provider"
         onAdd={() =>
           showToast(
             "Adding a provider needs the key editor, which is not built yet",
           )
+        }
+        actions={
+          <Button
+            variant="ghostSm"
+            disabled={refreshModels.isPending}
+            onClick={refresh}
+          >
+            {refreshModels.isPending ? "Refreshing…" : "Refresh models"}
+          </Button>
         }
       >
         <ListState
@@ -168,9 +218,7 @@ export function ModelsSection() {
                 }
                 description={
                   <>
-                    {`${info.keys.length} ${
-                      info.keys.length === 1 ? "key" : "keys"
-                    } · ${info.key_selection_strategy}`}
+                    {providerKeyLine(info)}
                     {notLoaded[provider] !== undefined && (
                       <span className="mt-[3px] block text-red-ink">
                         On, but not loaded — {notLoaded[provider]}
