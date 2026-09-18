@@ -26,7 +26,10 @@ pub struct RouterRequest {
     pub tools_token_estimate: Option<u32>,
     /// Enable Anthropic prompt caching.
     pub enable_caching: bool,
-    /// Extended thinking config (Anthropic only).
+    /// How much the caller wants this model to reason; see
+    /// [`ChatRequest::thinking`](crate::types::ChatRequest::thinking). Forwarded
+    /// unchanged to whichever model the ladder settles on, so an internal call
+    /// that asked for no reasoning still asks for none on the fallback rung.
     pub thinking: Option<ThinkingConfig>,
     /// Context management configuration (Anthropic only).
     pub context_management: Option<crate::context_management::ContextManagement>,

@@ -698,3 +698,184 @@ async fn the_router_reports_a_local_provider_as_needing_no_key() {
             .is_empty()
     );
 }
+
+// ── M2: a small budget on a thinking model ──────────────────────────────────
+
+/// The live failure, reproduced: `POST /v1/chat/completions` with
+/// `max_tokens: 24` against a thinking model answers `content: ""`,
+/// `reasoning: "…"`, `finish_reason: "length"` and `completion_tokens == 24`.
+/// The caller then parsed `""` as JSON and reported "malformed JSON … EOF at
+/// column 0", which names neither the cause nor the fix.
+fn budget_exhausted_body(model: &str, cap: u32) -> String {
+    serde_json::json!({
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "reasoning": "The user wants me to extract JSON traits from the statement. Let"
+            },
+            "finish_reason": "length"
+        }],
+        "usage": {"prompt_tokens": 24, "completion_tokens": cap}
+    })
+    .to_string()
+}
+
+/// M2, the request half: `ThinkingConfig::Disabled` must reach Ollama's wire as
+/// `reasoning_effort = "none"` — the one value that actually stops the thinking
+/// (verified live: 2 completion tokens against 25 for "low").
+#[tokio::test]
+async fn a_call_that_wants_no_reasoning_says_so_on_the_wire() {
+    let server = MockHttpServer::start(|req| {
+        if req.path == "/v1/chat/completions" {
+            MockResponse::json(completion_body("local-model", "{\"traits\":[]}"))
+        } else {
+            MockResponse::not_found()
+        }
+    })
+    .await;
+
+    let router = keyless_router(&server.base_url, "local-model");
+    let mut req = request("local-model");
+    req.max_tokens = Some(256);
+    req.thinking = Some(ThinkingConfig::Disabled);
+
+    router.complete(req).await.expect("the local model answers");
+
+    let seen = server.requests().await;
+    assert_eq!(seen.len(), 1);
+    let body: serde_json::Value = serde_json::from_str(&seen[0].body).expect("a JSON body");
+    assert_eq!(
+        body["reasoning_effort"], "none",
+        "the utility call asked for no reasoning: {}",
+        seen[0].body
+    );
+    assert_eq!(body["max_tokens"], 256);
+}
+
+/// M2, the honest-error half: an answer with nothing in it is reported as the
+/// budget problem it is, naming the model and the tokens spent — not handed
+/// back as an empty string for the caller to misdiagnose.
+#[tokio::test]
+async fn an_empty_completion_is_reported_as_a_spent_budget() {
+    let server = MockHttpServer::start(|req| {
+        if req.path == "/v1/chat/completions" {
+            MockResponse::json(budget_exhausted_body("local-model", 24))
+        } else {
+            MockResponse::not_found()
+        }
+    })
+    .await;
+
+    let router = keyless_router(&server.base_url, "local-model");
+    let mut req = request("local-model");
+    req.max_tokens = Some(24);
+
+    let err = router
+        .complete(req)
+        .await
+        .expect_err("an empty answer is a failure, not an answer");
+
+    match err {
+        LlmRouterError::Llm(crate::error::LlmError::EmptyCompletion {
+            ref model,
+            output_tokens,
+        }) => {
+            assert_eq!(model, "local-model");
+            assert_eq!(output_tokens, 24);
+            let text = err.to_string();
+            assert!(text.contains("max_tokens"), "the fix is named: {text}");
+            assert!(text.contains("reasoning"), "the cause is named: {text}");
+        }
+        other => panic!("expected an empty-completion error, got {other:?}"),
+    }
+
+    // The tokens were really spent, so they are still booked.
+    let usage = router
+        .cost_tracker
+        .get_agent_usage("unknown")
+        .await
+        .expect("the spent turn was recorded");
+    assert_eq!(usage.total_output_tokens, 24);
+}
+
+/// The narrowness matters: a model that answers briefly, or stops at the cap
+/// with text in hand, or calls a tool and says nothing, is not an empty
+/// completion. Only "nothing at all" is.
+#[tokio::test]
+async fn a_terse_answer_is_not_an_empty_completion() {
+    let server = MockHttpServer::start(|req| {
+        if req.path == "/v1/chat/completions" {
+            MockResponse::json(
+                serde_json::json!({
+                    "model": "local-model",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "length"
+                    }],
+                    "usage": {"prompt_tokens": 9, "completion_tokens": 2}
+                })
+                .to_string(),
+            )
+        } else {
+            MockResponse::not_found()
+        }
+    })
+    .await;
+
+    let router = keyless_router(&server.base_url, "local-model");
+    let response = router
+        .complete(request("local-model"))
+        .await
+        .expect("a short answer is still an answer");
+    assert_eq!(response.content, "ok");
+}
+
+/// A turn that emits no prose but does call a tool is the normal shape of a
+/// tool-using round, and must never be turned into an error.
+#[tokio::test]
+async fn a_tool_call_with_no_prose_is_not_an_empty_completion() {
+    let server = MockHttpServer::start(|req| {
+        if req.path == "/v1/chat/completions" {
+            MockResponse::json(
+                serde_json::json!({
+                    "model": "local-model",
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning": "I should look this up.",
+                            "tool_calls": [{
+                                "id": "call_1",
+                                "function": {"name": "search", "arguments": "{\"q\":\"rust\"}"}
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }],
+                    "usage": {"prompt_tokens": 30, "completion_tokens": 12}
+                })
+                .to_string(),
+            )
+        } else {
+            MockResponse::not_found()
+        }
+    })
+    .await;
+
+    let router = keyless_router(&server.base_url, "local-model");
+    let response = router
+        .complete(request("local-model"))
+        .await
+        .expect("a tool-calling round is not empty");
+    assert_eq!(response.tool_calls.len(), 1);
+    assert_eq!(response.tool_calls[0].name, "search");
+    assert_eq!(
+        response.thinking.as_deref(),
+        Some("I should look this up."),
+        "M1: the local model's reasoning is kept, not dropped"
+    );
+}

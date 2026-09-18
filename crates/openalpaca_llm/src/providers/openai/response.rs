@@ -1,6 +1,21 @@
 use crate::error::LlmError;
 use crate::types::*;
 
+/// The model's own reasoning, under whichever name the server used.
+///
+/// OpenAI and the proxies that copy it say `reasoning_content`; Ollama 0.34
+/// says `reasoning` (`message.reasoning` here, `delta.reasoning` on the stream).
+/// Reading only the first name dropped every thinking token a local model
+/// produced, so a thinking model showed dead air where the indicator belongs
+/// (M1). Both names are accepted, `reasoning_content` first.
+pub(crate) fn reasoning_text(message: &serde_json::Value) -> Option<String> {
+    ["reasoning_content", "reasoning"]
+        .iter()
+        .find_map(|name| message[*name].as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
 pub(super) fn parse_response(
     default_model: &str,
     body: serde_json::Value,
@@ -62,10 +77,7 @@ pub(super) fn parse_response(
         model,
         usage,
         finish_reason,
-        thinking: message["reasoning_content"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string()),
+        thinking: reasoning_text(message),
         parts,
     })
 }

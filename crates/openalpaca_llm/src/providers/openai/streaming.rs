@@ -68,12 +68,14 @@ pub(super) fn parse_openai_sse(
                         ));
                     }
 
-                    if let Some(reasoning) = delta["reasoning_content"].as_str()
-                        && !reasoning.is_empty()
-                    {
+                    // Both spellings — Ollama streams `delta.reasoning` (M1).
+                    // `ThinkingDelta` is the event Anthropic's extended
+                    // thinking already uses, so nothing new reaches the wire:
+                    // the text simply stops being dropped.
+                    if let Some(reasoning) = super::response::reasoning_text(delta) {
                         return Some((
                             Ok(StreamEvent::ThinkingDelta {
-                                thinking: reasoning.to_string(),
+                                thinking: reasoning,
                             }),
                             (stream, buffer),
                         ));

@@ -446,6 +446,78 @@ fn test_openai_reasoning_effort_mapping() {
     assert_eq!(body3["temperature"], 0.5); // temperature preserved
 }
 
+/// M2: `ThinkingConfig::Disabled` is how a small-budget internal call says it
+/// wants no reasoning. Ollama thinks unless told otherwise, so it must hear
+/// `reasoning_effort = "none"`; OpenAI has no "off" and rejects the key on a
+/// model that cannot reason, so the cloud flavour must still say nothing.
+#[test]
+fn test_disabled_thinking_asks_ollama_for_no_reasoning() {
+    use crate::providers::openai::request::build_request_body;
+
+    let request = ChatRequest {
+        messages: Arc::new(vec![ChatMessage::user("extract traits")]),
+        tools: Arc::new(vec![]),
+        model: None,
+        temperature: Some(0.2),
+        max_tokens: Some(256),
+        tool_choice: None,
+        enable_caching: false,
+        thinking: Some(ThinkingConfig::Disabled),
+        context_management: None,
+        ephemeral_system_notice: None,
+    };
+
+    let ollama = build_request_body("qwen3.8:27b", 8192, OpenAiFlavour::Ollama, &request);
+    assert_eq!(
+        ollama["reasoning_effort"], "none",
+        "a local thinking model must be told not to think for this call"
+    );
+    assert!(
+        ollama["temperature"].is_number(),
+        "asking for no reasoning does not strip temperature, unlike asking for more"
+    );
+
+    let cloud = build_request_body("gpt-4o", 4096, OpenAiFlavour::OpenAi, &request);
+    assert!(
+        cloud.get("reasoning_effort").is_none_or(|v| v.is_null()),
+        "OpenAI rejects reasoning_effort on a model that does not reason: {cloud}"
+    );
+}
+
+/// The Ollama flavour changes nothing else: `Enabled`/`Adaptive` map exactly as
+/// they do for OpenAI, and an absent `thinking` still says nothing at all.
+#[test]
+fn test_ollama_flavour_leaves_the_other_thinking_arms_alone() {
+    use crate::providers::openai::request::build_request_body;
+
+    let mut request = ChatRequest {
+        messages: Arc::new(vec![ChatMessage::user("think hard")]),
+        tools: Arc::new(vec![]),
+        model: None,
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        enable_caching: false,
+        thinking: None,
+        context_management: None,
+        ephemeral_system_notice: None,
+    };
+
+    let body = build_request_body("qwen3.8:27b", 8192, OpenAiFlavour::Ollama, &request);
+    assert!(
+        body.get("reasoning_effort").is_none_or(|v| v.is_null()),
+        "no thinking config means the model reasons as it normally would"
+    );
+
+    request.thinking = Some(ThinkingConfig::Adaptive);
+    let body = build_request_body("qwen3.8:27b", 8192, OpenAiFlavour::Ollama, &request);
+    assert_eq!(body["reasoning_effort"], "medium");
+
+    request.thinking = Some(ThinkingConfig::Enabled { budget_tokens: 2048 });
+    let body = build_request_body("qwen3.8:27b", 8192, OpenAiFlavour::Ollama, &request);
+    assert_eq!(body["reasoning_effort"], "high");
+}
+
 #[test]
 fn test_openai_reasoning_response_parsing() {
     let provider = OpenAiProvider::new("test-key".to_string(), None, None, None);
@@ -478,6 +550,39 @@ fn test_openai_reasoning_response_parsing() {
         Some("Let me think step by step about this problem...")
     );
     assert_eq!(response.model, "o3");
+}
+
+/// M1: Ollama 0.34 names the field `reasoning`, not `reasoning_content`.
+/// Reading only the OpenAI spelling dropped every thinking token a local model
+/// produced.
+#[test]
+fn test_ollama_reasoning_field_is_parsed() {
+    let provider = OpenAiProvider::new_without_auth(
+        "qwen3.8:27b".to_string(),
+        "http://localhost:11434/v1".to_string(),
+        None,
+    );
+    let response_json = serde_json::json!({
+        "id": "chatcmpl-244",
+        "model": "qwen3.8:27b",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "Hello, friend!",
+                "reasoning": "The user wants a simple hello in one short sentence."
+            },
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 47, "completion_tokens": 19, "total_tokens": 66}
+    });
+
+    let response = provider.parse_response(response_json).unwrap();
+    assert_eq!(response.content, "Hello, friend!");
+    assert_eq!(
+        response.thinking.as_deref(),
+        Some("The user wants a simple hello in one short sentence.")
+    );
 }
 
 #[test]
@@ -538,6 +643,43 @@ async fn test_openai_sse_reasoning_delta() {
     assert_eq!(text_parts.join(""), "The answer is 42.");
 }
 
+/// M1, the streamed half: a live Ollama frame is
+/// `{"delta":{"content":"","reasoning":"The"}}` — the empty `content` must not
+/// swallow the frame, and the reasoning text must arrive as the same
+/// `ThinkingDelta` Anthropic's thinking already uses.
+#[tokio::test]
+async fn test_ollama_sse_reasoning_delta() {
+    use futures_util::StreamExt;
+
+    let raw = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning\":\"The\"},\"finish_reason\":null}]}\n",
+        "\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\" user\"},\"finish_reason\":null}]}\n",
+        "\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n",
+        "\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":19,\"completion_tokens\":10}}\n",
+        "\n",
+        "data: [DONE]\n",
+        "\n",
+    );
+
+    let byte_stream = futures_util::stream::iter(vec![Ok(bytes::Bytes::from(raw))]);
+    let events: Vec<_> = parse_openai_sse(byte_stream).collect().await;
+
+    let mut thinking_parts = Vec::new();
+    let mut text_parts = Vec::new();
+    for event in &events {
+        match event.as_ref().unwrap() {
+            StreamEvent::ThinkingDelta { thinking } => thinking_parts.push(thinking.clone()),
+            StreamEvent::TextDelta { text } => text_parts.push(text.clone()),
+            _ => {}
+        }
+    }
+    assert_eq!(thinking_parts.join(""), "The user");
+    assert_eq!(text_parts.join(""), "Hi");
+}
+
 #[test]
 fn test_openai_ephemeral_notice_placement() {
     use crate::types::{ChatMessage, ChatRequest};
@@ -559,7 +701,8 @@ fn test_openai_ephemeral_notice_placement() {
         ephemeral_system_notice: Some("[budget_notice]\nwatch out\n[/budget_notice]".to_string()),
     };
 
-    let body = super::request::build_request_body("gpt-test", 1024, &request);
+    let body =
+        super::request::build_request_body("gpt-test", 1024, OpenAiFlavour::OpenAi, &request);
     let messages = body["messages"].as_array().unwrap();
     let last = messages.last().unwrap();
     assert_eq!(last["role"], "system");

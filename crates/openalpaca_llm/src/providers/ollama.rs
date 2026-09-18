@@ -43,7 +43,8 @@ impl OllamaProvider {
             Self {
                 inner: super::openai::OpenAiProvider::new_without_auth_with_client(
                     client, model, url, max_tokens,
-                ),
+                )
+                .with_flavour(super::openai::OpenAiFlavour::Ollama),
                 request_timeout: None,
             }
         }
@@ -397,7 +398,12 @@ mod tests {
             ephemeral_system_notice: Some("[budget_notice]\nollama path\n[/budget_notice]".to_string()),
         };
 
-        let body = build_request_body("llama3", 1024, &request);
+        let body = build_request_body(
+            "llama3",
+            1024,
+            crate::providers::openai::OpenAiFlavour::Ollama,
+            &request,
+        );
         let messages = body["messages"].as_array().unwrap();
         let last = messages.last().unwrap();
         assert_eq!(last["role"], "system");

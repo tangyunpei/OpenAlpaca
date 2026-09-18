@@ -12,6 +12,22 @@ const DEFAULT_MODEL: &str = "gpt-4o";
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 
+/// Which OpenAI-compatible server is on the other end.
+///
+/// The wire is the same but for the few places it is not, and the only one
+/// today is how a call says it wants no reasoning (M2). Ollama's `/v1` takes
+/// `reasoning_effort = "none"` — verified against a live 0.34 server, which
+/// accepts `minimal|low|medium|high|xhigh|ultra|max|none` and answers `400` to
+/// anything else. OpenAI's own API rejects the key outright on a model that
+/// does not reason, so the default flavour keeps saying nothing and cloud
+/// behaviour is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum OpenAiFlavour {
+    #[default]
+    OpenAi,
+    Ollama,
+}
+
 fn parse_retry_after_ms(headers: &HeaderMap) -> Option<u64> {
     headers
         .get("retry-after")
@@ -31,6 +47,8 @@ pub struct OpenAiProvider {
     /// [`with_request_timeout`](Self::with_request_timeout). `None` leaves the
     /// bound to the client's connect and idle timeouts alone (L7).
     request_timeout: Option<std::time::Duration>,
+    /// Whose OpenAI-compatible wire this is — see [`OpenAiFlavour`].
+    flavour: OpenAiFlavour,
 }
 
 impl OpenAiProvider {
@@ -58,6 +76,7 @@ impl OpenAiProvider {
             base_url: base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
             max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             request_timeout: None,
+            flavour: OpenAiFlavour::OpenAi,
         }
     }
 
@@ -84,7 +103,17 @@ impl OpenAiProvider {
             base_url,
             max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             request_timeout: None,
+            flavour: OpenAiFlavour::OpenAi,
         }
+    }
+
+    /// Declare whose OpenAI-compatible wire this is (M2).
+    ///
+    /// Only Ollama's wrapper calls this; everything else keeps the default,
+    /// which behaves exactly as this provider always has.
+    pub(crate) fn with_flavour(mut self, flavour: OpenAiFlavour) -> Self {
+        self.flavour = flavour;
+        self
     }
 
     /// Give one non-streaming call this much wall clock, and no more.
@@ -113,7 +142,7 @@ impl OpenAiProvider {
     }
 
     pub(crate) fn build_request_body(&self, request: &ChatRequest) -> serde_json::Value {
-        request::build_request_body(&self.model, self.max_tokens, request)
+        request::build_request_body(&self.model, self.max_tokens, self.flavour, request)
     }
 
     pub(crate) fn parse_response(

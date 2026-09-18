@@ -110,6 +110,23 @@ impl LlmRouter {
                         };
                         self.cost_tracker.record(&record).await;
 
+                        // The tokens were spent, so they are booked above —
+                        // but an answer with nothing in it is not an answer.
+                        // Say which failure it was here, once, instead of
+                        // letting every caller rediscover it as a parse error
+                        // on an empty string (M2).
+                        if let Some(empty) = crate::error::empty_completion_error(&response) {
+                            tracing::warn!(
+                                model = %response.model,
+                                output_tokens = response.usage.output_tokens,
+                                max_tokens = ?request.max_tokens,
+                                finish_reason = ?response.finish_reason,
+                                reasoned = response.thinking.is_some(),
+                                "Model returned an empty completion"
+                            );
+                            return Err(LlmRouterError::Llm(empty));
+                        }
+
                         return Ok(response);
                     }
                     Err(LlmError::RateLimited { retry_after_ms }) => {

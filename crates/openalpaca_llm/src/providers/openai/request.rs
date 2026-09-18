@@ -88,6 +88,7 @@ pub(super) fn build_message_content(msg: &ChatMessage) -> serde_json::Value {
 pub(crate) fn build_request_body(
     default_model: &str,
     default_max_tokens: u32,
+    flavour: super::OpenAiFlavour,
     request: &ChatRequest,
 ) -> serde_json::Value {
     let model = request.model.as_deref().unwrap_or(default_model);
@@ -157,6 +158,8 @@ pub(crate) fn build_request_body(
         body["temperature"] = serde_json::json!(temp);
     }
 
+    // `thinking` is the one request field that says how much the caller wants
+    // the model to reason, and each provider maps it to its own wire (M2).
     if let Some(ref thinking) = request.thinking {
         match thinking {
             ThinkingConfig::Enabled { .. } => {
@@ -167,7 +170,18 @@ pub(crate) fn build_request_body(
                 body["reasoning_effort"] = serde_json::json!("medium");
                 body.as_object_mut().unwrap().remove("temperature");
             }
-            ThinkingConfig::Disabled => {}
+            // Asking for nothing is only worth saying where thinking is on by
+            // default. On Ollama it is: a thinking model spends its output
+            // budget on thought first, so a 256-token extraction call comes
+            // back empty and the caller reports "malformed JSON … EOF at
+            // column 0". `"none"` turns it off for that one call. OpenAI's own
+            // API has no "off" and refuses the key on a model that cannot
+            // reason, so the cloud arm still sends nothing.
+            ThinkingConfig::Disabled => {
+                if flavour == super::OpenAiFlavour::Ollama {
+                    body["reasoning_effort"] = serde_json::json!("none");
+                }
+            }
         }
     }
 
