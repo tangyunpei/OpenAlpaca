@@ -1,9 +1,11 @@
+mod edit;
 mod migration;
 mod router_builder;
 pub mod router_config;
 pub mod runtime;
 
 // Re-export public API (unchanged from before the split)
+pub use edit::render_config_preserving;
 pub use migration::{
     collect_secret_refs, migrate_llm_secrets, resolve_key_from_config, reverse_migrate_llm_secrets,
 };
@@ -75,9 +77,34 @@ pub fn render_config(config: &LlmRouterConfig) -> Result<String, LlmError> {
         .map_err(|e| LlmError::Config(format!("Failed to serialize config: {}", e)))
 }
 
+/// Read a config together with the text it came from.
+///
+/// The text is what a comment-preserving write edits, and the parse is what the
+/// caller mutates; taking both from one read keeps them describing the same
+/// bytes (M3).
+pub fn read_config_with_text(
+    path: &std::path::Path,
+) -> Result<(String, LlmRouterConfig), LlmError> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| LlmError::Config(format!("Failed to read {}: {}", path.display(), e)))?;
+    let config = toml::from_str(&content)
+        .map_err(|e| LlmError::Config(format!("Failed to parse {}: {}", path.display(), e)))?;
+    Ok((content, config))
+}
+
 /// Write a hierarchical LLM config to a TOML file.
+///
+/// An existing file is **edited**, not re-serialised: only the keys that differ
+/// from what is on disk are rewritten, so comments, blank lines, key order and
+/// keys these types do not model survive the write (M3). A file that does not
+/// exist yet — or one this crate cannot parse, where there is no "before" to
+/// diff against — is written from a full render as it always was.
 pub fn write_config(path: &std::path::Path, config: &LlmRouterConfig) -> Result<(), LlmError> {
-    std::fs::write(path, render_config(config)?)
+    let rendered = match read_config_with_text(path) {
+        Ok((existing, before)) => render_config_preserving(&existing, &before, config)?,
+        Err(_) => render_config(config)?,
+    };
+    std::fs::write(path, rendered)
         .map_err(|e| LlmError::Config(format!("Failed to write {}: {}", path.display(), e)))?;
     Ok(())
 }

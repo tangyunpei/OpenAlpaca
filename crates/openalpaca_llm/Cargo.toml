@@ -21,6 +21,9 @@ thiserror.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 toml.workspace = true
+# An `llm.toml` write is an in-place edit, so the owner's comments, key order
+# and unknown keys survive it (M3) — the same writer shape `mcp.toml` uses.
+toml_edit.workspace = true
 
 arc-swap.workspace = true
 aes-gcm.workspace = true

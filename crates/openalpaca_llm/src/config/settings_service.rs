@@ -4,7 +4,8 @@
 //! config persistence, and hot-reload via ArcSwap.
 
 use crate::config::{
-    KeyConfig, LlmRouterConfig, ProviderConfig, WebSearchConfig, read_config, render_config,
+    KeyConfig, LlmRouterConfig, ProviderConfig, WebSearchConfig, read_config,
+    read_config_with_text, render_config_preserving,
 };
 use crate::keys::key_encryption::KeyEncryptor;
 use crate::keys::key_pool::{
@@ -786,10 +787,11 @@ impl LlmSettingsService {
     /// The bytes go out through the injected [`ConfigWriter`] — the daemon's is
     /// the one atomic writer (§1.4, P-11), so `llm.toml` gets the same
     /// tmp → fsync → rotate → rename and five-version backup as `mcp.toml`.
-    /// The document is rendered through `toml::Value`, whose tables are
-    /// ordered, so a rewrite that changes one key changes one key: the
-    /// serialiser's own `HashMap` order is not stable between reads, and an
-    /// owner's file must not reshuffle itself on every toggle.
+    /// The document is **edited in place** rather than re-serialised
+    /// ([`render_config_preserving`]): a write that changes one key changes one
+    /// key, and the comments, blank lines, key order and unmodelled keys the
+    /// owner put in `llm.toml` are still there afterwards (M3). Re-serialising
+    /// erased all of them the first time the GUI toggled a provider.
     ///
     /// Returns the mutated config, which the caller usually needs anyway.
     ///
@@ -810,11 +812,13 @@ impl LlmSettingsService {
         let _lock = crate::keys::key_encryption::acquire_config_write_lock(&self.config_path)
             .map_err(E::from)?;
 
-        let mut config = read_config(&self.config_path)
+        let (existing, mut config) = read_config_with_text(&self.config_path)
             .map_err(|e| E::from(format!("Failed to read config: {e}")))?;
+        let before = config.clone();
         mutate(&mut config)?;
 
-        let rendered = render_config(&config).map_err(|e| E::from(e.to_string()))?;
+        let rendered = render_config_preserving(&existing, &before, &config)
+            .map_err(|e| E::from(e.to_string()))?;
         (self.config_writer)(&self.config_path, &rendered).map_err(E::from)?;
 
         Ok(config)

@@ -141,6 +141,66 @@ impl Harness {
 
 // ── The write ───────────────────────────────────────────────────────────────
 
+/// M3: the provider toggle is an edit, not a re-serialisation. Before the fix
+/// the one switch on Settings → Models cost the owner every comment in
+/// `llm.toml` and re-sorted the keys underneath them.
+#[tokio::test]
+async fn the_toggle_keeps_the_comments_and_the_key_order() {
+    let h = Harness::new();
+    let commented = format!(
+        r#"# my llm.toml — hand written
+[orchestrator]
+model = "{DEFAULT_MODEL}"
+
+# the cloud one, off for now
+[providers.anthropic]
+enabled = true
+strategy = "round_robin"
+
+[[providers.anthropic.keys]]
+id = "key_one"
+secret_encrypted = "{SECRET}"
+priority = "primary"
+
+# a knob from a newer build than this one
+[providers.openai]
+enabled = true
+base_url = "https://api.openai.com/v1"
+strategy = "round_robin"
+retry_budget = 7
+"#
+    );
+    std::fs::write(&h.path, &commented).unwrap();
+
+    h.service.set_provider_enabled("openai", false).await.unwrap();
+
+    let after = h.text();
+    assert!(after.contains("# my llm.toml — hand written"));
+    assert!(after.contains("# the cloud one, off for now"));
+    assert!(after.contains("# a knob from a newer build than this one"));
+    assert!(
+        after.contains("retry_budget = 7"),
+        "a key this crate does not model was deleted: {after}"
+    );
+    assert!(after.contains(SECRET), "the encrypted secret must survive");
+
+    // The bit moved; the block around it did not.
+    let openai = after
+        .split("[providers.openai]")
+        .nth(1)
+        .expect("the openai block survives");
+    let keys: Vec<&str> = openai
+        .lines()
+        .filter_map(|l| l.split_once('=').map(|(k, _)| k.trim()))
+        .collect();
+    assert_eq!(
+        keys,
+        vec!["enabled", "base_url", "strategy", "retry_budget"],
+        "the write reshuffled the block"
+    );
+    assert!(openai.contains("enabled = false"));
+}
+
 #[tokio::test]
 async fn the_write_goes_through_the_injected_atomic_writer() {
     let h = Harness::new();
