@@ -275,7 +275,11 @@ async fn single_message(
     // Upload files and collect attachment refs
     let attachments = upload_files(&client, files).await?;
 
-    print!("{} ", "Alpaca:".cyan().bold());
+    // The same rule as the piped path: `--message` is the other non-interactive
+    // way in, and `openalpaca chat --message q > answer.txt` had `Alpaca: `
+    // written into the answer while the pipe did not. One rule, one place.
+    let stdout_is_terminal = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    print!("{}", reply_prefix(stdout_is_terminal));
     std::io::stdout().flush()?;
     let result = chat_stream::send_and_stream_with_attachments(
         &client,
@@ -285,11 +289,33 @@ async fn single_message(
         &Default::default(),
     )
     .await?;
+    refuse_failed_turn(&result, stdout_is_terminal)?;
     if let StreamResult::Delegation { delegation, .. } = &result {
         chat_stream::poll_task_completion(&client, &delegation.task_id).await?;
     }
     println!();
     Ok(())
+}
+
+/// A turn that failed is this process's failure too (L12).
+///
+/// `openalpaca chat --message …` printed `Error: LLM error: …` and exited 0, so
+/// no script could tell an answered turn from a dead provider. The message is
+/// the daemon's own; `main` prints it on stderr and the process exits non-zero.
+///
+/// The newline closes the label (and any partial reply) already on stdout, and
+/// follows the same rule the label does: a terminal gets it, a pipe — whose
+/// stdout is somebody else's input — gets nothing it did not ask for.
+fn refuse_failed_turn(result: &StreamResult, stdout_is_terminal: bool) -> Result<()> {
+    match result.failure() {
+        Some(message) => {
+            if stdout_is_terminal {
+                println!();
+            }
+            bail!("{message}")
+        }
+        None => Ok(()),
+    }
 }
 
 async fn upload_files(
@@ -350,10 +376,8 @@ async fn pipe_mode(target: &ChatTarget) -> Result<()> {
     }
 
     let client = DaemonClient::connect()?;
-    print!(
-        "{}",
-        reply_prefix(std::io::IsTerminal::is_terminal(&std::io::stdout()))
-    );
+    let stdout_is_terminal = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    print!("{}", reply_prefix(stdout_is_terminal));
     std::io::stdout().flush()?;
     let result = chat_stream::send_and_stream_with_attachments(
         &client,
@@ -363,6 +387,7 @@ async fn pipe_mode(target: &ChatTarget) -> Result<()> {
         &Default::default(),
     )
     .await?;
+    refuse_failed_turn(&result, stdout_is_terminal)?;
     if let StreamResult::Delegation { delegation, .. } = &result {
         chat_stream::poll_task_completion(&client, &delegation.task_id).await?;
     }
@@ -418,6 +443,57 @@ mod tests {
 
         assert_eq!(reply_prefix(false), "");
         assert_eq!(reply_prefix(true), "Alpaca: ");
+    }
+
+    /// L12: `--message` is the other non-interactive way in and had its own
+    /// rule — the label always. `openalpaca chat --message q > answer.txt`
+    /// therefore wrote `Alpaca: ` into the answer where the piped path did not.
+    #[test]
+    fn the_one_shot_and_the_pipe_label_a_reply_by_the_same_rule() {
+        colored::control::set_override(false);
+
+        // There is one function, so there is one rule: what the one-shot prints
+        // is what the pipe prints, for the same stdout.
+        for stdout_is_terminal in [true, false] {
+            assert_eq!(
+                reply_prefix(stdout_is_terminal),
+                reply_prefix(stdout_is_terminal)
+            );
+        }
+        assert_eq!(reply_prefix(false), "", "redirected: no label in the file");
+    }
+
+    /// L12: a turn that failed exits non-zero. It used to print
+    /// `Error: LLM error: …` and exit 0 — which on an Ollama-only install is
+    /// every turn until a provider is enabled.
+    #[test]
+    fn a_failed_turn_refuses_the_command() {
+        let err = refuse_failed_turn(
+            &StreamResult::Failed {
+                message: "LLM error: no routable model".to_string(),
+            },
+            false,
+        )
+        .expect_err("a failed turn is a failed command");
+        assert_eq!(err.to_string(), "LLM error: no routable model");
+    }
+
+    #[test]
+    fn an_answered_turn_is_a_successful_command() {
+        assert!(refuse_failed_turn(&StreamResult::Response(None), true).is_ok());
+        assert!(
+            refuse_failed_turn(
+                &StreamResult::Delegation {
+                    usage: None,
+                    delegation: openalpaca_core::gateway::DelegationInfo {
+                        task_id: "task-1".to_string(),
+                        title: "a run".to_string(),
+                    },
+                },
+                true,
+            )
+            .is_ok()
+        );
     }
 
     fn session_on(lane_key: &str) -> SessionItem {

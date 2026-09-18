@@ -26,11 +26,7 @@ fn test_format_usage_line() {
 
 #[test]
 fn test_process_sse_event_thinking() {
-    let mut state = SseState {
-        usage: None,
-        had_delta: false,
-        delegation: None,
-    };
+    let mut state = SseState::default();
     let result = process_sse_event("event: thinking\ndata: {}", false, &mut state);
     assert!(result.is_ok());
     assert!(state.usage.is_none());
@@ -39,11 +35,7 @@ fn test_process_sse_event_thinking() {
 
 #[test]
 fn test_process_sse_event_delta() {
-    let mut state = SseState {
-        usage: None,
-        had_delta: false,
-        delegation: None,
-    };
+    let mut state = SseState::default();
     let result = process_sse_event(
         "event: delta\ndata: {\"content\":\"hello\"}",
         false,
@@ -57,9 +49,8 @@ fn test_process_sse_event_delta() {
 #[test]
 fn test_process_sse_event_done_with_prior_delta() {
     let mut state = SseState {
-        usage: None,
         had_delta: true,
-        delegation: None,
+        ..SseState::default()
     };
     let result = process_sse_event(
         "event: done\ndata: {\"content\":\"hello\",\"model\":\"gpt-4\",\"tokens_in\":10,\"tokens_out\":20,\"duration_ms\":100}",
@@ -76,11 +67,7 @@ fn test_process_sse_event_done_with_prior_delta() {
 
 #[test]
 fn test_process_sse_event_done_no_prior_delta() {
-    let mut state = SseState {
-        usage: None,
-        had_delta: false,
-        delegation: None,
-    };
+    let mut state = SseState::default();
     let result = process_sse_event(
         "event: done\ndata: {\"content\":\"response text\",\"model\":\"gpt-4\",\"tokens_in\":5,\"tokens_out\":10,\"duration_ms\":50}",
         false,
@@ -93,11 +80,7 @@ fn test_process_sse_event_done_no_prior_delta() {
 
 #[test]
 fn test_process_sse_event_error() {
-    let mut state = SseState {
-        usage: None,
-        had_delta: false,
-        delegation: None,
-    };
+    let mut state = SseState::default();
     let result = process_sse_event(
         "event: error\ndata: {\"message\":\"something failed\"}",
         false,
@@ -105,15 +88,62 @@ fn test_process_sse_event_error() {
     );
     assert!(result.is_ok());
     assert!(state.usage.is_none());
+    assert_eq!(state.failure.as_deref(), Some("something failed"));
+}
+
+/// L12: the turn failed, and the process has to say so with more than ink.
+/// `openalpaca chat --message …` printed `Error: LLM error: …` and exited 0 —
+/// on an Ollama-only install that is every turn until a provider is enabled,
+/// and no script could tell it from an answer.
+#[test]
+fn a_failed_turn_is_carried_out_of_the_stream_as_a_failure() {
+    let mut state = SseState::default();
+    process_sse_event(
+        "event: error\ndata: {\"message\":\"LLM error: no routable model\"}",
+        false,
+        &mut state,
+    )
+    .expect("an error event is parsed, not refused");
+
+    let result = StreamResult::Failed {
+        message: state.failure.clone().expect("the event recorded a failure"),
+    };
+    assert_eq!(result.failure(), Some("LLM error: no routable model"));
+    assert!(result.usage().is_none());
+}
+
+/// An `error` event the CLI cannot parse is still a failed turn; the one thing
+/// it must not become is a silent success.
+#[test]
+fn an_unreadable_error_event_still_fails_the_turn() {
+    let mut state = SseState::default();
+    process_sse_event("event: error\ndata: not-json", false, &mut state).expect("no panic");
+    assert_eq!(state.failure.as_deref(), Some("Unknown error"));
+
+    let mut state = SseState::default();
+    process_sse_event("event: error\ndata: {\"detail\":\"x\"}", false, &mut state)
+        .expect("no panic");
+    assert_eq!(state.failure.as_deref(), Some("Unknown error"));
+}
+
+/// An answered turn carries no failure — the flag has to discriminate, not
+/// just exist.
+#[test]
+fn an_answered_turn_carries_no_failure() {
+    let mut state = SseState::default();
+    process_sse_event(
+        "event: done\ndata: {\"content\":\"hi\",\"model\":\"m\",\"tokens_in\":1,\"tokens_out\":1,\"duration_ms\":1}",
+        false,
+        &mut state,
+    )
+    .expect("done parses");
+    assert!(state.failure.is_none());
+    assert!(StreamResult::Response(state.usage).failure().is_none());
 }
 
 #[test]
 fn test_process_sse_event_unknown() {
-    let mut state = SseState {
-        usage: None,
-        had_delta: false,
-        delegation: None,
-    };
+    let mut state = SseState::default();
     let result = process_sse_event("event: unknown\ndata: {}", false, &mut state);
     assert!(result.is_ok());
     assert!(state.usage.is_none());
@@ -129,9 +159,8 @@ fn test_find_event_boundary() {
 #[test]
 fn test_process_sse_event_done_with_delegation() {
     let mut state = SseState {
-        usage: None,
         had_delta: true,
-        delegation: None,
+        ..SseState::default()
     };
     let result = process_sse_event(
         "event: done\ndata: {\"content\":\"I've kicked off a task\",\"model\":\"router\",\"tokens_in\":0,\"tokens_out\":0,\"duration_ms\":50,\"delegation\":{\"task_id\":\"task-123\",\"title\":\"Research quantum computing\"}}",
@@ -147,9 +176,8 @@ fn test_process_sse_event_done_with_delegation() {
 #[test]
 fn test_process_sse_event_done_without_delegation() {
     let mut state = SseState {
-        usage: None,
         had_delta: true,
-        delegation: None,
+        ..SseState::default()
     };
     let result = process_sse_event(
         "event: done\ndata: {\"content\":\"a normal reply\",\"model\":\"gpt-4\",\"tokens_in\":10,\"tokens_out\":20,\"duration_ms\":100}",
@@ -163,9 +191,8 @@ fn test_process_sse_event_done_without_delegation() {
 #[test]
 fn test_process_sse_event_done_with_malformed_delegation() {
     let mut state = SseState {
-        usage: None,
         had_delta: true,
-        delegation: None,
+        ..SseState::default()
     };
     // Missing required "title" field — must be ignored, not crash
     let result = process_sse_event(

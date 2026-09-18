@@ -39,6 +39,15 @@ pub enum StreamResult {
         usage: Option<UsageInfo>,
         delegation: DelegationInfo,
     },
+    /// The turn did not produce an answer: the daemon sent an `error` event, or
+    /// the stream broke before one arrived (L12).
+    ///
+    /// Carried rather than printed here, because the two callers want opposite
+    /// things from it. A one-shot (`--message`, or a pipe) must **exit
+    /// non-zero** — a script that cannot tell a failed turn from an answered
+    /// one is the bug this closes — while the REPL prints it and keeps the
+    /// prompt open. Whoever handles it says so; nothing is swallowed.
+    Failed { message: String },
 }
 
 impl StreamResult {
@@ -46,6 +55,15 @@ impl StreamResult {
         match self {
             StreamResult::Response(u) => u.as_ref(),
             StreamResult::Delegation { usage, .. } => usage.as_ref(),
+            StreamResult::Failed { .. } => None,
+        }
+    }
+
+    /// The failure this turn ended in, if it ended in one.
+    pub fn failure(&self) -> Option<&str> {
+        match self {
+            StreamResult::Failed { message } => Some(message),
+            _ => None,
         }
     }
 }
@@ -191,12 +209,16 @@ pub async fn send_and_stream_with_attachments(
 }
 
 /// Internal state accumulated during SSE event processing.
+#[derive(Default)]
 struct SseState {
     usage: Option<UsageInfo>,
     had_delta: bool,
     /// Structured delegation metadata from the done event, if the server
     /// delegated the message to a background task.
     delegation: Option<DelegationInfo>,
+    /// The `error` event's message, when one arrived — the turn failed and the
+    /// caller decides what that costs (L12).
+    failure: Option<String>,
 }
 
 async fn stream_sse_events(
@@ -206,11 +228,7 @@ async fn stream_sse_events(
 ) -> Result<StreamResult> {
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
-    let mut state = SseState {
-        usage: None,
-        had_delta: false,
-        delegation: None,
-    };
+    let mut state = SseState::default();
 
     loop {
         tokio::select! {
@@ -229,8 +247,11 @@ async fn stream_sse_events(
                             }
                         }
                     }
+                    // The connection broke mid-turn: no answer arrived and none
+                    // is coming. Recorded as a failure rather than printed here
+                    // so it reaches the exit code too (L12).
                     Some(Err(e)) => {
-                        eprintln!("\n{}", format!("Stream error: {}", e).red());
+                        state.failure.get_or_insert_with(|| format!("stream error: {e}"));
                         break;
                     }
                     None => break,
@@ -241,6 +262,12 @@ async fn stream_sse_events(
                 break;
             }
         }
+    }
+
+    // A failure outranks both: a turn that ended in an `error` event delegated
+    // nothing and answered nothing, whatever else was on the wire.
+    if let Some(message) = state.failure {
+        return Ok(StreamResult::Failed { message });
     }
 
     if let Some(delegation) = state.delegation {
@@ -391,12 +418,22 @@ fn process_sse_event(event_text: &str, verbose: bool, state: &mut SseState) -> R
                 }
             }
         }
+        // Recorded, not printed: this went to **stdout** before, which put the
+        // daemon's error text into whatever a pipe was feeding, and the process
+        // still exited 0. The caller prints it — on stderr — and a one-shot
+        // exits non-zero (L12). An event whose data will not parse is still a
+        // failed turn, so it is never dropped on the floor.
         "error" => {
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&data) {
-                let msg = parsed["message"].as_str().unwrap_or("Unknown error");
-                println!();
-                println!("{} {}", "Error:".red(), msg);
-            }
+            let msg = serde_json::from_str::<serde_json::Value>(&data)
+                .ok()
+                .and_then(|parsed| {
+                    parsed["message"]
+                        .as_str()
+                        .map(|m| m.to_string())
+                        .filter(|m| !m.is_empty())
+                })
+                .unwrap_or_else(|| "Unknown error".to_string());
+            state.failure.get_or_insert(msg);
         }
         _ => {}
     }

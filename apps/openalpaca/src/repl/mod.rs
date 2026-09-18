@@ -212,6 +212,12 @@ impl ReplSession {
                 if let Some(usage) = result.usage() {
                     self.context.session_usage.add(usage);
                 }
+                // A failed turn is said out loud and the prompt stays open —
+                // the REPL's half of L12, where the one-shot paths exit
+                // non-zero instead. On stderr, like every other error here.
+                if let Some(message) = result.failure() {
+                    eprintln!("\n{} {}", "Error:".red(), message);
+                }
                 // If delegation, poll for task completion
                 if let StreamResult::Delegation { delegation, .. } = &result
                     && let Err(e) =
