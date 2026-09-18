@@ -12,11 +12,13 @@ use super::*;
 use openalpaca_llm::ProviderType;
 use tempfile::TempDir;
 
-use crate::test_util::HomeStoreGuard;
+use crate::test_util::{HomeStoreGuard, MockOllama};
 
 /// Ollama is on and owns a `[models]` row; the default model is Anthropic's,
 /// so turning Ollama off is allowed. No provider carries a key, so nothing
-/// here can reach a provider's API.
+/// here can reach a provider's API — and Ollama's `base_url` is a loopback
+/// port nothing can bind, so a discovery pass reaches no real Ollama on the
+/// developer's machine.
 const CONFIG: &str = r#"[orchestrator]
 model = "claude-haiku-4-5-20251001"
 
@@ -25,7 +27,7 @@ enabled = true
 
 [providers.ollama]
 enabled = true
-base_url = "http://localhost:11434/v1"
+base_url = "http://127.0.0.1:1/v1"
 
 [models."llama3.1"]
 provider = "ollama"
@@ -46,11 +48,16 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
+        Self::with_config(CONFIG)
+    }
+
+    fn with_config(seed: impl Into<String>) -> Self {
+        let seed = seed.into();
         let home = TempDir::new().expect("home");
         let env = HomeStoreGuard::set_with_master_key(home.path());
         let dir = TempDir::new().expect("config");
         let path = dir.path().join("llm.toml");
-        std::fs::write(&path, CONFIG).expect("seed llm.toml");
+        std::fs::write(&path, &seed).expect("seed llm.toml");
 
         let router = Arc::new(openalpaca_llm::build_router(&path).expect("router"));
         let secret_store: Arc<dyn openalpaca_llm::SecretStore> =
@@ -88,10 +95,33 @@ impl Harness {
         )
     }
 
+    /// The whole watcher event, L13's registration included — what the
+    /// daemon really runs for one `llm.toml` change.
+    async fn reload(&self) -> bool {
+        llm_config_watcher_reload(
+            &self.hashes,
+            &self.router,
+            Some(&self.service),
+            &*self.secret_store,
+            &self.web_search,
+            &self.path,
+        )
+        .await
+    }
+
     fn ollama_models(&self) -> Option<ProviderType> {
         self.router.model_registry().resolve_provider("llama3.1")
     }
 }
+
+/// Anthropic only: Ollama is not in the file at all, so the router boots
+/// without it — the shape L13 is about.
+const NO_OLLAMA: &str = r#"[orchestrator]
+model = "claude-haiku-4-5-20251001"
+
+[providers.anthropic]
+enabled = true
+"#;
 
 #[tokio::test]
 async fn a_toggles_own_write_does_not_put_the_disabled_providers_models_back() {
@@ -189,5 +219,62 @@ async fn a_hand_edit_still_reloads() {
     std::fs::write(&h.path, &edited).expect("hand edit");
 
     assert!(h.tick(), "a hand edit is not the daemon's write");
+    assert_eq!(h.web_search.load().timeout_secs, 42);
+}
+
+/// **L13.** Hand-editing `llm.toml` to enable a provider the daemon booted
+/// without used to do nothing until a restart: the tick reloads runtime
+/// config, models, the default and the key pools, and every one of those
+/// needs the provider to already be in the router. Now the edit registers it
+/// live — the same registration the toggle route performs, discovery
+/// included, so both ways of saying "on" mean the same thing.
+#[tokio::test]
+async fn a_hand_edit_that_enables_a_provider_registers_it_live() {
+    let ollama = MockOllama::start(&["qwen3:8b"], 32_768).await;
+    let h = Harness::with_config(NO_OLLAMA);
+    assert!(
+        !h.router.has_provider(&ProviderType::Ollama),
+        "the daemon booted without it"
+    );
+
+    std::fs::write(
+        &h.path,
+        format!(
+            "{NO_OLLAMA}\n[providers.ollama]\nenabled = true\nbase_url = \"{}\"\n",
+            ollama.base_url
+        ),
+    )
+    .expect("hand edit");
+
+    assert!(h.reload().await, "a hand edit is not the daemon's write");
+
+    assert!(
+        h.router.has_provider(&ProviderType::Ollama),
+        "the provider the file now enables is loaded"
+    );
+    assert_eq!(
+        h.router.model_registry().resolve_provider("qwen3:8b"),
+        Some(ProviderType::Ollama),
+        "and its installed models were discovered, not waited for"
+    );
+}
+
+/// A provider that is already loaded is left exactly as it is: the reload must
+/// not tear down and rebuild a live provider on every unrelated edit.
+#[tokio::test]
+async fn an_edit_does_not_re_register_a_provider_that_is_already_loaded() {
+    let h = Harness::new();
+    assert!(h.router.has_provider(&ProviderType::Ollama));
+
+    let edited = format!("{CONFIG}\n[web_search]\ntimeout_secs = 42\n");
+    std::fs::write(&h.path, &edited).expect("hand edit");
+
+    assert!(h.reload().await);
+    assert!(h.router.has_provider(&ProviderType::Ollama));
+    assert_eq!(
+        h.ollama_models(),
+        Some(ProviderType::Ollama),
+        "its declared [models] row is untouched"
+    );
     assert_eq!(h.web_search.load().timeout_secs, 42);
 }

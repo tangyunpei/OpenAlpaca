@@ -90,6 +90,11 @@ pub struct FileWatcherContext {
     pub orchestrator: Arc<Orchestrator>,
     pub agent_registry: Arc<openalpaca_core::agent::registry::AgentRegistry>,
     pub llm_router: Option<Arc<openalpaca_llm::LlmRouter>>,
+    /// The settings service, for the one thing the router alone cannot do:
+    /// build and register a provider the daemon booted without, which is what
+    /// a hand edit enabling one asks for (L13). Same registration the toggle
+    /// route performs.
+    pub llm_settings_service: Option<Arc<openalpaca_llm::LlmSettingsService>>,
     pub secret_store: Arc<dyn openalpaca_llm::SecretStore>,
     pub skill_catalog: Arc<openalpaca_core::orchestrator::skill_catalog::SkillCatalog>,
     /// The ENABLE axis's read side for the cron skip: a scheduled skill whose
@@ -181,7 +186,7 @@ pub fn spawn_file_watcher(
 
                 // LLM config (llm.toml) hot-reload
                 if bootstrap::is_same_file_path(&changed_path, &ctx.llm_config_path) {
-                    handle_llm_config_change(&ctx);
+                    handle_llm_config_change(&ctx).await;
                 }
 
                 // Daemon config (daemon.toml) hot-reload
@@ -375,17 +380,55 @@ async fn handle_bootstrap_change(ctx: &FileWatcherContext, bp: &Path) {
     }
 }
 
-fn handle_llm_config_change(ctx: &FileWatcherContext) {
+async fn handle_llm_config_change(ctx: &FileWatcherContext) {
     let Some(ref router) = ctx.llm_router else {
         return;
     };
-    llm_config_watcher_tick(
+    llm_config_watcher_reload(
         &ctx.llm_hashes,
         router,
+        ctx.llm_settings_service.as_deref(),
         &*ctx.secret_store,
         &ctx.web_search_config,
         &ctx.llm_config_path,
-    );
+    )
+    .await;
+}
+
+/// A whole `llm.toml` watcher event: the reload, then **L13** — loading any
+/// provider the file now enables that the router does not hold.
+///
+/// [`llm_config_watcher_tick`] reloads runtime config, models, the default
+/// model and the key pools, every one of which needs the provider to already
+/// be *in* the router. So a hand edit flipping `enabled = false` to `true` for
+/// a provider the daemon booted without changed nothing at all until a
+/// restart — `reload_keys` has nowhere to put keys for a provider that was
+/// never registered. Registration runs **after** the tick, never before: the
+/// tick's step 1 is what puts this edit's timeouts and provider defaults into
+/// the runtime config the registration then reads.
+///
+/// Split from [`handle_llm_config_change`] for the same reason the tick was:
+/// the behaviour worth testing needs a service, a ring and a path, not a whole
+/// `FileWatcherContext`.
+pub(crate) async fn llm_config_watcher_reload(
+    hashes: &ConfigHashes,
+    router: &openalpaca_llm::LlmRouter,
+    settings_service: Option<&openalpaca_llm::LlmSettingsService>,
+    secret_store: &dyn openalpaca_llm::SecretStore,
+    web_search_config: &ArcSwap<openalpaca_llm::WebSearchConfig>,
+    path: &Path,
+) -> bool {
+    let reloaded =
+        llm_config_watcher_tick(hashes, router, secret_store, web_search_config, path);
+    if !reloaded {
+        return false;
+    }
+    if let Some(service) = settings_service
+        && let Ok(config) = openalpaca_llm::read_config(path)
+    {
+        service.register_enabled_providers(&config).await;
+    }
+    true
 }
 
 /// One `llm.toml` watcher event: swallow the daemon's own write, otherwise

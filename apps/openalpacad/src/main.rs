@@ -411,6 +411,9 @@ async fn async_main(
     let confirmation_broker = Arc::new(openalpaca_core::security::confirmation::ConfirmationBroker::new());
 
     let llm_router_for_reload = svcs.llm_router.clone();
+    // L13: the watcher needs the settings service, not just the router, to
+    // register a provider a hand edit turned on.
+    let llm_settings_for_reload = svcs.llm_settings_service.clone();
     let llm_router_for_shutdown = svcs.llm_router.clone();
     // The session log's writers buffer: shutdown has to drain them (§5.5).
     let session_log_for_shutdown = svcs.shared_context.session_log().cloned();
@@ -508,6 +511,7 @@ async fn async_main(
             orchestrator: orchestrator.clone(),
             agent_registry: svcs.shared_context.agent_registry.clone(),
             llm_router: llm_router_for_reload,
+            llm_settings_service: llm_settings_for_reload,
             secret_store: svcs.secret_store,
             skill_catalog: svcs.skill_catalog,
             tool_registry: tool_registry_for_watcher,

@@ -931,6 +931,83 @@ impl LlmSettingsService {
         Ok(outcome)
     }
 
+    /// Load every provider `config` enables that the router does not hold yet
+    /// (L13), and report what each one did.
+    ///
+    /// The toggle route is one way a provider is turned on; a hand edit to
+    /// `llm.toml` is the other, and it used to reach only
+    /// [`LlmRouter::reload_keys`] — which has nowhere to put keys for a
+    /// provider that was never registered. Adding `[providers.ollama] enabled
+    /// = true` to a file the daemon booted without therefore did nothing at
+    /// all until a restart. This is the same registration the toggle performs,
+    /// discovery included, so the two ways of saying "on" mean the same thing.
+    ///
+    /// Nothing is unloaded here: a disable arrives through the toggle, and the
+    /// watcher's own reload already keeps a disabled provider's models out of
+    /// the registry (R58b).
+    pub async fn register_enabled_providers(
+        &self,
+        config: &LlmRouterConfig,
+    ) -> Vec<ProviderEnabledOutcome> {
+        let mut outcomes = Vec::new();
+        let Some(providers) = config.providers.as_ref() else {
+            return outcomes;
+        };
+
+        for (name, provider_config) in providers {
+            if provider_config.enabled != Some(true) {
+                continue;
+            }
+            let Some(provider_type) =
+                parse_provider_type(name).filter(|pt| ProviderType::all().contains(pt))
+            else {
+                continue;
+            };
+            if self.router.has_provider(&provider_type) {
+                continue;
+            }
+
+            let mut outcome = ProviderEnabledOutcome {
+                id: name.clone(),
+                enabled: true,
+                loaded: false,
+                removed_models: Vec::new(),
+                restored_models: self
+                    .router
+                    .model_registry()
+                    .restore_defaults_for_provider(&provider_type),
+                discovered_models: 0,
+                discovery_error: None,
+                warning: None,
+            };
+
+            match self.register_provider_from_config(config, provider_type.clone()) {
+                Ok(()) => {
+                    let discovery = self.router.refresh_models_for(&provider_type).await;
+                    outcome.discovered_models = discovery.models;
+                    outcome.discovery_error = discovery.error;
+                    outcome.loaded = self.router.has_provider(&provider_type);
+                    tracing::info!(
+                        provider = %name,
+                        models = outcome.discovered_models,
+                        "Provider enabled by a hand edit — registered live"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        provider = %name,
+                        error = %e,
+                        "Provider enabled by a hand edit but not loaded"
+                    );
+                    outcome.warning = Some(e);
+                }
+            }
+            outcomes.push(outcome);
+        }
+
+        outcomes
+    }
+
     /// The default model, and the provider that serves it as far as anything
     /// can say.
     ///
