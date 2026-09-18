@@ -128,7 +128,11 @@ pub(super) async fn extract_user_traits_background(
         tool_choice: None,
         tools_token_estimate: None,
         enable_caching: false,
-        thinking: None,
+        // M2: 256 tokens is a JSON object's worth of budget, and a local
+        // thinking model spends all of it reasoning before it writes a
+        // character — the answer came back empty and was reported as
+        // malformed JSON. An internal utility call wants no reasoning.
+        thinking: Some(openalpaca_llm::ThinkingConfig::Disabled),
         context_management: None,
         fallback_models: Vec::new(),
         ephemeral_system_notice: None,
@@ -572,4 +576,98 @@ async fn apply_profile_patches(
         "Extraction: updated USER.md sections: {:?}",
         modified_sections
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::{RecordingProvider, router_recording};
+    use openalpaca_llm::ThinkingConfig;
+
+    /// **M2.** The user-trait extractor asks the model for 256 tokens. On a
+    /// thinking model that whole budget went into reasoning and the answer
+    /// came back empty — reported, wrongly, as "malformed JSON". The call now
+    /// says it wants no reasoning.
+    #[tokio::test]
+    async fn the_user_trait_extractor_asks_for_no_reasoning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).expect("db");
+        let provider = RecordingProvider::new(r#"{"extractions": []}"#);
+        let router = router_recording(provider.clone());
+
+        let mut cfg = DaemonConfig::default();
+        // One turn is enough for this test; the frequency gate is not what is
+        // under test.
+        cfg.orchestrator.costs.extract_every_n_turns = 1;
+
+        extract_user_traits_background(
+            db,
+            router,
+            Arc::new(ArcSwap::from_pointee(cfg)),
+            Arc::new(Mutex::new(HashMap::new())),
+            None,
+            Arc::new(RwLock::new(None)),
+            Arc::new(RwLock::new(None)),
+            Arc::new(AtomicU64::new(0)),
+            crate::bus::EventBus::new(16),
+            "owner:cli".to_string(),
+            "I moved to Tokyo last week and I prefer concise answers.".to_string(),
+            "Noted.".to_string(),
+            "owner".to_string(),
+        )
+        .await;
+
+        let request = provider.first_request();
+        assert!(
+            matches!(request.thinking, Some(ThinkingConfig::Disabled)),
+            "the extractor must ask for no reasoning, got {:?}",
+            request.thinking
+        );
+        assert_eq!(request.max_tokens, Some(256), "the small budget is intact");
+    }
+
+    /// **M2, second half.** When the budget really is spent before an answer
+    /// is written, the router says so (`LlmError::EmptyCompletion`) and the
+    /// extractor reports *that* — it no longer runs the empty string through
+    /// `serde_json` and files "malformed JSON … EOF at column 0" against the
+    /// model.
+    #[tokio::test]
+    async fn an_answer_the_reasoning_ate_is_not_filed_as_malformed_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).expect("db");
+        let provider = RecordingProvider::spent_budget();
+        let router = router_recording(provider.clone());
+
+        let mut cfg = DaemonConfig::default();
+        cfg.orchestrator.costs.extract_every_n_turns = 1;
+
+        extract_user_traits_background(
+            db.clone(),
+            router,
+            Arc::new(ArcSwap::from_pointee(cfg)),
+            Arc::new(Mutex::new(HashMap::new())),
+            None,
+            Arc::new(RwLock::new(None)),
+            Arc::new(RwLock::new(None)),
+            Arc::new(AtomicU64::new(0)),
+            crate::bus::EventBus::new(16),
+            "owner:cli".to_string(),
+            "I moved to Tokyo last week and I prefer concise answers.".to_string(),
+            "Noted.".to_string(),
+            "owner".to_string(),
+        )
+        .await;
+
+        let logs = LlmUsageRepository::new(&db)
+            .get_agent_usage("orchestrator_user_extract", 10)
+            .expect("read the call log");
+        assert!(
+            logs.iter().all(|l| l
+                .error_message
+                .as_deref()
+                .is_none_or(|m| !m.contains("JSON parse"))),
+            "an empty completion must not be filed as malformed JSON: {:?}",
+            logs.iter().map(|l| l.error_message.clone()).collect::<Vec<_>>()
+        );
+    }
 }

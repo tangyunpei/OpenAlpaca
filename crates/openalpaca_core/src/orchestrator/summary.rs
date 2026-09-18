@@ -91,7 +91,8 @@ pub(super) async fn update_summary_background(
         tool_choice: None,
         tools_token_estimate: None,
         enable_caching: false,
-        thinking: None,
+        // M2: an internal utility call, capped at 1 536 tokens — no reasoning.
+        thinking: Some(openalpaca_llm::ThinkingConfig::Disabled),
         context_management: None,
         fallback_models: Vec::new(),
         ephemeral_system_notice: None,
@@ -235,5 +236,51 @@ pub(super) async fn update_summary_background(
             }
         }
         Err(e) => tracing::warn!("Summary update: save failed: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::{RecordingProvider, router_recording};
+    use openalpaca_llm::ThinkingConfig;
+
+    /// **M2.** The incremental conversation summarizer is an internal utility
+    /// call on a 1 536-token budget, and asks for no reasoning.
+    #[tokio::test]
+    async fn the_summarizer_asks_for_no_reasoning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).expect("db");
+        let provider = RecordingProvider::new(r#"{"summary": "They talked."}"#);
+        let router = router_recording(provider.clone());
+
+        let mut cfg = DaemonConfig::default();
+        cfg.orchestrator.memory.summary_min_new_older_messages = 1;
+
+        let ctx = ConversationContext {
+            summary: None,
+            recent_messages: Vec::new(),
+            older_window: vec![(1, "user".to_string(), "where do files go?".to_string())],
+            summary_version: 0,
+            last_summarized_id: 0,
+            old_summary_text: String::new(),
+        };
+
+        update_summary_background(
+            db,
+            router,
+            Arc::new(ArcSwap::from_pointee(cfg)),
+            "owner:cli".to_string(),
+            ctx,
+        )
+        .await;
+
+        let request = provider.first_request();
+        assert!(
+            matches!(request.thinking, Some(ThinkingConfig::Disabled)),
+            "the summarizer must ask for no reasoning, got {:?}",
+            request.thinking
+        );
+        assert_eq!(request.max_tokens, Some(1536));
     }
 }

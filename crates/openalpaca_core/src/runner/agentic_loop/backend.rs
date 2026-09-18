@@ -252,7 +252,10 @@ impl<'a> crate::context_budget::compaction::MemoryExtractor for LlmBackend<'a> {
             tool_choice: None,
             tools_token_estimate: None,
             enable_caching: false,
-            thinking: None,
+            // M2: compaction's extraction is an internal utility call on a
+            // capped budget — reasoning would eat it before the memories are
+            // written. Ignored by a provider that has no such control.
+            thinking: Some(ThinkingConfig::Disabled),
             context_management: None,
             fallback_models: Vec::new(),
             ephemeral_system_notice: None,
@@ -336,7 +339,8 @@ impl<'a> crate::context_budget::compaction::Summarizer for LlmBackend<'a> {
             tool_choice: None,
             tools_token_estimate: None,
             enable_caching: false,
-            thinking: None,
+            // M2: as above — the summary is a utility call, not a turn.
+            thinking: Some(ThinkingConfig::Disabled),
             context_management: None,
             fallback_models: Vec::new(),
             ephemeral_system_notice: None,
@@ -344,5 +348,68 @@ impl<'a> crate::context_budget::compaction::Summarizer for LlmBackend<'a> {
 
         let response = router.complete(request).await.map_err(|e| e.to_string())?;
         Ok(response.content)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context_budget::compaction::{MemoryExtractor, Summarizer};
+    use crate::test_util::{RecordingProvider, router_recording};
+
+    /// **M2.** Compaction's memory extraction is an internal utility call on a
+    /// 1 024-token budget: it asks for no reasoning, so a local thinking model
+    /// spends the budget on the answer instead of on thoughts nobody reads.
+    #[tokio::test]
+    async fn compaction_extraction_asks_for_no_reasoning() {
+        let provider = RecordingProvider::new("fact: the store root is ~/.openalpaca");
+        let router = router_recording(provider.clone());
+        let backend = LlmBackend::Router {
+            router: &router,
+            context: RequestContext::default(),
+            compaction_model: None,
+            fallback_models: Vec::new(),
+        };
+
+        let memories = backend
+            .extract(&[ChatMessage::user("where do files go?")])
+            .await
+            .expect("extraction");
+        assert_eq!(memories.len(), 1, "the canned reply parsed");
+
+        let request = provider.first_request();
+        assert!(
+            matches!(request.thinking, Some(ThinkingConfig::Disabled)),
+            "the utility call must ask for no reasoning, got {:?}",
+            request.thinking
+        );
+        assert_eq!(request.max_tokens, Some(1024), "the small budget is intact");
+    }
+
+    /// **M2.** The same for compaction's summarizer (2 048 tokens).
+    #[tokio::test]
+    async fn compaction_summary_asks_for_no_reasoning() {
+        let provider = RecordingProvider::new("They discussed the store layout.");
+        let router = router_recording(provider.clone());
+        let backend = LlmBackend::Router {
+            router: &router,
+            context: RequestContext::default(),
+            compaction_model: None,
+            fallback_models: Vec::new(),
+        };
+
+        let summary = backend
+            .summarize(&[ChatMessage::user("where do files go?")])
+            .await
+            .expect("summary");
+        assert!(!summary.is_empty());
+
+        let request = provider.first_request();
+        assert!(
+            matches!(request.thinking, Some(ThinkingConfig::Disabled)),
+            "the utility call must ask for no reasoning, got {:?}",
+            request.thinking
+        );
+        assert_eq!(request.max_tokens, Some(2048));
     }
 }
