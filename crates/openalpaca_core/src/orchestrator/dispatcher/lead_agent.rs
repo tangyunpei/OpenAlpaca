@@ -32,6 +32,25 @@ pub(crate) enum RowWrite {
     Relaunch,
 }
 
+/// Why no lead agent could be spawned (L9).
+///
+/// Two very different facts wore one sentence. "All agents are busy" is a
+/// capacity problem that clears on its own; an install with **no agent
+/// templates at all** — which is what a packaged daemon had before the daemon
+/// started seeding them — never clears, and the owner reading "busy" has no
+/// reason to go looking at a directory. The registry knows which it is, so it
+/// is asked.
+pub(crate) fn no_lead_agent_message(no_templates: bool) -> String {
+    if no_templates {
+        "No agent templates are installed, so nothing can act as Lead Agent. \
+         Put one carrying the `orchestration` capability in the daemon's \
+         `config/agents` directory — a first boot seeds the shipped set there."
+            .to_string()
+    } else {
+        "No agents available to act as Lead Agent. All agents are busy.".to_string()
+    }
+}
+
 impl TaskDispatcher {
     /// Dispatch a task using the Lead Agent orchestration pattern.
     /// Spawns a lead agent instance from the "lead_agent" template (singleton),
@@ -229,7 +248,12 @@ impl TaskDispatcher {
                 }
             }
             spawned.ok_or_else(|| {
-                "No agents available to act as Lead Agent. All agents are busy.".to_string()
+                no_lead_agent_message(
+                    self.shared_context
+                        .agent_registry
+                        .list_templates()
+                        .is_empty(),
+                )
             })?
         };
 

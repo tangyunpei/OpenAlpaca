@@ -385,3 +385,96 @@ fn an_interrupted_run_is_announced_on_its_session() {
     drop(db);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+// ── L9: first-boot content ──────────────────────────────────────────────
+
+/// A packaged daemon's config directory holds only what it seeds. Before L9
+/// that was three files, and `GET /v1/agents` answered `[]` on a live install:
+/// no template could act as Lead Agent, and no skill could be invoked.
+#[test]
+fn a_first_boot_seeds_the_agents_skills_and_tools_it_carries() {
+    let dir = make_temp_dir("openalpaca-seed-content");
+
+    seed_default_configs(&dir);
+
+    assert!(dir.join("agents").join("lead_agent.md").exists());
+    let lead = std::fs::read_to_string(dir.join("agents").join("lead_agent.md"))
+        .expect("read the seeded lead template");
+    assert!(
+        lead.contains("orchestration"),
+        "the seeded lead template must carry the capability the dispatcher looks for"
+    );
+    assert_eq!(
+        std::fs::read_dir(dir.join("agents")).unwrap().count(),
+        9,
+        "all nine shipped templates land"
+    );
+
+    assert!(dir.join("skills").join("code-review").join("SKILL.md").exists());
+    let script = dir
+        .join("skills")
+        .join("create-skill")
+        .join("scripts")
+        .join("scaffold.sh");
+    assert!(script.exists(), "a skill's nested helper scripts land too");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&script).unwrap().permissions().mode();
+        assert_eq!(mode & 0o111, 0o111, "a script the skill runs is executable");
+    }
+
+    assert!(dir.join("tools").join("example.toml").exists());
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The daemon fills a gap; it does not restore a default. A directory the
+/// owner has curated is theirs — including one they emptied.
+#[test]
+fn seeding_never_touches_content_the_owner_already_has() {
+    let dir = make_temp_dir("openalpaca-seed-content-existing");
+    std::fs::create_dir_all(dir.join("agents")).unwrap();
+    std::fs::write(dir.join("agents").join("lead_agent.md"), "mine").unwrap();
+    // Curated down to nothing: still the owner's directory.
+    std::fs::create_dir_all(dir.join("skills")).unwrap();
+
+    seed_default_configs(&dir);
+
+    assert_eq!(
+        std::fs::read_to_string(dir.join("agents").join("lead_agent.md")).unwrap(),
+        "mine",
+        "an existing template is never overwritten"
+    );
+    assert_eq!(
+        std::fs::read_dir(dir.join("agents")).unwrap().count(),
+        1,
+        "and the other eight are not added beside it"
+    );
+    assert_eq!(
+        std::fs::read_dir(dir.join("skills")).unwrap().count(),
+        0,
+        "an emptied directory stays empty"
+    );
+    // …while the directory that really is absent is still filled.
+    assert!(dir.join("tools").join("example.toml").exists());
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Seeding is idempotent: a second boot writes nothing and changes nothing.
+#[test]
+fn a_second_boot_seeds_nothing_again() {
+    let dir = make_temp_dir("openalpaca-seed-content-twice");
+    seed_default_configs(&dir);
+    std::fs::write(dir.join("agents").join("lead_agent.md"), "edited by hand").unwrap();
+
+    seed_default_configs(&dir);
+
+    assert_eq!(
+        std::fs::read_to_string(dir.join("agents").join("lead_agent.md")).unwrap(),
+        "edited by hand"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}

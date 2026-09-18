@@ -1,6 +1,7 @@
 //! Bootstrap helpers: config resolution, persona loading, and data migration.
 
 mod config;
+mod content;
 mod interrupted;
 mod migration;
 mod persona;

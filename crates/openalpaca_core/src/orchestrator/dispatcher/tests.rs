@@ -243,9 +243,11 @@ fn test_dispatch_lead_agent_fallback_to_any_idle_agent() {
     );
 }
 
+/// L9. An install with no agent templates at all is the shape a packaged
+/// daemon really had, and it never clears on its own — so it must not be
+/// reported as the one thing that does.
 #[test]
-fn test_dispatch_lead_agent_fails_no_agents() {
-    // When no agents are available at all, should fail
+fn test_dispatch_lead_agent_says_no_templates_are_installed() {
     let dispatcher = setup(vec![]);
 
     let result = dispatcher.dispatch_lead_agent(
@@ -258,8 +260,51 @@ fn test_dispatch_lead_agent_fails_no_agents() {
         None,
     );
 
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("No agents available"));
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("No agent templates are installed") && err.contains("config/agents"),
+        "the message must name the cause and where the fix goes: {err}"
+    );
+    assert!(
+        !err.contains("busy"),
+        "nothing is busy — there is nothing at all: {err}"
+    );
+}
+
+/// …and the capacity case still reads as capacity.
+#[test]
+fn test_dispatch_lead_agent_fails_when_the_only_lead_is_busy() {
+    // `orchestration` makes the template a singleton, so the second dispatch
+    // finds the one instance already claimed.
+    let dispatcher = setup(vec![make_agent("lead-01", vec!["orchestration"])]);
+    dispatcher
+        .dispatch_lead_agent(
+            "First",
+            "First".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            None,
+        )
+        .expect("the first dispatch claims the lead");
+
+    let err = dispatcher
+        .dispatch_lead_agent(
+            "Second",
+            "Second".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            None,
+        )
+        .unwrap_err();
+
+    assert!(
+        err.contains("All agents are busy"),
+        "a template exists — this really is capacity: {err}"
+    );
 }
 
 #[test]
