@@ -500,37 +500,55 @@ fn make_sse_stream(
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     let stream = BroadcastStream::new(rx);
 
+    // A lagged subscriber (`Err`) is skipped, not closed: it resumes at the
+    // oldest event still buffered, and the `done` that ends every turn is the
+    // last one in, so the authoritative content still arrives.
     stream.filter_map(|result| match result {
         Ok(event) => {
-            let sse_event = match &event {
-                openalpaca_core::chat::ChatStreamEvent::Thinking => {
-                    Event::default().event("thinking").data("{}")
-                }
-                openalpaca_core::chat::ChatStreamEvent::Delta { content } => Event::default()
-                    .event("delta")
-                    .data(serde_json::json!({"content": content}).to_string()),
-                openalpaca_core::chat::ChatStreamEvent::Done { .. } => {
-                    Event::default().event("done").data(done_event_data(&event))
-                }
-                openalpaca_core::chat::ChatStreamEvent::Error { message } => Event::default()
-                    .event("error")
-                    .data(serde_json::json!({"message": message}).to_string()),
-                openalpaca_core::chat::ChatStreamEvent::ConfirmationRequested {
-                    request_id,
-                    tool_name,
-                    tool_arguments,
-                } => Event::default()
-                    .event("confirmation_requested")
-                    .data(serde_json::json!({
-                        "request_id": request_id,
-                        "tool_name": tool_name,
-                        "tool_arguments": tool_arguments,
-                    }).to_string()),
-            };
-            Some(Ok(sse_event))
+            let (name, data) = sse_frame(&event);
+            Some(Ok(Event::default().event(name).data(data)))
         }
         Err(_) => None,
     })
+}
+
+/// The SSE `(event name, data)` pair for one chat stream event.
+///
+/// Pure, so the wire shape can be asserted without a live stream — and
+/// exhaustive, so a new `ChatStreamEvent` cannot reach clients unnamed.
+fn sse_frame(event: &openalpaca_core::chat::ChatStreamEvent) -> (&'static str, String) {
+    use openalpaca_core::chat::ChatStreamEvent as E;
+    match event {
+        E::Thinking => ("thinking", "{}".to_string()),
+        // S2: the model's reasoning, live. Nothing persists it — it is not in
+        // `done.content` and the history route never replays it.
+        E::Reasoning { text } => (
+            "reasoning",
+            serde_json::json!({ "text": text }).to_string(),
+        ),
+        E::Delta { content } => (
+            "delta",
+            serde_json::json!({ "content": content }).to_string(),
+        ),
+        E::Done { .. } => ("done", done_event_data(event)),
+        E::Error { message } => (
+            "error",
+            serde_json::json!({ "message": message }).to_string(),
+        ),
+        E::ConfirmationRequested {
+            request_id,
+            tool_name,
+            tool_arguments,
+        } => (
+            "confirmation_requested",
+            serde_json::json!({
+                "request_id": request_id,
+                "tool_name": tool_name,
+                "tool_arguments": tool_arguments,
+            })
+            .to_string(),
+        ),
+    }
 }
 
 /// SSE data payload for a `done` event: the serde form of the event minus the
@@ -936,6 +954,35 @@ mod tests {
             attachments_used: None,
             delegation,
         }
+    }
+
+    /// **S2.** The reasoning event has its own name on the wire and carries
+    /// the text; `thinking` stays the empty placeholder it always was.
+    #[test]
+    fn sse_frames_name_thinking_and_reasoning_apart() {
+        use openalpaca_core::chat::ChatStreamEvent as E;
+
+        let (name, data) = sse_frame(&E::Thinking);
+        assert_eq!(name, "thinking");
+        assert_eq!(data, "{}");
+
+        let (name, data) = sse_frame(&E::Reasoning {
+            text: "let me think".to_string(),
+        });
+        assert_eq!(name, "reasoning");
+        let parsed: serde_json::Value = serde_json::from_str(&data).unwrap();
+        assert_eq!(parsed["text"], "let me think");
+        assert!(
+            parsed.get("content").is_none(),
+            "reasoning is not content — a client must not append it to the answer"
+        );
+
+        let (name, data) = sse_frame(&E::Delta {
+            content: "Paris".to_string(),
+        });
+        assert_eq!(name, "delta");
+        let parsed: serde_json::Value = serde_json::from_str(&data).unwrap();
+        assert_eq!(parsed["content"], "Paris");
     }
 
     #[test]

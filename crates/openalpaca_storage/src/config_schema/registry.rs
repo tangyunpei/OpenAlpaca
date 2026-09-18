@@ -748,32 +748,6 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
         backend: ConfigBackend::DaemonToml,
     },
     ConfigKeyDef {
-        key: "daemon.server.stream_chunk_delay_ms",
-        kind: ConfigKind::Int {
-            min: Some(0),
-            max: Some(500),
-        },
-        default: Some("30"),
-        description: "Delay in milliseconds between streaming word chunks (0 = no delay)",
-        category: "Daemon",
-        subcategory: Some("Server"),
-        sensitive: false,
-        backend: ConfigBackend::DaemonToml,
-    },
-    ConfigKeyDef {
-        key: "daemon.server.stream_chunk_words",
-        kind: ConfigKind::Int {
-            min: Some(1),
-            max: Some(50),
-        },
-        default: Some("3"),
-        description: "Number of words per streaming delta chunk",
-        category: "Daemon",
-        subcategory: Some("Server"),
-        sensitive: false,
-        backend: ConfigBackend::DaemonToml,
-    },
-    ConfigKeyDef {
         key: "daemon.server.embedding_poll_interval_secs",
         kind: ConfigKind::Int {
             min: Some(5),

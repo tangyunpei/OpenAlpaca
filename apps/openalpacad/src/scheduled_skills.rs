@@ -216,6 +216,7 @@ pub fn spawn_timer_turn(
                 // where it can be approved, rather than holding the run for
                 // the confirmation timeout at whatever hour the cron fired.
                 unattended: true,
+                turn_sink: None,
             })
             .await;
         if response.is_error {

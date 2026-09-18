@@ -6,8 +6,8 @@ pub mod span;
 pub mod steering;
 
 pub use agentic_loop::{
-    LoopConfig, LoopCostAccumulator, LoopFinishReason, LoopResult, run_agentic_loop,
-    run_agentic_loop_routed,
+    LoopConfig, LoopCostAccumulator, LoopFinishReason, LoopResult, StreamCallback,
+    run_agentic_loop, run_agentic_loop_routed,
 };
 pub(crate) use agentic_loop::{compress_context, estimate_messages_tokens, estimate_tools_tokens};
 pub use lead_agent::{LeadAgentResult, run_lead_agent};

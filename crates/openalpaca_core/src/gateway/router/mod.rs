@@ -89,6 +89,9 @@ pub struct HandleRequest {
     /// M6 — see [`GatewayRequest::unattended`]. `false` for every caller that
     /// does not set it, which is today's behaviour.
     pub unattended: bool,
+    /// S1 — see [`GatewayRequest::turn_sink`]. `None` for every caller that
+    /// has nowhere to put a live delta.
+    pub turn_sink: Option<crate::chat::TurnSinkHandle>,
 }
 
 impl HandleRequest {
@@ -114,6 +117,7 @@ impl HandleRequest {
             stream_id: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         }
     }
 }
@@ -172,6 +176,15 @@ pub struct GatewayRequest {
     ///
     /// `false` is every client that says nothing, and is today's behaviour.
     pub unattended: bool,
+    /// S1 — where this turn's text goes **while the model is producing it**.
+    ///
+    /// Set by [`ChatService::send_message`](crate::chat::ChatService::send_message),
+    /// which owns the SSE stream the deltas land in; `None` for a connector,
+    /// a scheduled skill, a follow-up — every caller with no client watching a
+    /// stream. It travels to the main loop's `LoopConfig.stream_callback`, so
+    /// each provider delta reaches the client as it arrives instead of after
+    /// the turn. The turn's `done` still carries the authoritative content.
+    pub turn_sink: Option<crate::chat::TurnSinkHandle>,
 }
 
 /// Response from the gateway after handling a message.
@@ -354,6 +367,7 @@ impl Gateway {
             stream_id: req.stream_id,
             model_override: req.model_override,
             unattended: req.unattended,
+            turn_sink: req.turn_sink,
         };
         let handler_result = if req.attachments.is_empty() {
             self.handler.handle(handle_request).await

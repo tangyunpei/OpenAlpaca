@@ -98,6 +98,7 @@ pub async fn command_handler(
                     // M6: `/v1/command` does not carry the declaration —
                     // today's behaviour until a client asks for it.
                     unattended: false,
+                    turn_sink: None,
                 })
                 .await;
 

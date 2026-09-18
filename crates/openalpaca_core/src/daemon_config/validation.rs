@@ -377,18 +377,6 @@ impl DaemonConfig {
             300,
             "server.sse_keep_alive_secs",
         );
-        clamp_val(
-            &mut self.server.chat_streams.stream_chunk_delay_ms,
-            0,
-            500,
-            "server.chat_streams.stream_chunk_delay_ms",
-        );
-        clamp_val(
-            &mut self.server.chat_streams.stream_chunk_words,
-            1,
-            50,
-            "server.chat_streams.stream_chunk_words",
-        );
         // ── Upload ──
         clamp_val(
             &mut self.upload.max_file_size_bytes,

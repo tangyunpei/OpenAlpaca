@@ -52,6 +52,7 @@ impl FollowupRunner for GatewayFollowupRunner {
                     // the client that queued it is still watching — today's
                     // behaviour, and the honest one.
                     unattended: false,
+                    turn_sink: None,
                 })
                 .await;
             if response.is_error {

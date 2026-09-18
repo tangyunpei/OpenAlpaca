@@ -74,7 +74,7 @@ pub struct DaemonConfig {
 /// and silence is the one outcome worth avoiding, because the owner could
 /// believe a tool is still suppressed (extension design §11.1).
 ///
-/// This probe is the only place the purged key's name survives in code.
+/// This probe is the only place the purged keys' names survive in code.
 fn warn_on_removed_keys(value: &toml::Value) {
     let present = value
         .get("execution")
@@ -86,6 +86,22 @@ fn warn_on_removed_keys(value: &toml::Value) {
             "`execution.skill_defaults.global_tool_deny` was removed — per-extension toggles \
              replace it; see `openalpaca ext list`. The key is being ignored."
         );
+    }
+
+    // S1: chat streaming is the provider's own, so there is no longer a
+    // re-chunking pass for these two to pace. An owner who set them was
+    // configuring how a fake was drawn.
+    let chat_streams = value
+        .get("server")
+        .and_then(|s| s.get("chat_streams"));
+    for key in ["stream_chunk_delay_ms", "stream_chunk_words"] {
+        if chat_streams.and_then(|c| c.get(key)).is_some() {
+            tracing::warn!(
+                "`server.chat_streams.{key}` was removed — chat deltas are now the model's own \
+                 tokens, forwarded as they arrive, not the finished answer re-cut into words. \
+                 The key is being ignored."
+            );
+        }
     }
 }
 

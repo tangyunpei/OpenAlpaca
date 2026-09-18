@@ -617,6 +617,7 @@ impl DiscordConnector {
                 // M6: a chat platform can answer a confirmation — the
                 // connector renders the prompt in the conversation.
                 unattended: false,
+                turn_sink: None,
             })
             .await;
 

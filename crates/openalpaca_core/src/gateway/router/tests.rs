@@ -78,6 +78,7 @@ async fn test_handle_event_echo() {
             lane_override: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await;
     assert_eq!(resp.lane_key.user_id, "user1");
@@ -110,6 +111,7 @@ async fn test_handle_event_propagates_delegation() {
             lane_override: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await;
     assert!(!resp.is_error);
@@ -145,6 +147,7 @@ async fn test_delegating_turn_persists_its_task_id() {
         lane_override: None,
         model_override: None,
         unattended: false,
+        turn_sink: None,
     })
     .await;
 
@@ -186,6 +189,7 @@ async fn test_plain_turn_persists_no_task_id() {
         lane_override: None,
         model_override: None,
         unattended: false,
+        turn_sink: None,
     })
     .await;
 
@@ -215,6 +219,7 @@ async fn test_handle_event_creates_lane() {
         lane_override: None,
         model_override: None,
         unattended: false,
+        turn_sink: None,
     })
     .await;
     assert_eq!(gw.lane_manager.conversation_count(), 1);
@@ -234,6 +239,7 @@ async fn test_handle_event_creates_lane() {
         lane_override: None,
         model_override: None,
         unattended: false,
+        turn_sink: None,
     })
     .await;
     assert_eq!(gw.lane_manager.conversation_count(), 1);
@@ -256,6 +262,7 @@ async fn test_handle_event_error_propagation() {
             lane_override: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await;
     assert!(resp.is_error);
@@ -280,6 +287,7 @@ async fn test_handle_event_records_message_on_lane() {
         lane_override: None,
         model_override: None,
         unattended: false,
+        turn_sink: None,
     })
     .await;
     gw.handle_event(GatewayRequest {
@@ -296,6 +304,7 @@ async fn test_handle_event_records_message_on_lane() {
         lane_override: None,
         model_override: None,
         unattended: false,
+        turn_sink: None,
     })
     .await;
 
@@ -326,6 +335,7 @@ async fn test_principal_aware_lane_derivation() {
             lane_override: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await;
     assert_eq!(resp.lane_key.user_id, "global1");
@@ -351,6 +361,7 @@ async fn test_principal_aware_lane_derivation() {
             lane_override: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await;
     assert_eq!(resp2.lane_key.user_id, "tg_user_456");
@@ -372,6 +383,7 @@ async fn test_principal_aware_lane_derivation() {
             lane_override: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await;
     assert_eq!(resp3.lane_key.user_id, "tg_user_789");
@@ -410,6 +422,7 @@ async fn test_gateway_persists_messages() {
         lane_override: None,
         model_override: None,
         unattended: false,
+        turn_sink: None,
     })
     .await;
 
@@ -466,6 +479,7 @@ async fn test_full_gateway_stack_integration() {
             lane_override: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await;
     let r2 = gw
@@ -482,6 +496,7 @@ async fn test_full_gateway_stack_integration() {
             lane_override: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await;
     let r3 = gw
@@ -499,6 +514,7 @@ async fn test_full_gateway_stack_integration() {
             lane_override: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await;
 
@@ -559,6 +575,7 @@ async fn test_handle_event_lane_override_pins_originating_lane() {
             lane_override: Some("junpei:cli".to_string()),
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await;
     assert_eq!(resp.lane_key.user_id, "junpei");
@@ -583,6 +600,7 @@ async fn test_handle_event_malformed_lane_override_falls_back() {
             lane_override: Some("no_colon".to_string()),
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await;
     // Malformed override → derived lane (principal + internal source).
@@ -636,6 +654,7 @@ async fn test_a_new_chat_mid_turn_keeps_the_turn_in_one_session() {
         lane_override: None,
         model_override: None,
         unattended: false,
+        turn_sink: None,
     })
     .await;
 
@@ -707,6 +726,7 @@ async fn test_changing_project_opens_a_new_session() {
         lane_override: None,
         model_override: None,
         unattended: false,
+        turn_sink: None,
     };
 
     gw.handle_event(turn(Some(project_path(&one)))).await;
@@ -796,6 +816,7 @@ async fn a_turn_writes_its_two_halves_and_its_delegation_to_the_session_log() {
         lane_override: None,
         model_override: None,
         unattended: false,
+        turn_sink: None,
     })
     .await;
 
@@ -860,6 +881,7 @@ async fn a_gateway_without_a_session_log_still_persists_its_turn() {
             lane_override: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await;
     assert!(!resp.is_error);
@@ -920,6 +942,7 @@ fn turn(model_override: Option<String>) -> GatewayRequest {
         lane_override: None,
         model_override,
         unattended: false,
+        turn_sink: None,
     }
 }
 

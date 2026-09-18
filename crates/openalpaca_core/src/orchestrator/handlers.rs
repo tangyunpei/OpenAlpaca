@@ -47,6 +47,7 @@ impl Orchestrator {
             stream_id,
             model_override,
             unattended,
+            turn_sink,
         } = request;
         let ack_start = Instant::now();
 
@@ -194,6 +195,7 @@ impl Orchestrator {
                 &scope_ctx,
                 current_parts.as_deref(),
                 stream_id.as_deref(),
+                turn_sink.as_ref(),
                 Some(super::query_handler::LoopOverrides::ModelOnly {
                     model_override: model_override.clone(),
                 }),
@@ -214,6 +216,7 @@ impl Orchestrator {
                 &scope_ctx,
                 current_parts.as_deref(),
                 stream_id.as_deref(),
+                turn_sink.as_ref(),
                 Some(super::query_handler::LoopOverrides::ModelOnly {
                     model_override: model_override.clone(),
                 }),
@@ -241,6 +244,7 @@ impl Orchestrator {
                 &lane_key,
                 &ctx,
                 model_override.clone(),
+                turn_sink.as_ref(),
             )
             .await
         } else {
@@ -263,6 +267,7 @@ impl Orchestrator {
                 &scope_ctx,
                 current_parts.as_deref(),
                 stream_id.as_deref(),
+                turn_sink.as_ref(),
                 Some(super::query_handler::LoopOverrides::MainLoop {
                     workspace_path: workspace_path.clone(),
                     model_override: model_override.clone(),

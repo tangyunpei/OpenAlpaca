@@ -28,6 +28,29 @@ use openalpaca_llm::{ChatMessage, ContentPart};
 use openalpaca_storage::repository::LlmUsageRepository;
 use uuid::Uuid;
 
+/// S1: the bridge from the provider's stream to the turn's chat stream.
+///
+/// `LoopConfig.stream_callback` is called once per event from inside the
+/// provider's stream, so this only forwards and returns. Every variant is
+/// named rather than swept under a `_` arm: a new `StreamEvent` should make
+/// someone decide whether the client wants it, not vanish silently.
+fn delta_forwarder(sink: &crate::chat::TurnSinkHandle) -> crate::runner::StreamCallback {
+    let sink = sink.clone();
+    std::sync::Arc::new(move |event: &openalpaca_llm::StreamEvent| match event {
+        openalpaca_llm::StreamEvent::TextDelta { text } => sink.text_delta(text),
+        // S2: Anthropic's extended thinking and Ollama's `reasoning` arrive
+        // as the same event. It is shown and dropped, never persisted.
+        openalpaca_llm::StreamEvent::ThinkingDelta { thinking } => {
+            sink.reasoning_delta(thinking)
+        }
+        openalpaca_llm::StreamEvent::ToolUseStart { .. }
+        | openalpaca_llm::StreamEvent::InputJsonDelta { .. }
+        | openalpaca_llm::StreamEvent::Usage(_)
+        | openalpaca_llm::StreamEvent::Done { .. }
+        | openalpaca_llm::StreamEvent::Error { .. } => {}
+    })
+}
+
 impl Orchestrator {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::orchestrator) async fn handle_simple_query(
@@ -44,6 +67,7 @@ impl Orchestrator {
         scope_ctx: &MemoryScopeContext,
         current_parts: Option<&[ContentPart]>,
         stream_id: Option<&str>,
+        turn_sink: Option<&crate::chat::TurnSinkHandle>,
         loop_overrides: Option<super::LoopOverrides>,
     ) -> Result<String, String> {
         // Layer 1: Deterministic direct send — bypass LLM entirely
@@ -268,6 +292,14 @@ impl Orchestrator {
         }
         .or_else(|| self.loop_config.model.clone());
 
+        // S1: the turn's live text rail. With a sink the loop takes the
+        // provider's streaming path and every text delta of every round
+        // reaches the client as it arrives; without one (a connector, a
+        // follow-up, a scheduled skill — nobody watching a stream) the loop
+        // is exactly as it was. The turn's `done` still carries the
+        // authoritative content, so a dropped delta costs a flicker.
+        let stream_callback = turn_sink.map(delta_forwarder);
+
         let (tools_for_loop, policy_opt, config_for_loop);
         if !tool_defs.is_empty() {
             tracing::info!(
@@ -318,6 +350,7 @@ impl Orchestrator {
                 session_log: session_log.clone(),
                 tool_result_inline_bytes: inline_bytes,
                 model: turn_model,
+                stream_callback: stream_callback.clone(),
                 ..self.loop_config.clone()
             };
             tools_for_loop = tool_defs;
@@ -328,6 +361,7 @@ impl Orchestrator {
                 session_log: session_log.clone(),
                 tool_result_inline_bytes: inline_bytes,
                 model: turn_model,
+                stream_callback,
                 ..self.loop_config.clone()
             };
         }
@@ -880,6 +914,7 @@ impl Orchestrator {
         lane_key: &str,
         ctx: &ConversationContext,
         model_override: Option<String>,
+        turn_sink: Option<&crate::chat::TurnSinkHandle>,
     ) -> Result<String, String> {
         let router = self.llm_router.as_ref().ok_or_else(|| "No LLM router".to_string())?;
 
@@ -1000,6 +1035,10 @@ impl Orchestrator {
             enable_caching: false,
             thinking: None,
             model: model_override.or_else(|| self.loop_config.model.clone()),
+            // S1: a three-word answer is still a streamed one — the same rail
+            // the main loop uses, so no branch of a chat turn is left with
+            // the client waiting for the whole reply.
+            stream_callback: turn_sink.map(delta_forwarder),
             ..self.loop_config.clone()
         };
 

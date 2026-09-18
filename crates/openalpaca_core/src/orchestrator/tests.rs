@@ -174,6 +174,7 @@ async fn test_simple_query_echo() {
             stream_id: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await;
     assert!(result.is_ok());
@@ -197,6 +198,7 @@ async fn test_task_query_empty() {
             stream_id: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await;
     assert!(result.is_ok());
@@ -224,6 +226,7 @@ async fn test_task_control_cancel() {
             stream_id: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await;
     assert!(result.is_ok());
@@ -249,6 +252,7 @@ async fn test_permission_denied_external() {
             stream_id: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await;
     assert!(result.is_err());
@@ -328,6 +332,7 @@ async fn test_simple_query_with_mock_llm() {
             stream_id: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await;
     assert!(result.is_ok());
@@ -351,6 +356,7 @@ async fn test_input_sanitization_blocks_null_bytes() {
             stream_id: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await;
     assert!(result.is_err());
@@ -376,6 +382,7 @@ async fn test_security_gate_replaces_trust_gate() {
             stream_id: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await;
     assert!(result.is_err());
@@ -504,6 +511,7 @@ async fn test_slash_commands_bypass_llm() {
             stream_id: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await;
 
@@ -714,6 +722,7 @@ mod request_workspace_threading {
             stream_id: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await
         .expect("turn should succeed");
@@ -836,6 +845,7 @@ async fn test_tool_intent_detected_and_executes() {
             stream_id: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await;
 
@@ -921,6 +931,7 @@ async fn test_tool_max_rounds_enforcement() {
             stream_id: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await;
 
@@ -952,6 +963,7 @@ async fn test_tool_intent_but_not_in_registry() {
             stream_id: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await;
 
@@ -992,6 +1004,7 @@ async fn test_attachment_text_does_not_change_intent_classification() {
                 stream_id: None,
                 model_override: None,
                 unattended: false,
+                turn_sink: None,
             },
             attachments,
         )
@@ -1026,6 +1039,7 @@ async fn test_empty_content_with_attachments_forces_simple_query() {
                 stream_id: None,
                 model_override: None,
                 unattended: false,
+                turn_sink: None,
             },
             attachments,
         )
@@ -1098,6 +1112,7 @@ async fn test_attachment_image_is_converted_to_base64_part() {
                 stream_id: None,
                 model_override: None,
                 unattended: false,
+                turn_sink: None,
             },
             attachments,
         )
@@ -1158,6 +1173,7 @@ async fn test_attachment_image_read_failure_inserts_placeholder_text() {
                 stream_id: None,
                 model_override: None,
                 unattended: false,
+                turn_sink: None,
             },
             attachments,
         )
@@ -1209,6 +1225,7 @@ async fn test_attachment_document_pending_adds_pending_text_part() {
                 stream_id: None,
                 model_override: None,
                 unattended: false,
+                turn_sink: None,
             },
             attachments,
         )
@@ -1305,6 +1322,7 @@ async fn test_attachment_context_does_not_trigger_file_write_tool() {
                 stream_id: None,
                 model_override: None,
                 unattended: false,
+                turn_sink: None,
             },
             attachments,
         )
@@ -1831,6 +1849,7 @@ async fn test_slash_skill_takes_deterministic_tier_with_router() {
             stream_id: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await;
 
@@ -1898,6 +1917,7 @@ async fn test_slash_skill_no_router_still_invokes_skill() {
             stream_id: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await;
 
@@ -2048,6 +2068,7 @@ async fn test_plugin_skill_invoked_via_executor_with_sandboxed_tool_callback() {
             stream_id: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await;
 
@@ -2112,6 +2133,7 @@ async fn send_steer(orch: &Orchestrator, content: &str) -> String {
         stream_id: None,
         model_override: None,
         unattended: false,
+        turn_sink: None,
     })
     .await
     .unwrap()
@@ -2412,6 +2434,7 @@ async fn send_tool_mode(orch: &Orchestrator, request_id: Uuid, content: &str) ->
         stream_id: None,
         model_override: None,
         unattended: false,
+        turn_sink: None,
     })
     .await
     .unwrap()
@@ -3009,6 +3032,7 @@ async fn a_legacy_tools_allow_skill_is_attributed_on_both_the_top_level_and_the_
             stream_id: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await;
 
@@ -3320,6 +3344,7 @@ async fn an_explicit_slash_for_a_withheld_skill_returns_the_named_error_as_ok() 
             stream_id: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await
         .expect("the refusal is the reply, returned as Ok — never as Err");
@@ -3351,6 +3376,7 @@ async fn an_explicit_slash_for_a_withheld_skill_returns_the_named_error_as_ok() 
             stream_id: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await
         .expect("the legacy branch refuses as Ok(reply) too");
@@ -3775,6 +3801,7 @@ async fn a_withdrawn_plugin_skill_is_attributed_to_its_plugin_on_slash() {
             stream_id: None,
             model_override: None,
             unattended: false,
+            turn_sink: None,
         })
         .await
         .expect("the tombstone answer is the reply");
@@ -4081,5 +4108,214 @@ async fn the_social_fast_path_still_gets_the_named_model() {
         requests[0].model.as_deref(),
         Some("claude-opus-4-6"),
         "the override must reach the social fast path's LoopConfig.model"
+    );
+}
+
+// ── S1: the turn's live text rail ────────────────────────────────────
+
+/// A provider whose answer only exists on the streaming path. Its
+/// non-streaming `chat()` returns a marker: if that text comes back as the
+/// turn's answer, the loop never streamed.
+fn make_orchestrator_with_streaming_llm() -> Orchestrator {
+    use openalpaca_llm::{
+        ChatResponse, ChatStream, FinishReason, LlmError, LlmProvider, ProviderType, StreamEvent,
+        Usage,
+    };
+
+    struct StreamingMockLlm;
+
+    #[async_trait]
+    impl LlmProvider for StreamingMockLlm {
+        fn name(&self) -> &str {
+            "streaming-mock"
+        }
+
+        fn supports_tools(&self) -> bool {
+            false
+        }
+
+        fn supports_streaming(&self) -> bool {
+            true
+        }
+
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            Ok(ChatResponse {
+                content: "NOT STREAMED".to_string(),
+                tool_calls: vec![],
+                model: "mock-model".to_string(),
+                usage: Usage {
+                    input_tokens: 12,
+                    output_tokens: 8,
+                    ..Default::default()
+                },
+                finish_reason: FinishReason::Stop,
+                thinking: None,
+                parts: None,
+            })
+        }
+
+        async fn chat_streaming(&self, _request: ChatRequest) -> Result<ChatStream, LlmError> {
+            let events: Vec<Result<StreamEvent, LlmError>> = vec![
+                // S2: Ollama's `delta.reasoning` and Anthropic's extended
+                // thinking both arrive as `ThinkingDelta`.
+                Ok(StreamEvent::ThinkingDelta {
+                    thinking: "the user wants a capital".to_string(),
+                }),
+                Ok(StreamEvent::TextDelta {
+                    text: "Paris".to_string(),
+                }),
+                Ok(StreamEvent::TextDelta {
+                    text: " is".to_string(),
+                }),
+                Ok(StreamEvent::TextDelta {
+                    text: " the capital.".to_string(),
+                }),
+                Ok(StreamEvent::Usage(Usage {
+                    input_tokens: 12,
+                    output_tokens: 8,
+                    ..Default::default()
+                })),
+                Ok(StreamEvent::Done {
+                    finish_reason: FinishReason::Stop,
+                }),
+            ];
+            Ok(Box::pin(futures_util::stream::iter(events)))
+        }
+    }
+
+    let router = openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(StreamingMockLlm),
+        ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    );
+    make_orchestrator_with_llm_and_agents(Arc::new(router), vec![])
+}
+
+#[derive(Default)]
+struct RecordingTurnSink {
+    text: std::sync::Mutex<Vec<String>>,
+    reasoning: std::sync::Mutex<Vec<String>>,
+}
+
+impl crate::chat::TurnSink for RecordingTurnSink {
+    fn text_delta(&self, text: &str) {
+        self.text
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(text.to_string());
+    }
+
+    fn reasoning_delta(&self, text: &str) {
+        self.reasoning
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(text.to_string());
+    }
+}
+
+/// **S1.** A turn that carries a sink runs the provider's streaming path and
+/// forwards each text delta verbatim: `HandleRequest.turn_sink` →
+/// `LoopConfig.stream_callback` → the client.
+#[tokio::test]
+async fn provider_text_deltas_reach_the_turns_sink() {
+    let recorder = Arc::new(RecordingTurnSink::default());
+    let sink = crate::chat::TurnSinkHandle::new(recorder.clone());
+    let orch = make_orchestrator_with_streaming_llm();
+
+    let answer = orch
+        .handle_message(HandleRequest {
+            turn_sink: Some(sink.clone()),
+            ..HandleRequest::new(
+                Uuid::new_v4(),
+                "gui",
+                "what is the capital of France?",
+                Principal::System,
+                Scope::Global,
+                "test:gui",
+            )
+        })
+        .await
+        .expect("the turn should be answered");
+
+    assert_eq!(
+        recorder
+            .text
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_slice(),
+        ["Paris", " is", " the capital."],
+        "each provider delta is forwarded as it arrives, not re-cut afterwards"
+    );
+    assert!(sink.saw_text(), "the handle remembers that text was streamed");
+    assert_eq!(
+        answer, "Paris is the capital.",
+        "the streamed content is the turn's answer"
+    );
+}
+
+/// **S1.** A turn with no sink — a connector, a follow-up, a scheduled skill —
+/// is unchanged: no streaming callback, and nothing tries to forward anywhere.
+#[tokio::test]
+async fn a_turn_without_a_sink_does_not_stream() {
+    let orch = make_orchestrator_with_streaming_llm();
+
+    let answer = orch
+        .handle_message(HandleRequest::new(
+            Uuid::new_v4(),
+            "cli",
+            "what is the capital of France?",
+            Principal::System,
+            Scope::Global,
+            "test:cli",
+        ))
+        .await
+        .expect("the turn should be answered");
+
+    assert_eq!(
+        answer, "NOT STREAMED",
+        "with no sink the loop takes the non-streaming path it always took"
+    );
+}
+
+/// **S2.** The model's reasoning is surfaced on the turn's sink and kept out
+/// of the answer: the transcript holds what was said, not the thinking that
+/// produced it.
+#[tokio::test]
+async fn reasoning_reaches_the_sink_and_never_the_answer() {
+    let recorder = Arc::new(RecordingTurnSink::default());
+    let sink = crate::chat::TurnSinkHandle::new(recorder.clone());
+    let orch = make_orchestrator_with_streaming_llm();
+
+    let answer = orch
+        .handle_message(HandleRequest {
+            turn_sink: Some(sink.clone()),
+            ..HandleRequest::new(
+                Uuid::new_v4(),
+                "gui",
+                "what is the capital of France?",
+                Principal::System,
+                Scope::Global,
+                "test:gui",
+            )
+        })
+        .await
+        .expect("the turn should be answered");
+
+    assert_eq!(
+        recorder
+            .reasoning
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_slice(),
+        ["the user wants a capital"],
+        "the reasoning delta is forwarded, not dropped"
+    );
+    assert_eq!(
+        answer, "Paris is the capital.",
+        "the answer is the text, with no reasoning spliced into it"
+    );
+    assert!(
+        !answer.contains("the user wants a capital"),
+        "reasoning must never be persisted as content"
     );
 }

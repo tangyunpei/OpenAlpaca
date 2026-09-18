@@ -93,8 +93,9 @@ fn test_keys_in_category() {
 fn test_daemon_keys_in_category() {
     let keys = keys_in_category("Daemon");
     // 41 keys plus the 8 [orchestrator.routing] keys (2026-08-30 wiring audit)
-    // plus the 2 [execution.artifacts] keys (plan §4.6).
-    assert_eq!(keys.len(), 51);
+    // plus the 2 [execution.artifacts] keys (plan §4.6), less the 2
+    // simulated-chunking keys the real chat stream retired (S1).
+    assert_eq!(keys.len(), 49);
     assert!(
         keys.iter()
             .any(|d| d.key == "daemon.execution.artifacts.max_artifact_bytes")
@@ -182,14 +183,11 @@ fn test_daemon_keys_in_category() {
         keys.iter()
             .any(|d| d.key == "daemon.orchestrator.decay_soft_cap")
     );
-    // Streaming keys
+    // S1: the two simulated-chunking keys are gone with the fake they
+    // paced — the provider's own deltas are the chunks now.
     assert!(
         keys.iter()
-            .any(|d| d.key == "daemon.server.stream_chunk_delay_ms")
-    );
-    assert!(
-        keys.iter()
-            .any(|d| d.key == "daemon.server.stream_chunk_words")
+            .all(|d| !d.key.starts_with("daemon.server.stream_chunk"))
     );
     assert!(keys.iter().all(|d| d.backend == ConfigBackend::DaemonToml));
 }
@@ -330,7 +328,8 @@ fn test_validate_daemon_int_range() {
 #[test]
 fn test_daemon_server_keys() {
     let server_keys = keys_in_subcategory("Daemon", "Server");
-    assert_eq!(server_keys.len(), 10);
+    // Ten, less `stream_chunk_delay_ms` and `stream_chunk_words` (S1).
+    assert_eq!(server_keys.len(), 8);
     assert!(
         server_keys
             .iter()
