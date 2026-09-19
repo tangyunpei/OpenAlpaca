@@ -226,11 +226,39 @@ so they survive a reload; the recap *card* is built from the live
 `workflow_started` / `task_status` frames and does not.
 
 **Composer.** Two mutually exclusive states. Normally: a growing textarea, the
-model picker, and today's spend. While a tool confirmation is pending the
-textarea is **not rendered at all** — `Approve`, `Deny` and `Always allow`
-replace it, which is why ↵ can never mean both "send" and "approve".
-`Always allow` sends `approval_scope: "entire_tool"`, which the daemon honours
-for the rest of the session.
+`Attach` button, the model picker, and today's spend. While a tool confirmation
+is pending the textarea is **not rendered at all** — `Approve`, `Deny` and
+`Always allow` replace it, which is why ↵ can never mean both "send" and
+"approve". `Always allow` sends `approval_scope: "entire_tool"`, which the
+daemon honours for the rest of the session.
+
+**Attaching files.** `Attach`, left of the model button, opens a file picker;
+pasting an image into the textarea and dropping files on the composer do the
+same thing. Each file uploads immediately and appears as a chip above the
+textarea with its name, its size and one of three states: `uploading…`, `✓`, or
+the daemon's own refusal — `MIME type 'application/zip' is not allowed`,
+`Declared MIME … doesn't match detected …`, the size limit. A refused chip
+never travels; `✗` removes any chip. **Send is off while an upload is in
+flight**, so a turn can never go out missing a file you attached, and the chips
+clear only once the daemon has accepted the turn — if it refuses one, your
+files are still there and are not re-uploaded.
+
+Ten files per turn (the daemon's `[upload] max_files_per_message`); an eleventh
+pick is refused in the window with the same sentence the daemon would have
+answered with. Files ride an ordinary chat turn only: `Steer` and
+`Queue follow-up` carry no attachments, so chips wait for the next chat message
+rather than being dropped. A file the browser cannot type is offered as
+`application/octet-stream` and the daemon refuses it by name — nothing here
+guesses a type on your behalf.
+
+**"Not sent to the model."** An attachment can reach the daemon and still not
+reach the model that answers: a local model with no vision cannot take an
+image, and a model with no native document part gets a document's extracted
+text instead (or a placeholder, when there is no text to extract). When that
+happens the turn shows a muted note under the answer naming each file and the
+daemon's reason, and the file is **not** listed among the ones the turn used.
+The note is live only — the daemon stores no record of a skip on the message —
+so a reloaded transcript shows the answer without it.
 
 **A thinking model shows its thinking.** A local reasoning model can spend ten
 seconds or more before its first token. While the turn is thinking, the
