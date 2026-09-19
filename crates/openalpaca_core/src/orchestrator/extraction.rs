@@ -2,7 +2,9 @@ use crate::bus::EventBus;
 use crate::daemon_config::DaemonConfig;
 use crate::events::SystemEvent;
 use crate::memory::task_extraction::{PersistResult, persist_memory_item};
-use crate::middleware::user::{UserDocument, parse_user_markdown, render_user_markdown};
+use crate::middleware::user::{
+    UserDocument, parse_user_markdown, render_user_markdown, section_is_unset,
+};
 use arc_swap::ArcSwap;
 use chrono::Utc;
 use openalpaca_llm::{ChatMessage, LlmRouter, RequestContext, RouterRequest};
@@ -437,7 +439,7 @@ async fn apply_profile_patches(
                     .get("action")
                     .and_then(|a| a.as_str())
                     .unwrap_or("set");
-                if !v.is_empty() && (doc.communication_style.is_empty() || action == "update") {
+                if !v.is_empty() && (section_is_unset(&doc.communication_style) || action == "update") {
                     doc.communication_style = v.to_string();
                     modified_sections.push("communication_style".to_string());
                 }
@@ -452,7 +454,7 @@ async fn apply_profile_patches(
                     .get("action")
                     .and_then(|a| a.as_str())
                     .unwrap_or("set");
-                if !v.is_empty() && (doc.expertise.is_empty() || action == "update") {
+                if !v.is_empty() && (section_is_unset(&doc.expertise) || action == "update") {
                     doc.expertise = v.to_string();
                     modified_sections.push("expertise".to_string());
                 }
@@ -467,7 +469,7 @@ async fn apply_profile_patches(
                     .get("action")
                     .and_then(|a| a.as_str())
                     .unwrap_or("set");
-                if !v.is_empty() && (doc.projects.is_empty() || action == "update") {
+                if !v.is_empty() && (section_is_unset(&doc.projects) || action == "update") {
                     doc.projects = v.to_string();
                     modified_sections.push("projects".to_string());
                 }
@@ -482,7 +484,7 @@ async fn apply_profile_patches(
                     .get("action")
                     .and_then(|a| a.as_str())
                     .unwrap_or("set");
-                if !v.is_empty() && (doc.preferences.is_empty() || action == "update") {
+                if !v.is_empty() && (section_is_unset(&doc.preferences) || action == "update") {
                     doc.preferences = v.to_string();
                     modified_sections.push("preferences".to_string());
                 }
@@ -497,7 +499,7 @@ async fn apply_profile_patches(
                     .get("action")
                     .and_then(|a| a.as_str())
                     .unwrap_or("set");
-                if !v.is_empty() && (doc.notes.is_empty() || action == "update") {
+                if !v.is_empty() && (section_is_unset(&doc.notes) || action == "update") {
                     doc.notes = v.to_string();
                     modified_sections.push("notes".to_string());
                 }
@@ -509,6 +511,17 @@ async fn apply_profile_patches(
     }
 
     if modified_sections.is_empty() {
+        // S6: an extraction that passed every threshold and still changed
+        // nothing is the state that hid the bug for the life of the install.
+        // It is legitimate — `set` does not overwrite what is already known —
+        // but it must be legible, so the fields are named rather than
+        // silently dropped.
+        let fields: Vec<&str> = patches.keys().map(String::as_str).collect();
+        tracing::info!(
+            fields = ?fields,
+            "Extraction: nothing written to USER.md — every extracted field is already set \
+             (a 'set' action fills only unset sections; 'update' replaces)"
+        );
         return;
     }
 
@@ -669,5 +682,160 @@ mod tests {
             "an empty completion must not be filed as malformed JSON: {:?}",
             logs.iter().map(|l| l.error_message.clone()).collect::<Vec<_>>()
         );
+    }
+
+    /// The seeded `USER.md`, verbatim (the daemon's `DEFAULT_USER_TEMPLATE`
+    /// and the tracked `config/orchestrator/templates/USER_temp.md` are the
+    /// same bytes; `a_seeded_user_profile_parses_as_unset` in the daemon
+    /// crate pins that copy to this behaviour).
+    const SEEDED_USER_MD: &str = r#"---
+title: "USER.md"
+summary: "User profile record"
+read_when:
+  - Bootstrapping a workspace manually
+---
+
+# USER.md -- About Your Human
+
+Learn about the person you're helping. Update this as you go.
+
+## Identity
+
+* Name:
+* What to call them:
+* Pronouns:
+* Timezone:
+
+## Communication Style
+
+(How they like to communicate -- terse vs verbose, formal vs casual, etc.)
+
+## Expertise & Background
+
+(Technical background, domains of expertise, skill level in various areas)
+
+## Projects & Context
+
+(Current projects, tools they use, stack preferences)
+
+## Preferences
+
+(Likes, dislikes, pet peeves, formatting preferences, etc.)
+
+## Notes
+
+(Anything else. Build this over time. The more you know, the better you can help -- but remember, you're learning about a person, not building a dossier. Respect the difference.)
+"#;
+
+    /// **S6.** The live run's turn — "I am a Rust developer based in Taipei
+    /// and I prefer terse answers" — extracted successfully (553 in / 99 out,
+    /// status `success`) and `USER.md` was still the untouched template
+    /// afterwards. The seeded file is not an empty profile: every section
+    /// holds a parenthetical hint, `set` fills only *empty* fields, and so
+    /// nothing was ever written on any install.
+    #[tokio::test]
+    async fn an_extracted_trait_reaches_a_freshly_seeded_user_profile() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).expect("db");
+        let user_md = dir.path().join("USER.md");
+        std::fs::write(&user_md, SEEDED_USER_MD).expect("seed USER.md");
+
+        // The model's own answer shape, from the documented schema.
+        let provider = RecordingProvider::new(
+            r#"{"extractions": [
+                 {"target": "profile", "field": "expertise",
+                  "value": "Rust developer", "confidence": 0.95, "action": "set"},
+                 {"target": "profile", "field": "communication_style",
+                  "value": "Prefers terse answers", "confidence": 0.9, "action": "set"},
+                 {"target": "profile", "field": "identity.Timezone",
+                  "value": "Asia/Taipei", "confidence": 0.9, "action": "set"}
+               ]}"#,
+        );
+        let router = router_recording(provider.clone());
+
+        let mut cfg = DaemonConfig::default();
+        cfg.orchestrator.costs.extract_every_n_turns = 1;
+
+        let persona_version = Arc::new(AtomicU64::new(0));
+        let user_document = Arc::new(RwLock::new(None));
+
+        extract_user_traits_background(
+            db,
+            router,
+            Arc::new(ArcSwap::from_pointee(cfg)),
+            Arc::new(Mutex::new(HashMap::new())),
+            None,
+            Arc::new(RwLock::new(Some(user_md.clone()))),
+            user_document.clone(),
+            persona_version.clone(),
+            crate::bus::EventBus::new(16),
+            "owner:cli".to_string(),
+            "I am a Rust developer based in Taipei and I prefer terse answers".to_string(),
+            "Noted.".to_string(),
+            "owner".to_string(),
+        )
+        .await;
+
+        let written = std::fs::read_to_string(&user_md).expect("read back USER.md");
+        let doc = parse_user_markdown(&written).expect("the written file parses");
+        assert_eq!(doc.expertise, "Rust developer");
+        assert_eq!(doc.communication_style, "Prefers terse answers");
+        assert_eq!(doc.identity.get("Timezone").map(String::as_str), Some("Asia/Taipei"));
+        assert!(
+            !written.contains("terse vs verbose"),
+            "the hint the section held is replaced, not appended to"
+        );
+
+        // …and the live document the prompt reads is the new one.
+        assert_eq!(persona_version.load(Ordering::Relaxed), 1);
+        let live = user_document.read().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(live.expect("the in-memory copy is refreshed").expertise, "Rust developer");
+    }
+
+    /// The other half of the contract: what the person already told the agent
+    /// is not overwritten by a `set`.
+    #[tokio::test]
+    async fn a_set_does_not_overwrite_what_is_already_known() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).expect("db");
+        let user_md = dir.path().join("USER.md");
+        std::fs::write(
+            &user_md,
+            SEEDED_USER_MD.replace(
+                "(Technical background, domains of expertise, skill level in various areas)",
+                "Haskell, twenty years of it",
+            ),
+        )
+        .expect("seed USER.md");
+
+        let provider = RecordingProvider::new(
+            r#"{"extractions": [
+                 {"target": "profile", "field": "expertise",
+                  "value": "Rust developer", "confidence": 0.95, "action": "set"}
+               ]}"#,
+        );
+        let router = router_recording(provider.clone());
+        let mut cfg = DaemonConfig::default();
+        cfg.orchestrator.costs.extract_every_n_turns = 1;
+
+        extract_user_traits_background(
+            db,
+            router,
+            Arc::new(ArcSwap::from_pointee(cfg)),
+            Arc::new(Mutex::new(HashMap::new())),
+            None,
+            Arc::new(RwLock::new(Some(user_md.clone()))),
+            Arc::new(RwLock::new(None)),
+            Arc::new(AtomicU64::new(0)),
+            crate::bus::EventBus::new(16),
+            "owner:cli".to_string(),
+            "I am a Rust developer based in Taipei and I prefer terse answers".to_string(),
+            "Noted.".to_string(),
+            "owner".to_string(),
+        )
+        .await;
+
+        let doc = parse_user_markdown(&std::fs::read_to_string(&user_md).unwrap()).unwrap();
+        assert_eq!(doc.expertise, "Haskell, twenty years of it");
     }
 }

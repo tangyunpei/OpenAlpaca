@@ -395,20 +395,66 @@ pub fn render_user_markdown(doc: &UserDocument) -> String {
     out
 }
 
+/// Whether a parsed section holds nothing the agent has learned (S6).
+///
+/// This module's own doc comment says "a freshly-bootstrapped profile starts
+/// empty and fills in organically", and every caller believed it. It does
+/// not: the seeded `USER.md` gives each section a parenthetical hint —
+/// `(How they like to communicate -- terse vs verbose, formal vs casual,
+/// etc.)` — which parses as that section's content. So the automatic
+/// extraction's `set` action, which by contract "fills only empty profile
+/// fields", filled nothing on any install, ever: the trait was extracted, the
+/// call was billed, and `USER.md` never changed.
+///
+/// A section is unset when it is blank, or when it is **wholly one
+/// parenthesised run** — a prompt to whoever opens the file, not a fact about
+/// the person. Text outside the parentheses makes it content, so a real note
+/// that happens to contain an aside is safe; a real note that is *only* an
+/// aside is not, and may be overwritten by a later `set`.
+pub fn section_is_unset(section: &str) -> bool {
+    let text = section.trim();
+    if text.is_empty() {
+        return true;
+    }
+    if !text.starts_with('(') {
+        return false;
+    }
+    let mut depth = 0usize;
+    for (idx, ch) in text.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return text[idx + ch.len_utf8()..].trim().is_empty();
+                }
+            }
+            _ => {}
+        }
+    }
+    // Unbalanced: treat as content rather than silently discarding it.
+    false
+}
+
 /// Returns true if the document has meaningful content beyond the template defaults.
 ///
 /// Requires identity to be non-empty AND at least one other section to also be
 /// populated. This prevents bootstrap from completing when only the user's name
 /// has been saved — the agent should gather communication style, expertise,
 /// preferences, etc. before bootstrap is considered done.
+///
+/// "Populated" is [`section_is_unset`]'s answer, not `!is_empty()` (S6): the
+/// seeded template's parenthetical hints are not things the agent learned,
+/// and counting them let identity-plus-nothing finish onboarding — exactly
+/// what the paragraph above says this must not do.
 pub fn user_document_has_content(doc: &UserDocument) -> bool {
     let has_identity = !doc.identity.is_empty();
     let other_sections = [
-        !doc.communication_style.is_empty(),
-        !doc.expertise.is_empty(),
-        !doc.projects.is_empty(),
-        !doc.preferences.is_empty(),
-        !doc.notes.is_empty(),
+        !section_is_unset(&doc.communication_style),
+        !section_is_unset(&doc.expertise),
+        !section_is_unset(&doc.projects),
+        !section_is_unset(&doc.preferences),
+        !section_is_unset(&doc.notes),
     ];
     let has_other = other_sections.iter().any(|&filled| filled);
 
