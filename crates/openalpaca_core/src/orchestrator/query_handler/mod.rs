@@ -52,7 +52,11 @@ pub(super) use workflow_context::render_workflow_context_block;
 #[cfg(test)]
 mod tests;
 
-fn sanitize_parts_for_dispatch(parts: Vec<ContentPart>) -> Vec<ContentPart> {
+/// Shared by the two tiers that hand a turn's own parts to a model: the main
+/// loop and (A1) the skill tier.
+pub(in crate::orchestrator) fn sanitize_parts_for_dispatch(
+    parts: Vec<ContentPart>,
+) -> Vec<ContentPart> {
     parts
         .into_iter()
         .filter_map(|part| match part {

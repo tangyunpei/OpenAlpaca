@@ -54,6 +54,11 @@ impl Orchestrator {
         // cannot (its answer comes back finished over the plugin protocol)
         // and keeps the chat service's single fallback delta.
         turn_sink: Option<&crate::chat::TurnSinkHandle>,
+        // A1 — the turn's own attachments, already adapted. A file-based
+        // skill's loop carries them in its user message exactly as the main
+        // loop does; a plugin-backed skill takes a string over the plugin
+        // protocol and cannot, so it records them skipped.
+        attachments: Option<&crate::orchestrator::handler_attachments::TurnAttachments>,
     ) -> Result<SkillInvocationResult, String> {
         // Look up the catalog entry (for skill_dir) and load full skill (Level 2)
         let entry = self
@@ -76,6 +81,15 @@ impl Orchestrator {
             ref executor,
         } = entry.source
         {
+            // A1 — `skill/invoke` takes a plain query string over the plugin
+            // protocol: there is nowhere to put an image, and inlining a
+            // document's text into the query would be exactly the silent
+            // degradation the settled rules forbid. Say so instead.
+            self.skip_turn_attachments(
+                request_id,
+                attachments,
+                crate::orchestrator::handler_attachments::skipped::PLUGIN_SKILL,
+            );
             return self
                 .invoke_plugin_skill(
                     request_id,
@@ -101,18 +115,24 @@ impl Orchestrator {
             String::new()
         };
 
-        // ── Resolve model context window (drives Layer 5 trimming + budget) ──
+        // ── Resolve the answering model ONCE (A1) ────────────────────────────
         //
         // S3's sibling site: the *configured* default is not necessarily the
         // model that answers — on an install whose provider is not configured
         // L3 substitutes one, and reading the pin's window budgets the skill
-        // against a window it will never get. `None` (no router, or no
-        // registered window) keeps the 200 000 default.
-        let model_window = self
-            .llm_router
-            .as_ref()
-            .and_then(|r| crate::runner::routed_context_window(r, None))
-            .unwrap_or(200_000);
+        // against a window it will never get.
+        //
+        // This function used to resolve twice and disagree with itself: the
+        // window came from `routed_context_window(r, None)` — the router's
+        // configured default — while the multimodal adaptation walked the
+        // ladder from `config_for_loop.model`. One resolution now answers
+        // both, off the pin the loop will actually pass to the router. Both
+        // arms of the `config_for_loop` assembly below build from
+        // `self.loop_config`, so this **is** that pin. `None` (no router,
+        // nothing routable) means "change nothing"; `None` for the window
+        // (no registered window, or a window of 0) keeps the 200 000 default.
+        let answering = self.answering_model(self.loop_config.model.as_deref());
+        let model_window = answering.as_ref().and_then(|m| m.window).unwrap_or(200_000);
 
         // Extract prompt components
         let system_persona = match self.system_persona.read() {
@@ -565,34 +585,52 @@ impl Orchestrator {
         // replayed into a local model that has no vision reached the provider
         // as an `image_url` it cannot serve, and a document part reached a
         // model with no native document support with nothing done about its
-        // extracted text (U2). Same resolution as the main loop and the
-        // context window — `runner::routed_model`, via `answering_model` —
-        // off this tier's own `LoopConfig.model`. `None` (no router, nothing
-        // routable) changes nothing.
-        let adapted_recent: Vec<ChatMessage> =
-            match self.answering_model(config_for_loop.model.as_deref()) {
-                None => ctx.recent_messages.clone(),
-                Some(model) => ctx
-                    .recent_messages
-                    .iter()
-                    .map(|msg| match &msg.parts {
-                        None => msg.clone(),
-                        Some(parts) => {
-                            let mut adapted = msg.clone();
-                            adapted.parts =
-                                Some(self.adapt_parts_for_model(parts.clone(), &model));
-                            adapted
-                        }
-                    })
-                    .collect(),
-            };
+        // extracted text (U2). `answering` is the one resolution taken at the
+        // top of this function; `None` (no router, nothing routable) changes
+        // nothing.
+        let adapted_recent: Vec<ChatMessage> = match &answering {
+            None => ctx.recent_messages.clone(),
+            Some(model) => ctx
+                .recent_messages
+                .iter()
+                .map(|msg| match &msg.parts {
+                    None => msg.clone(),
+                    Some(parts) => {
+                        let mut adapted = msg.clone();
+                        adapted.parts = Some(self.adapt_parts_for_model(parts.clone(), model));
+                        adapted
+                    }
+                })
+                .collect(),
+        };
+
+        // **A1 — the turn's own attachments reach the skill's model.** This
+        // tier is a model-answering path like the main loop, and it was the
+        // only one that dropped the parts: a `/slash` with a file sent the
+        // model the bare question, and the turn's result still called the file
+        // used. The parts arrive adapted for the model the *turn* resolved;
+        // they are run through this tier's own resolution as well, because the
+        // two can differ (the tier does not honour `model_override`), and a
+        // part the answering model cannot take must never be sent. Already
+        // adapted for the same model, this is a no-op.
+        let current_user_turn = match attachments.map(|a| a.message_parts(query)) {
+            Some(parts) if !parts.is_empty() => {
+                let parts = crate::orchestrator::query_handler::sanitize_parts_for_dispatch(parts);
+                let parts = match &answering {
+                    Some(model) => self.adapt_parts_for_model(parts, model),
+                    None => parts,
+                };
+                Some(ChatMessage::user_with_parts(parts))
+            }
+            _ => Some(ChatMessage::user(query)),
+        };
 
         let history_input = HistoryInput {
             lane_tip_fingerprint: [0u8; 32],
             summary: ctx.summary.as_deref().map(Arc::<str>::from),
             summary_wrap_mode: SummaryWrapMode::UntrustedWrap,
             recent_messages: Arc::new(adapted_recent),
-            current_user_turn: Some(ChatMessage::user(query)),
+            current_user_turn,
             mode: HistoryMode::Default,
         };
 

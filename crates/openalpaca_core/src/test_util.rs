@@ -134,10 +134,15 @@ impl RecordingProvider {
     /// The first request this provider saw, panicking when it saw none —
     /// "the call never reached a provider" is the failure worth reporting.
     pub(crate) fn first_request(&self) -> openalpaca_llm::ChatRequest {
-        let seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
-        seen.first()
-            .cloned()
+        self.first_request_opt()
             .expect("the call under test never reached a provider")
+    }
+
+    /// The same, for a test whose point is that **no** call was made — a tier
+    /// that answers without a model (A1).
+    pub(crate) fn first_request_opt(&self) -> Option<openalpaca_llm::ChatRequest> {
+        let seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
+        seen.first().cloned()
     }
 }
 

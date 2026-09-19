@@ -43,7 +43,10 @@ impl Orchestrator {
         ctx: &ConversationContext,
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
-        current_parts: Option<&[ContentPart]>,
+        // A1 — the turn's own attachments, adapted and carrying their ids.
+        // The parts are read out of it below; the ids are what the one branch
+        // of this function that answers *without* a model has to report.
+        attachments: Option<&crate::orchestrator::handler_attachments::TurnAttachments>,
         stream_id: Option<&str>,
         turn_sink: Option<&crate::chat::TurnSinkHandle>,
         loop_overrides: Option<super::LoopOverrides>,
@@ -54,8 +57,21 @@ impl Orchestrator {
                 Ok(summary) => summary,
                 Err(e) => format!("\u{26a0}\u{fe0f} Send failed / 发送失败: {e}"),
             };
+            // A1 — this branch answers with no model at all: the send is
+            // executed and summarised here. The turn's files went nowhere.
+            self.skip_turn_attachments(
+                request_id,
+                attachments,
+                crate::orchestrator::handler_attachments::skipped::DIRECT_SEND,
+            );
             return Ok(response);
         }
+        // The turn's files followed by the message as typed — the shape this
+        // tier has always sent (A1 keeps the question out of the carrier so
+        // the skill tier can send its own parsed one instead).
+        let own_parts: Option<Vec<ContentPart>> =
+            attachments.map(|a| a.message_parts(&a.question));
+        let current_parts: Option<&[ContentPart]> = own_parts.as_deref();
 
         // ── Extract individual prompt parts ─────────────────────────────────
         let system_persona = match self.system_persona.read() {

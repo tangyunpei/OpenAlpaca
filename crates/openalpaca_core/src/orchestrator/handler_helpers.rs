@@ -69,6 +69,9 @@ impl Orchestrator {
         // producing them. `None` for every caller with nobody watching a
         // stream (scheduled skills, connectors, the follow-up runner).
         turn_sink: Option<&crate::chat::TurnSinkHandle>,
+        // A1 — the turn's own attachments, already adapted. `None` for every
+        // caller that is not a chat turn with files on it.
+        attachments: Option<&super::handler_attachments::TurnAttachments>,
     ) -> Result<String, String> {
         self.bus.publish(SystemEvent::IntentClassified {
             request_id,
@@ -108,6 +111,12 @@ impl Orchestrator {
                     skill = skill_name,
                     "Refusing explicitly invoked skill: a required capability is wholly withheld"
                 );
+                // A1 — the refusal is written here, without a model.
+                self.skip_turn_attachments(
+                    request_id,
+                    attachments,
+                    super::handler_attachments::skipped::SKILL_REFUSED,
+                );
                 return Ok(requirements.refusal(skill_name));
             }
         }
@@ -135,6 +144,7 @@ impl Orchestrator {
             stream_id,
             unattended,
             turn_sink,
+            attachments,
         )
         .await
     }
@@ -189,15 +199,20 @@ impl Orchestrator {
                         }
                     }
                 },
-                ContentPart::Audio { .. } => match attachment_adapt::audio_fate(model) {
-                    Fate::Native => part,
-                    _ => {
-                        warn_withheld(None, &model.id, attachment_adapt::REASON_NO_AUDIO);
-                        ContentPart::Text {
-                            text: attachment_adapt::PLACEHOLDER_AUDIO.to_string(),
+                // A history-replayed audio part carries no extracted text (the
+                // part has no field for one), so A2's shared tail lands on the
+                // placeholder exactly as before.
+                ContentPart::Audio { .. } => {
+                    match attachment_adapt::audio_fate(model, None, max_chars) {
+                        Fate::Native => part,
+                        _ => {
+                            warn_withheld(None, &model.id, attachment_adapt::REASON_NO_AUDIO);
+                            ContentPart::Text {
+                                text: attachment_adapt::PLACEHOLDER_AUDIO.to_string(),
+                            }
                         }
                     }
-                },
+                }
                 ContentPart::Document {
                     file_id,
                     filename,

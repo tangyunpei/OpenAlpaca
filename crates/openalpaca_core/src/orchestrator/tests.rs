@@ -3909,6 +3909,7 @@ Dump.
         None,
         false,
         None,
+        None,
     )
     .await
     .expect("the skill runs");
@@ -3960,6 +3961,7 @@ async fn the_top_level_invocation_site_refuses_on_the_same_predicate() {
                 false,
                 None,
                 false,
+                None,
                 None,
             )
             .await
@@ -5736,6 +5738,7 @@ Look.
         None,
         false,
         None,
+        None,
     )
     .await
     .expect("the skill runs");
@@ -5768,6 +5771,451 @@ Look.
         )),
         "the document's extracted text did not reach the skill tier's model: {parts:?}"
     );
+}
+
+// ── A1: the skill tier takes the turn's own attachments ─────────────────
+//
+// Round 8 adapted the tier's *history*. The turn's own files still stopped at
+// `handle_message_internal`: the `Intent::SkillInvocation` arm was the only
+// model-answering arm that never received `current_parts`, so `/explain-code`
+// with a text file sent the model two messages — the system prompt and the
+// bare question — while `done.attachments_used` said the file had arrived.
+
+/// An orchestrator with one `/echo` skill and a local-only router, the shape a
+/// `/slash` turn with a file meets on an Ollama-only install.
+fn local_skill_orchestrator(
+    provider: Arc<crate::test_util::RecordingProvider>,
+    model_id: &str,
+    supports_image: bool,
+    supports_document: bool,
+) -> (tempfile::TempDir, Orchestrator) {
+    let registry = make_tool_registry();
+    let (tmp, catalog) = catalog_with_echo_skill(registry.clone(), &[]);
+    let router = local_only_router(provider, model_id, supports_image, supports_document);
+    let bus = EventBus::default();
+    let gate = make_security_gate_with_registry(&bus, registry.clone());
+    let orch = Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        bus,
+        SystemPersona::default(),
+        Some(router),
+        LoopConfig::default(),
+        gate,
+        registry,
+        None,
+        None,
+        catalog,
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    );
+    (tmp, orch)
+}
+
+/// The tier that actually answered this turn, read off the ladder's own
+/// `OrchestrationStage` event — an assertion on the parts alone could pass
+/// because the turn fell through to the main loop.
+fn drain_stage_mode(rx: &mut tokio::sync::broadcast::Receiver<SystemEvent>) -> Option<String> {
+    let mut mode = None;
+    while let Ok(event) = rx.try_recv() {
+        if let SystemEvent::OrchestrationStage { mode: m, .. } = event {
+            mode = Some(m);
+        }
+    }
+    mode
+}
+
+/// **A1** — a `/slash` turn's own text file reaches the skill's model.
+///
+/// The history is empty, so nothing but this turn can put the text in the
+/// request: on a dirty lane the *next* turn would see the persisted
+/// attachment and the assertion would pass for the wrong reason.
+#[tokio::test]
+async fn a_slash_turns_own_document_reaches_the_skills_model() {
+    let provider = crate::test_util::RecordingProvider::new("PLATYPUS");
+    let (_tmp, orch) = local_skill_orchestrator(provider.clone(), "qwen3:8b", false, false);
+    let mut rx = orch.bus.subscribe();
+
+    let request_id = Uuid::new_v4();
+    orch.handle_message_with_attachments(
+        attachment_request(request_id, "/echo what is the codeword?"),
+        vec![ResolvedAttachment {
+            file_id: "doc-1".to_string(),
+            filename: "secret.txt".to_string(),
+            mime_type: "text/plain".to_string(),
+            size_bytes: 40,
+            extracted_text: Some("the codeword is PLATYPUS".to_string()),
+            storage_path: "/dev/null".to_string(),
+        }],
+    )
+    .await
+    .expect("the turn answers");
+
+    assert_eq!(
+        drain_stage_mode(&mut rx).as_deref(),
+        Some("skill_command"),
+        "this turn must be answered by the skill tier, or the test proves nothing"
+    );
+
+    let parts = parts_the_model_saw(&provider);
+    let carried = parts
+        .iter()
+        .filter_map(|p| match p {
+            ContentPart::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        carried.contains("PLATYPUS"),
+        "the file's text never reached the skill's model: {parts:?}"
+    );
+    assert!(
+        carried.contains("Attached file: secret.txt (text/plain)"),
+        "the text is not labelled with the file it came from: {carried}"
+    );
+    // The question is the one the intent parser took out of the command, not
+    // the raw slash line: attaching a file must not change what the skill's
+    // model is asked.
+    assert!(
+        carried.contains("what is the codeword?") && !carried.contains("/echo"),
+        "the skill's model must see the parsed query, not the slash line: {carried}"
+    );
+    assert!(
+        orch.attachments_skipped_map.get(&request_id).is_none(),
+        "an attachment that reached the model is not skipped"
+    );
+}
+
+/// **A1, the image half** — a `/slash` turn's image reaches a vision model as
+/// a real image part, not as a placeholder and not as nothing at all.
+#[tokio::test]
+async fn a_slash_turns_image_reaches_the_skills_vision_model() {
+    let provider = crate::test_util::RecordingProvider::new("a red square");
+    let (_tmp, orch) = local_skill_orchestrator(provider.clone(), "qwen2.5vl:7b", true, false);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let img_path = tmp.path().join("image.jpg");
+    let image_bytes = vec![0xFFu8, 0xD8, 0xFF, 0xE0, 0x12, 0x34];
+    std::fs::write(&img_path, &image_bytes).unwrap();
+    let expected_b64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
+
+    orch.handle_message_with_attachments(
+        attachment_request(Uuid::new_v4(), "/echo what colour is it?"),
+        vec![ResolvedAttachment {
+            file_id: "img-1".to_string(),
+            filename: "image.jpg".to_string(),
+            mime_type: "image/jpeg".to_string(),
+            size_bytes: image_bytes.len() as i64,
+            extracted_text: None,
+            storage_path: img_path.to_string_lossy().to_string(),
+        }],
+    )
+    .await
+    .expect("the turn answers");
+
+    let parts = parts_the_model_saw(&provider);
+    let source = parts
+        .iter()
+        .find_map(|p| match p {
+            ContentPart::Image { source, .. } => Some(source.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the skill's vision model was handed no image part: {parts:?}"));
+    match source {
+        ImageSource::Base64 { media_type, data } => {
+            assert_eq!(media_type, "image/jpeg");
+            assert_eq!(data.as_str(), expected_b64);
+        }
+        other => panic!("expected base64 image source, got {other:?}"),
+    }
+}
+
+/// **A1** — a plugin-contributed skill takes a plain query string over the
+/// plugin protocol. There is nowhere to put the file, and inlining its text
+/// into the query would be the silent degradation the settled rules forbid,
+/// so the attachment is reported skipped with a reason that says why.
+#[tokio::test]
+async fn a_plugin_skills_turn_reports_the_attachment_skipped() {
+    use openalpaca_api::plugin_traits::{PluginSkillExecutor, ToolCallbackExecutor};
+
+    struct EchoPluginSkill;
+    #[async_trait::async_trait]
+    impl PluginSkillExecutor for EchoPluginSkill {
+        async fn invoke(
+            &self,
+            query: &str,
+            _c: &serde_json::Value,
+            _t: &dyn ToolCallbackExecutor,
+        ) -> Result<String, String> {
+            Ok(format!("plugin saw: {query}"))
+        }
+        fn plugin_id(&self) -> &str {
+            "notes"
+        }
+        fn skill_id(&self) -> &str {
+            "jot"
+        }
+    }
+
+    let catalog = skill_catalog::SkillCatalog::new();
+    catalog.register_plugin_skill(
+        "jot".to_string(),
+        crate::middleware::skill::SkillFrontmatter {
+            name: "Jot".to_string(),
+            description: "Jots things down".to_string(),
+            invoke: crate::middleware::skill::InvokeConfig {
+                slash: Some("/jot".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        Arc::new(EchoPluginSkill),
+        "notes".to_string(),
+    );
+
+    let provider = crate::test_util::RecordingProvider::new("unused");
+    let router = local_only_router(provider.clone(), "qwen3:8b", false, false);
+    let bus = EventBus::default();
+    let gate = make_security_gate(&bus);
+    let orch = Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        bus,
+        SystemPersona::default(),
+        Some(router),
+        LoopConfig::default(),
+        gate,
+        make_tool_registry(),
+        None,
+        None,
+        Arc::new(catalog),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    );
+
+    let request_id = Uuid::new_v4();
+    let answer = orch
+        .handle_message_with_attachments(
+            attachment_request(request_id, "/jot remember this"),
+            vec![ResolvedAttachment {
+                file_id: "doc-7".to_string(),
+                filename: "secret.txt".to_string(),
+                mime_type: "text/plain".to_string(),
+                size_bytes: 40,
+                extracted_text: Some("the codeword is PLATYPUS".to_string()),
+                storage_path: "/dev/null".to_string(),
+            }],
+        )
+        .await
+        .expect("the plugin skill answers");
+
+    assert!(
+        answer.contains("plugin saw:"),
+        "the plugin skill did not run: {answer}"
+    );
+    assert!(
+        !answer.contains("PLATYPUS"),
+        "the file's text must not be inlined into the plugin's query: {answer}"
+    );
+    let recorded = orch
+        .attachments_skipped_map
+        .remove(&request_id)
+        .map(|(_, v)| v)
+        .expect("a plugin-skill turn records its attachments skipped");
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].id, "doc-7");
+    assert!(
+        recorded[0].reason.contains("plugin"),
+        "the reason must name the plugin protocol: {}",
+        recorded[0].reason
+    );
+}
+
+/// **A1's invariant** — an id is in exactly one of `used` / `skipped`, on
+/// **every** arm. A task command is answered with no model at all, so its
+/// attachments are skipped rather than silently reported used.
+#[tokio::test]
+async fn a_deterministic_tier_reports_the_turns_attachments_skipped() {
+    let provider = crate::test_util::RecordingProvider::new("unused");
+    let router = local_only_router(provider.clone(), "qwen3:8b", false, false);
+    let orch = make_orchestrator_with_llm_and_agents(router, vec![]);
+
+    let request_id = Uuid::new_v4();
+    orch.handle_message_with_attachments(
+        attachment_request(request_id, "/tasks"),
+        vec![ResolvedAttachment {
+            file_id: "doc-3".to_string(),
+            filename: "notes.txt".to_string(),
+            mime_type: "text/plain".to_string(),
+            size_bytes: 20,
+            extracted_text: Some("the codeword is PLATYPUS".to_string()),
+            storage_path: "/dev/null".to_string(),
+        }],
+    )
+    .await
+    .expect("the task command answers");
+
+    assert!(
+        provider.first_request_opt().is_none(),
+        "a task command reaches no model at all"
+    );
+    let recorded = orch
+        .attachments_skipped_map
+        .remove(&request_id)
+        .map(|(_, v)| v)
+        .expect("a task-ops turn records its attachments skipped");
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].id, "doc-3");
+    assert!(
+        recorded[0].reason.contains("task command"),
+        "the reason must say which arm answered: {}",
+        recorded[0].reason
+    );
+}
+
+/// **A1's invariant, the other half** — the deterministic **direct send**
+/// inside `handle_simple_query` answers with no model at all (it executes the
+/// send and summarises it), so it reports the turn's files skipped too. This
+/// branch runs *below* an arm that does pass the parts on, which is why the
+/// ids travel with them rather than being derived from the parts.
+#[tokio::test]
+async fn a_direct_send_reports_the_turns_attachments_skipped() {
+    struct RecordingSender;
+    #[async_trait::async_trait]
+    impl crate::orchestrator::ConnectorSendProvider for RecordingSender {
+        async fn send_message(
+            &self,
+            channel: &str,
+            _recipient: &str,
+            content: &str,
+        ) -> Result<String, String> {
+            Ok(format!("sent to {channel}: {content}"))
+        }
+        fn sendable_channels(&self) -> Vec<String> {
+            vec!["telegram".to_string()]
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    openalpaca_storage::repository::PreferenceRepository::new(&db)
+        .set("alice", "telegram.last_chat_id", "42", None)
+        .unwrap();
+
+    let provider = crate::test_util::RecordingProvider::new("unused");
+    let router = local_only_router(provider.clone(), "qwen3:8b", false, false);
+    let bus = EventBus::default();
+    let gate = make_security_gate(&bus);
+    let orch = Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        bus,
+        SystemPersona::default(),
+        Some(router),
+        LoopConfig::default(),
+        gate,
+        make_tool_registry(),
+        Some(db),
+        None,
+        Arc::new(skill_catalog::SkillCatalog::new()),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    );
+    orch.set_connector_send_provider(Arc::new(RecordingSender));
+
+    let request_id = Uuid::new_v4();
+    let answer = orch
+        .handle_message_with_attachments(
+            HandleRequest {
+                principal: Principal::User {
+                    global_id: "alice".to_string(),
+                },
+                ..attachment_request(request_id, "send \"on my way\" to telegram")
+            },
+            vec![ResolvedAttachment {
+                file_id: "doc-5".to_string(),
+                filename: "notes.txt".to_string(),
+                mime_type: "text/plain".to_string(),
+                size_bytes: 20,
+                extracted_text: Some("the codeword is PLATYPUS".to_string()),
+                storage_path: "/dev/null".to_string(),
+            }],
+        )
+        .await
+        .expect("the direct send answers");
+
+    assert!(
+        answer.contains("sent to telegram"),
+        "the direct-send branch did not run, so this test proves nothing: {answer}"
+    );
+    assert!(
+        provider.first_request_opt().is_none(),
+        "a direct send reaches no model at all"
+    );
+    let recorded = orch
+        .attachments_skipped_map
+        .remove(&request_id)
+        .map(|(_, v)| v)
+        .expect("a direct-send turn records its attachments skipped");
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].id, "doc-5");
+    assert_eq!(
+        recorded[0].reason,
+        super::handler_attachments::skipped::DIRECT_SEND
+    );
+}
+
+/// **A2** — a turn's own audio attachment is judged by `supports_audio`.
+///
+/// Its fate used to be decided by `document_fate`, so a model that takes
+/// documents but no audio was handed the clip as if it could hear it, and the
+/// turn's result called it used.
+#[tokio::test]
+async fn a_turns_audio_attachment_is_judged_as_audio() {
+    let provider = crate::test_util::RecordingProvider::new("I cannot hear it");
+    // `supports_document = true`, `supports_audio` false (the registry entry
+    // `local_only_router` writes never sets it): the two answers differ, which
+    // is the whole point.
+    let router = local_only_router(provider.clone(), "qwen3:8b", false, true);
+    let orch = make_orchestrator_with_llm_and_agents(router, vec![]);
+
+    let request_id = Uuid::new_v4();
+    orch.handle_message_with_attachments(
+        attachment_request(request_id, "what is said?"),
+        vec![ResolvedAttachment {
+            file_id: "aud-1".to_string(),
+            filename: "memo.m4a".to_string(),
+            mime_type: "audio/mp4".to_string(),
+            size_bytes: 4096,
+            extracted_text: None,
+            storage_path: "/dev/null".to_string(),
+        }],
+    )
+    .await
+    .expect("the turn answers");
+
+    let parts = parts_the_model_saw(&provider);
+    assert!(
+        parts.iter().any(|p| matches!(
+            p,
+            ContentPart::Text { text } if text == super::attachment_adapt::PLACEHOLDER_AUDIO
+        )),
+        "an unhearable clip must be withheld behind the audio placeholder: {parts:?}"
+    );
+    assert!(
+        !parts
+            .iter()
+            .any(|p| matches!(p, ContentPart::Document { .. })),
+        "the clip must not travel as a document part: {parts:?}"
+    );
+    let recorded = orch
+        .attachments_skipped_map
+        .remove(&request_id)
+        .map(|(_, v)| v)
+        .expect("the withheld clip is recorded for the turn's result");
+    assert_eq!(recorded[0].id, "aud-1");
+    assert_eq!(recorded[0].reason, super::attachment_adapt::REASON_NO_AUDIO);
 }
 
 /// The turn's own message is deduped out of its history **on the attachment

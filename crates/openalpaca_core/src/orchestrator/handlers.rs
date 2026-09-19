@@ -1,3 +1,4 @@
+use super::handler_attachments::{TurnAttachments, skipped};
 use super::{Orchestrator, principal_id};
 use crate::events::SystemEvent;
 use crate::gateway::HandleRequest;
@@ -6,7 +7,6 @@ use crate::security::gate::SecurityGate;
 use crate::security::policy::Principal;
 use crate::types::Capability;
 use chrono::Utc;
-use openalpaca_llm::ContentPart;
 use openalpaca_storage::repository::orchestrator_latency::{
     OrchestratorLatencyRecord, OrchestratorLatencyRepository,
 };
@@ -29,12 +29,19 @@ impl Orchestrator {
     /// classification checks; `model_input_content` is used for LLM calls and
     /// context building. The two differ on the attachment path, where the model
     /// sees the message augmented with the files' extracted text.
+    ///
+    /// **A1 — every arm answers for its attachments.** `attachments` is the
+    /// turn's own files, already adapted for the model that will answer. An
+    /// arm either hands the parts to its model or calls
+    /// [`Orchestrator::skip_turn_attachments`] with a reason, so the bridge's
+    /// `attachments_used` / `attachments_skipped` stay a partition and `used`
+    /// keeps meaning "the model's request really carried it".
     pub(super) async fn handle_message_internal(
         &self,
         request: HandleRequest,
         model_input_content: String,
         force_simple_query: bool,
-        current_parts: Option<Vec<ContentPart>>,
+        attachments: Option<TurnAttachments>,
     ) -> Result<String, String> {
         let HandleRequest {
             request_id,
@@ -112,6 +119,10 @@ impl Orchestrator {
                     }
                     _ => unreachable!(),
                 };
+                // A1 — a task command is answered with no model at all, so the
+                // turn's files went nowhere. Say so rather than let the bridge
+                // report them used.
+                self.skip_turn_attachments(request_id, attachments.as_ref(), skipped::TASK_OPS);
                 // Task ops skip the routing ladder entirely, but every routed
                 // message must still be observable (Routing V2 Phase 3):
                 // emit OrchestrationStage + the latency record before returning.
@@ -152,6 +163,9 @@ impl Orchestrator {
             // model. With steering_enabled=false (rollback) this arm is
             // skipped and "/steer ..." routes like any other message.
             mode = "steered".to_string();
+            // A1 — a steer is a deterministic injection, not a turn a model
+            // answers; nothing carries the files into the running workflow.
+            self.skip_turn_attachments(request_id, attachments.as_ref(), skipped::STEER);
             self.handle_steer_prefix(
                 request_id,
                 steer_text,
@@ -190,6 +204,11 @@ impl Orchestrator {
                 // the whole generation — a silent minute on a local model —
                 // while the main loop two arms below streamed.
                 turn_sink.as_ref(),
+                // A1: and for the same reason again, the turn's own files. A
+                // `/slash` with an attachment reached the model as the bare
+                // question — no file, no name, and `attachments_used` saying
+                // it had arrived.
+                attachments.as_ref(),
             )
             .await
         } else if let Some(reply) = self.withdrawn_skill_reply(&intent_source_content) {
@@ -199,6 +218,8 @@ impl Orchestrator {
             // to the main loop as ordinary chat; the tombstone answers with the
             // plugin that owns it instead (extension design §10 case 5(a)).
             mode = "skill_withdrawn".to_string();
+            // A1 — the tombstone is a fixed sentence, written without a model.
+            self.skip_turn_attachments(request_id, attachments.as_ref(), skipped::NO_MODEL_TIER);
             Ok(reply)
         } else if self.is_bootstrapping() {
             mode = "bootstrap".to_string();
@@ -213,7 +234,7 @@ impl Orchestrator {
                 &ctx,
                 owner_id,
                 &scope_ctx,
-                current_parts.as_deref(),
+                attachments.as_ref(),
                 stream_id.as_deref(),
                 turn_sink.as_ref(),
                 Some(super::query_handler::LoopOverrides::ModelOnly {
@@ -234,7 +255,7 @@ impl Orchestrator {
                 &ctx,
                 owner_id,
                 &scope_ctx,
-                current_parts.as_deref(),
+                attachments.as_ref(),
                 stream_id.as_deref(),
                 turn_sink.as_ref(),
                 Some(super::query_handler::LoopOverrides::ModelOnly {
@@ -258,6 +279,9 @@ impl Orchestrator {
         {
             // Social fast path: ultra-light prompt for "ok", "thanks", "好的" etc.
             mode = "social_fast_path".to_string();
+            // A1 — this arm *does* reach a model, but with a prompt of its own
+            // that carries no parts. The turn's files did not reach it.
+            self.skip_turn_attachments(request_id, attachments.as_ref(), skipped::SOCIAL);
             self.handle_social_query(
                 request_id,
                 &model_input_content,
@@ -285,7 +309,7 @@ impl Orchestrator {
                 &ctx,
                 owner_id,
                 &scope_ctx,
-                current_parts.as_deref(),
+                attachments.as_ref(),
                 stream_id.as_deref(),
                 turn_sink.as_ref(),
                 Some(super::query_handler::LoopOverrides::MainLoop {

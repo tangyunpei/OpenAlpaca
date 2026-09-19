@@ -37,6 +37,12 @@ pub(crate) struct AnsweringModel {
     pub image: bool,
     pub audio: bool,
     pub document: bool,
+    /// The model's context window in tokens — `None` when the registry holds
+    /// no entry for it, or the entry's window is `0` (which must never reach
+    /// compaction, which divides by it). Carried here so a caller that needs
+    /// both the window and the media capabilities walks L3's ladder **once**
+    /// and cannot budget against one model while adapting for another (A1).
+    pub window: Option<usize>,
 }
 
 /// U1 — resolve the answering model once, the same way the window is resolved.
@@ -51,6 +57,10 @@ pub(crate) fn answering_model(router: &LlmRouter, pinned: Option<&str>) -> Optio
         image: registry.supports_image(&id),
         audio: registry.supports_audio(&id),
         document: registry.supports_document(&id),
+        window: registry
+            .get_model_info(&id)
+            .map(|info| info.context_window as usize)
+            .filter(|w| *w > 0),
         id,
     })
 }
@@ -88,13 +98,23 @@ pub(crate) fn image_fate(model: &AnsweringModel) -> Fate {
     }
 }
 
-pub(crate) fn audio_fate(model: &AnsweringModel) -> Fate {
-    match model.audio {
-        true => Fate::Native,
-        false => Fate::Withheld {
-            reason: REASON_NO_AUDIO,
-        },
+/// A2 — an `audio/*` attachment is judged as audio.
+///
+/// The turn's own attachments used to ask [`document_fate`] about every
+/// non-image file, so an audio clip's fate hung on `supports_document`; only
+/// the history-replay path (`ContentPart::Audio`) ever reached this. A model
+/// that takes no audio still reads a transcript, so U2 applies here for the
+/// same reason it applies to a document: `extracted_text` is `None` on the
+/// replay path, which lands on the placeholder exactly as before.
+pub(crate) fn audio_fate(
+    model: &AnsweringModel,
+    extracted_text: Option<&str>,
+    max_chars: usize,
+) -> Fate {
+    if model.audio {
+        return Fate::Native;
     }
+    as_text_or_withheld(extracted_text, max_chars, REASON_NO_AUDIO)
 }
 
 /// U2 — a document the model cannot take natively becomes text when there is
@@ -107,6 +127,16 @@ pub(crate) fn document_fate(
     if model.document {
         return Fate::Native;
     }
+    as_text_or_withheld(extracted_text, max_chars, REASON_NO_DOCUMENT)
+}
+
+/// U2's shared tail: what the model cannot take natively travels as text when
+/// the upload pipeline extracted some, and is withheld when it did not.
+fn as_text_or_withheld(
+    extracted_text: Option<&str>,
+    max_chars: usize,
+    reason: &'static str,
+) -> Fate {
     match extracted_text {
         Some(text) if !text.trim().is_empty() => {
             let total = text.chars().count();
@@ -114,9 +144,7 @@ pub(crate) fn document_fate(
                 cut_at: (total > max_chars).then_some(total),
             }
         }
-        _ => Fate::Withheld {
-            reason: REASON_NO_DOCUMENT,
-        },
+        _ => Fate::Withheld { reason },
     }
 }
 
@@ -154,6 +182,7 @@ mod tests {
             image,
             audio,
             document,
+            window: Some(32_768),
         }
     }
 
@@ -222,6 +251,37 @@ mod tests {
                 reason: REASON_NO_IMAGE
             }
         );
-        assert_eq!(audio_fate(&model(false, true, false)), Fate::Native);
+        assert_eq!(
+            audio_fate(&model(false, true, false), None, 100),
+            Fate::Native
+        );
+    }
+
+    /// **A2** — audio is judged by `supports_audio`, never by
+    /// `supports_document`: a model that takes documents but no audio must
+    /// still withhold the clip, and one that takes audio keeps it even though
+    /// it takes no documents.
+    #[test]
+    fn audio_is_judged_as_audio_not_as_a_document() {
+        assert_eq!(
+            audio_fate(&model(false, false, true), None, 100),
+            Fate::Withheld {
+                reason: REASON_NO_AUDIO
+            }
+        );
+        assert_eq!(
+            audio_fate(&model(false, true, false), None, 100),
+            Fate::Native
+        );
+    }
+
+    /// U2 reaches audio too: a clip the model cannot hear still travels as its
+    /// transcript when the upload pipeline extracted one.
+    #[test]
+    fn an_unhearable_clip_travels_as_its_transcript() {
+        assert_eq!(
+            audio_fate(&model(false, false, false), Some("hello there"), 100),
+            Fate::AsText { cut_at: None }
+        );
     }
 }
