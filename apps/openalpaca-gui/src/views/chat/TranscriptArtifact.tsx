@@ -1,10 +1,10 @@
 /**
  * An `ArtifactCard` (DESIGN_SPEC §3.13) for a file a turn referenced.
  *
- * Two populations share this component, and only one of them fetches. A
- * history-served link (`ChatMessage.attachments`/`.artifacts`, GAP-23)
- * already carries its id, name and kind from the one history query, so it
- * renders with **no request of its own** — the badge needs nothing more. A
+ * Two populations share this component, and only one of them fetches. A file
+ * history named (`ChatMessage.artifacts`, GAP-23, or a file part of
+ * `content_json`, P1) already carries its id and name from the one history
+ * query, so it renders with **no request of its own**. A
  * live turn's SSE `done.attachments_used` carries only the file id, so that
  * chip still calls `useFileMetadata`/`useArtifact` to learn even the
  * filename, and gets the preview body and version those calls return. `Diff`
@@ -28,10 +28,10 @@ export interface TranscriptArtifactProps {
 }
 
 export function TranscriptArtifact({ attachment }: TranscriptArtifactProps) {
-  // A history-served link already names its file (`filename` is never null
-  // for `role='attachment'`/`role='artifact'` rows the server resolved); only
-  // a bare live-turn id lacks even that. Passing `null` disables the query
-  // outright, so a history chip issues no request at all.
+  // A file history named already carries its name (a `role='artifact'` row
+  // the server resolved, and a `content_json` file part, both do); only a bare
+  // live-turn id lacks even that. Passing `null` disables the query outright,
+  // so a history chip issues no request at all.
   const knownFromServer = attachment.filename !== null;
   const metadata = useFileMetadata(knownFromServer ? null : attachment.fileId);
   const row = useArtifact(knownFromServer ? null : attachment.fileId);

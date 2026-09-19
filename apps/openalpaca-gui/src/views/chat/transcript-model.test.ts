@@ -474,7 +474,7 @@ describe("the run link and artifact chips (GAP-23)", () => {
     });
   });
 
-  it("turns a completion report's links into chips beside its attachments", () => {
+  it("turns a completion report's links into chips of their own", () => {
     const items = buildTranscript(
       input({
         history: [
@@ -483,14 +483,6 @@ describe("the run link and artifact chips (GAP-23)", () => {
             role: "assistant",
             content: "Done — two files written.",
             task_id: "b41c8e02",
-            attachments: [
-              {
-                file_id: "upload-1",
-                filename: "spec.pdf",
-                mime_type: "application/pdf",
-                size_bytes: 12,
-              },
-            ],
             artifacts: [
               { id: "produced-1", name: "notes.md", kind: "markdown" },
               { id: "produced-2", name: "run.log", kind: null },
@@ -503,16 +495,10 @@ describe("the run link and artifact chips (GAP-23)", () => {
     expect(items[0]).toMatchObject({
       kind: "assistant",
       runId: "b41c8e02",
-      // The upload the turn carried stays where it was…
-      attachments: [
-        {
-          fileId: "upload-1",
-          filename: "spec.pdf",
-          mimeType: "application/pdf",
-          kind: null,
-        },
-      ],
-      // …and the run's own output is a separate list, kind included.
+      // Files the turn *carried in* are a separate list, and an assistant row
+      // never has one: only a user turn is written with file parts.
+      attachments: [],
+      // The run's own output, kind included.
       artifacts: [
         {
           fileId: "produced-1",
@@ -620,28 +606,43 @@ describe("a turn in flight, read from a timezone (G5)", () => {
 });
 
 /**
- * T5 — a file the turn carried is a file, not a sentence.
+ * T5 — a file the turn carried is a file, not a sentence — and P1, where its
+ * files actually are.
  *
  * The user row read `What is the codeword…?` followed by the literal text
  * `[Attachments: tauri-codeword.txt]`. That string is the daemon's
  * `display_text`: the typed content plus a rendering of the attachments for a
  * client that can only print one string. This window draws the links, so it
  * reads `content` and shows the files themselves.
+ *
+ * T5 read them off `message.attachments`, which the two history routes have
+ * never served — the fixture below is a **real** `GET /v1/chat/history` row,
+ * captured live in the Tauri app, and there is no such key on it. The files
+ * are file parts of `content_json` (P1).
  */
-describe("a user turn's attachments (T5)", () => {
+describe("a user turn's attachments (T5, P1)", () => {
   const stored = message({
     id: 7,
     role: "user",
-    content: "What is the codeword?",
-    display_text: "What is the codeword?\n[Attachments: tauri-codeword.txt]",
-    attachments: [
-      {
-        file_id: "file-1",
-        filename: "tauri-codeword.txt",
-        mime_type: "text/plain",
-        size_bytes: 54,
-      },
-    ],
+    content: "What is the codeword in the attached file?",
+    display_text:
+      "What is the codeword in the attached file?\n[Attachments: tauri-codeword.txt]",
+    content_json: JSON.stringify({
+      parts: [
+        {
+          text: "What is the codeword in the attached file?",
+          type: "text",
+        },
+        {
+          extracted_text: "The codeword is HERON-6042.",
+          file_id: "67c763a2-0000-4000-8000-000000000001",
+          filename: "tauri-codeword.txt",
+          mime_type: "text/plain",
+          type: "document",
+        },
+      ],
+      v: 1,
+    }),
   });
 
   it("shows the file and never the augmentation suffix", () => {
@@ -649,16 +650,87 @@ describe("a user turn's attachments (T5)", () => {
     const row = items[0];
     if (row?.kind !== "user") throw new Error("expected a user row");
 
-    expect(row.text).toBe("What is the codeword?");
+    expect(row.text).toBe("What is the codeword in the attached file?");
     expect(row.text).not.toContain("[Attachments:");
     expect(row.attachments).toEqual([
       {
-        fileId: "file-1",
+        fileId: "67c763a2-0000-4000-8000-000000000001",
         filename: "tauri-codeword.txt",
         mimeType: "text/plain",
         kind: null,
       },
     ]);
+  });
+
+  /** The bytes the daemon kept for the model are not the chip's business. */
+  it("never puts the extracted text on screen", () => {
+    const items = buildTranscript(input({ history: [stored] }));
+    expect(JSON.stringify(items)).not.toContain("HERON-6042");
+  });
+
+  /** An image or an audio file is a `file_ref` part and has no text at all. */
+  it("reads a file_ref part the same way", () => {
+    const items = buildTranscript(
+      input({
+        history: [
+          message({
+            id: 9,
+            role: "user",
+            content: "what is this?",
+            content_json: JSON.stringify({
+              v: 1,
+              parts: [
+                { type: "text", text: "what is this?" },
+                {
+                  type: "file_ref",
+                  file_id: "img-1",
+                  filename: "paddock.png",
+                  mime_type: "image/png",
+                },
+              ],
+            }),
+          }),
+        ],
+      }),
+    );
+    const row = items[0];
+    if (row?.kind !== "user") throw new Error("expected a user row");
+    expect(row.attachments).toEqual([
+      {
+        fileId: "img-1",
+        filename: "paddock.png",
+        mimeType: "image/png",
+        kind: null,
+      },
+    ]);
+  });
+
+  /** A row the client cannot parse is a row without chips, never a crash. */
+  it("renders a turn whose content_json is unreadable", () => {
+    for (const contentJson of [
+      "not json",
+      "null",
+      '{"v":1}',
+      '{"v":1,"parts":"nope"}',
+      '{"v":1,"parts":[null,7,{"type":"text","text":"hi"},{"file_id":""}]}',
+    ]) {
+      const items = buildTranscript(
+        input({
+          history: [
+            message({
+              id: 10,
+              role: "user",
+              content: "hi",
+              content_json: contentJson,
+            }),
+          ],
+        }),
+      );
+      const row = items[0];
+      if (row?.kind !== "user") throw new Error("expected a user row");
+      expect(row.text).toBe("hi");
+      expect(row.attachments).toEqual([]);
+    }
   });
 
   /** A turn that carried nothing still reads exactly as it did. */

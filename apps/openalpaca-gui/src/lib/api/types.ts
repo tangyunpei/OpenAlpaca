@@ -158,13 +158,6 @@ export interface AttachmentRef {
   caption?: string;
 }
 
-export interface AttachmentDisplay {
-  file_id: string;
-  filename: string;
-  mime_type: string;
-  size_bytes: number;
-}
-
 export interface ToolConfirmation {
   request_id: string;
   tool_name: string;
@@ -209,7 +202,20 @@ export interface ChatMessage {
   tokens_out?: number | null;
   duration_ms?: number;
   created_at: string;
-  attachments?: AttachmentDisplay[];
+  /**
+   * The turn's structured content, as a JSON *string* — the row's own column,
+   * written only for a turn that carried files:
+   * `{"v":1,"parts":[{"type":"text","text":"…"},{"type":"document","file_id":"…","filename":"…","mime_type":"…","extracted_text":"…"}]}`
+   * (`gateway/persistence.rs`; a file with no usable text is a `file_ref`
+   * part instead). `null` on every other row.
+   *
+   * **This is where a user turn's files are** (P1). `ConversationMessageView`
+   * is the stored row flattened plus `artifacts`, and the stored row has no
+   * attachment column — so neither history route has ever answered an
+   * `attachments` key, and a client that reads one reads `undefined` for
+   * every real row. `extracted_text` is the daemon's copy of the bytes for
+   * the model and is never shown.
+   */
   content_json?: string | null;
   display_text?: string | null;
   confirmation?: ToolConfirmation;

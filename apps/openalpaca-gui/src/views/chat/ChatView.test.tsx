@@ -3437,17 +3437,27 @@ describe("ChatView — a user turn's own files (T5)", () => {
             id: 1,
             lane_key: "user:gui",
             role: "user",
-            content: "What is the codeword?",
+            content: "What is the codeword in the attached file?",
             display_text:
-              "What is the codeword?\n[Attachments: tauri-codeword.txt]",
-            attachments: [
-              {
-                file_id: "file-1",
-                filename: "tauri-codeword.txt",
-                mime_type: "text/plain",
-                size_bytes: 54,
-              },
-            ],
+              "What is the codeword in the attached file?\n[Attachments: tauri-codeword.txt]",
+            // The real row, captured live: there is no `attachments` key on
+            // it, and the file is a part of `content_json` (P1).
+            content_json: JSON.stringify({
+              parts: [
+                {
+                  text: "What is the codeword in the attached file?",
+                  type: "text",
+                },
+                {
+                  extracted_text: "The codeword is HERON-6042.",
+                  file_id: "67c763a2-0000-4000-8000-000000000001",
+                  filename: "tauri-codeword.txt",
+                  mime_type: "text/plain",
+                  type: "document",
+                },
+              ],
+              v: 1,
+            }),
             created_at: "2026-09-18 17:04:00",
           },
         ],
@@ -3458,10 +3468,12 @@ describe("ChatView — a user turn's own files (T5)", () => {
     renderChat();
 
     expect(
-      await screen.findByText("What is the codeword?"),
+      await screen.findByText("What is the codeword in the attached file?"),
     ).toBeInTheDocument();
     // The file is a card, not a sentence.
     expect(screen.getByText("tauri-codeword.txt")).toBeInTheDocument();
     expect(screen.queryByText(/\[Attachments:/)).toBeNull();
+    // …and the daemon's copy of the bytes is not on screen at all.
+    expect(screen.queryByText(/HERON-6042/)).toBeNull();
   });
 });

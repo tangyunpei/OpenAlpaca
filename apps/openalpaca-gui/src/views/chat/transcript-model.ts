@@ -24,11 +24,7 @@ import type { SkippedAttachment } from "@/components/chat";
 import type { SteerRef } from "@/components/chat";
 import type { Resolution } from "@/components/chat";
 import type { RunReportStatus } from "@/components/chat";
-import type {
-  AttachmentDisplay,
-  ChatMessage,
-  MessageArtifact,
-} from "@/lib/api/types";
+import type { ChatMessage, MessageArtifact } from "@/lib/api/types";
 import type { ChatStreamState } from "@/lib/chat-stream";
 import { timestampMs } from "@/lib/time";
 
@@ -160,8 +156,8 @@ export type TranscriptItem =
       time: string | null;
       steer: SteerRef | null;
       /**
-       * The files this turn carried in (T5) — `role='attachment'` links on the
-       * stored message, or the chips the composer just sent.
+       * The files this turn carried in (T5) — the file parts of the stored
+       * message's `content_json` (P1), or the chips the composer just sent.
        *
        * They are shown *as files*. The daemon also writes a text rendering of
        * them into the row's `display_text` ("…\n[Attachments: notes.txt]") for
@@ -182,7 +178,11 @@ export type TranscriptItem =
        * persists it.
        */
       reasoning: string;
-      /** Files the turn carried in (`role='attachment'`). */
+      /**
+       * Files the turn carried in. Always empty in practice — only a *user*
+       * turn is written with file parts — but read the same way, so a row
+       * that ever carries one shows it.
+       */
       attachments: AttachmentInfo[];
       /**
        * Files the turn carried in that the model never received (U3), from
@@ -245,15 +245,56 @@ function timestamp(value: string | null | undefined): number {
   return timestampMs(value) ?? Number.MAX_SAFE_INTEGER;
 }
 
-function toAttachments(
-  attachments: AttachmentDisplay[] | undefined,
+/**
+ * The files a stored turn carried in, read off its `content_json` (P1).
+ *
+ * Round 10 read `message.attachments`, and the two history routes have never
+ * served such a key: `ConversationMessageView` is the stored row flattened
+ * plus `artifacts`, and `conversation_messages` has no attachment column. The
+ * files are in the row's structured content instead — one part per file,
+ * `document` when the daemon extracted text from it and `file_ref` otherwise
+ * — so that is what this reads, by the one thing both spellings share: a
+ * `file_id`.
+ *
+ * `extracted_text` is never touched. It is the daemon's copy of the bytes for
+ * the model, it can be thousands of characters, and the chip is a link to the
+ * file, not a rendering of it.
+ *
+ * Nothing here throws on a row it does not understand: a malformed or absent
+ * `content_json`, `parts` that is not an array, a part that is not an object
+ * or carries no `file_id` — each is simply not a file, and the turn renders
+ * without chips rather than not at all.
+ */
+export function attachmentsFromContent(
+  contentJson: string | null | undefined,
 ): AttachmentInfo[] {
-  return (attachments ?? []).map((attachment) => ({
-    fileId: attachment.file_id,
-    filename: attachment.filename,
-    mimeType: attachment.mime_type,
-    kind: null,
-  }));
+  if (typeof contentJson !== "string" || contentJson === "") return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contentJson);
+  } catch {
+    return [];
+  }
+  const parts = (parsed as { parts?: unknown } | null)?.parts;
+  if (!Array.isArray(parts)) return [];
+
+  const files: AttachmentInfo[] = [];
+  for (const part of parts) {
+    if (typeof part !== "object" || part === null) continue;
+    const {
+      file_id: fileId,
+      filename,
+      mime_type: mimeType,
+    } = part as Record<string, unknown>;
+    if (typeof fileId !== "string" || fileId === "") continue;
+    files.push({
+      fileId,
+      filename: typeof filename === "string" ? filename : null,
+      mimeType: typeof mimeType === "string" ? mimeType : null,
+      kind: null,
+    });
+  }
+  return files;
 }
 
 /** A message's `role='artifact'` links, as the same card reads them. */
@@ -360,7 +401,7 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
         text: parsed.text,
         time: message.created_at,
         steer: parsed.steered ? { mode: "steer", label: steerLabel } : null,
-        attachments: toAttachments(message.attachments),
+        attachments: attachmentsFromContent(message.content_json),
       });
       continue;
     }
@@ -374,7 +415,7 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
       // A stored message has none: the daemon keeps reasoning out of what it
       // writes, so there is nothing to replay.
       reasoning: "",
-      attachments: toAttachments(message.attachments),
+      attachments: attachmentsFromContent(message.content_json),
       // Nothing persists a skip, so a stored row can only ever say "none".
       skipped: [],
       artifacts: toArtifacts(message.artifacts),
