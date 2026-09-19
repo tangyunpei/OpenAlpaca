@@ -133,7 +133,11 @@ tokens as the provider produces them, and their sum is **not** necessarily the
 answer — a turn that calls a tool streams the text written before the call — so
 the `done` frame's full content is the source of truth and replaces the preview
 (`src/lib/chat-stream.ts`). A `reasoning` frame carries the model thinking out
-loud; it is never appended to the answer, and nothing stores it.
+loud; it is never appended to the answer, and nothing stores it. A turn that
+reaches no answer at all — it ran out of tool rounds, hit its cost cap, or was
+cut short — arrives as one plain line saying so and naming the last tool error,
+in the assistant bubble like any other reply, and it is in the transcript after
+a reload. A turn never ends with an empty bubble.
 
 **Auth.** HTTP requests carry the discovery bearer token in a header. The
 WebSocket, the SSE stream and the artifact content routes take `?token=`
@@ -232,8 +236,10 @@ for the rest of the session.
 seconds or more before its first token. While the turn is thinking, the
 `thinking…` indicator beside `Alpaca` becomes a disclosure control and the
 reasoning runs live underneath it: muted mono type in a box with its own scroll
-and a fixed height, so it cannot push the composer down the screen. Click the
-label to collapse or reopen it. It is live only — the daemon keeps reasoning
+and a fixed height, so it cannot push the composer down the screen. The box
+follows the newest text as it arrives; scroll up inside it to read something
+earlier and it stays where you left it until you scroll back to the bottom.
+Click the label to collapse or reopen it. It is live only — the daemon keeps reasoning
 out of the message it stores, so a reloaded transcript shows the answer alone.
 
 **A confirmation outlives the turn that started it.** A workflow asks for
@@ -252,7 +258,9 @@ daemon waited out the timeout. The window now reads
 `GET /v1/chat/confirmations`, the daemon's list of what is *still waiting*, on
 load and again whenever the socket reconnects, and draws a card for each prompt
 that belongs to this lane. A card this window has already retired is not
-brought back by it.
+brought back by it. When that read *fails*, the transcript says so — "Could not
+check for pending approvals: …" — rather than looking like a daemon with
+nothing waiting; live prompts keep arriving regardless.
 
 The composer can also be *aimed*: `Steer` on a run card points it at that run
 (`POST /v1/tasks/{id}/steer`, which answers `accepted` and the inbox depth),

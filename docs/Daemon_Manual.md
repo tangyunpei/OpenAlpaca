@@ -195,6 +195,16 @@ routable, the next request fails with one error naming the fix (enable a
 provider in Settings → Models, `openalpaca llm status`, `ollama pull`) rather
 than "Unknown model".
 
+**What is reported is what answered.** Every place a turn names its model — the
+SSE `done` frame, the usage and call-log rows, the conversation row, the
+session log — carries the model the router actually called, on the streaming
+path as much as the non-streaming one; a substitution is visible rather than
+hidden behind the requested id, and the turn is priced against the model that
+ran. `POST /v1/chat`'s `model_used` is the one prediction in the set, because
+it answers before the turn runs: it echoes the model named in the body, or the
+effective default for a turn that names none, and `null` when nothing is
+routable.
+
 ### Cost
 
 The cost tracker prices from the router's live registry — compiled defaults
@@ -315,7 +325,7 @@ Major groups:
 - Tasks: list/create/status/action, plus `GET /v1/tasks/{id}/timeline` — one lane per spawned subagent (label, template, state, start/end), which is where a run's agents are reported; the legacy `assigned_agents` (list) / `assignments` (detail) arrays were deleted, and a list row keeps only their count as `subagent_count`. `POST /v1/tasks/{id}/steer` pushes into the run's steering inbox (owner-scoped, `404` on a run that is not yours) and `POST /v1/tasks/{id}/rerun` answers `201` with a **new** id copied from a finished run's goal. `POST /v1/tasks` records the caller as `created_by` whatever the body claims, and refuses a `source_lane` the caller does not own with `404 LANE_NOT_FOUND` — never `403`; `start`, `rerun` and `resume` re-check the row's owner **and** its lane before dispatching, so a row parked on somebody else's lane never launches its completion report or its confirmation prompts there (ruling R79)
 - Lane follow-ups: `GET|POST /v1/lanes/{lane_key}/followups`, `DELETE /v1/lanes/{lane_key}/followups/{id}` (a cancel that lost the race to autostart answers `409`)
 - Agents: CRUD/action/config plus template CRUD (`/v1/agent-templates`) and a read-only instance list (`GET /v1/agent-instances`)
-- Chat: send/history/stream, message feedback (`PUT|GET|DELETE /v1/chat/messages/{message_id}/feedback`), tool confirmations — `GET /v1/chat/confirmations` lists the prompts a run is **still waiting on** (`{request_id, tool_name, tool_arguments, task_id, agent_id, lane_key, raised_at}`, oldest first, RFC 3339; an empty list, not an error, when the daemon has no broker), and `POST /v1/chat/confirmations/{request_id}` answers one. The listing is an unscoped read (seeing that something is waiting is not acting on it) and a **snapshot** — an entry can be answered a microsecond later; answering stays owner-scoped
+- Chat: send/history/stream, message feedback (`PUT|GET|DELETE /v1/chat/messages/{message_id}/feedback`), tool confirmations — `GET /v1/chat/confirmations` lists the prompts a run is **still waiting on** (`{request_id, tool_name, tool_arguments, task_id, agent_id, lane_key, raised_at}`, oldest first, RFC 3339; an empty list, not an error, when the daemon has no broker), and `POST /v1/chat/confirmations/{request_id}` answers one. The listing is an unscoped read (seeing that something is waiting is not acting on it) and a **snapshot** — an entry can be answered a microsecond later; answering stays owner-scoped. The unscoped read carries each prompt's `tool_arguments`, which no other unscoped surface does — the persisted `tool_confirmation_requested` event keeps the id, agent, tool and run and not the arguments. Whether the list should be owner-scoped, or redact the arguments for rows the caller does not own, is owner decision **T22** (`tasks/api-fix-plan.md` §0) and is not adopted
 - Sessions: `GET|POST /v1/sessions`, `GET|PATCH|DELETE /v1/sessions/{id}`, `GET /v1/sessions/{id}/messages`, `GET /v1/sessions/{id}/events`, `POST /v1/sessions/{id}/activate|archive`. A lane holds many sessions with exactly one `active`; the old `/v1/conversations` family was deleted. `DELETE /v1/sessions/{id}` takes the transcript with the rows: one transaction deletes the messages and the session itself and unpins everything that only *pointed* at it — its runs, its queued follow-ups and its tool-call audit rows survive with their session index cleared — and then the session's writer is stood down and `~/.openalpaca/sessions/<id>/` is removed, so a record emitted afterwards on a handle captured earlier re-creates nothing. It answers `204`; a run still writing into the session is `409 SESSION_HAS_ACTIVE_WORKFLOWS` (cancel it first), and another owner's session is `404`. `POST /v1/workspaces/purge` removes the same directories for every session it purges
 - Files: `POST /v1/files/upload` (body limit 100 MiB), `GET /v1/files/{id}`, `GET /v1/files/{id}/content`, `POST /v1/files/{id}/open`
 - Artifacts: `GET /v1/artifacts` (filters and paging), `GET /v1/artifacts/{id}`, `…/versions`, `…/diff?from=&to=`, `PUT …/pin`, and the content routes `…/content` and `…/versions/{n}/content`

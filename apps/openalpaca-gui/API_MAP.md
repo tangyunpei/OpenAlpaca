@@ -902,9 +902,14 @@ POST /v1/chat
   disabled provider's rows out of the registry, so "not registered" is the one true
   answer for both, and the message says which knob puts them back. `GET /v1/models`
   reads that same registry, so neither kind of refused id is in the picker.
-- `model_used` is the named model, or the router's current default — so a client
-  never has to guess whether its override took. The SSE `done` frame's own `model`
-  still reports what actually answered.
+- `model_used` is the named model, or — for a turn that names none — the model a
+  turn _would_ reach right now: the router's **effective** default, the rung of
+  the L3 ladder its configured default falls through to, and `null` when nothing
+  is routable at all (V4; it used to echo the configured default regardless,
+  which on a daemon whose default is not installed named a model that could not
+  answer). It is a prediction: the POST returns before the turn runs. The SSE
+  `done` frame's own `model` reports what actually answered, and since V4 that is
+  the id the router really called on the streaming path too.
 - **The answering model is now stored** on the assistant row.
   `conversation_messages.model` has always existed and the transcript has always
   rendered it, but nothing wrote it, so a reload dropped it — which this gap makes
