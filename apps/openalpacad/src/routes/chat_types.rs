@@ -47,10 +47,18 @@ pub struct ChatSendResponseBody {
     pub stream_id: String,
     pub lane_key: String,
     /// The model this turn will run on: the request's `model` when it named
-    /// one, else the daemon default. `null` only on a daemon with no LLM
-    /// router at all, where there is no model to name. The client does not
-    /// have to guess which of the two it got, and the SSE `done` frame's own
-    /// `model` still reports what actually answered.
+    /// one, else the router's **effective** default — what a request naming
+    /// none actually reaches after the L3 ladder has substituted, not the
+    /// configured `default_model` (V4, `resolve_turn_model`).
+    ///
+    /// `null` in two cases, not one: a daemon with no LLM router at all, and a
+    /// daemon whose router can route nothing — a configured default no loaded
+    /// provider serves and no rung of the ladder to fall to. Either way there
+    /// is no model to name; the second will fail at the router with
+    /// `NoRoutableModel` when the turn runs.
+    ///
+    /// It is a prediction — the POST returns before the turn does. The SSE
+    /// `done` frame's own `model` reports what actually answered.
     pub model_used: Option<String>,
 }
 
