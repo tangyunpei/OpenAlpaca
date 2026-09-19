@@ -560,11 +560,38 @@ impl Orchestrator {
             mode: DynamicContextMode::Default,
         };
 
+        // **U1 — the skill tier adapts too.** This handed the lane's history
+        // to the model exactly as it came out of the database: an image part
+        // replayed into a local model that has no vision reached the provider
+        // as an `image_url` it cannot serve, and a document part reached a
+        // model with no native document support with nothing done about its
+        // extracted text (U2). Same resolution as the main loop and the
+        // context window — `runner::routed_model`, via `answering_model` —
+        // off this tier's own `LoopConfig.model`. `None` (no router, nothing
+        // routable) changes nothing.
+        let adapted_recent: Vec<ChatMessage> =
+            match self.answering_model(config_for_loop.model.as_deref()) {
+                None => ctx.recent_messages.clone(),
+                Some(model) => ctx
+                    .recent_messages
+                    .iter()
+                    .map(|msg| match &msg.parts {
+                        None => msg.clone(),
+                        Some(parts) => {
+                            let mut adapted = msg.clone();
+                            adapted.parts =
+                                Some(self.adapt_parts_for_model(parts.clone(), &model));
+                            adapted
+                        }
+                    })
+                    .collect(),
+            };
+
         let history_input = HistoryInput {
             lane_tip_fingerprint: [0u8; 32],
             summary: ctx.summary.as_deref().map(Arc::<str>::from),
             summary_wrap_mode: SummaryWrapMode::UntrustedWrap,
-            recent_messages: Arc::new(ctx.recent_messages.clone()),
+            recent_messages: Arc::new(adapted_recent),
             current_user_turn: Some(ChatMessage::user(query)),
             mode: HistoryMode::Default,
         };

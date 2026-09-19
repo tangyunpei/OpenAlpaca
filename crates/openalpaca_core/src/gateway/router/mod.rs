@@ -28,6 +28,19 @@ pub struct DelegationInfo {
     pub title: String,
 }
 
+/// U3 — one of the turn's attachments that never reached the model, and why.
+///
+/// The counterpart of `attachments_used`: an attachment the adaptation
+/// replaced with a placeholder (no vision, no document support and no
+/// extracted text) is *not* listed as used, and appears here instead with the
+/// reason a person can read. Travels `HandleResult` → `GatewayResponse` → the
+/// SSE `done` frame, exactly as `attachments_used` does.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SkippedAttachment {
+    pub id: String,
+    pub reason: String,
+}
+
 /// Rich result from message handling, carrying optional LLM metadata.
 ///
 /// Non-LLM paths (task queries, commands, etc.) use `HandleResult::text()` which
@@ -38,8 +51,12 @@ pub struct HandleResult {
     pub model: Option<String>,
     pub tokens_in: Option<u32>,
     pub tokens_out: Option<u32>,
-    /// File IDs of attachments consumed during handling.
+    /// File IDs of attachments that reached the model in some form — natively,
+    /// or (U2) as the labelled text of a document. An attachment the
+    /// adaptation withheld is **not** here; it is in `attachments_skipped`.
     pub attachments_used: Vec<String>,
+    /// U3 — the turn's attachments that never reached the model, with a reason.
+    pub attachments_skipped: Vec<SkippedAttachment>,
     /// Set when handling delegated the message to a background task.
     pub delegation: Option<DelegationInfo>,
 }
@@ -53,6 +70,7 @@ impl HandleResult {
             tokens_in: None,
             tokens_out: None,
             attachments_used: Vec::new(),
+            attachments_skipped: Vec::new(),
             delegation: None,
         }
     }
@@ -201,8 +219,10 @@ pub struct GatewayResponse {
     pub tokens_in: Option<u32>,
     /// Output tokens generated (if LLM was called).
     pub tokens_out: Option<u32>,
-    /// File IDs of attachments consumed during handling.
+    /// File IDs of attachments that reached the model in some form.
     pub attachments_used: Vec<String>,
+    /// U3 — the turn's attachments that never reached the model, with a reason.
+    pub attachments_skipped: Vec<SkippedAttachment>,
     /// Set when handling delegated the message to a background task.
     pub delegation: Option<DelegationInfo>,
 }
@@ -446,6 +466,7 @@ impl Gateway {
                     tokens_in: result.tokens_in,
                     tokens_out: result.tokens_out,
                     attachments_used: result.attachments_used,
+                    attachments_skipped: result.attachments_skipped,
                     delegation: result.delegation,
                 }
             }
@@ -457,6 +478,7 @@ impl Gateway {
                 tokens_in: None,
                 tokens_out: None,
                 attachments_used: Vec::new(),
+                attachments_skipped: Vec::new(),
                 delegation: None,
             },
         }

@@ -520,45 +520,59 @@ impl Orchestrator {
         // parts for the target model's capabilities here, BEFORE handing them
         // to compose(). Likewise, adapt `current_parts` before constructing the
         // `current_user_turn` ChatMessage.
+        //
+        // **U1 — the model that will answer.** This used to adapt against
+        // `config_for_loop.model.unwrap_or(router.default_model())` — the
+        // *configured* default. On a local-only install that id is not in the
+        // registry at all (a disabled provider's compiled defaults are
+        // pruned), so `supports_image` and `supports_document` both fell
+        // through `unwrap_or(false)` and the vision model that was about to
+        // answer received `[image attached — model does not support vision]`.
+        // `answering_model` walks L3's ladder through `runner::routed_model`
+        // — the same reader `model_window` above uses — and `None` (nothing
+        // routable) leaves every part alone so `NoRoutableModel` can speak.
         let (adapted_recent, current_user_turn): (Vec<ChatMessage>, Option<ChatMessage>) =
-            if let Some(ref router) = self.llm_router {
-                let default_model = router.default_model();
-                let target_model = config_for_loop
-                    .model
-                    .as_deref()
-                    .unwrap_or(&default_model)
-                    .to_string();
-                let recent: Vec<ChatMessage> = ctx
-                    .recent_messages
-                    .iter()
-                    .map(|msg| {
-                        if msg.parts.is_some() {
-                            let mut adapted = msg.clone();
-                            adapted.parts = Some(self.adapt_parts_for_model(
-                                sanitize_parts_for_dispatch(
-                                    msg.parts.clone().unwrap_or_default(),
-                                ),
-                                &target_model,
-                            ));
-                            adapted
-                        } else {
-                            msg.clone()
-                        }
-                    })
-                    .collect();
-                let cur = if let Some(parts) = current_parts {
-                    let adapted = self.adapt_parts_for_model(
-                        sanitize_parts_for_dispatch(parts.to_vec()),
-                        &target_model,
-                    );
-                    Some(ChatMessage::user_with_parts(adapted))
-                } else {
-                    Some(ChatMessage::user(query))
-                };
-                (recent, cur)
-            } else {
+            if self.llm_router.is_none() {
                 // Echo-stub path (no router) — pass messages through unchanged.
                 (ctx.recent_messages.clone(), Some(ChatMessage::user(query)))
+            } else {
+                // `None` here is "nothing at all is routable": every part is
+                // left exactly as it is rather than replaced by a placeholder
+                // claiming the model cannot read it.
+                let model = self.answering_model(config_for_loop.model.as_deref());
+                let recent: Vec<ChatMessage> = match &model {
+                    None => ctx.recent_messages.clone(),
+                    Some(model) => ctx
+                        .recent_messages
+                        .iter()
+                        .map(|msg| {
+                            if msg.parts.is_some() {
+                                let mut adapted = msg.clone();
+                                adapted.parts = Some(self.adapt_parts_for_model(
+                                    sanitize_parts_for_dispatch(
+                                        msg.parts.clone().unwrap_or_default(),
+                                    ),
+                                    model,
+                                ));
+                                adapted
+                            } else {
+                                msg.clone()
+                            }
+                        })
+                        .collect(),
+                };
+                let cur = match current_parts {
+                    Some(parts) => {
+                        let parts = sanitize_parts_for_dispatch(parts.to_vec());
+                        let parts = match &model {
+                            Some(model) => self.adapt_parts_for_model(parts, model),
+                            None => parts,
+                        };
+                        Some(ChatMessage::user_with_parts(parts))
+                    }
+                    None => Some(ChatMessage::user(query)),
+                };
+                (recent, cur)
             };
 
         // Resolve ConversationLane for Tier-2 cache activation (Component 4).

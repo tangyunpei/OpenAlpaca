@@ -332,6 +332,29 @@ fn delta_to_print(tty: bool, content: &str) -> Option<&str> {
     (tty && !content.is_empty()).then_some(content)
 }
 
+/// U3(d) — one line per attachment the daemon says never reached the model.
+///
+/// The turn answered; it just answered without that file, and the round-7
+/// acceptance run showed what silence costs — the model guessed, and the only
+/// clue was that the answer was wrong. Printed on **stderr**, under the
+/// answer, for the same reason `Uploaded: …` is: a pipe's stdout is somebody
+/// else's input and carries the answer alone (S13).
+fn skipped_attachment_lines(done: &serde_json::Value) -> Vec<String> {
+    let Some(skipped) = done.get("attachments_skipped").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    skipped
+        .iter()
+        .map(|entry| {
+            let id = entry["id"].as_str().unwrap_or("(unknown)");
+            match entry["reason"].as_str().filter(|r| !r.is_empty()) {
+                Some(reason) => format!("Attachment {id} did not reach the model: {reason}"),
+                None => format!("Attachment {id} did not reach the model"),
+            }
+        })
+        .collect()
+}
+
 /// What a `reasoning` frame prints (S2).
 ///
 /// Dim, on a terminal, as it arrives — it is the 13 s a thinking model spends
@@ -570,6 +593,14 @@ fn process_sse_event(event_text: &str, opts: &StreamOptions, state: &mut SseStat
                 }
 
                 println!();
+
+                // U3(d): what the turn answered *without*, before the usage
+                // line — one line per withheld attachment, naming the reason
+                // the daemon gave.
+                for line in skipped_attachment_lines(&parsed) {
+                    eprintln!("{}", line.yellow());
+                }
+
                 let model = parsed["model"].as_str().unwrap_or("").to_string();
                 let tokens_in = parsed["tokens_in"].as_u64().unwrap_or(0);
                 let tokens_out = parsed["tokens_out"].as_u64().unwrap_or(0);

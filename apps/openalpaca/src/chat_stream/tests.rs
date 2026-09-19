@@ -588,3 +588,48 @@ event: done\ndata: {\"content\":\"hi\",\"model\":\"qwen3\",\"tokens_in\":1,\"tok
 
     server.join().expect("the server thread finishes");
 }
+
+// ── U3(d): the CLI says what the turn answered without ──────────────────
+
+/// One line per withheld attachment, naming the id and the daemon's own
+/// reason. The round-7 acceptance run had no clue at all: the model guessed,
+/// and the only symptom was a wrong answer.
+#[test]
+fn a_withheld_attachment_gets_one_warning_line() {
+    let done = serde_json::json!({
+        "content": "I cannot see it",
+        "model": "qwen3:8b",
+        "attachments_skipped": [
+            { "id": "img-1", "reason": "the answering model does not support image input" },
+            { "id": "doc-2", "reason": "no text was extracted" },
+        ],
+    });
+    assert_eq!(
+        skipped_attachment_lines(&done),
+        vec![
+            "Attachment img-1 did not reach the model: the answering model does not support image input".to_string(),
+            "Attachment doc-2 did not reach the model: no text was extracted".to_string(),
+        ]
+    );
+}
+
+/// A turn that withheld nothing prints nothing — the field is omitted, and an
+/// older daemon never sends it at all.
+#[test]
+fn a_clean_turn_prints_no_warning() {
+    let done = serde_json::json!({ "content": "hi", "model": "qwen3:8b" });
+    assert!(skipped_attachment_lines(&done).is_empty());
+    let empty = serde_json::json!({ "attachments_skipped": [] });
+    assert!(skipped_attachment_lines(&empty).is_empty());
+}
+
+/// A daemon that sends an entry with no reason still names the attachment
+/// rather than printing a dangling colon.
+#[test]
+fn a_reasonless_entry_still_names_the_attachment() {
+    let done = serde_json::json!({ "attachments_skipped": [ { "id": "img-1" } ] });
+    assert_eq!(
+        skipped_attachment_lines(&done),
+        vec!["Attachment img-1 did not reach the model".to_string()]
+    );
+}

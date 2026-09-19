@@ -8,6 +8,7 @@ pub mod intent;
 pub mod skill;
 pub mod task_state;
 
+mod attachment_adapt;
 mod bootstrap;
 mod context_builder;
 mod direct_send;
@@ -206,6 +207,11 @@ pub struct Orchestrator {
     /// Mirrors `llm_metadata_map`: populated when a dispatch creates a task,
     /// removed by bridge after reading.
     pub delegation_map: DashMap<Uuid, crate::gateway::DelegationInfo>,
+    /// U3 — per-request record of the turn's attachments that never reached
+    /// the model. Mirrors `delegation_map`: written by the attachment
+    /// adaptation, removed by the bridge after reading. Written only when
+    /// something was actually withheld, so an ordinary turn touches nothing.
+    pub attachments_skipped_map: DashMap<Uuid, Vec<crate::gateway::SkippedAttachment>>,
     /// Optional broker for interactive tool confirmation (set post-construction via `set_confirmation_broker()`).
     pub confirmation_broker: Arc<RwLock<Option<Arc<crate::security::confirmation::ConfirmationBroker>>>>,
     /// Context manager for resolving dynamic context (memory, user profile, etc.) via PromptBuilder.
@@ -363,6 +369,7 @@ impl Orchestrator {
             connector_sender,
             llm_metadata_map: DashMap::new(),
             delegation_map: DashMap::new(),
+            attachments_skipped_map: DashMap::new(),
             confirmation_broker: Arc::new(RwLock::new(None)),
             context_manager,
             persona_version: Arc::new(AtomicU64::new(0)),

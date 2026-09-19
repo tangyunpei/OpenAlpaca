@@ -3,7 +3,7 @@
 //! Manages broadcast channels for chat streaming. Each active chat request
 //! gets a unique stream_id with a broadcast channel for SSE delivery.
 
-use crate::gateway::DelegationInfo;
+use crate::gateway::{DelegationInfo, SkippedAttachment};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -39,6 +39,10 @@ pub enum ChatStreamEvent {
         duration_ms: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         attachments_used: Option<Vec<String>>,
+        /// U3 — the turn's attachments that never reached the model, each with
+        /// a reason. Omitted when there are none, like `attachments_used`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        attachments_skipped: Option<Vec<SkippedAttachment>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         delegation: Option<DelegationInfo>,
     },
@@ -103,18 +107,25 @@ impl StreamSink {
         duration_ms: u64,
         delegation: Option<DelegationInfo>,
     ) {
-        self.send_event(ChatStreamEvent::Done {
-            content: content.to_string(),
-            model: model.to_string(),
+        self.send_done_with_attachments(
+            content,
+            model,
             tokens_in,
             tokens_out,
             duration_ms,
-            attachments_used: None,
+            Vec::new(),
+            Vec::new(),
             delegation,
-        });
+        );
     }
 
     /// Send the final Done event with attachment info.
+    ///
+    /// U3: `attachments_skipped` travels beside `attachments_used` and is
+    /// omitted from the frame the same way — a turn that withheld nothing is
+    /// byte-identical to what it always was. A turn whose *every* attachment
+    /// was withheld has an empty `used` and a non-empty `skipped`, which is
+    /// why the two are one call rather than two.
     #[allow(clippy::too_many_arguments)]
     pub fn send_done_with_attachments(
         &self,
@@ -124,20 +135,17 @@ impl StreamSink {
         tokens_out: u64,
         duration_ms: u64,
         attachments_used: Vec<String>,
+        attachments_skipped: Vec<SkippedAttachment>,
         delegation: Option<DelegationInfo>,
     ) {
-        let att = if attachments_used.is_empty() {
-            None
-        } else {
-            Some(attachments_used)
-        };
         self.send_event(ChatStreamEvent::Done {
             content: content.to_string(),
             model: model.to_string(),
             tokens_in,
             tokens_out,
             duration_ms,
-            attachments_used: att,
+            attachments_used: (!attachments_used.is_empty()).then_some(attachments_used),
+            attachments_skipped: (!attachments_skipped.is_empty()).then_some(attachments_skipped),
             delegation,
         });
     }

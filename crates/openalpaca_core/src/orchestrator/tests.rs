@@ -1052,10 +1052,312 @@ async fn test_empty_content_with_attachments_forces_simple_query() {
     assert!(json.get("count").is_none() || json["count"].is_null());
 }
 
+// ── U1–U3: attachments reach the model that answers ─────────────────────
+//
+// The round-7 acceptance run attached an image and a text file to an
+// Ollama-only install and got `[image attached — …]` and
+// `[document attached — …]` back: the adaptation asked the registry about
+// `claude-haiku-4-5-20251001`, the *configured* default, which a local-only
+// install has pruned from the catalogue entirely. These build the same shape.
+
+/// A router shaped like a local-only install: Anthropic and OpenAI are
+/// **disabled**, so their compiled defaults are gone from the catalogue
+/// (`with_defaults_and_config`, R58b) and the configured default names a model
+/// the registry has never heard of. One Ollama model is registered and
+/// routable, with the media support the case under test needs.
+fn local_only_router(
+    provider: Arc<crate::test_util::RecordingProvider>,
+    model_id: &str,
+    supports_image: bool,
+    supports_document: bool,
+) -> Arc<LlmRouter> {
+    use openalpaca_llm::ProviderType;
+    use openalpaca_llm::routing::cost_tracker::CostTracker;
+    use openalpaca_llm::routing::model_registry::{ModelInfo, ModelRegistry};
+
+    let disabled: std::collections::HashSet<ProviderType> =
+        [ProviderType::Anthropic, ProviderType::OpenAI]
+            .into_iter()
+            .collect();
+    let registry =
+        ModelRegistry::with_defaults_and_config(&std::collections::HashMap::new(), &disabled);
+    let cost_registry =
+        ModelRegistry::with_defaults_and_config(&std::collections::HashMap::new(), &disabled);
+    let router = LlmRouter::new(
+        std::collections::HashMap::new(),
+        registry,
+        std::collections::HashMap::new(),
+        Arc::new(CostTracker::new(cost_registry)),
+        // Exactly what a shipped `llm.toml` names, and exactly what the
+        // acceptance run's install could not route.
+        "claude-haiku-4-5-20251001".to_string(),
+    );
+    router.model_registry().register(
+        model_id.to_string(),
+        ModelInfo {
+            provider: ProviderType::Ollama,
+            input_price_per_million: 0.0,
+            output_price_per_million: 0.0,
+            context_window: 32_768,
+            discovered: true,
+            supports_image,
+            supports_audio: false,
+            supports_document,
+            supports_reasoning: false,
+            supports_tools: true,
+            declared: false,
+        },
+    );
+    // `RecordingProvider` is not `OllamaProvider`, so it keeps the trait's
+    // `requires_key() == true`: give it the same placeholder key
+    // `LlmRouter::single_provider` hands every mock. What is under test is the
+    // *adaptation*, not L1's keyless slot.
+    router.register_provider(
+        ProviderType::Ollama,
+        provider,
+        openalpaca_llm::keys::key_pool::KeyPool::new(
+            vec![openalpaca_llm::keys::ApiKey::new(
+                "default".to_string(),
+                ProviderType::Ollama,
+                String::new(),
+            )],
+            openalpaca_llm::keys::key_pool::SelectionStrategy::RoundRobin,
+        ),
+    );
+    Arc::new(router)
+}
+
+fn attachment_request(request_id: Uuid, content: &str) -> HandleRequest {
+    HandleRequest {
+        request_id,
+        source: "cli".to_string(),
+        content: content.to_string(),
+        principal: Principal::System,
+        scope: Scope::Global,
+        lane_key: "test:cli".to_string(),
+        workspace_path: None,
+        stream_id: None,
+        model_override: None,
+        unattended: false,
+        turn_sink: None,
+    }
+}
+
+/// The parts of the last user message the provider was actually handed.
+fn parts_the_model_saw(provider: &crate::test_util::RecordingProvider) -> Vec<ContentPart> {
+    provider
+        .first_request()
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == openalpaca_llm::Role::User && m.parts.is_some())
+        .and_then(|m| m.parts.clone())
+        .expect("expected a user message carrying parts")
+}
+
+/// **U1 — the model that answers, not the model that was configured.**
+///
+/// The configured default is an unroutable Claude id that is not in the
+/// catalogue at all; the only routable model is a local one that *does* see.
+/// Before this the adaptation read `supports_image("claude-haiku-…")` →
+/// `None.unwrap_or(false)` and handed the vision model
+/// `[image attached — model does not support vision]`.
+#[tokio::test]
+async fn an_image_survives_for_a_local_vision_model_the_ladder_picked() {
+    let provider = crate::test_util::RecordingProvider::new("a red square");
+    let router = local_only_router(provider.clone(), "qwen2.5vl:7b", true, false);
+    let orch = make_orchestrator_with_llm_and_agents(router, vec![]);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let img_path = tmp.path().join("image.jpg");
+    let image_bytes = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x12, 0x34];
+    std::fs::write(&img_path, &image_bytes).unwrap();
+    let expected_b64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
+
+    orch.handle_message_with_attachments(
+        attachment_request(Uuid::new_v4(), "what colour is it?"),
+        vec![ResolvedAttachment {
+            file_id: "img-1".to_string(),
+            filename: "image.jpg".to_string(),
+            mime_type: "image/jpeg".to_string(),
+            size_bytes: image_bytes.len() as i64,
+            extracted_text: None,
+            storage_path: img_path.to_string_lossy().to_string(),
+        }],
+    )
+    .await
+    .expect("the turn answers");
+
+    let parts = parts_the_model_saw(&provider);
+    let source = parts
+        .iter()
+        .find_map(|p| match p {
+            ContentPart::Image { source, .. } => Some(source.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!("the vision model that answered was handed no image part: {parts:?}")
+        });
+    match source {
+        ImageSource::Base64 { media_type, data } => {
+            assert_eq!(media_type, "image/jpeg");
+            assert_eq!(data.as_str(), expected_b64);
+        }
+        other => panic!("expected base64 image source, got {other:?}"),
+    }
+}
+
+/// **U1, the other half.** A local model with no vision still gets the
+/// placeholder — the resolution changed, the honesty did not — and U3 records
+/// the withholding for the turn's result.
+#[tokio::test]
+async fn an_image_is_withheld_from_a_local_model_that_cannot_see_and_is_reported() {
+    let provider = crate::test_util::RecordingProvider::new("I cannot see it");
+    let router = local_only_router(provider.clone(), "qwen3:8b", false, false);
+    let orch = make_orchestrator_with_llm_and_agents(router, vec![]);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let img_path = tmp.path().join("image.jpg");
+    std::fs::write(&img_path, [0xFFu8, 0xD8, 0xFF]).unwrap();
+
+    let request_id = Uuid::new_v4();
+    orch.handle_message_with_attachments(
+        attachment_request(request_id, "what colour is it?"),
+        vec![ResolvedAttachment {
+            file_id: "img-1".to_string(),
+            filename: "image.jpg".to_string(),
+            mime_type: "image/jpeg".to_string(),
+            size_bytes: 3,
+            extracted_text: None,
+            storage_path: img_path.to_string_lossy().to_string(),
+        }],
+    )
+    .await
+    .expect("the turn answers");
+
+    let parts = parts_the_model_saw(&provider);
+    assert!(
+        parts.iter().any(|p| matches!(
+            p,
+            ContentPart::Text { text } if text == super::attachment_adapt::PLACEHOLDER_IMAGE
+        )),
+        "expected the placeholder, got {parts:?}"
+    );
+
+    // U3(c): the turn's result carries the withheld id and a reason.
+    let recorded = orch
+        .attachments_skipped_map
+        .remove(&request_id)
+        .map(|(_, v)| v)
+        .expect("a withheld attachment is recorded for the turn's result");
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].id, "img-1");
+    assert_eq!(
+        recorded[0].reason,
+        super::attachment_adapt::REASON_NO_IMAGE
+    );
+}
+
+/// **U2 — every model reads text.** A text file's extracted content reaches a
+/// model that takes no *native* document part, labelled with the file name.
+/// Before this the codeword in the file never left the daemon.
+#[tokio::test]
+async fn a_documents_text_reaches_a_model_without_native_document_support() {
+    let provider = crate::test_util::RecordingProvider::new("PLATYPUS");
+    let router = local_only_router(provider.clone(), "qwen3:8b", false, false);
+    let orch = make_orchestrator_with_llm_and_agents(router, vec![]);
+
+    let request_id = Uuid::new_v4();
+    orch.handle_message_with_attachments(
+        attachment_request(request_id, "what is the codeword?"),
+        vec![ResolvedAttachment {
+            file_id: "doc-1".to_string(),
+            filename: "secret.txt".to_string(),
+            mime_type: "text/plain".to_string(),
+            size_bytes: 40,
+            extracted_text: Some("the codeword is PLATYPUS".to_string()),
+            storage_path: "/dev/null".to_string(),
+        }],
+    )
+    .await
+    .expect("the turn answers");
+
+    let parts = parts_the_model_saw(&provider);
+    let carried = parts
+        .iter()
+        .filter_map(|p| match p {
+            ContentPart::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        carried.contains("PLATYPUS"),
+        "the extracted text never reached the model: {parts:?}"
+    );
+    assert!(
+        carried.contains("Attached file: secret.txt (text/plain)"),
+        "the text is not labelled with the file it came from: {carried}"
+    );
+    assert!(
+        orch.attachments_skipped_map.get(&request_id).is_none(),
+        "an attachment that reached the model as text is not skipped"
+    );
+}
+
+/// **U2 — the placeholder is left for a document with no text at all**, and
+/// U3 reports it.
+#[tokio::test]
+async fn a_document_with_no_extracted_text_keeps_the_placeholder() {
+    let provider = crate::test_util::RecordingProvider::new("I did not receive the file");
+    let router = local_only_router(provider.clone(), "qwen3:8b", false, false);
+    let orch = make_orchestrator_with_llm_and_agents(router, vec![]);
+
+    let request_id = Uuid::new_v4();
+    orch.handle_message_with_attachments(
+        attachment_request(request_id, "what does it say?"),
+        vec![ResolvedAttachment {
+            file_id: "doc-2".to_string(),
+            filename: "scan.pdf".to_string(),
+            mime_type: "application/pdf".to_string(),
+            size_bytes: 1024,
+            extracted_text: None,
+            storage_path: "/dev/null".to_string(),
+        }],
+    )
+    .await
+    .expect("the turn answers");
+
+    let parts = parts_the_model_saw(&provider);
+    assert!(
+        parts.iter().any(|p| matches!(
+            p,
+            ContentPart::Text { text } if text == super::attachment_adapt::PLACEHOLDER_DOCUMENT
+        )),
+        "expected the placeholder, got {parts:?}"
+    );
+    let recorded = orch
+        .attachments_skipped_map
+        .remove(&request_id)
+        .map(|(_, v)| v)
+        .expect("a withheld attachment is recorded");
+    assert_eq!(recorded[0].id, "doc-2");
+    assert_eq!(
+        recorded[0].reason,
+        super::attachment_adapt::REASON_NO_DOCUMENT
+    );
+}
+
+/// A model that *does* take a native document part is untouched: the part goes
+/// out as a `Document` and the provider renders it (Anthropic, and any
+/// `[models]` row declaring `supports_document`).
 #[test]
-fn test_adapt_parts_document_unsupported_uses_fixed_placeholder() {
+fn a_native_document_model_still_gets_the_native_part() {
     let router = make_planning_mock_llm(r#"{"classification":"simple_query","assignments":[]}"#);
     let orch = make_orchestrator_with_llm_and_agents(router, vec![]);
+    let model = orch
+        .answering_model(Some("claude-sonnet-4-5-20250929"))
+        .expect("the configured default is routable here");
 
     let adapted = orch.adapt_parts_for_model(
         vec![ContentPart::Document {
@@ -1064,19 +1366,70 @@ fn test_adapt_parts_document_unsupported_uses_fixed_placeholder() {
             mime_type: "application/pdf".to_string(),
             extracted_text: Some("secret text".to_string()),
         }],
-        "gpt-5-mini",
+        &model,
     );
 
     assert_eq!(adapted.len(), 1);
-    match &adapted[0] {
-        ContentPart::Text { text } => {
-            assert_eq!(
-                text,
-                "[document attached — model does not support document input]"
-            );
-        }
-        other => panic!("expected text placeholder, got {other:?}"),
-    }
+    assert!(matches!(adapted[0], ContentPart::Document { .. }));
+}
+
+/// **U2 — bounded, and never silently.** The extraction cap
+/// (`[upload.governance] max_extracted_text_chars`) bounds the block, and the
+/// block says so where the model can read it.
+#[tokio::test]
+async fn an_over_long_document_is_cut_at_the_extraction_cap_and_says_so() {
+    let provider = crate::test_util::RecordingProvider::new("ok");
+    let router = local_only_router(provider.clone(), "qwen3:8b", false, false);
+
+    let mut config = DaemonConfig::default();
+    config.upload.governance.max_extracted_text_chars = 20;
+    let ctx = Arc::new(SharedContext::new());
+    let bus = EventBus::default();
+    let gate = make_security_gate(&bus);
+    let orch = Orchestrator::new(
+        ctx,
+        Arc::new(LaneManager::new()),
+        bus,
+        SystemPersona::default(),
+        Some(router),
+        LoopConfig::default(),
+        gate,
+        make_tool_registry(),
+        None,
+        None,
+        Arc::new(skill_catalog::SkillCatalog::new()),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(config)),
+    );
+
+    orch.handle_message_with_attachments(
+        attachment_request(Uuid::new_v4(), "summarize"),
+        vec![ResolvedAttachment {
+            file_id: "doc-3".to_string(),
+            filename: "long.txt".to_string(),
+            mime_type: "text/plain".to_string(),
+            size_bytes: 100,
+            extracted_text: Some("y".repeat(100)),
+            storage_path: "/dev/null".to_string(),
+        }],
+    )
+    .await
+    .expect("the turn answers");
+
+    let parts = parts_the_model_saw(&provider);
+    let carried = parts
+        .iter()
+        .filter_map(|p| match p {
+            ContentPart::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        carried.contains("[truncated — 20 of 100 characters shown]"),
+        "the cut is invisible to the model: {carried}"
+    );
+    assert!(!carried.contains(&"y".repeat(21)));
 }
 
 #[tokio::test]
@@ -5289,4 +5642,221 @@ async fn the_main_loop_is_budgeted_against_the_model_that_answers() {
             "the budget must be the answering model's window, not the compiled 200 000"
         );
     }
+}
+
+/// **U1 on the skill tier.**
+///
+/// The deterministic skill tier handed the lane's history to the model exactly
+/// as the database returned it — no adaptation at all — so a `/slash` turn on
+/// an Ollama-only install sent a real `image_url` part to a local model with
+/// no vision, and a document part with nothing done about its extracted text.
+/// It now resolves the answering model the same way the main loop and the
+/// context window do.
+#[tokio::test]
+async fn the_skill_tier_adapts_history_for_the_model_that_answers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let skill_dir = tmp.path().join("looker");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        r#"---
+name: "Looker"
+description: "Looks at things"
+invoke:
+  slash: "/look"
+  mode: "auto"
+---
+
+## Instructions
+
+Look.
+"#,
+    )
+    .unwrap();
+    let catalog = skill_catalog::SkillCatalog::new();
+    catalog.scan_directory(tmp.path(), crate::middleware::skill::SkillScope::Project);
+
+    let provider = crate::test_util::RecordingProvider::new("I cannot see it");
+    let router = local_only_router(provider.clone(), "qwen3:8b", false, false);
+    let bus = EventBus::default();
+    let gate = make_security_gate(&bus);
+    let orch = Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        bus,
+        SystemPersona::default(),
+        Some(router),
+        LoopConfig::default(),
+        gate,
+        make_tool_registry(),
+        None,
+        None,
+        Arc::new(catalog),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    );
+
+    // A history turn carrying an image and a document, as the transcript
+    // replays them.
+    let ctx = ConversationContext {
+        summary: None,
+        recent_messages: vec![ChatMessage::user_with_parts(vec![
+            ContentPart::Image {
+                source: ImageSource::Base64 {
+                    media_type: "image/jpeg".to_string(),
+                    data: Arc::new("AAAA".to_string()),
+                },
+                detail: None,
+            },
+            ContentPart::Document {
+                file_id: "doc-9".to_string(),
+                filename: "notes.txt".to_string(),
+                mime_type: "text/plain".to_string(),
+                extracted_text: Some("the codeword is WOMBAT".to_string()),
+            },
+        ])],
+        older_window: Vec::new(),
+        summary_version: 0,
+        last_summarized_id: 0,
+        old_summary_text: String::new(),
+    };
+    let scope = crate::memory::scope_context::MemoryScopeContext::new(None);
+
+    orch.handle_skill_invocation(
+        Uuid::new_v4(),
+        "cli",
+        "Looker",
+        "look at it",
+        "test:cli",
+        &ctx,
+        None,
+        &scope,
+        None,
+        false,
+        None,
+        false,
+        None,
+    )
+    .await
+    .expect("the skill runs");
+
+    let seen = provider.first_request();
+    let parts = seen
+        .messages
+        .iter()
+        .find_map(|m| m.parts.clone())
+        .expect("the history turn's parts reached the model");
+    assert!(
+        parts.iter().any(|p| matches!(
+            p,
+            ContentPart::Text { text } if text == super::attachment_adapt::PLACEHOLDER_IMAGE
+        )),
+        "the skill tier sent a raw image to a model with no vision: {parts:?}"
+    );
+    assert!(
+        !parts
+            .iter()
+            .any(|p| matches!(p, ContentPart::Image { .. })),
+        "no image part may survive for a model that cannot see: {parts:?}"
+    );
+    // U2 applies on this tier too: the document's text is carried, labelled.
+    assert!(
+        parts.iter().any(|p| matches!(
+            p,
+            ContentPart::Text { text }
+                if text.contains("WOMBAT") && text.contains("Attached file: notes.txt")
+        )),
+        "the document's extracted text did not reach the skill tier's model: {parts:?}"
+    );
+}
+
+/// The turn's own message is deduped out of its history **on the attachment
+/// path too**.
+///
+/// The gateway persists the turn before the handler runs, and
+/// `build_context` drops the last row when it matches the current query. That
+/// comparison was against the *model input* — on the attachment path, the
+/// augmented string with the files' extracted text wrapped around the
+/// question, which never equals the stored content. So the turn's own message
+/// came back as history, and with U2 the whole document would have been sent
+/// twice: on an 8 192-token local model, twice is the difference between
+/// fitting and not.
+#[tokio::test]
+async fn an_attachment_turn_is_not_replayed_as_its_own_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+
+    let provider = crate::test_util::RecordingProvider::new("WOMBAT");
+    let router = local_only_router(provider.clone(), "qwen3:8b", false, false);
+    let bus = EventBus::default();
+    let gate = make_security_gate(&bus);
+    let orch = Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        bus,
+        SystemPersona::default(),
+        Some(router),
+        LoopConfig::default(),
+        gate,
+        make_tool_registry(),
+        Some(db.clone()),
+        None,
+        Arc::new(skill_catalog::SkillCatalog::new()),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    );
+
+    let attachment = ResolvedAttachment {
+        file_id: "doc-1".to_string(),
+        filename: "secret.txt".to_string(),
+        mime_type: "text/plain".to_string(),
+        size_bytes: 40,
+        extracted_text: Some("the codeword is WOMBAT".to_string()),
+        storage_path: "/dev/null".to_string(),
+    };
+
+    // Exactly what `Gateway::handle_event` does before calling the handler.
+    crate::gateway::persistence::GatewayPersistence::new(db)
+        .persist_user_message_with_attachments(
+            "test:cli",
+            "what is the codeword?",
+            "cli",
+            None,
+            std::slice::from_ref(&attachment),
+        )
+        .expect("the gateway persists the user half first");
+
+    orch.handle_message_with_attachments(
+        attachment_request(Uuid::new_v4(), "what is the codeword?"),
+        vec![attachment],
+    )
+    .await
+    .expect("the turn answers");
+
+    let request = provider.first_request();
+    let occurrences: usize = request
+        .messages
+        .iter()
+        // A message with parts is serialized from its parts; `content` is the
+        // flattened copy the providers ignore, so it must not be counted twice.
+        .map(|m| match &m.parts {
+            Some(parts) => parts
+                .iter()
+                .filter_map(|p| match p {
+                    ContentPart::Text { text } => Some(text.matches("WOMBAT").count()),
+                    ContentPart::Document {
+                        extracted_text: Some(text),
+                        ..
+                    } => Some(text.matches("WOMBAT").count()),
+                    _ => None,
+                })
+                .sum(),
+            None => m.content.matches("WOMBAT").count(),
+        })
+        .sum();
+    assert_eq!(
+        occurrences, 1,
+        "the attached document reached the model {occurrences} times, not once: {:?}",
+        request.messages
+    );
 }

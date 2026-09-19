@@ -231,26 +231,19 @@ impl ChatService {
                 let tokens_in = response.tokens_in.unwrap_or(0) as u64;
                 let tokens_out = response.tokens_out.unwrap_or(0) as u64;
                 let delegation = response.delegation.clone();
-                if response.attachments_used.is_empty() {
-                    sink.send_done(
-                        &response.content,
-                        model,
-                        tokens_in,
-                        tokens_out,
-                        duration_ms,
-                        delegation,
-                    );
-                } else {
-                    sink.send_done_with_attachments(
-                        &response.content,
-                        model,
-                        tokens_in,
-                        tokens_out,
-                        duration_ms,
-                        response.attachments_used,
-                        delegation,
-                    );
-                }
+                // U3: one call — an all-withheld turn has an empty
+                // `attachments_used` and a non-empty `attachments_skipped`,
+                // and both are omitted from the frame when empty.
+                sink.send_done_with_attachments(
+                    &response.content,
+                    model,
+                    tokens_in,
+                    tokens_out,
+                    duration_ms,
+                    response.attachments_used,
+                    response.attachments_skipped,
+                    delegation,
+                );
             }
 
             // Emit ChatStreamEnded event

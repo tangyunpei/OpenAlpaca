@@ -1018,8 +1018,35 @@ mod tests {
             tokens_out: 0,
             duration_ms: 42,
             attachments_used: None,
+            attachments_skipped: None,
             delegation,
         }
+    }
+
+    /// **U3(c).** The `done` payload names what the turn answered *without*.
+    /// Absent when nothing was withheld, so every existing client is unchanged.
+    #[test]
+    fn done_names_the_attachments_that_never_reached_the_model() {
+        let event = openalpaca_core::chat::ChatStreamEvent::Done {
+            content: "I cannot see it".to_string(),
+            model: "qwen3:8b".to_string(),
+            tokens_in: 10,
+            tokens_out: 5,
+            duration_ms: 90,
+            attachments_used: None,
+            attachments_skipped: Some(vec![openalpaca_core::gateway::SkippedAttachment {
+                id: "img-1".to_string(),
+                reason: "the answering model does not support image input".to_string(),
+            }]),
+            delegation: None,
+        };
+        let data: serde_json::Value = serde_json::from_str(&done_event_data(&event)).unwrap();
+        assert_eq!(data["attachments_skipped"][0]["id"], "img-1");
+        assert_eq!(
+            data["attachments_skipped"][0]["reason"],
+            "the answering model does not support image input"
+        );
+        assert!(data.get("attachments_used").is_none());
     }
 
     /// **S2.** The reasoning event has its own name on the wire and carries
@@ -1064,6 +1091,7 @@ mod tests {
         assert!(data.get("event").is_none());
         assert!(data.get("delegation").is_none());
         assert!(data.get("attachments_used").is_none());
+        assert!(data.get("attachments_skipped").is_none());
     }
 
     #[test]

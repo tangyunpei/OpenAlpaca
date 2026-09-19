@@ -1,6 +1,7 @@
 //! Helper methods for the orchestrator message handler: delegation metadata,
 //! skill invocation telemetry, and multimodal adaptation.
 
+use super::attachment_adapt::{self, AnsweringModel, Fate};
 use super::{ConversationContext, Orchestrator};
 use crate::events::SystemEvent;
 use crate::memory::scope_context::MemoryScopeContext;
@@ -138,39 +139,122 @@ impl Orchestrator {
         .await
     }
 
-    /// Adapt multimodal content parts for a model's capabilities.
+    /// U1 — the model this turn will actually be answered by, and what it
+    /// takes natively. `None` when there is no router or nothing is routable,
+    /// which every caller must read as "change nothing".
+    pub(super) fn answering_model(&self, pinned: Option<&str>) -> Option<AnsweringModel> {
+        attachment_adapt::answering_model(self.llm_router.as_ref()?, pinned)
+    }
+
+    /// `[upload.governance] max_extracted_text_chars` — the cap extraction
+    /// itself applies, and therefore the bound U2's labelled text block is
+    /// carried under. One number, one place.
+    pub(super) fn attachment_text_cap(&self) -> usize {
+        self.daemon_config
+            .load()
+            .upload
+            .governance
+            .max_extracted_text_chars
+    }
+
+    /// Adapt multimodal content parts for the model that will answer.
     ///
-    /// Replaces unsupported content types with text placeholders based on
-    /// the model's capability flags in the registry.
+    /// Not "the configured default": on a local-only install that id is not in
+    /// the registry at all, and every capability question answered `false`
+    /// (U1). The caller resolves the model once with
+    /// [`Orchestrator::answering_model`] and passes it here, so this and the
+    /// context-window code read the same ladder.
+    ///
+    /// An image or audio part the model cannot take becomes a placeholder; a
+    /// document becomes its extracted text, labelled and bounded (U2), and a
+    /// placeholder only when there is no text. Every withholding is logged
+    /// (U3) — the ids of the turn's *own* attachments are reported by
+    /// `handle_message_with_attachments`, which knows them; a part replayed
+    /// out of history carries an id only when it is a document.
     pub(super) fn adapt_parts_for_model(
         &self,
         parts: Vec<ContentPart>,
-        model_id: &str,
+        model: &AnsweringModel,
     ) -> Vec<ContentPart> {
-        let router = match &self.llm_router {
-            Some(r) => r,
-            None => return parts,
-        };
-        let registry = router.model_registry();
-
-        let supports_image = registry.supports_image(model_id);
-        let supports_audio = registry.supports_audio(model_id);
-        let supports_document = registry.supports_document(model_id);
-
+        let max_chars = self.attachment_text_cap();
         parts
             .into_iter()
-            .map(|part| match &part {
-                ContentPart::Image { .. } if !supports_image => ContentPart::Text {
-                    text: "[image attached — model does not support vision]".to_string(),
+            .map(|part| match part {
+                ContentPart::Image { .. } => match attachment_adapt::image_fate(model) {
+                    Fate::Native => part,
+                    _ => {
+                        warn_withheld(None, &model.id, attachment_adapt::REASON_NO_IMAGE);
+                        ContentPart::Text {
+                            text: attachment_adapt::PLACEHOLDER_IMAGE.to_string(),
+                        }
+                    }
                 },
-                ContentPart::Audio { .. } if !supports_audio => ContentPart::Text {
-                    text: "[audio attached — model does not support audio input]".to_string(),
+                ContentPart::Audio { .. } => match attachment_adapt::audio_fate(model) {
+                    Fate::Native => part,
+                    _ => {
+                        warn_withheld(None, &model.id, attachment_adapt::REASON_NO_AUDIO);
+                        ContentPart::Text {
+                            text: attachment_adapt::PLACEHOLDER_AUDIO.to_string(),
+                        }
+                    }
                 },
-                ContentPart::Document { .. } if !supports_document => ContentPart::Text {
-                    text: "[document attached — model does not support document input]".to_string(),
-                },
-                _ => part,
+                ContentPart::Document {
+                    file_id,
+                    filename,
+                    mime_type,
+                    extracted_text,
+                } => {
+                    let fate = attachment_adapt::document_fate(
+                        model,
+                        extracted_text.as_deref(),
+                        max_chars,
+                    );
+                    match fate {
+                        Fate::Native => ContentPart::Document {
+                            file_id,
+                            filename,
+                            mime_type,
+                            extracted_text,
+                        },
+                        Fate::AsText { cut_at } => {
+                            if let Some(total) = cut_at {
+                                tracing::warn!(
+                                    file_id = %file_id,
+                                    model = %model.id,
+                                    kept_chars = max_chars,
+                                    total_chars = total,
+                                    "Attachment text cut to the extraction cap before the model saw it"
+                                );
+                            }
+                            ContentPart::Text {
+                                text: attachment_adapt::document_as_text(
+                                    &filename,
+                                    &mime_type,
+                                    extracted_text.as_deref().unwrap_or_default(),
+                                    max_chars,
+                                ),
+                            }
+                        }
+                        Fate::Withheld { reason } => {
+                            warn_withheld(Some(&file_id), &model.id, reason);
+                            ContentPart::Text {
+                                text: attachment_adapt::PLACEHOLDER_DOCUMENT.to_string(),
+                            }
+                        }
+                    }
+                }
+                other => other,
             })
             .collect()
     }
+}
+
+/// U3(a) — one WARN naming the attachment, the model and the reason.
+pub(super) fn warn_withheld(file_id: Option<&str>, model: &str, reason: &str) {
+    tracing::warn!(
+        file_id = file_id.unwrap_or("-"),
+        model = %model,
+        reason = %reason,
+        "Attachment withheld from the model"
+    );
 }

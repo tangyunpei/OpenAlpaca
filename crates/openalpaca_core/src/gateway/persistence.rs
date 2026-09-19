@@ -461,6 +461,7 @@ mod tests {
                     tokens_in: Some(7621),
                     tokens_out: Some(338),
                     attachments_used: Vec::new(),
+                    attachments_skipped: Vec::new(),
                     delegation: None,
                 },
                 Some(1234),

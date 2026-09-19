@@ -128,7 +128,16 @@ impl Orchestrator {
         }
 
         // 4. Build context ONCE for all remaining paths (D6: single dedup location)
-        let ctx = self.build_context(&lane_key, &model_input_content);
+        //
+        // The dedup key is the **raw** message, not the model input. The
+        // gateway persists this turn before the handler runs, so the last
+        // recent row *is* this turn; `build_context` drops it by comparing it
+        // to the current query. On the attachment path the model input is the
+        // augmented string (the files' extracted text wrapped around the
+        // question) and never equalled the stored content, so the turn's own
+        // message came back as history — the attachment reached the model
+        // twice, and U2 would have sent the whole document twice.
+        let ctx = self.build_context(&lane_key, &intent_source_content);
 
         // 5. Compute result — deterministic tiers, then the main loop.
         //    Track timing for observability (OrchestrationStage metrics).

@@ -83,6 +83,74 @@ fn test_sink_send_done_with_delegation() {
     }
 }
 
+/// **U3(c).** A turn whose *only* attachment was withheld has an empty
+/// `attachments_used` and a non-empty `attachments_skipped` — which is exactly
+/// the case the old two-function split dropped on the floor, because the
+/// caller picked `send_done` (no attachment info at all) whenever `used` was
+/// empty.
+#[test]
+fn the_done_frame_carries_what_never_reached_the_model() {
+    let mgr = ChatStreamManager::new();
+    let (_stream_id, mut rx, sink) = mgr.create_stream("user:gui");
+
+    let skipped = SkippedAttachment {
+        id: "img-1".to_string(),
+        reason: "the answering model does not support image input".to_string(),
+    };
+    sink.send_done_with_attachments(
+        "I cannot see it",
+        "qwen3:8b",
+        10,
+        5,
+        90,
+        Vec::new(),
+        vec![skipped.clone()],
+        None,
+    );
+
+    match rx.try_recv().unwrap() {
+        ChatStreamEvent::Done {
+            attachments_used,
+            attachments_skipped,
+            ..
+        } => {
+            assert!(attachments_used.is_none());
+            assert_eq!(attachments_skipped, Some(vec![skipped]));
+        }
+        other => panic!("Expected Done event, got {other:?}"),
+    }
+}
+
+/// Nothing withheld leaves the frame exactly as it was.
+#[test]
+fn a_clean_turn_omits_both_attachment_fields() {
+    let mgr = ChatStreamManager::new();
+    let (_stream_id, mut rx, sink) = mgr.create_stream("user:gui");
+
+    sink.send_done_with_attachments(
+        "hi",
+        "qwen3:8b",
+        1,
+        1,
+        1,
+        vec!["doc-1".to_string()],
+        Vec::new(),
+        None,
+    );
+
+    match rx.try_recv().unwrap() {
+        ChatStreamEvent::Done {
+            attachments_used,
+            attachments_skipped,
+            ..
+        } => {
+            assert_eq!(attachments_used, Some(vec!["doc-1".to_string()]));
+            assert!(attachments_skipped.is_none());
+        }
+        other => panic!("Expected Done event, got {other:?}"),
+    }
+}
+
 #[test]
 fn test_remove() {
     let mgr = ChatStreamManager::new();
