@@ -60,7 +60,8 @@ pub use artifacts::{
 pub use auth::{generate_link_token_handler, get_me_handler};
 pub use chat::{
     chat_stream_handler, confirm_tool, delete_chat_history_handler, delete_feedback_handler,
-    get_chat_history_handler, get_feedback_handler, send_chat_handler, upsert_feedback_handler,
+    get_chat_history_handler, get_feedback_handler, list_confirmations, send_chat_handler,
+    upsert_feedback_handler,
 };
 pub use command::command_handler;
 pub use connectors::{

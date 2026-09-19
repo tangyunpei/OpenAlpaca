@@ -153,6 +153,33 @@ pub struct ConfirmationBody {
     pub approval_scope: Option<ApprovalScope>,
 }
 
+/// One pending tool confirmation, as `GET /v1/chat/confirmations` serves it
+/// (S9).
+///
+/// The broker holds these in memory and nothing could list them, so a CLI
+/// asked the *event log* — which records that a prompt was raised, never
+/// whether it is still waiting — and a GUI that reloaded lost the cards of
+/// every background run. This is the pending set itself.
+#[derive(Serialize)]
+pub struct PendingConfirmation {
+    pub request_id: String,
+    pub tool_name: String,
+    pub tool_arguments: serde_json::Value,
+    /// The run whose lane is blocked, when the call belongs to one.
+    pub task_id: Option<String>,
+    /// The agent template that asked.
+    pub agent_id: String,
+    pub lane_key: Option<String>,
+    /// When the prompt was raised, RFC 3339.
+    pub raised_at: String,
+}
+
+/// `GET /v1/chat/confirmations` (S9) — pending only, never a history.
+#[derive(Serialize)]
+pub struct PendingConfirmationsResponse {
+    pub confirmations: Vec<PendingConfirmation>,
+}
+
 /// Check if the given lane_key belongs to the specified user.
 /// Lane key format is "{user_id}:{source_name}".
 pub(super) fn is_lane_owned_by(lane_key: &str, user_id: &str) -> bool {

@@ -754,6 +754,63 @@ pub async fn delete_feedback_handler(
     }
 }
 
+// ── GET /v1/chat/confirmations ────────────────────────────────────
+
+/// **S9.** The prompts still waiting for an answer, now.
+///
+/// The broker keeps pending requests in memory and nothing could read them:
+/// `openalpaca tasks confirmations list` was reading the event log, which
+/// says a prompt was *raised* and never that it is still open, and a GUI that
+/// reloaded mid-run lost the card for every background confirmation. This
+/// answers the one question both actually ask.
+///
+/// A snapshot, like the run timeline's (`ConfirmationBroker::pending_requests`):
+/// a request answered a microsecond later is still in the list, and the next
+/// read corrects it. Ordered oldest first, because that is the order a person
+/// should work through them.
+///
+/// **Unscoped read** (R40), like `GET /v1/tasks`: seeing that something is
+/// waiting is not acting on it. Answering stays owner-scoped at
+/// `POST /v1/chat/confirmations/{request_id}`, which is unchanged.
+pub async fn list_confirmations(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(pending_confirmations(
+        state.confirmation_broker.as_deref(),
+    ))
+}
+
+/// The body of [`list_confirmations`] — split out so the shape is provable
+/// without an `AppState`.
+///
+/// No broker means nothing can be pending, and an empty list is the truth: a
+/// client polling this does not want an error for a daemon that never raises
+/// prompts.
+fn pending_confirmations(
+    broker: Option<&openalpaca_core::security::confirmation::ConfirmationBroker>,
+) -> PendingConfirmationsResponse {
+    let Some(broker) = broker else {
+        return PendingConfirmationsResponse {
+            confirmations: Vec::new(),
+        };
+    };
+
+    let mut pending = broker.pending_requests();
+    pending.sort_by_key(|r| r.timestamp);
+    PendingConfirmationsResponse {
+        confirmations: pending
+            .into_iter()
+            .map(|r| PendingConfirmation {
+                request_id: r.request_id,
+                tool_name: r.tool_name,
+                tool_arguments: r.tool_arguments,
+                task_id: r.task_id,
+                agent_id: r.agent_id,
+                lane_key: r.lane_key,
+                raised_at: r.timestamp.to_rfc3339(),
+            })
+            .collect(),
+    }
+}
+
 // ── POST /v1/chat/confirmations/:request_id ──────────────────────
 
 pub async fn confirm_tool(
@@ -1461,5 +1518,85 @@ mod tests {
         let (status, body) = refusal(err).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body["error"]["code"], "SESSION_NOT_FOUND");
+    }
+
+    // ── S9: GET /v1/chat/confirmations ────────────────────────────
+
+    fn raised(
+        request_id: &str,
+        tool: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> openalpaca_core::security::confirmation::ConfirmationRequest {
+        openalpaca_core::security::confirmation::ConfirmationRequest {
+            request_id: request_id.to_string(),
+            agent_id: "lead_agent".to_string(),
+            tool_name: tool.to_string(),
+            tool_arguments: serde_json::json!({"path": "notes.md"}),
+            stream_id: None,
+            lane_key: Some("user1:gui".to_string()),
+            task_id: Some("task-1".to_string()),
+            agent_instance_id: Some("lead_agent::abcd1234".to_string()),
+            timestamp: at,
+        }
+    }
+
+    /// **S9.** The broker held the pending set and nothing could read it, so
+    /// the CLI listed the *event log* (prompts raised, not prompts waiting)
+    /// and a reloaded GUI lost the cards of background runs. The route serves
+    /// the pending set itself, oldest first, with everything a card needs.
+    #[test]
+    fn the_confirmations_route_serves_what_is_still_waiting() {
+        let broker = openalpaca_core::security::confirmation::ConfirmationBroker::new();
+        let base = chrono::Utc::now();
+        let older = raised("req-older", "artifact_write", base);
+        let newer = raised("req-newer", "workspace_write", base + chrono::Duration::seconds(5));
+        // Registered newest first, to prove the ordering is the route's.
+        let _newer_rx = broker.request(&newer);
+        let _older_rx = broker.request(&older);
+
+        let body = pending_confirmations(Some(&broker));
+        let ids: Vec<&str> = body
+            .confirmations
+            .iter()
+            .map(|c| c.request_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["req-older", "req-newer"], "oldest first");
+
+        let first = &body.confirmations[0];
+        assert_eq!(first.tool_name, "artifact_write");
+        assert_eq!(first.tool_arguments["path"], "notes.md");
+        assert_eq!(first.task_id.as_deref(), Some("task-1"));
+        assert_eq!(first.agent_id, "lead_agent");
+        assert_eq!(first.lane_key.as_deref(), Some("user1:gui"));
+        assert_eq!(first.raised_at, base.to_rfc3339());
+    }
+
+    /// Answered is gone: this is the pending set, never a history.
+    #[test]
+    fn an_answered_confirmation_leaves_the_list() {
+        let broker = openalpaca_core::security::confirmation::ConfirmationBroker::new();
+        let _rx = broker.request(&raised("req-1", "artifact_write", chrono::Utc::now()));
+        assert_eq!(pending_confirmations(Some(&broker)).confirmations.len(), 1);
+
+        broker
+            .respond(
+                "req-1",
+                openalpaca_core::security::confirmation::ConfirmationResponse {
+                    approved: true,
+                    approval_scope: None,
+                },
+            )
+            .expect("the answer lands");
+        assert!(
+            pending_confirmations(Some(&broker)).confirmations.is_empty(),
+            "an answered prompt is not pending"
+        );
+    }
+
+    /// A daemon with no broker answers an empty list, not an error: nothing
+    /// can be pending, and a poller should not have to special-case it.
+    #[test]
+    fn no_broker_means_nothing_is_pending() {
+        assert!(pending_confirmations(None).confirmations.is_empty());
     }
 }

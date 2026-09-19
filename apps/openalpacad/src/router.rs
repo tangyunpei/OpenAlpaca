@@ -323,7 +323,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/skills/health",
             get(crate::routes::skill_health_handler),
         )
-        // Tool confirmation route
+        // Tool confirmation routes. The list is **pending only** (S9) and an
+        // unscoped read (R40) — seeing that something is waiting is not
+        // acting on it; answering, below, stays owner-scoped.
+        .route(
+            "/v1/chat/confirmations",
+            get(crate::routes::list_confirmations),
+        )
         .route(
             "/v1/chat/confirmations/{request_id}",
             post(crate::routes::confirm_tool),
