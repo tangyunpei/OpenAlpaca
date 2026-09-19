@@ -274,6 +274,31 @@ export interface ConfirmationRequestBody {
   approval_scope?: ApprovalScope;
 }
 
+/**
+ * One row of `GET /v1/chat/confirmations` (S9) — a prompt some run is parked
+ * on **right now**, not a log of one that was once raised.
+ *
+ * It is a snapshot: an entry can be answered or time out a microsecond after
+ * it is read, and the answer route is where that is settled. `lane_key` is
+ * `null` for every confirmation raised inside a workflow (the sandbox policy
+ * carries a lane only on the main loop's), and `task_id` is `null` for a
+ * main-loop prompt.
+ */
+export interface PendingConfirmation {
+  request_id: string;
+  tool_name: string;
+  tool_arguments: unknown;
+  task_id: string | null;
+  agent_id: string;
+  lane_key: string | null;
+  /** RFC 3339, from the daemon's own clock. */
+  raised_at: string;
+}
+
+export interface PendingConfirmationsResponse {
+  confirmations: PendingConfirmation[];
+}
+
 export type FeedbackValue = "positive" | "negative";
 
 export interface FeedbackResponse {

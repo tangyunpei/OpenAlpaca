@@ -120,6 +120,12 @@ let sessionWriteReply: () => Response;
  * usually wins in practice (G6).
  */
 let confirmationReply: () => Response | Promise<Response>;
+/**
+ * What `GET /v1/chat/confirmations` answers (S9) — the prompts a run is
+ * waiting on *now*. Mutable, because the point of the route is that the answer
+ * changes underneath a window that was not listening when a prompt was raised.
+ */
+let pendingConfirmationRows: Record<string, unknown>[] = [];
 
 /** `limit`/`offset`, exactly as the route pages. */
 function pageOfSessions(url: string): Response {
@@ -178,6 +184,9 @@ function installFetch() {
     }
     if (url.includes("/v1/chat/confirmations/")) {
       return await confirmationReply();
+    }
+    if (url.includes("/v1/chat/confirmations")) {
+      return json({ confirmations: pendingConfirmationRows });
     }
     if (url.includes("/v1/chat")) {
       return chatSendReply();
@@ -332,6 +341,7 @@ beforeEach(() => {
   sessionListReply = pageOfSessions;
   sessionWriteReply = () => json(sessionRow());
   confirmationReply = () => new Response("", { status: 200 });
+  pendingConfirmationRows = [];
   statusReply = (headers) =>
     json(daemonStatus(headers.get("x-workspace-path")));
   steerReply = () =>
@@ -697,6 +707,139 @@ describe("ChatView — a confirmation raised after the turn finished (G1)", () =
       ).toBeNull(),
     );
     expect(await screen.findByLabelText("Message")).toBeInTheDocument();
+  });
+});
+
+/**
+ * S9 — a prompt that was raised before this window was listening.
+ *
+ * Confirmations only ever arrive as live frames, and there is no replay: a
+ * reload, a second window, or a restart of this app while a background run is
+ * blocked showed no card at all, and the run sat on the prompt until the 300 s
+ * timeout. `GET /v1/chat/confirmations` is the snapshot that closes it.
+ */
+describe("ChatView — pending confirmations seeded from the daemon (S9)", () => {
+  function pendingRow(overrides: Record<string, unknown> = {}) {
+    return {
+      request_id: "req-seeded",
+      tool_name: "artifact_write",
+      tool_arguments: { name: "01-alpaca-facts.md" },
+      task_id: "run-1",
+      agent_id: "lead_agent",
+      lane_key: null,
+      raised_at: "2026-09-18T17:10:05+00:00",
+      ...overrides,
+    };
+  }
+
+  it("draws the card for a prompt raised before the window opened", async () => {
+    pendingConfirmationRows = [pendingRow()];
+    renderChat();
+
+    expect(
+      await screen.findByText("Confirmation required · artifact_write"),
+    ).toBeInTheDocument();
+
+    // And it is answerable: the composer is blocked and Approve posts to the
+    // route, exactly as it does for a card that arrived live.
+    fireEvent.click(screen.getByRole("button", { name: /Approve/ }));
+    await waitFor(() => {
+      const posted = requests.find((request) =>
+        request.url.includes("/v1/chat/confirmations/req-seeded"),
+      );
+      expect(posted?.method).toBe("POST");
+      expect(posted?.body).toEqual({ approved: true });
+    });
+  });
+
+  /**
+   * The socket drops frames for a lagged client with no notification, so a
+   * reconnect invalidates the whole cache — and this list with it. A prompt
+   * raised while the window was away is picked up there.
+   */
+  it("picks up a prompt raised while the socket was down", async () => {
+    const client = renderChat();
+    expect(await screen.findByLabelText("Message")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Confirmation required · artifact_write"),
+    ).toBeNull();
+
+    pendingConfirmationRows = [pendingRow({ request_id: "req-offline" })];
+    // What `invalidateAfterResync` does when the socket comes back.
+    await act(async () => {
+      await client.invalidateQueries();
+    });
+
+    expect(
+      await screen.findByText("Confirmation required · artifact_write"),
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * The read is unscoped (R40) but answering is not a spectator sport: a
+   * prompt belonging to another lane must not block this composer, exactly as
+   * a foreign live frame must not.
+   */
+  it("ignores a prompt that belongs to another lane", async () => {
+    pendingConfirmationRows = [
+      pendingRow({
+        request_id: "req-foreign",
+        lane_key: "someone:telegram",
+        task_id: "run-foreign",
+      }),
+    ];
+    renderChat();
+
+    expect(await screen.findByLabelText("Message")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        requests.some((request) =>
+          request.url.includes("/v1/chat/confirmations"),
+        ),
+      ).toBe(true);
+    });
+    expect(
+      screen.queryByText("Confirmation required · artifact_write"),
+    ).toBeNull();
+  });
+
+  /**
+   * A card the run has moved past is retired (G1); the next poll of the
+   * snapshot must not resurrect it.
+   */
+  it("does not bring back a card this window has already retired", async () => {
+    pendingConfirmationRows = [pendingRow()];
+    const client = renderChat();
+    expect(
+      await screen.findByText("Confirmation required · artifact_write"),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      emitServerEvent({
+        type: "task_status",
+        task_id: "run-1",
+        title: "Alpaca facts",
+        status: "completed",
+        progress_current: null,
+        progress_total: null,
+        result_summary: "done",
+        outcome_kind: "artifact_only",
+        artifact_count: 1,
+        outcome_summary: null,
+      });
+    });
+    await waitFor(() =>
+      expect(
+        screen.queryByText("Confirmation required · artifact_write"),
+      ).toBeNull(),
+    );
+
+    await act(async () => {
+      await client.invalidateQueries();
+    });
+    expect(
+      screen.queryByText("Confirmation required · artifact_write"),
+    ).toBeNull();
   });
 });
 

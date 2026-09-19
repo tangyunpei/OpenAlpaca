@@ -33,6 +33,14 @@ export const qk = {
     all: () => ["chat"] as const,
     history: (query: ChatHistoryQuery) => ["chat", "history", query] as const,
     feedback: (messageId: number) => ["chat", "feedback", messageId] as const,
+    /**
+     * `GET /v1/chat/confirmations` (S9) — the prompts a run is waiting on.
+     *
+     * Under `chat` so a resync invalidates it with everything else, which is
+     * what makes a reconnected window pick up a prompt raised while it was
+     * away.
+     */
+    confirmations: () => ["chat", "confirmations"] as const,
   },
 
   sessions: {

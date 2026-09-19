@@ -59,7 +59,11 @@ import {
   type ToolRun,
 } from "@/components/chat";
 import { toUiStatus, type UiStatus } from "@/components/ui";
-import { useChatHistory, useChatStream } from "@/hooks/useChat";
+import {
+  useChatHistory,
+  useChatStream,
+  usePendingConfirmations,
+} from "@/hooks/useChat";
 import { useServerEvent } from "@/hooks/useDaemonEvents";
 import {
   useCancelFollowup,
@@ -87,6 +91,41 @@ import {
   type TranscriptItem,
   type WrittenArtifact,
 } from "./transcript-model";
+
+/**
+ * Whether a confirmation the daemon reports is this window's to answer.
+ *
+ * One rule for both ways a prompt reaches this view — the live
+ * `tool_confirmation_requested` frame and the `GET /v1/chat/confirmations`
+ * snapshot S9 added — because accepting one is what blocks this composer and
+ * arms Enter-approve, and answering a foreign run's prompt from here (with
+ * `Always allow`, worse) is exactly what the lane filter exists to prevent.
+ *
+ * Three things make a prompt this window's, in the order they are trusted: it
+ * is this stream's own, it belongs to a run this lane started, or its lane is
+ * this one. A `lane_key: null` prompt is **kept**: `SandboxPolicy` carries a
+ * lane only on the main-loop policy, so every confirmation raised inside a
+ * workflow arrives with none, and dropping those would leave the GUI's own
+ * background runs unanswerable. The snapshot's rows carry no `stream_id` at
+ * all, which is why it is optional here.
+ */
+export function confirmationBelongsHere(
+  frame: {
+    stream_id?: string | null;
+    task_id: string | null;
+    lane_key: string | null;
+  },
+  context: {
+    streamId: string | null;
+    laneKey: string | null;
+    startedHere: (taskId: string) => boolean;
+  },
+): boolean {
+  const streamId = frame.stream_id ?? null;
+  if (streamId !== null && streamId === context.streamId) return true;
+  if (frame.task_id !== null && context.startedHere(frame.task_id)) return true;
+  return frame.lane_key === null || frame.lane_key === context.laneKey;
+}
 
 /** Constant identities: `useServerEvent` keys its subscription off the list. */
 const RUN_EVENTS = ["workflow_started", "task_status"] as const;
@@ -255,12 +294,12 @@ export function useChatSession(): ChatSession {
   const toolRuns = useRef<ToolRun[]>([]);
 
   const stream = useChatStream({
-    accepts: (event, streamId) => {
-      if (event.stream_id !== null && event.stream_id === streamId) return true;
-      if (event.task_id !== null && started.current.has(event.task_id))
-        return true;
-      return event.lane_key === null || event.lane_key === laneKeyRef.current;
-    },
+    accepts: (event, streamId) =>
+      confirmationBelongsHere(event, {
+        streamId,
+        laneKey: laneKeyRef.current,
+        startedHere: (taskId) => started.current.has(taskId),
+      }),
   });
   const activeTasks = useTasks({ status: "active" });
 
@@ -448,6 +487,64 @@ export function useChatSession(): ChatSession {
           },
     );
   });
+
+  /**
+   * The prompts a run is waiting on right now (S9), seeded into the same
+   * session-level list the live frames feed.
+   *
+   * The frames are live-only — there is no replay — so a window that opened
+   * after a prompt was raised showed no card at all and the run sat on it
+   * until the 300 s timeout. That is every reload, every second window, and
+   * every restart of this app while a background run is blocked. The snapshot
+   * closes it on load, and on reconnect: a resync invalidates the whole cache,
+   * so this query is re-read the moment the socket comes back.
+   *
+   * A prompt this window has already seen is skipped — `confirmationMeta` is
+   * the record of that, and it survives a card being retired (G1), so a
+   * dismissed card is not resurrected by the next poll.
+   */
+  const pendingConfirmations = usePendingConfirmations();
+  const pendingRows = pendingConfirmations.data;
+  const confirmationMetaRef = useRef(confirmationMeta);
+  confirmationMetaRef.current = confirmationMeta;
+  const adoptConfirmation = stream.adoptConfirmation;
+
+  useEffect(() => {
+    if (pendingRows === undefined) return;
+    const fresh = pendingRows.filter(
+      (row) =>
+        confirmationMetaRef.current[row.request_id] === undefined &&
+        confirmationBelongsHere(row, {
+          streamId: null,
+          laneKey: laneKeyRef.current,
+          startedHere: (taskId) => started.current.has(taskId),
+        }),
+    );
+    if (fresh.length === 0) return;
+
+    for (const row of fresh) {
+      adoptConfirmation({
+        request_id: row.request_id,
+        tool_name: row.tool_name,
+        tool_arguments: row.tool_arguments,
+      });
+    }
+    setConfirmationMeta((current) => {
+      const next = { ...current };
+      for (const row of fresh) {
+        if (next[row.request_id] !== undefined) continue;
+        next[row.request_id] = {
+          // The daemon's own clock, so a card seeded after a reload sorts
+          // where the prompt actually happened rather than at "now".
+          at: row.raised_at,
+          agentId: row.agent_id,
+          agentName: agents.current.get(row.agent_id)?.name ?? row.agent_id,
+          taskId: row.task_id,
+        };
+      }
+      return next;
+    });
+  }, [pendingRows, laneKey, adoptConfirmation]);
 
   useServerEvent(TOOL_EVENTS, (event) => {
     if (event.type !== "tool_executed") return;

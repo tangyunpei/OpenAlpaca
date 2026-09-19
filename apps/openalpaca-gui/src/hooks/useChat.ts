@@ -26,11 +26,12 @@ import { useCallback, useEffect, useReducer, useRef } from "react";
 
 import {
   getChatHistory,
+  listPendingConfirmations,
   respondToConfirmation,
   type ChatHistoryQuery,
   type RespondToConfirmationInput,
 } from "@/lib/api/chat";
-import type { ChatHistoryResponse } from "@/lib/api/types";
+import type { ChatHistoryResponse, PendingConfirmation } from "@/lib/api/types";
 import {
   chatStreamReducer,
   initialChatStreamState,
@@ -38,6 +39,7 @@ import {
   isStreamActive,
   sendChatMessage,
   startChatStream,
+  type ChatConfirmationRequest,
   type ChatStreamHandle,
   type ChatStreamState,
   type SendChatOptions,
@@ -63,6 +65,30 @@ export function useChatHistory(
     queryKey: qk.chat.history(query),
     queryFn: ({ signal }) => getChatHistory(query, signal),
     enabled: options.enabled ?? true,
+  });
+}
+
+/**
+ * `GET /v1/chat/confirmations` (S9) — what is waiting *now*, not what was
+ * announced while this window happened to be listening.
+ *
+ * The prompts themselves only ever arrive as live frames, so a window that
+ * opened after one was raised — a reload, a second window, a restart of this
+ * app — showed no card at all and the run sat on the prompt until it timed
+ * out. This query is the seed for that, on load and, because a resync
+ * invalidates the whole cache, on every reconnect.
+ *
+ * Polled slowly as well: the daemon publishes no "this prompt expired" frame,
+ * so a card that is no longer in this list is one nobody has to answer any
+ * more.
+ */
+export function usePendingConfirmations(): UseQueryResult<
+  PendingConfirmation[]
+> {
+  return useQuery({
+    queryKey: qk.chat.confirmations(),
+    queryFn: ({ signal }) => listPendingConfirmations(signal),
+    refetchInterval: 30_000,
   });
 }
 
@@ -95,6 +121,15 @@ export interface ChatStreamController {
   send: (options: SendChatOptions) => Promise<void>;
   /** Approve/deny the oldest pending confirmation, or a named one. */
   respond: UseMutationResult<void, Error, RespondToConfirmationInput>;
+  /**
+   * Take on a confirmation this client learned about off-stream (S9) — from
+   * `GET /v1/chat/confirmations`, which is the only way a window that was not
+   * listening when it was raised can know it exists.
+   *
+   * Deduped by `request_id` in the reducer, so seeding what is already on
+   * screen changes nothing.
+   */
+  adoptConfirmation: (request: ChatConfirmationRequest) => void;
   /**
    * Drop a pending confirmation this client is not going to answer (G1).
    *
@@ -191,6 +226,10 @@ export function useChatStream(
     },
   });
 
+  const adoptConfirmation = useCallback((request: ChatConfirmationRequest) => {
+    dispatch({ type: "confirmation", request });
+  }, []);
+
   const dismissConfirmation = useCallback((requestId: string) => {
     dispatch({ type: "confirmation_resolved", requestId });
   }, []);
@@ -207,6 +246,7 @@ export function useChatStream(
     active: isStreamActive(state),
     send,
     respond,
+    adoptConfirmation,
     dismissConfirmation,
     reset,
   };

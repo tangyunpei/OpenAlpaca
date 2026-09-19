@@ -7,6 +7,8 @@ import type {
   ChatHistoryResponse,
   FeedbackResponse,
   FeedbackValue,
+  PendingConfirmation,
+  PendingConfirmationsResponse,
 } from "./types";
 
 export interface ChatHistoryQuery {
@@ -52,6 +54,27 @@ export async function clearChatHistory(
     method: "DELETE",
     query: { lane_key: laneKey },
   });
+}
+
+/**
+ * `GET /v1/chat/confirmations` (S9) — every prompt a run is still waiting on,
+ * oldest first.
+ *
+ * The broker holds these in memory and the SSE/WS frames that announce them
+ * are live-only, so a window that opens (or reconnects) after one was raised
+ * had no way to learn about it: the card was lost and the run sat on the
+ * prompt until it timed out. This is that missing read. It is **unscoped**
+ * (R40) — seeing that something is waiting is not acting on it — so the
+ * caller filters it to its own lane exactly as it filters the WS frames.
+ */
+export async function listPendingConfirmations(
+  signal?: AbortSignal,
+): Promise<PendingConfirmation[]> {
+  const body = await apiFetch<PendingConfirmationsResponse>(
+    "/v1/chat/confirmations",
+    { signal },
+  );
+  return body.confirmations ?? [];
 }
 
 export interface RespondToConfirmationInput {
