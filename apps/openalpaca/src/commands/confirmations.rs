@@ -18,17 +18,18 @@
 //! openalpaca tasks confirmations deny <id>
 //! ```
 //!
-//! Everything here rides routes that already exist: `POST
-//! /v1/chat/confirmations/{request_id}` to answer, `GET /v1/events/history` to
-//! list what was raised, and the `/v1/events` socket to watch. No new daemon
-//! surface, and no pre-approval of anything — the owner answers every prompt.
+//! Everything here rides daemon routes: `POST
+//! /v1/chat/confirmations/{request_id}` to answer, `GET /v1/chat/confirmations`
+//! to list what is still waiting, and the `/v1/events` socket to watch. No
+//! pre-approval of anything — the owner answers every prompt.
 //!
-//! **What `list` can and cannot say.** The daemon keeps its pending prompts in
-//! memory (`ConfirmationBroker`) and publishes no list route and no resolution
-//! event, so the event log is the only record a client can read: it holds what
-//! was *raised*, not what is still waiting. The listing says exactly that, and
-//! the answer is where the truth is — a prompt already answered, or timed out,
-//! is refused by id rather than silently re-approved.
+//! **What `list` says (S9).** It reads the broker's own pending set, so the
+//! rows are the prompts a run is waiting on *right now* — not the event log's
+//! record of what was once raised, which is what this command used to show and
+//! which listed answered and timed-out prompts as if they were live. It is a
+//! **snapshot**: a prompt answered a microsecond later is still in the list,
+//! and answering is still where the truth is — one already answered, or timed
+//! out, is refused by id rather than silently re-approved.
 
 use anyhow::{Result, bail};
 use clap::Subcommand;
@@ -42,16 +43,10 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use crate::client::DaemonClient;
 use crate::output::{OutputFormat, TableRow, print_list};
 
-/// How many raised prompts `list` asks the event log for by default.
-const DEFAULT_LIMIT: usize = 20;
-
 #[derive(Subcommand)]
 pub enum ConfirmationCommands {
-    /// List the approval prompts this daemon has raised, newest first
+    /// List the approval prompts a run is waiting on, oldest first
     List {
-        /// Maximum number of prompts to read from the event log
-        #[arg(long, default_value = "20")]
-        limit: usize,
         /// Output format
         #[arg(long, value_enum, default_value = "table")]
         format: OutputFormat,
@@ -75,7 +70,7 @@ pub enum ConfirmationCommands {
 
 pub async fn run(command: ConfirmationCommands) -> Result<()> {
     match command {
-        ConfirmationCommands::List { limit, format } => list(limit, format).await,
+        ConfirmationCommands::List { format } => list(format).await,
         ConfirmationCommands::Watch => watch().await,
         ConfirmationCommands::Approve {
             request_id,
@@ -87,34 +82,33 @@ pub async fn run(command: ConfirmationCommands) -> Result<()> {
 
 // ── The wire ─────────────────────────────────────────────────────
 
-/// One row of `GET /v1/events/history`, as this command reads it.
-#[derive(Debug, Deserialize)]
-struct EventRow {
-    timestamp: String,
-    event_type: String,
-    #[serde(default)]
-    task_id: Option<String>,
-    #[serde(default)]
-    detail: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Deserialize)]
-struct EventHistoryPage {
-    events: Vec<EventRow>,
-}
-
-/// A prompt the daemon raised, as the listing shows it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct RaisedPrompt {
+/// One prompt of `GET /v1/chat/confirmations` (S9) — a request some run is
+/// still parked on, not an event-log row about one that once existed.
+///
+/// Serialized as it is deserialized, so `--format json` hands on the daemon's
+/// own fields rather than a re-spelling of them.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct PendingPrompt {
     pub request_id: String,
     pub tool_name: String,
+    #[serde(default)]
+    pub tool_arguments: serde_json::Value,
     /// The run that is waiting, or `null` for a main-loop prompt.
+    #[serde(default)]
     pub task_id: Option<String>,
-    pub agent_id: Option<String>,
+    pub agent_id: String,
+    #[serde(default)]
+    pub lane_key: Option<String>,
     pub raised_at: String,
 }
 
-impl TableRow for RaisedPrompt {
+#[derive(Debug, Deserialize)]
+struct PendingPrompts {
+    #[serde(default)]
+    confirmations: Vec<PendingPrompt>,
+}
+
+impl TableRow for PendingPrompt {
     fn headers() -> Vec<(&'static str, usize)> {
         vec![
             ("REQUEST_ID", 38),
@@ -142,61 +136,34 @@ impl TableRow for RaisedPrompt {
     }
 }
 
-/// The `tool_confirmation_requested` rows of an event page, newest first.
+/// The prompts a listing shows: what the daemon handed back, minus anything
+/// without an answerable id.
 ///
-/// A row whose payload carries no `request_id` is dropped rather than shown
-/// with a blank id: an id that cannot be answered with is not a listing, it is
-/// a decoy.
-fn raised_prompts(page: &EventHistoryPage) -> Vec<RaisedPrompt> {
-    let mut out = Vec::new();
-    for event in &page.events {
-        if event.event_type != "tool_confirmation_requested" {
-            continue;
-        }
-        let detail = event.detail.clone().unwrap_or(serde_json::Value::Null);
-        let Some(request_id) = detail["request_id"].as_str().filter(|id| !id.is_empty()) else {
-            continue;
-        };
-        out.push(RaisedPrompt {
-            request_id: request_id.to_string(),
-            tool_name: detail["tool_name"]
-                .as_str()
-                .unwrap_or("unknown_tool")
-                .to_string(),
-            // The column is the indexed one; the payload is the fallback for a
-            // row written before migration 037 filled it.
-            task_id: event
-                .task_id
-                .clone()
-                .or_else(|| detail["task_id"].as_str().map(|id| id.to_string())),
-            agent_id: detail["agent_id"].as_str().map(|id| id.to_string()),
-            raised_at: event.timestamp.clone(),
-        });
-    }
-    out
+/// A row with a blank `request_id` is dropped rather than shown: an id that
+/// cannot be answered with is not a listing, it is a decoy.
+fn pending_prompts(page: PendingPrompts) -> Vec<PendingPrompt> {
+    page.confirmations
+        .into_iter()
+        .filter(|prompt| !prompt.request_id.is_empty())
+        .collect()
 }
 
 /// What the listing says above the rows: what these are, and what they are not.
 fn listing_note(count: usize) -> String {
     if count == 0 {
-        return "No approval prompt has been raised. A run that needs one shows it here; \
+        return "Nothing is waiting for an approval. A run that needs one shows it here; \
                 `openalpaca tasks confirmations watch` waits for the next."
             .to_string();
     }
-    "Prompts this daemon raised, newest first. It keeps no list of which are still waiting, \
-     so answering is what says: one already answered, or timed out, is refused by id."
+    "Prompts a run is waiting on, oldest first. It is a snapshot — one answered or timed out \
+     since this was read is refused by id, and nothing is changed."
         .to_string()
 }
 
-async fn list(limit: usize, format: OutputFormat) -> Result<()> {
+async fn list(format: OutputFormat) -> Result<()> {
     let client = DaemonClient::connect()?;
-    let limit = if limit == 0 { DEFAULT_LIMIT } else { limit };
-    let page: EventHistoryPage = client
-        .get(&format!(
-            "/v1/events/history?event_type=tool_confirmation_requested&limit={limit}"
-        ))
-        .await?;
-    let prompts = raised_prompts(&page);
+    let page: PendingPrompts = client.get("/v1/chat/confirmations").await?;
+    let prompts = pending_prompts(page);
 
     if matches!(format, OutputFormat::Table) {
         println!("{}", listing_note(prompts.len()).dimmed());
@@ -345,8 +312,8 @@ async fn watch() -> Result<()> {
     let (ws_stream, _) = connect_async(&ws_url).await?;
     println!(
         "{}",
-        "Waiting for approval prompts (Ctrl+C to stop). Prompts raised before now are not \
-         replayed — `openalpaca tasks confirmations list` shows those."
+        "Waiting for approval prompts (Ctrl+C to stop). Prompts already waiting are not \
+         replayed here — `openalpaca tasks confirmations list` shows those."
             .dimmed()
     );
 
@@ -424,34 +391,38 @@ fn read_answer(input: &str) -> (bool, bool) {
 mod tests {
     use super::*;
 
-    fn page(events: serde_json::Value) -> EventHistoryPage {
-        serde_json::from_value(serde_json::json!({ "events": events })).expect("page")
+    fn page(confirmations: serde_json::Value) -> PendingPrompts {
+        serde_json::from_value(serde_json::json!({ "confirmations": confirmations }))
+            .expect("page")
     }
 
-    /// The listing reads the payload the daemon's own persistence writes
-    /// (`events/persistence.rs`: request_id, agent_id, tool_name, task_id).
+    /// S9: the rows are the broker's pending set, read off
+    /// `GET /v1/chat/confirmations` exactly as the daemon serializes it
+    /// (`routes/chat_types.rs::PendingConfirmation`).
     #[test]
-    fn a_raised_prompt_is_read_off_the_event_the_daemon_logged() {
-        let prompts = raised_prompts(&page(serde_json::json!([
+    fn a_pending_prompt_is_read_off_the_route_that_lists_them() {
+        let prompts = pending_prompts(page(serde_json::json!([
             {
-                "timestamp": "2026-09-18T17:10:05.123Z",
-                "event_type": "tool_confirmation_requested",
+                "request_id": "req-1",
+                "tool_name": "artifact_write",
+                "tool_arguments": { "path": "notes.md" },
                 "task_id": "76751dc6-1111-2222-3333-444444444444",
-                "detail": {
-                    "request_id": "req-1",
-                    "agent_id": "lead_agent",
-                    "tool_name": "artifact_write",
-                    "task_id": "76751dc6-1111-2222-3333-444444444444"
-                }
+                "agent_id": "lead_agent",
+                "lane_key": null,
+                "raised_at": "2026-09-18T17:10:05.123+00:00"
             },
             {
-                "timestamp": "2026-09-18T17:09:00.000Z",
-                "event_type": "tool_executed",
-                "detail": { "tool_name": "memory_search" }
+                "request_id": "req-2",
+                "tool_name": "file_write",
+                "tool_arguments": null,
+                "task_id": null,
+                "agent_id": "orchestrator",
+                "lane_key": "alice:gui",
+                "raised_at": "2026-09-18T17:11:00+00:00"
             }
         ])));
 
-        assert_eq!(prompts.len(), 1, "only the confirmation rows are prompts");
+        assert_eq!(prompts.len(), 2, "the daemon's order is kept: oldest first");
         let prompt = &prompts[0];
         assert_eq!(prompt.request_id, "req-1");
         assert_eq!(prompt.tool_name, "artifact_write");
@@ -459,7 +430,18 @@ mod tests {
             prompt.task_id.as_deref(),
             Some("76751dc6-1111-2222-3333-444444444444")
         );
-        assert_eq!(prompt.agent_id.as_deref(), Some("lead_agent"));
+        assert_eq!(prompt.agent_id, "lead_agent");
+        assert_eq!(prompt.tool_arguments["path"], "notes.md");
+    }
+
+    /// The daemon with no broker answers `{"confirmations": []}`, and a client
+    /// that polls this must read that as "nothing is waiting", not as a
+    /// failure.
+    #[test]
+    fn an_empty_list_is_an_answer() {
+        assert!(pending_prompts(page(serde_json::json!([]))).is_empty());
+        let empty: PendingPrompts = serde_json::from_value(serde_json::json!({})).expect("page");
+        assert!(pending_prompts(empty).is_empty());
     }
 
     /// A main-loop prompt belongs to no run; the row says `-` rather than
@@ -467,10 +449,11 @@ mod tests {
     #[test]
     fn a_prompt_outside_a_run_names_no_run() {
         colored::control::set_override(false);
-        let prompts = raised_prompts(&page(serde_json::json!([{
-            "timestamp": "2026-09-18T17:10:05Z",
-            "event_type": "tool_confirmation_requested",
-            "detail": { "request_id": "req-2", "tool_name": "file_write" }
+        let prompts = pending_prompts(page(serde_json::json!([{
+            "request_id": "req-2",
+            "tool_name": "file_write",
+            "agent_id": "orchestrator",
+            "raised_at": "2026-09-18T17:10:05+00:00"
         }])));
         assert_eq!(prompts[0].task_id, None);
         let row = prompts[0].table_row();
@@ -483,24 +466,30 @@ mod tests {
     #[test]
     fn a_row_with_no_request_id_is_not_listed() {
         assert!(
-            raised_prompts(&page(serde_json::json!([{
-                "timestamp": "2026-09-18T17:10:05Z",
-                "event_type": "tool_confirmation_requested",
-                "detail": { "tool_name": "file_write" }
+            pending_prompts(page(serde_json::json!([{
+                "request_id": "",
+                "tool_name": "file_write",
+                "agent_id": "orchestrator",
+                "raised_at": "2026-09-18T17:10:05+00:00"
             }])))
             .is_empty()
         );
     }
 
-    /// The listing never claims the rows are still waiting — the daemon
-    /// publishes no such list, and saying otherwise would be the silent
-    /// degradation the rules reject.
+    /// The listing says these are waiting — which is now true, and was not
+    /// when the rows came off the event log — and still says it is a snapshot
+    /// rather than claiming more than a poll can know.
     #[test]
-    fn the_listing_says_what_it_does_not_know() {
+    fn the_listing_says_what_it_knows_and_what_it_cannot() {
         let note = listing_note(3);
-        assert!(note.contains("still waiting"), "{note}");
+        assert!(note.contains("waiting on"), "{note}");
+        assert!(note.contains("snapshot"), "{note}");
         assert!(note.contains("refused by id"), "{note}");
         assert!(listing_note(0).contains("watch"), "the empty case points on");
+        assert!(
+            listing_note(0).contains("Nothing is waiting"),
+            "an empty broker is not 'nothing was ever raised'"
+        );
     }
 
     /// The scope is only ever what the owner asked for, and a denial carries

@@ -471,6 +471,26 @@ fn format_event_payload(payload: &serde_json::Value) -> String {
     payload.to_string()
 }
 
+/// The body `POST /v1/tasks` takes.
+///
+/// `unattended` is the S10 declaration, **stored on the row**: this route only
+/// parks the work, and whoever starts it later — `openalpaca tasks resume`,
+/// the GUI, the follow-up runner — inherits what the parker said unless it
+/// declares for itself. Sent only when it is true, so an attended create's
+/// body is byte-for-byte what it was.
+fn create_body(title: &str, priority: i32, unattended: bool) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "title": title,
+        "created_by": "cli_user",
+        "source_lane": "cli_user:cli",
+        "priority": priority,
+    });
+    if unattended {
+        body["unattended"] = serde_json::json!(true);
+    }
+    body
+}
+
 async fn create_task(description: Option<String>, priority: i32) -> Result<()> {
     let title = match description {
         Some(d) => d,
@@ -484,12 +504,9 @@ async fn create_task(description: Option<String>, priority: i32) -> Result<()> {
     };
 
     let client = DaemonClient::connect()?;
-    let body = serde_json::json!({
-        "title": title,
-        "created_by": "cli_user",
-        "source_lane": "cli_user:cli",
-        "priority": priority,
-    });
+    // S10: a run parked from a script has nobody to answer its tool prompts,
+    // and the row remembers that rather than discovering it 300 s at a time.
+    let body = create_body(&title, priority, crate::unattended::declared_unattended());
 
     let result: serde_json::Value = client.post("/v1/tasks", &body).await?;
     let task_id = result["task_id"].as_str().unwrap_or("unknown");
@@ -516,6 +533,30 @@ mod tests {
             created_at: Some("2026-09-04T09:15:00.000Z".to_string()),
             subagent_count,
         }
+    }
+
+    /// S10: a run parked by a script carries the declaration on the row, so
+    /// whoever starts it later does not have to rediscover that nobody can
+    /// answer its prompts. A create from a terminal says nothing at all — the
+    /// route's own default is `false`.
+    #[test]
+    fn a_parked_run_carries_the_declaration_only_when_it_is_true() {
+        let attended = create_body("Audit the connectors", 0, false);
+        assert_eq!(
+            attended,
+            serde_json::json!({
+                "title": "Audit the connectors",
+                "created_by": "cli_user",
+                "source_lane": "cli_user:cli",
+                "priority": 0,
+            }),
+            "an attended create's body is what it always was"
+        );
+
+        let scripted = create_body("Audit the connectors", 2, true);
+        assert_eq!(scripted["unattended"], true);
+        assert_eq!(scripted["priority"], 2);
+        assert_eq!(scripted["title"], "Audit the connectors");
     }
 
     /// R38 — the AGENTS column is back, as the count the list route now

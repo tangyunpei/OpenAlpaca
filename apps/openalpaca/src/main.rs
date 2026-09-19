@@ -20,6 +20,7 @@ mod commands;
 mod manager;
 mod output;
 mod repl;
+mod unattended;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

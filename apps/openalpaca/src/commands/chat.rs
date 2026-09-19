@@ -12,6 +12,7 @@ use std::io::Write;
 use crate::chat_stream::{self, ChatTarget, StreamResult};
 use crate::client::DaemonClient;
 use crate::commands::sessions::{self, SessionItem};
+use crate::unattended::can_answer_prompts;
 
 /// How much of a resumed conversation is printed before the prompt opens.
 const TAIL_MESSAGES: usize = 8;
@@ -42,6 +43,7 @@ pub async fn run(args: ChatArgs) -> Result<()> {
     }
 
     let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin());
+    let stdout_is_terminal = std::io::IsTerminal::is_terminal(&std::io::stdout());
     let mut target = ChatTarget::for_cwd();
 
     if args.resume || args.session.is_some() {
@@ -56,8 +58,9 @@ pub async fn run(args: ChatArgs) -> Result<()> {
         target = target.resuming(resumed.id);
     }
 
-    // M6: say so before the turn starts, not after a run has hung on a prompt.
-    if !can_answer_prompts(args.message.is_some(), interactive) {
+    // M6/S10: say so before the turn starts, not after a run has hung on a
+    // prompt.
+    if !can_answer_prompts(interactive, stdout_is_terminal) {
         target = target.unattended();
     }
 
@@ -69,20 +72,6 @@ pub async fn run(args: ChatArgs) -> Result<()> {
         return session.run().await;
     }
     pipe_mode(&target).await
-}
-
-/// Whether this invocation can answer a tool-approval prompt (M6).
-///
-/// Only the REPL can: it is the one form that is still here, with a terminal,
-/// after the turn it started has finished — which is when a workflow's
-/// confirmations arrive. The one-shot and the pipe both exit with their turn,
-/// so a prompt raised by the run they started reaches nobody; declaring that
-/// up front is what turns a five-minute hang into an immediate, honest refusal.
-///
-/// A declaration, never a detection: what is asserted is the *shape* of the
-/// invocation, not a guess at whether somebody is watching.
-fn can_answer_prompts(one_shot: bool, stdin_is_terminal: bool) -> bool {
-    !one_shot && stdin_is_terminal
 }
 
 /// The conversation `--session <id>` names — checked before anything is
@@ -482,19 +471,17 @@ mod tests {
         assert_eq!(reply_prefix(false), "", "redirected: no label in the file");
     }
 
-    /// M6: the two ways in that end with the process cannot answer a prompt
-    /// their run raises minutes later. The REPL can, and must keep today's
-    /// behaviour — it is the one client that is still there.
+    /// S10: `chat` declares by the one shared rule — a one-shot typed at a
+    /// terminal keeps its inline `[y/N]`, and every redirected form declares.
+    /// (The rule itself is pinned in `crate::unattended`.)
     #[test]
-    fn only_the_repl_is_left_to_answer_an_approval_prompt() {
-        // `--message`, terminal or not: the process is gone when the workflow
-        // it started asks.
-        assert!(!can_answer_prompts(true, true));
+    fn chat_declares_by_the_shape_of_its_streams() {
+        // `openalpaca chat --message …` at a prompt, and the REPL.
+        assert!(can_answer_prompts(true, true));
+        // `… --message q > answer.txt`, `| jq`, `< question.txt`, a cron line.
         assert!(!can_answer_prompts(true, false));
-        // A pipe: nobody was ever there.
+        assert!(!can_answer_prompts(false, true));
         assert!(!can_answer_prompts(false, false));
-        // The REPL, which prompts on stdin and stays open.
-        assert!(can_answer_prompts(false, true));
     }
 
     /// The declaration reaches the daemon as `POST /v1/chat`'s `unattended`,
