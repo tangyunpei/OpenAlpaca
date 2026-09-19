@@ -2989,4 +2989,54 @@ describe("ChatView — composer attachments (U5, U3)", () => {
     await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
     expect(chatBody().attachments).toEqual([]);
   });
+
+  /**
+   * **A3** — a refused send keeps the chips.
+   *
+   * The daemon already holds the uploaded file; clearing the chips on a
+   * refusal would make the retry either lose the attachment or re-upload it.
+   * The clear lives inside `.then()` for exactly this reason, and nothing
+   * drove the `.catch()` path with a chip on screen until now.
+   */
+  it("keeps the chips when the daemon refuses the send", async () => {
+    renderChat();
+    await screen.findByLabelText("Message");
+
+    await pick(textFile("notes.txt"));
+    await waitFor(() => expect(uploads()).toHaveLength(1));
+    await screen.findByLabelText("ready");
+
+    chatSendReply = () =>
+      new Response(
+        JSON.stringify({
+          error: { code: "SESSION_ARCHIVED", message: "archived" },
+        }),
+        { status: 409 },
+      );
+
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "what is the codeword?" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    });
+
+    expect(
+      await screen.findByText(/This conversation was archived/),
+    ).toBeInTheDocument();
+
+    // The chip is still there, still ready, and was not uploaded a second time.
+    expect(screen.getByText("notes.txt")).toBeInTheDocument();
+    expect(screen.getByLabelText("ready")).toBeInTheDocument();
+    expect(uploads()).toHaveLength(1);
+
+    // And a retry sends the id the daemon already holds, exactly once.
+    chatSendReply = () => json({ stream_id: "stream-1", lane_key: "user:gui" });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    });
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    expect(chatBody().attachments).toEqual([{ file_id: "file-notes.txt" }]);
+    expect(uploads()).toHaveLength(1);
+  });
 });
