@@ -497,8 +497,12 @@ fn a_piped_turn_sees_no_reasoning() {
 #[test]
 fn a_terminal_frame_ends_the_turn_and_an_ordinary_one_does_not() {
     let mut state = SseState::default();
-    process_sse_event("event: delta\ndata: {\"content\":\"hi\"}", &piped(), &mut state)
-        .expect("a delta is read");
+    process_sse_event(
+        "event: delta\ndata: {\"content\":\"hi\"}",
+        &piped(),
+        &mut state,
+    )
+    .expect("a delta is read");
     assert!(!state.finished, "there is more of this turn to come");
 
     process_sse_event(
@@ -507,7 +511,10 @@ fn a_terminal_frame_ends_the_turn_and_an_ordinary_one_does_not() {
         &mut state,
     )
     .expect("done is read");
-    assert!(state.finished, "`done` is the last frame of an answered turn");
+    assert!(
+        state.finished,
+        "`done` is the last frame of an answered turn"
+    );
 
     let mut failed = SseState::default();
     process_sse_event(

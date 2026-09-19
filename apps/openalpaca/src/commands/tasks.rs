@@ -479,7 +479,9 @@ fn format_event_payload(payload: &serde_json::Value) -> String {
 /// guesses a different identity than the one it is about to send would only
 /// make the refusal harder to read.
 fn owner_of(lane_key: &str) -> &str {
-    lane_key.split_once(':').map_or(lane_key, |(owner, _)| owner)
+    lane_key
+        .split_once(':')
+        .map_or(lane_key, |(owner, _)| owner)
 }
 
 /// The body `POST /v1/tasks` takes.
@@ -498,12 +500,7 @@ fn owner_of(lane_key: &str) -> &str {
 /// the GUI, the follow-up runner — inherits what the parker said unless it
 /// declares for itself. Sent only when it is true, so an attended create's
 /// body is what it was but for the lane.
-fn create_body(
-    title: &str,
-    priority: i32,
-    unattended: bool,
-    lane_key: &str,
-) -> serde_json::Value {
+fn create_body(title: &str, priority: i32, unattended: bool, lane_key: &str) -> serde_json::Value {
     let mut body = serde_json::json!({
         "title": title,
         "created_by": owner_of(lane_key),
