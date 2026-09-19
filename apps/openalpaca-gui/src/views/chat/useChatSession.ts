@@ -203,6 +203,17 @@ export interface ChatSession {
   deny: () => void;
   alwaysAllow: () => void;
 
+  /**
+   * The snapshot of prompts a run is waiting on could not be read (V9).
+   *
+   * Live frames are unaffected — this is only the seed S9 added — but a window
+   * that opened while a background run was blocked then shows no card and the
+   * run sits on the prompt until it times out. That is worth a line, for the
+   * same reason `historyError` is: a silent failure here looks exactly like
+   * "nothing is waiting".
+   */
+  confirmationsError: Error | null;
+
   activeRuns: ActiveRun[];
   steer: { mode: ComposerMode; label: string } | null;
 
@@ -502,6 +513,11 @@ export function useChatSession(): ChatSession {
    * A prompt this window has already seen is skipped — `confirmationMeta` is
    * the record of that, and it survives a card being retired (G1), so a
    * dismissed card is not resurrected by the next poll.
+   *
+   * A read that **failed** is carried out as `confirmationsError` rather than
+   * swallowed (V9): the view says so where it says a failed history, because
+   * a snapshot nobody could read looks from here exactly like a snapshot with
+   * nothing in it. The live frames are untouched by it.
    */
   const pendingConfirmations = usePendingConfirmations();
   const pendingRows = pendingConfirmations.data;
@@ -966,6 +982,8 @@ export function useChatSession(): ChatSession {
     approve,
     deny,
     alwaysAllow,
+
+    confirmationsError: pendingConfirmations.error,
 
     activeRuns,
     steer,

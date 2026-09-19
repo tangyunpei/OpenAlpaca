@@ -198,6 +198,16 @@ export default function ChatView({
                 Could not load this lane: {session.historyError.message}
               </p>
             )}
+            {/* V9: the same line for the same reason — a snapshot that could
+                not be read is not "nothing is waiting", and a run blocked on
+                a prompt this window never drew will sit there until it times
+                out. Live frames keep arriving regardless. */}
+            {session.confirmationsError !== null && (
+              <p className="mb-[20px] font-mono text-2xs-plus text-faint">
+                Could not check for pending approvals:{" "}
+                {session.confirmationsError.message}
+              </p>
+            )}
             <Transcript items={session.items} dense={dense} />
             {session.sendError !== null && (
               <p

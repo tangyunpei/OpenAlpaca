@@ -126,6 +126,13 @@ let confirmationReply: () => Response | Promise<Response>;
  * changes underneath a window that was not listening when a prompt was raised.
  */
 let pendingConfirmationRows: Record<string, unknown>[] = [];
+/**
+ * What `GET /v1/chat/confirmations` answers. The default serves
+ * `pendingConfirmationRows`; a test swaps in a refusal to check that a seed
+ * nobody could read is said out loud rather than read as "nothing is waiting"
+ * (V9).
+ */
+let pendingConfirmationsReply: () => Response;
 
 /** `limit`/`offset`, exactly as the route pages. */
 function pageOfSessions(url: string): Response {
@@ -186,7 +193,7 @@ function installFetch() {
       return await confirmationReply();
     }
     if (url.includes("/v1/chat/confirmations")) {
-      return json({ confirmations: pendingConfirmationRows });
+      return pendingConfirmationsReply();
     }
     if (url.includes("/v1/chat")) {
       return chatSendReply();
@@ -342,6 +349,8 @@ beforeEach(() => {
   sessionWriteReply = () => json(sessionRow());
   confirmationReply = () => new Response("", { status: 200 });
   pendingConfirmationRows = [];
+  pendingConfirmationsReply = () =>
+    json({ confirmations: pendingConfirmationRows });
   statusReply = (headers) =>
     json(daemonStatus(headers.get("x-workspace-path")));
   steerReply = () =>
@@ -840,6 +849,74 @@ describe("ChatView — pending confirmations seeded from the daemon (S9)", () =>
     expect(
       screen.queryByText("Confirmation required · artifact_write"),
     ).toBeNull();
+  });
+
+  /**
+   * V9 — a lead-agent run's prompt is served with `lane_key: null`
+   * (`SandboxPolicy` carries a lane only on the main-loop policy), so the
+   * lane test cannot place it and `task_id` is what is left. This window
+   * started `run-1`, and the card is drawn.
+   */
+  it("cards a lane-less prompt from a run this window started", async () => {
+    const client = renderChat();
+    expect(await screen.findByLabelText("Message")).toBeInTheDocument();
+
+    // The run this window launched, as `workflow_started` reports it.
+    await act(async () => {
+      emitServerEvent({
+        type: "workflow_started",
+        task_id: "run-1",
+        title: "Alpaca facts",
+        agent_count: 1,
+      });
+    });
+
+    pendingConfirmationRows = [
+      pendingRow({ request_id: "req-leadless", lane_key: null }),
+    ];
+    await act(async () => {
+      await client.invalidateQueries();
+    });
+
+    expect(
+      await screen.findByText("Confirmation required · artifact_write"),
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * V9 — the seed is a background query, and a failed one used to disappear:
+   * no card, no line, and a run sitting on a prompt until it timed out. The
+   * view says so where it says a failed history.
+   */
+  it("says so when the snapshot could not be read", async () => {
+    pendingConfirmationsReply = () =>
+      new Response(
+        JSON.stringify({
+          error: { code: "CHAT_NOT_CONFIGURED", message: "Chat is not up" },
+        }),
+        { status: 503 },
+      );
+    renderChat();
+
+    expect(
+      await screen.findByText(/Could not check for pending approvals/),
+    ).toHaveTextContent("Chat is not up");
+
+    // The live path is untouched: a frame still raises its card.
+    await act(async () => {
+      emitServerEvent({
+        type: "tool_confirmation_requested",
+        request_id: "req-live",
+        tool_name: "artifact_write",
+        tool_arguments: { name: "01-alpaca-facts.md" },
+        agent_id: "lead_agent",
+        task_id: "run-1",
+        lane_key: null,
+      });
+    });
+    expect(
+      await screen.findByText("Confirmation required · artifact_write"),
+    ).toBeInTheDocument();
   });
 });
 
