@@ -21,6 +21,28 @@ export function renderMarkdown(source: string): string {
   return DOMPurify.sanitize(marked.parse(source, { async: false }));
 }
 
+/**
+ * A markdown table (P5).
+ *
+ * §3.25(a) does not list one — the spec's table renderer is (d), a *table
+ * artifact* — so the look is extrapolated from (d): an uppercase mono header
+ * on the sunken ground, hairline row rules, cells that breathe. Without any of
+ * it the browser's bare `<table>` drew a 3-column table with no padding and no
+ * rules at all, and in a 1080-point window's pane its cells read as one word
+ * ("Fiber appearancehalo").
+ *
+ * `display:block` + `width:max-content` + `overflow-x:auto` is what makes it
+ * *scroll* rather than squeeze: the table takes the width its content needs,
+ * is capped at the pane, and scrolls inside itself — the same bargain the code
+ * blocks already make, and the only one that keeps a wide table legible in a
+ * pane the owner can narrow to a third of the window.
+ */
+const TABLE_PROSE = cn(
+  "[&_table]:block [&_table]:w-max [&_table]:max-w-full [&_table]:overflow-x-auto [&_table]:border-collapse",
+  "[&_th]:border-b [&_th]:border-line [&_th]:bg-sunken [&_th]:text-left [&_th]:font-mono [&_th]:font-normal [&_th]:text-muted-fg [&_th]:uppercase",
+  "[&_td]:border-b [&_td]:border-line-subtle [&_td]:align-top [&_td]:text-body",
+);
+
 const COMPACT_PROSE = cn(
   "[&_p]:m-0 [&_p]:mb-[12px] [&_p]:text-base-plus [&_p]:leading-[1.65] [&_p]:text-body",
   "[&_h2]:m-0 [&_h2]:mb-[5px] [&_h2]:text-base-plus [&_h2]:font-semibold [&_h2]:text-ink",
@@ -33,6 +55,10 @@ const COMPACT_PROSE = cn(
   "[&_pre_code]:bg-transparent [&_pre_code]:px-0",
   "[&_blockquote]:m-0 [&_blockquote]:mb-[12px] [&_blockquote]:border-l-2 [&_blockquote]:border-gold [&_blockquote]:py-px [&_blockquote]:pl-[10px] [&_blockquote]:text-base [&_blockquote]:leading-[1.6] [&_blockquote]:text-tertiary",
   "[&_blockquote_p]:m-0 [&_blockquote_p]:text-base [&_blockquote_p]:leading-[1.6] [&_blockquote_p]:text-tertiary",
+  TABLE_PROSE,
+  "[&_table]:mb-[12px]",
+  "[&_th]:px-[11px] [&_th]:py-[7px] [&_th]:text-2xs [&_th]:tracking-label",
+  "[&_td]:px-[11px] [&_td]:py-[8px] [&_td]:text-sm-plus [&_td]:leading-[1.6]",
   "[&_a]:text-blue [&_a]:underline",
   "[&_*:last-child]:mb-0",
 );
@@ -49,6 +75,10 @@ const FULL_PROSE = cn(
   "[&_pre_code]:bg-transparent [&_pre_code]:px-0",
   "[&_blockquote]:m-0 [&_blockquote]:mb-[18px] [&_blockquote]:border-l-2 [&_blockquote]:border-gold [&_blockquote]:py-[2px] [&_blockquote]:pl-[12px] [&_blockquote]:text-md [&_blockquote]:leading-[1.65] [&_blockquote]:text-tertiary",
   "[&_blockquote_p]:m-0 [&_blockquote_p]:text-md [&_blockquote_p]:leading-[1.65] [&_blockquote_p]:text-tertiary",
+  TABLE_PROSE,
+  "[&_table]:mb-[18px]",
+  "[&_th]:px-[14px] [&_th]:py-[9px] [&_th]:text-2xs-plus [&_th]:tracking-label",
+  "[&_td]:px-[14px] [&_td]:py-[10px] [&_td]:text-base-plus [&_td]:leading-[1.65]",
   "[&_a]:text-blue [&_a]:underline",
   "[&_*:last-child]:mb-0",
 );
