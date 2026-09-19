@@ -59,6 +59,7 @@ import {
   type ToolRun,
 } from "@/components/chat";
 import { toUiStatus, type UiStatus } from "@/components/ui";
+import { useAgentTemplates } from "@/hooks/useAgents";
 import {
   useChatHistory,
   useChatStream,
@@ -127,6 +128,39 @@ export function confirmationBelongsHere(
   return frame.lane_key === null || frame.lane_key === context.laneKey;
 }
 
+/**
+ * What to call the agent a confirmation card is waiting on — one rule for both
+ * ways a prompt reaches this view (G10).
+ *
+ * The two paths used to disagree about the same prompt: live it read "Lead
+ * Agent", and the card restored from `GET /v1/chat/confirmations` after a
+ * reload read "lead_agent". Neither path was wrong — they had different
+ * information. The name came from the `agent_status` map, which is built from
+ * *frames*, and frames are live-only: a window that opened after the agent was
+ * spawned has none, so it fell through to the raw id.
+ *
+ * Both prompts carry the same thing — the **template** id ("The agent template
+ * that asked", `routes/chat_types.rs`) — so the daemon's own template list is
+ * the name table that survives a reload, and it is asked first. The live map
+ * stays behind it for the ids it does answer: a non-singleton instance
+ * (`code_agent::a1b2c3d4`) is in no template list, and a window whose template
+ * list has not loaded yet still has whatever it has seen. The raw id is the
+ * last resort, never a guess: `general_agent` is called "General Purpose
+ * Agent", so there is no titlecasing rule to invent here.
+ */
+export function agentDisplayName(
+  agentId: string,
+  templateNames: ReadonlyMap<string, string>,
+  instanceName?: string,
+): string {
+  const template = templateNames.get(agentId);
+  if (template !== undefined && template !== "") return template;
+  // `AgentStatusChanged.name` is empty when the instance could not be
+  // resolved (GAP-07), and an empty name is not a name.
+  if (instanceName !== undefined && instanceName !== "") return instanceName;
+  return agentId;
+}
+
 /** Constant identities: `useServerEvent` keys its subscription off the list. */
 const RUN_EVENTS = ["workflow_started", "task_status"] as const;
 const AGENT_EVENTS = ["agent_status"] as const;
@@ -153,8 +187,14 @@ interface StartedRun {
 
 interface ConfirmationMeta {
   at: string;
+  /**
+   * Who asked, as the daemon names them — the agent **template** id on both
+   * paths. The display name is resolved from it at render time by
+   * `agentDisplayName`, not frozen here: the template list can answer after
+   * the card is drawn, and a name frozen from an empty map is what made the
+   * live and restored cards of one prompt disagree (G10).
+   */
   agentId: string | null;
-  agentName: string | null;
   /**
    * The run the daemon is blocked on, straight off the frame. `null` for a
    * confirmation raised outside a workflow — the main loop's own — and for a
@@ -297,6 +337,18 @@ export function useChatSession(): ChatSession {
   const started = useRef(new Map<string, StartedRun>());
   /** `agent_id → { name, current_task_id }` — the only run mapping on the wire. */
   const agents = useRef(new Map<string, AgentRecord>());
+  /**
+   * `template id → display name`, the half of the confirmation card's copy
+   * that outlives a reload (G10). A cache read for a window that has already
+   * opened Settings → Agents, one small `GET /v1/agent-templates` otherwise.
+   */
+  const agentTemplates = useAgentTemplates();
+  const templateNames = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const template of agentTemplates.data ?? [])
+      names.set(template.id, template.name);
+    return names;
+  }, [agentTemplates.data]);
   /**
    * The last few `tool_executed` frames, for the card that has not been drawn
    * yet (G6). The broker releases the tool the moment the answer is posted, so
@@ -483,7 +535,6 @@ export function useChatSession(): ChatSession {
 
   useServerEvent(CONFIRM_EVENTS, (event) => {
     if (event.type !== "tool_confirmation_requested") return;
-    const agent = agents.current.get(event.agent_id);
     setConfirmationMeta((current) =>
       current[event.request_id] !== undefined
         ? current
@@ -492,7 +543,6 @@ export function useChatSession(): ChatSession {
             [event.request_id]: {
               at: event.ts,
               agentId: event.agent_id,
-              agentName: agent?.name ?? event.agent_id,
               taskId: event.task_id,
             },
           },
@@ -554,7 +604,6 @@ export function useChatSession(): ChatSession {
           // where the prompt actually happened rather than at "now".
           at: row.raised_at,
           agentId: row.agent_id,
-          agentName: agents.current.get(row.agent_id)?.name ?? row.agent_id,
           taskId: row.task_id,
         };
       }
@@ -620,15 +669,23 @@ export function useChatSession(): ChatSession {
     () =>
       stream.state.pendingConfirmations.map((request) => {
         const meta = confirmationMeta[request.request_id];
+        const agentId = meta?.agentId ?? null;
         return {
           requestId: request.request_id,
           toolName: request.tool_name,
           toolArguments: request.tool_arguments,
-          agentName: meta?.agentName ?? null,
+          agentName:
+            agentId === null
+              ? null
+              : agentDisplayName(
+                  agentId,
+                  templateNames,
+                  agents.current.get(agentId)?.name,
+                ),
           at: meta?.at ?? new Date().toISOString(),
         };
       }),
-    [stream.state.pendingConfirmations, confirmationMeta],
+    [stream.state.pendingConfirmations, confirmationMeta, templateNames],
   );
 
   const firstConfirmation = confirmations[0] ?? null;

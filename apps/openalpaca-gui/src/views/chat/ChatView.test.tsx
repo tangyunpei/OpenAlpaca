@@ -134,6 +134,12 @@ let pendingConfirmationRows: Record<string, unknown>[] = [];
  */
 let pendingConfirmationsReply: () => Response;
 
+/**
+ * What `GET /v1/agent-templates` answers — the `id → name` table the
+ * confirmation card names the blocked agent from, on both paths (G10).
+ */
+let agentTemplateRows: Record<string, unknown>[] = [];
+
 /** `limit`/`offset`, exactly as the route pages. */
 function pageOfSessions(url: string): Response {
   const query = new URL(url).searchParams;
@@ -205,6 +211,7 @@ function installFetch() {
       return method === "GET" ? followupListReply() : followupWriteReply();
     }
     if (url.includes("/v1/tasks")) return json([]);
+    if (url.includes("/v1/agent-templates")) return json(agentTemplateRows);
     if (url.includes("/v1/models")) {
       return json([
         {
@@ -348,6 +355,7 @@ beforeEach(() => {
   sessionListReply = pageOfSessions;
   sessionWriteReply = () => json(sessionRow());
   confirmationReply = () => new Response("", { status: 200 });
+  agentTemplateRows = [{ id: "lead_agent", name: "Lead Agent" }];
   pendingConfirmationRows = [];
   pendingConfirmationsReply = () =>
     json({ confirmations: pendingConfirmationRows });
@@ -917,6 +925,48 @@ describe("ChatView — pending confirmations seeded from the daemon (S9)", () =>
     expect(
       await screen.findByText("Confirmation required · artifact_write"),
     ).toBeInTheDocument();
+  });
+
+  /**
+   * G10 — one card, one name.
+   *
+   * Live, the card read "Lead Agent is blocked on this."; the same card
+   * restored after a reload read "lead_agent is blocked on this.". The name
+   * came from the `agent_status` map, and frames are live-only — so a window
+   * that opened after the agent was spawned had nothing to look the id up in.
+   * Both prompts carry the agent *template* id, so the daemon's own template
+   * list is the name table, and it survives the reload. These two assert the
+   * same string on purpose.
+   */
+  const BLOCKED_SENTENCE =
+    "Lead Agent is blocked on this. Answer in the composer to continue.";
+
+  it("names the blocked agent on the restored card", async () => {
+    // No frame has ever named this agent to this window — which is every
+    // reload, and is where the card used to read `lead_agent`.
+    pendingConfirmationRows = [pendingRow()];
+    renderChat();
+
+    expect(await screen.findByText(BLOCKED_SENTENCE)).toBeInTheDocument();
+  });
+
+  it("names it the same way on the live card", async () => {
+    renderChat();
+    expect(await screen.findByLabelText("Message")).toBeInTheDocument();
+
+    await act(async () => {
+      emitServerEvent({
+        type: "tool_confirmation_requested",
+        request_id: "req-live-name",
+        tool_name: "artifact_write",
+        tool_arguments: { name: "01-alpaca-facts.md" },
+        agent_id: "lead_agent",
+        task_id: "run-1",
+        lane_key: null,
+      });
+    });
+
+    expect(await screen.findByText(BLOCKED_SENTENCE)).toBeInTheDocument();
   });
 });
 

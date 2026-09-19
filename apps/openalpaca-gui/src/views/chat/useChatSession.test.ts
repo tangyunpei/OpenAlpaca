@@ -11,7 +11,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { confirmationBelongsHere } from "./useChatSession";
+import { agentDisplayName, confirmationBelongsHere } from "./useChatSession";
 
 const HERE = "user:gui";
 
@@ -110,5 +110,56 @@ describe("confirmationBelongsHere", () => {
         here({ streamId: null }),
       ),
     ).toBe(false);
+  });
+});
+
+/**
+ * `agentDisplayName` — the other rule both paths share (G10).
+ *
+ * The live frame and the restored snapshot row carry the same thing, the agent
+ * *template* id, so they must read the same name; before this they did not,
+ * because only the live path had ever seen an `agent_status` frame to look a
+ * name up in.
+ */
+describe("agentDisplayName", () => {
+  const TEMPLATES = new Map([
+    ["lead_agent", "Lead Agent"],
+    ["general_agent", "General Purpose Agent"],
+  ]);
+
+  it("names a template from the daemon's own list, seen or not", () => {
+    // The two paths, side by side: with a live `agent_status` name and
+    // without one. Same id, same sentence.
+    expect(agentDisplayName("lead_agent", TEMPLATES, "Lead Agent")).toBe(
+      "Lead Agent",
+    );
+    expect(agentDisplayName("lead_agent", TEMPLATES)).toBe("Lead Agent");
+  });
+
+  /** There is no titlecasing rule to invent: `general_agent` is not "General Agent". */
+  it("uses the daemon's name rather than a rule over the id", () => {
+    expect(agentDisplayName("general_agent", TEMPLATES)).toBe(
+      "General Purpose Agent",
+    );
+  });
+
+  it("falls back to a live instance name for an id no template answers", () => {
+    // A non-singleton instance (`code_agent::a1b2c3d4`) is in no template
+    // list, and a window whose template list has not loaded has only this.
+    expect(
+      agentDisplayName("code_agent::a1b2c3d4", TEMPLATES, "Code Agent"),
+    ).toBe("Code Agent");
+    expect(agentDisplayName("lead_agent", new Map(), "Lead Agent")).toBe(
+      "Lead Agent",
+    );
+  });
+
+  it("falls back to the id, and never to an empty name", () => {
+    expect(agentDisplayName("mystery_agent", TEMPLATES)).toBe("mystery_agent");
+    // `AgentStatusChanged.name` is empty when the instance could not be
+    // resolved (GAP-07).
+    expect(agentDisplayName("mystery_agent", TEMPLATES, "")).toBe(
+      "mystery_agent",
+    );
   });
 });
