@@ -17,7 +17,7 @@ use crate::memory::scope_context::MemoryScopeContext;
 use crate::middleware::bootstrap::bootstrap_to_prompt_block;
 use crate::middleware::guard::{OutputGuard, detect_hallucinated_send};
 use crate::middleware::prompt::AgentPersona;
-use crate::orchestrator::{ConversationContext, Orchestrator};
+use crate::orchestrator::{ConversationContext, MAIN_LOOP_AGENT_ID, Orchestrator};
 use crate::prompt_ctx::{SectionPriority, sources::{ContextRequest, ExecutionPath}};
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
 use crate::security::capabilities::Allowlist;
@@ -138,7 +138,13 @@ impl Orchestrator {
         // loop-override resolution because the tool-mode main loop hands it
         // to `main_loop_tool_set` (identity for steer/followup re-entry).
         let tool_ctx = ToolContext {
-            agent_id: None,
+            // T4: the main loop is not an agent template, but it *is*
+            // somebody, and a confirmation card that reads "unknown is blocked
+            // on this" names nobody at all. `orchestrator` is what the rest of
+            // the system already calls this path (the router's own WARN
+            // lines), and it is what every event, audit row and artifact this
+            // turn produces is now attributed to.
+            agent_id: Some(MAIN_LOOP_AGENT_ID.to_string()),
             task_id: None,
             owner_id: owner_id.map(|s| s.to_string()),
             workspace_id: scope_ctx.workspace_id.clone(),

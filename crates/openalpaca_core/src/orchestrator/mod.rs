@@ -32,6 +32,16 @@ pub(crate) use task_ops::task_status_query;
 pub use skill::catalog as skill_catalog;
 pub use skill::router as skill_router;
 
+/// Who the main loop is, for everything that attributes a tool call (T4).
+///
+/// The main loop is not an agent template, so it has no template id — and
+/// until now it had no id at all: `ToolContext.agent_id` was `None`, which
+/// every consumer rendered as the literal `unknown`, up to and including the
+/// GUI's confirmation card ("unknown is blocked on this"). This is the name
+/// the rest of the system already uses for this path, in the router's own
+/// WARN lines and in the CLI's log output.
+pub const MAIN_LOOP_AGENT_ID: &str = "orchestrator";
+
 #[cfg(test)]
 mod tests;
 

@@ -154,3 +154,40 @@ fn make_executable_if_script(path: &Path) {
 
 #[cfg(not(unix))]
 fn make_executable_if_script(_path: &Path) {}
+
+#[cfg(test)]
+mod tests {
+    use super::AGENTS;
+    use openalpaca_core::orchestrator::MAIN_LOOP_AGENT_ID;
+
+    /// **T4.** The main loop's tool calls are attributed to `orchestrator`, so
+    /// that a confirmation card can name who is asking instead of reading
+    /// "unknown is blocked on this". That only works while the name belongs to
+    /// nobody else: a shipped template with the same id would make the
+    /// capability log ambiguous and would make the GUI call a real agent by
+    /// the assistant's name. The templates are embedded here, so this is where
+    /// the collision would be caught.
+    #[test]
+    fn no_shipped_agent_template_claims_the_main_loop_s_id() {
+        let mut ids = Vec::new();
+        for file in AGENTS {
+            let id = file
+                .contents
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("id:"))
+                .map(|value| value.trim().trim_matches('"').to_string())
+                .unwrap_or_else(|| panic!("{} has no `id:` in its frontmatter", file.path));
+            ids.push(id);
+        }
+
+        assert_eq!(ids.len(), 9, "the nine shipped templates: {ids:?}");
+        assert!(
+            !ids.iter().any(|id| id == MAIN_LOOP_AGENT_ID),
+            "`{MAIN_LOOP_AGENT_ID}` is the main loop's own id and must not \
+             also be a template's: {ids:?}"
+        );
+        // And it is a name, not the absence of one.
+        assert_ne!(MAIN_LOOP_AGENT_ID, "unknown");
+        assert!(!MAIN_LOOP_AGENT_ID.is_empty());
+    }
+}
