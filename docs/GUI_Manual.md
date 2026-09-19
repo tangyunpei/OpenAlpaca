@@ -157,9 +157,19 @@ Work item carries a badge counting `GET /v1/tasks?status=active` — whose SQL i
 Library carries **no** count: there is no count on the rail's budget, and a `0`
 beside Library would be a claim about your library the app cannot make.
 
-The window has a 1200px minimum width, which is what the chat view needs with
-both of its side columns open; both of those collapse, so narrower windows stay
-usable.
+**Narrow windows.** The app window will not go below 1000×640, which is what
+the Work, Library and Settings views need — none of their columns collapses.
+Chat's two side columns do, and below a breakpoint they give way on their own
+rather than pushing the layout off the edge of the window: on a portrait
+monitor or a half-screen split (about 1080pt wide) the conversation list
+collapses and the aside stays; narrower still, the aside goes too. The header's
+`Conversations` and `N running` buttons are the way back, and **re-opening a
+column by hand sticks** — nothing re-collapses it until you resize the window
+again, and nothing re-opens one for you either. The composer keeps pace: when
+the row cannot hold both the message box and `Attach` / the model button /
+`Send`, the three controls move to a line of their own below the box, and a
+long model id (a local `hf.co/…:Q8_0` tag) is shown elided with the full id on
+its tooltip.
 
 **Resizable panes.** Four columns are draggable and their widths persist
 per-machine in `localStorage` (`oa-pane-widths`): the chat aside (300–600,
@@ -213,16 +223,27 @@ Two rules the sidebar displays rather than enforces:
   row says which one wins.
 
 **Transcript.** Mono speaker labels over plain paragraphs — no avatars, no
-bubbles. A body is rendered from a small fixed vocabulary — paragraphs, bullet
-and numbered lists, `**bold**`, `*italic*` and inline code — which is what a
-completion report is written in; anything richer (headings, links, tables)
-belongs to a file, and the Library's renderers show it there. Times are the
-reader's own: the daemon stores UTC, and every clock in the window converts it. Besides messages it carries the run-report card for a background
+bubbles. A body is rendered from a fixed markdown vocabulary, the one a model
+actually writes in: paragraphs, bullet and numbered lists, `**bold**`,
+`*italic*`, inline code, `#`–`####` headings, `---` thematic breaks, fenced
+code blocks (with the language named above them and their own horizontal
+scroll) and simple pipe tables (also scrollable when wide). An ordered list
+resumed after a code block counts on from its own marker instead of restarting
+at 1, and a half-received fence or table renders as what it is while the answer
+streams rather than flashing raw backticks first. Nothing here renders HTML:
+links, images and raw markup are shown as the text they are, and the Library's
+own renderers are where a full document belongs. Times are the reader's own:
+the daemon stores UTC, and every clock in the window converts it. Besides
+messages it carries the run-report card for a background
 workflow that finished in this session, session-local rows for a steer or a
 queued follow-up (neither is a chat turn, so neither is persisted), the tool
 confirmation banner, and chips for the files a turn carried in and the files its
-run produced. The run pill and the artifact chips are read off stored history,
-so they survive a reload; the recap *card* is built from the live
+run produced. A file **you** attached is shown the same way, as a card under
+your own message, live and after a reload — the daemon also writes a text
+rendering of them into the message (`[Attachments: notes.txt]`) for clients
+that can only print a string, and this window draws the cards instead. The run
+pill and the artifact chips are read off stored history, so they survive a
+reload; the recap *card* is built from the live
 `workflow_started` / `task_status` frames and does not.
 
 **Composer.** Two mutually exclusive states. Normally: a growing textarea, the
@@ -279,11 +300,24 @@ out of the message it stores, so a reloaded transcript shows the answer alone.
 **A confirmation outlives the turn that started it.** A workflow asks for
 approval minutes after the chat turn that launched it has finished, so the
 prompt is held against the *conversation*, not against that turn's stream: the
-card appears whenever the daemon raises it, the run card in the Work pane says
-`Waiting on you: <tool>` while it waits, and the card is cleared when you
-answer it or when the run it belongs to finishes (the daemon announces nothing
-when a prompt times out, so a finished run is the signal). A confirmation
-raised on another lane never blocks this composer.
+card appears whenever the daemon raises it, and the run card in the Work pane
+says `Waiting on you: <tool>` while it waits. A confirmation raised on another
+lane never blocks this composer, and the card names who is asking — the agent
+template for a workflow's prompt, and `Alpaca` for one the assistant raised in
+the chat itself.
+
+**A prompt nobody answers settles anyway.** The daemon waits a fixed five
+minutes per prompt and then refuses the call: the tool does **not** run. The
+window learns that three ways, and never trusts one of them alone — the daemon
+announces the resolution (`tool_confirmation_resolved`, whatever the outcome),
+the prompt drops out of `GET /v1/chat/confirmations`, which is re-read every
+ten seconds while a card is up, and a prompt the assistant raised in the chat
+is settled by its own turn's last frame. However it settles, the composer
+unpauses at once, and a card that ran out its clock leaves a row saying so —
+`Timed out · update_persona timed out — not run. Nobody answered in time, so
+the agent continued without it.` An answer given somewhere else (another
+window, `openalpaca tasks confirmations approve`) clears the card here without
+claiming you gave it.
 
 **A prompt raised before the window opened is picked up too.** The frames are
 live-only with no replay, so a reload — or a second window, or restarting the

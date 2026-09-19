@@ -57,6 +57,8 @@ Enabling the provider is the only action: the daemon then asks the running Ollam
 
 Two things to expect: the seeded default model and every shipped agent template name a Claude id, so on an Ollama-only machine the router substitutes and says so (`openalpaca llm status` reads `configured: X — not available, using Y`); and the first boot downloads about 1 GB of local embedding model into `~/.openalpaca/state/cache/fastembed` unless you set `[embeddings] enabled = false`.
 
+**Onboarding comes first.** While `~/.openalpaca/config/orchestrator/BOOTSTRAP.md` is present the assistant is getting to know you, and the only tool it holds is `update_persona` — so a first message asking it to *run* something is answered truthfully with "I have no tool for that". Answer its questions, or delete `BOOTSTRAP.md`, and the ordinary tool surface (`start_workflow`, memory, your MCP servers and plugins) comes back on the next turn.
+
 Full details, including the output-ceiling and timeout knobs: [Installation Manual → Local Models (Ollama)](Installation_Manual.md#local-models-ollama).
 
 ## Default Install Locations
