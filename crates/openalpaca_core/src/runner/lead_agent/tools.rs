@@ -379,6 +379,11 @@ impl BuiltInTool for SpawnSubagentTool {
             self.bus.clone(),
             &self.daemon_config.load().security.circuit_breaker,
         );
+        // V2: a subagent's refusal is the *run's* refusal — its rows carry
+        // this task_id, which is how the workflow's report finds them.
+        if let Some(ref db) = self.db {
+            sandbox.set_db(db.clone());
+        }
         if let Some(ref broker) = self.confirmation_broker {
             sandbox.set_confirmation_broker(broker.clone());
         }

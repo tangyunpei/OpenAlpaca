@@ -1935,3 +1935,308 @@ async fn a_long_report_survives_to_the_two_thousand_character_cap() {
     };
     assert_eq!(summary, report, "the whole report, not its first 500 chars");
 }
+
+// ── V2: the refusal row a real run writes ────────────────────────────
+
+/// A tool that would do something, if it were ever allowed to run.
+struct DangerTool;
+
+#[async_trait::async_trait]
+impl crate::tools::registry::BuiltInTool for DangerTool {
+    async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+        Ok("the tool ran".to_string())
+    }
+}
+
+/// The dispatcher of [`setup_with_specific_router_and_db`], with one extra
+/// tool registered in the registry the lead will assemble its surface from.
+fn setup_with_tool_and_router(
+    agents: Vec<SubAgent>,
+    db: Database,
+    router: Arc<openalpaca_llm::LlmRouter>,
+    tool_name: &str,
+) -> TaskDispatcher {
+    let ctx = Arc::new(SharedContext::new());
+    for a in &agents {
+        ctx.agent_registry.register_template(template_from_agent(a));
+        ctx.agent_registry.register(a.clone());
+    }
+    let tool_registry = Arc::new(crate::tools::ToolRegistry::default());
+    tool_registry
+        .register(crate::tools::registry::RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: tool_name.to_string(),
+                description: "Does something that needs a human".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: crate::tools::registry::ToolBackend::BuiltIn(Arc::new(DangerTool)),
+            provides_capabilities: vec![tool_name.to_string()],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "1.0.0".to_string(),
+            author: "test".to_string(),
+            created_at: chrono::Utc::now(),
+        })
+        .expect("the test tool registers");
+
+    let bus = EventBus::default();
+    let sandbox = Arc::new(crate::security::sandbox::SandboxManager::with_defaults(
+        tool_registry.clone(),
+        bus.clone(),
+    ));
+    let gate = Arc::new(crate::security::gate::SecurityGate::new(sandbox));
+    TaskDispatcher::new(
+        ctx,
+        Arc::new(LaneManager::new()),
+        bus,
+        Some(router),
+        gate,
+        tool_registry,
+        Some(db),
+        None,
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        Arc::new(std::sync::RwLock::new(None)),
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+    )
+}
+
+/// **V2.** A real run, dispatched the way production dispatches one, whose
+/// lead calls a tool nobody can approve: the refusal reaches the run's report.
+///
+/// This goes through the production construction path on purpose. The S4 tests
+/// hand-built a `SandboxManager::with_db(...)`, and `with_db` had **no**
+/// production caller — every real sandbox was built with `new`, so the typed
+/// `tool_approval_unavailable` row the report reads was never written and the
+/// line was lost on every real run. Un-fixed, this test finds a report with no
+/// refusal in it.
+#[tokio::test]
+async fn a_real_unattended_run_reports_the_tool_nobody_could_approve() {
+    use openalpaca_llm::{ChatResponse, FinishReason, ProviderType, Usage};
+
+    let tool_name = "danger_tool";
+    let mock_provider = Arc::new(e2e_mock::MockProvider::new(vec![
+        // Round 1: the lead reaches for the tool.
+        ChatResponse {
+            content: String::new(),
+            tool_calls: vec![openalpaca_llm::ToolCall {
+                id: "tc_1".to_string(),
+                name: tool_name.to_string(),
+                arguments: serde_json::json!({}),
+            }],
+            model: "mock-model".to_string(),
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::ToolUse,
+            thinking: None,
+            parts: None,
+        },
+        // Round 2: it writes its report having been refused.
+        ChatResponse {
+            content: "I could not do it.".to_string(),
+            tool_calls: vec![],
+            model: "mock-model".to_string(),
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        },
+    ]));
+    let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
+        mock_provider,
+        ProviderType::Anthropic,
+        "mock-model".to_string(),
+    ));
+
+    // The lead carries the capability the tool provides, so the tool is on its
+    // surface, and names it as needing confirmation.
+    let mut lead = make_agent("lead-01", vec!["orchestration", tool_name]);
+    lead.constraints.allowed_capabilities =
+        vec!["orchestration".to_string(), tool_name.to_string()];
+    lead.constraints.require_confirmation_for = vec![tool_name.to_string()];
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let dispatcher = setup_with_tool_and_router(vec![lead], db.clone(), router, tool_name);
+
+    let outcome = dispatcher
+        .dispatch_lead_agent(
+            "Do the dangerous thing",
+            "The thing".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            None,
+            // M6/S5: nobody on the other end of a confirmation prompt.
+            true,
+        )
+        .unwrap();
+
+    let message = wait_for_conversation_message(&db, "user1:cli").await;
+    assert!(
+        message.content.contains(tool_name),
+        "the completion report must name what nobody could approve: {}",
+        message.content
+    );
+    assert!(
+        message.content.contains("could not ask anyone for approval"),
+        "…in the runtime's own words: {}",
+        message.content
+    );
+
+    // And the same line reached the row a client reads back.
+    let repo = openalpaca_storage::TaskRepository::new(&db);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let summary = loop {
+        if let Ok(Some(task)) = repo.get(&outcome.task_id)
+            && let Some(summary) = task.result_summary
+        {
+            break summary;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for the run's summary"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    assert!(
+        summary.contains(tool_name),
+        "the run's own summary carries it too: {summary}"
+    );
+}
+
+/// A provider that answers by *who is asking*, so a lead and its subagent can
+/// be scripted independently without depending on the order their rounds
+/// interleave. The lead is the caller whose surface carries `spawn_subagent`.
+struct LeadAndSubagentMock {
+    subagent_tool: String,
+}
+
+#[async_trait::async_trait]
+impl openalpaca_llm::LlmProvider for LeadAndSubagentMock {
+    fn name(&self) -> &str {
+        "lead-and-subagent-mock"
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    async fn chat(
+        &self,
+        request: openalpaca_llm::ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        use openalpaca_llm::{ChatResponse, FinishReason, ToolCall, Usage};
+        let tool_results = request
+            .messages
+            .iter()
+            .filter(|m| matches!(m.role, openalpaca_llm::Role::Tool))
+            .count();
+        let is_lead = request.tools.iter().any(|t| t.name == "spawn_subagent");
+
+        let call = |name: &str, args: serde_json::Value| ChatResponse {
+            content: String::new(),
+            tool_calls: vec![ToolCall {
+                id: format!("tc_{name}_{tool_results}"),
+                name: name.to_string(),
+                arguments: args,
+            }],
+            model: "mock-model".to_string(),
+            usage: Usage {
+                input_tokens: 5,
+                output_tokens: 2,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::ToolUse,
+            thinking: None,
+            parts: None,
+        };
+        let say = |text: &str| ChatResponse {
+            content: text.to_string(),
+            tool_calls: vec![],
+            model: "mock-model".to_string(),
+            usage: Usage {
+                input_tokens: 5,
+                output_tokens: 2,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        };
+
+        Ok(match (is_lead, tool_results) {
+            (true, 0) => call(
+                "spawn_subagent",
+                serde_json::json!({
+                    "agent_id": "worker",
+                    "objective": "do the dangerous thing"
+                }),
+            ),
+            (true, 1) => call("wait_for_subagents", serde_json::json!({})),
+            (true, _) => say("The worker reported back."),
+            (false, 0) => call(&self.subagent_tool, serde_json::json!({})),
+            (false, _) => say("I could not do it."),
+        })
+    }
+}
+
+/// **V2.** The refusal a *subagent* hit reaches the workflow's report.
+///
+/// Each agent of a run has its own `SandboxManager`; they all write their
+/// refusal rows against the run's `task_id`, which is how finalisation finds
+/// them. Un-fixed, the subagent's sandbox had no database either, so the run
+/// closed with no mention of what its worker could not do.
+#[tokio::test]
+async fn a_subagents_refusal_reaches_the_runs_report() {
+    use openalpaca_llm::ProviderType;
+
+    let tool_name = "danger_tool";
+    let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(LeadAndSubagentMock {
+            subagent_tool: tool_name.to_string(),
+        }),
+        ProviderType::Anthropic,
+        "mock-model".to_string(),
+    ));
+
+    let mut lead = make_agent("lead-01", vec!["orchestration"]);
+    lead.constraints.allowed_capabilities = vec!["orchestration".to_string()];
+    // The worker is the one holding the tool nobody can approve.
+    let mut worker = make_agent("worker", vec![tool_name]);
+    worker.constraints.allowed_capabilities = vec![tool_name.to_string()];
+    worker.constraints.require_confirmation_for = vec![tool_name.to_string()];
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let dispatcher = setup_with_tool_and_router(vec![lead, worker], db.clone(), router, tool_name);
+
+    dispatcher
+        .dispatch_lead_agent(
+            "Delegate the dangerous thing",
+            "The thing".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            None,
+            true,
+        )
+        .unwrap();
+
+    let message = wait_for_conversation_message(&db, "user1:cli").await;
+    assert!(
+        message.content.contains(tool_name),
+        "the run's report must carry its subagent's refusal: {}",
+        message.content
+    );
+}

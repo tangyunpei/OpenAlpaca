@@ -397,6 +397,38 @@ async fn an_unattended_skill_turn_refuses_a_tool_nobody_can_approve() {
     );
 }
 
+/// **V5.** The refusal is attributed to the skill that caused it. The tool
+/// context on this tier carried no `agent_id`, so every event and audit row a
+/// skill's tool call produced was filed under `agent_id="unknown"`.
+#[tokio::test]
+async fn a_skill_tier_refusal_names_the_skill() {
+    use crate::events::SystemEvent;
+
+    let registry = Arc::new(registry(true));
+    let orch = orchestrator_for(registry);
+    let mut events = orch.bus.subscribe();
+    let stub = Arc::new(StubPluginSkill {
+        tool: "acme__search".to_string(),
+        invoked: Arc::new(AtomicBool::new(false)),
+        outcome: Arc::new(Mutex::new(None)),
+    });
+
+    run_plugin_skill_as(&orch, confirm_listed("acme__search"), stub, true)
+        .await
+        .expect("the skill runs");
+
+    let mut seen = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let SystemEvent::SecurityViolation { agent_id, .. } = event {
+            seen.push(agent_id);
+        }
+    }
+    assert!(
+        seen.iter().any(|a| a == "skill:acme-search"),
+        "the refusal must name the skill, not 'unknown': {seen:?}"
+    );
+}
+
 /// The attended path is untouched: with no broker attached the skill tier is
 /// fail-closed exactly as it always was, and says so in its own words.
 #[tokio::test]

@@ -39,6 +39,11 @@ use tracing::Instrument;
 /// Maximum retries when LLM response is truncated due to max_tokens.
 const MAX_TOKENS_RETRIES: usize = 2;
 
+/// How much of the last tool error a turn's "no answer" line may carry (V3).
+/// Long enough for a compiler or assertion message, short enough that the line
+/// stays a line.
+const LAST_TOOL_ERROR_MAX_BYTES: usize = 600;
+
 /// Extra rounds granted per non-empty steering drain. The effective round
 /// budget is capped at `2 * max_rounds` regardless of how many drains occur.
 const STEERING_ROUNDS_BONUS: usize = 5;
@@ -56,6 +61,9 @@ struct LoopState {
     last_model: Option<String>,
     max_tokens_retries: usize,
     last_cost: f64,
+    /// V3: the last tool result that was an error, so a turn that ends with
+    /// nothing can say what it last tripped over.
+    last_tool_error: Option<String>,
 }
 
 impl LoopState {
@@ -70,6 +78,7 @@ impl LoopState {
             last_model: None,
             max_tokens_retries: 0,
             last_cost: 0.0,
+            last_tool_error: None,
         }
     }
 
@@ -85,6 +94,7 @@ impl LoopState {
             model_used: self.last_model.clone(),
             elapsed: self.start.elapsed(),
             estimated_cost: self.last_cost,
+            last_tool_error: self.last_tool_error.clone(),
         }
     }
 
@@ -104,6 +114,7 @@ impl LoopState {
             model_used: self.last_model.clone(),
             elapsed: self.start.elapsed(),
             estimated_cost: self.last_cost,
+            last_tool_error: self.last_tool_error.clone(),
         }
     }
 }
@@ -1110,6 +1121,15 @@ async fn run_agentic_loop_core(
                     for (tc, result_text) in executable.iter().zip(results.iter()) {
                         state.tool_calls_made += 1;
                         let ok = !result_text.starts_with("[tool_error]");
+                        if !ok {
+                            // V3: the reason a turn that reaches no answer
+                            // usually reached none. The last one wins — it is
+                            // the one the loop stopped on.
+                            state.last_tool_error = Some(truncate_tool_result_to(
+                                result_text.clone(),
+                                LAST_TOOL_ERROR_MAX_BYTES,
+                            ));
+                        }
                         // §5.4's "Spill, don't truncate". A result over the
                         // threshold is written once to the session's
                         // `results/` and the model is handed a stub naming it,

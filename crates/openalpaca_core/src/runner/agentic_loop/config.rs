@@ -301,6 +301,56 @@ pub struct LoopResult {
     pub elapsed: Duration,
     /// Accumulated cost for this loop invocation (from CostTracker for Router, local estimate for Direct).
     pub estimated_cost: f64,
+    /// The last tool result that came back an error, verbatim (V3).
+    ///
+    /// A turn that ends with no answer usually ends that way because a tool
+    /// kept failing, and "I stopped after 8 rounds" is only half an answer
+    /// without the reason. `None` when no tool failed — the loop tracks the
+    /// last one, not a list: the reader wants the one it stopped on.
+    pub last_tool_error: Option<String>,
+}
+
+impl LoopResult {
+    /// The line a turn shows when it produced no answer text of its own (V3).
+    ///
+    /// `None` when there is genuine content, and for `Cancelled` — a turn the
+    /// user stopped is not a turn that failed to speak, and it keeps whatever
+    /// its caller already does.
+    ///
+    /// The vocabulary is the lead's ([`completion_status_line`]), rewritten
+    /// for a chat turn: the same four reasons, named the way the person who
+    /// asked the question would name them.
+    ///
+    /// [`completion_status_line`]: crate::orchestrator::dispatcher::completion_status_line
+    pub fn no_answer_line(&self) -> Option<String> {
+        if !self.final_content.trim().is_empty() {
+            return None;
+        }
+        let reason = match &self.finish_reason {
+            LoopFinishReason::Cancelled => return None,
+            LoopFinishReason::MaxRounds => format!(
+                "I stopped after {} tool rounds without reaching an answer.",
+                self.rounds_used
+            ),
+            LoopFinishReason::CostExceeded => {
+                "I stopped before reaching an answer: this turn hit its cost limit.".to_string()
+            }
+            LoopFinishReason::Truncated => {
+                "I stopped before reaching an answer: the reply hit the model's output limit."
+                    .to_string()
+            }
+            LoopFinishReason::Error(e) => {
+                format!("I could not finish this turn: {e}")
+            }
+            LoopFinishReason::Complete => {
+                "I finished this turn without writing an answer.".to_string()
+            }
+        };
+        Some(match self.last_tool_error {
+            Some(ref err) => format!("{reason} The last tool error was: {}", err.trim()),
+            None => reason,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

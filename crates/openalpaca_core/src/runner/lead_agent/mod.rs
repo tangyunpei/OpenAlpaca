@@ -345,6 +345,13 @@ pub async fn run_lead_agent(
         bus.clone(),
         &daemon_config.load().security.circuit_breaker,
     );
+    // V2: the audit rows a refusal writes — including the typed
+    // `tool_approval_unavailable` row the run's completion report reads back
+    // at finalisation. Best-effort inside the sandbox; absent here it was
+    // written by nobody.
+    if let Some(ref db) = db {
+        sandbox.set_db(db.clone());
+    }
     if let Some(ref broker) = confirmation_broker {
         sandbox.set_confirmation_broker(broker.clone());
     }

@@ -505,4 +505,44 @@ mod tests {
         assert_eq!(msg.tokens_in, None);
         assert_eq!(msg.tokens_out, None);
     }
+
+    /// **V3, the other half.** An empty answer writes no row at all — which is
+    /// why a turn that reached no answer left no trace in the transcript. The
+    /// runtime line the main loop now returns instead is an ordinary answer
+    /// here, and gets an ordinary row.
+    #[test]
+    fn a_runtime_no_answer_line_is_persisted_and_an_empty_one_is_not() {
+        let (_tmp, db) = make_db();
+        let persistence = GatewayPersistence::new(db.clone());
+
+        let empty = persistence
+            .persist_assistant_message(
+                "user6:gui",
+                &super::super::HandleResult::text(String::new()),
+                None,
+                "gui",
+                None,
+            )
+            .expect("an empty answer is not an error");
+        assert_eq!(empty, 0, "nothing was written");
+
+        let line = "I stopped after 8 tool rounds without reaching an answer.";
+        let id = persistence
+            .persist_assistant_message(
+                "user6:gui",
+                &super::super::HandleResult::text(line.to_string()),
+                None,
+                "gui",
+                None,
+            )
+            .expect("persist assistant message");
+        assert!(id > 0);
+
+        let repo = ConversationRepository::new(&db);
+        let msgs = repo
+            .list_recent_by_lane("user6:gui", 10)
+            .expect("load recent messages");
+        let msg = msgs.iter().find(|m| m.role == "assistant").expect("row");
+        assert_eq!(msg.content, line, "the transcript keeps what the user read");
+    }
 }

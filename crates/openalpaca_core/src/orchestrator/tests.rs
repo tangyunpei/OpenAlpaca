@@ -4463,6 +4463,91 @@ async fn a_streamed_tool_call_runs_with_its_arguments() {
     );
 }
 
+// ── V3: a turn that reaches no answer says so ────────────────────────
+
+/// A model that calls the same tool every round and never writes anything:
+/// the live shape of the failure — eight rounds of "missing required
+/// parameter", then an empty answer.
+struct AlwaysToolCallingMock;
+
+#[async_trait]
+impl openalpaca_llm::LlmProvider for AlwaysToolCallingMock {
+    fn name(&self) -> &str {
+        "always-tool-calling-mock"
+    }
+
+    fn supports_tools(&self) -> bool {
+        true
+    }
+
+    async fn chat(
+        &self,
+        request: ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        use openalpaca_llm::{ChatResponse, FinishReason, Usage};
+        let name = request
+            .tools
+            .first()
+            .map(|t| t.name.clone())
+            .unwrap_or_else(|| "start_workflow".to_string());
+        Ok(ChatResponse {
+            content: String::new(),
+            tool_calls: vec![openalpaca_llm::ToolCall {
+                id: "tc_1".to_string(),
+                name,
+                // Deliberately missing every required parameter, which is what
+                // the tool refuses on.
+                arguments: serde_json::json!({}),
+            }],
+            model: "mock-model".to_string(),
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 1,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::ToolUse,
+            thinking: None,
+            parts: None,
+        })
+    }
+}
+
+/// **V3.** A main-loop turn that spends its whole round budget on a failing
+/// tool answers with the runtime's own line — the reason, and the last tool
+/// error — instead of the empty string that reached the client as a bare meta
+/// line with no bubble and no assistant row.
+#[tokio::test]
+async fn a_turn_that_reaches_no_answer_says_why() {
+    let mut config = DaemonConfig::default();
+    config.orchestrator.routing.main_loop_max_rounds = 2;
+    let router = openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(AlwaysToolCallingMock),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    );
+    let orch = make_orchestrator_with_llm_agents_and_config(
+        Arc::new(router),
+        vec![make_agent("lead", vec!["orchestration"])],
+        config,
+        None,
+    );
+
+    let reply = send_tool_mode(&orch, Uuid::new_v4(), "please do the thing").await;
+
+    assert!(
+        !reply.trim().is_empty(),
+        "a turn must never end with nothing at all"
+    );
+    assert!(
+        reply.contains("without reaching an answer"),
+        "the line names the reason: {reply}"
+    );
+    assert!(
+        reply.contains("The last tool error was:"),
+        "…and the error it kept hitting: {reply}"
+    );
+}
+
 // ── S8: the poll set loses the path before the file does ─────────────
 
 /// **S8.** Finishing onboarding deletes `BOOTSTRAP.md`, which the wake

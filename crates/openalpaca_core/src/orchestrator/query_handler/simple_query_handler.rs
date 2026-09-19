@@ -756,6 +756,10 @@ impl Orchestrator {
                 self.bus.clone(),
                 &self.daemon_config.load().security.circuit_breaker,
             );
+            // V2: audit rows for what this turn's sandbox refused.
+            if let Some(ref db) = self.db {
+                per_request_sandbox.set_db(db.clone());
+            }
             if let Ok(guard) = self.confirmation_broker.read()
                 && let Some(broker) = guard.as_ref()
             {
@@ -858,12 +862,34 @@ impl Orchestrator {
                 },
             );
 
-            // If LLM failed and produced no content, propagate as error
-            // so the Gateway doesn't persist an empty assistant message.
+            // **V3: a turn never ends with nothing.**
+            //
+            // A main loop that exhausted its rounds, its cost budget or the
+            // model's output limit used to return `""` — no deltas, no
+            // assistant row, and a client showing only the meta line. The
+            // runtime writes the line instead, naming the reason and the last
+            // tool error, and it is persisted, streamed and returned exactly
+            // like an answer.
+            //
+            // An LLM **error** keeps its error channel rather than becoming an
+            // ordinary-looking turn — every client that branches on failure
+            // (the CLI's exit code, the GUI's error state) would otherwise
+            // read a hard failure as a normal reply — but the message it
+            // carries is now the same runtime-authored line.
+            let no_answer = result.no_answer_line();
             if let LoopFinishReason::Error(ref err) = result.finish_reason
                 && result.final_content.trim().is_empty()
             {
-                return Err(format!("LLM error: {}", err));
+                return Err(no_answer.unwrap_or_else(|| format!("LLM error: {err}")));
+            }
+            if let Some(line) = no_answer {
+                tracing::warn!(
+                    request_id = %request_id,
+                    finish_reason = ?result.finish_reason,
+                    rounds = result.rounds_used,
+                    "Main-loop turn produced no answer text; answering with the runtime line"
+                );
+                return Ok(line);
             }
 
             // Post-hoc guard: detect hallucinated send confirmations.
@@ -1139,10 +1165,21 @@ impl Orchestrator {
             },
         );
 
+        // V3, as on the main loop above: the social path runs a model too, and
+        // a turn of it that says nothing says why.
+        let no_answer = result.no_answer_line();
         if let LoopFinishReason::Error(ref err) = result.finish_reason
             && result.final_content.trim().is_empty()
         {
-            return Err(format!("LLM error: {}", err));
+            return Err(no_answer.unwrap_or_else(|| format!("LLM error: {err}")));
+        }
+        if let Some(line) = no_answer {
+            tracing::warn!(
+                request_id = %request_id,
+                finish_reason = ?result.finish_reason,
+                "Social turn produced no answer text; answering with the runtime line"
+            );
+            return Ok(line);
         }
 
         let response = result.final_content;

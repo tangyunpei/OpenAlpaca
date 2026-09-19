@@ -125,15 +125,21 @@ impl SandboxManager {
         circuit_breaker_config: &CircuitBreakerConfig,
         db: openalpaca_storage::Database,
     ) -> Self {
-        let circuit_breaker = ToolCircuitBreaker::new(circuit_breaker_config, bus.clone());
-        Self {
-            registry,
-            bus,
-            circuit_breaker,
-            db: Some(db),
-            confirmation_broker: None,
-            approval_cache: crate::security::confirmation::ApprovalCache::new(),
-        }
+        let mut sandbox = Self::new(registry, bus, circuit_breaker_config);
+        sandbox.set_db(db);
+        sandbox
+    }
+
+    /// Give this sandbox the audit database (V2).
+    ///
+    /// The same shape as [`Self::set_confirmation_broker`], and for the same
+    /// reason: the production sites build the sandbox first and hand it what
+    /// they hold afterwards. Without this the typed refusal row
+    /// ([`UNAPPROVABLE_EVENT_TYPE`]) that a workflow's completion report reads
+    /// was written by nothing — `with_db` had no production caller at all, so
+    /// the S4 tests passed and every real run lost the line.
+    pub fn set_db(&mut self, db: openalpaca_storage::Database) {
+        self.db = Some(db);
     }
 
     /// Create a new SandboxManager with default circuit breaker settings.

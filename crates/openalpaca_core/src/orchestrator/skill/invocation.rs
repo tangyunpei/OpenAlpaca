@@ -642,7 +642,11 @@ impl Orchestrator {
 
             // Per-request sandbox with ToolContext
             let tool_ctx = ToolContext {
-                agent_id: None,
+                // V5: the skill is the identity at hand. Left `None`, every
+                // event and every refusal this tier logged said
+                // `agent_id="unknown"`, so a refused tool could not be traced
+                // back to what invoked it.
+                agent_id: Some(format!("skill:{skill_name}")),
                 task_id: None,
                 owner_id: owner_id.map(|s| s.to_string()),
                 workspace_id: scope_ctx.workspace_id.clone(),
@@ -754,6 +758,11 @@ impl Orchestrator {
                 self.bus.clone(),
                 &self.daemon_config.load().security.circuit_breaker,
             );
+            // V2: as on the other tiers — a refusal that nobody could approve
+            // leaves a row, not only a bus event.
+            if let Some(ref db) = self.db {
+                per_request_sandbox.set_db(db.clone());
+            }
             if let Ok(guard) = self.confirmation_broker.read() {
                 if let Some(broker) = guard.as_ref() {
                     per_request_sandbox.set_confirmation_broker(broker.clone());
@@ -1084,6 +1093,10 @@ impl Orchestrator {
             self.bus.clone(),
             &self.daemon_config.load().security.circuit_breaker,
         );
+        // V2: as above, for a plugin-contributed skill.
+        if let Some(ref db) = self.db {
+            sandbox.set_db(db.clone());
+        }
         if let Ok(guard) = self.confirmation_broker.read() {
             if let Some(broker) = guard.as_ref() {
                 sandbox.set_confirmation_broker(broker.clone());
@@ -1091,7 +1104,8 @@ impl Orchestrator {
         }
 
         let tool_ctx = ToolContext {
-            agent_id: None,
+            // V5, as on the file-skill tier above.
+            agent_id: Some(format!("skill:{skill_name}")),
             task_id: None,
             owner_id: owner_id.map(|s| s.to_string()),
             workspace_id: scope_ctx.workspace_id.clone(),

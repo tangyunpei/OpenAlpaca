@@ -3481,3 +3481,143 @@ async fn a_substituted_model_is_reported_on_the_streaming_path() {
         "a streamed turn names the model the router called, not the one requested"
     );
 }
+
+// ── V3: a turn that reaches no answer says why ───────────────────────
+
+fn result_with(finish_reason: LoopFinishReason, content: &str) -> LoopResult {
+    LoopResult {
+        final_content: content.to_string(),
+        rounds_used: 8,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        tool_calls_made: 3,
+        finish_reason,
+        model_used: None,
+        elapsed: std::time::Duration::from_secs(1),
+        estimated_cost: 0.0,
+        last_tool_error: None,
+    }
+}
+
+/// **V3.** Every exit that leaves no answer gets a line naming the reason;
+/// an answer gets none, and a cancellation keeps whatever it did before.
+#[test]
+fn a_turn_with_no_answer_names_the_reason() {
+    let line = result_with(LoopFinishReason::MaxRounds, "")
+        .no_answer_line()
+        .expect("a round-budget exit owes the reader a line");
+    assert!(line.contains("8"), "it names the rounds it spent: {line}");
+
+    assert!(
+        result_with(LoopFinishReason::CostExceeded, "")
+            .no_answer_line()
+            .is_some_and(|l| l.contains("cost limit")),
+        "a cost exit says so"
+    );
+    assert!(
+        result_with(LoopFinishReason::Truncated, "")
+            .no_answer_line()
+            .is_some_and(|l| l.contains("output limit")),
+        "a truncation says so"
+    );
+    assert!(
+        result_with(LoopFinishReason::Error("provider is down".into()), "")
+            .no_answer_line()
+            .is_some_and(|l| l.contains("provider is down")),
+        "an error carries the error"
+    );
+    assert!(
+        result_with(LoopFinishReason::Complete, "")
+            .no_answer_line()
+            .is_some(),
+        "an empty 'complete' is still a turn that said nothing"
+    );
+
+    // An answer needs no line, whatever the exit.
+    assert!(
+        result_with(LoopFinishReason::Complete, "Here you go.")
+            .no_answer_line()
+            .is_none()
+    );
+    assert!(
+        result_with(LoopFinishReason::MaxRounds, "Partial, but an answer.")
+            .no_answer_line()
+            .is_none()
+    );
+    // Whitespace is not an answer.
+    assert!(
+        result_with(LoopFinishReason::MaxRounds, "  \n ")
+            .no_answer_line()
+            .is_some()
+    );
+    // A cancelled turn is not a turn that failed to speak.
+    assert!(
+        result_with(LoopFinishReason::Cancelled, "")
+            .no_answer_line()
+            .is_none()
+    );
+}
+
+/// **V3.** Where a tool error exists it is the second half of the line: "I
+/// stopped after N rounds" alone does not tell anyone what went wrong.
+#[test]
+fn the_no_answer_line_carries_the_last_tool_error() {
+    let mut result = result_with(LoopFinishReason::MaxRounds, "");
+    result.last_tool_error =
+        Some("[tool_error] start_workflow: missing required parameter 'goal'".to_string());
+    let line = result.no_answer_line().expect("a line");
+    assert!(
+        line.contains("missing required parameter 'goal'"),
+        "the reason the turn got nowhere: {line}"
+    );
+}
+
+/// **V3.** The loop really records that error: a tool that fails on every
+/// round leaves its message on the result the turn is built from.
+#[tokio::test]
+async fn the_loop_records_the_last_tool_error() {
+    use crate::security::sandbox::SandboxPolicy;
+
+    // A model that reaches for a tool and writes nothing — the shape the live
+    // run produced: rounds of tool errors and an empty answer.
+    let silent_tool_call = ChatResponse {
+        content: String::new(),
+        ..MockProvider::tool_use_response()
+    };
+    let provider = MockProvider::new(vec![Ok(silent_tool_call)]);
+    let config = LoopConfig {
+        max_rounds: 2,
+        ..Default::default()
+    };
+    // No sandbox: every tool call comes back as the loop's own error string,
+    // which is the shape a refused or failed call has.
+    let result = run_agentic_loop(
+        &provider,
+        vec![ChatMessage::user("go")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None::<&SandboxPolicy>,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert_eq!(result.finish_reason, LoopFinishReason::MaxRounds);
+    let error = result
+        .last_tool_error
+        .as_deref()
+        .expect("the failing tool is remembered");
+    assert!(
+        error.starts_with("[tool_error]"),
+        "the tool's own error text: {error}"
+    );
+    assert!(
+        result
+            .no_answer_line()
+            .is_some_and(|l| l.contains("[tool_error]")),
+        "and it reaches the line the turn shows"
+    );
+}
