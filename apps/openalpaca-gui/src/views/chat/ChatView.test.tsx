@@ -10,6 +10,7 @@
 import { QueryClient } from "@tanstack/react-query";
 import {
   act,
+  cleanup,
   fireEvent,
   render,
   screen,
@@ -28,6 +29,7 @@ import { useSessionSelection } from "@/stores/session";
 import { useUiStore } from "@/stores/ui";
 
 import ChatView from "./ChatView";
+import { useResolutions } from "./resolution-store";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(async () => ({
@@ -459,6 +461,9 @@ beforeEach(() => {
     });
   resetConnection();
   useUiStore.setState({ ...initialUi, model: null, view: "chat" });
+  // P2's rows outlive the component on purpose, so they have to be cleared
+  // between tests the way the other window-lifetime stores are.
+  useResolutions.getState().clear();
   useProjectStore.setState({ path: null });
   useSessionSelection.setState({ selectedId: null });
   vi.stubGlobal("EventSource", FakeEventSource);
@@ -3475,5 +3480,163 @@ describe("ChatView — a user turn's own files (T5)", () => {
     expect(screen.queryByText(/\[Attachments:/)).toBeNull();
     // …and the daemon's copy of the bytes is not on screen at all.
     expect(screen.queryByText(/HERON-6042/)).toBeNull();
+  });
+});
+
+/**
+ * P2 — a resolution row is the record of something that happened to the
+ * person: a prompt they answered, or one nobody did. It has to stay in the
+ * transcript for the life of the window.
+ *
+ * The views are swapped, not stacked — `App.tsx`'s `renderView` returns a
+ * different lazy component per view — so leaving chat *unmounts* it, and one
+ * click on a `FILE WRITTEN` card (which opens the Library) used to take every
+ * row on screen with it. That is what the owner's session hit: a `TIMED OUT`
+ * row on screen at 15:52 was gone afterwards, while a later run's `DENIED`
+ * row, written after the trip, was still there.
+ */
+describe("ChatView — resolution rows stay for the life of the window (P2)", () => {
+  /** Put a `Timed out` row on screen for a background run's prompt. */
+  async function timeOutARunsPrompt(): Promise<FakeEventSource> {
+    const source = await sendMessage("write up the alpaca facts");
+    await act(async () => {
+      emitServerEvent({
+        type: "workflow_started",
+        task_id: "run-1",
+        title: "Alpaca facts",
+        lane_key: "user:gui",
+      });
+      emitServerEvent({
+        type: "tool_confirmation_requested",
+        request_id: "req-p2",
+        agent_id: "lead_agent",
+        tool_name: "artifact_write",
+        tool_arguments: { name: "01-alpaca-facts.md" },
+        stream_id: null,
+        lane_key: null,
+        task_id: "run-1",
+      });
+    });
+    expect(
+      await screen.findByText("Confirmation required · artifact_write"),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      emitServerEvent({
+        type: "tool_confirmation_resolved",
+        request_id: "req-p2",
+        agent_id: "lead_agent",
+        tool_name: "artifact_write",
+        outcome: "timed_out",
+        stream_id: null,
+        lane_key: null,
+        task_id: "run-1",
+      });
+    });
+    expect(await screen.findByText("Timed out")).toBeInTheDocument();
+    return source;
+  }
+
+  /**
+   * The ruling's own sequence — and it **passed before the fix**, which is
+   * what sent the diagnosis looking at the component's lifetime instead of at
+   * the transcript's. Kept as the guard it is.
+   */
+  it("keeps the row after the run finishes and another turn is sent", async () => {
+    renderChat();
+    const source = await timeOutARunsPrompt();
+
+    await act(async () => {
+      source.emit("done", {
+        content: "Kicked off a run.",
+        model: "qwen3:8b",
+        tokens_in: 12,
+        tokens_out: 4,
+        duration_ms: 900,
+        delegation: { task_id: "run-1", title: "Alpaca facts" },
+      });
+    });
+    await act(async () => {
+      emitServerEvent({
+        type: "task_status",
+        task_id: "run-1",
+        title: "Alpaca facts",
+        status: "completed",
+        outcome_summary: "Done.",
+        artifact_count: 1,
+        lane_key: "user:gui",
+      });
+    });
+    await settleSnapshot();
+    expect(screen.getByText("Timed out")).toBeInTheDocument();
+
+    fireEvent.change(await screen.findByLabelText("Message"), {
+      target: { value: "thanks" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await settleSnapshot();
+    expect(screen.getByText("Timed out")).toBeInTheDocument();
+  });
+
+  /** …and the one that actually dropped it: a trip to another view. */
+  it("keeps the row across a trip to another view and back", async () => {
+    const client = renderChat();
+    await timeOutARunsPrompt();
+
+    // What clicking the FILE WRITTEN card does: the Library is a different
+    // lazy component in the same slot, so the chat view unmounts.
+    cleanup();
+    render(
+      <QueryProvider client={client} connectEvents={false}>
+        <KeyLadder />
+        <ChatView />
+      </QueryProvider>,
+    );
+    await settleSnapshot();
+
+    expect(await screen.findByText("Timed out")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "artifact_write timed out — not run. Nobody answered in time, so the agent continued without it.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  /**
+   * The half that must not regress with it: the rows belong to the
+   * conversation they happened in, and a switch still clears them (I5).
+   */
+  it("still drops the rows when the conversation changes", async () => {
+    sessionRows = [
+      sessionRow({ id: "sess-a", title: "Audit" }),
+      sessionRow({ id: "sess-b", title: "Docs", status: "archived" }),
+    ];
+    historyReply = () =>
+      json({
+        messages: [],
+        total: 0,
+        lane_key: "user:gui",
+        session_id: "sess-a",
+      });
+    renderChat();
+    const source = await timeOutARunsPrompt();
+    await act(async () => {
+      source.emit("done", {
+        content: "Kicked off a run.",
+        model: "qwen3:8b",
+        duration_ms: 900,
+      });
+    });
+
+    historyReply = () =>
+      json({
+        messages: [],
+        total: 0,
+        lane_key: "user:gui",
+        session_id: "sess-b",
+      });
+    fireEvent.click(screen.getByRole("button", { name: "New chat" }));
+
+    await waitFor(() => expect(screen.queryByText("Timed out")).toBeNull());
   });
 });

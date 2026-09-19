@@ -320,6 +320,16 @@ the agent continued without it.` An answer given somewhere else (another
 window, `openalpaca tasks confirmations approve`) clears the card here without
 claiming you gave it.
 
+`Approved`, `Denied` and `Timed out` rows stay in the transcript for as long
+as the window is open, in the order they happened — switching to Work, the
+Library or Settings and coming back leaves them where they were. They belong
+to the conversation they happened in, so switching conversations drops them,
+and so does reloading: nothing persists a resolution. The run-report and
+written-file cards are the other way round — both are rebuilt from live frames
+only, so a trip to another view does clear them, and what survives of a
+finished run is its completion message, its run pill and its file chips, all
+of which come from stored history.
+
 **A prompt raised before the window opened is picked up too.** The frames are
 live-only with no replay, so a reload — or a second window, or restarting the
 app while a background run is blocked — used to show no card at all while the

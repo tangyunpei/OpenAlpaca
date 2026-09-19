@@ -85,11 +85,11 @@ import { useProjectStore, workspaceOption } from "@/stores/project";
 import { useSessionSelection } from "@/stores/session";
 import { useUiStore, type ComposerMode } from "@/stores/ui";
 
+import { useResolutions } from "./resolution-store";
 import {
   buildTranscript,
   type ConfirmationEntry,
   type PendingTurn,
-  type ResolutionEntry,
   type RunReportData,
   type SteerEntry,
   type TranscriptItem,
@@ -452,7 +452,17 @@ export function useChatSession(): ChatSession {
   const [sendError, setSendError] = useState<string | null>(null);
   const [reports, setReports] = useState<RunReportData[]>([]);
   const [artifacts, setArtifacts] = useState<WrittenArtifact[]>([]);
-  const [resolutions, setResolutions] = useState<ResolutionEntry[]>([]);
+  /**
+   * The resolution rows are the one piece of session-local state that outlives
+   * this component (P2): the views are swapped, not stacked, so a click on a
+   * `FILE WRITTEN` card — which opens the Library — used to take every
+   * `Approved` / `Denied` / `Timed out` row on screen with it. They are still
+   * cleared when the *conversation* changes, below.
+   */
+  const resolutions = useResolutions((s) => s.rows);
+  const addResolution = useResolutions((s) => s.add);
+  const noteToolRun = useResolutions((s) => s.noteToolRun);
+  const clearResolutions = useResolutions((s) => s.clear);
   const [steers, setSteers] = useState<SteerEntry[]>([]);
   const [confirmationMeta, setConfirmationMeta] = useState<
     Record<string, ConfirmationMeta>
@@ -749,19 +759,12 @@ export function useChatSession(): ChatSession {
 
     dismissConfirmation(event.request_id);
     if (event.outcome !== "timed_out") return;
-    setResolutions((current) =>
-      current.some((entry) => entry.requestId === event.request_id)
-        ? current
-        : [
-            ...current,
-            {
-              requestId: event.request_id,
-              resolution: "timed_out",
-              note: timedOutResolutionNote(shown.tool_name),
-              at: event.ts,
-            },
-          ],
-    );
+    addResolution({
+      requestId: event.request_id,
+      resolution: "timed_out",
+      note: timedOutResolutionNote(shown.tool_name),
+      at: event.ts,
+    });
   });
 
   /**
@@ -817,19 +820,12 @@ export function useChatSession(): ChatSession {
         atMs: Date.now(),
       },
     ];
-    setResolutions((current) =>
-      current.map((entry) =>
-        entry.resolution === "approved" &&
-        entry.note.startsWith(`${event.tool_name} approved · waiting`)
-          ? {
-              ...entry,
-              note: executedResolutionNote(
-                event.tool_name,
-                event.success,
-                formatDurationMs(event.duration_ms),
-              ),
-            }
-          : entry,
+    noteToolRun(
+      event.tool_name,
+      executedResolutionNote(
+        event.tool_name,
+        event.success,
+        formatDurationMs(event.duration_ms),
       ),
     );
   });
@@ -938,13 +934,13 @@ export function useChatSession(): ChatSession {
     setPending(null);
     setReports([]);
     setArtifacts([]);
-    setResolutions([]);
+    clearResolutions();
     setSteers([]);
     setConfirmationMeta({});
     firstSeenAtMs.current.clear();
     started.current.clear();
     stream.reset();
-  }, [history.data, stream.active, stream.reset]);
+  }, [history.data, stream.active, stream.reset, clearResolutions]);
 
   const items = useMemo(
     () =>
@@ -1198,22 +1194,19 @@ export function useChatSession(): ChatSession {
         },
         {
           onSuccess: () => {
-            setResolutions((current) => [
-              ...current,
-              {
-                requestId: target.requestId,
+            addResolution({
+              requestId: target.requestId,
+              resolution,
+              // The tool may already have run and reported: the daemon
+              // releases it as soon as the answer lands, and that frame
+              // routinely arrives before this callback does.
+              note: resolutionNote(
                 resolution,
-                // The tool may already have run and reported: the daemon
-                // releases it as soon as the answer lands, and that frame
-                // routinely arrives before this callback does.
-                note: resolutionNote(
-                  resolution,
-                  target.toolName,
-                  settlingRun(toolRuns.current, target.toolName, answeredAtMs),
-                ),
-                at: new Date().toISOString(),
-              },
-            ]);
+                target.toolName,
+                settlingRun(toolRuns.current, target.toolName, answeredAtMs),
+              ),
+              at: new Date().toISOString(),
+            });
           },
           onError: (error: Error) => {
             showToast(error.message);
@@ -1221,7 +1214,7 @@ export function useChatSession(): ChatSession {
         },
       );
     },
-    [firstConfirmation, showToast],
+    [firstConfirmation, showToast, addResolution],
   );
 
   const approve = useCallback(() => answer("approved"), [answer]);
