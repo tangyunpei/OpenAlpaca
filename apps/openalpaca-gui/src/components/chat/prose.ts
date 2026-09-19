@@ -334,6 +334,14 @@ export function plainText(markdown: string): string {
       case "rule":
         // A rule is punctuation, and punctuation with no text is nothing.
         break;
+      default: {
+        // Exhaustive by construction: a block kind added to `parseProse` and
+        // not to this switch is a type error here, rather than content the
+        // run-report card silently drops. Nothing throws — this file never
+        // does, and it is unreachable anyway.
+        const unhandled: never = block;
+        void unhandled;
+      }
     }
   }
   return lines
