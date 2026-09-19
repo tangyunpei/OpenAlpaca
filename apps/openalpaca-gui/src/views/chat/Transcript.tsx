@@ -55,6 +55,7 @@ export function Transcript({ items, dense }: TranscriptProps) {
                 text={item.text}
                 meta={item.meta}
                 streamPhase={item.streamPhase}
+                reasoning={item.reasoning}
                 dense={dense}
                 run={
                   item.runId === null

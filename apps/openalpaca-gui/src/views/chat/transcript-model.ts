@@ -160,6 +160,12 @@ export type TranscriptItem =
       text: string;
       meta: AssistantMeta | null;
       streamPhase: StreamPhaseLabel;
+      /**
+       * The model's live reasoning (S2) — only ever on the live row, and only
+       * while it is still thinking. Empty for every stored message: nothing
+       * persists it.
+       */
+      reasoning: string;
       /** Files the turn carried in (`role='attachment'`). */
       attachments: AttachmentInfo[];
       /** Files the turn's run produced (`role='artifact'`, GAP-23). */
@@ -326,6 +332,9 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
       text: body,
       meta: messageMeta(message),
       streamPhase: null,
+      // A stored message has none: the daemon keeps reasoning out of what it
+      // writes, so there is nothing to replay.
+      reasoning: "",
       attachments: toAttachments(message.attachments),
       artifacts: toArtifacts(message.artifacts),
       runId: message.task_id ?? null,
@@ -413,6 +422,7 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
       text: stream.content,
       meta,
       streamPhase: streamPhaseLabel(stream),
+      reasoning: stream.reasoning,
       attachments,
       // The live turn's own delegation reaches the transcript as a report card,
       // and the pill arrives with the row when history catches up.

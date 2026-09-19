@@ -11,11 +11,17 @@
  * run-report card between two messages has its own 26px margin.
  */
 
+import { useState } from "react";
+
 import { cn } from "@/lib/cn";
 
 import { assistantMetaLine, type AssistantMeta } from "./format";
 import { MessageBody } from "./MessageBody";
-import { StreamCaret, ThinkingIndicator } from "./StreamingIndicator";
+import {
+  ReasoningPanel,
+  StreamCaret,
+  ThinkingIndicator,
+} from "./StreamingIndicator";
 
 /** `steer → connector audit` / `follow-up → connector audit`. */
 export interface SteerRef {
@@ -104,6 +110,12 @@ export interface AssistantMessageProps {
   /** The SSE `done` payload, mapped 1:1 onto the meta line. */
   meta?: AssistantMeta | null;
   streamPhase?: StreamPhase;
+  /**
+   * The model's live reasoning (S2), shown under the header while the turn is
+   * still thinking. Empty — the default, and every stored message — draws
+   * nothing at all.
+   */
+  reasoning?: string;
   dense?: boolean;
   /** Set when this message started a workflow, or reported one (§5.1). */
   run?: RunRef | null;
@@ -115,11 +127,18 @@ export function AssistantMessage({
   text,
   meta = null,
   streamPhase = null,
+  reasoning = "",
   dense = false,
   run = null,
   children,
 }: AssistantMessageProps) {
   const metaLine = meta === null ? null : assistantMetaLine(meta);
+  // Open by default: the point of S2 is that thirteen silent seconds now show
+  // what the model is doing. Collapsing is the person's call, and it lasts as
+  // long as the row does.
+  const [traceOpen, setTraceOpen] = useState(true);
+  const thinking = streamPhase === "thinking";
+  const hasReasoning = thinking && reasoning !== "";
 
   return (
     <article className={messageGapClass(dense)}>
@@ -134,8 +153,12 @@ export function AssistantMessage({
             run → {run.label}
           </button>
         )}
-        {streamPhase === "thinking" ? (
-          <ThinkingIndicator />
+        {thinking ? (
+          <ThinkingIndicator
+            hasReasoning={hasReasoning}
+            expanded={traceOpen}
+            onToggle={() => setTraceOpen((open) => !open)}
+          />
         ) : (
           metaLine !== null && (
             <span className="font-mono text-2xs-plus text-faint">
@@ -144,6 +167,7 @@ export function AssistantMessage({
           )
         )}
       </div>
+      {hasReasoning && traceOpen && <ReasoningPanel text={reasoning} />}
       <MessageBody
         text={text}
         spacing="assistant"

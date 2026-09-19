@@ -142,6 +142,44 @@ describe("live-turn lifecycle", () => {
 
 // The GUI stopped sending the prefix when GAP-02 closed, but the CLI and
 // Telegram still do — and stored history keeps what was sent before.
+describe("the live turn's reasoning (S2)", () => {
+  it("rides on the live row and on no stored one", () => {
+    const stream = drive(
+      OPEN,
+      { type: "thinking" },
+      { type: "reasoning", text: "they want the capital" },
+    );
+
+    const items = buildTranscript(
+      input({
+        history: [
+          message({ id: 1, role: "assistant", content: "An older answer." }),
+        ],
+        stream,
+      }),
+    );
+
+    const rows = items.filter((item) => item.kind === "assistant");
+    expect(rows).toHaveLength(2);
+    // The stored one: nothing persists reasoning, so there is none to show.
+    expect(rows[0]).toMatchObject({ reasoning: "", streamPhase: null });
+    expect(rows[1]).toMatchObject({
+      reasoning: "they want the capital",
+      streamPhase: "thinking",
+    });
+  });
+
+  it("never leaks into the text the row renders", () => {
+    const stream = drive(
+      OPEN,
+      { type: "reasoning", text: "thinking out loud" },
+      { type: "delta", content: "Paris." },
+    );
+    const live = buildTranscript(input({ stream })).at(-1);
+    expect(live).toMatchObject({ kind: "assistant", text: "Paris." });
+  });
+});
+
 describe("parseUserContent — the chat prefix in stored history", () => {
   it("recognises the `/steer ` prefix and strips it for display", () => {
     expect(parseUserContent("/steer keep going")).toEqual({

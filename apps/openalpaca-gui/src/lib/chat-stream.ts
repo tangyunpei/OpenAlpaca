@@ -8,7 +8,14 @@
  *    receiving the id — do not await anything else first.
  *  * `done` carries the **full** content, not the tail. It is the source of
  *    truth; accumulated deltas are only a live preview, and the SSE bridge
- *    silently drops frames for a lagged client.
+ *    silently drops frames for a lagged client. Since S1 the deltas are the
+ *    provider's own tokens as they arrive — so they no longer necessarily
+ *    concatenate to `done.content` (a multi-round turn streams the text
+ *    written before a tool call), and replacing the content on `done` is not
+ *    an optimisation but the contract.
+ *  * `reasoning` (S2) carries the model thinking out loud, as `{ text }`. It
+ *    is **not** the answer: it never enters `buffer`/`content`, the daemon
+ *    never stores it, and history never replays it.
  *  * `confirmation_requested` can arrive at any point before `done`, including
  *    before any delta, and does **not** terminate the stream.
  *  * `EventSource` delivers both the server's *named* `error` event (JSON body)
@@ -49,6 +56,24 @@ export interface ChatConfirmationRequest {
   tool_arguments: unknown;
 }
 
+/**
+ * How much live reasoning the state keeps (S2).
+ *
+ * The **tail**, not the head: a model's thinking runs forward, and what it is
+ * working on now is what the indicator should be showing. It is a bound on
+ * this client's memory of a stream that can run for minutes; the panel that
+ * renders it caps its own height separately, so neither can push the
+ * transcript around.
+ */
+export const REASONING_CAP = 4000;
+
+/** The last `REASONING_CAP` characters of the reasoning so far. */
+export function capReasoning(text: string): string {
+  return text.length <= REASONING_CAP
+    ? text
+    : text.slice(text.length - REASONING_CAP);
+}
+
 // ── State machine ───────────────────────────────────────────────────────────
 
 export type ChatStreamPhase =
@@ -68,6 +93,15 @@ export interface ChatStreamState {
   buffer: string;
   /** `done.content` once it lands, otherwise the buffer. Render this. */
   content: string;
+  /**
+   * The model's live reasoning, capped to its last {@link REASONING_CAP}
+   * characters (S2).
+   *
+   * Never part of `content`, never persisted: the daemon keeps it out of the
+   * stored message and `GET /v1/chat/history` never replays it, so this is the
+   * only place it exists and it dies with the turn.
+   */
+  reasoning: string;
   result: ChatStreamDone | null;
   /**
    * Unresolved confirmations, deduped by `request_id`, in arrival order.
@@ -86,6 +120,8 @@ export type ChatStreamAction =
   | { type: "open"; streamId: string; laneKey: string }
   | { type: "thinking" }
   | { type: "delta"; content: string }
+  /** One `reasoning` frame — the model thinking out loud (S2). */
+  | { type: "reasoning"; text: string }
   | { type: "confirmation"; request: ChatConfirmationRequest }
   /** Answered, timed out, or its run finished — drop the card. */
   | { type: "confirmation_resolved"; requestId: string }
@@ -100,6 +136,7 @@ export const initialChatStreamState: ChatStreamState = {
   laneKey: null,
   buffer: "",
   content: "",
+  reasoning: "",
   result: null,
   pendingConfirmations: [],
   error: null,
@@ -148,6 +185,17 @@ export function chatStreamReducer(
       if (state.terminal) return state;
       // A late `thinking` after deltas have started must not rewind the phase.
       return state.deltaCount > 0 ? state : { ...state, phase: "thinking" };
+
+    case "reasoning": {
+      // Not `buffer`, and no phase change: reasoning is not an answer, and a
+      // turn that only thought out loud still owes the person one. The
+      // `thinking` frame the daemon sends first is what moved the phase.
+      if (state.terminal || action.text === "") return state;
+      return {
+        ...state,
+        reasoning: capReasoning(state.reasoning + action.text),
+      };
+    }
 
     case "delta": {
       if (state.terminal) return state;
@@ -289,6 +337,14 @@ export function attachChatStream(
     const payload = safeParse(event.data);
     if (payload === null || typeof payload.content !== "string") return;
     onAction({ type: "delta", content: payload.content });
+  });
+
+  // S2. The field is `text`, not `content`, deliberately: a client must never
+  // append reasoning to the answer.
+  source.addEventListener("reasoning", (event) => {
+    const payload = safeParse(event.data);
+    if (payload === null || typeof payload.text !== "string") return;
+    onAction({ type: "reasoning", text: payload.text });
   });
 
   source.addEventListener("confirmation_requested", (event) => {

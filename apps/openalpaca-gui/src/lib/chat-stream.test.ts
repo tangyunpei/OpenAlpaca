@@ -2,9 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   attachChatStream,
+  capReasoning,
   chatStreamReducer,
   initialChatStreamState,
   isBlocked,
+  REASONING_CAP,
   type ChatStreamAction,
   type ChatStreamDone,
   type ChatStreamState,
@@ -235,6 +237,75 @@ function fakeSource() {
   };
 }
 
+describe("reasoning (S2)", () => {
+  it("accumulates the model's thinking without touching the answer", () => {
+    const state = run([
+      open,
+      { type: "thinking" },
+      { type: "reasoning", text: "the user wants " },
+      { type: "reasoning", text: "the capital" },
+      { type: "delta", content: "Paris" },
+    ]);
+
+    expect(state.reasoning).toBe("the user wants the capital");
+    // Reasoning is not an answer: it never enters the buffer, never counts as
+    // a delta, and the rendered content is the answer alone.
+    expect(state.buffer).toBe("Paris");
+    expect(state.content).toBe("Paris");
+    expect(state.deltaCount).toBe(1);
+  });
+
+  it("leaves the phase to the frames that own it", () => {
+    // A turn that has only thought out loud still owes an answer, so the row
+    // stays in `thinking` — and reasoning arriving mid-stream must not rewind
+    // a turn that is already typing.
+    const opening = run([open, { type: "reasoning", text: "hmm" }]);
+    expect(opening.phase).toBe("opening");
+
+    const streaming = run([
+      open,
+      { type: "delta", content: "Par" },
+      { type: "reasoning", text: "second round" },
+    ]);
+    expect(streaming.phase).toBe("streaming");
+  });
+
+  it("keeps the tail once the cap is reached", () => {
+    const long = "x".repeat(REASONING_CAP + 40);
+    expect(capReasoning(long)).toHaveLength(REASONING_CAP);
+    expect(capReasoning(long + "END").endsWith("END")).toBe(true);
+
+    const state = run([
+      open,
+      { type: "reasoning", text: long },
+      { type: "reasoning", text: "…and so the answer is Paris" },
+    ]);
+    expect(state.reasoning).toHaveLength(REASONING_CAP);
+    expect(state.reasoning.endsWith("…and so the answer is Paris")).toBe(true);
+  });
+
+  it("ignores empty frames and anything after the turn is terminal", () => {
+    const empty = run([open, { type: "reasoning", text: "" }]);
+    expect(empty.reasoning).toBe("");
+
+    const late = run([
+      open,
+      { type: "done", data: doneData },
+      { type: "reasoning", text: "stray" },
+    ]);
+    expect(late.reasoning).toBe("");
+  });
+
+  it("is dropped when the conversation is reset", () => {
+    const state = run([
+      open,
+      { type: "reasoning", text: "thinking" },
+      { type: "reset" },
+    ]);
+    expect(state.reasoning).toBe("");
+  });
+});
+
 describe("attachChatStream", () => {
   it("closes the stream on done so EventSource cannot auto-reconnect into a 404", () => {
     const fake = fakeSource();
@@ -315,5 +386,29 @@ describe("attachChatStream", () => {
 
     expect(actions.at(-1)).toMatchObject({ type: "server_error" });
     expect(fake.close).toHaveBeenCalled();
+  });
+});
+
+describe("the reasoning frame on the wire (S2)", () => {
+  it("reads `text`, and never mistakes it for content", () => {
+    const fake = fakeSource();
+    const actions: ChatStreamAction[] = [];
+    attachChatStream(fake.source, {
+      streamId: "s1",
+      laneKey: "l",
+      onAction: (a) => actions.push(a),
+    });
+
+    fake.emit("reasoning", JSON.stringify({ text: "let me think" }));
+    expect(actions.at(-1)).toEqual({ type: "reasoning", text: "let me think" });
+
+    // A frame shaped like a delta is not one: `content` is not `text`.
+    fake.emit("reasoning", JSON.stringify({ content: "not the answer" }));
+    expect(actions.at(-1)).toEqual({ type: "reasoning", text: "let me think" });
+    fake.emit("reasoning", "not json");
+    expect(actions.at(-1)).toEqual({ type: "reasoning", text: "let me think" });
+
+    // And it does not end the stream.
+    expect(fake.close).not.toHaveBeenCalled();
   });
 });

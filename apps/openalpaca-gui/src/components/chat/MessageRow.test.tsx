@@ -74,6 +74,75 @@ describe("AssistantMessage (§3.10, §3.11)", () => {
     expect(screen.queryByText(/tok$/)).toBeNull();
   });
 
+  /**
+   * S2 — the thirteen seconds a thinking model spends before its first token
+   * used to show nothing at all. The reasoning is live, muted, and the
+   * indicator itself is the disclosure.
+   */
+  it("shows the live reasoning inside the thinking indicator", () => {
+    render(
+      <AssistantMessage
+        text=""
+        streamPhase="thinking"
+        reasoning="the user wants the capital of France"
+      />,
+    );
+
+    expect(
+      screen.getByText("the user wants the capital of France"),
+    ).toBeInTheDocument();
+    const toggle = screen.getByRole("button", { name: "thinking… (hide)" });
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("lets the reasoning be collapsed and reopened", () => {
+    render(
+      <AssistantMessage text="" streamPhase="thinking" reasoning="mulling" />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "thinking… (hide)" }));
+    expect(screen.queryByText("mulling")).toBeNull();
+
+    const closed = screen.getByRole("button", { name: "thinking… (show)" });
+    expect(closed).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(closed);
+    expect(screen.getByText("mulling")).toBeInTheDocument();
+  });
+
+  /**
+   * Capped, so a model that thinks for a minute cannot push the composer off
+   * the screen: the panel scrolls inside a fixed height instead of growing.
+   */
+  it("caps the reasoning panel's height rather than growing the row", () => {
+    const { container } = render(
+      <AssistantMessage
+        text=""
+        streamPhase="thinking"
+        reasoning={"a long thought. ".repeat(80)}
+      />,
+    );
+
+    const panel = container.querySelector("[class*='max-h-']");
+    expect(panel).not.toBeNull();
+    expect(panel?.className).toContain("overflow-y-auto");
+  });
+
+  it("shows no reasoning for a turn that has none, or that is past thinking", () => {
+    const { rerender } = render(
+      <AssistantMessage text="" streamPhase="thinking" />,
+    );
+    // No reasoning: the plain label, not a disclosure control.
+    expect(screen.getByText("thinking…")).toBeInTheDocument();
+    expect(screen.queryByRole("button")).toBeNull();
+
+    // A stored message carries none, and reasoning is never shown beside a
+    // finished answer.
+    rerender(
+      <AssistantMessage text="Paris." streamPhase={null} reasoning="mulling" />,
+    );
+    expect(screen.queryByText("mulling")).toBeNull();
+  });
+
   it("swaps the indicator for the metadata line on done", () => {
     const { rerender } = render(
       <AssistantMessage text="par" streamPhase="streaming" />,
