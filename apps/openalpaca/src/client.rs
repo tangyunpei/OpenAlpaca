@@ -42,6 +42,20 @@ impl DaemonClient {
         })
     }
 
+    /// A client aimed at a test server, with no discovery file involved.
+    ///
+    /// `connect()` is the only way in for real runs; this exists so the SSE
+    /// reader can be driven against a socket whose closing behaviour the test
+    /// controls (V7).
+    #[cfg(test)]
+    pub fn for_tests(base_url: &str, token: &str) -> Self {
+        Self {
+            base_url: base_url.to_string(),
+            token: token.to_string(),
+            http: reqwest::Client::new(),
+        }
+    }
+
     #[allow(dead_code)]
     pub fn base_url(&self) -> &str {
         &self.base_url

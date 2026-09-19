@@ -488,3 +488,96 @@ fn a_piped_turn_sees_no_reasoning() {
     assert!(state.shown.is_empty());
     assert!(!state.reasoning_open);
 }
+
+/// V7: `done` and `error` are terminal, and the reader must know it.
+///
+/// The daemon keeps the SSE open for five seconds after the last frame so a
+/// late subscriber can still read the turn; a reader that stops only when the
+/// socket closes therefore idles through all five on every one-shot.
+#[test]
+fn a_terminal_frame_ends_the_turn_and_an_ordinary_one_does_not() {
+    let mut state = SseState::default();
+    process_sse_event("event: delta\ndata: {\"content\":\"hi\"}", &piped(), &mut state)
+        .expect("a delta is read");
+    assert!(!state.finished, "there is more of this turn to come");
+
+    process_sse_event(
+        "event: done\ndata: {\"content\":\"hi\",\"model\":\"m\",\"tokens_in\":1,\"tokens_out\":1,\"duration_ms\":1}",
+        &piped(),
+        &mut state,
+    )
+    .expect("done is read");
+    assert!(state.finished, "`done` is the last frame of an answered turn");
+
+    let mut failed = SseState::default();
+    process_sse_event(
+        "event: error\ndata: {\"message\":\"no routable model\"}",
+        &piped(),
+        &mut failed,
+    )
+    .expect("an error is read");
+    assert!(
+        failed.finished,
+        "a turn that errored sends no `done` afterwards"
+    );
+}
+
+/// The same rule, driven end to end against a socket that stays open exactly
+/// the way the daemon's does (V7).
+///
+/// Before this the reader returned when the server dropped the connection, so
+/// `openalpaca chat --message …` printed its answer and then sat for the
+/// daemon's whole late-subscriber window — a ~5 s tail on every turn, measured
+/// at 9.06 s → 14.06 s in the round-3 acceptance run.
+#[tokio::test]
+async fn a_one_shot_returns_when_the_turn_is_over_not_when_the_socket_closes() {
+    /// Longer than the assertion below by enough that an unfixed reader
+    /// cannot pass by luck, shorter than the daemon's real 5 s so the test
+    /// does not pay for what it is proving.
+    const SERVER_HOLD: std::time::Duration = std::time::Duration::from_secs(3);
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let addr = listener.local_addr().expect("the bound address");
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("the reader connects");
+        // Drain the request line and headers first: a response written into a
+        // socket whose request has not been read is what hyper rejects as an
+        // unexpected message.
+        let mut request = [0u8; 1024];
+        let _ = std::io::Read::read(&mut socket, &mut request);
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n\
+event: delta\ndata: {\"content\":\"hi\"}\n\n\
+event: done\ndata: {\"content\":\"hi\",\"model\":\"qwen3\",\"tokens_in\":1,\"tokens_out\":2,\"duration_ms\":900}\n\n",
+            )
+            .expect("the frames are written");
+        socket.flush().ok();
+        // What `ChatService::send_message` does after the last frame: hold the
+        // stream for late subscribers, then drop it.
+        std::thread::sleep(SERVER_HOLD);
+    });
+
+    let client = DaemonClient::for_tests(&format!("http://{addr}"), "token");
+    let response = client
+        .get_sse_stream("/v1/chat/stream/stream-1?token=token")
+        .await
+        .expect("the stream opens");
+
+    let started = std::time::Instant::now();
+    let result = stream_sse_events(response, &piped(), &client)
+        .await
+        .expect("the turn is read");
+    let elapsed = started.elapsed();
+
+    assert!(
+        matches!(result, StreamResult::Response(Some(_))),
+        "the turn answered, with usage"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(1500),
+        "the reader returned on `done`, not on the socket closing — took {elapsed:?}"
+    );
+
+    server.join().expect("the server thread finishes");
+}

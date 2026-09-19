@@ -272,6 +272,18 @@ struct SseState {
     /// The `error` event's message, when one arrived — the turn failed and the
     /// caller decides what that costs (L12).
     failure: Option<String>,
+    /// A terminal frame has been handled: the turn is over and nothing else is
+    /// coming (V7).
+    ///
+    /// The daemon keeps the SSE open for five seconds after the last frame so
+    /// a late subscriber can still read it (`ChatService::send_message` →
+    /// `sleep(Duration::from_secs(5))` → `stream_manager.remove`), and the
+    /// stream ends only when that sender is dropped. A reader that waits for
+    /// the socket to close therefore pays those five seconds on **every**
+    /// turn — the tail a one-shot `chat --message` printed its answer and then
+    /// sat through. The turn is over when its terminal frame is over, so the
+    /// reader stops there.
+    finished: bool,
 }
 
 /// What `done` still owes the reader, given what the stream already printed
@@ -316,7 +328,7 @@ fn reconcile(shown: &str, content: &str) -> Reconciliation {
 /// else's input, and it must contain the final answer once and nothing else —
 /// which, now that deltas no longer concatenate to `done.content`, is only
 /// true if nothing is written before `done` (S13).
-fn delta_to_print<'a>(tty: bool, content: &'a str) -> Option<&'a str> {
+fn delta_to_print(tty: bool, content: &str) -> Option<&str> {
     (tty && !content.is_empty()).then_some(content)
 }
 
@@ -326,7 +338,7 @@ fn delta_to_print<'a>(tty: bool, content: &'a str) -> Option<&'a str> {
 /// before its first token, and printing nothing made that look like a hang.
 /// Never on a pipe: reasoning is not the answer, and a script must not have to
 /// tell them apart.
-fn reasoning_to_print<'a>(tty: bool, text: &'a str) -> Option<&'a str> {
+fn reasoning_to_print(tty: bool, text: &str) -> Option<&str> {
     (tty && !text.is_empty()).then_some(text)
 }
 
@@ -339,7 +351,7 @@ async fn stream_sse_events(
     let mut buffer = String::new();
     let mut state = SseState::default();
 
-    loop {
+    'stream: loop {
         tokio::select! {
             chunk = stream.next() => {
                 match chunk {
@@ -353,6 +365,15 @@ async fn stream_sse_events(
                                 handle_confirmation_prompt(client, &event_text).await?;
                             } else {
                                 process_sse_event(&event_text, opts, &mut state)?;
+                            }
+                            // V7: the turn ended on this frame. Reading on
+                            // would only wait out the daemon's five-second
+                            // late-subscriber window — and nothing is
+                            // auto-approved by leaving: a confirmation is
+                            // raised *before* `done`, and an unanswered one
+                            // still times out on the daemon as a refusal.
+                            if state.finished {
+                                break 'stream;
                             }
                         }
                     }
@@ -517,7 +538,10 @@ fn process_sse_event(event_text: &str, opts: &StreamOptions, state: &mut SseStat
                 state.shown.push_str(visible);
             }
         }
+        // Terminal (V7): `done` is the last frame of an answered turn — the
+        // service sends it or `error`, never both, and then nothing.
         "done" => {
+            state.finished = true;
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&data) {
                 // S13: the terminal ends on the authoritative answer, exactly
                 // once, whatever the deltas showed.
@@ -568,7 +592,10 @@ fn process_sse_event(event_text: &str, opts: &StreamOptions, state: &mut SseStat
         // still exited 0. The caller prints it — on stderr — and a one-shot
         // exits non-zero (L12). An event whose data will not parse is still a
         // failed turn, so it is never dropped on the floor.
+        // Terminal too (V7): a turn that errored answered nothing and sends
+        // no `done` afterwards.
         "error" => {
+            state.finished = true;
             let msg = serde_json::from_str::<serde_json::Value>(&data)
                 .ok()
                 .and_then(|parsed| {
