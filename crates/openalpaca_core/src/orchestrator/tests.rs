@@ -4325,6 +4325,144 @@ async fn reasoning_reaches_the_sink_and_never_the_answer() {
     );
 }
 
+// ── V1: a streamed tool call carries its arguments ───────────────────
+
+/// A provider that streams a tool call the way Ollama sends one: the start and
+/// the whole argument string together, which is what **one** SSE frame yields
+/// once the parser stops returning at the first field it recognises (V1).
+///
+/// Round two — the frame after the tool result — streams the answer.
+struct StreamingToolMockLlm {
+    call_count: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl openalpaca_llm::LlmProvider for StreamingToolMockLlm {
+    fn name(&self) -> &str {
+        "streaming-tool-mock"
+    }
+
+    fn supports_tools(&self) -> bool {
+        true
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    async fn chat(
+        &self,
+        _request: ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        Err(openalpaca_llm::LlmError::NotConfigured)
+    }
+
+    async fn chat_streaming(
+        &self,
+        _request: ChatRequest,
+    ) -> Result<openalpaca_llm::ChatStream, openalpaca_llm::LlmError> {
+        use openalpaca_llm::{FinishReason, StreamEvent, Usage};
+        let round = self
+            .call_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let events: Vec<Result<StreamEvent, openalpaca_llm::LlmError>> = if round == 0 {
+            vec![
+                Ok(StreamEvent::ToolUseStart {
+                    index: 0,
+                    id: "call_8st7b155".to_string(),
+                    name: "start_workflow".to_string(),
+                }),
+                Ok(StreamEvent::InputJsonDelta {
+                    index: 0,
+                    partial_json:
+                        r#"{"goal":"write alpaca notes","title":"Alpaca notes"}"#.to_string(),
+                }),
+                Ok(StreamEvent::Usage(Usage {
+                    input_tokens: 20,
+                    output_tokens: 10,
+                    ..Default::default()
+                })),
+                Ok(StreamEvent::Done {
+                    finish_reason: FinishReason::ToolUse,
+                }),
+            ]
+        } else {
+            vec![
+                Ok(StreamEvent::TextDelta {
+                    text: "Started it in the background.".to_string(),
+                }),
+                Ok(StreamEvent::Usage(Usage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    ..Default::default()
+                })),
+                Ok(StreamEvent::Done {
+                    finish_reason: FinishReason::Stop,
+                }),
+            ]
+        };
+        Ok(Box::pin(futures_util::stream::iter(events)))
+    }
+}
+
+/// **V1, at the loop.** A streamed tool call reaches the main loop with its
+/// arguments and the tool runs on them: `start_workflow` gets the goal and the
+/// title, and the turn delegates.
+///
+/// The loss this guards was in the SSE parser one layer below (a whole tool
+/// call in one frame lost everything after its `id`), so this test is the
+/// regression rail for the seam the parser feeds — the accumulator and the
+/// loop — with the parser's own captured-frame tests in
+/// `openalpaca_llm::providers::openai`.
+#[tokio::test]
+async fn a_streamed_tool_call_runs_with_its_arguments() {
+    let router = openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(StreamingToolMockLlm {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        }),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    );
+    let orch = make_orchestrator_with_llm_agents_and_config(
+        Arc::new(router),
+        vec![make_agent("lead", vec!["orchestration"])],
+        DaemonConfig::default(),
+        None,
+    );
+
+    let recorder = Arc::new(RecordingTurnSink::default());
+    let sink = crate::chat::TurnSinkHandle::new(recorder.clone());
+    let request_id = Uuid::new_v4();
+
+    let reply = orch
+        .handle_message(HandleRequest {
+            turn_sink: Some(sink),
+            ..HandleRequest::new(
+                request_id,
+                "gui",
+                "please write alpaca notes",
+                Principal::User {
+                    global_id: "user1".to_string(),
+                },
+                Scope::Global,
+                "user1:gui",
+            )
+        })
+        .await
+        .expect("the turn should be answered");
+
+    assert_eq!(reply, "Started it in the background.");
+
+    let delegation = orch
+        .delegation_map
+        .get(&request_id)
+        .expect("the streamed tool call must have started a workflow");
+    assert_eq!(
+        delegation.title, "Alpaca notes",
+        "the arguments of a single-frame tool call reach the tool"
+    );
+}
+
 // ── S8: the poll set loses the path before the file does ─────────────
 
 /// **S8.** Finishing onboarding deletes `BOOTSTRAP.md`, which the wake
