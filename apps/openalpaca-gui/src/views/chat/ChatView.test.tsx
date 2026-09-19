@@ -133,7 +133,20 @@ let pendingConfirmationRows: Record<string, unknown>[] = [];
  * (V9).
  */
 let pendingConfirmationsReply: () => Response;
-
+/**
+ * What `GET /v1/models` answers — the catalogue the composer's held model has
+ * to be in (G9). Mutable, because the interesting cases are the transitions:
+ * a provider switched off takes its models out of this list.
+ */
+let modelRows: Record<string, unknown>[] = [];
+/**
+ * `GET /v1/status`'s `llm` block: the *configured* default against the one
+ * that would really answer (L3). The composer seeds from the effective id, so
+ * a fixture where the two disagree is what proves it (G9).
+ */
+let llmStatus: Record<string, unknown> | null = null;
+/** `[orchestrator] model` — the configured default, which the composer must not read. */
+let orchestratorModel = "claude-sonnet-4-6";
 /**
  * What `GET /v1/agent-templates` answers — the `id → name` table the
  * confirmation card names the blocked agent from, on both paths (G10).
@@ -211,21 +224,11 @@ function installFetch() {
       return method === "GET" ? followupListReply() : followupWriteReply();
     }
     if (url.includes("/v1/tasks")) return json([]);
+    if (url.includes("/v1/models")) return json(modelRows);
     if (url.includes("/v1/agent-templates")) return json(agentTemplateRows);
-    if (url.includes("/v1/models")) {
-      return json([
-        {
-          id: "claude-sonnet-4-6",
-          provider: "anthropic",
-          context_window: 200000,
-          input_price_per_million: 3,
-          output_price_per_million: 15,
-        },
-      ]);
-    }
     if (url.includes("/v1/orchestrator/config")) {
       return json({
-        model: "claude-sonnet-4-6",
+        model: orchestratorModel,
         fallback_models: [],
         active_agents: 0,
         active_tasks: 0,
@@ -303,6 +306,18 @@ function renderChat(): QueryClient {
   return client;
 }
 
+/** The body of the one `POST /v1/chat` a send makes. */
+function chatBody(): Record<string, unknown> {
+  const post = requests.find(
+    (request) =>
+      request.method === "POST" &&
+      request.url.includes("/v1/chat") &&
+      !request.url.includes("/v1/chat/history"),
+  );
+  if (post === undefined) throw new Error("no POST /v1/chat recorded");
+  return post.body as Record<string, unknown>;
+}
+
 /** Send one message and hand back the stream it opened. */
 async function sendMessage(text: string): Promise<FakeEventSource> {
   fireEvent.change(screen.getByLabelText("Message"), {
@@ -315,13 +330,30 @@ async function sendMessage(text: string): Promise<FakeEventSource> {
   return source;
 }
 
-/** `GET /v1/status`'s body — the store roots plus this request's project. */
+/**
+ * `GET /v1/status`'s body — the store roots, this request's project, and the
+ * `llm` block the composer seeds its model from (G9).
+ */
 function daemonStatus(projectRoot: string | null) {
   return {
     home_root: "/Users/dev/.openalpaca",
     state_dir: "/Users/dev/.openalpaca/state",
     db_path: "/Users/dev/.openalpaca/state/openalpaca.db",
     project_root: projectRoot,
+    llm: llmStatus,
+  };
+}
+
+/** One `ModelEntry`, as `GET /v1/models` serializes it. */
+function modelRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "claude-sonnet-4-6",
+    provider: "anthropic",
+    context_window: 200000,
+    input_price_per_million: 3,
+    output_price_per_million: 15,
+    supports_tools: true,
+    ...overrides,
   };
 }
 
@@ -355,6 +387,13 @@ beforeEach(() => {
   sessionListReply = pageOfSessions;
   sessionWriteReply = () => json(sessionRow());
   confirmationReply = () => new Response("", { status: 200 });
+  modelRows = [modelRow()];
+  orchestratorModel = "claude-sonnet-4-6";
+  llmStatus = {
+    default_model: "claude-sonnet-4-6",
+    default_model_routable: true,
+    effective_default_model: "claude-sonnet-4-6",
+  };
   agentTemplateRows = [{ id: "lead_agent", name: "Lead Agent" }];
   pendingConfirmationRows = [];
   pendingConfirmationsReply = () =>
@@ -445,18 +484,6 @@ describe("ChatView — streaming lifecycle (§3.11, API_MAP §4.1)", () => {
 });
 
 describe("ChatView — model picker (GAP-13, closed)", () => {
-  /** The body of the one `POST /v1/chat` a send makes. */
-  function chatBody(): Record<string, unknown> {
-    const post = requests.find(
-      (request) =>
-        request.method === "POST" &&
-        request.url.includes("/v1/chat") &&
-        !request.url.includes("/v1/chat/history"),
-    );
-    if (post === undefined) throw new Error("no POST /v1/chat recorded");
-    return post.body as Record<string, unknown>;
-  }
-
   /** The picker popover, once open — scoped so the trigger is not a match. */
   async function openPicker(): Promise<HTMLElement> {
     await waitFor(() =>
@@ -510,6 +537,121 @@ describe("ChatView — model picker (GAP-13, closed)", () => {
     expect(
       within(picker).getByText(/Applies to this conversation/),
     ).toBeInTheDocument();
+  });
+});
+
+/**
+ * G9 — the composer must never send an id the daemon cannot route.
+ *
+ * A *named* model that is not in the registry is refused outright
+ * (`400 UNKNOWN_MODEL`): the L3 fallback ladder is for turns that name
+ * nothing. The picker seeded itself from `[orchestrator] model`, the
+ * **configured** default — which on a local-only install is the Claude id the
+ * shipped `llm.toml` carries and nothing serves — so the first message typed
+ * into a fresh window failed, and every reload re-seeded the same dead id.
+ * The seed is now `GET /v1/status`'s `llm.effective_default_model`: what a
+ * request naming nothing would really reach.
+ */
+describe("ChatView — the composer names a model the daemon can route (G9)", () => {
+  /** A local-only install: Ollama is on, and the configured default is dead. */
+  function localOnly(effective: string | null): void {
+    orchestratorModel = "claude-haiku-4-5-20251001";
+    llmStatus = {
+      default_model: "claude-haiku-4-5-20251001",
+      default_model_routable: false,
+      effective_default_model: effective,
+    };
+    modelRows =
+      effective === null
+        ? []
+        : [
+            modelRow({
+              id: effective,
+              provider: "ollama",
+              context_window: 40960,
+              input_price_per_million: 0,
+              output_price_per_million: 0,
+            }),
+          ];
+  }
+
+  it("seeds from the effective default, not the configured one", async () => {
+    localOnly("qwen3:8b");
+    renderChat();
+
+    await waitFor(() =>
+      expect(screen.getByTitle("Chat model")).toHaveTextContent("qwen3:8b"),
+    );
+
+    await sendMessage("what can you do?");
+    expect(chatBody().model).toBe("qwen3:8b");
+  });
+
+  it("sends no model at all when the daemon can route nothing", async () => {
+    localOnly(null);
+    renderChat();
+
+    // Both queries the seed could read have answered by the time the spend
+    // line is drawn — which is exactly when the old seed fired.
+    expect(await screen.findByText("$0.0000 today")).toBeInTheDocument();
+    expect(screen.getByTitle("Chat model")).toHaveTextContent("model");
+
+    await sendMessage("what can you do?");
+    // No `model` field: the daemon's own `NoRoutableModel` is the honest
+    // answer here, and it is a better one than `UNKNOWN_MODEL`.
+    expect("model" in chatBody()).toBe(false);
+  });
+
+  it("replaces a held model that left the catalogue, and says so once", async () => {
+    const client = renderChat();
+    await waitFor(() =>
+      expect(screen.getByTitle("Chat model")).toHaveTextContent(
+        "claude-sonnet-4-6",
+      ),
+    );
+
+    // Anthropic is switched off in another pane: its models leave the
+    // catalogue, and the daemon's effective default moves with them. Both
+    // queries are invalidated by that write (`qk.statusAll`, `qk.models.all`).
+    localOnly("qwen3:8b");
+    await act(async () => {
+      await client.invalidateQueries();
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTitle("Chat model")).toHaveTextContent("qwen3:8b"),
+    );
+    expect(useUiStore.getState().toast).toBe(
+      "Chat model → qwen3:8b (ollama) — claude-sonnet-4-6 is no longer available",
+    );
+
+    await sendMessage("still there?");
+    expect(chatBody().model).toBe("qwen3:8b");
+  });
+
+  it("leaves a held model that is still in the catalogue alone", async () => {
+    modelRows = [modelRow(), modelRow({ id: "qwen3:8b", provider: "ollama" })];
+    const client = renderChat();
+    await waitFor(() =>
+      expect(screen.getByTitle("Chat model")).toHaveTextContent(
+        "claude-sonnet-4-6",
+      ),
+    );
+
+    fireEvent.click(screen.getByTitle("Chat model"));
+    const picker = await screen.findByRole("dialog", { name: "Chat model" });
+    fireEvent.click(within(picker).getByRole("button", { name: /qwen3:8b/ }));
+    // The pick's own toast is not the one under test.
+    act(() => useUiStore.setState({ toast: null }));
+
+    await act(async () => {
+      await client.invalidateQueries();
+    });
+
+    // The daemon's effective default is still the Anthropic one, and the
+    // window's own pick outranks it for as long as it is routable.
+    expect(screen.getByTitle("Chat model")).toHaveTextContent("qwen3:8b");
+    expect(useUiStore.getState().toast).toBeNull();
   });
 });
 

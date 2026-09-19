@@ -914,6 +914,20 @@ POST /v1/chat
   `conversation_messages.model` has always existed and the transcript has always
   rendered it, but nothing wrote it, so a reload dropped it — which this gap makes
   visible, since a turn can now run on a model the picker is not showing.
+- **What the picker starts on is `GET /v1/status`'s
+  `llm.effective_default_model`, not `[orchestrator] model`** (G9). The composer
+  seeded itself from the _configured_ default, and on a local-only install that
+  is the shipped Claude id: the first message of every fresh window was answered
+  with `400 UNKNOWN_MODEL`, and because the store is not persisted each reload
+  re-seeded the same dead id. A _named_ unknown model is correctly refused — the
+  L3 ladder is for turns that name nothing — so the fix is entirely client-side:
+  seed from the id the daemon says would answer, send no `model` at all when
+  that is `null`, and when the held id leaves `GET /v1/models` (a provider
+  switched off, an Ollama tag removed) replace it with the effective default and
+  toast. A held id that is still in the catalogue is never touched. The rule is
+  `src/views/chat/chat-model.ts`; both queries are already invalidated by the
+  writes that move them (`qk.statusAll()`, `qk.models.all()`), so no new
+  invalidation was added.
 
 `PUT /v1/orchestrator/config` keeps its job: Settings → Models & keys' real "make
 this the default" action, now labelled as exactly that.

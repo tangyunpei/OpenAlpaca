@@ -89,7 +89,12 @@ export interface UiState {
   sessionsOpen: boolean;
 
   // Composer
-  /** `null` until the daemon's default model is known — never a hardcoded id. */
+  /**
+   * `null` until the daemon's default model is known — never a hardcoded id —
+   * and back to `null` when the daemon can route nothing at all (G9), because
+   * a send that carries no `model` is answered by the daemon's own ladder,
+   * while one naming a dead id is refused.
+   */
   model: string | null;
   modelPickerOpen: boolean;
   steerTargetRunId: string | null;
@@ -128,7 +133,7 @@ export interface UiState {
   /** Carries the current tab across into the Library view. */
   openInLibrary: () => void;
 
-  setModel: (model: string) => void;
+  setModel: (model: string | null) => void;
   toggleModelPicker: () => void;
   closeModelPicker: () => void;
   setSteerTarget: (runId: string | null, mode?: ComposerMode) => void;

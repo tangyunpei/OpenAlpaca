@@ -279,6 +279,18 @@ simply has no row here — and a model discovered from a local Ollama is listed
 like any other, so picking one is how you chat on-device for a conversation
 without changing the default.
 
+Before anything is picked, the picker starts on the model that would really
+answer — `GET /v1/status`'s `llm.effective_default_model`, not the configured
+`[orchestrator] model`, which on a local-only install names a Claude id nothing
+serves. The label is a promise: every send carries that id, and a turn naming a
+model the router does not hold is refused outright, so the composer never sends
+one. If the model it is holding leaves the catalogue — its provider was
+switched off, or an Ollama tag was removed — it moves to the effective default
+and says so in a toast; a model you picked yourself is left alone for as long
+as it is still there. When the daemon can route nothing at all the picker reads
+`model`, the send carries no model, and the answer is the daemon's own "no
+routable model" message rather than a guess.
+
 **The aside** is one slot with two modes, never both: the Work pane (run cards
 for every run that is not `done`) or the file panel (one artifact, with the
 same Preview / Diff / History renderers the Library uses, at compact size).

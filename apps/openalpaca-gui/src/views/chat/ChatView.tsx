@@ -33,6 +33,7 @@ import {
 } from "@/components/chat";
 import { Resizer } from "@/components/shell";
 import { PaneHeader } from "@/components/ui";
+import { useDaemonStatus } from "@/hooks/useConnection";
 import { useModels } from "@/hooks/useSettings";
 import {
   MODEL_SCOPE_NOTE,
@@ -40,6 +41,7 @@ import {
 } from "@/hooks/useOrchestrator";
 import { formatSpend } from "@/hooks/useUsage";
 import { usePublishConfirmation } from "@/stores/confirmation";
+import { useProjectStore } from "@/stores/project";
 import {
   selectPanelOn,
   selectShowAside,
@@ -48,6 +50,7 @@ import {
   useUiStore,
 } from "@/stores/ui";
 
+import { decideChatModel, modelReplacedToast } from "./chat-model";
 import { FilePanelSlot } from "./FilePanelSlot";
 import { Transcript } from "./Transcript";
 import { useChatSession } from "./useChatSession";
@@ -92,6 +95,9 @@ export default function ChatView({
 
   const models = useModels();
   const orchestrator = useOrchestratorConfig();
+  // `GET /v1/status` answers about the request's own project, so the path is
+  // part of its key — the same one the rest of the window asks with.
+  const projectPath = useProjectStore((s) => s.path);
 
   const session = useChatSession();
   const sidebar = useSessionSidebar(session.laneKey, session.sessionId);
@@ -112,11 +118,32 @@ export default function ChatView({
   // The store holds no default model on purpose — the daemon's own default is
   // the only truthful starting value (§4.2 seeds a literal; this does not).
   // Once seeded, the label and the turn agree: every send carries this id as
-  // `model`, so what the composer says is what answers.
-  const daemonModel = orchestrator.data?.model ?? null;
+  // `model`, so what the composer says is what answers — which is why the seed
+  // is the daemon's **effective** default and not its configured one (G9): on
+  // a local-only install `[orchestrator] model` names a model nothing serves,
+  // and a turn that names it is refused outright. `GET /v1/status` is this
+  // window's own polling query (the Models banner reads the same block), so
+  // this costs a cache read, and the `llm` key moves on a provider toggle and
+  // on a models refresh — which is what keeps the held id true afterwards.
+  const effectiveModel =
+    useDaemonStatus(projectPath).data?.llm?.effective_default_model;
+  const modelRows = models.data;
   useEffect(() => {
-    if (model === null && daemonModel !== null) setModel(daemonModel);
-  }, [model, daemonModel, setModel]);
+    const decision = decideChatModel({
+      held: model,
+      effective: effectiveModel,
+      models: modelRows,
+    });
+    if (decision.action === "keep") return;
+    setModel(decision.model);
+    if (decision.action === "seed") return;
+    const provider =
+      decision.model === null
+        ? null
+        : (modelRows?.find((entry) => entry.id === decision.model)?.provider ??
+          null);
+    showToast(modelReplacedToast(decision.model, provider, decision.previous));
+  }, [model, effectiveModel, modelRows, setModel, showToast]);
 
   // Follow the transcript: a new row, or another delta on the live row.
   const scroller = useRef<HTMLDivElement>(null);
