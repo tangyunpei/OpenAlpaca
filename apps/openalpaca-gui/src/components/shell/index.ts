@@ -6,6 +6,7 @@ export * from "./CommandButton";
 export * from "./ConnectionRow";
 export * from "./NavItem";
 export * from "./NavRail";
+export * from "./pane-fit";
 export * from "./Resizer";
 export * from "./RunningNowSection";
 export * from "./TrafficLights";

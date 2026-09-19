@@ -15,25 +15,34 @@ import { describe, expect, it } from "vitest";
 import { PANE_BOUNDS } from "@/stores/pane-widths";
 
 import { AppShell } from "./AppShell";
+import { MIN_TRANSCRIPT_WIDTH, RAIL_WIDTH } from "./pane-fit";
 
 /** §2: the nav rail is a literal 196px and never shrinks. */
-const RAIL = 196;
+const RAIL = RAIL_WIDTH;
 /** §8.7's "transcript ~500" — the narrowest column the design tolerates. */
 const TRANSCRIPT = 500;
 
 describe("AppShell", () => {
-  it("is never narrower than the sum of the columns chat can show", () => {
+  /**
+   * T2 turned this assertion around. The chat floor used to be the sum of all
+   * four columns *open* (1200), which on a 1080-point window laid the row out
+   * wider than the window and drew the aside's collapse button outside it.
+   * Chat's two side columns give way instead, so its floor is what the view
+   * needs with them closed.
+   */
+  it("holds chat to what it needs with its collapsible columns closed", () => {
     const { container } = render(
       <AppShell view="chat">
         <div />
       </AppShell>,
     );
 
-    // rail 196 + conversations 200 + transcript 500 + chat aside 300 = 1196.
-    const budget =
-      RAIL + PANE_BOUNDS.chatSessionsW.min + TRANSCRIPT + PANE_BOUNDS.workW.min;
-    expect(budget).toBeLessThanOrEqual(1200);
-    expect(container.firstElementChild).toHaveClass("min-w-[1200px]");
+    // rail 196 + the §2.2 26px gutters + a 440px transcript = 688.
+    const collapsed = RAIL + 26 * 2 + MIN_TRANSCRIPT_WIDTH;
+    expect(collapsed).toBeLessThanOrEqual(700);
+    expect(container.firstElementChild).toHaveClass("min-w-[700px]");
+    // And it is below the window the bug was found in, so nothing overflows.
+    expect(700).toBeLessThan(1080);
   });
 
   /**
@@ -49,7 +58,7 @@ describe("AppShell", () => {
         </AppShell>,
       );
       expect(container.firstElementChild).toHaveClass("min-w-[1000px]");
-      expect(container.firstElementChild).not.toHaveClass("min-w-[1200px]");
+      expect(container.firstElementChild).not.toHaveClass("min-w-[700px]");
     }
 
     // Work is the widest of the three: rail + list + a detail column.
@@ -57,14 +66,14 @@ describe("AppShell", () => {
     expect(widest).toBeLessThanOrEqual(1000);
   });
 
-  /** A caller that names no view gets the widest floor, never the narrowest. */
+  /** A caller that names no view gets the chat floor. */
   it("defaults to the chat floor", () => {
     const { container } = render(
       <AppShell>
         <div />
       </AppShell>,
     );
-    expect(container.firstElementChild).toHaveClass("min-w-[1200px]");
+    expect(container.firstElementChild).toHaveClass("min-w-[700px]");
   });
 
   /**

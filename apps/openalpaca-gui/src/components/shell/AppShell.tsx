@@ -12,19 +12,19 @@
  *     260/480 and 200/360 pane bounds, the 720/780 transcript column — stays a
  *     token;
  *   * the `min-width` is §8.7's "minimum sensible window", and it belongs to
- *     the **view on screen**, not to the app. Chat is the widest: rail 196 +
- *     conversations 200 + transcript ~500 + aside 300 = 1196, so 1200. It was
- *     1000 while the chat view had three columns; the conversation list (§5.7)
- *     made it four, and a floor that did not move with it would have left the
- *     transcript ~170px at the default aside width. Both of chat's side columns
- *     collapse, so the floor is what a window needs with everything open, not
- *     what it needs to be usable.
+ *     the **view on screen**, not to the app. Work, Library and Settings draw
+ *     rail 196 + a 260px list + a detail column, or a 220px nav over a 660px
+ *     body, and none of those columns collapses — so 1000px is the sum of what
+ *     they really need, and it is their floor.
  *
- *     Work, Library and Settings never draw a fourth column — rail 196 + a
- *     260px list + a detail column, or a 220px nav over a 660px body — so the
- *     chat floor made every one of them scroll sideways in a window they fit
- *     in perfectly well. They keep the pre-§5.7 1000px, which is still the sum
- *     of what they do draw.
+ *     Chat's is **lower**, and that is T2's correction. Its floor was 1200 —
+ *     the sum of all four columns with everything open — which is not a
+ *     minimum window at all but a demand: on a 1080-point window the row was
+ *     laid out at 1200 *inside* it, and the aside's right edge, its collapse
+ *     button included, was drawn outside the window with no way to reach it.
+ *     Chat's two side columns collapse, and `chatPaneFit` now collapses them
+ *     when the window cannot hold them, so the floor is what the view needs
+ *     with them closed: rail 196 + the §2.2 gutters + a 440px transcript, 700.
  *
  * `position:relative` is load-bearing: the toast (z-60) and the command palette
  * (z-50) are absolutely positioned siblings of the panes (§2.6).
@@ -42,9 +42,12 @@ import { cn } from "@/lib/cn";
 import { dragCarriesFiles } from "@/lib/drag";
 import type { View } from "@/stores/ui";
 
-/** §8.7's floor per view — chat's four columns, everything else's three. */
+/**
+ * §8.7's floor per view — what each one needs once the columns that *can*
+ * collapse have (T2), not what it needs with everything open.
+ */
 export const MIN_WINDOW_CLASS: Record<View, string> = {
-  chat: "min-w-[1200px]",
+  chat: "min-w-[700px]",
   work: "min-w-[1000px]",
   library: "min-w-[1000px]",
   settings: "min-w-[1000px]",

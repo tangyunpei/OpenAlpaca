@@ -31,7 +31,7 @@ import {
   SessionSidebar,
   formatHeaderDate,
 } from "@/components/chat";
-import { Resizer } from "@/components/shell";
+import { chatPaneFit, Resizer } from "@/components/shell";
 import { PaneHeader } from "@/components/ui";
 import { useDaemonStatus } from "@/hooks/useConnection";
 import { useModels } from "@/hooks/useSettings";
@@ -82,6 +82,7 @@ export default function ChatView({
   const closeSessions = useUiStore((s) => s.closeSessions);
   const openWorkPane = useUiStore((s) => s.openWorkPane);
   const closeWorkPane = useUiStore((s) => s.closeWorkPane);
+  const closePanel = useUiStore((s) => s.closePanel);
   const setView = useUiStore((s) => s.setView);
   const setSettingsSection = useUiStore((s) => s.setSettingsSection);
   const clearSteerTarget = useUiStore((s) => s.clearSteerTarget);
@@ -144,6 +145,35 @@ export default function ChatView({
           null);
     showToast(modelReplacedToast(decision.model, provider, decision.previous));
   }, [model, effectiveModel, modelRows, setModel, showToast]);
+
+  /**
+   * The window is too narrow for both side columns (T2).
+   *
+   * Applied on resize and on mount, and **only** then: the collapse is the
+   * window making a choice the layout can no longer avoid, not a rule that
+   * runs on every render. That is what lets the owner re-open a column in a
+   * narrow window — a deliberate trade of transcript width for the list — and
+   * keep it until they change the window again. It never re-opens one either,
+   * for the mirror-image reason.
+   */
+  useEffect(() => {
+    const fit = (): void => {
+      const { paneWidths, sessionsOpen, workOpen, panelArtifactId } =
+        useUiStore.getState();
+      const room = chatPaneFit(window.innerWidth, {
+        sessions: paneWidths.chatSessionsW,
+        aside: paneWidths.workW,
+      });
+      if (!room.sessions && sessionsOpen) closeSessions();
+      // `closePanel`, not `closeWorkPane`: the aside is one slot with two
+      // modes (§8.4), and closing only the Work half would leave a file panel
+      // occupying the width that just ran out.
+      if (!room.aside && (workOpen || panelArtifactId !== null)) closePanel();
+    };
+    fit();
+    window.addEventListener("resize", fit);
+    return () => window.removeEventListener("resize", fit);
+  }, [closeSessions, closePanel]);
 
   // Follow the transcript: a new row, or another delta on the live row.
   const scroller = useRef<HTMLDivElement>(null);

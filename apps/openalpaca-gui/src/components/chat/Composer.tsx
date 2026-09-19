@@ -40,6 +40,27 @@ import { ModelPicker } from "./ModelPicker";
 /** Auto-grow ceiling: past this the textarea scrolls instead of pushing the transcript out. */
 const MAX_TEXTAREA_HEIGHT = 220;
 
+/**
+ * The narrowest the message box may get before the controls beside it give way
+ * (T2).
+ *
+ * On a 1080-point window the row held a textarea 8px wide — "A / s / k" stacked
+ * one letter per line — because `flex-1` will happily shrink to nothing while
+ * Attach, a 24-character local model id and Send all refuse to. This is the
+ * floor that makes the row wrap instead: below it the controls take a line of
+ * their own and the textarea keeps the full width.
+ */
+const MIN_TEXTAREA_WIDTH = 180;
+
+/**
+ * How much of a model id the button shows before eliding it.
+ *
+ * A local id (`qwen3.8:27b-mtp-q8_0`) is two to three times the length of a
+ * hosted one and was the single widest thing in the row. The full id stays on
+ * the label's own `title`, and the picker shows it in full.
+ */
+const MAX_MODEL_LABEL_WIDTH = 150;
+
 export interface ComposerSteerTarget {
   mode: ComposerMode;
   /** Two or three words — the run's short label. */
@@ -231,7 +252,9 @@ export function Composer(props: ComposerProps) {
             </span>
           </div>
 
-          <div className="flex items-center gap-[8px] rounded-3xl border border-red bg-raised p-[8px] shadow-alert">
+          {/* Wraps for the same reason the composer's own row does (T2): three
+              answers side by side do not fit a half-screen window. */}
+          <div className="flex flex-wrap items-center gap-[8px] rounded-3xl border border-red bg-raised p-[8px] shadow-alert">
             <Button
               variant="primaryBlock"
               className="flex-1"
@@ -344,7 +367,12 @@ export function Composer(props: ComposerProps) {
           </ul>
         )}
 
-        <div className="relative flex items-end gap-[9px] rounded-3xl border border-line bg-raised py-[7px] pr-[7px] pl-[11px] focus-within:border-line-hover">
+        {/* `flex-wrap`, and the three controls as one item, is the whole of
+            T2's composer rule: while the row can hold the textarea's floor and
+            the cluster it looks exactly as the design draws it, and when it
+            cannot the cluster takes a line of its own rather than squeezing
+            the message box to nothing. */}
+        <div className="relative flex flex-wrap items-end gap-[9px] rounded-3xl border border-line bg-raised py-[7px] pr-[7px] pl-[11px] focus-within:border-line-hover">
           <textarea
             ref={textarea}
             rows={1}
@@ -363,61 +391,72 @@ export function Composer(props: ComposerProps) {
                 if (canSend) onSend();
               }
             }}
+            style={{ minWidth: MIN_TEXTAREA_WIDTH }}
             className="min-h-[24px] flex-1 resize-none border-none bg-transparent py-[8px] font-sans text-lg leading-[1.5] text-ink outline-none placeholder:text-faint"
           />
 
-          {onAttachFiles !== undefined && (
-            <>
-              {/* Hidden, not absent: the button is the control, and this is
-                  the only thing that can open a file picker. `value` is
-                  cleared after every pick so the same file can be attached
-                  twice in a row. */}
-              <input
-                ref={fileInput}
-                type="file"
-                multiple
-                hidden
-                onChange={(event) => {
-                  attach(event.target.files);
-                  event.target.value = "";
-                }}
-              />
-              {/* Deliberately never disabled at the cap: the 11th pick has to
-                  be *refused with a sentence*, and a dead button says
-                  nothing. */}
-              <Button
-                variant="ghostXs"
-                className="shrink-0 self-end py-[7px]"
-                title="Attach files"
-                onClick={() => fileInput.current?.click()}
+          <div className="ml-auto flex shrink-0 items-end gap-[9px]">
+            {onAttachFiles !== undefined && (
+              <>
+                {/* Hidden, not absent: the button is the control, and this is
+                    the only thing that can open a file picker. `value` is
+                    cleared after every pick so the same file can be attached
+                    twice in a row. */}
+                <input
+                  ref={fileInput}
+                  type="file"
+                  multiple
+                  hidden
+                  onChange={(event) => {
+                    attach(event.target.files);
+                    event.target.value = "";
+                  }}
+                />
+                {/* Deliberately never disabled at the cap: the 11th pick has to
+                    be *refused with a sentence*, and a dead button says
+                    nothing. */}
+                <Button
+                  variant="ghostXs"
+                  className="shrink-0 self-end py-[7px]"
+                  title="Attach files"
+                  onClick={() => fileInput.current?.click()}
+                >
+                  Attach
+                </Button>
+              </>
+            )}
+
+            <button
+              type="button"
+              title="Chat model"
+              aria-haspopup="dialog"
+              aria-expanded={modelPickerOpen}
+              onClick={onToggleModelPicker}
+              className="flex min-w-0 shrink cursor-pointer items-center gap-[5px] rounded-md border border-line bg-main px-[9px] py-[8px] font-mono text-xs text-secondary hover:border-line-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue"
+            >
+              {/* Elided, never wrapped: the full id is on the label's own
+                  `title` and in the picker. */}
+              <span
+                className="truncate"
+                style={{ maxWidth: MAX_MODEL_LABEL_WIDTH }}
+                {...(model === null ? {} : { title: model })}
               >
-                Attach
-              </Button>
-            </>
-          )}
+                {model ?? "model"}
+              </span>
+              <span aria-hidden className="text-[8px] text-muted-fg">
+                {modelPickerOpen ? "▴" : "▾"}
+              </span>
+            </button>
 
-          <button
-            type="button"
-            title="Chat model"
-            aria-haspopup="dialog"
-            aria-expanded={modelPickerOpen}
-            onClick={onToggleModelPicker}
-            className="flex shrink-0 cursor-pointer items-center gap-[5px] rounded-md border border-line bg-main px-[9px] py-[8px] font-mono text-xs text-secondary hover:border-line-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue"
-          >
-            {model ?? "model"}
-            <span aria-hidden className="text-[8px] text-muted-fg">
-              {modelPickerOpen ? "▴" : "▾"}
-            </span>
-          </button>
-
-          <Button
-            variant="primaryMd"
-            className="shrink-0"
-            disabled={!canSend}
-            onClick={onSend}
-          >
-            Send
-          </Button>
+            <Button
+              variant="primaryMd"
+              className="shrink-0"
+              disabled={!canSend}
+              onClick={onSend}
+            >
+              Send
+            </Button>
+          </div>
 
           {modelPickerOpen && (
             <ModelPicker

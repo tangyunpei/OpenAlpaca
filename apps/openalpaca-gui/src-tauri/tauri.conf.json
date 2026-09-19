@@ -15,6 +15,8 @@
         "title": "openalpaca-gui",
         "width": 1920,
         "height": 1080,
+        "minWidth": 1000,
+        "minHeight": 640,
         "dragDropEnabled": false
       }
     ],
