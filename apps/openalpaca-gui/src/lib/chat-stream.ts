@@ -38,7 +38,26 @@ export interface DelegationInfo {
   title: string;
 }
 
-/** SSE `done`. `attachments_used`/`delegation` are omitted when absent. */
+/**
+ * One attachment the model that answered never received (U3).
+ *
+ * The turn still ran — the prompt carries a placeholder saying so — but the
+ * bytes did not reach the model: no vision, no native document part, or an
+ * extract the budget cut. `reason` is the daemon's own sentence.
+ */
+export interface SkippedAttachmentRef {
+  id: string;
+  reason: string;
+}
+
+/**
+ * SSE `done`. `attachments_used`/`attachments_skipped`/`delegation` are
+ * omitted when absent.
+ *
+ * Since U3 the two attachment lists are disjoint and `attachments_used` is
+ * truthful: an attachment the adaptation withheld leaves it and appears in
+ * `attachments_skipped` instead, so a client must not read "used" as "sent".
+ */
 export interface ChatStreamDone {
   content: string;
   model: string;
@@ -46,6 +65,7 @@ export interface ChatStreamDone {
   tokens_out: number;
   duration_ms: number;
   attachments_used?: string[];
+  attachments_skipped?: SkippedAttachmentRef[];
   delegation?: DelegationInfo;
 }
 

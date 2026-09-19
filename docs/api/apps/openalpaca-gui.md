@@ -62,6 +62,7 @@
 | POST | `/v1/extensions/{kind}/{id}/{verb}` | `extensions.ts` | `apps/openalpaca-gui/src/lib/api/extensions.ts` |
 | DELETE | `/v1/extensions/{kind}/{id}` | `extensions.ts` | `apps/openalpaca-gui/src/lib/api/extensions.ts` |
 | GET | `/v1/extensions` | `extensions.ts` | `apps/openalpaca-gui/src/lib/api/extensions.ts` |
+| POST | `/v1/files/upload` | `files.ts` | `apps/openalpaca-gui/src/lib/api/files.ts` |
 | GET | `/v1/files/{id}/content` | `files.ts` | `apps/openalpaca-gui/src/lib/api/files.ts` |
 | POST | `/v1/files/{id}/open` | `files.ts` | `apps/openalpaca-gui/src/lib/api/files.ts` |
 | GET | `/v1/files/{id}` | `files.ts` | `apps/openalpaca-gui/src/lib/api/files.ts` |
@@ -178,8 +179,8 @@
 ### `files.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/files.ts`
-- Exported functions: `downloadFile`, `getFileMetadata`, `openFileWithSystemDefault`
-- Endpoints: `GET /v1/files/{id}`, `GET /v1/files/{id}/content`, `POST /v1/files/{id}/open`
+- Exported functions: `downloadFile`, `getFileMetadata`, `openFileWithSystemDefault`, `uploadFile`
+- Endpoints: `POST /v1/files/upload`, `GET /v1/files/{id}`, `GET /v1/files/{id}/content`, `POST /v1/files/{id}/open`
 
 ### `followups.test.ts`
 

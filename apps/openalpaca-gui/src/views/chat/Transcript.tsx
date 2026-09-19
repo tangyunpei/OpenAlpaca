@@ -11,6 +11,7 @@ import {
   AssistantMessage,
   ResolutionRow,
   RunReportCard,
+  SkippedAttachmentsNote,
   ToolConfirmationBanner,
   UserMessage,
   WrittenArtifactCard,
@@ -74,6 +75,9 @@ export function Transcript({ items, dense }: TranscriptProps) {
                     attachment={attachment}
                   />
                 ))}
+                {/* U3: what the model never received, and why. Below the
+                    chips, because the chips are what it *did* get. */}
+                <SkippedAttachmentsNote items={item.skipped} />
               </AssistantMessage>
             );
 

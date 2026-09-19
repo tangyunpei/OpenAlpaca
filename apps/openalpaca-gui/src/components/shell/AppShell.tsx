@@ -28,9 +28,18 @@
  *
  * `position:relative` is load-bearing: the toast (z-60) and the command palette
  * (z-50) are absolutely positioned siblings of the panes (§2.6).
+ *
+ * It also swallows every **file** drop that nothing else took (U5). The window
+ * runs with `dragDropEnabled: false`, so the webview — not Tauri — handles
+ * drops, and a webview's default for a dropped file is to navigate to it,
+ * which would replace the running app with a PDF. The composer takes its own
+ * drop; this is the floor under it. Drags carrying anything but files pass
+ * through untouched, or dragging a selection into the textarea would stop
+ * working.
  */
 
 import { cn } from "@/lib/cn";
+import { dragCarriesFiles } from "@/lib/drag";
 import type { View } from "@/stores/ui";
 
 /** §8.7's floor per view — chat's four columns, everything else's three. */
@@ -64,6 +73,12 @@ export function AppShell({
         MIN_WINDOW_CLASS[view],
         className,
       )}
+      onDragOver={(event) => {
+        if (dragCarriesFiles(event.dataTransfer)) event.preventDefault();
+      }}
+      onDrop={(event) => {
+        if (dragCarriesFiles(event.dataTransfer)) event.preventDefault();
+      }}
     >
       {children}
     </div>

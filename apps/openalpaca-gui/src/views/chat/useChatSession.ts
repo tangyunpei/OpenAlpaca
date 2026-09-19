@@ -55,6 +55,7 @@ import {
   resolutionNote,
   settlingRun,
   shortTitle,
+  type DraftAttachment,
   type Resolution,
   type ToolRun,
 } from "@/components/chat";
@@ -92,6 +93,7 @@ import {
   type TranscriptItem,
   type WrittenArtifact,
 } from "./transcript-model";
+import { useComposerAttachments } from "./useComposerAttachments";
 
 /**
  * Whether a confirmation the daemon reports is this window's to answer.
@@ -232,6 +234,19 @@ export interface ChatSession {
   send: () => void;
   sending: boolean;
   sendError: string | null;
+
+  /**
+   * The files this turn will carry (U5), in pick order.
+   *
+   * They ride a **chat** turn only: neither `POST /v1/tasks/{id}/steer` nor
+   * `POST /v1/lanes/{lane}/followups` takes attachments, so a steer leaves the
+   * chips where they are for the next ordinary send rather than dropping them.
+   */
+  attachments: DraftAttachment[];
+  /** A pick that never became a chip — the 11th file. */
+  attachmentError: string | null;
+  attachFiles: (files: readonly File[]) => void;
+  removeAttachment: (key: string) => void;
 
   blocked: boolean;
   /** The tool the daemon is waiting on, if any. */
@@ -390,6 +405,10 @@ export function useChatSession(): ChatSession {
   // §4.7 item 2: the project the turn belongs to, sent as `x-workspace-path`.
   // `null` (no project chosen) sends no header at all.
   const projectPath = useProjectStore((s) => s.path);
+
+  // The picker's project governs where an upload's bytes land (D2), the same
+  // way it governs the turn that will carry them.
+  const attachments = useComposerAttachments(projectPath);
 
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState<PendingTurn | null>(null);
@@ -765,6 +784,7 @@ export function useChatSession(): ChatSession {
         stream: stream.state,
         pending,
         steerLabel: steerRun === null ? undefined : shortTitle(steerRun.title),
+        attachmentNames: attachments.names,
       }),
     [
       history.data,
@@ -776,12 +796,17 @@ export function useChatSession(): ChatSession {
       stream.state,
       pending,
       steerRun,
+      attachments.names,
     ],
   );
 
   const send = useCallback(() => {
     const text = draft.trim();
     if (text === "" || sending) return;
+    // An upload still in flight has no `file_id`, so sending now would drop a
+    // file the user attached. The composer disables Send for the same reason;
+    // this is the guard for every other way in (⏎, the palette).
+    if (attachments.uploading) return;
 
     if (steerTargetRunId !== null && composerMode === "queue") {
       // A follow-up is parked on the *lane*, not on the run: the daemon claims
@@ -890,9 +915,14 @@ export function useChatSession(): ChatSession {
       steer: null,
     });
 
+    // Only the chips the daemon actually holds: an upload it refused never
+    // travels, and the chip stays on screen saying why.
+    const refs = attachments.refs;
+
     void stream
       .send({
         content: text,
+        ...(refs.length === 0 ? {} : { attachments: refs }),
         ...(model === null ? {} : { model }),
         ...workspaceOption(projectPath),
         // A resumed conversation is addressed by id, and R49 then makes its
@@ -900,6 +930,11 @@ export function useChatSession(): ChatSession {
         // sent while the sidebar has nothing pinned, which is what leaves R48
         // free to open a new conversation on a project change.
         ...(selectedSessionId === null ? {} : { sessionId: selectedSessionId }),
+      })
+      .then(() => {
+        // Accepted: the files are the turn's now. A refusal leaves the chips
+        // alone, so a retry does not re-upload what the daemon already holds.
+        attachments.clear();
       })
       .catch((error: unknown) => {
         // A refused *session* is its own fact — archived elsewhere, or on
@@ -931,6 +966,7 @@ export function useChatSession(): ChatSession {
     laneKey,
     queueFollowup,
     clearSteerTarget,
+    attachments,
   ]);
 
   /**
@@ -1031,6 +1067,11 @@ export function useChatSession(): ChatSession {
     send,
     sending,
     sendError,
+
+    attachments: attachments.items,
+    attachmentError: attachments.error,
+    attachFiles: attachments.add,
+    removeAttachment: attachments.remove,
 
     blocked: stream.blocked,
     pendingToolName: firstConfirmation?.toolName ?? null,

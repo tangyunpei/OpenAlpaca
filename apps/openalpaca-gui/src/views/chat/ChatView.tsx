@@ -274,6 +274,10 @@ export default function ChatView({
           sending={session.sending}
           steer={session.steer}
           onClearSteer={clearSteerTarget}
+          attachments={session.attachments}
+          onAttachFiles={session.attachFiles}
+          onRemoveAttachment={session.removeAttachment}
+          attachmentError={session.attachmentError}
           models={models.data ?? []}
           model={model}
           modelStatus={

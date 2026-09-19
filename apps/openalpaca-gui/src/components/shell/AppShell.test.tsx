@@ -1,5 +1,6 @@
 /**
- * The shell's one load-bearing number: the minimum window (§8.7).
+ * The shell's one load-bearing number: the minimum window (§8.7) — and, since
+ * U5, the floor under the composer's file drop.
  *
  * `AppShell`'s doc comment states the budget as an arithmetic sum of the
  * columns a view can show at once, and a column added anywhere in the app makes
@@ -8,7 +9,7 @@
  * view on screen and only chat draws four columns.
  */
 
-import { render } from "@testing-library/react";
+import { fireEvent, render } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { PANE_BOUNDS } from "@/stores/pane-widths";
@@ -64,5 +65,30 @@ describe("AppShell", () => {
       </AppShell>,
     );
     expect(container.firstElementChild).toHaveClass("min-w-[1200px]");
+  });
+
+  /**
+   * U5's floor. The window runs with `dragDropEnabled: false`, so the webview
+   * handles drops itself and its default for a dropped file is to navigate to
+   * it — replacing the app. A file dropped anywhere but the composer has to
+   * die here.
+   */
+  it("swallows a file dropped outside the composer, and only a file", () => {
+    const { container } = render(
+      <AppShell>
+        <div>body</div>
+      </AppShell>,
+    );
+    const shell = container.firstElementChild as HTMLElement;
+
+    const file = { types: ["Files"], files: [] };
+    expect(fireEvent.dragOver(shell, { dataTransfer: file })).toBe(false);
+    expect(fireEvent.drop(shell, { dataTransfer: file })).toBe(false);
+
+    // A dragged selection is not ours: cancelling it would break dropping
+    // text into the composer's textarea.
+    const text = { types: ["text/plain"], files: [] };
+    expect(fireEvent.dragOver(shell, { dataTransfer: text })).toBe(true);
+    expect(fireEvent.drop(shell, { dataTransfer: text })).toBe(true);
   });
 });

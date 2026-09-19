@@ -20,6 +20,7 @@
  */
 
 import type { AssistantMeta } from "@/components/chat";
+import type { SkippedAttachment } from "@/components/chat";
 import type { SteerRef } from "@/components/chat";
 import type { Resolution } from "@/components/chat";
 import type { RunReportStatus } from "@/components/chat";
@@ -168,6 +169,15 @@ export type TranscriptItem =
       reasoning: string;
       /** Files the turn carried in (`role='attachment'`). */
       attachments: AttachmentInfo[];
+      /**
+       * Files the turn carried in that the model never received (U3), from
+       * `done.attachments_skipped`.
+       *
+       * Live only: the daemon stores no skip on the message, so a reloaded
+       * transcript has nothing to rebuild the note from and this is `[]` for
+       * every stored row.
+       */
+      skipped: SkippedAttachment[];
       /** Files the turn's run produced (`role='artifact'`, GAP-23). */
       artifacts: AttachmentInfo[];
       /** The run this turn started or reported on — `null` for plain chat. */
@@ -192,6 +202,12 @@ export interface TranscriptInput {
   pending: PendingTurn | null;
   /** Label for the steer pill on history messages that carry the prefix. */
   steerLabel?: string;
+  /**
+   * `file_id → filename` for uploads this window made, so a skipped
+   * attachment reads as a name instead of an id (U3). Unknown ids fall back to
+   * the id itself — never to a guess.
+   */
+  attachmentNames?: Readonly<Record<string, string>>;
 }
 
 interface Slot {
@@ -301,6 +317,7 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
     stream,
     pending,
     steerLabel = "the active workflow",
+    attachmentNames = {},
   } = input;
 
   const slots: Slot[] = [];
@@ -336,6 +353,8 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
       // writes, so there is nothing to replay.
       reasoning: "",
       attachments: toAttachments(message.attachments),
+      // Nothing persists a skip, so a stored row can only ever say "none".
+      skipped: [],
       artifacts: toArtifacts(message.artifacts),
       runId: message.task_id ?? null,
     });
@@ -415,6 +434,16 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
         mimeType: null,
         kind: null,
       })) ?? [];
+    // Disjoint from `attachments_used` since U3 — a withheld attachment is no
+    // longer listed as used, so a file appears as a chip or in the note, never
+    // as both.
+    const skipped: SkippedAttachment[] = (
+      stream.result?.attachments_skipped ?? []
+    ).map((entry) => ({
+      fileId: entry.id,
+      filename: attachmentNames[entry.id] ?? null,
+      reason: entry.reason,
+    }));
 
     push(Number.MAX_SAFE_INTEGER, {
       kind: "assistant",
@@ -424,6 +453,7 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
       streamPhase: streamPhaseLabel(stream),
       reasoning: stream.reasoning,
       attachments,
+      skipped,
       // The live turn's own delegation reaches the transcript as a report card,
       // and the pill arrives with the row when history catches up.
       artifacts: [],

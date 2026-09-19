@@ -71,6 +71,8 @@ interface RecordedRequest {
   body: unknown;
   /** Headers matter on the wire too: `x-workspace-path` is header-only. */
   headers: Headers;
+  /** `POST /v1/files/upload` is multipart, so its body is not JSON (U5). */
+  form?: FormData;
 }
 
 let requests: RecordedRequest[] = [];
@@ -152,6 +154,11 @@ let orchestratorModel = "claude-sonnet-4-6";
  * confirmation card names the blocked agent from, on both paths (G10).
  */
 let agentTemplateRows: Record<string, unknown>[] = [];
+/**
+ * What `POST /v1/files/upload` answers (U5). Swappable per test, and allowed
+ * to be a promise so a test can hold an upload open and watch Send stay off.
+ */
+let uploadReply: (form: FormData) => Response | Promise<Response>;
 
 /** `limit`/`offset`, exactly as the route pages. */
 function pageOfSessions(url: string): Response {
@@ -188,13 +195,18 @@ function installFetch() {
     const url = String(input);
     const method = init?.method ?? "GET";
     const rawBody = init?.body;
+    const form = rawBody instanceof FormData ? rawBody : undefined;
     requests.push({
       url,
       method,
       body: typeof rawBody === "string" ? JSON.parse(rawBody) : null,
       headers: new Headers(init?.headers),
+      ...(form === undefined ? {} : { form }),
     });
 
+    if (url.includes("/v1/files/upload")) {
+      return await uploadReply(form ?? new FormData());
+    }
     if (url.includes("/v1/status")) {
       return statusReply(new Headers(init?.headers));
     }
@@ -407,6 +419,18 @@ beforeEach(() => {
       inbox_depth: 1,
       lane_key: "user:gui",
     });
+  uploadReply = (form) => {
+    const file = form.get("file");
+    const name = file instanceof File ? file.name : "unnamed";
+    const size = file instanceof File ? file.size : 0;
+    return json({
+      id: `file-${name}`,
+      filename: name,
+      mime_type: file instanceof File ? file.type : "application/octet-stream",
+      size_bytes: size,
+      status: "uploaded",
+    });
+  };
   followupListReply = () => json([]);
   followupWriteReply = () =>
     json({
@@ -2704,5 +2728,265 @@ describe("ChatView — a run the daemon never finished (§5.6b)", () => {
     });
 
     expect(screen.queryByText(/interrupted/i)).toBeNull();
+  });
+});
+
+/**
+ * Attaching files from the composer (U5) and saying what the model never got
+ * (U3), over the real data layer: the multipart body, the daemon's own
+ * refusals and the `attachments` array on `POST /v1/chat` are all asserted on
+ * the wire rather than on a spy.
+ */
+describe("ChatView — composer attachments (U5, U3)", () => {
+  function fileInput(): HTMLInputElement {
+    const node = document.querySelector<HTMLInputElement>('input[type="file"]');
+    if (node === null) throw new Error("no file input in the composer");
+    return node;
+  }
+
+  function textFile(name: string, body = "codeword: alpaca"): File {
+    return new File([body], name, { type: "text/plain" });
+  }
+
+  /** Pick files through the hidden input, the way the Attach button does. */
+  async function pick(...files: File[]): Promise<void> {
+    await act(async () => {
+      fireEvent.change(fileInput(), { target: { files } });
+    });
+  }
+
+  /** The bodies of every `POST /v1/files/upload` this test made. */
+  function uploads(): RecordedRequest[] {
+    return requests.filter((request) =>
+      request.url.includes("/v1/files/upload"),
+    );
+  }
+
+  it("uploads a picked file and sends the id the daemon gave it", async () => {
+    renderChat();
+    await screen.findByLabelText("Message");
+
+    // The button is the control; the input is hidden behind it.
+    expect(screen.getByRole("button", { name: "Attach" })).toBeInTheDocument();
+
+    await pick(textFile("notes.txt"));
+
+    // One multipart POST, with the CLI's own field name and the picked file.
+    await waitFor(() => expect(uploads()).toHaveLength(1));
+    const sent = uploads()[0]?.form?.get("file");
+    expect(sent).toBeInstanceOf(File);
+    expect((sent as File).name).toBe("notes.txt");
+
+    // The chip settles on "ready" — and it is the *daemon's* id that travels.
+    expect(await screen.findByText("notes.txt")).toBeInTheDocument();
+    await screen.findByLabelText("ready");
+
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "what is the codeword?" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    });
+
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    expect(chatBody().attachments).toEqual([{ file_id: "file-notes.txt" }]);
+
+    // Accepted ⇒ the chips are the turn's now, not the composer's.
+    await waitFor(() => expect(screen.queryByText("notes.txt")).toBeNull());
+  });
+
+  it("shows the daemon's own refusal and never sends the refused file", async () => {
+    uploadReply = () =>
+      new Response(
+        JSON.stringify({
+          error: {
+            code: "UNSUPPORTED_MIME",
+            message: "MIME type 'application/zip' is not allowed",
+          },
+        }),
+        { status: 415 },
+      );
+    renderChat();
+    await screen.findByLabelText("Message");
+
+    await pick(new File(["PK"], "bundle.zip", { type: "application/zip" }));
+
+    expect(
+      await screen.findByText("MIME type 'application/zip' is not allowed"),
+    ).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "have a look" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    });
+
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    // A failed chip is not an attachment: the turn carries none.
+    expect(chatBody().attachments).toEqual([]);
+  });
+
+  it("refuses the eleventh file with the daemon's own sentence", async () => {
+    renderChat();
+    await screen.findByLabelText("Message");
+
+    await pick(
+      ...Array.from({ length: 10 }, (_, index) =>
+        textFile(`note-${index}.txt`),
+      ),
+    );
+    await waitFor(() => expect(uploads()).toHaveLength(10));
+
+    await pick(textFile("one-too-many.txt"));
+
+    expect(
+      await screen.findByText(
+        "Too many attachments: 11 provided, maximum is 10",
+      ),
+    ).toBeInTheDocument();
+    // Refused in the UI: it never became a chip and never reached the daemon.
+    expect(uploads()).toHaveLength(10);
+    expect(screen.queryByText("one-too-many.txt")).toBeNull();
+  });
+
+  it("holds Send off while an upload is in flight", async () => {
+    let release: (() => void) | null = null;
+    uploadReply = async (form) => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const file = form.get("file");
+      const name = file instanceof File ? file.name : "unnamed";
+      return json({
+        id: `file-${name}`,
+        filename: name,
+        mime_type: "text/plain",
+        size_bytes: 3,
+        status: "uploaded",
+      });
+    };
+
+    renderChat();
+    await screen.findByLabelText("Message");
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "read this" },
+    });
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+
+    await pick(textFile("slow.txt"));
+    expect(await screen.findByText("uploading…")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+
+    await act(async () => {
+      release?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Send" })).toBeEnabled(),
+    );
+  });
+
+  it("attaches a pasted image and a dropped file the same way", async () => {
+    renderChat();
+    const textarea = await screen.findByLabelText("Message");
+
+    await act(async () => {
+      fireEvent.paste(textarea, {
+        clipboardData: {
+          files: [new File(["png"], "screenshot.png", { type: "image/png" })],
+        },
+      });
+    });
+    expect(await screen.findByText("screenshot.png")).toBeInTheDocument();
+
+    // A file drag has to be *accepted* on `dragover` or the browser never
+    // fires `drop` at all — and only a file drag, so dragging a selection into
+    // the textarea keeps working.
+    const fileDrag = {
+      types: ["Files"],
+      files: [textFile("dropped.txt")],
+    };
+    expect(fireEvent.dragOver(textarea, { dataTransfer: fileDrag })).toBe(
+      false,
+    );
+    expect(
+      fireEvent.dragOver(textarea, {
+        dataTransfer: { types: ["text/plain"], files: [] },
+      }),
+    ).toBe(true);
+
+    await act(async () => {
+      fireEvent.drop(textarea, { dataTransfer: fileDrag });
+    });
+    expect(await screen.findByText("dropped.txt")).toBeInTheDocument();
+
+    await waitFor(() => expect(uploads()).toHaveLength(2));
+  });
+
+  it("says which attachments the model never received (U3)", async () => {
+    renderChat();
+    await screen.findByLabelText("Message");
+
+    await pick(textFile("photo.png"));
+    await screen.findByLabelText("ready");
+
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "what colour is it?" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    });
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    const source = FakeEventSource.instances[0];
+    if (source === undefined) throw new Error("no stream opened");
+
+    await act(async () => {
+      source.emit("done", {
+        content: "I cannot see the image.",
+        model: "qwen3.8:27b",
+        tokens_in: 10,
+        tokens_out: 6,
+        duration_ms: 900,
+        attachments_used: [],
+        attachments_skipped: [
+          {
+            id: "file-photo.png",
+            reason: "qwen3.8:27b does not accept images",
+          },
+        ],
+      });
+    });
+
+    expect(
+      await screen.findByText("Not sent to the model"),
+    ).toBeInTheDocument();
+    // Named, not printed as an id: this window uploaded it, so it knows.
+    expect(
+      screen.getByText("photo.png — qwen3.8:27b does not accept images"),
+    ).toBeInTheDocument();
+  });
+
+  it("drops a chip the user removed before it is sent", async () => {
+    renderChat();
+    await screen.findByLabelText("Message");
+
+    await pick(textFile("notes.txt"));
+    await screen.findByLabelText("ready");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Remove notes.txt" }));
+    });
+    expect(screen.queryByText("notes.txt")).toBeNull();
+
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "never mind" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    });
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    expect(chatBody().attachments).toEqual([]);
   });
 });
