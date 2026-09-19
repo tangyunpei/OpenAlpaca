@@ -471,18 +471,43 @@ fn format_event_payload(payload: &serde_json::Value) -> String {
     payload.to_string()
 }
 
+/// The owner half of a lane key — `{owner}:{source}` (`is_lane_owned_by`,
+/// `routes/chat_types.rs`).
+///
+/// A lane with no `:` at all is passed through whole rather than blanked: the
+/// daemon is the one that decides whether it owns a lane, and a client that
+/// guesses a different identity than the one it is about to send would only
+/// make the refusal harder to read.
+fn owner_of(lane_key: &str) -> &str {
+    lane_key.split_once(':').map_or(lane_key, |(owner, _)| owner)
+}
+
 /// The body `POST /v1/tasks` takes.
+///
+/// **The lane is the caller's own** (V6). `"cli_user:cli"` was a lane nobody
+/// owns, and since the create route began refusing a lane the local owner does
+/// not hold (R79, `404 LANE_NOT_FOUND`) every `openalpaca tasks create` failed
+/// on it. The lane is therefore read the same way `openalpaca chat` reads it —
+/// `GET /v1/me`'s `default_lane_key`, which is the lane a CLI turn actually
+/// lands on — and `created_by` is that lane's owner rather than a second
+/// invented identity. (The route overwrites `created_by` with the local user
+/// anyway; sending the same thing keeps the body honest about who parked it.)
 ///
 /// `unattended` is the S10 declaration, **stored on the row**: this route only
 /// parks the work, and whoever starts it later — `openalpaca tasks resume`,
 /// the GUI, the follow-up runner — inherits what the parker said unless it
 /// declares for itself. Sent only when it is true, so an attended create's
-/// body is byte-for-byte what it was.
-fn create_body(title: &str, priority: i32, unattended: bool) -> serde_json::Value {
+/// body is what it was but for the lane.
+fn create_body(
+    title: &str,
+    priority: i32,
+    unattended: bool,
+    lane_key: &str,
+) -> serde_json::Value {
     let mut body = serde_json::json!({
         "title": title,
-        "created_by": "cli_user",
-        "source_lane": "cli_user:cli",
+        "created_by": owner_of(lane_key),
+        "source_lane": lane_key,
         "priority": priority,
     });
     if unattended {
@@ -504,9 +529,17 @@ async fn create_task(description: Option<String>, priority: i32) -> Result<()> {
     };
 
     let client = DaemonClient::connect()?;
+    // V6: the lane this CLI talks on, as the daemon names it — the same read
+    // `openalpaca chat` does, not a second resolver.
+    let lane_key = crate::commands::sessions::default_lane_key(&client).await?;
     // S10: a run parked from a script has nobody to answer its tool prompts,
     // and the row remembers that rather than discovering it 300 s at a time.
-    let body = create_body(&title, priority, crate::unattended::declared_unattended());
+    let body = create_body(
+        &title,
+        priority,
+        crate::unattended::declared_unattended(),
+        &lane_key,
+    );
 
     let result: serde_json::Value = client.post("/v1/tasks", &body).await?;
     let task_id = result["task_id"].as_str().unwrap_or("unknown");
@@ -541,22 +574,66 @@ mod tests {
     /// route's own default is `false`.
     #[test]
     fn a_parked_run_carries_the_declaration_only_when_it_is_true() {
-        let attended = create_body("Audit the connectors", 0, false);
+        let attended = create_body("Audit the connectors", 0, false, OWNER_LANE);
         assert_eq!(
             attended,
             serde_json::json!({
                 "title": "Audit the connectors",
-                "created_by": "cli_user",
-                "source_lane": "cli_user:cli",
+                "created_by": "8f1c5b0e-0000-4000-8000-000000000001",
+                "source_lane": OWNER_LANE,
                 "priority": 0,
             }),
-            "an attended create's body is what it always was"
+            "an attended create's body is the lane and nothing more"
         );
 
-        let scripted = create_body("Audit the connectors", 2, true);
+        let scripted = create_body("Audit the connectors", 2, true, OWNER_LANE);
         assert_eq!(scripted["unattended"], true);
         assert_eq!(scripted["priority"], 2);
         assert_eq!(scripted["title"], "Audit the connectors");
+    }
+
+    /// The lane `GET /v1/me` reports, in the shape the daemon reports it.
+    const OWNER_LANE: &str = "8f1c5b0e-0000-4000-8000-000000000001:gui";
+
+    /// V6: `POST /v1/tasks` refuses a `source_lane` the local owner does not
+    /// hold (R79 — `404 LANE_NOT_FOUND`, never a `403` that would confirm the
+    /// lane exists), and `"cli_user:cli"` is a lane nobody owns, so every
+    /// `openalpaca tasks create` died on it. The body carries the lane this
+    /// CLI actually talks on.
+    #[test]
+    fn a_created_task_is_parked_on_a_lane_this_owner_holds() {
+        let body = create_body("Audit the connectors", 0, false, OWNER_LANE);
+        let lane = body["source_lane"].as_str().expect("a lane is sent");
+
+        assert_eq!(lane, OWNER_LANE);
+        assert!(
+            is_lane_owned_by(lane, "8f1c5b0e-0000-4000-8000-000000000001"),
+            "the daemon's own ownership test passes on what the CLI sends"
+        );
+        assert_ne!(lane, "cli_user:cli", "the invented lane is gone");
+        assert_eq!(
+            body["created_by"], "8f1c5b0e-0000-4000-8000-000000000001",
+            "one identity, the lane's own owner"
+        );
+    }
+
+    /// `is_lane_owned_by` as `apps/openalpacad/src/routes/chat_types.rs:186`
+    /// defines it — copied rather than imported because the daemon is not a
+    /// dependency of the CLI, and pinned here so a drift in either is a
+    /// failing test rather than a 404 nobody can explain.
+    fn is_lane_owned_by(lane_key: &str, user_id: &str) -> bool {
+        lane_key.starts_with(&format!("{}:", user_id))
+    }
+
+    /// A lane whose owner cannot be read is sent whole: guessing a different
+    /// identity than the one in `source_lane` would only make the daemon's
+    /// refusal harder to read.
+    #[test]
+    fn a_lane_without_a_source_still_names_its_owner() {
+        assert_eq!(owner_of("owner-1:gui"), "owner-1");
+        assert_eq!(owner_of("owner-1:cli:extra"), "owner-1");
+        assert_eq!(owner_of("owner-1"), "owner-1");
+        assert_eq!(owner_of(""), "");
     }
 
     /// R38 — the AGENTS column is back, as the count the list route now
@@ -615,8 +692,11 @@ mod tests {
             progress_current: Some(5),
             progress_total: Some(8),
             result_summary: None,
-            created_by: "cli_user".to_string(),
-            source_lane: "cli_user:cli".to_string(),
+            // What the daemon stores and reads back: the local owner and one
+            // of that owner's lanes (R79, V6) — never the `cli_user` the CLI
+            // used to invent.
+            created_by: "8f1c5b0e-0000-4000-8000-000000000001".to_string(),
+            source_lane: OWNER_LANE.to_string(),
             created_at: "2026-09-04T09:15:00.000Z".to_string(),
             updated_at: "2026-09-04T09:18:00.000Z".to_string(),
             completed_at: None,
