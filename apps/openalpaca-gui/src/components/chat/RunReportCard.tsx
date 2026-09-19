@@ -12,10 +12,17 @@
  * neither event carries a cost field, even though `GET /v1/tasks` now does
  * (GAP-08b). The `$` segment is **omitted** rather than printed as `$0.00`;
  * `note` is where the card says why something is missing.
+ *
+ * The summary arrives as markdown — it is the first 500 characters of a report
+ * a model wrote — and §3.12 draws the body as **one paragraph**, so the markup
+ * is reduced away rather than rendered (P3). The full report is the completion
+ * message in the transcript below, which does render it.
  */
 
 import { FileBadge, type FileKind } from "@/components/ui";
 import { cn } from "@/lib/cn";
+
+import { plainText } from "./prose";
 
 export type RunReportStatus = "done" | "failed" | "cancelled" | "interrupted";
 
@@ -76,6 +83,12 @@ export function RunReportCard({
   note = null,
 }: RunReportCardProps) {
   const right = [runId, duration].filter((part) => part !== null).join(" · ");
+  // P3: the daemon's summary is the first 500 characters of a report a model
+  // wrote in markdown, and §3.12 draws this body as one paragraph — a
+  // one-glance summary, not a document. So the markup is stripped rather than
+  // rendered: the full report is the completion *message* below this card,
+  // where the transcript's own renderer shows it properly.
+  const body = summary === null ? null : plainText(summary);
 
   return (
     <section className="mb-[26px] overflow-hidden rounded-3xl border border-line bg-raised">
@@ -103,9 +116,9 @@ export function RunReportCard({
         <p className="mb-[6px] text-md-plus font-semibold [text-wrap:pretty]">
           {title}
         </p>
-        {summary !== null && summary !== "" && (
-          <p className="mt-0 mb-[11px] text-md-plus leading-[1.6] [text-wrap:pretty] text-secondary">
-            {summary}
+        {body !== null && body !== "" && (
+          <p className="mt-0 mb-[11px] text-md-plus leading-[1.6] [text-wrap:pretty] whitespace-pre-line text-secondary">
+            {body}
           </p>
         )}
 

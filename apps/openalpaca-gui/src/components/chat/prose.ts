@@ -298,6 +298,54 @@ function looksLikeTableRow(line: string): boolean {
   return /(^|[^\\])\|/.test(line);
 }
 
+/**
+ * The same markdown, reduced to its words (P3).
+ *
+ * For the surfaces that are a *summary* rather than a body — DESIGN_SPEC
+ * §3.12 draws the run-report card as one paragraph — where rendering the
+ * markup would be wrong and printing it raw (`**Basics**`, `## Summary`,
+ * backticks) is what the owner saw. It is the parser's own vocabulary
+ * flattened, not a regex strip, so it strips exactly what the transcript
+ * renders and nothing else: an asterisk that was never emphasis survives.
+ *
+ * Blocks keep their line breaks — a 500-character run summary is regularly
+ * three short sections — and the caller renders with `whitespace-pre-line`.
+ */
+export function plainText(markdown: string): string {
+  const lines: string[] = [];
+  for (const block of parseProse(markdown)) {
+    switch (block.kind) {
+      case "paragraph":
+      case "heading":
+      case "quote":
+        lines.push(segmentText(block.segments));
+        break;
+      case "list":
+        for (const item of block.items) lines.push(segmentText(item));
+        break;
+      case "code":
+        lines.push(block.text);
+        break;
+      case "table":
+        for (const row of [block.header, ...block.rows]) {
+          lines.push(row.map(segmentText).join(" · "));
+        }
+        break;
+      case "rule":
+        // A rule is punctuation, and punctuation with no text is nothing.
+        break;
+    }
+  }
+  return lines
+    .map((line) => line.trim())
+    .filter((line) => line !== "")
+    .join("\n");
+}
+
+function segmentText(segments: readonly ProseSegment[]): string {
+  return segments.map((segment) => segment.text).join("");
+}
+
 /** Parse a whole message body into renderable blocks. */
 export function parseProse(text: string): ProseBlock[] {
   const blocks: ProseBlock[] = [];

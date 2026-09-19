@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   parseInlineCode,
   parseProse,
+  plainText,
   splitTableRow,
   type ProseBlock,
 } from "./prose";
@@ -442,5 +443,42 @@ describe("blockquotes (P4)", () => {
   it("is not confused by a greater-than sign inside a sentence", () => {
     const blocks = parseProse("2 > 1 is true");
     expect(blocks.map((block) => block.kind)).toEqual(["paragraph"]);
+  });
+});
+
+/**
+ * P3 — the run-report card prints its summary as one paragraph (§3.12), so the
+ * markdown a model wrote it in is reduced to its words rather than rendered.
+ */
+describe("plainText (P3)", () => {
+  it("strips headings, emphasis, code spans and list markers", () => {
+    expect(
+      plainText(
+        "## Summary\n\n**Basics**: the fibre is `hollow`.\n\n- one\n- two",
+      ),
+    ).toBe("Summary\nBasics: the fibre is hollow.\none\ntwo");
+  });
+
+  it("keeps a fenced block's own text and drops a thematic break", () => {
+    expect(plainText("before\n\n---\n\n```sh\ncargo test\n```")).toBe(
+      "before\ncargo test",
+    );
+  });
+
+  it("reads a table as its cells", () => {
+    expect(plainText("| a | b |\n| --- | --- |\n| 1 | 2 |")).toBe(
+      "a · b\n1 · 2",
+    );
+  });
+
+  it("leaves prose that was never markdown alone", () => {
+    expect(
+      plainText("Wrote the notes. 2 * 3 = 6, and task_id is a word."),
+    ).toBe("Wrote the notes. 2 * 3 = 6, and task_id is a word.");
+  });
+
+  it("reduces a summary with no words to the empty string", () => {
+    expect(plainText("---")).toBe("");
+    expect(plainText("")).toBe("");
   });
 });
