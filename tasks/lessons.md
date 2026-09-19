@@ -43,3 +43,11 @@ Each entry: what went wrong → the rule that prevents it.
 ## 2026-08 — Verify a link check's own transform
 **What happened:** A KB link checker used `tr -d '](.)'`, which also stripped the `.` in `.md`, producing false "MISSING" results.
 **Rule:** When a check reports many failures, test the checker on one known-good input before trusting the report.
+
+## 2026-09 — A binary that ignores its arguments will boot on `--help`
+**What happened:** During a live acceptance run an agent ran `openalpacad --help` to read usage, without the isolation variables. The daemon never read its arguments, so it booted against the real `~/.openalpaca` and seeded a store on a machine where none was supposed to exist.
+**Rule:** Never run the daemon binary, for any reason, without both `OPENALPACA_HOME_STORE` and `OPENALPACA_CONFIG_DIR` pointing into a temp directory; put that sentence in every agent prompt that can reach the binary. To learn a binary's flags, read its source first. (The daemon now refuses arguments, `apps/openalpacad/src/args.rs`, but the rule stands for any binary whose argument handling has not been read.)
+
+## 2026-09 — A fixer's green tests are not acceptance; start the live check from a blank slate
+**What happened:** Round 3 made chat streaming real and every gate passed, yet on the live model every chat tool call lost its arguments (Ollama sends a whole tool call in one SSE frame; the parser's only test used OpenAI's split-frame shape). Separately, the first GUI session picked a chat model by hand before sending, which hid that a fresh window seeded an unroutable model and failed its first message.
+**Rule:** Any change that moves a code path onto production for the first time gets a live end-to-end run before it is called done, and the live run starts exactly as a new user would: fresh store, fresh window, no manual setup step that the product does not require. When a provider's wire shape matters, capture the real frames and put them in the tests verbatim.
