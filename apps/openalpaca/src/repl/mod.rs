@@ -170,6 +170,7 @@ impl ReplSession {
 
         let opts = StreamOptions {
             verbose: self.context.verbose,
+            ..StreamOptions::default()
         };
 
         // Phase 1: send_chat (POST) with retry-once

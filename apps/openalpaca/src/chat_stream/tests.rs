@@ -1,5 +1,22 @@
 use super::*;
 
+/// The shape every legacy assertion here was written against: no terminal, so
+/// nothing is printed before `done`.
+fn piped() -> StreamOptions {
+    StreamOptions {
+        verbose: false,
+        tty: false,
+    }
+}
+
+/// A terminal: deltas and reasoning are shown as they arrive.
+fn terminal() -> StreamOptions {
+    StreamOptions {
+        verbose: false,
+        tty: true,
+    }
+}
+
 #[test]
 fn test_format_token_count() {
     assert_eq!(format_token_count(0), "0");
@@ -27,10 +44,10 @@ fn test_format_usage_line() {
 #[test]
 fn test_process_sse_event_thinking() {
     let mut state = SseState::default();
-    let result = process_sse_event("event: thinking\ndata: {}", false, &mut state);
+    let result = process_sse_event("event: thinking\ndata: {}", &piped(), &mut state);
     assert!(result.is_ok());
     assert!(state.usage.is_none());
-    assert!(!state.had_delta);
+    assert!(state.shown.is_empty());
 }
 
 #[test]
@@ -38,23 +55,24 @@ fn test_process_sse_event_delta() {
     let mut state = SseState::default();
     let result = process_sse_event(
         "event: delta\ndata: {\"content\":\"hello\"}",
-        false,
+        &piped(),
         &mut state,
     );
     assert!(result.is_ok());
     assert!(state.usage.is_none());
-    assert!(state.had_delta);
+    // A pipe prints nothing until `done` (S13), so nothing was shown.
+    assert!(state.shown.is_empty());
 }
 
 #[test]
 fn test_process_sse_event_done_with_prior_delta() {
     let mut state = SseState {
-        had_delta: true,
+        shown: "hello".to_string(),
         ..SseState::default()
     };
     let result = process_sse_event(
         "event: done\ndata: {\"content\":\"hello\",\"model\":\"gpt-4\",\"tokens_in\":10,\"tokens_out\":20,\"duration_ms\":100}",
-        false,
+        &piped(),
         &mut state,
     );
     assert!(result.is_ok());
@@ -70,7 +88,7 @@ fn test_process_sse_event_done_no_prior_delta() {
     let mut state = SseState::default();
     let result = process_sse_event(
         "event: done\ndata: {\"content\":\"response text\",\"model\":\"gpt-4\",\"tokens_in\":5,\"tokens_out\":10,\"duration_ms\":50}",
-        false,
+        &piped(),
         &mut state,
     );
     assert!(result.is_ok());
@@ -83,7 +101,7 @@ fn test_process_sse_event_error() {
     let mut state = SseState::default();
     let result = process_sse_event(
         "event: error\ndata: {\"message\":\"something failed\"}",
-        false,
+        &piped(),
         &mut state,
     );
     assert!(result.is_ok());
@@ -100,7 +118,7 @@ fn a_failed_turn_is_carried_out_of_the_stream_as_a_failure() {
     let mut state = SseState::default();
     process_sse_event(
         "event: error\ndata: {\"message\":\"LLM error: no routable model\"}",
-        false,
+        &piped(),
         &mut state,
     )
     .expect("an error event is parsed, not refused");
@@ -117,11 +135,11 @@ fn a_failed_turn_is_carried_out_of_the_stream_as_a_failure() {
 #[test]
 fn an_unreadable_error_event_still_fails_the_turn() {
     let mut state = SseState::default();
-    process_sse_event("event: error\ndata: not-json", false, &mut state).expect("no panic");
+    process_sse_event("event: error\ndata: not-json", &piped(), &mut state).expect("no panic");
     assert_eq!(state.failure.as_deref(), Some("Unknown error"));
 
     let mut state = SseState::default();
-    process_sse_event("event: error\ndata: {\"detail\":\"x\"}", false, &mut state)
+    process_sse_event("event: error\ndata: {\"detail\":\"x\"}", &piped(), &mut state)
         .expect("no panic");
     assert_eq!(state.failure.as_deref(), Some("Unknown error"));
 }
@@ -133,7 +151,7 @@ fn an_answered_turn_carries_no_failure() {
     let mut state = SseState::default();
     process_sse_event(
         "event: done\ndata: {\"content\":\"hi\",\"model\":\"m\",\"tokens_in\":1,\"tokens_out\":1,\"duration_ms\":1}",
-        false,
+        &piped(),
         &mut state,
     )
     .expect("done parses");
@@ -144,7 +162,7 @@ fn an_answered_turn_carries_no_failure() {
 #[test]
 fn test_process_sse_event_unknown() {
     let mut state = SseState::default();
-    let result = process_sse_event("event: unknown\ndata: {}", false, &mut state);
+    let result = process_sse_event("event: unknown\ndata: {}", &piped(), &mut state);
     assert!(result.is_ok());
     assert!(state.usage.is_none());
 }
@@ -159,12 +177,12 @@ fn test_find_event_boundary() {
 #[test]
 fn test_process_sse_event_done_with_delegation() {
     let mut state = SseState {
-        had_delta: true,
+        shown: "hello".to_string(),
         ..SseState::default()
     };
     let result = process_sse_event(
         "event: done\ndata: {\"content\":\"I've kicked off a task\",\"model\":\"router\",\"tokens_in\":0,\"tokens_out\":0,\"duration_ms\":50,\"delegation\":{\"task_id\":\"task-123\",\"title\":\"Research quantum computing\"}}",
-        false,
+        &piped(),
         &mut state,
     );
     assert!(result.is_ok());
@@ -176,12 +194,12 @@ fn test_process_sse_event_done_with_delegation() {
 #[test]
 fn test_process_sse_event_done_without_delegation() {
     let mut state = SseState {
-        had_delta: true,
+        shown: "hello".to_string(),
         ..SseState::default()
     };
     let result = process_sse_event(
         "event: done\ndata: {\"content\":\"a normal reply\",\"model\":\"gpt-4\",\"tokens_in\":10,\"tokens_out\":20,\"duration_ms\":100}",
-        false,
+        &piped(),
         &mut state,
     );
     assert!(result.is_ok());
@@ -191,13 +209,13 @@ fn test_process_sse_event_done_without_delegation() {
 #[test]
 fn test_process_sse_event_done_with_malformed_delegation() {
     let mut state = SseState {
-        had_delta: true,
+        shown: "hello".to_string(),
         ..SseState::default()
     };
     // Missing required "title" field — must be ignored, not crash
     let result = process_sse_event(
         "event: done\ndata: {\"content\":\"x\",\"model\":\"m\",\"tokens_in\":0,\"tokens_out\":0,\"duration_ms\":1,\"delegation\":{\"task_id\":\"task-123\"}}",
-        false,
+        &piped(),
         &mut state,
     );
     assert!(result.is_ok());
@@ -315,4 +333,158 @@ fn attachments_ride_along_with_the_session() {
         .body("look at this", &attachments);
     assert_eq!(body["attachments"][0]["file_id"], "file-1");
     assert_eq!(body["session_id"], "sess-1");
+}
+
+// ── What the terminal ends on (S13) ─────────────────────────────────
+
+/// Deltas that add up to the answer: the terminal already has it, and `done`
+/// must not print it a second time.
+#[test]
+fn a_complete_stream_owes_the_reader_nothing() {
+    assert_eq!(reconcile("Paris.", "Paris."), Reconciliation::Nothing);
+    // A delegation's `done` carries no content at all.
+    assert_eq!(reconcile("working on it", ""), Reconciliation::Nothing);
+    assert_eq!(reconcile("", ""), Reconciliation::Nothing);
+}
+
+/// A stream that broke mid-way, or a provider that streamed nothing: what was
+/// shown is a prefix of the answer, so only the tail is owed.
+#[test]
+fn a_partial_stream_is_finished_rather_than_repeated() {
+    assert_eq!(
+        reconcile("The capital of ", "The capital of France is Paris."),
+        Reconciliation::Append("France is Paris.".to_string())
+    );
+    // A pipe shows nothing, so the whole answer is the tail — printed once,
+    // with no leading blank line.
+    assert_eq!(
+        reconcile("", "Paris."),
+        Reconciliation::Append("Paris.".to_string())
+    );
+}
+
+/// A multi-round turn: the model narrated before calling a tool, and the
+/// answer that followed is not a continuation of that narration. The terminal
+/// ends on the answer, once.
+#[test]
+fn a_diverged_stream_ends_on_the_authoritative_answer() {
+    assert_eq!(
+        reconcile("Let me check the file.", "The file lists three connectors."),
+        Reconciliation::Redraw("The file lists three connectors.".to_string())
+    );
+}
+
+/// The bug S13 names: before this, `done.content` was printed **only** when no
+/// delta had arrived, so a partial or multi-round stream left the terminal
+/// holding a prefix — or a sentence that was never the answer — and the answer
+/// itself was never shown.
+#[test]
+fn a_streamed_turn_still_ends_on_the_answer() {
+    colored::control::set_override(false);
+    let opts = terminal();
+    let mut state = SseState::default();
+
+    process_sse_event(
+        "event: delta\ndata: {\"content\":\"The capital of \"}",
+        &opts,
+        &mut state,
+    )
+    .expect("a delta is shown");
+    assert_eq!(state.shown, "The capital of ");
+
+    process_sse_event(
+        "event: done\ndata: {\"content\":\"The capital of France is Paris.\",\"model\":\"m\",\"tokens_in\":1,\"tokens_out\":1,\"duration_ms\":1}",
+        &opts,
+        &mut state,
+    )
+    .expect("done reconciles");
+    assert_eq!(
+        state.shown, "The capital of France is Paris.",
+        "the terminal holds the whole answer, exactly once"
+    );
+}
+
+/// A pipe is somebody else's input: nothing reaches it before `done`, and what
+/// `done` writes is the authoritative answer and nothing else — which is the
+/// only way to keep that guarantee now that deltas can diverge from it.
+#[test]
+fn a_piped_turn_sees_only_the_answer() {
+    let opts = piped();
+    let mut state = SseState::default();
+
+    process_sse_event(
+        "event: delta\ndata: {\"content\":\"Let me check the file.\"}",
+        &opts,
+        &mut state,
+    )
+    .expect("a delta is swallowed");
+    assert!(state.shown.is_empty(), "nothing was written to the pipe");
+
+    process_sse_event(
+        "event: done\ndata: {\"content\":\"The file lists three connectors.\",\"model\":\"m\",\"tokens_in\":1,\"tokens_out\":1,\"duration_ms\":1}",
+        &opts,
+        &mut state,
+    )
+    .expect("done prints the answer");
+    assert_eq!(state.shown, "The file lists three connectors.");
+}
+
+// ── Reasoning (S2) ──────────────────────────────────────────────────
+
+/// Dim on a terminal, nothing when piped — and never part of the answer.
+#[test]
+fn reasoning_is_shown_to_a_terminal_and_withheld_from_a_pipe() {
+    assert_eq!(
+        reasoning_to_print(true, "the user is asking about"),
+        Some("the user is asking about")
+    );
+    assert_eq!(reasoning_to_print(false, "the user is asking about"), None);
+    assert_eq!(reasoning_to_print(true, ""), None, "an empty frame prints nothing");
+}
+
+/// The frame the daemon sends is `reasoning` with a `text` field (S2's wire),
+/// and it must not be mistaken for the answer: `shown` stays empty, so `done`
+/// still owes the reader the whole of `done.content`.
+#[test]
+fn reasoning_never_becomes_the_answer() {
+    colored::control::set_override(false);
+    let opts = terminal();
+    let mut state = SseState::default();
+
+    process_sse_event(
+        "event: reasoning\ndata: {\"text\":\"they want the capital\"}",
+        &opts,
+        &mut state,
+    )
+    .expect("a reasoning frame is rendered");
+    assert!(
+        state.shown.is_empty(),
+        "reasoning is not the answer and is never counted as shown"
+    );
+    assert!(state.reasoning_open, "the run is open on the current line");
+
+    process_sse_event(
+        "event: done\ndata: {\"content\":\"Paris.\",\"model\":\"m\",\"tokens_in\":1,\"tokens_out\":1,\"duration_ms\":1}",
+        &opts,
+        &mut state,
+    )
+    .expect("done prints the answer");
+    assert_eq!(state.shown, "Paris.");
+    assert!(!state.reasoning_open, "the answer closed the reasoning run");
+}
+
+/// A `reasoning` frame on a piped run writes nothing at all — not even the
+/// newline that separates a terminal's reasoning from its answer.
+#[test]
+fn a_piped_turn_sees_no_reasoning() {
+    let opts = piped();
+    let mut state = SseState::default();
+    process_sse_event(
+        "event: reasoning\ndata: {\"text\":\"they want the capital\"}",
+        &opts,
+        &mut state,
+    )
+    .expect("no panic");
+    assert!(state.shown.is_empty());
+    assert!(!state.reasoning_open);
 }

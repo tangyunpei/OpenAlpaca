@@ -7,7 +7,7 @@ use colored::Colorize;
 use futures_util::StreamExt;
 use openalpaca_core::gateway::DelegationInfo;
 use serde::Deserialize;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 
 use crate::client::DaemonClient;
 
@@ -18,9 +18,31 @@ pub struct ChatSendResponse {
     pub lane_key: String,
 }
 
-#[derive(Default)]
 pub struct StreamOptions {
     pub verbose: bool,
+    /// Whether **stdout is a terminal**, which is what decides how a turn is
+    /// shown (S2, S13).
+    ///
+    /// A terminal is a live view: the model's tokens are printed as they
+    /// arrive and its reasoning runs dim beside them. A pipe is somebody
+    /// else's input: it gets the authoritative answer once, at `done`, and
+    /// nothing else — deltas cannot be taken back, and since real streaming
+    /// landed they no longer concatenate to `done.content` (a multi-round turn
+    /// streams text before a tool call; a stream that broke mid-way is
+    /// answered by the non-streaming fallback).
+    pub tty: bool,
+}
+
+impl Default for StreamOptions {
+    /// Not `derive(Default)`: `false` would mean "no terminal", and every
+    /// caller that writes `&Default::default()` is a real invocation whose
+    /// stdout can be asked.
+    fn default() -> Self {
+        Self {
+            verbose: false,
+            tty: std::io::stdout().is_terminal(),
+        }
+    }
 }
 
 pub struct UsageInfo {
@@ -134,13 +156,16 @@ impl ChatTarget {
         self
     }
 
-    /// Declare that nobody will be here to answer a tool-approval prompt (M6).
+    /// Declare that nobody will be here to answer a tool-approval prompt (M6,
+    /// scoped by S10).
     ///
-    /// The one-shot (`--message`) and the pipe are the two ways in that end
-    /// with the process: a workflow they start raises its confirmations long
-    /// after the stream they were watching is `done`, so the prompt reaches
-    /// nobody and the run sits on it until the 300 s timeout — five and a half
-    /// minutes per tool call, which is what the acceptance run measured.
+    /// Set when this process has no terminal on stdin or on stdout
+    /// (`crate::unattended`): a redirected run raises its confirmations into a
+    /// pipe nobody reads, and the run sits on each one until the 300 s timeout
+    /// — five and a half minutes per tool call, which is what the acceptance
+    /// run measured. A `--message` typed at a prompt is *not* this: the
+    /// confirmation arrives on the stream it is still reading and it asks
+    /// inline, which is the behaviour S10 gave back.
     ///
     /// This is a **declaration, not an approval**: the daemon refuses a
     /// confirm-listed tool at once and tells the model where it *can* be
@@ -235,13 +260,74 @@ pub async fn send_and_stream_with_attachments(
 #[derive(Default)]
 struct SseState {
     usage: Option<UsageInfo>,
-    had_delta: bool,
+    /// The answer text this process has already **printed** from `delta`
+    /// frames — empty on a pipe, which prints none (S13).
+    shown: String,
+    /// A dim reasoning run is open on the current line, so the answer owes it
+    /// a newline before it starts (S2).
+    reasoning_open: bool,
     /// Structured delegation metadata from the done event, if the server
     /// delegated the message to a background task.
     delegation: Option<DelegationInfo>,
     /// The `error` event's message, when one arrived — the turn failed and the
     /// caller decides what that costs (L12).
     failure: Option<String>,
+}
+
+/// What `done` still owes the reader, given what the stream already printed
+/// (S13).
+///
+/// Before real streaming the deltas always concatenated to `done.content`, so
+/// "print `done.content` when no delta arrived" was a complete rule. It is not
+/// any more: a multi-round turn streams the text the model wrote *before* a
+/// tool call, and a stream that failed mid-way is answered by the
+/// non-streaming fallback — in both cases the terminal held a prefix, or
+/// something else entirely, and never the answer.
+#[derive(Debug, PartialEq, Eq)]
+enum Reconciliation {
+    /// The reader already has the whole answer, exactly once.
+    Nothing,
+    /// Print this tail: what was shown is a strict prefix of the answer.
+    Append(String),
+    /// Print the whole answer on a fresh line: what was shown diverged from
+    /// it. The narration above stays — it is an honest record of the turn —
+    /// and the answer itself still appears exactly once.
+    Redraw(String),
+}
+
+/// Reconcile the authoritative `done.content` against what was printed.
+fn reconcile(shown: &str, content: &str) -> Reconciliation {
+    if content.is_empty() || shown == content {
+        // A delegation's `done` carries no content, and a turn whose stream
+        // was complete owes nothing.
+        return Reconciliation::Nothing;
+    }
+    match content.strip_prefix(shown) {
+        // `shown` empty (a pipe, or a turn that streamed nothing) lands here
+        // too, and prints the answer once with no leading blank line.
+        Some(tail) => Reconciliation::Append(tail.to_string()),
+        None => Reconciliation::Redraw(content.to_string()),
+    }
+}
+
+/// What a `delta` frame prints.
+///
+/// A terminal watches the model type. A pipe waits: its bytes are somebody
+/// else's input, and it must contain the final answer once and nothing else —
+/// which, now that deltas no longer concatenate to `done.content`, is only
+/// true if nothing is written before `done` (S13).
+fn delta_to_print<'a>(tty: bool, content: &'a str) -> Option<&'a str> {
+    (tty && !content.is_empty()).then_some(content)
+}
+
+/// What a `reasoning` frame prints (S2).
+///
+/// Dim, on a terminal, as it arrives — it is the 13 s a thinking model spends
+/// before its first token, and printing nothing made that look like a hang.
+/// Never on a pipe: reasoning is not the answer, and a script must not have to
+/// tell them apart.
+fn reasoning_to_print<'a>(tty: bool, text: &'a str) -> Option<&'a str> {
+    (tty && !text.is_empty()).then_some(text)
 }
 
 async fn stream_sse_events(
@@ -266,7 +352,7 @@ async fn stream_sse_events(
                             if is_confirmation_event(&event_text) {
                                 handle_confirmation_prompt(client, &event_text).await?;
                             } else {
-                                process_sse_event(&event_text, opts.verbose, &mut state)?;
+                                process_sse_event(&event_text, opts, &mut state)?;
                             }
                         }
                     }
@@ -376,7 +462,18 @@ fn find_event_boundary(buf: &str) -> Option<usize> {
     buf.find("\n\n")
 }
 
-fn process_sse_event(event_text: &str, verbose: bool, state: &mut SseState) -> Result<()> {
+/// Close an open reasoning run so the answer starts on its own line.
+fn end_reasoning(state: &mut SseState) -> Result<()> {
+    if !state.reasoning_open {
+        return Ok(());
+    }
+    state.reasoning_open = false;
+    println!();
+    std::io::stdout().flush()?;
+    Ok(())
+}
+
+fn process_sse_event(event_text: &str, opts: &StreamOptions, state: &mut SseState) -> Result<()> {
     let mut event_type = String::new();
     let mut data = String::new();
 
@@ -390,30 +487,55 @@ fn process_sse_event(event_text: &str, verbose: bool, state: &mut SseState) -> R
 
     match event_type.as_str() {
         "thinking" => {
-            if verbose {
+            if opts.verbose {
                 print!("{}", "Thinking...".dimmed());
                 std::io::stdout().flush()?;
                 print!("\r            \r");
                 std::io::stdout().flush()?;
             }
         }
+        // S2: the model's own reasoning, live. Never recorded in `shown` — it
+        // is not part of the answer and `done.content` never carries it.
+        "reasoning" => {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&data)
+                && let Some(text) = parsed["text"].as_str()
+                && let Some(visible) = reasoning_to_print(opts.tty, text)
+            {
+                print!("{}", visible.dimmed());
+                std::io::stdout().flush()?;
+                state.reasoning_open = true;
+            }
+        }
         "delta" => {
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&data)
                 && let Some(content) = parsed["content"].as_str()
+                && let Some(visible) = delta_to_print(opts.tty, content)
             {
-                print!("{}", content);
+                end_reasoning(state)?;
+                print!("{}", visible);
                 std::io::stdout().flush()?;
-                state.had_delta = true;
+                state.shown.push_str(visible);
             }
         }
         "done" => {
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&data) {
-                // BUG FIX: Print done.content if no delta events printed it
-                if !state.had_delta
-                    && let Some(content) = parsed["content"].as_str()
-                    && !content.is_empty()
-                {
-                    print!("{}", content);
+                // S13: the terminal ends on the authoritative answer, exactly
+                // once, whatever the deltas showed.
+                if let Some(content) = parsed["content"].as_str() {
+                    match reconcile(&state.shown, content) {
+                        Reconciliation::Nothing => end_reasoning(state)?,
+                        Reconciliation::Append(tail) => {
+                            end_reasoning(state)?;
+                            print!("{}", tail);
+                            state.shown.push_str(&tail);
+                        }
+                        Reconciliation::Redraw(answer) => {
+                            end_reasoning(state)?;
+                            println!();
+                            print!("{}", answer);
+                            state.shown = answer;
+                        }
+                    }
                 }
 
                 // Capture structured delegation metadata if present
