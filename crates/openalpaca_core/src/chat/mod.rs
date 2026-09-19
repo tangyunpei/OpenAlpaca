@@ -6,4 +6,4 @@ pub mod turn_sink;
 
 pub use service::{ChatService, preflight_attachments};
 pub use stream_manager::{ChatStreamEvent, ChatStreamManager, StreamSink};
-pub use turn_sink::{TurnSink, TurnSinkHandle};
+pub use turn_sink::{TurnSink, TurnSinkHandle, delta_forwarder};

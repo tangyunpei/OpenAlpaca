@@ -6,6 +6,7 @@ use super::{
     apply_send_keepalive, detect_active_send_hints, resolve_send_tool_choice,
     sanitize_parts_for_dispatch,
 };
+use crate::chat::delta_forwarder;
 use crate::compose::{
     ComposeOverrides, ComposeRequest, ConnectorSummary, DynamicContextInput, DynamicContextMode,
     HistoryInput, HistoryMode, PersonaInput, PersonaMode, StaticPromptInput, StaticPromptMode,
@@ -27,29 +28,6 @@ use chrono::Utc;
 use openalpaca_llm::{ChatMessage, ContentPart};
 use openalpaca_storage::repository::LlmUsageRepository;
 use uuid::Uuid;
-
-/// S1: the bridge from the provider's stream to the turn's chat stream.
-///
-/// `LoopConfig.stream_callback` is called once per event from inside the
-/// provider's stream, so this only forwards and returns. Every variant is
-/// named rather than swept under a `_` arm: a new `StreamEvent` should make
-/// someone decide whether the client wants it, not vanish silently.
-fn delta_forwarder(sink: &crate::chat::TurnSinkHandle) -> crate::runner::StreamCallback {
-    let sink = sink.clone();
-    std::sync::Arc::new(move |event: &openalpaca_llm::StreamEvent| match event {
-        openalpaca_llm::StreamEvent::TextDelta { text } => sink.text_delta(text),
-        // S2: Anthropic's extended thinking and Ollama's `reasoning` arrive
-        // as the same event. It is shown and dropped, never persisted.
-        openalpaca_llm::StreamEvent::ThinkingDelta { thinking } => {
-            sink.reasoning_delta(thinking)
-        }
-        openalpaca_llm::StreamEvent::ToolUseStart { .. }
-        | openalpaca_llm::StreamEvent::InputJsonDelta { .. }
-        | openalpaca_llm::StreamEvent::Usage(_)
-        | openalpaca_llm::StreamEvent::Done { .. }
-        | openalpaca_llm::StreamEvent::Error { .. } => {}
-    })
-}
 
 impl Orchestrator {
     #[allow(clippy::too_many_arguments)]

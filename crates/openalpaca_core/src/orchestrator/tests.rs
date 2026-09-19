@@ -3555,6 +3555,7 @@ Dump.
         false,
         None,
         false,
+        None,
     )
     .await
     .expect("the skill runs");
@@ -3606,6 +3607,7 @@ async fn the_top_level_invocation_site_refuses_on_the_same_predicate() {
                 false,
                 None,
                 false,
+                None,
             )
             .await
             .expect_err("the invocation site refuses independently of the /slash tier");
@@ -4322,6 +4324,547 @@ async fn reasoning_reaches_the_sink_and_never_the_answer() {
     assert!(
         !answer.contains("the user wants a capital"),
         "reasoning must never be persisted as content"
+    );
+}
+
+// ── K1: the deterministic skill tier streams too ─────────────────────
+
+/// A file-based skill, `/echo`, with whatever tool names the caller allows.
+///
+/// `mode: auto` matches the shipped skills; the slash command takes priority
+/// over the router either way (`intent/skill_match.rs:24`).
+fn catalog_with_echo_skill(
+    registry: Arc<ToolRegistry>,
+    allow: &[&str],
+) -> (tempfile::TempDir, Arc<skill_catalog::SkillCatalog>) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path().join("echoer");
+    std::fs::create_dir_all(&dir).unwrap();
+    let tools = if allow.is_empty() {
+        String::new()
+    } else {
+        let names: String = allow.iter().map(|n| format!("    - {n}\n")).collect();
+        format!("tools:\n  allow:\n{names}")
+    };
+    std::fs::write(
+        dir.join("SKILL.md"),
+        format!(
+            r#"---
+name: "Echoer"
+description: "Echoes what it is given"
+invoke:
+  slash: "/echo"
+  mode: "auto"
+{tools}---
+
+## Instructions
+
+Echo.
+"#
+        ),
+    )
+    .unwrap();
+    let catalog = skill_catalog::SkillCatalog::new();
+    catalog.scan_directory(tmp.path(), crate::middleware::skill::SkillScope::Project);
+    catalog.set_availability_oracle(registry);
+    (tmp, Arc::new(catalog))
+}
+
+fn orchestrator_with_skill(
+    provider: Arc<dyn openalpaca_llm::LlmProvider>,
+    registry: Arc<ToolRegistry>,
+    catalog: Arc<skill_catalog::SkillCatalog>,
+) -> Orchestrator {
+    orchestrator_with_skill_and_config(provider, registry, catalog, DaemonConfig::default())
+}
+
+fn orchestrator_with_skill_and_config(
+    provider: Arc<dyn openalpaca_llm::LlmProvider>,
+    registry: Arc<ToolRegistry>,
+    catalog: Arc<skill_catalog::SkillCatalog>,
+    config: DaemonConfig,
+) -> Orchestrator {
+    let router = openalpaca_llm::LlmRouter::single_provider(
+        provider,
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    );
+    let bus = EventBus::default();
+    let gate = make_security_gate_with_registry(&bus, registry.clone());
+    Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        bus,
+        SystemPersona::default(),
+        Some(Arc::new(router)),
+        LoopConfig::default(),
+        gate,
+        registry,
+        None,
+        None,
+        catalog,
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(config)),
+    )
+}
+
+/// A provider whose answer exists only on the streaming path, and whose stream
+/// **parks before `Done`** until the test releases it. `chat()` answers with a
+/// marker: an answer of "NOT STREAMED" means the skill loop never streamed.
+struct ParkedStreamingSkillLlm {
+    release: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+
+#[async_trait]
+impl openalpaca_llm::LlmProvider for ParkedStreamingSkillLlm {
+    fn name(&self) -> &str {
+        "parked-streaming-skill-mock"
+    }
+
+    fn supports_tools(&self) -> bool {
+        false
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    async fn chat(
+        &self,
+        _request: ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        use openalpaca_llm::{ChatResponse, FinishReason, Usage};
+        Ok(ChatResponse {
+            content: "NOT STREAMED".to_string(),
+            tool_calls: vec![],
+            model: "mock-model".to_string(),
+            usage: Usage {
+                input_tokens: 12,
+                output_tokens: 8,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        })
+    }
+
+    async fn chat_streaming(
+        &self,
+        _request: ChatRequest,
+    ) -> Result<openalpaca_llm::ChatStream, openalpaca_llm::LlmError> {
+        use futures_util::StreamExt;
+        use openalpaca_llm::{FinishReason, LlmError, StreamEvent, Usage};
+
+        let release = self
+            .release
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
+        let head: Vec<Result<StreamEvent, LlmError>> = vec![
+            Ok(StreamEvent::ThinkingDelta {
+                thinking: "which word do they want".to_string(),
+            }),
+            Ok(StreamEvent::TextDelta {
+                text: "live".to_string(),
+            }),
+            Ok(StreamEvent::TextDelta {
+                text: " from the skill".to_string(),
+            }),
+            Ok(StreamEvent::Usage(Usage {
+                input_tokens: 12,
+                output_tokens: 8,
+                ..Default::default()
+            })),
+        ];
+        let tail = futures_util::stream::once(async move {
+            if let Some(rx) = release {
+                let _ = rx.await;
+            }
+            Ok(StreamEvent::Done {
+                finish_reason: FinishReason::Stop,
+            })
+        });
+        Ok(Box::pin(futures_util::stream::iter(head).chain(tail)))
+    }
+}
+
+fn recorded_text(recorder: &RecordingTurnSink) -> Vec<String> {
+    recorder
+        .text
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+}
+
+/// **K1.** A `/slash` skill's answer reaches the client *while the model is
+/// still producing it*, not as one delta after the whole generation.
+///
+/// The ordering is asserted against the turn's completion, not against a
+/// clock: the provider's stream parks before `Done`, so every delta the
+/// recorder holds when the test releases it was forwarded while the skill
+/// invocation was still running.
+#[tokio::test]
+async fn a_skill_tiers_deltas_arrive_before_the_skill_completes() {
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let registry = make_tool_registry();
+    let (_tmp, catalog) = catalog_with_echo_skill(registry.clone(), &[]);
+    let orch = Arc::new(orchestrator_with_skill(
+        Arc::new(ParkedStreamingSkillLlm {
+            release: std::sync::Mutex::new(Some(release_rx)),
+        }),
+        registry,
+        catalog,
+    ));
+
+    let recorder = Arc::new(RecordingTurnSink::default());
+    let sink = crate::chat::TurnSinkHandle::new(recorder.clone());
+
+    let turn = tokio::spawn({
+        let orch = Arc::clone(&orch);
+        let sink = sink.clone();
+        async move {
+            orch.handle_message(HandleRequest {
+                turn_sink: Some(sink),
+                ..HandleRequest::new(
+                    Uuid::new_v4(),
+                    "gui",
+                    "/echo hello",
+                    Principal::System,
+                    Scope::Global,
+                    "test:gui",
+                )
+            })
+            .await
+        }
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while recorded_text(&recorder).len() < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no text delta reached the sink while the skill was still running"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        !turn.is_finished(),
+        "the deltas must arrive before the skill completes, and it is still parked"
+    );
+
+    release_tx.send(()).expect("the turn is still parked");
+    let answer = turn
+        .await
+        .expect("the turn task must not panic")
+        .expect("the skill turn should be answered");
+
+    assert_eq!(
+        recorded_text(&recorder),
+        ["live", " from the skill"],
+        "each provider delta is forwarded verbatim, as it arrives"
+    );
+    assert!(sink.saw_text(), "the handle remembers that text was streamed");
+    assert_eq!(
+        answer, "live from the skill",
+        "the streamed content is the skill's answer"
+    );
+}
+
+/// **K1 + S2.** The skill tier's reasoning rides the same sink and stays out
+/// of the answer, exactly as the main loop's does.
+#[tokio::test]
+async fn a_skill_tiers_reasoning_reaches_the_sink_and_never_the_answer() {
+    let registry = make_tool_registry();
+    let (_tmp, catalog) = catalog_with_echo_skill(registry.clone(), &[]);
+    let orch = orchestrator_with_skill(
+        Arc::new(ParkedStreamingSkillLlm {
+            release: std::sync::Mutex::new(None),
+        }),
+        registry,
+        catalog,
+    );
+
+    let recorder = Arc::new(RecordingTurnSink::default());
+    let sink = crate::chat::TurnSinkHandle::new(recorder.clone());
+
+    let answer = orch
+        .handle_message(HandleRequest {
+            turn_sink: Some(sink),
+            ..HandleRequest::new(
+                Uuid::new_v4(),
+                "gui",
+                "/echo hello",
+                Principal::System,
+                Scope::Global,
+                "test:gui",
+            )
+        })
+        .await
+        .expect("the skill turn should be answered");
+
+    assert_eq!(
+        recorder
+            .reasoning
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_slice(),
+        ["which word do they want"],
+        "the reasoning delta is forwarded, not dropped"
+    );
+    assert_eq!(answer, "live from the skill");
+    assert!(
+        !answer.contains("which word do they want"),
+        "reasoning must never be persisted as the skill's content"
+    );
+}
+
+/// **K1, the guard.** A skill invoked with no sink — a scheduled skill, a
+/// connector, the follow-up runner, a nested `invoke_skill` — is unchanged:
+/// no callback, the non-streaming path it always took.
+#[tokio::test]
+async fn a_skill_invoked_without_a_sink_does_not_stream() {
+    let registry = make_tool_registry();
+    let (_tmp, catalog) = catalog_with_echo_skill(registry.clone(), &[]);
+    let orch = orchestrator_with_skill(
+        Arc::new(ParkedStreamingSkillLlm {
+            release: std::sync::Mutex::new(None),
+        }),
+        registry,
+        catalog,
+    );
+
+    let answer = orch
+        .handle_message(HandleRequest::new(
+            Uuid::new_v4(),
+            "cli",
+            "/echo hello",
+            Principal::System,
+            Scope::Global,
+            "test:cli",
+        ))
+        .await
+        .expect("the skill turn should be answered");
+
+    assert_eq!(
+        answer, "NOT STREAMED",
+        "with no sink the skill loop takes the non-streaming path it always took"
+    );
+}
+
+/// A provider for the tool-bearing skill arm: round one streams a whole tool
+/// call the way Ollama sends one (start + arguments together, V1's shape),
+/// round two streams the answer. It records every request so the test can
+/// check the forced `ToolChoice` survived the streaming path.
+struct StreamingSendSkillLlm {
+    round: std::sync::atomic::AtomicUsize,
+    seen: Arc<Mutex<Vec<ChatRequest>>>,
+}
+
+#[async_trait]
+impl openalpaca_llm::LlmProvider for StreamingSendSkillLlm {
+    fn name(&self) -> &str {
+        "streaming-send-skill-mock"
+    }
+
+    fn supports_tools(&self) -> bool {
+        true
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    async fn chat(
+        &self,
+        _request: ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        Err(openalpaca_llm::LlmError::NotConfigured)
+    }
+
+    async fn chat_streaming(
+        &self,
+        request: ChatRequest,
+    ) -> Result<openalpaca_llm::ChatStream, openalpaca_llm::LlmError> {
+        use openalpaca_llm::{FinishReason, LlmError, StreamEvent, Usage};
+        self.seen
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(request);
+        let round = self
+            .round
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let events: Vec<Result<StreamEvent, LlmError>> = if round == 0 {
+            vec![
+                Ok(StreamEvent::ToolUseStart {
+                    index: 0,
+                    id: "call_k1".to_string(),
+                    name: "send".to_string(),
+                }),
+                Ok(StreamEvent::InputJsonDelta {
+                    index: 0,
+                    partial_json: r#"{"channel":"cli","message":"hello"}"#.to_string(),
+                }),
+                Ok(StreamEvent::Usage(Usage {
+                    input_tokens: 20,
+                    output_tokens: 10,
+                    ..Default::default()
+                })),
+                Ok(StreamEvent::Done {
+                    finish_reason: FinishReason::ToolUse,
+                }),
+            ]
+        } else {
+            vec![
+                Ok(StreamEvent::TextDelta {
+                    text: "sent it".to_string(),
+                }),
+                Ok(StreamEvent::Usage(Usage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    ..Default::default()
+                })),
+                Ok(StreamEvent::Done {
+                    finish_reason: FinishReason::Stop,
+                }),
+            ]
+        };
+        Ok(Box::pin(futures_util::stream::iter(events)))
+    }
+}
+
+/// **K1, the tool arm.** A skill whose resolved surface contains `send` runs
+/// with `initial_tool_choice = Tool("send")`; that forced first round, and the
+/// single-frame tool call it answers with (V1), must still work now that the
+/// tier streams — and the round-two text still reaches the sink.
+#[tokio::test]
+async fn a_streaming_skill_keeps_its_forced_tool_choice() {
+    let registry = ToolRegistry::default();
+    registry.register(make_mock_tool("send")).unwrap();
+    let registry = Arc::new(registry);
+    let (_tmp, catalog) = catalog_with_echo_skill(registry.clone(), &["send"]);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let orch = orchestrator_with_skill(
+        Arc::new(StreamingSendSkillLlm {
+            round: std::sync::atomic::AtomicUsize::new(0),
+            seen: seen.clone(),
+        }),
+        registry,
+        catalog,
+    );
+
+    let recorder = Arc::new(RecordingTurnSink::default());
+    let sink = crate::chat::TurnSinkHandle::new(recorder.clone());
+
+    let answer = orch
+        .handle_message(HandleRequest {
+            turn_sink: Some(sink),
+            ..HandleRequest::new(
+                Uuid::new_v4(),
+                "gui",
+                "/echo hello",
+                Principal::System,
+                Scope::Global,
+                "test:gui",
+            )
+        })
+        .await
+        .expect("the skill turn should be answered");
+
+    let requests = seen.lock().unwrap_or_else(|p| p.into_inner());
+    assert_eq!(requests.len(), 2, "one forced tool round, then the answer");
+    assert!(
+        matches!(
+            requests[0].tool_choice,
+            Some(openalpaca_llm::ToolChoice::Tool(ref t)) if t == "send"
+        ),
+        "the forced initial tool choice must reach the streaming request, got {:?}",
+        requests[0].tool_choice
+    );
+    assert_eq!(
+        recorded_text(&recorder),
+        ["sent it"],
+        "the round-two text streams like any other"
+    );
+    assert_eq!(answer, "sent it");
+}
+
+// ── K2(b): a skill turn that reaches no answer says why ──────────────
+
+struct FailingBuiltInTool;
+
+#[async_trait::async_trait]
+impl BuiltInTool for FailingBuiltInTool {
+    async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+        Err("missing required parameter: target".to_string())
+    }
+}
+
+/// **K2(b) / V3.** A skill turn that spends its whole round budget on a
+/// failing tool answers with the runtime's own line — the reason, and the last
+/// tool error — instead of the empty string that reached the client as a `/`
+/// command with no answer at all. The same few lines the main loop has
+/// (`a_turn_that_reaches_no_answer_says_why`), on the tier that was missing
+/// them.
+#[tokio::test]
+async fn a_skill_turn_that_reaches_no_answer_says_why() {
+    let registry = ToolRegistry::default();
+    registry
+        .register(RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: "flaky".to_string(),
+                description: "Fails".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: ToolBackend::BuiltIn(Arc::new(FailingBuiltInTool)),
+            provides_capabilities: vec![],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+    let registry = Arc::new(registry);
+    let (_tmp, catalog) = catalog_with_echo_skill(registry.clone(), &["flaky"]);
+
+    let mut config = DaemonConfig::default();
+    config.execution.skill_defaults.max_rounds = 2;
+    let orch = orchestrator_with_skill_and_config(
+        Arc::new(AlwaysToolCallingMock),
+        registry,
+        catalog,
+        config,
+    );
+
+    let reply = orch
+        .handle_message(HandleRequest::new(
+            Uuid::new_v4(),
+            "cli",
+            "/echo do the thing",
+            Principal::System,
+            Scope::Global,
+            "test:cli",
+        ))
+        .await
+        .expect("the skill turn should be answered");
+
+    assert!(
+        !reply.trim().is_empty(),
+        "a skill turn must never end with nothing at all"
+    );
+    assert!(
+        reply.contains("without reaching an answer"),
+        "the line names the reason: {reply}"
+    );
+    assert!(
+        reply.contains("The last tool error was:"),
+        "…and the error it kept hitting: {reply}"
+    );
+    assert!(
+        !reply.contains("[tool_error]"),
+        "the loop's own marker is not shown to the reader (W2): {reply}"
     );
 }
 

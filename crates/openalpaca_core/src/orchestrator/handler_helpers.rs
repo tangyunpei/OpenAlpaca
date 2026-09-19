@@ -64,6 +64,10 @@ impl Orchestrator {
         stream_id: Option<&str>,
         // M6/S5 — the client behind this turn cannot answer a confirmation.
         unattended: bool,
+        // K1 — where this turn's text deltas go while the model is still
+        // producing them. `None` for every caller with nobody watching a
+        // stream (scheduled skills, connectors, the follow-up runner).
+        turn_sink: Option<&crate::chat::TurnSinkHandle>,
     ) -> Result<String, String> {
         self.bus.publish(SystemEvent::IntentClassified {
             request_id,
@@ -129,6 +133,7 @@ impl Orchestrator {
             was_auto_selected,
             stream_id,
             unattended,
+            turn_sink,
         )
         .await
     }

@@ -49,6 +49,11 @@ impl Orchestrator {
         stream_id: Option<&str>,
         // S5 — the client behind this turn cannot answer a confirmation.
         unattended: bool,
+        // K1 — the turn's live text rail. A file-based skill's loop streams
+        // through it exactly like the main loop's; a plugin-backed skill
+        // cannot (its answer comes back finished over the plugin protocol)
+        // and keeps the chat service's single fallback delta.
+        turn_sink: Option<&crate::chat::TurnSinkHandle>,
     ) -> Result<SkillInvocationResult, String> {
         // Look up the catalog entry (for skill_dir) and load full skill (Level 2)
         let entry = self
@@ -410,6 +415,15 @@ impl Orchestrator {
             .orchestrator
             .sessions
             .tool_result_inline_bytes;
+
+        // **K1 — the skill tier streams like any other turn.** Set the same
+        // way the main loop sets it (`query_handler/simple_query_handler.rs`),
+        // from the same shared `delta_forwarder`, and set after both arms
+        // because both build their config from `self.loop_config` — which
+        // never carries a callback. With no sink (a scheduled skill, a
+        // connector, the follow-up runner, a nested `invoke_skill`) this is
+        // `None` and the loop takes the non-streaming path it always took.
+        config_for_loop.stream_callback = turn_sink.map(crate::chat::delta_forwarder);
 
         // ── Route system-prompt + message-list assembly through the layered
         // compose engine (Phase 5 Commit 1 — Skill Invocation migration).
@@ -871,10 +885,52 @@ impl Orchestrator {
             inv_cost_usd = call_cost;
             inv_model_used = result.model_used.clone();
 
+            // **K2(b) — a skill turn never ends with nothing either.**
+            //
+            // The same few lines the main loop has
+            // (`query_handler/simple_query_handler.rs`, V3): a loop that
+            // exhausted its rounds, its cost budget or the model's output
+            // limit used to hand the client `""`, which on the skill tier
+            // then went through output validation and arrived as an empty
+            // answer. The runtime writes the line instead — the reason in the
+            // user's terms plus the last tool error — and it is the turn's
+            // content, so it streams, persists and returns like an answer.
+            //
+            // It bypasses validation and the `max_length` cut on purpose: it
+            // is the chat layer's sentence, not the skill's declared output,
+            // exactly as the partial-loss prefix below is. An LLM **error**
+            // keeps its error channel (V3's recorded deviation) and only its
+            // message changes.
+            let no_answer = result.no_answer_line();
             if let LoopFinishReason::Error(ref err) = result.finish_reason
                 && result.final_content.trim().is_empty()
             {
-                return Err(format!("LLM error: {}", err));
+                return Err(no_answer.unwrap_or_else(|| format!("LLM error: {}", err)));
+            }
+            if let Some(line) = no_answer {
+                tracing::warn!(
+                    request_id = %request_id,
+                    skill = skill_name,
+                    finish_reason = ?result.finish_reason,
+                    rounds = result.rounds_used,
+                    "Skill turn produced no answer text; answering with the runtime line"
+                );
+                return Ok(SkillInvocationResult {
+                    content: match requirements.chat_prefix() {
+                        Some(prefix) => format!("{prefix}{line}"),
+                        None => line,
+                    },
+                    finish_reason: inv_finish_reason,
+                    rounds_used: inv_rounds_used,
+                    tool_calls_made: inv_tool_calls_made,
+                    input_tokens: inv_input_tokens,
+                    output_tokens: inv_output_tokens,
+                    cost_usd: inv_cost_usd,
+                    model_used: inv_model_used,
+                    repair_attempted: false,
+                    repair_succeeded: false,
+                    validation_failures: Vec::new(),
+                });
             }
 
             // Post-hoc guard: detect hallucinated send confirmations.

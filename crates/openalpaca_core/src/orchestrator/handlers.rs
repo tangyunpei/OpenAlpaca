@@ -176,6 +176,11 @@ impl Orchestrator {
                 // declaration has to arrive here too, or the turn sits out
                 // the whole confirmation timeout with nobody to answer.
                 unattended,
+                // K1: and for the same reason, the turn's live rail. A
+                // `/slash` answer used to reach the client as one delta after
+                // the whole generation — a silent minute on a local model —
+                // while the main loop two arms below streamed.
+                turn_sink.as_ref(),
             )
             .await
         } else if let Some(reply) = self.withdrawn_skill_reply(&intent_source_content) {

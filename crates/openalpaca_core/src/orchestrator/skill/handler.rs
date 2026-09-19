@@ -43,6 +43,8 @@ impl Orchestrator {
         was_auto_selected: bool,
         stream_id: Option<&str>,
         unattended: bool,
+        // K1 — the turn's live text rail, when a client is watching one.
+        turn_sink: Option<&crate::chat::TurnSinkHandle>,
     ) -> Result<String, String> {
         let invocation_start = std::time::Instant::now();
 
@@ -57,7 +59,7 @@ impl Orchestrator {
         let result = self
             .handle_skill_invocation_inner(
                 request_id, source, skill_name, query, lane_key, ctx, owner_id, scope_ctx,
-                stream_id, unattended,
+                stream_id, unattended, turn_sink,
             )
             .await;
 
