@@ -220,14 +220,6 @@ interface ConfirmationMeta {
    * fallback.
    */
   taskId: string | null;
-  /**
-   * When *this client* first learned the prompt exists, on its own clock.
-   *
-   * Not `at`, which is the daemon's stamp: this is compared against the moment
-   * a `GET /v1/chat/confirmations` answer landed, and the two clocks have to be
-   * the same one for that comparison to mean anything (T1).
-   */
-  seenAtMs: number;
 }
 
 /**
@@ -242,6 +234,11 @@ interface ConfirmationMeta {
  * absence counts as evidence. Localhost answers in single-digit milliseconds;
  * two seconds is three orders of magnitude of headroom and still settles a
  * timed-out card within one poll.
+ *
+ * The sighting it is measured from is {@link useChatSession}'s own, taken off
+ * the rendered card list rather than off one transport (R2): a card the SSE
+ * frame drew and the WebSocket twin never described has no `confirmationMeta`
+ * entry, and reading "no record" as "old enough" is the same bug again.
  */
 export const SNAPSHOT_SETTLE_GRACE_MS = 2_000;
 
@@ -602,7 +599,6 @@ export function useChatSession(): ChatSession {
               at: event.ts,
               agentId: event.agent_id,
               taskId: event.task_id,
-              seenAtMs: Date.now(),
             },
           },
     );
@@ -640,6 +636,31 @@ export function useChatSession(): ChatSession {
   shownConfirmationsRef.current = shownConfirmations;
   const dismissConfirmation = stream.dismissConfirmation;
 
+  /**
+   * When this hook first *saw* each card, on its own clock (R2).
+   *
+   * Off the rendered list, so it does not depend on which transport drew the
+   * card: the SSE frame carries no `agent_id` and no `task_id`, so it is the
+   * WebSocket twin that fills `confirmationMeta` — and a twin that is late or
+   * lost used to leave the card with no sighting at all, which the
+   * snapshot-absence signal below read as "old enough to settle". A card with
+   * nothing on record is treated as just-seen, never as old.
+   *
+   * A request id is never reused, so entries are only cleared with the rest of
+   * the conversation's session-local state.
+   */
+  const firstSeenAtMs = useRef(new Map<string, number>());
+  const noteFirstSeen = useCallback((requestId: string): number => {
+    const seen = firstSeenAtMs.current.get(requestId);
+    if (seen !== undefined) return seen;
+    const now = Date.now();
+    firstSeenAtMs.current.set(requestId, now);
+    return now;
+  }, []);
+  useEffect(() => {
+    for (const card of shownConfirmations) noteFirstSeen(card.request_id);
+  }, [shownConfirmations, noteFirstSeen]);
+
   useEffect(() => {
     if (pendingRows === undefined) return;
     const fresh = pendingRows.filter(
@@ -660,13 +681,14 @@ export function useChatSession(): ChatSession {
     const stillPending = new Set(pendingRows.map((row) => row.request_id));
     for (const card of shownConfirmationsRef.current) {
       if (stillPending.has(card.request_id)) continue;
-      const meta = confirmationMetaRef.current[card.request_id];
       // A prompt raised while this GET was in flight is legitimately missing
       // from its answer; only an absence older than the round trip is
-      // evidence.
+      // evidence. The sighting is this hook's own and covers every transport,
+      // so a card whose `confirmationMeta` never arrived is protected rather
+      // than settled on the spot (R2).
       if (
-        meta !== undefined &&
-        meta.seenAtMs > snapshotAtMs - SNAPSHOT_SETTLE_GRACE_MS
+        noteFirstSeen(card.request_id) >
+        snapshotAtMs - SNAPSHOT_SETTLE_GRACE_MS
       )
         continue;
       dismissConfirmation(card.request_id);
@@ -675,6 +697,8 @@ export function useChatSession(): ChatSession {
     if (fresh.length === 0) return;
 
     for (const row of fresh) {
+      // No `stream_id`: the snapshot's rows carry none, and a card with no
+      // stream on it is one the turn-ended signal leaves alone (R1).
       adoptConfirmation({
         request_id: row.request_id,
         tool_name: row.tool_name,
@@ -691,7 +715,6 @@ export function useChatSession(): ChatSession {
           at: row.raised_at,
           agentId: row.agent_id,
           taskId: row.task_id,
-          seenAtMs: Date.now(),
         };
       }
       return next;
@@ -702,6 +725,7 @@ export function useChatSession(): ChatSession {
     laneKey,
     adoptConfirmation,
     dismissConfirmation,
+    noteFirstSeen,
   ]);
 
   /**
@@ -751,19 +775,28 @@ export function useChatSession(): ChatSession {
    * the turn that started the workflow finished (G1) — so a card carrying a
    * `task_id` is left alone here and retired by its run's own `task_status`.
    *
+   * **This turn's own prompts, and nobody else's** (R1). The `{owner}:gui`
+   * lane is shared — a CLI turn or a second window runs its own main loop on
+   * it (owner decision T18) — and its prompts arrive here with `task_id: null`
+   * exactly like this turn's. The argument above is about *one* loop being
+   * blocked, so it licenses retiring only the cards that loop raised: the
+   * stream is what says which, and a card whose stream is unknown (the
+   * snapshot carries none) is left to the other two signals. Retiring a live
+   * one would be worse than the bug this signal exists for, because
+   * `confirmationMeta` keeps a retired card from ever being re-adopted.
+   *
    * Only a terminal frame the **daemon** sent counts. A transport error is
    * this client losing the socket, not the turn ending, and the daemon may
-   * still be waiting for the answer — retiring the card there would take the
-   * only way to give it away, and `confirmationMeta` keeps a retired card from
-   * ever being re-adopted.
+   * still be waiting for the answer.
    */
   const daemonEndedTurn =
     stream.state.phase === "done" ||
     (stream.state.phase === "error" && stream.state.error?.transport === false);
   const streamId = stream.state.streamId;
   useEffect(() => {
-    if (!daemonEndedTurn) return;
+    if (!daemonEndedTurn || streamId === null) return;
     for (const card of shownConfirmationsRef.current) {
+      if ((card.stream_id ?? null) !== streamId) continue;
       const meta = confirmationMetaRef.current[card.request_id];
       if (meta !== undefined && meta.taskId !== null) continue;
       dismissConfirmation(card.request_id);
@@ -908,6 +941,7 @@ export function useChatSession(): ChatSession {
     setResolutions([]);
     setSteers([]);
     setConfirmationMeta({});
+    firstSeenAtMs.current.clear();
     started.current.clear();
     stream.reset();
   }, [history.data, stream.active, stream.reset]);

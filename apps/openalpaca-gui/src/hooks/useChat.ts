@@ -200,6 +200,9 @@ export function useChatStream(
             request_id: event.request_id,
             tool_name: event.tool_name,
             tool_arguments: event.tool_arguments,
+            // Which turn raised it, so a terminal frame can retire this
+            // window's own prompts and leave another client's alone (R1).
+            stream_id: event.stream_id,
           },
         });
       }),

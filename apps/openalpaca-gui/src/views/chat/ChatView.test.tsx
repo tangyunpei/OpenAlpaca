@@ -343,6 +343,20 @@ async function sendMessage(text: string): Promise<FakeEventSource> {
 }
 
 /**
+ * Let a refetched `GET /v1/chat/confirmations` reach the view.
+ *
+ * `invalidateQueries` resolves before React has committed the new answer, so
+ * the signal that settles cards by absence runs a tick later. A test asserting
+ * that a card *survived* a snapshot has to give it that tick, or it proves
+ * nothing.
+ */
+async function settleSnapshot(): Promise<void> {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
+/**
  * `GET /v1/status`'s body — the store roots, this request's project, and the
  * `llm` block the composer seeds its model from (G9).
  */
@@ -1370,6 +1384,129 @@ describe("ChatView — a confirmation nobody answered (T1)", () => {
     // one from here.
     expect(screen.queryByText("Timed out")).toBeNull();
     expect(screen.queryByText("Approved")).toBeNull();
+  });
+});
+
+/**
+ * Round 11 — the same bug as T1 with the sign flipped: a settle signal that
+ * retires a prompt the daemon is *still waiting on*. That is the worse
+ * direction, because `confirmationMeta` keeps a retired card from being
+ * re-adopted: the run then waits out its whole timeout with nothing on screen.
+ */
+describe("ChatView — a settle signal never retires a live prompt (R1, R2)", () => {
+  /**
+   * R1. The `{owner}:gui` lane is shared (owner decision T18): a CLI turn or a
+   * second window runs its own main loop on it, and its prompts arrive here
+   * with `task_id: null` exactly like this window's own. Only the stream tells
+   * them apart.
+   */
+  it("retires only the prompts this window's own turn raised", async () => {
+    renderChat();
+    const source = await sendMessage("update my persona");
+    await act(async () => {
+      emitServerEvent({
+        type: "tool_confirmation_requested",
+        request_id: "req-mine",
+        agent_id: "orchestrator",
+        tool_name: "update_persona",
+        tool_arguments: { section: "USER.md" },
+        stream_id: "stream-1",
+        lane_key: "user:gui",
+        task_id: null,
+      });
+      emitServerEvent({
+        type: "tool_confirmation_requested",
+        request_id: "req-theirs",
+        agent_id: "orchestrator",
+        tool_name: "web_search",
+        tool_arguments: { query: "alpaca shearing" },
+        // Another client's turn on the same lane: its own stream, and no run
+        // of its own either.
+        stream_id: "stream-cli",
+        lane_key: "user:gui",
+        task_id: null,
+      });
+    });
+    expect(
+      await screen.findByText("Confirmation required · update_persona"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Confirmation required · web_search"),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      source.emit("done", {
+        content: "The persona write timed out waiting for confirmation.",
+        model: "qwen3:8b",
+        tokens_in: 40,
+        tokens_out: 12,
+        duration_ms: 601_000,
+      });
+    });
+
+    await waitFor(() =>
+      expect(
+        screen.queryByText("Confirmation required · update_persona"),
+      ).toBeNull(),
+    );
+    // `done` re-reads the pending list too, and that answer must not finish
+    // off what the terminal frame spared.
+    await settleSnapshot();
+    // The other client's turn is still blocked on its answer, and this window
+    // is showing it — so it stays, and the composer stays paused.
+    expect(
+      screen.getByText("Confirmation required · web_search"),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("Message")).toBeNull();
+  });
+
+  /**
+   * R2. The SSE frame draws the card; the WebSocket twin is what fills
+   * `confirmationMeta`. A twin that is late or lost left the card with no
+   * sighting on record, and the snapshot signal read "no record" as "old
+   * enough to settle" — with no grace at all.
+   */
+  it("protects a card the WebSocket twin never described, then settles it", async () => {
+    // The grace is a clock comparison, so the test owns the clock.
+    let now = 1_760_000_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const client = renderChat();
+    const source = await sendMessage("update my persona");
+
+    // The SSE frame alone — nothing on the socket, so nothing fills the meta.
+    await act(async () => {
+      source.emit("confirmation_requested", {
+        request_id: "req-sse-only",
+        tool_name: "update_persona",
+        tool_arguments: { section: "USER.md" },
+      });
+    });
+    expect(
+      await screen.findByText("Confirmation required · update_persona"),
+    ).toBeInTheDocument();
+
+    // A snapshot that was in flight when the prompt was raised cannot list it.
+    now += 500;
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["chat", "confirmations"] });
+    });
+    await settleSnapshot();
+    expect(
+      screen.getByText("Confirmation required · update_persona"),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("Message")).toBeNull();
+
+    // A minute on, the absence is evidence and the same signal settles it.
+    now += 60_000;
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["chat", "confirmations"] });
+    });
+    await waitFor(() =>
+      expect(
+        screen.queryByText("Confirmation required · update_persona"),
+      ).toBeNull(),
+    );
+    expect(await screen.findByLabelText("Message")).toBeInTheDocument();
   });
 });
 

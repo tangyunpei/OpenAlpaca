@@ -69,11 +69,22 @@ export interface ChatStreamDone {
   delegation?: DelegationInfo;
 }
 
-/** SSE `confirmation_requested`. The WS twin adds `agent_id`/`stream_id`/`lane_key`. */
+/** SSE `confirmation_requested`. The WS twin adds `agent_id`/`lane_key`. */
 export interface ChatConfirmationRequest {
   request_id: string;
   tool_name: string;
   tool_arguments: unknown;
+  /**
+   * The chat turn that raised it (R1) — this client's own stream when the SSE
+   * frame drew the card, the frame's `stream_id` when the WebSocket twin did.
+   *
+   * `null`/absent means *unknown*, not "no stream": `GET /v1/chat/confirmations`
+   * carries none, so a card seeded from the snapshot has no stream on it. A
+   * consumer that retires cards on a turn's terminal frame must therefore act
+   * on a match and never on the absence of one — the lane is shared, and
+   * another client's main-loop prompt looks exactly like this one's.
+   */
+  stream_id?: string | null;
 }
 
 /**
@@ -231,6 +242,11 @@ export function chatStreamReducer(
 
     case "confirmation": {
       // Deliberately not gated on `terminal`: see the note above.
+      //
+      // The first sighting wins, `stream_id` included — so a card seeded from
+      // the snapshot keeps its unknown stream even when a live frame follows.
+      // That is the conservative side of R1: a consumer acts on a stream it
+      // knows, never on one it does not.
       const seen = state.pendingConfirmations.some(
         (c) => c.request_id === action.request.request_id,
       );
@@ -379,6 +395,9 @@ export function attachChatStream(
             ? payload.tool_name
             : "unknown_tool",
         tool_arguments: payload.tool_arguments ?? null,
+        // The frame does not name a stream and does not have to: it *is* this
+        // one (R1).
+        stream_id: streamId,
       },
     });
     // Deliberately does NOT close — the same stream continues after the

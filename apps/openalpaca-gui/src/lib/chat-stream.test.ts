@@ -373,6 +373,42 @@ describe("attachChatStream", () => {
     expect(actions.at(-1)).toMatchObject({ type: "confirmation" });
   });
 
+  /**
+   * R1 — the card carries the stream that raised it.
+   *
+   * The SSE frame does not name one and does not have to: it *is* the stream,
+   * and the handle knows which. Without it a turn's terminal frame cannot tell
+   * its own prompt from one another client raised on the same shared lane.
+   */
+  it("stamps a confirmation with the stream it arrived on", () => {
+    const fake = fakeSource();
+    const actions: ChatStreamAction[] = [];
+    attachChatStream(fake.source, {
+      streamId: "s1",
+      laneKey: "l",
+      onAction: (a) => actions.push(a),
+    });
+
+    fake.emit(
+      "confirmation_requested",
+      JSON.stringify({
+        request_id: "r1",
+        tool_name: "shell_execute",
+        tool_arguments: {},
+      }),
+    );
+
+    expect(actions.at(-1)).toEqual({
+      type: "confirmation",
+      request: {
+        request_id: "r1",
+        tool_name: "shell_execute",
+        tool_arguments: {},
+        stream_id: "s1",
+      },
+    });
+  });
+
   it("reports a malformed done frame as a server error", () => {
     const fake = fakeSource();
     const actions: ChatStreamAction[] = [];
