@@ -1527,18 +1527,38 @@ Keep-alive comments every `server.sse_keep_alive_secs` (default **15 s**).
 **Lifecycle (from `chat/service.rs::send_message` and `routes/chat.rs`):**
 
 1. Client `POST /v1/chat` → `{ stream_id, lane_key }`. The handler synchronously
-   creates the broadcast channel (`ChatStreamManager::create_stream`, capacity **128**)
+   creates the broadcast channel (`ChatStreamManager::create_stream`, capacity **1024**)
    **before** returning, then spawns the work task and publishes
    `SystemEvent::ChatStreamStarted` → WS `chat_stream_started`.
 2. The spawned task **sleeps 100 ms** before the first event, explicitly to give the
    client time to subscribe. **The client must open the EventSource immediately on
    receiving `stream_id` — do not await anything else first.**
-3. `thinking` — sent once, after the sleep. Data is literally `{}`.
-4. `delta` — `{ "content": "<chunk>" }`, one per `stream_chunk_words` words
-   (default **3**), spaced `stream_chunk_delay_ms` (default **30 ms**). Chunks preserve
-   exact bytes (whitespace/newlines/indentation) — concatenating all `delta.content`
-   reproduces the final text. Note: this is **simulated** streaming — the daemon has the
-   full response before the first delta.
+3. `thinking` — sent once, after the sleep. Data is literally `{}`. It is the
+   placeholder for "the turn started and nothing is written yet", and it is sent
+   whether or not the model reasons.
+4. `delta` — `{ "content": "<chunk>" }`. **Real streaming since S1**: one frame per
+   provider delta, as the provider produces it, with the exact bytes it produced
+   (whitespace/newlines/indentation preserved). A turn that streams nothing — a
+   deterministic tier, a provider without streaming, a stream that failed and was
+   answered by the non-streaming fallback — sends exactly **one** delta carrying the
+   finished answer. The two knobs that paced the old simulated chunker,
+   `server.chat_streams.stream_chunk_words` and `stream_chunk_delay_ms`, **no longer
+   exist** (a hand-edited `daemon.toml` still carrying one gets a boot WARN).
+   **The deltas of a turn no longer necessarily concatenate to `done.content`**: a
+   multi-round turn streams the text the model wrote before a tool call, and a stream
+   that broke mid-way is followed by the whole answer in `done`. Treat the accumulated
+   buffer as a live preview and **replace** it on `done` — this client does
+   (`lib/chat-stream.ts`, `case "done"`).
+   4a. `reasoning` — `{ "text": "<chunk>" }` (S2). The model thinking out loud, forwarded
+   as it arrives: Anthropic's extended thinking, and an OpenAI-compatible provider's
+   `delta.reasoning` / `reasoning_content`, which is what a local thinking model on
+   Ollama emits. The field is `text`, **not** `content`, deliberately: it is not part
+   of the answer. Nothing persists it — `done.content` never carries it and
+   `GET /v1/chat/history` never replays it — so a client that wants to show it must
+   show it live. This window renders it muted, collapsible and height-capped inside
+   the thinking indicator; the CLI prints it dim on a terminal and not at all into a
+   pipe. A provider that reasons silently sends none, and `thinking` alone is then the
+   whole of the pre-answer signal.
 5. `confirmation_requested` — `{ request_id, tool_name, tool_arguments }`. May arrive
    **at any point before `done`**, including before any `delta`. It does **not**
    terminate the stream; the same stream continues after
@@ -1553,6 +1573,16 @@ Keep-alive comments every `server.sse_keep_alive_secs` (default **15 s**).
    nobody was asked for. Nothing announces a prompt that timed out or was answered
    elsewhere, so the honest way to retire a card is a terminal `task_status` for the
    run named on the frame.
+   **`GET /v1/chat/confirmations` (S9) is the snapshot of what is still waiting** —
+   `{ "confirmations": [{ request_id, tool_name, tool_arguments, task_id, agent_id,
+lane_key, raised_at }] }`, oldest first, RFC 3339 `raised_at`, an empty list (not
+   an error) on a daemon with no broker. The frames are live-only with no replay, so
+   this is the only way a window that opened after a prompt was raised can learn it
+   exists: seed the pending list from it on load and on every reconnect (a resync
+   invalidates the cache, which is what re-reads it here). It is a **poll, not a
+   subscription** — an entry can be answered a microsecond after it is read — and the
+   read is unscoped (R40), so filter it to your own lane exactly as you filter the WS
+   frames. Answering stays owner-scoped on the unchanged `POST` sibling.
 6. **Terminal:** exactly one of
    - `done` — `{ content, model, tokens_in, tokens_out, duration_ms, attachments_used?, delegation? }`.
      `content` is the **full** text (not the tail) — prefer it over the accumulated
@@ -1599,7 +1629,11 @@ let buf = "";
 es.addEventListener("thinking", () => setPhase("thinking"));
 es.addEventListener("delta", (e) => {
   buf += JSON.parse(e.data).content;
-  render(buf);
+  render(buf); // a live preview — `done.content` replaces it
+});
+es.addEventListener("reasoning", (e) => {
+  // NOT the answer: never append this to `buf`.
+  showThinking(JSON.parse(e.data).text);
 });
 es.addEventListener("confirmation_requested", (e) =>
   openConfirmCard(JSON.parse(e.data)),

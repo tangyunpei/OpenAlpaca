@@ -109,11 +109,11 @@
 
 - Source: `apps/openalpaca/src/commands/confirmations.rs`
 - Enum `ConfirmationCommands` variants:
-  - `list` (fields: `limit`, `format`)
+  - `list` (fields: `format`)
   - `watch`
   - `approve` (fields: `request_id`, `entire_tool`)
   - `deny` (fields: `request_id`)
-- Parsed flags: `--entire-tool`, `--format`, `--limit`
+- Parsed flags: `--entire-tool`, `--format`
 
 ### `connector`
 

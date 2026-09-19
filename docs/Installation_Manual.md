@@ -250,8 +250,12 @@ openalpaca chat --message "say hello in five words"
   provider, never a `✗`, and `llm keys list` gives it a row saying the same.
 - **Cost 0.** Prices come from the router's live catalogue, so a discovered
   local model costs nothing: usage shows real token counts against `$0.00`.
-- **Streaming.** A local reply arrives token by token, and the token counts
-  come back on the stream itself.
+- **Streaming.** A local reply arrives token by token — the provider's own
+  deltas, forwarded as it produces them — and the token counts come back on the
+  stream itself. A thinking model's reasoning comes with it, on its own
+  `reasoning` frame: the GUI shows it in the thinking indicator and the CLI
+  dims it at a terminal, so the ten seconds before the first token no longer
+  look like a hang. Nothing stores reasoning; it is live or it is gone.
 - **The configured model may not be yours.** Every shipped agent template, and
   the seeded `[orchestrator] model`, names a Claude id. Those are right when
   Anthropic is configured and fall through a fallback ladder when it is not:

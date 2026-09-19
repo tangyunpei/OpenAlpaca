@@ -41,6 +41,7 @@
 | GET | `/v1/artifacts/{id}` | `artifacts.ts` | `apps/openalpaca-gui/src/lib/api/artifacts.ts` |
 | GET | `/v1/artifacts` | `artifacts.ts` | `apps/openalpaca-gui/src/lib/api/artifacts.ts` |
 | POST | `/v1/chat/confirmations/{request_id}` | `chat.ts` | `apps/openalpaca-gui/src/lib/api/chat.ts` |
+| GET | `/v1/chat/confirmations` | `chat.ts` | `apps/openalpaca-gui/src/lib/api/chat.ts` |
 | GET | `/v1/chat/history` | `chat.ts` | `apps/openalpaca-gui/src/lib/api/chat.ts` |
 | DELETE | `/v1/chat/history` | `chat.ts` | `apps/openalpaca-gui/src/lib/api/chat.ts` |
 | GET | `/v1/chat/messages/{id}/feedback` | `chat.ts` | `apps/openalpaca-gui/src/lib/api/chat.ts` |
@@ -159,8 +160,8 @@
 ### `chat.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/chat.ts`
-- Exported functions: `clearChatHistory`, `deleteMessageFeedback`, `getChatHistory`, `getMessageFeedback`, `respondToConfirmation`, `setMessageFeedback`
-- Endpoints: `GET /v1/chat/history`, `DELETE /v1/chat/history`, `POST /v1/chat/confirmations/{request_id}`, `PUT /v1/chat/messages/{id}/feedback`, `GET /v1/chat/messages/{id}/feedback`, `DELETE /v1/chat/messages/{id}/feedback`
+- Exported functions: `clearChatHistory`, `deleteMessageFeedback`, `getChatHistory`, `getMessageFeedback`, `listPendingConfirmations`, `respondToConfirmation`, `setMessageFeedback`
+- Endpoints: `GET /v1/chat/history`, `DELETE /v1/chat/history`, `GET /v1/chat/confirmations`, `POST /v1/chat/confirmations/{request_id}`, `PUT /v1/chat/messages/{id}/feedback`, `GET /v1/chat/messages/{id}/feedback`, `DELETE /v1/chat/messages/{id}/feedback`
 
 ### `connectors.ts`
 

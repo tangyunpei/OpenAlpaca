@@ -128,9 +128,12 @@ off from 1 s to a 30 s ceiling with ±20 % jitter (`src/lib/events.ts`).
 
 **Streaming a turn.** Sending is `POST /v1/chat`, which answers
 `{ stream_id, lane_key }`; the reply arrives on
-`GET /v1/chat/stream/{stream_id}?token=…` (SSE). The `done` frame carries the
-full content, not the tail, and is the source of truth — accumulated deltas are
-only a live preview (`src/lib/chat-stream.ts`).
+`GET /v1/chat/stream/{stream_id}?token=…` (SSE). The deltas are the model's own
+tokens as the provider produces them, and their sum is **not** necessarily the
+answer — a turn that calls a tool streams the text written before the call — so
+the `done` frame's full content is the source of truth and replaces the preview
+(`src/lib/chat-stream.ts`). A `reasoning` frame carries the model thinking out
+loud; it is never appended to the answer, and nothing stores it.
 
 **Auth.** HTTP requests carry the discovery bearer token in a header. The
 WebSocket, the SSE stream and the artifact content routes take `?token=`
@@ -225,6 +228,14 @@ replace it, which is why ↵ can never mean both "send" and "approve".
 `Always allow` sends `approval_scope: "entire_tool"`, which the daemon honours
 for the rest of the session.
 
+**A thinking model shows its thinking.** A local reasoning model can spend ten
+seconds or more before its first token. While the turn is thinking, the
+`thinking…` indicator beside `Alpaca` becomes a disclosure control and the
+reasoning runs live underneath it: muted mono type in a box with its own scroll
+and a fixed height, so it cannot push the composer down the screen. Click the
+label to collapse or reopen it. It is live only — the daemon keeps reasoning
+out of the message it stores, so a reloaded transcript shows the answer alone.
+
 **A confirmation outlives the turn that started it.** A workflow asks for
 approval minutes after the chat turn that launched it has finished, so the
 prompt is held against the *conversation*, not against that turn's stream: the
@@ -233,6 +244,15 @@ card appears whenever the daemon raises it, the run card in the Work pane says
 answer it or when the run it belongs to finishes (the daemon announces nothing
 when a prompt times out, so a finished run is the signal). A confirmation
 raised on another lane never blocks this composer.
+
+**A prompt raised before the window opened is picked up too.** The frames are
+live-only with no replay, so a reload — or a second window, or restarting the
+app while a background run is blocked — used to show no card at all while the
+daemon waited out the timeout. The window now reads
+`GET /v1/chat/confirmations`, the daemon's list of what is *still waiting*, on
+load and again whenever the socket reconnects, and draws a card for each prompt
+that belongs to this lane. A card this window has already retired is not
+brought back by it.
 
 The composer can also be *aimed*: `Steer` on a run card points it at that run
 (`POST /v1/tasks/{id}/steer`, which answers `accepted` and the inbox depth),
