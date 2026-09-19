@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { parseInlineCode, parseProse, type ProseBlock } from "./prose";
+import {
+  parseInlineCode,
+  parseProse,
+  splitTableRow,
+  type ProseBlock,
+} from "./prose";
 
 /** The paragraph text of a block, for the assertions that only want that. */
 function paragraphText(block: ProseBlock | undefined): string {
@@ -129,5 +134,187 @@ describe("parseProse", () => {
       (block) => block.key,
     );
     expect(new Set(keys).size).toBe(keys.length);
+  });
+});
+
+/**
+ * T3 — what the transcript showed in the first real session on a local model:
+ * a fenced code block as stray backticks, a table as raw `| a | b |` lines,
+ * `## Heading` raw, `---` as three dashes, and an ordered list that restarted
+ * at "1." after a code block.
+ */
+describe("fenced code (T3)", () => {
+  it("takes a fenced block whole, with its language", () => {
+    const blocks = parseProse(
+      "try this:\n\n```rust\nlet x = 1;\n\nlet y = 2;\n```\n\nand then run it",
+    );
+
+    expect(blocks.map((block) => block.kind)).toEqual([
+      "paragraph",
+      "code",
+      "paragraph",
+    ]);
+    const code = blocks[1];
+    if (code?.kind !== "code") throw new Error("expected code");
+    expect(code.language).toBe("rust");
+    // Blank lines inside the fence belong to the block, not to the splitter.
+    expect(code.text).toBe("let x = 1;\n\nlet y = 2;");
+    expect(code.open).toBe(false);
+  });
+
+  it("leaves the block's own markup alone — it is shown as written", () => {
+    const blocks = parseProse("```\n- **not** a list\n| not | a table |\n```");
+    const code = blocks[0];
+    if (code?.kind !== "code") throw new Error("expected code");
+    expect(code.text).toBe("- **not** a list\n| not | a table |");
+    expect(code.language).toBeNull();
+  });
+
+  it("accepts tildes, and a longer fence than the one that opened it", () => {
+    const tildes = parseProse("~~~py\nprint(1)\n~~~");
+    expect(tildes[0]?.kind).toBe("code");
+
+    const longer = parseProse("```\nbody\n`````");
+    const code = longer[0];
+    if (code?.kind !== "code") throw new Error("expected code");
+    expect(code.text).toBe("body");
+    expect(code.open).toBe(false);
+  });
+
+  /**
+   * The streaming half. Every delta re-parses the whole answer, so the moment
+   * the opening fence lands the block has to *be* a block — showing three
+   * backticks and then swapping them for a `<pre>` is the flicker.
+   */
+  it("renders a half-received fence as an open code block", () => {
+    const opened = parseProse("here:\n\n```ts\nconst a =");
+    expect(opened.map((block) => block.kind)).toEqual(["paragraph", "code"]);
+    const code = opened[1];
+    if (code?.kind !== "code") throw new Error("expected code");
+    expect(code.open).toBe(true);
+    expect(code.text).toBe("const a =");
+
+    // Even the bare fence, one character into the block.
+    const bare = parseProse("```");
+    expect(bare[0]?.kind).toBe("code");
+  });
+});
+
+describe("headings and thematic breaks (T3)", () => {
+  it("reads # through #### as headings, with inline spans", () => {
+    const blocks = parseProse(
+      "# One\n## Two\n### Three\n#### Four\n##### Five is prose",
+    );
+    expect(blocks.map((block) => block.kind)).toEqual([
+      "heading",
+      "heading",
+      "heading",
+      "heading",
+      "paragraph",
+    ]);
+    expect(
+      blocks.map((block) => (block.kind === "heading" ? block.level : 0)),
+    ).toEqual([1, 2, 3, 4, 0]);
+
+    const emphasised = parseProse("## The `llm.toml` **rule**");
+    const heading = emphasised[0];
+    if (heading?.kind !== "heading") throw new Error("expected a heading");
+    expect(heading.segments).toEqual([
+      { text: "The ", code: false },
+      { text: "llm.toml", code: true },
+      { text: " ", code: false },
+      { text: "rule", code: false, strong: true },
+    ]);
+  });
+
+  it("needs a space after the hashes", () => {
+    const blocks = parseProse("#nothashtag");
+    expect(blocks[0]?.kind).toBe("paragraph");
+  });
+
+  it("reads ---, *** and ___ as a thematic break", () => {
+    for (const rule of ["---", "***", "___", "-----"]) {
+      const blocks = parseProse(`before\n${rule}\nafter`);
+      expect(blocks.map((block) => block.kind)).toEqual([
+        "paragraph",
+        "rule",
+        "paragraph",
+      ]);
+    }
+  });
+
+  it("does not mistake a bullet for a break", () => {
+    const blocks = parseProse("- one\n- two");
+    expect(blocks.map((block) => block.kind)).toEqual(["list"]);
+  });
+});
+
+describe("tables (T3)", () => {
+  it("reads a pipe table with its header", () => {
+    const blocks = parseProse(
+      "| Model | Context |\n|---|---:|\n| qwen3:8b | 8192 |\n| llama3 | 4096 |",
+    );
+    const table = blocks[0];
+    if (table?.kind !== "table") throw new Error("expected a table");
+    expect(table.header.map((cell) => cell[0]?.text)).toEqual([
+      "Model",
+      "Context",
+    ]);
+    expect(table.rows).toHaveLength(2);
+    expect(table.rows[0]?.map((cell) => cell[0]?.text)).toEqual([
+      "qwen3:8b",
+      "8192",
+    ]);
+  });
+
+  it("needs its delimiter row — a header alone is still prose", () => {
+    const blocks = parseProse("| Model | Context |\nnot a delimiter");
+    expect(blocks.map((block) => block.kind)).toEqual(["paragraph"]);
+  });
+
+  /** Half-received: the header and the rule have arrived, no rows yet. */
+  it("renders a table whose rows have not streamed in yet", () => {
+    const blocks = parseProse("| a | b |\n|---|---|");
+    const table = blocks[0];
+    if (table?.kind !== "table") throw new Error("expected a table");
+    expect(table.rows).toEqual([]);
+  });
+
+  it("pads a short row rather than leaving it ragged", () => {
+    const blocks = parseProse("| a | b | c |\n|---|---|---|\n| 1 | 2 |");
+    const table = blocks[0];
+    if (table?.kind !== "table") throw new Error("expected a table");
+    expect(table.rows[0]).toHaveLength(3);
+    expect(table.rows[0]?.[2]).toEqual([]);
+  });
+
+  it("keeps an escaped pipe inside its cell", () => {
+    expect(splitTableRow("| a \\| b | c |")).toEqual(["a | b", "c"]);
+  });
+});
+
+describe("ordered lists across an interleaved block (T3)", () => {
+  it("resumes at the marker the model wrote, not at 1", () => {
+    const blocks = parseProse(
+      "1. first\n\n```\nsome code\n```\n\n2. second\n3. third",
+    );
+    expect(blocks.map((block) => block.kind)).toEqual(["list", "code", "list"]);
+    const first = blocks[0];
+    const resumed = blocks[2];
+    if (first?.kind !== "list" || resumed?.kind !== "list")
+      throw new Error("expected lists");
+    expect(first.start).toBe(1);
+    expect(resumed.start).toBe(2);
+    expect(resumed.items.map((item) => item[0]?.text)).toEqual([
+      "second",
+      "third",
+    ]);
+  });
+
+  it("leaves a bullet list's start at 1", () => {
+    const blocks = parseProse("- a\n- b");
+    const list = blocks[0];
+    if (list?.kind !== "list") throw new Error("expected a list");
+    expect(list.start).toBe(1);
   });
 });
