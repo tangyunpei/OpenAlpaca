@@ -108,6 +108,11 @@ export interface PendingTurn {
   sent: string;
   at: string;
   steer: SteerRef | null;
+  /**
+   * The files this turn carried (T5), so the row shows them the moment it is
+   * sent and not only once history comes back with the links.
+   */
+  attachments: AttachmentInfo[];
 }
 
 /**
@@ -154,6 +159,16 @@ export type TranscriptItem =
       text: string;
       time: string | null;
       steer: SteerRef | null;
+      /**
+       * The files this turn carried in (T5) — `role='attachment'` links on the
+       * stored message, or the chips the composer just sent.
+       *
+       * They are shown *as files*. The daemon also writes a text rendering of
+       * them into the row's `display_text` ("…\n[Attachments: notes.txt]") for
+       * surfaces that can only print a string; this window is not one, and
+       * printing that suffix as if the person had typed it is what T5 found.
+       */
+      attachments: AttachmentInfo[];
     }
   | {
       kind: "assistant";
@@ -332,13 +347,20 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
     const body = message.display_text ?? message.content;
 
     if (message.role === "user") {
-      const parsed = parseUserContent(body);
+      // `content`, never `display_text` (T5). The two differ on exactly one
+      // kind of row — a turn that carried files, where `display_text` is the
+      // text the person typed plus `\n[Attachments: a.txt, b.png]`, built by
+      // the daemon for a client that can only print a string. This one draws
+      // the links instead, so the suffix would be the same fact told twice,
+      // the second time as if the person had typed it.
+      const parsed = parseUserContent(message.content);
       push(at, {
         kind: "user",
         key: `m${message.id}`,
         text: parsed.text,
         time: message.created_at,
         steer: parsed.steered ? { mode: "steer", label: steerLabel } : null,
+        attachments: toAttachments(message.attachments),
       });
       continue;
     }
@@ -404,6 +426,9 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
       text: entry.text,
       time: entry.at,
       steer: { mode: entry.mode, label: entry.label },
+      // Neither route takes attachments, so a steer or a follow-up never
+      // carries one.
+      attachments: [],
     });
   }
 
@@ -414,6 +439,7 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
       text: pending.text,
       time: pending.at,
       steer: pending.steer,
+      attachments: pending.attachments,
     });
   }
 

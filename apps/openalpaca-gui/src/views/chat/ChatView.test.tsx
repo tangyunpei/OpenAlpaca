@@ -1137,6 +1137,243 @@ describe("ChatView — pending confirmations seeded from the daemon (S9)", () =>
 });
 
 /**
+ * T1 — the card that never went away.
+ *
+ * Two `update_persona` prompts were raised, nobody answered, the daemon waited
+ * out 300 s each and the turn finished saying so — and the window still showed
+ * "update_persona is waiting on you · composer paused until answered", because
+ * the only thing that ever settled a card was a resolution this client had
+ * posted itself. Three signals settle one now, and none of them is trusted
+ * alone.
+ */
+describe("ChatView — a confirmation nobody answered (T1)", () => {
+  /** The frame that puts a main-loop card on screen for this window's turn. */
+  function mainLoopPrompt(overrides: Record<string, unknown> = {}) {
+    return {
+      type: "tool_confirmation_requested",
+      request_id: "req-unanswered",
+      agent_id: "orchestrator",
+      tool_name: "update_persona",
+      tool_arguments: { section: "USER.md" },
+      stream_id: "stream-1",
+      lane_key: "user:gui",
+      // The main loop runs no workflow: this is the `task_id: null` half.
+      task_id: null,
+      ...overrides,
+    };
+  }
+
+  /**
+   * T4 comes with it: the main loop is not a template, so the card used to
+   * read "unknown is blocked on this."
+   */
+  it("names the main loop after the assistant, not 'unknown'", async () => {
+    renderChat();
+    const source = await sendMessage("remember that I prefer short answers");
+    await act(async () => {
+      emitServerEvent(mainLoopPrompt());
+    });
+
+    expect(
+      await screen.findByText(
+        "Alpaca is blocked on this. Answer in the composer to continue.",
+      ),
+    ).toBeInTheDocument();
+    expect(source.closed).toBe(false);
+  });
+
+  /** Signal 1: the pending list no longer contains it. */
+  it("settles a card the daemon no longer lists, and unpauses the composer", async () => {
+    // The snapshot's grace window is a clock comparison, so the test owns the
+    // clock: a card is immune to an absence younger than the round trip that
+    // could have raced it.
+    let now = 1_760_000_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+
+    pendingConfirmationRows = [
+      {
+        request_id: "req-gone",
+        tool_name: "update_persona",
+        tool_arguments: { section: "USER.md" },
+        task_id: null,
+        agent_id: "orchestrator",
+        lane_key: "user:gui",
+        raised_at: "2026-09-18T17:10:05+00:00",
+      },
+    ];
+    const client = renderChat();
+
+    expect(
+      await screen.findByText("Confirmation required · update_persona"),
+    ).toBeInTheDocument();
+    // Paused: §3.16a replaces the textarea outright while a card is up.
+    expect(screen.queryByLabelText("Message")).toBeNull();
+    expect(
+      screen.getByText("composer paused until answered"),
+    ).toBeInTheDocument();
+
+    // The daemon gave up on it. Nothing else says so — no frame, no answer.
+    pendingConfirmationRows = [];
+    now += 60_000;
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["chat", "confirmations"] });
+    });
+
+    await waitFor(() =>
+      expect(
+        screen.queryByText("Confirmation required · update_persona"),
+      ).toBeNull(),
+    );
+    expect(await screen.findByLabelText("Message")).toBeInTheDocument();
+  });
+
+  /** Signal 2: the turn that raised it reached its terminal frame. */
+  it("settles an unanswered main-loop prompt when its turn ends", async () => {
+    renderChat();
+    const source = await sendMessage("update my persona twice");
+    await act(async () => {
+      emitServerEvent(mainLoopPrompt());
+    });
+    expect(
+      await screen.findByText("Confirmation required · update_persona"),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("Message")).toBeNull();
+
+    // The turn finishes having given up on both prompts — which is exactly
+    // what the daemon did, and it sent nothing between the two frames.
+    await act(async () => {
+      source.emit("done", {
+        content: "Both writes timed out waiting for confirmation.",
+        model: "qwen3:8b",
+        tokens_in: 40,
+        tokens_out: 12,
+        duration_ms: 601_000,
+      });
+    });
+
+    await waitFor(() =>
+      expect(
+        screen.queryByText("Confirmation required · update_persona"),
+      ).toBeNull(),
+    );
+    expect(await screen.findByLabelText("Message")).toBeInTheDocument();
+  });
+
+  /**
+   * …but a workflow's prompt routinely *outlives* the turn that started the
+   * workflow (G1), so the rule above must not touch one.
+   */
+  it("leaves a run's prompt alone when a turn ends", async () => {
+    renderChat();
+    const source = await sendMessage("write up the alpaca facts");
+    await act(async () => {
+      emitServerEvent({
+        type: "tool_confirmation_requested",
+        request_id: "req-run",
+        agent_id: "lead_agent",
+        tool_name: "artifact_write",
+        tool_arguments: { name: "01-alpaca-facts.md" },
+        stream_id: null,
+        lane_key: null,
+        task_id: "run-1",
+      });
+    });
+    expect(
+      await screen.findByText("Confirmation required · artifact_write"),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      source.emit("done", {
+        content: "Started a run.",
+        model: "qwen3:8b",
+        tokens_in: 12,
+        tokens_out: 4,
+        duration_ms: 900,
+        delegation: { task_id: "run-1", title: "Alpaca facts" },
+      });
+    });
+
+    expect(
+      screen.getByText("Confirmation required · artifact_write"),
+    ).toBeInTheDocument();
+  });
+
+  /** Signal 3: the daemon says so — and says the tool did not run. */
+  it("renders the timed-out outcome as its own resolution", async () => {
+    renderChat();
+    await sendMessage("update my persona");
+    await act(async () => {
+      emitServerEvent(mainLoopPrompt({ request_id: "req-timeout" }));
+    });
+    expect(
+      await screen.findByText("Confirmation required · update_persona"),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      emitServerEvent({
+        type: "tool_confirmation_resolved",
+        request_id: "req-timeout",
+        agent_id: "orchestrator",
+        tool_name: "update_persona",
+        outcome: "timed_out",
+        stream_id: "stream-1",
+        lane_key: "user:gui",
+        task_id: null,
+      });
+    });
+
+    await waitFor(() =>
+      expect(
+        screen.queryByText("Confirmation required · update_persona"),
+      ).toBeNull(),
+    );
+    expect(screen.getByText("Timed out")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "update_persona timed out — not run. Nobody answered in time, so the agent continued without it.",
+      ),
+    ).toBeInTheDocument();
+    expect(await screen.findByLabelText("Message")).toBeInTheDocument();
+  });
+
+  /** An answer given elsewhere settles the card and writes no row of its own. */
+  it("settles on an answer posted by another client without inventing a row", async () => {
+    renderChat();
+    await sendMessage("update my persona");
+    await act(async () => {
+      emitServerEvent(mainLoopPrompt({ request_id: "req-elsewhere" }));
+    });
+    expect(
+      await screen.findByText("Confirmation required · update_persona"),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      emitServerEvent({
+        type: "tool_confirmation_resolved",
+        request_id: "req-elsewhere",
+        agent_id: "orchestrator",
+        tool_name: "update_persona",
+        outcome: "approved",
+        stream_id: "stream-1",
+        lane_key: "user:gui",
+        task_id: null,
+      });
+    });
+
+    await waitFor(() =>
+      expect(
+        screen.queryByText("Confirmation required · update_persona"),
+      ).toBeNull(),
+    );
+    // This client answered nothing, so it claims nothing — and G6's richer
+    // row, which only its own POST can write, is not overwritten by a plainer
+    // one from here.
+    expect(screen.queryByText("Timed out")).toBeNull();
+    expect(screen.queryByText("Approved")).toBeNull();
+  });
+});
+
+/**
  * G6 — a resolved card still reading "approved · waiting for the tool to run…"
  * minutes after the tool had run and the turn had finished.
  *
@@ -2791,8 +3028,12 @@ describe("ChatView — composer attachments (U5, U3)", () => {
     await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
     expect(chatBody().attachments).toEqual([{ file_id: "file-notes.txt" }]);
 
-    // Accepted ⇒ the chips are the turn's now, not the composer's.
-    await waitFor(() => expect(screen.queryByText("notes.txt")).toBeNull());
+    // Accepted ⇒ the chips are the turn's now, not the composer's. The file
+    // does not vanish: it moves into the row that carried it, as a file (T5).
+    await waitFor(() =>
+      expect(screen.queryByRole("list", { name: "Attachments" })).toBeNull(),
+    );
+    expect(screen.getByText("notes.txt")).toBeInTheDocument();
   });
 
   it("shows the daemon's own refusal and never sends the refused file", async () => {
@@ -3038,5 +3279,52 @@ describe("ChatView — composer attachments (U5, U3)", () => {
     await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
     expect(chatBody().attachments).toEqual([{ file_id: "file-notes.txt" }]);
     expect(uploads()).toHaveLength(1);
+  });
+});
+
+/**
+ * T5 — the user's bubble shows a file as a file.
+ *
+ * After sending a message with an attachment the row read `What is the
+ * codeword…?` followed by the literal text `[Attachments: tauri-codeword.txt]`.
+ * That suffix is the daemon's `display_text` — the typed content plus a
+ * rendering of the links for a client that can only print one string — and
+ * this window draws the links themselves.
+ */
+describe("ChatView — a user turn's own files (T5)", () => {
+  it("shows a stored turn's file, and never the augmentation suffix", async () => {
+    historyReply = () =>
+      json({
+        messages: [
+          {
+            id: 1,
+            lane_key: "user:gui",
+            role: "user",
+            content: "What is the codeword?",
+            display_text:
+              "What is the codeword?\n[Attachments: tauri-codeword.txt]",
+            attachments: [
+              {
+                file_id: "file-1",
+                filename: "tauri-codeword.txt",
+                mime_type: "text/plain",
+                size_bytes: 54,
+              },
+            ],
+            created_at: "2026-09-18 17:04:00",
+          },
+        ],
+        total: 1,
+        lane_key: "user:gui",
+        session_id: "sess-1",
+      });
+    renderChat();
+
+    expect(
+      await screen.findByText("What is the codeword?"),
+    ).toBeInTheDocument();
+    // The file is a card, not a sentence.
+    expect(screen.getByText("tauri-codeword.txt")).toBeInTheDocument();
+    expect(screen.queryByText(/\[Attachments:/)).toBeNull();
   });
 });

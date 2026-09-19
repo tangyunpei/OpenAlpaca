@@ -11,7 +11,13 @@
 
 import { describe, expect, it } from "vitest";
 
-import { agentDisplayName, confirmationBelongsHere } from "./useChatSession";
+import { ASSISTANT_NAME } from "@/components/chat";
+
+import {
+  agentDisplayName,
+  confirmationBelongsHere,
+  MAIN_LOOP_AGENT_ID,
+} from "./useChatSession";
 
 const HERE = "user:gui";
 
@@ -161,5 +167,34 @@ describe("agentDisplayName", () => {
     expect(agentDisplayName("mystery_agent", TEMPLATES, "")).toBe(
       "mystery_agent",
     );
+  });
+});
+
+/**
+ * T4 — the main loop has a name now.
+ *
+ * A main-loop confirmation card read "unknown is blocked on this": the main
+ * loop is not an agent template, so its `ToolContext` carried no `agent_id`
+ * and every consumer rendered the `None` as the literal `unknown`. The daemon
+ * gives it `orchestrator`; this window knows that is the assistant the person
+ * is already talking to and calls it what the transcript calls it.
+ */
+describe("agentDisplayName — the main loop (T4)", () => {
+  it("names the main loop after the assistant, not after its id", () => {
+    expect(agentDisplayName(MAIN_LOOP_AGENT_ID, new Map())).toBe(
+      ASSISTANT_NAME,
+    );
+    expect(agentDisplayName("orchestrator", new Map())).toBe("Alpaca");
+  });
+
+  /** And it answers before any table, because no table will ever hold it. */
+  it("answers even when a template list claims the id", () => {
+    expect(
+      agentDisplayName(
+        MAIN_LOOP_AGENT_ID,
+        new Map([["orchestrator", "Something Else"]]),
+        "Also Something Else",
+      ),
+    ).toBe(ASSISTANT_NAME);
   });
 });

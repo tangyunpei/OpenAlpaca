@@ -130,6 +130,7 @@ describe("live-turn lifecycle", () => {
       sent: "/steer audit",
       at: "2026-08-31T14:22:10Z",
       steer: { mode: "steer", label: "connector audit" },
+      attachments: [],
     };
     expect(showsPendingTurn(pending, [])).toBe(true);
     expect(
@@ -596,6 +597,7 @@ describe("a turn in flight, read from a timezone (G5)", () => {
           sent: "and the next one?",
           at: "2026-09-18T17:06:00.000Z",
           steer: null,
+          attachments: [],
         },
         stream: drive(OPEN),
       }),
@@ -614,5 +616,108 @@ describe("a turn in flight, read from a timezone (G5)", () => {
     // The live assistant row is last, which is what the user watches.
     const live = items[3];
     expect(live?.kind === "assistant" && live.streamPhase).toBe("thinking");
+  });
+});
+
+/**
+ * T5 — a file the turn carried is a file, not a sentence.
+ *
+ * The user row read `What is the codeword…?` followed by the literal text
+ * `[Attachments: tauri-codeword.txt]`. That string is the daemon's
+ * `display_text`: the typed content plus a rendering of the attachments for a
+ * client that can only print one string. This window draws the links, so it
+ * reads `content` and shows the files themselves.
+ */
+describe("a user turn's attachments (T5)", () => {
+  const stored = message({
+    id: 7,
+    role: "user",
+    content: "What is the codeword?",
+    display_text: "What is the codeword?\n[Attachments: tauri-codeword.txt]",
+    attachments: [
+      {
+        file_id: "file-1",
+        filename: "tauri-codeword.txt",
+        mime_type: "text/plain",
+        size_bytes: 54,
+      },
+    ],
+  });
+
+  it("shows the file and never the augmentation suffix", () => {
+    const items = buildTranscript(input({ history: [stored] }));
+    const row = items[0];
+    if (row?.kind !== "user") throw new Error("expected a user row");
+
+    expect(row.text).toBe("What is the codeword?");
+    expect(row.text).not.toContain("[Attachments:");
+    expect(row.attachments).toEqual([
+      {
+        fileId: "file-1",
+        filename: "tauri-codeword.txt",
+        mimeType: "text/plain",
+        kind: null,
+      },
+    ]);
+  });
+
+  /** A turn that carried nothing still reads exactly as it did. */
+  it("leaves an ordinary turn alone", () => {
+    const items = buildTranscript(
+      input({
+        history: [message({ id: 8, role: "user", content: "hello" })],
+      }),
+    );
+    const row = items[0];
+    if (row?.kind !== "user") throw new Error("expected a user row");
+    expect(row.text).toBe("hello");
+    expect(row.attachments).toEqual([]);
+  });
+
+  /** Live, too: the optimistic row carries what the composer just sent. */
+  it("shows the optimistic row's own files before history catches up", () => {
+    const items = buildTranscript(
+      input({
+        pending: {
+          text: "What is the codeword?",
+          sent: "What is the codeword?",
+          at: "2026-09-19T10:00:00.000Z",
+          steer: null,
+          attachments: [
+            {
+              fileId: "file-1",
+              filename: "tauri-codeword.txt",
+              mimeType: null,
+              kind: null,
+            },
+          ],
+        },
+      }),
+    );
+    const row = items[0];
+    if (row?.kind !== "user") throw new Error("expected a user row");
+    expect(row.attachments.map((a) => a.filename)).toEqual([
+      "tauri-codeword.txt",
+    ]);
+  });
+
+  /** A steer is not a chat turn and neither route takes a file. */
+  it("gives a steer row no attachments", () => {
+    const items = buildTranscript(
+      input({
+        steers: [
+          {
+            id: "s1",
+            text: "focus on the stale ones",
+            mode: "steer",
+            label: "connector audit",
+            at: "2026-09-19T10:00:00.000Z",
+          },
+        ],
+      }),
+    );
+    const row = items[0];
+    if (row?.kind !== "user") throw new Error("expected a user row");
+    expect(row.attachments).toEqual([]);
   });
 });

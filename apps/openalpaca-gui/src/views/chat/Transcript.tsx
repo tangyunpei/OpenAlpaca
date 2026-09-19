@@ -46,7 +46,17 @@ export function Transcript({ items, dense }: TranscriptProps) {
                 time={formatClock(item.time)}
                 steer={item.steer}
                 dense={dense}
-              />
+              >
+                {/* T5: a file the turn carried is drawn as a file, in the
+                    same card the rest of the transcript uses — not printed
+                    into the message as `[Attachments: …]`. */}
+                {item.attachments.map((attachment) => (
+                  <TranscriptArtifact
+                    key={attachment.fileId}
+                    attachment={attachment}
+                  />
+                ))}
+              </UserMessage>
             );
 
           case "assistant":

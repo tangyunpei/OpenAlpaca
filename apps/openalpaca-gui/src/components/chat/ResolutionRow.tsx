@@ -6,9 +6,21 @@
  * duration_ms}` arrives on the WS once the approved tool runs, so the note is
  * upgraded in place when it lands and stays honest ("waiting for the tool to
  * run…") until then.
+ *
+ * A prompt nobody answered ends the same way (T1): the daemon's wait runs out,
+ * the tool does not run, and the card that was on screen settles into this row
+ * rather than staying up for ever. It is a resolution — it just is not an
+ * answer.
  */
 
-export type Resolution = "approved" | "denied";
+export type Resolution = "approved" | "denied" | "timed_out";
+
+/** The eyebrow label for each outcome. */
+function resolutionLabel(resolution: Resolution): string {
+  if (resolution === "approved") return "Approved";
+  if (resolution === "denied") return "Denied";
+  return "Timed out";
+}
 
 export interface ResolutionRowProps {
   resolution: Resolution;
@@ -26,7 +38,7 @@ export function ResolutionRow({
   return (
     <div className="mb-[26px] flex items-center gap-[9px] rounded-xl border border-line-subtle bg-muted px-[13px] py-[11px]">
       <span className="shrink-0 font-mono text-2xs-plus tracking-eyebrow text-tertiary uppercase">
-        {resolution === "approved" ? "Approved" : "Denied"}
+        {resolutionLabel(resolution)}
       </span>
       <span className="flex-1 text-base-plus text-secondary">{note}</span>
       {time !== null && (
@@ -36,11 +48,23 @@ export function ResolutionRow({
   );
 }
 
+/**
+ * What a prompt that ran out its clock says (T1).
+ *
+ * The daemon waited the policy's confirmation timeout, nobody answered, and it
+ * refused the call — so this is a *denial with a different reason*, and the
+ * sentence says both halves: it was not answered, and the tool did not run.
+ */
+export function timedOutResolutionNote(toolName: string): string {
+  return `${toolName} timed out — not run. Nobody answered in time, so the agent continued without it.`;
+}
+
 /** The note a fresh resolution shows before any `tool_executed` arrives. */
 export function pendingResolutionNote(
   resolution: Resolution,
   toolName: string,
 ): string {
+  if (resolution === "timed_out") return timedOutResolutionNote(toolName);
   return resolution === "approved"
     ? `${toolName} approved · waiting for the tool to run…`
     : `${toolName} denied · the agent was told to skip it.`;

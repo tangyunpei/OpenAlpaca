@@ -50,11 +50,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  ASSISTANT_NAME,
   executedResolutionNote,
   formatDurationMs,
   resolutionNote,
   settlingRun,
   shortTitle,
+  timedOutResolutionNote,
   type DraftAttachment,
   type Resolution,
   type ToolRun,
@@ -131,6 +133,13 @@ export function confirmationBelongsHere(
 }
 
 /**
+ * What the daemon calls the main loop on a tool call (T4) —
+ * `openalpaca_core::orchestrator::MAIN_LOOP_AGENT_ID`. Not a template id: no
+ * template list will ever hold it.
+ */
+export const MAIN_LOOP_AGENT_ID = "orchestrator";
+
+/**
  * What to call the agent a confirmation card is waiting on — one rule for both
  * ways a prompt reaches this view (G10).
  *
@@ -149,12 +158,18 @@ export function confirmationBelongsHere(
  * list has not loaded yet still has whatever it has seen. The raw id is the
  * last resort, never a guess: `general_agent` is called "General Purpose
  * Agent", so there is no titlecasing rule to invent here.
+ *
+ * One id answers before any table (T4): the main loop is not an agent template
+ * and is in no template list, so it fell all the way through to the raw id —
+ * and until the daemon gave it one, to the literal `unknown`. It is the
+ * assistant the person is already talking to, and it is named that.
  */
 export function agentDisplayName(
   agentId: string,
   templateNames: ReadonlyMap<string, string>,
   instanceName?: string,
 ): string {
+  if (agentId === MAIN_LOOP_AGENT_ID) return ASSISTANT_NAME;
   const template = templateNames.get(agentId);
   if (template !== undefined && template !== "") return template;
   // `AgentStatusChanged.name` is empty when the instance could not be
@@ -167,6 +182,7 @@ export function agentDisplayName(
 const RUN_EVENTS = ["workflow_started", "task_status"] as const;
 const AGENT_EVENTS = ["agent_status"] as const;
 const CONFIRM_EVENTS = ["tool_confirmation_requested"] as const;
+const CONFIRM_RESOLVED_EVENTS = ["tool_confirmation_resolved"] as const;
 const TOOL_EVENTS = ["tool_executed"] as const;
 const ARTIFACT_EVENTS = ["artifact_written"] as const;
 const SESSION_EVENTS = ["session_changed"] as const;
@@ -204,7 +220,30 @@ interface ConfirmationMeta {
    * fallback.
    */
   taskId: string | null;
+  /**
+   * When *this client* first learned the prompt exists, on its own clock.
+   *
+   * Not `at`, which is the daemon's stamp: this is compared against the moment
+   * a `GET /v1/chat/confirmations` answer landed, and the two clocks have to be
+   * the same one for that comparison to mean anything (T1).
+   */
+  seenAtMs: number;
 }
+
+/**
+ * How long a card is immune to being retired by a snapshot that does not list
+ * it (T1).
+ *
+ * The snapshot is a read of what was pending when the daemon answered, and a
+ * prompt raised *while that GET was in flight* is legitimately absent from it.
+ * Retiring such a card would be the original bug with the sign flipped — the
+ * daemon still waiting, the person no longer able to answer — so a card has to
+ * have been on screen for longer than any plausible round trip before the
+ * absence counts as evidence. Localhost answers in single-digit milliseconds;
+ * two seconds is three orders of magnitude of headroom and still settles a
+ * timed-out card within one poll.
+ */
+export const SNAPSHOT_SETTLE_GRACE_MS = 2_000;
 
 interface AgentRecord {
   name: string;
@@ -563,6 +602,7 @@ export function useChatSession(): ChatSession {
               at: event.ts,
               agentId: event.agent_id,
               taskId: event.task_id,
+              seenAtMs: Date.now(),
             },
           },
     );
@@ -588,11 +628,17 @@ export function useChatSession(): ChatSession {
    * a snapshot nobody could read looks from here exactly like a snapshot with
    * nothing in it. The live frames are untouched by it.
    */
-  const pendingConfirmations = usePendingConfirmations();
+  const pendingConfirmations = usePendingConfirmations(stream.blocked);
   const pendingRows = pendingConfirmations.data;
+  const snapshotAtMs = pendingConfirmations.dataUpdatedAt;
   const confirmationMetaRef = useRef(confirmationMeta);
   confirmationMetaRef.current = confirmationMeta;
   const adoptConfirmation = stream.adoptConfirmation;
+  /** The cards on screen right now, for the handlers that retire them. */
+  const shownConfirmations = stream.state.pendingConfirmations;
+  const shownConfirmationsRef = useRef(shownConfirmations);
+  shownConfirmationsRef.current = shownConfirmations;
+  const dismissConfirmation = stream.dismissConfirmation;
 
   useEffect(() => {
     if (pendingRows === undefined) return;
@@ -605,6 +651,27 @@ export function useChatSession(): ChatSession {
           startedHere: (taskId) => started.current.has(taskId),
         }),
     );
+
+    // The other direction, and the one that unpauses the composer (T1): a
+    // card whose id is no longer in the snapshot is one nobody can answer any
+    // more. The daemon does publish a resolution now, but a modal state must
+    // never rest on a single signal — a dropped frame, a socket that was down,
+    // or an answer given from the CLI all land here instead.
+    const stillPending = new Set(pendingRows.map((row) => row.request_id));
+    for (const card of shownConfirmationsRef.current) {
+      if (stillPending.has(card.request_id)) continue;
+      const meta = confirmationMetaRef.current[card.request_id];
+      // A prompt raised while this GET was in flight is legitimately missing
+      // from its answer; only an absence older than the round trip is
+      // evidence.
+      if (
+        meta !== undefined &&
+        meta.seenAtMs > snapshotAtMs - SNAPSHOT_SETTLE_GRACE_MS
+      )
+        continue;
+      dismissConfirmation(card.request_id);
+    }
+
     if (fresh.length === 0) return;
 
     for (const row of fresh) {
@@ -624,11 +691,84 @@ export function useChatSession(): ChatSession {
           at: row.raised_at,
           agentId: row.agent_id,
           taskId: row.task_id,
+          seenAtMs: Date.now(),
         };
       }
       return next;
     });
-  }, [pendingRows, laneKey, adoptConfirmation]);
+  }, [
+    pendingRows,
+    snapshotAtMs,
+    laneKey,
+    adoptConfirmation,
+    dismissConfirmation,
+  ]);
+
+  /**
+   * The daemon's own word that a prompt is over (T1).
+   *
+   * `tool_confirmation_resolved` is the twin of the frame that raised the card
+   * and it is sent for every way the wait ends — the answer this window
+   * posted, an answer posted somewhere else, the 300 s timeout, a withdrawal.
+   * Only the timeout leaves a mark: this client's own answer already writes
+   * the richer row (with the tool's duration) from the POST's own success, and
+   * overwriting it here would undo G6.
+   */
+  useServerEvent(CONFIRM_RESOLVED_EVENTS, (event) => {
+    if (event.type !== "tool_confirmation_resolved") return;
+    const shown = shownConfirmationsRef.current.find(
+      (card) => card.request_id === event.request_id,
+    );
+    // Not ours: the socket carries every lane's frames, and dismissing a card
+    // this window never drew is a no-op we should not dress up as one.
+    if (shown === undefined) return;
+
+    dismissConfirmation(event.request_id);
+    if (event.outcome !== "timed_out") return;
+    setResolutions((current) =>
+      current.some((entry) => entry.requestId === event.request_id)
+        ? current
+        : [
+            ...current,
+            {
+              requestId: event.request_id,
+              resolution: "timed_out",
+              note: timedOutResolutionNote(shown.tool_name),
+              at: event.ts,
+            },
+          ],
+    );
+  });
+
+  /**
+   * The turn that raised it is over (T1) — the third signal.
+   *
+   * A main-loop tool call *blocks the loop*: the turn cannot reach `done`
+   * while the daemon is still waiting on its prompt. So a main-loop card still
+   * on screen when the daemon sends the turn's terminal frame is a card the
+   * daemon has already stopped waiting on, whatever became of the resolution
+   * frame. A workflow's prompt is the opposite — it routinely arrives after
+   * the turn that started the workflow finished (G1) — so a card carrying a
+   * `task_id` is left alone here and retired by its run's own `task_status`.
+   *
+   * Only a terminal frame the **daemon** sent counts. A transport error is
+   * this client losing the socket, not the turn ending, and the daemon may
+   * still be waiting for the answer — retiring the card there would take the
+   * only way to give it away, and `confirmationMeta` keeps a retired card from
+   * ever being re-adopted.
+   */
+  const daemonEndedTurn =
+    stream.state.phase === "done" ||
+    (stream.state.phase === "error" && stream.state.error?.transport === false);
+  const streamId = stream.state.streamId;
+  useEffect(() => {
+    if (!daemonEndedTurn) return;
+    for (const card of shownConfirmationsRef.current) {
+      const meta = confirmationMetaRef.current[card.request_id];
+      if (meta !== undefined && meta.taskId !== null) continue;
+      dismissConfirmation(card.request_id);
+    }
+  }, [daemonEndedTurn, streamId, dismissConfirmation]);
 
   useServerEvent(TOOL_EVENTS, (event) => {
     if (event.type !== "tool_executed") return;
@@ -904,6 +1044,10 @@ export function useChatSession(): ChatSession {
       return;
     }
 
+    // Only the chips the daemon actually holds: an upload it refused never
+    // travels, and the chip stays on screen saying why.
+    const refs = attachments.refs;
+
     setSendError(null);
     setSending(true);
     setDraft("");
@@ -913,11 +1057,17 @@ export function useChatSession(): ChatSession {
       at: new Date().toISOString(),
       // A chat turn is never a steer any more — that path returned above.
       steer: null,
+      // T5: the same files, drawn as files, from the moment the turn is sent
+      // — the stored row's own links replace them when history catches up.
+      // The name is this client's, which is why the card issues no metadata
+      // request for it.
+      attachments: refs.map((ref) => ({
+        fileId: ref.file_id,
+        filename: attachments.names[ref.file_id] ?? null,
+        mimeType: null,
+        kind: null,
+      })),
     });
-
-    // Only the chips the daemon actually holds: an upload it refused never
-    // travels, and the chip stays on screen saying why.
-    const refs = attachments.refs;
 
     void stream
       .send({

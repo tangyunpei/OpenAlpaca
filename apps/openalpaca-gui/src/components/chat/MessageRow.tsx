@@ -33,6 +33,16 @@ export function messageGapClass(dense: boolean): string {
   return dense ? "mb-[20px]" : "mb-[30px]";
 }
 
+/**
+ * What this window calls the thing on the other side of the conversation.
+ *
+ * The transcript's speaker label, and — since T4 — the name on a confirmation
+ * card the main loop raised: the main loop is not an agent template, it is the
+ * assistant the person is talking to, and "unknown is blocked on this" named
+ * nobody at all.
+ */
+export const ASSISTANT_NAME = "Alpaca";
+
 /** The mono uppercase label that *is* the avatar in this design. */
 function SpeakerLabel({
   children,
@@ -63,6 +73,12 @@ export interface UserMessageProps {
   /** Set when this message was routed to a running workflow (§3.10). */
   steer?: SteerRef | null;
   dense?: boolean;
+  /**
+   * Inline content below the body — the cards for files this turn carried
+   * (T5), the same `ArtifactCard` shape an assistant row uses for the files
+   * it produced.
+   */
+  children?: React.ReactNode;
 }
 
 export function UserMessage({
@@ -70,6 +86,7 @@ export function UserMessage({
   time,
   steer = null,
   dense = false,
+  children,
 }: UserMessageProps) {
   const label = time === null ? "You" : `You · ${time}`;
 
@@ -88,6 +105,7 @@ export function UserMessage({
         </div>
       )}
       <MessageBody text={text} spacing="user" />
+      {children}
     </article>
   );
 }
@@ -143,7 +161,7 @@ export function AssistantMessage({
   return (
     <article className={messageGapClass(dense)}>
       <div className="mb-[8px] flex items-center gap-[9px]">
-        <SpeakerLabel tone="assistant">Alpaca</SpeakerLabel>
+        <SpeakerLabel tone="assistant">{ASSISTANT_NAME}</SpeakerLabel>
         {run !== null && (
           <button
             type="button"

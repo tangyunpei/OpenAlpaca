@@ -22,6 +22,16 @@ import {
 // ── Event union ─────────────────────────────────────────────────────────────
 
 /**
+ * How a pending tool confirmation stopped being pending (T1).
+ *
+ * Mirrors `openalpaca_api::events::ConfirmationOutcome`. Only `approved` ran
+ * the tool; the other three are three reasons it did not, and a client needs
+ * to tell them apart only to say which.
+ */
+export type ConfirmationOutcome =
+  "approved" | "denied" | "timed_out" | "cancelled";
+
+/**
  * One `ServerEvent` frame, tagged with a monotonic local `_id` on receipt.
  *
  * `prettier-ignore` keeps one variant per line, so this stays diffable against
@@ -49,6 +59,12 @@ export type ServerEvent =
   | { type: "skill_completed"; request_id: string; skill_id: string; duration_ms: number; output_preview: string; ts: string; instance_id: string; _id: number }
   | { type: "skill_failed"; request_id: string; skill_id: string; error: string; ts: string; instance_id: string; _id: number }
   | { type: "tool_confirmation_requested"; request_id: string; agent_id: string; tool_name: string; tool_arguments: unknown; stream_id: string | null; lane_key: string | null; task_id: string | null; ts: string; instance_id: string; _id: number }
+  // T1. The twin of the frame above, sent for every way a prompt stops being
+  // pending — including the two nobody answered (`timed_out`, `cancelled`).
+  // Before it existed a prompt that ran out its 300 s clock produced nothing
+  // at all, so a window that had drawn the card kept it, and its composer,
+  // paused until it was reloaded.
+  | { type: "tool_confirmation_resolved"; request_id: string; agent_id: string; tool_name: string; outcome: ConfirmationOutcome; stream_id: string | null; lane_key: string | null; task_id: string | null; ts: string; instance_id: string; _id: number }
   | { type: "soul_updated"; actor: string; mode: string; content_sha256: string; backup_path: string | null; ts: string; instance_id: string; _id: number }
   | { type: "daemon_config_changed"; ts: string; instance_id: string; _id: number }
   | { type: "workflow_started"; task_id: string; lane_key: string; title: string; ts: string; instance_id: string; _id: number }

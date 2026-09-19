@@ -385,6 +385,18 @@ export function attachChatStream(
     // confirmation is answered.
   });
 
+  // T1. A prompt stops being pending for four reasons and only one of them is
+  // an answer this client posted; this frame carries all four. Like its twin
+  // it does not close the stream.
+  source.addEventListener("confirmation_resolved", (event) => {
+    const payload = safeParse(event.data);
+    if (payload === null || typeof payload.request_id !== "string") return;
+    onAction({
+      type: "confirmation_resolved",
+      requestId: payload.request_id,
+    });
+  });
+
   source.addEventListener("done", (event) => {
     const payload = safeParse(event.data);
     if (payload === null || typeof payload.content !== "string") {

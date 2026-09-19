@@ -78,17 +78,26 @@ export function useChatHistory(
  * out. This query is the seed for that, on load and, because a resync
  * invalidates the whole cache, on every reconnect.
  *
- * Polled slowly as well: the daemon publishes no "this prompt expired" frame,
- * so a card that is no longer in this list is one nobody has to answer any
- * more.
+ * Polled as well, because this list is a **second opinion** on a modal state:
+ * a card that is no longer in it is one nobody has to answer any more, however
+ * that came about, and never trusting one signal for the thing that pauses the
+ * composer is the rule T1 wrote. The cadence follows the stake — every 10 s
+ * while a card is up and the composer is paused, every 30 s otherwise, when it
+ * is only a seed for a prompt this window has not heard about.
  */
-export function usePendingConfirmations(): UseQueryResult<
-  PendingConfirmation[]
-> {
+export const CONFIRMATIONS_POLL_MS = 30_000;
+export const CONFIRMATIONS_POLL_BLOCKED_MS = 10_000;
+
+export function usePendingConfirmations(
+  /** A card is on screen — poll at the faster cadence. */
+  blocked = false,
+): UseQueryResult<PendingConfirmation[]> {
   return useQuery({
     queryKey: qk.chat.confirmations(),
     queryFn: ({ signal }) => listPendingConfirmations(signal),
-    refetchInterval: 30_000,
+    refetchInterval: blocked
+      ? CONFIRMATIONS_POLL_BLOCKED_MS
+      : CONFIRMATIONS_POLL_MS,
   });
 }
 
@@ -198,6 +207,9 @@ export function useChatStream(
   );
 
   // A finished turn changes the transcript, and may have started a workflow.
+  // `qk.chat.all()` covers the pending-confirmation snapshot too, which is the
+  // re-read T1 wants on a turn's terminal frame: the turn is over, so whatever
+  // it was blocked on is over with it.
   useEffect(() => {
     if (state.phase !== "done") return;
     void client.invalidateQueries({ queryKey: qk.chat.all() });
@@ -205,6 +217,14 @@ export function useChatStream(
       void client.invalidateQueries({ queryKey: qk.tasks.all() });
     }
   }, [state.phase, state.result, client]);
+
+  // The same re-read for the *other* terminal frame (T1). A failed turn
+  // invalidates no transcript — there is nothing new to show — but a prompt it
+  // raised is just as finished as one a successful turn raised.
+  useEffect(() => {
+    if (state.phase !== "error") return;
+    void client.invalidateQueries({ queryKey: qk.chat.confirmations() });
+  }, [state.phase, client]);
 
   const send = useCallback(async (options: SendChatOptions) => {
     handleRef.current?.close();
