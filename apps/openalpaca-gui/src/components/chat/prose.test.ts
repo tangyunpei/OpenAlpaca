@@ -318,3 +318,129 @@ describe("ordered lists across an interleaved block (T3)", () => {
     expect(list.start).toBe(1);
   });
 });
+
+/**
+ * P4 — the two gaps a local model hit in the very first live session after T3
+ * shipped: `**`alpaca-fiber-notes`**` rendered with its asterisks showing, and
+ * a `>` line rendered as a literal `>`.
+ */
+describe("emphasis around a code span (P4)", () => {
+  it("reads a code span a bold run wraps", () => {
+    expect(parseInlineCode("**`alpaca-fiber-notes`**")).toEqual([
+      { text: "alpaca-fiber-notes", code: true, strong: true },
+    ]);
+  });
+
+  it("reads a code span an italic run wraps", () => {
+    expect(parseInlineCode("see *`llm.toml`* for it")).toEqual([
+      { text: "see ", code: false },
+      { text: "llm.toml", code: true, em: true },
+      { text: " for it", code: false },
+    ]);
+  });
+
+  it("carries the emphasis onto the words beside the span", () => {
+    expect(parseInlineCode("**edit `llm.toml` first**")).toEqual([
+      { text: "edit ", code: false, strong: true },
+      { text: "llm.toml", code: true, strong: true },
+      { text: " first", code: false, strong: true },
+    ]);
+  });
+
+  /** The half that must not regress: a `*` inside a span is still literal. */
+  it("still refuses to open emphasis inside a code span", () => {
+    expect(parseInlineCode("run `a * b * c` now")).toEqual([
+      { text: "run ", code: false },
+      { text: "a * b * c", code: true },
+      { text: " now", code: false },
+    ]);
+    // …including when the asterisks inside would otherwise pair with one
+    // outside it.
+    expect(parseInlineCode("`a * b` and * c")).toEqual([
+      { text: "a * b", code: true },
+      { text: " and * c", code: false },
+    ]);
+  });
+
+  /** Streaming: the closing delimiters have not arrived yet. */
+  it("leaves a half-received emphasis run literal", () => {
+    expect(parseInlineCode("**`alpaca-fiber")).toEqual([
+      { text: "**`alpaca-fiber", code: false },
+    ]);
+    expect(parseInlineCode("**`alpaca-fiber-notes`")).toEqual([
+      { text: "**", code: false },
+      { text: "alpaca-fiber-notes", code: true },
+    ]);
+  });
+});
+
+describe("blockquotes (P4)", () => {
+  it("reads a one-line quote", () => {
+    const blocks = parseProse("> the alpaca is not a llama");
+    expect(blocks.map((block) => block.kind)).toEqual(["quote"]);
+    const quote = blocks[0];
+    if (quote?.kind !== "quote") throw new Error("expected a quote");
+    expect(quote.segments.map((segment) => segment.text).join("")).toBe(
+      "the alpaca is not a llama",
+    );
+  });
+
+  it("joins a run of quoted lines into one block", () => {
+    const blocks = parseProse("> one\n> two\n\nafter");
+    expect(blocks.map((block) => block.kind)).toEqual(["quote", "paragraph"]);
+    const quote = blocks[0];
+    if (quote?.kind !== "quote") throw new Error("expected a quote");
+    expect(quote.segments.map((segment) => segment.text).join("")).toBe(
+      "one\ntwo",
+    );
+    expect(paragraphText(blocks[1])).toBe("after");
+  });
+
+  it("carries the inline set inside a quote", () => {
+    const blocks = parseProse("> **note:** run `cargo test`");
+    const quote = blocks[0];
+    if (quote?.kind !== "quote") throw new Error("expected a quote");
+    expect(quote.segments).toEqual([
+      { text: "note:", code: false, strong: true },
+      { text: " run ", code: false },
+      { text: "cargo test", code: true },
+    ]);
+  });
+
+  it("keeps a deeper marker as the quote's own text — one level only", () => {
+    const blocks = parseProse("> > inner");
+    const quote = blocks[0];
+    if (quote?.kind !== "quote") throw new Error("expected a quote");
+    expect(quote.segments.map((segment) => segment.text).join("")).toBe(
+      "> inner",
+    );
+  });
+
+  it("ends the quote at the first line without the marker", () => {
+    const blocks = parseProse("> quoted\nnot quoted");
+    expect(blocks.map((block) => block.kind)).toEqual(["quote", "paragraph"]);
+    expect(paragraphText(blocks[1])).toBe("not quoted");
+  });
+
+  it("closes a paragraph and a list before it starts", () => {
+    const blocks = parseProse("intro\n- a\n> quoted");
+    expect(blocks.map((block) => block.kind)).toEqual([
+      "paragraph",
+      "list",
+      "quote",
+    ]);
+  });
+
+  /** Streaming: the marker has arrived and nothing after it has. */
+  it("renders a quote that is still empty", () => {
+    const blocks = parseProse(">");
+    const quote = blocks[0];
+    if (quote?.kind !== "quote") throw new Error("expected a quote");
+    expect(quote.segments.map((segment) => segment.text).join("")).toBe("");
+  });
+
+  it("is not confused by a greater-than sign inside a sentence", () => {
+    const blocks = parseProse("2 > 1 is true");
+    expect(blocks.map((block) => block.kind)).toEqual(["paragraph"]);
+  });
+});

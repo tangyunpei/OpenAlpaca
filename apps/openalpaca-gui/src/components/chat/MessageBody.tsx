@@ -30,20 +30,25 @@ export interface MessageBodyProps {
   className?: string;
 }
 
-/** One run of text: code, bold, italic, or plain. */
+/**
+ * One run of text: code, bold, italic, or plain — and, since P4, a code span
+ * an emphasis run wraps, which models write constantly (``**`file.md`**``).
+ * The two are independent, so the emphasis element wraps the `<code>` rather
+ * than the first match winning and the other being dropped.
+ */
 function Segment({ segment }: { segment: ProseSegment }) {
-  if (segment.code) {
-    return (
-      <code className="rounded-xs bg-code-chip px-[5px] py-px font-mono text-md">
-        {segment.text}
-      </code>
-    );
-  }
+  const body = segment.code ? (
+    <code className="rounded-xs bg-code-chip px-[5px] py-px font-mono text-md">
+      {segment.text}
+    </code>
+  ) : (
+    segment.text
+  );
   if (segment.strong === true) {
-    return <strong className="font-semibold text-ink">{segment.text}</strong>;
+    return <strong className="font-semibold text-ink">{body}</strong>;
   }
-  if (segment.em === true) return <em>{segment.text}</em>;
-  return <span>{segment.text}</span>;
+  if (segment.em === true) return <em>{body}</em>;
+  return segment.code ? body : <span>{segment.text}</span>;
 }
 
 function Segments({ segments }: { segments: ProseSegment[] }) {
@@ -159,6 +164,22 @@ export function MessageBody({
                 {isLast && trailing}
               </pre>
             </div>
+          );
+        }
+
+        if (block.kind === "quote") {
+          return (
+            <blockquote
+              key={block.key}
+              className={cn(
+                "m-0 border-l-2 border-gold py-px pl-[11px] text-xl leading-[1.6] [text-wrap:pretty] whitespace-pre-line text-tertiary",
+                tail,
+                className,
+              )}
+            >
+              <Segments segments={block.segments} />
+              {isLast && trailing}
+            </blockquote>
           );
         }
 

@@ -23,12 +23,14 @@
  *   * `#`…`####` at the head of a line is a heading;
  *   * `---`, `***` or `___` alone on a line is a thematic break;
  *   * a `|`-delimited row followed by a `|---|---|` row is a table;
+ *   * a run of `> ` lines is a blockquote — one level, no nesting;
  *   * a blank line separates paragraphs;
  *   * a run of `- `, `* `, `+ ` or `1. ` lines is a list, ordered by its first
  *     marker and **starting at that marker's number**, so a list resumed after
  *     a code block counts on from where it left off;
  *   * backtick pairs are inline code, and an unpaired backtick is literal;
- *   * `**bold**` and `*italic*` are emphasis.
+ *   * `**bold**` and `*italic*` are emphasis, and either may wrap a code span
+ *     (``**`alpaca-fiber-notes`**``, which models write constantly).
  *
  * It parses **incrementally, and never throws**, because it runs on every
  * delta of a streaming answer: a fence that has been opened and not yet closed
@@ -88,6 +90,15 @@ export type ProseBlock =
     }
   | { kind: "rule"; key: number }
   | {
+      kind: "quote";
+      key: number;
+      /**
+       * The quoted lines, joined with `\n` and parsed for the inline set. One
+       * level only: a `>` inside a quote is part of its text, not a nesting.
+       */
+      segments: ProseSegment[];
+    }
+  | {
       kind: "table";
       key: number;
       /** The header row's cells. */
@@ -106,6 +117,8 @@ const FENCE = /^\s{0,3}(`{3,}|~{3,})\s*([A-Za-z0-9_+#.-]*)\s*$/;
 const HEADING = /^\s{0,3}(#{1,4})\s+(.*?)\s*#*\s*$/;
 /** `---`, `***`, `___`. */
 const RULE = /^\s{0,3}(-{3,}|\*{3,}|_{3,})\s*$/;
+/** `> quoted` — the one optional space after the marker is the marker's. */
+const QUOTE = /^\s{0,3}>\s?(.*)$/;
 /** `|---|:--:|` — the row that turns the line above it into a table header. */
 const TABLE_DELIMITER = /^\s*\|?(\s*:?-+:?\s*\|)+(\s*:?-+:?\s*)?\|?\s*$/;
 
@@ -119,40 +132,18 @@ const TABLE_DELIMITER = /^\s*\|?(\s*:?-+:?\s*\|)+(\s*:?-+:?\s*)?\|?\s*$/;
  */
 const EMPHASIS = /\*\*(\S(?:[^*]*\S)?)\*\*|\*(\S(?:[^*]*\S)?)\*/g;
 
-/** Split a plain (already code-free) run into emphasis segments. */
-function splitEmphasis(text: string): ProseSegment[] {
-  const segments: ProseSegment[] = [];
-  let index = 0;
-
-  EMPHASIS.lastIndex = 0;
-  let match = EMPHASIS.exec(text);
-  while (match !== null) {
-    if (match.index > index) {
-      segments.push({ text: text.slice(index, match.index), code: false });
-    }
-    const strong = match[1];
-    if (strong !== undefined) {
-      segments.push({ text: strong, code: false, strong: true });
-    } else {
-      segments.push({ text: match[2] ?? "", code: false, em: true });
-    }
-    index = match.index + match[0].length;
-    match = EMPHASIS.exec(text);
-  }
-
-  if (index < text.length) {
-    segments.push({ text: text.slice(index), code: false });
-  }
-  return segments;
-}
+/** What an enclosing emphasis run puts on every segment inside it. */
+type Emphasis = Pick<ProseSegment, "strong" | "em">;
 
 /**
- * Split one paragraph into code, emphasis and plain segments.
+ * Split a run into code and plain segments, carrying `style` onto both.
  *
- * Code wins: the whole point of a backtick span is that what is inside it is
- * shown as written, so `` `a * b` `` is not italic anything.
+ * Code wins over emphasis *inside* it: the whole point of a backtick span is
+ * that what is inside it is shown as written, so `` `a * b` `` is not italic
+ * anything. It does not win over an emphasis run that **wraps** it — see
+ * `parseInlineCode`.
  */
-export function parseInlineCode(text: string): ProseSegment[] {
+function splitCode(text: string, style: Emphasis): ProseSegment[] {
   const segments: ProseSegment[] = [];
   let index = 0;
 
@@ -164,20 +155,92 @@ export function parseInlineCode(text: string): ProseSegment[] {
     if (close < 0) break;
 
     if (open > index) {
-      segments.push(...splitEmphasis(text.slice(index, open)));
+      segments.push({ text: text.slice(index, open), code: false, ...style });
     }
     const code = text.slice(open + 1, close);
     // "``" is an empty span; render the literal backticks instead.
     if (code === "") {
-      segments.push({ text: "``", code: false });
+      segments.push({ text: "``", code: false, ...style });
     } else {
-      segments.push({ text: code, code: true });
+      segments.push({ text: code, code: true, ...style });
     }
     index = close + 1;
   }
 
   if (index < text.length) {
-    segments.push(...splitEmphasis(text.slice(index)));
+    segments.push({ text: text.slice(index), code: false, ...style });
+  }
+  return segments;
+}
+
+/**
+ * The text with every code span — backticks and all — blanked out, in place.
+ *
+ * Same length, so every index into it is an index into the original. It exists
+ * so emphasis can be matched *around* code spans without ever being matched
+ * *inside* one: a `*` in `` `a * b` `` is gone from the masked copy, and a
+ * ``**`x`**`` still reads as bold because the run's own delimiters are not.
+ *
+ * The scan is `splitCode`'s, pair for pair, so the two agree on what a span
+ * is — an empty ``` `` ``` is literal in both and is left alone here.
+ */
+function maskCodeSpans(text: string): string {
+  let masked = "";
+  let index = 0;
+
+  while (index < text.length) {
+    const open = text.indexOf("`", index);
+    if (open < 0) break;
+    const close = text.indexOf("`", open + 1);
+    if (close < 0) break;
+
+    masked += text.slice(index, open);
+    const span = text.slice(open, close + 1);
+    masked += close === open + 1 ? span : "\0".repeat(span.length);
+    index = close + 1;
+  }
+
+  return masked + text.slice(index);
+}
+
+/**
+ * Split one paragraph into code, emphasis and plain segments.
+ *
+ * Emphasis is matched over a copy with the code spans blanked out, so a run
+ * may **wrap** one (``**`alpaca-fiber-notes`**`` was rendering with its
+ * asterisks showing, P4) while an asterisk *inside* a span still cannot open
+ * one. The delimiters themselves are always real characters — a match can
+ * therefore never begin or end in the middle of a code span, which is what
+ * makes it safe to re-split each piece on the original text.
+ */
+export function parseInlineCode(text: string): ProseSegment[] {
+  const masked = maskCodeSpans(text);
+  const segments: ProseSegment[] = [];
+  let index = 0;
+
+  EMPHASIS.lastIndex = 0;
+  let match = EMPHASIS.exec(masked);
+  while (match !== null) {
+    if (match.index > index) {
+      segments.push(...splitCode(text.slice(index, match.index), {}));
+    }
+    const strong = match[1];
+    const inner =
+      strong === undefined
+        ? { start: match.index + 1, length: (match[2] ?? "").length }
+        : { start: match.index + 2, length: strong.length };
+    segments.push(
+      ...splitCode(
+        text.slice(inner.start, inner.start + inner.length),
+        strong === undefined ? { em: true } : { strong: true },
+      ),
+    );
+    index = match.index + match[0].length;
+    match = EMPHASIS.exec(masked);
+  }
+
+  if (index < text.length) {
+    segments.push(...splitCode(text.slice(index), {}));
   }
   return segments;
 }
@@ -371,6 +434,30 @@ export function parseProse(text: string): ProseBlock[] {
       flushAll();
       blocks.push({ kind: "rule", key: key++ });
       index += 1;
+      continue;
+    }
+
+    // ── blockquote ─────────────────────────────────────────────────────────
+    // One level, and a run of `>` lines is one quote: a model writing a quoted
+    // paragraph writes several. A line without the marker ends it, so the
+    // block never swallows the answer that follows — and a quote still being
+    // streamed is simply a shorter quote.
+    const quote = QUOTE.exec(line);
+    if (quote !== null) {
+      flushAll();
+      const quoted: string[] = [quote[1] ?? ""];
+      index += 1;
+      while (index < lines.length) {
+        const more = QUOTE.exec(lines[index] ?? "");
+        if (more === null) break;
+        quoted.push(more[1] ?? "");
+        index += 1;
+      }
+      blocks.push({
+        kind: "quote",
+        key: key++,
+        segments: parseInlineCode(quoted.join("\n").replace(/\s+$/, "")),
+      });
       continue;
     }
 

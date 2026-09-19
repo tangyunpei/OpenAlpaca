@@ -225,7 +225,8 @@ Two rules the sidebar displays rather than enforces:
 **Transcript.** Mono speaker labels over plain paragraphs — no avatars, no
 bubbles. A body is rendered from a fixed markdown vocabulary, the one a model
 actually writes in: paragraphs, bullet and numbered lists, `**bold**`,
-`*italic*`, inline code, `#`–`####` headings, `---` thematic breaks, fenced
+`*italic*` (either of which may wrap a code span), inline code, `#`–`####`
+headings, `---` thematic breaks, one level of `>` blockquote, fenced
 code blocks (with the language named above them and their own horizontal
 scroll) and simple pipe tables (also scrollable when wide). An ordered list
 resumed after a code block counts on from its own marker instead of restarting
