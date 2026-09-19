@@ -1557,8 +1557,12 @@ Keep-alive comments every `server.sse_keep_alive_secs` (default **15 s**).
    whether or not the model reasons.
 4. `delta` — `{ "content": "<chunk>" }`. **Real streaming since S1**: one frame per
    provider delta, as the provider produces it, with the exact bytes it produced
-   (whitespace/newlines/indentation preserved). A turn that streams nothing — a
-   deterministic tier, a provider without streaming, a stream that failed and was
+   (whitespace/newlines/indentation preserved). **A file-based skill streams too**
+   (K1): a `/slash` or router-selected skill's answer arrives delta by delta like any
+   other turn's. A turn that streams nothing — a tier that answers without a model at
+   all (task ops, `/steer`, the withdrawn-skill tombstone), a **plugin-contributed**
+   skill (its answer comes back finished over the plugin protocol, and nothing fakes
+   chunks for it), a provider without streaming, a stream that failed and was
    answered by the non-streaming fallback — sends exactly **one** delta carrying the
    finished answer. The two knobs that paced the old simulated chunker,
    `server.chat_streams.stream_chunk_words` and `stream_chunk_delay_ms`, **no longer

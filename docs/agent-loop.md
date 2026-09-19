@@ -67,6 +67,18 @@ front door (below) IS a direct loop invocation per user turn
 invokes it too (`orchestrator/skill/invocation.rs`,
 `orchestrator/skill/invoke_executor.rs`).
 
+The two invocations that answer a user's turn — the main-loop front
+door and `skill/invocation.rs` — set `LoopConfig.stream_callback` from
+that turn's sink when a client is watching one
+(`chat::delta_forwarder`, one forwarder shared by both), so a
+`/slash` skill's answer and its reasoning reach the client delta by
+delta exactly like the main loop's (K1). A **plugin-contributed** skill
+does not: `invoke_plugin_skill` gets a finished answer back over the
+plugin protocol, so it keeps the chat service's single fallback delta —
+nothing simulates chunks for it. Every caller with nobody watching a
+stream (scheduled skills, connectors, the follow-up runner, the nested
+`invoke_skill` tool) passes no sink and runs the non-streaming path.
+
 ## The Main-Loop Front Door (Routing V2)
 
 Routing is a tool call, not a pre-classifier (the only routing since
