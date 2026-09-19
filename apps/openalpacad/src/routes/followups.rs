@@ -98,6 +98,11 @@ pub struct QueueFollowupRequest {
     /// The run this follow-up came out of, when the client knows it.
     #[serde(default)]
     pub source_task_id: Option<String>,
+    /// **S5** — the client queueing this promise cannot answer a tool-approval
+    /// prompt, so neither can the turn that keeps it. Absent is `false`,
+    /// today's behaviour.
+    #[serde(default)]
+    pub unattended: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -252,6 +257,7 @@ fn queue_followup(
         &principal_json,
         workspace_path,
         request.source_task_id.as_deref(),
+        request.unattended,
     ) {
         Ok(id) => id,
         Err(e) => return db_error(e),
@@ -409,6 +415,7 @@ mod tests {
             content: content.to_string(),
             kind: None,
             source_task_id: None,
+            unattended: false,
         }
     }
 
@@ -428,7 +435,7 @@ mod tests {
     /// `queue_followup` tool does), returning its id.
     fn seed(db: &Database, lane: &str, kind: &str, content: &str) -> i64 {
         FollowupRepository::new(db)
-            .queue(lane, kind, content, "\"System\"", None, Some("task-1"))
+            .queue(lane, kind, content, "\"System\"", None, Some("task-1"), false)
             .expect("queue")
     }
 
@@ -461,6 +468,7 @@ mod tests {
                 content: "  audit the connectors  ".to_string(),
                 kind: Some(FOLLOWUP_KIND_FOLLOWUP.to_string()),
                 source_task_id: Some("task-7".to_string()),
+                unattended: false,
             },
         ))
         .await;
@@ -519,6 +527,7 @@ mod tests {
             created_at: "2026-09-05 10:00:00".to_string(),
             updated_at: "2026-09-05 10:00:00".to_string(),
             session_id: Some("session-1".to_string()),
+            unattended: false,
         });
         let value = serde_json::to_value(&view).unwrap();
 
@@ -571,6 +580,7 @@ mod tests {
                 content: "leftover".to_string(),
                 kind: Some(FOLLOWUP_KIND_UNPROCESSED_STEERING.to_string()),
                 source_task_id: None,
+                unattended: false,
             },
         ))
         .await;

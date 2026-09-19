@@ -331,6 +331,9 @@ pub async fn run_lead_agent(
                 task_id.to_string(),
                 lane_key.to_string(),
                 created_by.to_string(),
+                // S5: a follow-up this run promises is run later by a runner,
+                // long after the client that started the run has gone.
+                unattended,
             )),
         );
     }
@@ -590,7 +593,16 @@ pub async fn run_lead_agent(
     // it is routable, otherwise whatever L3 substitutes for it. A lead pinned
     // to Claude on an Ollama-only install is budgeted at the local model's
     // window, so the loop compacts before the provider refuses the request.
-    let context_budget = {
+    //
+    // **S3** — and with its fixed zone registered. The sections used to be
+    // registered on a throwaway snapshot built for the telemetry below, so
+    // the budget the loop actually ran on believed its system prompt and
+    // tools cost nothing: every `round` record reported
+    // `system_prompt: 0, tools: 0`, and `should_compact` compared the
+    // messages alone against the trigger. On a 200 000-token cloud model that
+    // is a rounding error; on an 8 192-token local model the fixed zone *is*
+    // the budget, and the loop would sail past the window without compacting.
+    let mut context_budget = {
         let context_window = crate::runner::routed_context_window(
             router.as_ref(),
             lead_agent.llm_config.model.as_deref(),
@@ -601,6 +613,9 @@ pub async fn run_lead_agent(
             &daemon_config.load().execution.context,
         )
     };
+    // Estimate system prompt tokens (chars / 4 heuristic)
+    context_budget.register_section("system_prompt", full_system.len() / 4);
+    context_budget.register_section("tools", crate::runner::estimate_tools_tokens(&tools));
 
     // --- Context Budget Telemetry ---
     {
@@ -622,15 +637,9 @@ pub async fn run_lead_agent(
         let model_id = model_id.as_str();
         let model_window = context_budget.model_context_window();
         let request_id = uuid::Uuid::new_v4();
-        // Estimate system prompt tokens (chars / 4 heuristic)
-        let system_prompt_tokens = full_system.len() / 4;
-        let mut budget_snapshot =
-            crate::context_budget::ContextBudgetManager::new(
-                model_window,
-                &daemon_config.load().execution.context,
-            );
-        budget_snapshot.register_section("system_prompt", system_prompt_tokens);
-        budget_snapshot.register_section("tools", crate::runner::estimate_tools_tokens(&tools));
+        // The run's own budget, not a copy of it (S3): what this event
+        // reports is what the loop will compact against.
+        let budget_snapshot = &context_budget;
 
         tracing::debug!(
             request_id = %request_id,

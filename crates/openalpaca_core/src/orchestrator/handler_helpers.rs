@@ -62,6 +62,8 @@ impl Orchestrator {
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
         stream_id: Option<&str>,
+        // M6/S5 — the client behind this turn cannot answer a confirmation.
+        unattended: bool,
     ) -> Result<String, String> {
         self.bus.publish(SystemEvent::IntentClassified {
             request_id,
@@ -126,6 +128,7 @@ impl Orchestrator {
             route_score,
             was_auto_selected,
             stream_id,
+            unattended,
         )
         .await
     }

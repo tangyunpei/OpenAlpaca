@@ -1,6 +1,7 @@
 //! Task state, step state, and constraints.
 
 use super::workspace::{TaskWorkspace, WorkspaceEntryType};
+use crate::orchestrator::dispatcher::outcome::MAX_SUMMARY_LENGTH as SUMMARY_CAP;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -101,21 +102,28 @@ impl TaskState {
         self.updated_at = Utc::now();
     }
 
-    /// Mark a step as completed with a summary (capped at 500 chars).
+    /// Mark a step as completed with a summary, capped at
+    /// [`MAX_SUMMARY_LENGTH`](crate::orchestrator::dispatcher::outcome::MAX_SUMMARY_LENGTH).
+    ///
+    /// **S4**: this cap was 500, and it is the innermost of the two the lead's
+    /// report passed through — `build_outcome` joins these step summaries into
+    /// the outcome, which is what `result_summary` is written from. Raising
+    /// the outer one alone changed nothing.
     pub fn mark_step_completed(&mut self, step_order: i32, summary: &str) {
         if let Some(step) = self.steps.iter_mut().find(|s| s.step_order == step_order) {
             step.status = "completed".to_string();
-            step.result_summary = Some(summary.chars().take(500).collect());
+            step.result_summary = Some(summary.chars().take(SUMMARY_CAP).collect());
             step.completed_at = Some(Utc::now());
         }
         self.updated_at = Utc::now();
     }
 
-    /// Mark a step as failed with an error message (capped at 500 chars).
+    /// Mark a step as failed with an error message, capped like
+    /// [`Self::mark_step_completed`]'s summary (S4).
     pub fn mark_step_failed(&mut self, step_order: i32, error: &str) {
         if let Some(step) = self.steps.iter_mut().find(|s| s.step_order == step_order) {
             step.status = "failed".to_string();
-            step.result_summary = Some(error.chars().take(500).collect());
+            step.result_summary = Some(error.chars().take(SUMMARY_CAP).collect());
             step.completed_at = Some(Utc::now());
         }
         self.updated_at = Utc::now();

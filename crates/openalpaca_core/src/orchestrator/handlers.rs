@@ -170,6 +170,12 @@ impl Orchestrator {
                 owner_id,
                 &scope_ctx,
                 stream_id.as_deref(),
+                // S5: the deterministic skill tier is a *client-facing* tier
+                // — a `/slash` from a piped CLI and every scheduled skill
+                // reach the model here, not through the main loop — so the
+                // declaration has to arrive here too, or the turn sits out
+                // the whole confirmation timeout with nobody to answer.
+                unattended,
             )
             .await
         } else if let Some(reply) = self.withdrawn_skill_reply(&intent_source_content) {

@@ -104,7 +104,9 @@ fn test_migrate_lane_on_link() {
     // A promise made on the old lane, still queued.
     let followups = crate::repository::FollowupRepository::new(&db);
     followups
-        .queue(old_lane, "followup", "and the logs", "{}", None, None)
+        .queue(old_lane, "followup", "and the logs", "{}", None, None,
+false,
+)
         .unwrap();
 
     // Run migration

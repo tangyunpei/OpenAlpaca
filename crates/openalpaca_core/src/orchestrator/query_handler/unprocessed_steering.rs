@@ -134,6 +134,7 @@ mod tests {
                 "\"System\"",
                 None,
                 Some("task-1"),
+                false,
             )
             .unwrap();
 
@@ -161,6 +162,7 @@ mod tests {
                 "\"System\"",
                 None,
                 None,
+                false,
             )
             .unwrap();
         repo.queue(
@@ -170,6 +172,7 @@ mod tests {
             "\"System\"",
             None,
             None,
+            false,
         )
         .unwrap();
 
@@ -192,6 +195,7 @@ mod tests {
                 "\"System\"",
                 None,
                 None,
+                false,
             )
             .unwrap();
         }
@@ -228,6 +232,7 @@ mod tests {
                 "\"System\"",
                 None,
                 None,
+                false,
             )
             .unwrap();
         let survivor = repo
@@ -238,6 +243,7 @@ mod tests {
                 "\"System\"",
                 None,
                 None,
+                false,
             )
             .unwrap();
 
@@ -273,6 +279,7 @@ mod tests {
                 "\"System\"",
                 None,
                 None,
+                false,
             )
             .unwrap();
 
@@ -295,6 +302,7 @@ mod tests {
                 "\"System\"",
                 None,
                 None,
+                false,
             )
             .unwrap();
 

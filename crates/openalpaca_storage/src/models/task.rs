@@ -172,5 +172,15 @@ pub struct Task {
     /// every pre-039 row. Not a foreign key: deleting a session nulls this
     /// rather than taking the run's record with it.
     pub session_id: Option<String>,
+    /// The client that parked this row said it cannot answer a tool-approval
+    /// prompt (S5, migration 042).
+    ///
+    /// `POST /v1/tasks` only parks a row; `start` / `rerun` / `resume`
+    /// dispatch it later, and the declaration has to survive the gap — a
+    /// scripted client that creates a task and starts it should not have to
+    /// say so twice, and a launch verb that *does* say so overrides this.
+    /// `false` for every pre-042 row and every client that says nothing,
+    /// which is today's behaviour: raise the prompt and wait.
+    pub unattended: bool,
 }
 

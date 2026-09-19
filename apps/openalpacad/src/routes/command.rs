@@ -19,6 +19,14 @@ pub struct CommandRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[allow(dead_code)]
     pub target_agent: Option<String>,
+    /// **S5** — this client cannot answer a tool-approval prompt, the same
+    /// declaration `POST /v1/chat` takes. `openalpaca command` is scriptable
+    /// and usually piped, and the `process` command runs a full turn through
+    /// the gateway; without this a workflow it starts held every
+    /// confirm-listed tool for the whole 300-second timeout with nobody on
+    /// the other end. Absent is `false` — today's behaviour.
+    #[serde(default)]
+    pub unattended: bool,
 }
 
 /// Command response
@@ -95,9 +103,8 @@ pub async fn command_handler(
                     stream_id: None,
                     lane_override: None,
                     model_override: None,
-                    // M6: `/v1/command` does not carry the declaration —
-                    // today's behaviour until a client asks for it.
-                    unattended: false,
+                    // S5: and now it does.
+                    unattended: request.unattended,
                     turn_sink: None,
                 })
                 .await;
@@ -347,5 +354,24 @@ pub async fn command_handler(
                 "status": "rejected"
             })),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **S5.** `/v1/command` takes the same declaration `POST /v1/chat` does,
+    /// and takes it the same way: absent is `false`, so every existing client
+    /// keeps today's behaviour and one that says so is taken at its word.
+    #[test]
+    fn unattended_defaults_to_false_and_is_read_when_sent() {
+        let quiet: CommandRequest =
+            serde_json::from_str(r#"{"command":"process"}"#).expect("parse");
+        assert!(!quiet.unattended, "a client that says nothing is attended");
+
+        let declared: CommandRequest =
+            serde_json::from_str(r#"{"command":"process","unattended":true}"#).expect("parse");
+        assert!(declared.unattended);
     }
 }

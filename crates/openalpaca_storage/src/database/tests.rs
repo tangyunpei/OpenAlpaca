@@ -8,7 +8,7 @@ fn test_database_creation() {
 
     let db = Database::open(&db_path).unwrap();
     assert!(db_path.exists());
-    assert_eq!(db.schema_version().unwrap(), 41);
+    assert_eq!(db.schema_version().unwrap(), 42);
 }
 
 #[test]
@@ -20,14 +20,14 @@ fn test_migrations_idempotent() {
     let _db1 = Database::open(&db_path).unwrap();
     let db2 = Database::open(&db_path).unwrap();
 
-    assert_eq!(db2.schema_version().unwrap(), 41);
+    assert_eq!(db2.schema_version().unwrap(), 42);
 }
 
 #[test]
 fn test_migration_035_drops_planner_telemetry() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 41);
+    assert_eq!(db.schema_version().unwrap(), 42);
 
     db.with_connection(|conn| {
         let columns = |table: &str| -> rusqlite::Result<Vec<String>> {
@@ -183,7 +183,7 @@ fn insert_asset(
 fn test_migration_036_adds_artifact_columns() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 41);
+    assert_eq!(db.schema_version().unwrap(), 42);
 
     db.with_connection(|conn| {
         let columns = |table: &str| -> rusqlite::Result<Vec<String>> {
@@ -365,7 +365,7 @@ fn test_migration_036_artifact_versions_cascade() {
 fn test_migration_037_run_observability_schema() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 41);
+    assert_eq!(db.schema_version().unwrap(), 42);
 
     db.with_connection(|conn| {
         let columns = |table: &str| -> rusqlite::Result<Vec<String>> {
@@ -450,7 +450,7 @@ fn test_migration_037_run_observability_schema() {
 fn test_migration_038_message_run_links() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 41);
+    assert_eq!(db.schema_version().unwrap(), 42);
 
     db.with_connection(|conn| {
         let columns: Vec<String> = conn
@@ -901,7 +901,7 @@ fn factory_reset_empties_artifact_versions_without_the_cascade() {
 fn test_migration_040_adds_llm_call_log_timestamp_index() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 41);
+    assert_eq!(db.schema_version().unwrap(), 42);
 
     db.with_connection(|conn| {
         let exists: bool = conn.query_row(
@@ -929,7 +929,7 @@ fn test_migration_040_adds_llm_call_log_timestamp_index() {
 fn test_migration_041_indexes_the_execution_logs_by_timestamp() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 41);
+    assert_eq!(db.schema_version().unwrap(), 42);
 
     db.with_connection(|conn| {
         let plan = |sql: &str| -> rusqlite::Result<String> {

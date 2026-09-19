@@ -162,6 +162,7 @@ fn store_task_row(
         workspace_id: None,
         source_task_id: None,
         session_id: None,
+        unattended: false,
     }
 }
 
@@ -182,7 +183,7 @@ async fn rerun_dispatches_a_new_run_that_records_the_one_it_came_from() {
     );
     let (orchestrator, _ctx) = ready(&db);
 
-    let outcome = orchestrator.rerun_task("t1").expect("re-run dispatched");
+    let outcome = orchestrator.rerun_task("t1", None).expect("re-run dispatched");
 
     assert_ne!(outcome.task_id, "t1", "a re-run is a new run");
     assert_eq!(outcome.source_task_id, "t1");
@@ -217,7 +218,7 @@ async fn rerun_refuses_a_run_that_has_not_finished() {
         store_task(&db, id, status, Some("do the thing"));
         let (orchestrator, _ctx) = ready(&db);
         assert_eq!(
-            orchestrator.rerun_task(id),
+            orchestrator.rerun_task(id, None),
             Err(TaskLaunchError::NotTerminal { current: word })
         );
     }
@@ -235,11 +236,11 @@ async fn rerun_refuses_a_row_with_nothing_to_re_dispatch() {
     let (orchestrator, _ctx) = ready(&db);
 
     assert_eq!(
-        orchestrator.rerun_task("t-none"),
+        orchestrator.rerun_task("t-none", None),
         Err(TaskLaunchError::NoDescription)
     );
     assert_eq!(
-        orchestrator.rerun_task("t-blank"),
+        orchestrator.rerun_task("t-blank", None),
         Err(TaskLaunchError::NoDescription)
     );
     assert_eq!(TaskRepository::new(&db).list_recent(10).unwrap().len(), 2);
@@ -250,7 +251,7 @@ async fn rerun_of_an_unknown_run_is_not_found() {
     let (_dir, db) = temp_db();
     let (orchestrator, _ctx) = ready(&db);
     assert_eq!(
-        orchestrator.rerun_task("no-such-run"),
+        orchestrator.rerun_task("no-such-run", None),
         Err(TaskLaunchError::NotFound)
     );
 }
@@ -265,7 +266,7 @@ async fn start_runs_the_stored_row_under_its_own_id() {
     store_task(&db, "t1", TaskStatus::Queued, Some("write the changelog"));
     let (orchestrator, _ctx) = ready(&db);
 
-    let outcome = orchestrator.start_task("t1").expect("dispatched");
+    let outcome = orchestrator.start_task("t1", None).expect("dispatched");
     assert_eq!(outcome.task_id, "t1", "D5: the id does not change");
     assert_eq!(outcome.title, "Ship the release");
     assert!(
@@ -292,9 +293,9 @@ async fn starting_the_same_run_twice_refuses_the_second() {
     store_task(&db, "t1", TaskStatus::Queued, Some("write the changelog"));
     let (orchestrator, _ctx) = ready(&db);
 
-    assert!(orchestrator.start_task("t1").is_ok());
+    assert!(orchestrator.start_task("t1", None).is_ok());
     assert_eq!(
-        orchestrator.start_task("t1"),
+        orchestrator.start_task("t1", None),
         Err(TaskLaunchError::AlreadyRunning),
         "the id is already running",
     );
@@ -311,7 +312,7 @@ async fn start_refuses_a_run_that_is_already_live() {
     ctx.register_cancellation_token("t1", tokio_util::sync::CancellationToken::new());
 
     assert_eq!(
-        orchestrator.start_task("t1"),
+        orchestrator.start_task("t1", None),
         Err(TaskLaunchError::AlreadyRunning)
     );
 }
@@ -334,7 +335,7 @@ async fn start_refuses_a_run_that_has_already_finished() {
         let (orchestrator, ctx) = ready(&db);
 
         assert_eq!(
-            orchestrator.start_task(id),
+            orchestrator.start_task(id, None),
             Err(TaskLaunchError::NotStartable { current: word }),
             "a {word} run must not be re-launched in place",
         );
@@ -367,7 +368,7 @@ async fn start_on_a_paused_run_is_still_the_already_running_refusal() {
     ctx.register_cancellation_token("t1", tokio_util::sync::CancellationToken::new());
 
     assert_eq!(
-        orchestrator.start_task("t1"),
+        orchestrator.start_task("t1", None),
         Err(TaskLaunchError::AlreadyRunning)
     );
 }
@@ -391,7 +392,7 @@ async fn a_start_during_the_old_runs_finalisation_cannot_take_the_row() {
     ctx.register_cancellation_token("t1", tokio_util::sync::CancellationToken::new());
 
     assert_eq!(
-        orchestrator.start_task("t1"),
+        orchestrator.start_task("t1", None),
         Err(TaskLaunchError::AlreadyRunning),
         "the tail is still writing to this row",
     );
@@ -403,7 +404,7 @@ async fn a_start_during_the_old_runs_finalisation_cannot_take_the_row() {
     ctx.remove_cancellation_token("t1");
 
     assert_eq!(
-        orchestrator.start_task("t1"),
+        orchestrator.start_task("t1", None),
         Err(TaskLaunchError::NotStartable {
             current: "completed"
         }),
@@ -419,7 +420,7 @@ async fn start_of_an_unknown_run_is_not_found() {
     let (_dir, db) = temp_db();
     let (orchestrator, _ctx) = ready(&db);
     assert_eq!(
-        orchestrator.start_task("no-such-run"),
+        orchestrator.start_task("no-such-run", None),
         Err(TaskLaunchError::NotFound)
     );
 }
@@ -430,7 +431,7 @@ async fn start_refuses_a_row_with_nothing_to_dispatch() {
     store_task(&db, "t1", TaskStatus::Queued, None);
     let (orchestrator, _ctx) = ready(&db);
     assert_eq!(
-        orchestrator.start_task("t1"),
+        orchestrator.start_task("t1", None),
         Err(TaskLaunchError::NoDescription)
     );
 }
@@ -445,7 +446,7 @@ async fn a_start_that_could_not_dispatch_releases_the_run_slot() {
     let (orchestrator, ctx) = make_orchestrator(&db, vec![], true);
 
     assert!(matches!(
-        orchestrator.start_task("t1"),
+        orchestrator.start_task("t1", None),
         Err(TaskLaunchError::Dispatch(_))
     ));
     assert!(
@@ -468,7 +469,7 @@ async fn a_start_with_no_router_releases_the_run_slot() {
 
     // The dispatch itself succeeds — the run is registered and persisted — and
     // then dies for want of a router.
-    assert!(orchestrator.start_task("t1").is_ok());
+    assert!(orchestrator.start_task("t1", None).is_ok());
     assert!(
         ctx.claim_run_slot("t1").is_some(),
         "a run that could never start must not hold the id"
@@ -540,7 +541,7 @@ async fn resume_is_refused_while_the_flag_is_off() {
 
     assert!(!DaemonConfig::default().orchestrator.routing.resume_enabled);
     assert_eq!(
-        orchestrator.resume_task("t1").await,
+        orchestrator.resume_task("t1", None).await,
         Err(TaskLaunchError::ResumeDisabled)
     );
     // And nothing was launched behind the refusal.
@@ -572,7 +573,7 @@ async fn resume_is_refused_on_a_run_that_was_not_interrupted() {
         let id = format!("t-{}", status.as_str());
         store_task(&db, &id, status, Some("write the changelog"));
         assert_eq!(
-            orchestrator.resume_task(&id).await,
+            orchestrator.resume_task(&id, None).await,
             Err(TaskLaunchError::NotResumable {
                 current: status.as_str()
             }),
@@ -580,7 +581,7 @@ async fn resume_is_refused_on_a_run_that_was_not_interrupted() {
         );
     }
     assert_eq!(
-        orchestrator.resume_task("no-such-run").await,
+        orchestrator.resume_task("no-such-run", None).await,
         Err(TaskLaunchError::NotFound)
     );
 }
@@ -600,14 +601,14 @@ async fn resume_is_refused_when_the_log_is_gone() {
     // The sweep took the session's live segment (R54).
     std::fs::remove_file(logs.path().join("s1").join(crate::session_log::LIVE_SEGMENT)).unwrap();
     assert_eq!(
-        orchestrator.resume_task("t1").await,
+        orchestrator.resume_task("t1", None).await,
         Err(TaskLaunchError::ResumeLogMissing)
     );
 
     // A run that never had a session at all is the same answer.
     store_task(&db, "t2", TaskStatus::Interrupted, Some("write the changelog"));
     assert_eq!(
-        orchestrator.resume_task("t2").await,
+        orchestrator.resume_task("t2", None).await,
         Err(TaskLaunchError::ResumeLogMissing)
     );
 }
@@ -622,7 +623,7 @@ async fn resume_relaunches_the_run_under_its_own_id() {
     store_interrupted_with_log(&db, &ctx, logs.path(), "t1", "s1");
     enable_resume(&orchestrator);
 
-    let outcome = orchestrator.resume_task("t1").await.expect("resumed");
+    let outcome = orchestrator.resume_task("t1", None).await.expect("resumed");
 
     assert_eq!(outcome.task_id, "t1", "the same id (D5)");
     assert_eq!(outcome.title, "Ship the release");
@@ -693,7 +694,7 @@ async fn a_resume_keeps_the_state_and_artifacts_the_crashed_half_accumulated() {
     repo.set_outcome("t1", r#"{"summary":"partial"}"#, openalpaca_storage::OutcomeKind::Mixed, 1)
         .unwrap();
 
-    orchestrator.resume_task("t1").await.expect("resumed");
+    orchestrator.resume_task("t1", None).await.expect("resumed");
 
     let row = repo.get("t1").unwrap().expect("the row");
     assert_eq!(
@@ -726,4 +727,97 @@ fn enable_resume(orchestrator: &Orchestrator) {
     let mut config = DaemonConfig::clone(&orchestrator.daemon_config.load());
     config.orchestrator.routing.resume_enabled = true;
     orchestrator.daemon_config.store(Arc::new(config));
+}
+
+// ── S5: the declaration a parked row was created with ────────────────
+
+/// **S5.** `POST /v1/tasks` stored "this client cannot answer an approval
+/// prompt"; `start` is a different request, possibly minutes later, and by
+/// default it dispatches with what the row says rather than resetting it to
+/// `false`. The dispatch writes the row back, so the row is the witness.
+#[tokio::test]
+async fn start_inherits_the_parked_rows_declaration() {
+    let (_dir, db) = temp_db();
+    let mut task = store_task_row("t1", TaskStatus::Queued, Some("do the thing"), Utc::now());
+    task.unattended = true;
+    TaskRepository::new(&db).create(&task).expect("create task");
+    let (orchestrator, _ctx) = ready(&db);
+
+    orchestrator.start_task("t1", None).expect("dispatched");
+    assert!(
+        TaskRepository::new(&db).get("t1").unwrap().unwrap().unattended,
+        "the run was dispatched with the declaration the row was parked with"
+    );
+}
+
+/// …and a launch verb that declares for itself wins, in both directions.
+#[tokio::test]
+async fn a_launch_verb_can_override_the_parked_declaration() {
+    let (_dir, db) = temp_db();
+    let mut task = store_task_row("t1", TaskStatus::Queued, Some("do the thing"), Utc::now());
+    task.unattended = true;
+    TaskRepository::new(&db).create(&task).expect("create task");
+    let (orchestrator, _ctx) = ready(&db);
+
+    orchestrator
+        .start_task("t1", Some(false))
+        .expect("dispatched");
+    assert!(
+        !TaskRepository::new(&db).get("t1").unwrap().unwrap().unattended,
+        "an interactive client starting somebody's parked row can answer prompts"
+    );
+}
+
+/// `rerun` mints a new row, and it carries the source row's declaration
+/// unless the caller says otherwise.
+#[tokio::test]
+async fn rerun_carries_the_source_rows_declaration_onto_the_new_one() {
+    let (_dir, db) = temp_db();
+    let mut task = store_task_row(
+        "t1",
+        TaskStatus::Completed,
+        Some("write the changelog"),
+        Utc::now(),
+    );
+    task.unattended = true;
+    TaskRepository::new(&db).create(&task).expect("create task");
+    let (orchestrator, _ctx) = ready(&db);
+
+    let outcome = orchestrator.rerun_task("t1", None).expect("re-run");
+    assert!(
+        TaskRepository::new(&db)
+            .get(&outcome.task_id)
+            .unwrap()
+            .unwrap()
+            .unattended,
+        "the second run of an unattended goal is unattended too"
+    );
+}
+
+/// …and a `rerun` from a client that *can* answer says so, whatever the
+/// source row was carrying. Its own orchestrator: the lead is a singleton, so
+/// two dispatches in one test would find it busy.
+#[tokio::test]
+async fn rerun_can_declare_for_itself() {
+    let (_dir, db) = temp_db();
+    let mut task = store_task_row(
+        "t1",
+        TaskStatus::Completed,
+        Some("write the changelog"),
+        Utc::now(),
+    );
+    task.unattended = true;
+    TaskRepository::new(&db).create(&task).expect("create task");
+    let (orchestrator, _ctx) = ready(&db);
+
+    let outcome = orchestrator
+        .rerun_task("t1", Some(false))
+        .expect("re-run from a client that can answer");
+    assert!(
+        !TaskRepository::new(&db)
+            .get(&outcome.task_id)
+            .unwrap()
+            .unwrap()
+            .unattended
+    );
 }

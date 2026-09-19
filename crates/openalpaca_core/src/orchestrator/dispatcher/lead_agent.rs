@@ -110,6 +110,7 @@ impl TaskDispatcher {
         source: &str,
         workspace: MemoryScopeContext,
         source_task_id: &str,
+        unattended: bool,
     ) -> Result<DispatchOutcome, String> {
         self.dispatch_lead_agent_inner(
             Uuid::new_v4().to_string(),
@@ -125,8 +126,9 @@ impl TaskDispatcher {
             // A re-run comes from the route, not from a turn: the lane's
             // active session is the only answer there is.
             None,
-            // …and no turn means no client declaration: today's behaviour.
-            false,
+            // S5: the route's declaration, or — when it made none — the one
+            // the source row was carrying.
+            unattended,
         )
     }
 
@@ -146,6 +148,7 @@ impl TaskDispatcher {
         lane_key: &str,
         source: &str,
         workspace: MemoryScopeContext,
+        unattended: bool,
     ) -> Result<DispatchOutcome, String> {
         self.dispatch_lead_agent_inner(
             task_id.to_string(),
@@ -160,7 +163,8 @@ impl TaskDispatcher {
             None,
             // `start` likewise has no turn behind it.
             None,
-            false,
+            // S5: the route's declaration, or the parked row's.
+            unattended,
         )
     }
 
@@ -184,6 +188,7 @@ impl TaskDispatcher {
         source: &str,
         workspace: MemoryScopeContext,
         resume: ResumeSeed,
+        unattended: bool,
     ) -> Result<DispatchOutcome, String> {
         self.dispatch_lead_agent_inner(
             task_id.to_string(),
@@ -198,7 +203,8 @@ impl TaskDispatcher {
             Some(resume),
             // The seed's own session wins above; nothing to carry here.
             None,
-            false,
+            // S5: the route's declaration, or the interrupted row's.
+            unattended,
         )
     }
 
@@ -357,6 +363,11 @@ impl TaskDispatcher {
                 // another run's goal onto a new id (GAP-06).
                 source_task_id: source_task_id.clone(),
                 session_id: session_id.clone(),
+                // S5: the declaration this run is *actually* dispatched with,
+                // written onto the row — so a `start` that inherits it from
+                // the row and a `start` that declared it read the same
+                // afterwards, and a `rerun` of this run inherits the truth.
+                unattended,
             };
             let persisted = match row_write {
                 RowWrite::Create => repo.create(&task),
@@ -791,10 +802,21 @@ impl TaskDispatcher {
                 "Lead agent execution returned"
             );
 
-            // Update state_json: mark lead agent step completed or failed
+            // Update state_json: mark lead agent step completed or failed.
+            //
+            // **S4 — one cap, and it is 2 000.** This step summary is what
+            // `TaskState::build_outcome` joins into the outcome, which is what
+            // `result_summary` is written from — so a 500-character cut here
+            // was the run's report being cut at 500 characters, whatever the
+            // `MAX_SUMMARY_LENGTH = 2000` beside it said. The unattended run's
+            // report ended at "Done, with one snag:".
             if let Some(ref db) = db {
                 let success = result.success;
-                let summary_text: String = result.final_content.chars().take(500).collect();
+                let summary_text: String = result
+                    .final_content
+                    .chars()
+                    .take(super::outcome::MAX_SUMMARY_LENGTH)
+                    .collect();
                 let error_msg = format!("{:?}", result.loop_result.finish_reason);
                 if !update_state_with_retry(
                     db,
@@ -863,11 +885,22 @@ impl TaskDispatcher {
                 &bus,
             );
 
-            // Record agent task history
+            // Record agent task history.
+            //
+            // **S7 — the template, not the instance.** `agent_task_history`
+            // has `agent_id REFERENCES agent(id)` (migration 007) and the
+            // `agent` table holds *templates*. A singleton lead's instance id
+            // happens to equal its template id, so this read correctly for
+            // years; the moment the lead came from a non-singleton fallback
+            // template the id was `system_agent::1706337e`, the insert broke
+            // the foreign key, and the run finished with
+            // "Failed to record agent task history". The two `agent_metrics`
+            // counters below are keyed on the same column and were updating
+            // zero rows for the same reason.
             if let Some(ref db) = db {
                 usage::record_agent_history(
                     db,
-                    &lead_agent.id,
+                    &lead_agent.template_id,
                     &task_id,
                     "lead_agent",
                     result.success,
@@ -895,6 +928,17 @@ impl TaskDispatcher {
                         Some(status) => format!("{status}\n\n{report}"),
                         None => report,
                     };
+                // **S4** — and the runtime's own last line, when a tool was
+                // refused because nobody could approve it. The model was told
+                // (that refusal is its tool result) but a model may bury it,
+                // paraphrase it away, or run out of room; the reader of the
+                // report is owed it verbatim, once, at the end.
+                let content = match super::outcome::unapprovable_note(
+                    &super::outcome::unapprovable_tools(db, &task_id),
+                ) {
+                    Some(note) => format!("{content}\n\n{note}"),
+                    None => content,
+                };
                 // Resolve model name for conversation record
                 let default_model = router.default_model();
                 let actual_model = result
@@ -1031,6 +1075,7 @@ impl TaskDispatcher {
                                 scope,
                                 workspace_path: row.workspace_path,
                                 source_task_id: row.source_task_id,
+                                unattended: row.unattended,
                             });
                         }
                         Err(e) => {

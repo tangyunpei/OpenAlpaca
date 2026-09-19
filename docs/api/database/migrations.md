@@ -4,7 +4,7 @@
 
 ## Overview
 
-- Total registered migrations: 41
+- Total registered migrations: 42
 - Migration SQL directory: `crates/openalpaca_storage/src/migrations`
 
 ## Files
@@ -52,3 +52,4 @@
 | 39 | `sessions` | `039_sessions.sql` | Migration 039: sessions. Rebuilds `conversations` as `session` |
 | 40 | `llm_call_log_timestamp_index` | `040_llm_call_log_timestamp_index.sql` | Migration 040: index llm_call_log(timestamp) for the usage-summary query. |
 | 41 | `execution_log_timestamp_indexes` | `041_execution_log_timestamp_indexes.sql` | Migration 041: timestamp-leading indexes on the two execution logs. |
+| 42 | `unattended_declaration` | `042_unattended_declaration.sql` | Migration 042: the "this client cannot answer a confirmation" declaration, |

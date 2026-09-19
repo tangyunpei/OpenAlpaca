@@ -248,6 +248,9 @@ pub fn main_loop_tool_set(
                 bus,
                 lane_key.to_string(),
                 created_by,
+                // S5: the promise is kept by a later turn the runner starts,
+                // by which time this client may be long gone.
+                unattended,
             )) as Arc<dyn BuiltInTool>,
         ));
         Some(steer)

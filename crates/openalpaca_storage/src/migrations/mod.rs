@@ -216,4 +216,9 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "execution_log_timestamp_indexes",
         sql: include_str!("041_execution_log_timestamp_indexes.sql"),
     },
+    Migration {
+        version: 42,
+        name: "unattended_declaration",
+        sql: include_str!("042_unattended_declaration.sql"),
+    },
 ];

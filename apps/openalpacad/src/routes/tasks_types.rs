@@ -22,6 +22,13 @@ pub struct CreateTaskRequest {
     /// launched onto a lane posts its report into that conversation, so naming
     /// someone else's is `404 LANE_NOT_FOUND` (R79, R40's line — never `403`).
     pub source_lane: String,
+    /// **S5** — this client cannot answer a tool-approval prompt, the same
+    /// declaration `POST /v1/chat` takes. This route only *parks* a row, so
+    /// the flag is stored on it: the `start` / `rerun` / `resume` that
+    /// dispatches it later inherits this unless it declares for itself.
+    /// Absent is `false`, which is today's behaviour exactly.
+    #[serde(default)]
+    pub unattended: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -38,6 +45,28 @@ pub struct TaskActionRequest {
     /// but a dispatch of the stored row under its own id (D5, GAP-06) and is
     /// answered by the route before it reaches that function.
     pub action: String,
+    /// **S5**, on the two actions that dispatch (`start`, `resume`): this
+    /// client cannot answer a tool-approval prompt.
+    ///
+    /// `Option`, not a bare `bool` with a `false` default, because the row
+    /// already carries the declaration made when it was parked
+    /// (`POST /v1/tasks`) — absent means "whatever the row says", and only an
+    /// explicit value overrides it. Either way the observable default is the
+    /// same `false` `POST /v1/chat` has. Ignored by `cancel` and `pause`,
+    /// which dispatch nothing.
+    #[serde(default)]
+    pub unattended: Option<bool>,
+}
+
+/// `POST /v1/tasks/{id}/rerun` — the body, which is optional.
+///
+/// The verb took none before S5 and still needs none; a client that sends
+/// nothing gets the source row's declaration, as `start` does.
+#[derive(Debug, Default, Deserialize)]
+pub struct RerunTaskRequest {
+    /// See [`TaskActionRequest::unattended`].
+    #[serde(default)]
+    pub unattended: Option<bool>,
 }
 
 /// `POST /v1/tasks/{id}/rerun` (GAP-06) — `201`, and the id in it is **not**

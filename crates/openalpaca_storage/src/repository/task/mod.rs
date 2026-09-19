@@ -41,11 +41,11 @@ const TITLES_FOR_CHUNK: usize = 500;
 const TASK_COLUMNS: &str = "id, title, description, status, priority, progress_current, \
      progress_total, result_summary, created_by, source_lane, created_at, updated_at, \
      completed_at, state_json, state_version, outcome_json, outcome_kind, artifact_count, \
-     workspace_id, source_task_id, session_id";
+     workspace_id, source_task_id, session_id, unattended";
 
 /// The placeholder tuple matching [`TASK_COLUMNS`].
 const TASK_VALUES: &str = "(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, \
-     ?16, ?17, ?18, ?19, ?20, ?21)";
+     ?16, ?17, ?18, ?19, ?20, ?21, ?22)";
 
 /// [`TaskRepository::upsert_queued`]'s conflict tail — the row is reset to a
 /// fresh queued run, keeping only what makes it *this* row (`id`, `created_at`,
@@ -68,7 +68,8 @@ const RELAUNCH_ON_CONFLICT: &str = "ON CONFLICT(id) DO UPDATE SET \
      artifact_count = 0, \
      workspace_id = excluded.workspace_id, \
      source_task_id = excluded.source_task_id, \
-     session_id = excluded.session_id";
+     session_id = excluded.session_id, \
+     unattended = excluded.unattended";
 
 /// [`TaskRepository::upsert_queued_preserving_state`]'s conflict tail — the
 /// row goes live again **over what the last attempt accumulated**.
@@ -92,7 +93,8 @@ const RESUME_ON_CONFLICT: &str = "ON CONFLICT(id) DO UPDATE SET \
      completed_at = NULL, \
      workspace_id = excluded.workspace_id, \
      source_task_id = excluded.source_task_id, \
-     session_id = excluded.session_id";
+     session_id = excluded.session_id, \
+     unattended = excluded.unattended";
 
 /// Repository for task CRUD operations.
 pub struct TaskRepository<'a> {
@@ -187,6 +189,7 @@ impl<'a> TaskRepository<'a> {
                     task.workspace_id,
                     task.source_task_id,
                     task.session_id,
+                    task.unattended as i64,
                 ],
             )
             .context(context)?;
@@ -512,6 +515,7 @@ impl<'a> TaskRepository<'a> {
             workspace_id: row.get(18)?,
             source_task_id: row.get(19)?,
             session_id: row.get(20)?,
+            unattended: row.get::<_, i64>(21)? != 0,
         })
     }
 

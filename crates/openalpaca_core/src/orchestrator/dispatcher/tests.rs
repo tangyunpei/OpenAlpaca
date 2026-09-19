@@ -691,6 +691,7 @@ fn test_build_task_outcome_with_db_and_state_json() {
         workspace_id: None,
         source_task_id: None,
         session_id: None,
+        unattended: false,
     };
     repo.create(&task).unwrap();
 
@@ -787,6 +788,7 @@ fn test_finalize_task_with_outcome_persists_and_reads_back() {
         workspace_id: None,
         source_task_id: None,
         session_id: None,
+        unattended: false,
     };
     repo.create(&task).unwrap();
 
@@ -1612,4 +1614,324 @@ fn test_completion_report_lands_in_the_session_that_started_the_run() {
         openalpaca_storage::SESSION_ACTIVE,
         "and stays the live one — a report does not re-home the lane"
     );
+}
+
+// ── S7: the run's own history row ────────────────────────────────────
+
+/// Poll `agent_task_history` until the run's rows land, or give up.
+async fn wait_for_agent_history(
+    db: &Database,
+    task_id: &str,
+) -> Vec<openalpaca_storage::AgentTaskHistory> {
+    let repo = openalpaca_storage::SubAgentRepository::new(db);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let rows = repo.get_history_for_task(task_id).unwrap_or_default();
+        if !rows.is_empty() {
+            return rows;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Vec::new();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// **S7.** `agent_task_history.agent_id` references `agent(id)`, and the
+/// `agent` table holds **templates**. A lead spawned from a non-singleton
+/// template runs as `{template}::{uuid8}`, which is no row at all — so the
+/// insert broke the foreign key and a successful run finished with
+/// `WARN … Failed to record agent task history`, leaving the run absent from
+/// the history the task surface reads.
+#[tokio::test]
+async fn a_leads_history_row_names_the_template_that_ran() {
+    use openalpaca_llm::{ChatResponse, FinishReason, ProviderType, Usage};
+
+    let mock_provider = Arc::new(e2e_mock::MockProvider::new(vec![ChatResponse {
+        content: "Done.".to_string(),
+        tool_calls: vec![],
+        model: "mock-model".to_string(),
+        usage: Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            ..Default::default()
+        },
+        finish_reason: FinishReason::Stop,
+        thinking: None,
+        parts: None,
+    }]));
+    let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
+        mock_provider,
+        ProviderType::Anthropic,
+        "mock-model".to_string(),
+    ));
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    // The template row the history's foreign key points at — what the daemon
+    // syncs from `config/agents/` at boot.
+    db.with_connection(|conn| {
+        conn.execute(
+            "INSERT INTO agent (id, name, template_id) VALUES ('worker-01', 'Worker', 'worker-01')",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    // No "orchestration" capability → a non-singleton template → the lead
+    // runs as an instance whose id is *not* the template id.
+    let dispatcher = setup_with_specific_router_and_db(
+        vec![make_agent("worker-01", vec!["web_search"])],
+        DaemonConfig::default(),
+        db.clone(),
+        router,
+    );
+
+    let outcome = dispatcher
+        .dispatch_lead_agent(
+            "Do the thing",
+            "The thing".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            None,
+            false,
+        )
+        .unwrap();
+
+    let rows = wait_for_agent_history(&db, &outcome.task_id).await;
+    assert_eq!(rows.len(), 1, "the run records exactly one lead row");
+    assert_eq!(rows[0].agent_id, "worker-01");
+    assert_eq!(rows[0].role, "lead_agent");
+
+    // …and this test only means something while the instance really is
+    // suffixed. `llm_call_log` is written from `lead_agent.id` a moment
+    // before the history row, so it is the durable witness of what ran.
+    let instance_id: String = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT agent_id FROM llm_call_log WHERE task_id = ?1",
+                [&outcome.task_id],
+                |row| row.get(0),
+            )?)
+        })
+        .expect("the lead's own call is logged");
+    assert!(
+        instance_id.starts_with("worker-01::"),
+        "expected a non-singleton instance id, got {instance_id}"
+    );
+}
+
+// ── S4: the report cannot lose a refusal ─────────────────────────────
+
+/// The note is the runtime's own words, and it names every tool once.
+#[test]
+fn the_refusal_note_names_what_could_not_be_approved() {
+    use super::outcome::unapprovable_note;
+
+    assert!(unapprovable_note(&[]).is_none(), "nothing refused, no note");
+
+    let one = unapprovable_note(&["artifact_write".to_string()]).expect("a note");
+    assert!(one.contains("artifact_write"), "{one}");
+    assert!(one.contains("tool was refused"), "{one}");
+    assert!(one.contains("GUI") && one.contains("openalpaca chat"), "{one}");
+
+    let two = unapprovable_note(&[
+        "artifact_write".to_string(),
+        "workspace_write".to_string(),
+    ])
+    .expect("a note");
+    assert!(two.contains("tools were refused"), "{two}");
+    assert!(two.contains("artifact_write, workspace_write"), "{two}");
+}
+
+/// **S4.** The cut is exactly where the refusal used to be lost: a summary
+/// long enough to be truncated is the one whose last line goes. The prose
+/// gives way; the runtime's line stays whole.
+#[test]
+fn truncating_a_summary_keeps_the_runtime_line() {
+    use super::outcome::truncate_summary;
+
+    let note = "Not run — approve it.";
+    let prose = "x".repeat(500);
+    let summary = format!("{prose}\n\n{note}");
+
+    let cut = truncate_summary(&summary, Some(note), 100);
+    assert_eq!(cut.chars().count(), 100);
+    assert!(cut.ends_with(note), "the note survives the cut: {cut}");
+    assert!(cut.starts_with("xxx"), "…after as much prose as fits: {cut}");
+
+    // Short enough: untouched.
+    assert_eq!(truncate_summary(&summary, Some(note), 10_000), summary);
+    // No note: the old behaviour, a plain head cut.
+    assert_eq!(truncate_summary(&prose, None, 10).chars().count(), 10);
+}
+
+/// End to end through finalisation: the row a client reads carries the
+/// refusal, and carries it even when the model's own report is longer than
+/// the 2 000-character cap.
+#[test]
+fn a_finalised_run_reports_what_nobody_could_approve() {
+    use super::outcome::{MAX_SUMMARY_LENGTH, finalize_task_with_outcome};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    db.with_connection(|conn| {
+        conn.execute(
+            "INSERT INTO task (id, title, created_by, source_lane)
+             VALUES ('task-1', 'A run', 'user1', 'user1:cli')",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    // What the sandbox writes when nobody can answer (S4).
+    openalpaca_storage::repository::EventLogRepository::new(&db)
+        .log_for_task(
+            crate::security::sandbox::UNAPPROVABLE_EVENT_TYPE,
+            Some("lead_agent"),
+            Some("task-1"),
+            Some(&serde_json::json!({"tool_name": "artifact_write"})),
+            Some(&serde_json::json!({"outcome": "denied"})),
+        )
+        .unwrap();
+
+    let ctx = std::sync::Arc::new(crate::context::SharedContext::new());
+    ctx.task_registry
+        .register("task-1".to_string(), "A run".to_string());
+    let bus = crate::bus::EventBus::default();
+
+    // A report longer than the cap, so the truncation is the thing under test.
+    let report = format!("Done, with one snag: {}", "detail. ".repeat(400));
+    assert!(report.chars().count() > MAX_SUMMARY_LENGTH);
+
+    let outcome = finalize_task_with_outcome(&ctx, &bus, Some(&db), "task-1", &report, true);
+    assert!(
+        outcome.summary.contains("artifact_write"),
+        "the outcome carries the refusal: {}",
+        outcome.summary
+    );
+
+    let stored = openalpaca_storage::TaskRepository::new(&db)
+        .get("task-1")
+        .unwrap()
+        .unwrap()
+        .result_summary
+        .expect("a finished run has a summary");
+    assert!(
+        stored.chars().count() <= MAX_SUMMARY_LENGTH,
+        "still capped at {MAX_SUMMARY_LENGTH}, got {}",
+        stored.chars().count()
+    );
+    assert!(
+        stored.contains("artifact_write"),
+        "…and the cut kept the refusal: {stored}"
+    );
+    assert!(
+        stored.starts_with("Done, with one snag:"),
+        "…ahead of as much of the report as fits: {stored}"
+    );
+}
+
+/// A run nobody refused anything for reads exactly as it did before.
+#[test]
+fn a_run_with_nothing_refused_gains_no_note() {
+    use super::outcome::finalize_task_with_outcome;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    db.with_connection(|conn| {
+        conn.execute(
+            "INSERT INTO task (id, title, created_by, source_lane)
+             VALUES ('task-1', 'A run', 'user1', 'user1:cli')",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let ctx = std::sync::Arc::new(crate::context::SharedContext::new());
+    ctx.task_registry
+        .register("task-1".to_string(), "A run".to_string());
+
+    let outcome = finalize_task_with_outcome(
+        &ctx,
+        &crate::bus::EventBus::default(),
+        Some(&db),
+        "task-1",
+        "All done.",
+        true,
+    );
+    assert_eq!(outcome.summary, "All done.");
+}
+
+/// **S4.** The lead's step summary — which `build_outcome` joins into the
+/// run's `result_summary` — was cut at 500 characters beside a
+/// `MAX_SUMMARY_LENGTH = 2000`, so a report of 900 characters arrived
+/// mid-sentence. One cap, and it is the one the constant names.
+#[tokio::test]
+async fn a_long_report_survives_to_the_two_thousand_character_cap() {
+    use openalpaca_llm::{ChatResponse, FinishReason, ProviderType, Usage};
+
+    let report = format!("Report: {}", "one more finding. ".repeat(60));
+    assert!(report.chars().count() > 900 && report.chars().count() < 2000);
+
+    let mock_provider = Arc::new(e2e_mock::MockProvider::new(vec![ChatResponse {
+        content: report.clone(),
+        tool_calls: vec![],
+        model: "mock-model".to_string(),
+        usage: Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            ..Default::default()
+        },
+        finish_reason: FinishReason::Stop,
+        thinking: None,
+        parts: None,
+    }]));
+    let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
+        mock_provider,
+        ProviderType::Anthropic,
+        "mock-model".to_string(),
+    ));
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let dispatcher = setup_with_specific_router_and_db(
+        vec![make_agent("lead-01", vec!["orchestration"])],
+        DaemonConfig::default(),
+        db.clone(),
+        router,
+    );
+
+    let outcome = dispatcher
+        .dispatch_lead_agent(
+            "Do the thing",
+            "The thing".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            None,
+            false,
+        )
+        .unwrap();
+    wait_for_conversation_message(&db, "user1:cli").await;
+
+    let repo = openalpaca_storage::TaskRepository::new(&db);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let summary = loop {
+        if let Ok(Some(task)) = repo.get(&outcome.task_id)
+            && let Some(summary) = task.result_summary
+        {
+            break summary;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for the run's summary"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    assert_eq!(summary, report, "the whole report, not its first 500 chars");
 }

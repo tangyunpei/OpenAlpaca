@@ -6,7 +6,7 @@
 
 - DB path resolver: `openalpaca_storage::paths::database_path()`
 - Migrations entrypoint: `openalpaca_storage::migrations::MIGRATIONS`
-- Registered migrations: 41
+- Registered migrations: 42
 
 ## Tables
 
@@ -255,7 +255,7 @@ updated_at TEXT DEFAULT (datetime('now'))
 
 ### `lane_followups` (table)
 
-Source migration: `039_sessions.sql`
+Source migration: `042_unattended_declaration.sql`
 
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT
@@ -269,6 +269,7 @@ status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','done'
 created_at TEXT NOT NULL DEFAULT (datetime('now'))
 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 session_id TEXT
+unattended INTEGER NOT NULL DEFAULT 0
 ```
 
 ### `link_token` (table)
@@ -478,7 +479,7 @@ updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 
 ### `task` (table)
 
-Source migration: `039_sessions.sql`
+Source migration: `042_unattended_declaration.sql`
 
 ```sql
 id TEXT PRIMARY KEY
@@ -502,6 +503,7 @@ artifact_count INTEGER NOT NULL DEFAULT 0
 workspace_id TEXT
 source_task_id TEXT
 session_id TEXT
+unattended INTEGER NOT NULL DEFAULT 0
 ```
 
 ### `task_agent_assignment` (table)

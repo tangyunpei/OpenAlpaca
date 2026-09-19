@@ -32,6 +32,7 @@ fn make_task(db: &Database, id: &str, status: TaskStatus) {
         workspace_id: None,
         source_task_id: None,
         session_id: None,
+        unattended: false,
     };
     TaskRepository::new(db).create(&task).unwrap();
     if status.is_terminal() {

@@ -188,6 +188,16 @@ async fn run_plugin_skill(
     fm: SkillFrontmatter,
     stub: Arc<StubPluginSkill>,
 ) -> Result<String, String> {
+    run_plugin_skill_as(orch, fm, stub, false).await
+}
+
+/// [`run_plugin_skill`], with the S5 declaration the calling turn made.
+async fn run_plugin_skill_as(
+    orch: &Orchestrator,
+    fm: SkillFrontmatter,
+    stub: Arc<StubPluginSkill>,
+    unattended: bool,
+) -> Result<String, String> {
     let doc = skill_doc(fm);
     orch.invoke_plugin_skill(
         Uuid::new_v4(),
@@ -201,6 +211,7 @@ async fn run_plugin_skill(
         &MemoryScopeContext::new(None),
         None,
         &doc,
+        unattended,
     )
     .await
     .map(|r| r.content)
@@ -332,4 +343,85 @@ fn a_mixed_case_allowed_name_is_lowercased_at_construction() {
         );
     }
     assert!(denies(&allowed, "shell_execute"));
+}
+
+// ── S5: the skill tier is a client-facing tier too ───────────────────
+
+/// A skill whose one tool needs approval before it runs.
+fn confirm_listed(tool: &str) -> SkillFrontmatter {
+    let mut fm = SkillFrontmatter {
+        name: "acme-search".to_string(),
+        ..Default::default()
+    };
+    fm.tools.allow = vec![tool.to_string()];
+    fm.permissions.confirm.tools = vec![tool.to_string()];
+    fm
+}
+
+/// **S5.** `orchestrator/skill/invocation.rs` hardcoded `unattended: false`,
+/// so a `/slash` skill from a piped `openalpaca chat` — and *every scheduled
+/// skill*, which reaches the model through this tier and no other — raised a
+/// confirmation prompt with nobody on the other end and then waited out the
+/// full timeout. The declaration now travels here, and the tool is refused at
+/// once in words that name where it can be approved.
+#[tokio::test]
+async fn an_unattended_skill_turn_refuses_a_tool_nobody_can_approve() {
+    let registry = Arc::new(registry(true));
+    let orch = orchestrator_for(registry);
+    let invoked = Arc::new(AtomicBool::new(false));
+    let outcome = Arc::new(Mutex::new(None));
+    let stub = Arc::new(StubPluginSkill {
+        tool: "acme__search".to_string(),
+        invoked: invoked.clone(),
+        outcome: outcome.clone(),
+    });
+
+    run_plugin_skill_as(&orch, confirm_listed("acme__search"), stub, true)
+        .await
+        .expect("the skill itself runs — it is the tool call that is refused");
+
+    assert!(invoked.load(Ordering::SeqCst), "the plugin ran");
+    let refusal = outcome
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the tool call was attempted")
+        .expect_err("fail-closed: the tool must not run");
+    assert!(
+        refusal.contains("needs your approval") && refusal.contains("cannot ask for it"),
+        "the refusal must say what happened: {refusal}"
+    );
+    assert!(
+        refusal.contains("GUI") && refusal.contains("openalpaca chat"),
+        "…and where it can be approved: {refusal}"
+    );
+}
+
+/// The attended path is untouched: with no broker attached the skill tier is
+/// fail-closed exactly as it always was, and says so in its own words.
+#[tokio::test]
+async fn an_attended_skill_turn_keeps_the_fail_closed_refusal() {
+    let registry = Arc::new(registry(true));
+    let orch = orchestrator_for(registry);
+    let stub = Arc::new(StubPluginSkill {
+        tool: "acme__search".to_string(),
+        invoked: Arc::new(AtomicBool::new(false)),
+        outcome: Arc::new(Mutex::new(None)),
+    });
+    let outcome = stub.outcome.clone();
+
+    run_plugin_skill_as(&orch, confirm_listed("acme__search"), stub, false)
+        .await
+        .expect("the skill runs");
+
+    let refusal = outcome
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the tool call was attempted")
+        .expect_err("fail-closed either way");
+    assert!(
+        refusal.contains("no interactive"),
+        "an attended turn with no broker keeps its own words: {refusal}"
+    );
 }

@@ -465,6 +465,17 @@ async fn async_main(
     if let Some(ref path) = bootstrap_path {
         orchestrator.set_bootstrap_path(path.clone());
     }
+    // S8: the orchestrator deletes BOOTSTRAP.md when onboarding completes, so
+    // it is the one party that knows the file is going before it is gone.
+    // Hand it the watcher's unwatch so the path leaves the poll set first and
+    // the poll scanner never walks a file we removed ourselves.
+    if let Some(handle) = fs_watch_handle.clone() {
+        orchestrator.set_path_unwatcher(std::sync::Arc::new(move |path: &std::path::Path| {
+            if let Err(e) = handle.unwatch_path(path) {
+                warn!("Failed to unwatch {}: {e}", path.display());
+            }
+        }));
+    }
 
     // Gateway (needed by the hot-reload wake loop for scheduled-skill turns;
     // connectors and chat wire onto it in Step 12).

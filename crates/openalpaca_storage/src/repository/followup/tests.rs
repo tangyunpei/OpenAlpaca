@@ -6,7 +6,7 @@ fn setup_db() -> Database {
 }
 
 fn queue_item(repo: &FollowupRepository<'_>, lane: &str, kind: &str, content: &str) -> i64 {
-    repo.queue(lane, kind, content, "\"System\"", None, Some("task-1"))
+    repo.queue(lane, kind, content, "\"System\"", None, Some("task-1"), false)
         .unwrap()
 }
 
@@ -23,6 +23,7 @@ fn test_queue_and_list_queued_by_lane() {
             "{\"User\":{\"global_id\":\"user\"}}",
             Some("/tmp/project"),
             Some("task-abc"),
+            false,
         )
         .unwrap();
     assert!(id1 > 0);
@@ -478,6 +479,7 @@ fn the_guard_counts_rows_the_graceful_path_already_wrote() {
         "\"System\"",
         None,
         Some("task-1"),
+        false,
     )
     .unwrap();
 
@@ -536,4 +538,44 @@ fn a_cancelled_or_surfaced_row_is_not_recovered_again() {
         .unwrap()
         .is_empty()
     );
+}
+
+/// **S5.** The declaration of the turn that queued the promise rides the row,
+/// so the turn the runner later starts — possibly after a restart — refuses a
+/// tool nobody can approve instead of holding for the timeout.
+#[test]
+fn a_queued_followup_remembers_that_nobody_can_answer() {
+    let db = setup_db();
+    let repo = FollowupRepository::new(&db);
+
+    let unattended = repo
+        .queue(
+            "u:cli",
+            FOLLOWUP_KIND_FOLLOWUP,
+            "finish the audit",
+            "\"System\"",
+            None,
+            Some("task-1"),
+            true,
+        )
+        .unwrap();
+    let attended = repo
+        .queue(
+            "u:gui",
+            FOLLOWUP_KIND_FOLLOWUP,
+            "and this one",
+            "\"System\"",
+            None,
+            Some("task-2"),
+            false,
+        )
+        .unwrap();
+
+    assert!(repo.get(unattended).unwrap().unwrap().unattended);
+    assert!(!repo.get(attended).unwrap().unwrap().unattended);
+
+    // The claim is what the runner reads, so it must carry it too.
+    let claimed = repo.claim_next("u:cli").unwrap().expect("claimed");
+    assert_eq!(claimed.id, unattended);
+    assert!(claimed.unattended);
 }

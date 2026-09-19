@@ -50,12 +50,22 @@ fn test_mark_step_completed() {
     assert!(state.steps[0].completed_at.is_some());
 }
 
+/// S4: the cap is the one `MAX_SUMMARY_LENGTH` names — 2 000, not the 500
+/// that used to cut a run's report mid-sentence before the constant beside it
+/// was ever consulted.
 #[test]
 fn test_mark_step_completed_caps_summary() {
     let mut state = TaskState::initial("obj", &make_assignments());
-    let long_summary = "x".repeat(600);
-    state.mark_step_completed(0, &long_summary);
-    assert_eq!(state.steps[0].result_summary.as_ref().unwrap().len(), 500);
+    state.mark_step_completed(0, &"x".repeat(600));
+    assert_eq!(
+        state.steps[0].result_summary.as_ref().unwrap().len(),
+        600,
+        "600 characters is under the cap and must survive whole"
+    );
+
+    let mut state = TaskState::initial("obj", &make_assignments());
+    state.mark_step_completed(0, &"x".repeat(2_600));
+    assert_eq!(state.steps[0].result_summary.as_ref().unwrap().len(), 2_000);
 }
 
 #[test]
@@ -74,9 +84,8 @@ fn test_mark_step_failed() {
 #[test]
 fn test_mark_step_failed_caps_error() {
     let mut state = TaskState::initial("obj", &make_assignments());
-    let long_error = "e".repeat(600);
-    state.mark_step_failed(0, &long_error);
-    assert_eq!(state.steps[0].result_summary.as_ref().unwrap().len(), 500);
+    state.mark_step_failed(0, &"e".repeat(2_600));
+    assert_eq!(state.steps[0].result_summary.as_ref().unwrap().len(), 2_000);
 }
 
 #[test]

@@ -974,3 +974,83 @@ async fn sandbox_default_scope_when_response_missing_scope() {
         "Default TheseArgs scope must not behave like EntireTool"
     );
 }
+
+/// **S4.** The refusal is written to the run's audit log under its own event
+/// type, so finalisation can ask "what did this run have to refuse?" without
+/// parsing prose out of every `security_violation` the run produced.
+#[tokio::test]
+async fn an_unapprovable_tool_is_filed_under_its_own_event_type() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let mut sandbox = SandboxManager::with_db(
+        make_registry(),
+        EventBus::default(),
+        &CircuitBreakerConfig::default(),
+        db.clone(),
+    );
+    sandbox.set_confirmation_broker(Arc::new(ConfirmationBroker::new()));
+    let mut policy = make_policy("agent1");
+    policy.require_confirmation_for = vec!["web_search".to_string()];
+    policy.unattended = true;
+    let ctx = make_ctx_for_task("agent1", "t-1");
+
+    let _ = sandbox
+        .execute_tool(&make_tool_call("web_search"), &policy, &ctx)
+        .await;
+
+    let rows = openalpaca_storage::repository::EventLogRepository::new(&db)
+        .query(&openalpaca_storage::repository::EventLogQuery {
+            task_id: Some("t-1"),
+            event_type: Some(UNAPPROVABLE_EVENT_TYPE),
+            limit: 10,
+            ..Default::default()
+        })
+        .expect("read the audit log");
+    assert_eq!(rows.len(), 1, "one row per refusal");
+    assert_eq!(
+        rows[0].detail.as_ref().unwrap()["tool_name"],
+        "web_search"
+    );
+
+    // …and it is not double-counted as an ordinary violation.
+    let violations = openalpaca_storage::repository::EventLogRepository::new(&db)
+        .query(&openalpaca_storage::repository::EventLogQuery {
+            task_id: Some("t-1"),
+            event_type: Some("security_violation"),
+            limit: 10,
+            ..Default::default()
+        })
+        .expect("read the audit log");
+    assert!(violations.is_empty(), "{violations:?}");
+}
+
+/// Every other refusal keeps the word it has always had — a capability the
+/// agent was never granted is not a missing approver.
+#[tokio::test]
+async fn an_ordinary_violation_keeps_its_own_event_type() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let sandbox = SandboxManager::with_db(
+        make_registry(),
+        EventBus::default(),
+        &CircuitBreakerConfig::default(),
+        db.clone(),
+    );
+    let mut policy = make_policy("agent1");
+    policy.allowed_capabilities = Allowlist::only(["nothing_at_all"]);
+    let ctx = make_ctx_for_task("agent1", "t-1");
+
+    let _ = sandbox
+        .execute_tool(&make_tool_call("web_search"), &policy, &ctx)
+        .await;
+
+    let rows = openalpaca_storage::repository::EventLogRepository::new(&db)
+        .query(&openalpaca_storage::repository::EventLogQuery {
+            task_id: Some("t-1"),
+            event_type: Some("security_violation"),
+            limit: 10,
+            ..Default::default()
+        })
+        .expect("read the audit log");
+    assert_eq!(rows.len(), 1);
+}

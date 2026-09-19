@@ -5,7 +5,7 @@
 ## Overview
 
 - Router source: `apps/openalpacad/src/router.rs`.
-- Total documented method/path endpoints: 103.
+- Total documented method/path endpoints: 104.
 - Includes public, bearer-protected, WebSocket, and SSE routes.
 
 ## Auth
@@ -43,6 +43,7 @@
 | GET | `/v1/artifacts/{id}/versions/{n}/content` | `bearer_or_query_token` | `get_artifact_version_content_handler` | - | `super::TokenParams` | `apps/openalpacad/src/routes/artifacts.rs` |
 | POST | `/v1/auth/link` | `bearer` | `generate_link_token_handler` | - | - | `apps/openalpacad/src/routes/auth.rs` |
 | POST | `/v1/chat` | `bearer` | `send_chat_handler` | `ChatSendRequest` | - | `apps/openalpacad/src/routes/chat.rs` |
+| GET | `/v1/chat/confirmations` | `bearer` | `list_confirmations` | - | - | `apps/openalpacad/src/routes/chat.rs` |
 | POST | `/v1/chat/confirmations/{request_id}` | `bearer` | `confirm_tool` | `ConfirmationBody` | - | `apps/openalpacad/src/routes/chat.rs` |
 | GET | `/v1/chat/history` | `bearer` | `get_chat_history_handler` | - | `HistoryQuery` | `apps/openalpacad/src/routes/chat.rs` |
 | DELETE | `/v1/chat/history` | `bearer` | `delete_chat_history_handler` | - | `DeleteHistoryQuery` | `apps/openalpacad/src/routes/chat.rs` |
@@ -114,7 +115,7 @@
 | POST | `/v1/tasks` | `bearer` | `create_task_handler` | `CreateTaskRequest` | - | `apps/openalpacad/src/routes/tasks.rs` |
 | GET | `/v1/tasks/{id}` | `bearer` | `get_task_handler` | - | - | `apps/openalpacad/src/routes/tasks.rs` |
 | POST | `/v1/tasks/{id}/action` | `bearer` | `task_action_handler` | `TaskActionRequest` | - | `apps/openalpacad/src/routes/tasks.rs` |
-| POST | `/v1/tasks/{id}/rerun` | `bearer` | `rerun_task_handler` | - | - | `apps/openalpacad/src/routes/tasks.rs` |
+| POST | `/v1/tasks/{id}/rerun` | `bearer` | `rerun_task_handler` | `RerunTaskRequest` | - | `apps/openalpacad/src/routes/tasks.rs` |
 | POST | `/v1/tasks/{id}/steer` | `bearer` | `steer_task_handler` | `SteerTaskRequest` | - | `apps/openalpacad/src/routes/tasks.rs` |
 | GET | `/v1/tasks/{id}/timeline` | `bearer` | `get_task_timeline_handler` | - | - | `apps/openalpacad/src/routes/tasks.rs` |
 | GET | `/v1/tools` | `bearer` | `list_tools_handler` | - | - | `apps/openalpacad/src/routes/tools.rs` |
@@ -194,6 +195,10 @@
 - External or generic type; see handler source.
 
 ### `ReorderKeysRequest`
+
+- External or generic type; see handler source.
+
+### `RerunTaskRequest`
 
 - External or generic type; see handler source.
 
@@ -293,6 +298,7 @@
 | `command` | `String` |
 | `args` | `HashMap<String, serde_json::Value>` |
 | `target_agent` | `Option<String>` |
+| `unattended` | `bool` |
 
 ### `connectors::ConnectorActionBody`
 
@@ -385,6 +391,7 @@
 | `content` | `String` |
 | `kind` | `Option<String>` |
 | `source_task_id` | `Option<String>` |
+| `unattended` | `bool` |
 
 ### `orchestrator_latency::AggregateParams`
 

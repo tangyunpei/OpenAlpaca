@@ -4,7 +4,13 @@ use crate::orchestrator::task_state::{TaskOutcome, TaskState};
 use openalpaca_storage::OutcomeKind;
 
 /// Maximum length for the summary stored in `result_summary` column.
-pub(super) const MAX_SUMMARY_LENGTH: usize = 2000;
+///
+/// **S4 — this is the only cap.** Two others used to sit in front of it, both
+/// 500: the lead's step summary (`dispatcher/lead_agent.rs`) and
+/// `TaskState::mark_step_completed`, which is what the outcome's summary is
+/// built from. The number this constant names was therefore never reached,
+/// and a run's report arrived cut mid-sentence — "Done, with one snag:".
+pub(crate) const MAX_SUMMARY_LENGTH: usize = 2000;
 
 /// Persist a state update with retry (up to 3 attempts) to handle optimistic locking conflicts.
 ///
@@ -136,6 +142,101 @@ fn produced_artifacts(
         })
 }
 
+/// The tools this run had to refuse because nobody could approve them (S4),
+/// oldest first, each named once.
+///
+/// Read from the run's own audit rows rather than tracked in memory: the
+/// refusals happen in the sandbox — the lead's *and* every subagent's, each
+/// with its own `SandboxManager` — and they all write to one place already.
+/// A read failure costs the note, never the finalisation.
+pub(super) fn unapprovable_tools(
+    db: &openalpaca_storage::Database,
+    task_id: &str,
+) -> Vec<String> {
+    let rows = openalpaca_storage::repository::EventLogRepository::new(db)
+        .query(&openalpaca_storage::repository::EventLogQuery {
+            task_id: Some(task_id),
+            event_type: Some(crate::security::sandbox::UNAPPROVABLE_EVENT_TYPE),
+            limit: 100,
+            ..Default::default()
+        })
+        .unwrap_or_else(|e| {
+            tracing::warn!(task_id, "Failed to read the run's unapproved tools: {e}");
+            Vec::new()
+        });
+    let mut names = Vec::new();
+    // The query answers newest first; the report reads in the order the run
+    // hit them.
+    for row in rows.into_iter().rev() {
+        let Some(name) = row
+            .detail
+            .as_ref()
+            .and_then(|d| d.get("tool_name"))
+            .and_then(|v| v.as_str())
+        else {
+            continue;
+        };
+        if !names.iter().any(|n: &String| n == name) {
+            names.push(name.to_string());
+        }
+    }
+    names
+}
+
+/// The one runtime-authored line that says what the run could not do (S4).
+///
+/// `None` when nothing was refused. Deliberately not model prose: the
+/// evidence for this ruling is a report that ended mid-sentence at
+/// "Done, with one snag:" because the summary was cut at 500 characters, and
+/// a sentence the model wrote is exactly what a cut can take away. This line
+/// is appended by the runtime and [`truncate_summary`] keeps it whole.
+pub(super) fn unapprovable_note(tools: &[String]) -> Option<String> {
+    if tools.is_empty() {
+        return None;
+    }
+    let list = tools.join(", ");
+    let (subject, verb) = if tools.len() == 1 {
+        ("tool", "was")
+    } else {
+        ("tools", "were")
+    };
+    Some(format!(
+        "Not run — this run could not ask anyone for approval, so the following \
+         {subject} {verb} refused: {list}. Run it from the GUI, or from an \
+         interactive `openalpaca chat`, and approve it there."
+    ))
+}
+
+/// Cut `summary` to `max` characters, keeping a runtime-authored `note` at
+/// the end whole (S4).
+///
+/// The note is the point of the cut: a summary long enough to be truncated is
+/// exactly the one whose last line would otherwise be lost, and the last line
+/// is the only part the runtime wrote. When the note alone is longer than
+/// `max` — it cannot be, at 2 000, but the function must still be total — the
+/// note wins and the prose goes.
+pub(super) fn truncate_summary(summary: &str, note: Option<&str>, max: usize) -> String {
+    if summary.chars().count() <= max {
+        return summary.to_string();
+    }
+    let Some(note) = note else {
+        return summary.chars().take(max).collect();
+    };
+    let tail = format!("\n\n{note}");
+    let tail_len = tail.chars().count();
+    if tail_len >= max {
+        return note.chars().take(max).collect();
+    }
+    // The prose is everything before the note the caller already appended.
+    let prose: String = summary
+        .strip_suffix(&tail)
+        .unwrap_or(summary)
+        .chars()
+        .take(max - tail_len)
+        .collect();
+    format!("{prose}{tail}")
+}
+
 /// Build a structured TaskOutcome from the current task state.
 ///
 /// Reads the task's state_json from the DB (if available), uses it to collect
@@ -264,7 +365,20 @@ pub(super) fn finalize_task_with_outcome(
     final_content: &str,
     success: bool,
 ) -> TaskOutcome {
-    let outcome = build_task_outcome(db, task_id, final_content, success);
+    let mut outcome = build_task_outcome(db, task_id, final_content, success);
+
+    // S4: what nobody could approve, in the runtime's own words, appended to
+    // the summary so it reaches `outcome_json` as well as `result_summary`.
+    let note = db
+        .map(|db| unapprovable_tools(db, task_id))
+        .and_then(|tools| unapprovable_note(&tools));
+    if let Some(ref note) = note {
+        outcome.summary = if outcome.summary.trim().is_empty() {
+            note.clone()
+        } else {
+            format!("{}\n\n{note}", outcome.summary)
+        };
+    }
 
     // Observability: log warnings for inconsistent terminal states
     check_terminal_consistency(task_id, success, &outcome);
@@ -301,8 +415,10 @@ pub(super) fn finalize_task_with_outcome(
         }
     }
 
-    // Delegate status update + result_summary + event emission to existing finalize_task
-    let truncated_summary: String = outcome.summary.chars().take(MAX_SUMMARY_LENGTH).collect();
+    // Delegate status update + result_summary + event emission to existing
+    // finalize_task. S4: the cut keeps the runtime's line — it is the one
+    // part of the summary no rewording can restore.
+    let truncated_summary = truncate_summary(&outcome.summary, note.as_deref(), MAX_SUMMARY_LENGTH);
     finalize_task(
         ctx,
         bus,
@@ -363,7 +479,8 @@ pub(super) fn finalize_task(
             result_summary: Some(summary.to_string()),
             outcome_kind: outcome_kind.map(|k| k.as_str().to_string()),
             artifact_count,
-            outcome_summary: outcome_summary.map(|s| s.chars().take(500).collect()),
+            outcome_summary: outcome_summary
+                .map(|s| s.chars().take(MAX_SUMMARY_LENGTH).collect()),
             timestamp: now,
         });
     } else {

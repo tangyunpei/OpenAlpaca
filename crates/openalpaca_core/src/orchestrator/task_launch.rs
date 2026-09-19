@@ -171,7 +171,16 @@ impl Orchestrator {
     /// to re-dispatch (`NoDescription`). On success the new row carries
     /// `source_task_id = task_id`, so the link survives a restart the way the
     /// runs themselves do.
-    pub fn rerun_task(&self, task_id: &str) -> Result<RerunOutcome, TaskLaunchError> {
+    ///
+    /// S5: `unattended` is the caller's declaration for the new run —
+    /// `None` inherits what the source row was carrying, which is how a
+    /// scripted client that parked the original does not have to say so
+    /// twice.
+    pub fn rerun_task(
+        &self,
+        task_id: &str,
+        unattended: Option<bool>,
+    ) -> Result<RerunOutcome, TaskLaunchError> {
         let row = self.launchable_row(task_id)?;
         if !row.status.is_terminal() {
             return Err(TaskLaunchError::NotTerminal {
@@ -190,6 +199,7 @@ impl Orchestrator {
                 &plan.source,
                 plan.workspace,
                 &row.id,
+                unattended.unwrap_or(row.unattended),
             )
             .map_err(TaskLaunchError::Dispatch)?;
 
@@ -216,7 +226,14 @@ impl Orchestrator {
     /// that is the destruction of the only record it left, with nothing (not
     /// even `source_task_id`, which a `start` never sets) to say a first run
     /// happened. `rerun` exists so this is never the way to run a goal twice.
-    pub fn start_task(&self, task_id: &str) -> Result<StartOutcome, TaskLaunchError> {
+    ///
+    /// S5: `unattended` as on [`Self::rerun_task`] — `None` is the row's own
+    /// declaration, made when `POST /v1/tasks` parked it.
+    pub fn start_task(
+        &self,
+        task_id: &str,
+        unattended: Option<bool>,
+    ) -> Result<StartOutcome, TaskLaunchError> {
         let row = self.launchable_row(task_id)?;
         if row.status.is_terminal() {
             return Err(TaskLaunchError::NotStartable {
@@ -237,6 +254,7 @@ impl Orchestrator {
             &plan.lane_key,
             &plan.source,
             plan.workspace,
+            unattended.unwrap_or(row.unattended),
         ) {
             Ok(outcome) => outcome,
             Err(e) => {
@@ -277,7 +295,13 @@ impl Orchestrator {
     /// The rebuild is file I/O over a log that may be hundreds of megabytes,
     /// so it runs on a blocking thread rather than on the runtime this was
     /// awaited from (the same rule T41's writer follows, R52).
-    pub async fn resume_task(&self, task_id: &str) -> Result<ResumeOutcome, TaskLaunchError> {
+    ///
+    /// S5: `unattended` as on [`Self::start_task`].
+    pub async fn resume_task(
+        &self,
+        task_id: &str,
+        unattended: Option<bool>,
+    ) -> Result<ResumeOutcome, TaskLaunchError> {
         let row = self.launchable_row(task_id)?;
         if row.status != TaskStatus::Interrupted {
             return Err(TaskLaunchError::NotResumable {
@@ -341,6 +365,7 @@ impl Orchestrator {
             &plan.source,
             plan.workspace,
             seed,
+            unattended.unwrap_or(row.unattended),
         ) {
             Ok(outcome) => outcome,
             Err(e) => {

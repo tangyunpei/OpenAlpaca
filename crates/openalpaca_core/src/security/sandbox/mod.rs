@@ -19,6 +19,14 @@ use openalpaca_llm::ToolCall;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// `event_log.event_type` for a tool an unattended run had to refuse (S4).
+///
+/// Its own word rather than a `security_violation` among the others: the
+/// completion report has to name exactly these, and it asks the log for them
+/// by this type. Written only by the [`SandboxPolicy::unattended`] arm —
+/// nothing else in the system can produce a refusal with no approver.
+pub const UNAPPROVABLE_EVENT_TYPE: &str = "tool_approval_unavailable";
+
 /// Policy governing what a sandboxed agent can do.
 #[derive(Debug, Clone)]
 pub struct SandboxPolicy {
@@ -260,7 +268,20 @@ impl SandboxManager {
                     tool = %tool_call.name,
                     "Tool blocked: the originating client cannot answer confirmations"
                 );
-                self.emit_security_violation(agent_id, &tool_call.name, &reason, task_id);
+                // S4: the run's own ledger of what nobody could approve. The
+                // bus event is the same `SecurityViolation` M6 emitted — the
+                // event bridge and the GUI already read it — but the audit
+                // row is typed apart, so finalisation can ask the one
+                // question it needs answered ("what did this run have to
+                // refuse?") without parsing prose out of every violation the
+                // run produced.
+                self.emit_violation_as(
+                    UNAPPROVABLE_EVENT_TYPE,
+                    agent_id,
+                    &tool_call.name,
+                    &reason,
+                    task_id,
+                );
                 return Err(reason);
             } else if let Some(ref broker) = self.confirmation_broker {
                 let request_id = uuid::Uuid::new_v4().to_string();
@@ -439,6 +460,30 @@ impl SandboxManager {
         reason: &str,
         task_id: Option<&str>,
     ) {
+        self.emit_violation_as(
+            "security_violation",
+            agent_id,
+            tool_name,
+            reason,
+            task_id,
+        );
+    }
+
+    /// [`Self::emit_security_violation`], with the audit row's `event_type`
+    /// chosen by the caller (S4).
+    ///
+    /// The bus event is always `SecurityViolation` — there is one kind of
+    /// "the sandbox said no" as far as a client is concerned — but the
+    /// persisted row is what a later reader queries, and one of these
+    /// refusals is asked about by name.
+    fn emit_violation_as(
+        &self,
+        event_type: &str,
+        agent_id: &str,
+        tool_name: &str,
+        reason: &str,
+        task_id: Option<&str>,
+    ) {
         self.bus.publish(SystemEvent::SecurityViolation {
             agent_id: agent_id.to_string(),
             tool_name: tool_name.to_string(),
@@ -457,7 +502,7 @@ impl SandboxManager {
             let result = serde_json::json!({ "outcome": "denied" });
             let repo = openalpaca_storage::repository::EventLogRepository::new(db);
             if let Err(e) = repo.log_for_task(
-                "security_violation",
+                event_type,
                 Some(agent_id),
                 task_id,
                 Some(&detail),

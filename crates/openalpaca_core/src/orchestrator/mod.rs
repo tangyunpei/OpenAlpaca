@@ -56,6 +56,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, RwLock};
 use uuid::Uuid;
 
+/// Takes a path out of the filesystem watcher's poll set (S8).
+///
+/// The watcher is `openalpaca_wake`'s and core cannot see it, so the daemon
+/// hands in a closure over its handle — the same inversion as
+/// [`ConnectorStatusProvider`], one function rather than a trait because the
+/// contract is one verb.
+pub type PathUnwatcher = Arc<dyn Fn(&std::path::Path) + Send + Sync>;
+
 /// Provides connector status to the orchestrator without core depending on openalpaca_connectors.
 /// Implemented at daemon level (same inversion pattern as MessageHandler, BuiltInTool).
 pub trait ConnectorStatusProvider: Send + Sync {
@@ -108,6 +116,10 @@ pub struct FollowupItem {
     pub workspace_path: Option<String>,
     /// Task the item was queued from, if any.
     pub source_task_id: Option<String>,
+    /// S5 — the turn that queued this item could not answer a tool
+    /// confirmation, so neither can the turn it runs as. Read off the row, so
+    /// it survives a restart between the promise and the run.
+    pub unattended: bool,
 }
 
 /// Executes queued follow-ups. Implemented at daemon level over
@@ -171,6 +183,12 @@ pub struct Orchestrator {
     pub bootstrap_document: Arc<RwLock<Option<BootstrapDocument>>>,
     /// Path to BOOTSTRAP.md on disk (for deletion on completion).
     bootstrap_path: Arc<RwLock<Option<std::path::PathBuf>>>,
+    /// How to take a path out of the filesystem watcher's poll set (S8).
+    ///
+    /// Set by the daemon, which owns the watcher; `None` everywhere else.
+    /// Called *before* a path this process is about to delete goes away, so
+    /// the poll scanner never walks a file the daemon itself removed.
+    path_unwatcher: Arc<RwLock<Option<PathUnwatcher>>>,
     /// Daemon-level config (memory limits, costs, execution defaults, etc.).
     pub daemon_config: Arc<ArcSwap<DaemonConfig>>,
     /// Atomic guard to prevent concurrent bootstrap completion (race condition fix).
@@ -338,6 +356,7 @@ impl Orchestrator {
             skill_router,
             bootstrap_document: Arc::new(RwLock::new(None)),
             bootstrap_path: Arc::new(RwLock::new(None)),
+            path_unwatcher: Arc::new(RwLock::new(None)),
             daemon_config,
             bootstrap_completing: AtomicBool::new(false),
             connector_status,
@@ -481,6 +500,28 @@ impl Orchestrator {
     pub fn set_bootstrap_path(&self, path: std::path::PathBuf) {
         if let Ok(mut guard) = self.bootstrap_path.write() {
             *guard = Some(path);
+        }
+    }
+
+    /// Set how a watched path is taken out of the poll set (S8).
+    ///
+    /// The filesystem watcher lives in `openalpaca_wake`, which core cannot
+    /// see; the daemon hands in a closure over its `FileWatchHandle`. Same
+    /// post-construction inversion as [`Self::set_bootstrap_path`].
+    pub fn set_path_unwatcher(&self, unwatch: PathUnwatcher) {
+        if let Ok(mut guard) = self.path_unwatcher.write() {
+            *guard = Some(unwatch);
+        }
+    }
+
+    /// Ask the watcher to stop polling `path`, if a daemon wired one in.
+    pub(super) fn unwatch_path(&self, path: &std::path::Path) {
+        let hook = match self.path_unwatcher.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        if let Some(hook) = hook {
+            hook(path);
         }
     }
 

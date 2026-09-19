@@ -47,6 +47,8 @@ impl Orchestrator {
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
         stream_id: Option<&str>,
+        // S5 — the client behind this turn cannot answer a confirmation.
+        unattended: bool,
     ) -> Result<SkillInvocationResult, String> {
         // Look up the catalog entry (for skill_dir) and load full skill (Level 2)
         let entry = self
@@ -82,6 +84,7 @@ impl Orchestrator {
                     scope_ctx,
                     stream_id,
                     &skill_doc,
+                    unattended,
                 )
                 .await;
         }
@@ -94,14 +97,16 @@ impl Orchestrator {
         };
 
         // ── Resolve model context window (drives Layer 5 trimming + budget) ──
+        //
+        // S3's sibling site: the *configured* default is not necessarily the
+        // model that answers — on an install whose provider is not configured
+        // L3 substitutes one, and reading the pin's window budgets the skill
+        // against a window it will never get. `None` (no router, or no
+        // registered window) keeps the 200 000 default.
         let model_window = self
             .llm_router
             .as_ref()
-            .and_then(|r| {
-                let default = r.default_model();
-                r.model_registry().get_model_info(&default)
-            })
-            .map(|info| info.context_window as usize)
+            .and_then(|r| crate::runner::routed_context_window(r, None))
             .unwrap_or(200_000);
 
         // Extract prompt components
@@ -361,9 +366,14 @@ impl Orchestrator {
                     .load()
                     .security
                     .auto_approve_confirmations,
-                // A slash-command skill answers inside the turn, where the
-                // client that sent it is still listening (M6).
-                unattended: false,
+                // M6/S5: inside the turn, yes — but "the turn" is not always
+                // a client that can answer. A `/slash` from a piped
+                // `openalpaca chat`, and every scheduled skill, reach the
+                // model through this tier and nothing else, so the
+                // declaration the caller made travels here too. `false`
+                // (the GUI, an interactive CLI, a connector) is today's
+                // behaviour exactly: raise the prompt and wait.
+                unattended,
             });
             let skill_cfg = &self.daemon_config.load().execution.skill_defaults;
             config_for_loop = LoopConfig {
@@ -1018,6 +1028,9 @@ impl Orchestrator {
         scope_ctx: &MemoryScopeContext,
         stream_id: Option<&str>,
         skill_doc: &crate::middleware::skill::SkillDocument,
+        // S5 — as on the file-skill path: the client behind this turn may be
+        // one that cannot answer a confirmation.
+        unattended: bool,
     ) -> Result<SkillInvocationResult, String> {
         let fm = &skill_doc.frontmatter;
 
@@ -1061,8 +1074,9 @@ impl Orchestrator {
                 .load()
                 .security
                 .auto_approve_confirmations,
-            // As above: a plugin skill runs inside the turn that invoked it.
-            unattended: false,
+            // As above (S5): inside the turn that invoked it, whose client
+            // may be one that cannot answer.
+            unattended,
         };
 
         let mut sandbox = SandboxManager::new(

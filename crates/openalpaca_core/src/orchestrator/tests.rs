@@ -1366,6 +1366,7 @@ fn make_test_task() -> openalpaca_storage::Task {
         workspace_id: None,
         source_task_id: None,
         session_id: None,
+        unattended: false,
     }
 }
 
@@ -2723,6 +2724,7 @@ async fn test_tool_mode_unprocessed_steering_leftovers_surface_exactly_once() {
                 "{\"User\":{\"global_id\":\"user1\"}}",
                 None,
                 Some("task-old"),
+                false,
             )
             .unwrap();
         let followup_id = repo
@@ -2733,6 +2735,7 @@ async fn test_tool_mode_unprocessed_steering_leftovers_surface_exactly_once() {
                 "{\"User\":{\"global_id\":\"user1\"}}",
                 None,
                 Some("task-old"),
+                false,
             )
             .unwrap();
         (steering_id, followup_id)
@@ -3551,6 +3554,7 @@ Dump.
         None,
         false,
         None,
+        false,
     )
     .await
     .expect("the skill runs");
@@ -3601,6 +3605,7 @@ async fn the_top_level_invocation_site_refuses_on_the_same_predicate() {
                 None,
                 false,
                 None,
+                false,
             )
             .await
             .expect_err("the invocation site refuses independently of the /slash tier");
@@ -4318,4 +4323,204 @@ async fn reasoning_reaches_the_sink_and_never_the_answer() {
         !answer.contains("the user wants a capital"),
         "reasoning must never be persisted as content"
     );
+}
+
+// ── S8: the poll set loses the path before the file does ─────────────
+
+/// **S8.** Finishing onboarding deletes `BOOTSTRAP.md`, which the wake
+/// watcher is polling. Before this, the watcher found out the way every poll
+/// watcher finds out — by walking a path that is no longer there — and the
+/// one moment the system worked exactly as designed printed
+/// `WARN notify::poll::data: walkdir error scanning … NotFound` naming the
+/// file. The deleter knows first, so it says so first.
+#[tokio::test]
+async fn completing_onboarding_unwatches_bootstrap_before_deleting_it() {
+    use crate::middleware::bootstrap::parse_bootstrap_markdown;
+    use crate::middleware::identity::parse_identity_markdown;
+    use crate::middleware::user::parse_user_markdown;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("BOOTSTRAP.md");
+    std::fs::write(&path, "---\nsummary: \"x\"\nread_when:\n  - y\n---\n\n# Hello\n").unwrap();
+
+    let orch = make_orchestrator();
+    orch.update_bootstrap_document(Some(
+        parse_bootstrap_markdown(&std::fs::read_to_string(&path).unwrap()).unwrap(),
+    ));
+    orch.set_bootstrap_path(path.clone());
+    orch.update_identity_document(Some(
+        parse_identity_markdown(
+            "---\nsummary: \"i\"\nread_when:\n  - y\n---\n\n- **Name:** Koda\n",
+        )
+        .unwrap(),
+    ));
+    orch.update_user_document(Some(
+        parse_user_markdown(
+            "---\ntitle: \"USER.md\"\nsummary: \"u\"\nread_when:\n  - y\n---\n\n\
+             ## Identity\n\n* Name: Junpei\n\n## Expertise & Background\n\nRust\n",
+        )
+        .unwrap(),
+    ));
+
+    // What the daemon wires in: the watcher's unwatch. Records the path and
+    // whether the file was still there when it was asked to stop polling.
+    let seen: Arc<Mutex<Vec<(std::path::PathBuf, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = seen.clone();
+    orch.set_path_unwatcher(Arc::new(move |p: &std::path::Path| {
+        sink.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((p.to_path_buf(), p.exists()));
+    }));
+
+    orch.maybe_complete_bootstrap().await;
+
+    assert!(!path.exists(), "onboarding deletes BOOTSTRAP.md");
+    let calls = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    assert_eq!(calls.len(), 1, "exactly one path leaves the poll set");
+    assert_eq!(calls[0].0, path);
+    assert!(
+        calls[0].1,
+        "the unwatch must land while the file is still there — after the \
+         delete the poll has already walked a missing path and warned"
+    );
+}
+
+/// The same path with no daemon behind it: a core-only orchestrator has no
+/// watcher to tell, and completing onboarding must not care.
+#[tokio::test]
+async fn completing_onboarding_without_a_watcher_still_deletes_the_file() {
+    use crate::middleware::bootstrap::parse_bootstrap_markdown;
+    use crate::middleware::identity::parse_identity_markdown;
+    use crate::middleware::user::parse_user_markdown;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("BOOTSTRAP.md");
+    std::fs::write(&path, "---\nsummary: \"x\"\nread_when:\n  - y\n---\n\n# Hello\n").unwrap();
+
+    let orch = make_orchestrator();
+    orch.update_bootstrap_document(Some(
+        parse_bootstrap_markdown(&std::fs::read_to_string(&path).unwrap()).unwrap(),
+    ));
+    orch.set_bootstrap_path(path.clone());
+    orch.update_identity_document(Some(
+        parse_identity_markdown(
+            "---\nsummary: \"i\"\nread_when:\n  - y\n---\n\n- **Name:** Koda\n",
+        )
+        .unwrap(),
+    ));
+    orch.update_user_document(Some(
+        parse_user_markdown(
+            "---\ntitle: \"USER.md\"\nsummary: \"u\"\nread_when:\n  - y\n---\n\n\
+             ## Identity\n\n* Name: Junpei\n\n## Expertise & Background\n\nRust\n",
+        )
+        .unwrap(),
+    ));
+
+    orch.maybe_complete_bootstrap().await;
+    assert!(!path.exists());
+}
+
+// ── S3: the main loop budgets against the model that answers ─────────
+
+/// A router shaped like an Ollama-only install: the configured default is a
+/// Claude id no local install can reach, Anthropic is not loaded, and the one
+/// loaded provider holds a local 8 192-token model.
+fn ollama_only_router(
+    provider: Arc<crate::test_util::RecordingProvider>,
+) -> Arc<openalpaca_llm::LlmRouter> {
+    let router = openalpaca_llm::LlmRouter::single_provider(
+        provider,
+        openalpaca_llm::ProviderType::Ollama,
+        "claude-sonnet-4-6".to_string(),
+    );
+    router.model_registry().register(
+        "qwen3:8b".to_string(),
+        openalpaca_llm::routing::model_registry::ModelInfo {
+            provider: openalpaca_llm::ProviderType::Ollama,
+            input_price_per_million: 0.0,
+            output_price_per_million: 0.0,
+            context_window: 8192,
+            discovered: true,
+            supports_image: false,
+            supports_audio: false,
+            supports_document: false,
+            supports_reasoning: false,
+            supports_tools: true,
+            declared: false,
+        },
+    );
+    Arc::new(router)
+}
+
+/// **S3.** The main loop's round records read
+/// `"context":{"window":200000,…}` on an install whose only model has a
+/// 262 144-token window, because the window was looked up from the *pinned*
+/// id — and an ordinary turn pins nothing, so the lookup missed and fell to
+/// the compiled 200 000. On a small local model that number is not a
+/// cosmetic error: the loop compacts against it, so it would never compact.
+#[tokio::test]
+async fn the_main_loop_is_budgeted_against_the_model_that_answers() {
+    use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+
+    let dir = tempfile::tempdir().unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let ctx = Arc::new(SharedContext::new());
+    let service = Arc::new(SessionLogService::new(
+        logs.path().to_path_buf(),
+        Some(db.clone()),
+        SessionLogLimits::default(),
+        "test".to_string(),
+    ));
+    ctx.set_session_log(service.clone());
+
+    // The lane's session, as the gateway would have opened it for this turn.
+    let session = openalpaca_storage::ConversationRepository::new(&db)
+        .get_or_create_active_session("test:cli", "cli", None)
+        .unwrap();
+
+    let orch = Orchestrator::new(
+        ctx,
+        Arc::new(LaneManager::new()),
+        EventBus::default(),
+        SystemPersona::default(),
+        Some(ollama_only_router(crate::test_util::RecordingProvider::new(
+            "Sixty.",
+        ))),
+        LoopConfig::default(),
+        make_security_gate(&EventBus::default()),
+        make_tool_registry(),
+        Some(db.clone()),
+        None,
+        Arc::new(skill_catalog::SkillCatalog::new()),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    );
+
+    orch.handle_message(HandleRequest {
+        request_id: Uuid::new_v4(),
+        source: "cli".to_string(),
+        content: "How many alpacas is that?".to_string(),
+        principal: Principal::System,
+        scope: Scope::Global,
+        lane_key: "test:cli".to_string(),
+        workspace_path: None,
+        stream_id: None,
+        model_override: None,
+        unattended: false,
+        turn_sink: None,
+    })
+    .await
+    .expect("the turn is answered");
+
+    assert!(service.handle_for(&session.id).flush().await);
+    let records = read_records(&logs.path().join(&session.id)).unwrap();
+    let rounds: Vec<_> = records.iter().filter(|r| r.kind == "round").collect();
+    assert!(!rounds.is_empty(), "the main loop wrote no round record");
+    for round in rounds {
+        assert_eq!(
+            round.data["context"]["window"], 8192,
+            "the budget must be the answering model's window, not the compiled 200 000"
+        );
+    }
 }

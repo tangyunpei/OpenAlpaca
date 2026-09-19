@@ -554,6 +554,22 @@ impl BuiltInTool for SpawnSubagentTool {
         // Clone out of the Arc — run_agentic_loop_routed needs Vec<ChatMessage>.
         let messages: Vec<ChatMessage> = composed.messages.as_ref().clone();
 
+        // **S3 — a subagent's rounds carry a budget too.** The lead's loop is
+        // handed a `ContextBudgetManager` and the main loop's is; a subagent's
+        // was handed `None`, which meant two things at once: its `round`
+        // records wrote `"context": null`, so nothing could say how close the
+        // lane was to its window, and the loop's budget-aware compaction was
+        // switched off entirely — a subagent on an 8 192-token local model
+        // overflowed the provider instead of compacting. Same three
+        // ingredients as the other two sites: the *answering* model's window,
+        // the composed system prompt, and the tools.
+        let budget_window = model_window;
+        let budget_config = self.daemon_config.load().execution.context.clone();
+        let budget_system_prompt_tokens = (composed.token_budget.static_prompt_tokens
+            + composed.token_budget.dynamic_context_tokens)
+            as usize;
+        let budget_tools_tokens = crate::runner::estimate_tools_tokens(&tools);
+
         let mut sandbox_policy = SandboxPolicy::from_constraints(&instance_id, &agent.constraints);
         // M6: inherited from the run — a subagent's confirmation reaches the
         // same (absent) responder as the lead's.
@@ -795,6 +811,13 @@ impl BuiltInTool for SpawnSubagentTool {
                 return;
             }
 
+            // S3: the lane's own budget, built here so the loop both narrates
+            // it into every `round` record and compacts against it.
+            let mut context_budget =
+                crate::context_budget::ContextBudgetManager::new(budget_window, &budget_config);
+            context_budget.register_section("system_prompt", budget_system_prompt_tokens);
+            context_budget.register_section("tools", budget_tools_tokens);
+
             let result = run_agentic_loop_routed(
                 router.as_ref(),
                 messages,
@@ -804,7 +827,7 @@ impl BuiltInTool for SpawnSubagentTool {
                 &instance_id,
                 Some(&sandbox_policy),
                 Some(&task_id),
-                None, // context_budget
+                Some(&context_budget),
                 child_token,
                 Some(&subagent_tool_ctx),
                 None,
@@ -1337,6 +1360,10 @@ pub struct QueueFollowupTool {
     source_task_id: Option<String>,
     lane_key: String,
     created_by: String,
+    /// S5 — the declaration of the turn (or run) doing the queueing, written
+    /// onto the row so the follow-up turn inherits it however much later it
+    /// runs.
+    unattended: bool,
 }
 
 impl QueueFollowupTool {
@@ -1346,6 +1373,7 @@ impl QueueFollowupTool {
         task_id: String,
         lane_key: String,
         created_by: String,
+        unattended: bool,
     ) -> Self {
         Self {
             db,
@@ -1353,6 +1381,7 @@ impl QueueFollowupTool {
             source_task_id: Some(task_id),
             lane_key,
             created_by,
+            unattended,
         }
     }
 
@@ -1363,6 +1392,7 @@ impl QueueFollowupTool {
         bus: EventBus,
         lane_key: String,
         created_by: String,
+        unattended: bool,
     ) -> Self {
         Self {
             db,
@@ -1370,6 +1400,7 @@ impl QueueFollowupTool {
             source_task_id: None,
             lane_key,
             created_by,
+            unattended,
         }
     }
 
@@ -1402,6 +1433,7 @@ impl QueueFollowupTool {
                 &principal_json,
                 workspace_path,
                 self.source_task_id.as_deref(),
+                self.unattended,
             )
             .map_err(|e| format!("Failed to queue follow-up: {e}"))?;
 

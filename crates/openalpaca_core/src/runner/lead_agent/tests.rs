@@ -715,6 +715,7 @@ async fn test_queue_followup_inserts_row_and_publishes_event() {
         "task-1".to_string(),
         "junpei:cli".to_string(),
         "junpei".to_string(),
+        false,
     );
     let result = tool
         .execute(&serde_json::json!({"description": "Also update the docs"}))
@@ -757,6 +758,7 @@ async fn test_queue_followup_system_owner_maps_to_system_principal() {
         "task-1".to_string(),
         "system:internal".to_string(),
         "system".to_string(),
+        false,
     );
     tool.execute(&serde_json::json!({"description": "scheduled follow-up"}))
         .await
@@ -780,6 +782,7 @@ async fn test_queue_followup_main_loop_uses_ctx_identity_and_workspace_path() {
         EventBus::default(),
         "junpei:cli".to_string(),
         "fallback-owner".to_string(),
+        false,
     );
     let ctx = crate::tools::registry::ToolContext {
         owner_id: Some("junpei".to_string()),
@@ -817,6 +820,7 @@ async fn test_queue_followup_ctx_without_principal_falls_back_to_created_by() {
         EventBus::default(),
         "junpei:cli".to_string(),
         "junpei".to_string(),
+        false,
     );
     tool.execute_with_context(
         &serde_json::json!({"description": "later"}),
@@ -1105,6 +1109,7 @@ fn test_register_workflow_tools_registers_both() {
             "task-1".to_string(),
             "junpei:cli".to_string(),
             "junpei".to_string(),
+            false,
         )),
     );
     let tools = registry.registered_tool_names();
@@ -2087,4 +2092,201 @@ async fn an_unattended_run_tells_the_model_the_tool_cannot_be_approved() {
             .map(|m| m.content.clone())
             .collect::<Vec<_>>()
     );
+}
+
+// ── S3: a subagent's rounds carry a budget ───────────────────────────
+
+/// A provider that can tell the lead's rounds from a subagent's, so a
+/// concurrently running subagent cannot consume the lead's next scripted
+/// answer. The subagent's system prompt carries the `<scope>` block
+/// `spawn_subagent` builds; nothing else does.
+struct LeadAndSubagentProvider {
+    lead: std::sync::Mutex<std::collections::VecDeque<openalpaca_llm::ChatResponse>>,
+    subagent_reply: String,
+}
+
+#[async_trait]
+impl openalpaca_llm::LlmProvider for LeadAndSubagentProvider {
+    fn name(&self) -> &str {
+        "lead-and-subagent"
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    async fn chat(
+        &self,
+        request: openalpaca_llm::ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        let is_subagent = request
+            .messages
+            .first()
+            .is_some_and(|m| m.content.contains("You are a subagent"));
+        if is_subagent {
+            return Ok(scripted_response(&self.subagent_reply, vec![]));
+        }
+        let next = self
+            .lead
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .pop_front();
+        Ok(next.unwrap_or_else(|| scripted_response("done", vec![])))
+    }
+}
+
+/// **S3.** A subagent's loop was handed `context_budget: None`. Two
+/// consequences, one root: its `round` records wrote `"context": null`, so a
+/// reader could not say how close the lane was to overflowing, and the loop's
+/// budget-aware compaction never ran at all — on an 8 192-token local model
+/// the subagent walks into the provider's refusal instead of compacting. The
+/// budget is the *answering* model's window (8 192 here, not the template's
+/// unroutable Claude pin), with the fixed zone registered.
+#[tokio::test]
+async fn a_subagents_rounds_are_budgeted_against_the_model_that_answers() {
+    use crate::session_log::{SessionLogLimits, SessionLogService, read_records};
+
+    // A worker template for the lead to spawn.
+    let shared = Arc::new(SharedContext::new());
+    let worker = crate::test_util::make_agent("worker", vec!["memory_read"]);
+    shared
+        .agent_registry
+        .register_template(crate::test_util::template_from_agent(&worker));
+
+    let provider = Arc::new(LeadAndSubagentProvider {
+        lead: std::sync::Mutex::new(
+            vec![
+                scripted_response(
+                    "",
+                    vec![openalpaca_llm::ToolCall {
+                        id: "call-1".to_string(),
+                        name: "spawn_subagent".to_string(),
+                        arguments: serde_json::json!({
+                            "agent_id": "worker",
+                            "objective": "count the alpacas",
+                        }),
+                    }],
+                ),
+                scripted_response(
+                    "",
+                    vec![openalpaca_llm::ToolCall {
+                        id: "call-2".to_string(),
+                        name: "wait_for_subagents".to_string(),
+                        arguments: serde_json::json!({}),
+                    }],
+                ),
+                scripted_response("all done", vec![]),
+            ]
+            .into(),
+        ),
+        subagent_reply: "seventeen".to_string(),
+    });
+
+    let router = LlmRouter::single_provider(
+        provider,
+        openalpaca_llm::ProviderType::Ollama,
+        "claude-sonnet-4-20250514".to_string(),
+    );
+    router.model_registry().register(
+        "qwen3:8b".to_string(),
+        openalpaca_llm::routing::model_registry::ModelInfo {
+            provider: openalpaca_llm::ProviderType::Ollama,
+            input_price_per_million: 0.0,
+            output_price_per_million: 0.0,
+            context_window: 8192,
+            discovered: true,
+            supports_image: false,
+            supports_audio: false,
+            supports_document: false,
+            supports_reasoning: false,
+            supports_tools: true,
+            declared: false,
+        },
+    );
+
+    let logs = tempfile::tempdir().unwrap();
+    let service = Arc::new(SessionLogService::new(
+        logs.path().to_path_buf(),
+        None,
+        SessionLogLimits::default(),
+        "test".to_string(),
+    ));
+    let handle = service.handle_for("sess-subagent-budget");
+    // The dispatcher registers the run's log so `spawn_subagent` can find it
+    // (`SpawnSubagentTool::session_log`); without it a subagent narrates
+    // nowhere, whatever budget it was given.
+    shared.register_task_session_log("task-1", handle.clone());
+
+    let result = run_lead_agent(
+        &lead_subagent(),
+        "do the thing",
+        Arc::new(router),
+        Arc::new(ToolRegistry::default()),
+        shared,
+        EventBus::default(),
+        None,
+        None,
+        "task-1",
+        "user-1",
+        "user-1:cli",
+        "cli",
+        &Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        Some(handle.clone()),
+        "lead::task-1",
+        "",
+        None,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
+        false,
+    )
+    .await;
+    assert!(
+        result.success,
+        "finish: {:?}",
+        result.loop_result.finish_reason
+    );
+    assert!(handle.flush().await);
+
+    let records = read_records(&logs.path().join("sess-subagent-budget")).unwrap();
+    let subagent_rounds: Vec<_> = records
+        .iter()
+        .filter(|r| r.kind == "round" && r.span_id.as_deref() != Some("lead::task-1"))
+        .collect();
+    assert!(
+        !subagent_rounds.is_empty(),
+        "the subagent wrote no round record at all: {:?}",
+        records.iter().map(|r| (&r.kind, &r.span_id)).collect::<Vec<_>>()
+    );
+    for round in &subagent_rounds {
+        let context = &round.data["context"];
+        assert!(
+            !context.is_null(),
+            "a subagent round must carry its budget, not null"
+        );
+        assert_eq!(
+            context["window"], 8192,
+            "the budget is the answering model's window, not the pin's 200 000"
+        );
+        assert!(
+            context["system_prompt"].as_u64().unwrap_or(0) > 0,
+            "the fixed zone is registered, or compaction never sees it: {context}"
+        );
+    }
+
+    // …and the lead's own rounds keep theirs, fixed zone included (S3).
+    let lead_rounds: Vec<_> = records
+        .iter()
+        .filter(|r| r.kind == "round" && r.span_id.as_deref() == Some("lead::task-1"))
+        .collect();
+    assert!(!lead_rounds.is_empty(), "the lead wrote no round record");
+    for round in &lead_rounds {
+        assert_eq!(round.data["context"]["window"], 8192);
+        assert!(
+            round.data["context"]["system_prompt"].as_u64().unwrap_or(0) > 0,
+            "the lead's fixed zone reached the budget it compacts against"
+        );
+    }
 }

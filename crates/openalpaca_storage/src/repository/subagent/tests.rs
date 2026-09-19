@@ -52,6 +52,7 @@ fn make_task(id: &str) -> Task {
         workspace_id: None,
         source_task_id: None,
         session_id: None,
+        unattended: false,
     }
 }
 

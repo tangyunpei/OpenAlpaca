@@ -137,6 +137,11 @@ fn create_task(
         // resolved where a run actually starts (§5.1), not on a route that
         // only parks a row.
         session_id: None,
+        // S5: the one thing about a parked row this route *does* know and
+        // nothing else can recover — the client that asked for it said it
+        // cannot answer an approval prompt. `start` / `rerun` / `resume` read
+        // it back unless they declare for themselves.
+        unattended: request.unattended,
     };
 
     // 1. Persist to DB
@@ -486,7 +491,13 @@ pub async fn task_action_handler(
     // a lead agent is dispatched onto it. `apply_task_action` knows three
     // transitions and would report `UnknownAction` for this one.
     if request.action == START_ACTION {
-        return start_task(&state.orchestrator, &state.db, &state.local_user_id, &id);
+        return start_task(
+            &state.orchestrator,
+            &state.db,
+            &state.local_user_id,
+            &id,
+            request.unattended,
+        );
     }
 
     // Shared with the orchestrator chat handler: registry-first resolution with
@@ -510,7 +521,14 @@ pub async fn task_action_handler(
     if request.action == RESUME_ACTION
         && matches!(outcome, Err(TaskActionError::CannotResume { .. }))
     {
-        return resume_task(&state.orchestrator, &state.db, &state.local_user_id, &id).await;
+        return resume_task(
+            &state.orchestrator,
+            &state.db,
+            &state.local_user_id,
+            &id,
+            request.unattended,
+        )
+        .await;
     }
 
     match outcome {
@@ -746,11 +764,17 @@ fn launch_refusal(error: TaskLaunchError, verb: LaunchVerb) -> Response {
 
 /// `POST /v1/tasks/{id}/rerun`, as a `Response`. Split out from the handler so
 /// every status code is provable without a router or an `AppState`.
-fn rerun_task(orchestrator: &Orchestrator, db: &Database, owner_id: &str, id: &str) -> Response {
+fn rerun_task(
+    orchestrator: &Orchestrator,
+    db: &Database,
+    owner_id: &str,
+    id: &str,
+    unattended: Option<bool>,
+) -> Response {
     if let Err(refusal) = owned_run(db, owner_id, id) {
         return refusal;
     }
-    match orchestrator.rerun_task(id) {
+    match orchestrator.rerun_task(id, unattended) {
         Ok(outcome) => (
             StatusCode::CREATED,
             Json(RerunTaskResponse {
@@ -770,11 +794,17 @@ fn rerun_task(orchestrator: &Orchestrator, db: &Database, owner_id: &str, id: &s
 /// The success body is the shape the other three actions answer with, because
 /// from the client's side that is what happened: the run it named changed
 /// state. The id in it is the id it sent.
-fn start_task(orchestrator: &Orchestrator, db: &Database, owner_id: &str, id: &str) -> Response {
+fn start_task(
+    orchestrator: &Orchestrator,
+    db: &Database,
+    owner_id: &str,
+    id: &str,
+    unattended: Option<bool>,
+) -> Response {
     if let Err(refusal) = owned_run(db, owner_id, id) {
         return refusal;
     }
-    match orchestrator.start_task(id) {
+    match orchestrator.start_task(id, unattended) {
         Ok(outcome) => Json(serde_json::json!({
             "task_id": outcome.task_id,
             "status": outcome.status,
@@ -797,11 +827,12 @@ async fn resume_task(
     db: &Database,
     owner_id: &str,
     id: &str,
+    unattended: Option<bool>,
 ) -> Response {
     if let Err(refusal) = owned_run(db, owner_id, id) {
         return refusal;
     }
-    match orchestrator.resume_task(id).await {
+    match orchestrator.resume_task(id, unattended).await {
         Ok(outcome) => Json(serde_json::json!({
             "task_id": outcome.task_id,
             "status": outcome.status,
@@ -819,8 +850,18 @@ async fn resume_task(
 pub async fn rerun_task_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    // S5: optional, and an absent body is the common case — the verb took
+    // none before and every existing caller still sends none.
+    body: Option<Json<RerunTaskRequest>>,
 ) -> Response {
-    rerun_task(&state.orchestrator, &state.db, &state.local_user_id, &id)
+    let unattended = body.and_then(|Json(b)| b.unattended);
+    rerun_task(
+        &state.orchestrator,
+        &state.db,
+        &state.local_user_id,
+        &id,
+        unattended,
+    )
 }
 
 // ── Steerability, in one place (R40) ──────────────────────────────
@@ -1074,6 +1115,7 @@ mod tests {
             workspace_id: None,
             source_task_id: None,
             session_id: None,
+            unattended: false,
         }
     }
 
@@ -2318,6 +2360,7 @@ mod tests {
                 priority: None,
                 created_by: "someone-else".to_string(),
                 source_lane: "user-1:gui".to_string(),
+                unattended: false,
             },
         ))
         .await;
@@ -2366,6 +2409,7 @@ mod tests {
                     priority: None,
                     created_by: LAUNCH_OWNER.to_string(),
                     source_lane: lane.to_string(),
+                    unattended: false,
                 },
             ))
             .await;
@@ -2398,7 +2442,7 @@ mod tests {
         let (_dir, db) = launch_db(TaskStatus::Completed, Some("write the changelog"));
         let orchestrator = launch_orchestrator(&db, true);
 
-        let response = rerun_task(&orchestrator, &db, LAUNCH_OWNER, "task-1");
+        let response = rerun_task(&orchestrator, &db, LAUNCH_OWNER, "task-1", None);
         let (status, body) = split(response).await;
 
         assert_eq!(status, StatusCode::CREATED);
@@ -2425,7 +2469,7 @@ mod tests {
             let (_dir, db) = launch_db(status, Some("write the changelog"));
             let orchestrator = launch_orchestrator(&db, true);
 
-            let (code, body) = split(rerun_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
+            let (code, body) = split(rerun_task(&orchestrator, &db, LAUNCH_OWNER, "task-1", None)).await;
             assert_eq!(code, StatusCode::CONFLICT, "status {status:?}");
             assert_eq!(body["error"]["code"], "TASK_NOT_TERMINAL");
             assert!(
@@ -2448,7 +2492,7 @@ mod tests {
             let (_dir, db) = launch_db(TaskStatus::Completed, description);
             let orchestrator = launch_orchestrator(&db, true);
 
-            let (code, body) = split(rerun_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
+            let (code, body) = split(rerun_task(&orchestrator, &db, LAUNCH_OWNER, "task-1", None)).await;
             assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
             assert_eq!(body["error"]["code"], "TASK_NOT_RERUNNABLE");
         }
@@ -2461,11 +2505,11 @@ mod tests {
         let (_dir, db) = launch_db(TaskStatus::Completed, Some("write the changelog"));
         let orchestrator = launch_orchestrator(&db, true);
 
-        let (code, body) = split(rerun_task(&orchestrator, &db, LAUNCH_OWNER, "no-such-run")).await;
+        let (code, body) = split(rerun_task(&orchestrator, &db, LAUNCH_OWNER, "no-such-run", None)).await;
         assert_eq!(code, StatusCode::NOT_FOUND);
         assert_eq!(body["error"]["code"], "NOT_FOUND");
 
-        let (code, foreign) = split(rerun_task(&orchestrator, &db, "someone-else", "task-1")).await;
+        let (code, foreign) = split(rerun_task(&orchestrator, &db, "someone-else", "task-1", None)).await;
         assert_eq!(code, StatusCode::NOT_FOUND);
         assert_eq!(
             foreign["error"], body["error"],
@@ -2492,14 +2536,14 @@ mod tests {
         })
         .expect("re-park the row");
 
-        let (code, body) = split(rerun_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
+        let (code, body) = split(rerun_task(&orchestrator, &db, LAUNCH_OWNER, "task-1", None)).await;
         assert_eq!(code, StatusCode::NOT_FOUND);
         assert_eq!(body["error"]["code"], "NOT_FOUND");
 
-        let (code, _) = split(start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
+        let (code, _) = split(start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1", None)).await;
         assert_eq!(code, StatusCode::NOT_FOUND);
 
-        let (code, _) = split(resume_task(&orchestrator, &db, LAUNCH_OWNER, "task-1").await).await;
+        let (code, _) = split(resume_task(&orchestrator, &db, LAUNCH_OWNER, "task-1", None).await).await;
         assert_eq!(code, StatusCode::NOT_FOUND);
 
         assert_eq!(
@@ -2516,7 +2560,7 @@ mod tests {
         let (_dir, db) = launch_db(TaskStatus::Completed, Some("write the changelog"));
         let orchestrator = launch_orchestrator(&db, false);
 
-        let (code, body) = split(rerun_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
+        let (code, body) = split(rerun_task(&orchestrator, &db, LAUNCH_OWNER, "task-1", None)).await;
         assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["error"]["code"], "DISPATCH_FAILED");
     }
@@ -2528,7 +2572,7 @@ mod tests {
         let (_dir, db) = launch_db(TaskStatus::Queued, Some("write the changelog"));
         let orchestrator = launch_orchestrator(&db, true);
 
-        let (code, body) = split(start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
+        let (code, body) = split(start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1", None)).await;
         assert_eq!(code, StatusCode::OK);
         assert_eq!(body["task_id"], "task-1", "D5: the id does not change");
         assert!(matches!(
@@ -2547,8 +2591,8 @@ mod tests {
         let (_dir, db) = launch_db(TaskStatus::Queued, Some("write the changelog"));
         let orchestrator = launch_orchestrator(&db, true);
 
-        let first = start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1");
-        let second = start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1");
+        let first = start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1", None);
+        let second = start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1", None);
         assert_eq!(first.status(), StatusCode::OK);
 
         let (code, body) = split(second).await;
@@ -2564,7 +2608,7 @@ mod tests {
         let (_dir, db) = launch_db(TaskStatus::Queued, None);
         let orchestrator = launch_orchestrator(&db, true);
 
-        let (code, body) = split(start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
+        let (code, body) = split(start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1", None)).await;
         assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body["error"]["code"], "TASK_NOT_DISPATCHABLE");
     }
@@ -2587,7 +2631,7 @@ mod tests {
             let before = TaskRepository::new(&db).get("task-1").unwrap().unwrap();
             let orchestrator = launch_orchestrator(&db, true);
 
-            let (code, body) = split(start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
+            let (code, body) = split(start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1", None)).await;
             assert_eq!(code, StatusCode::CONFLICT, "status {status:?}");
             assert_eq!(body["error"]["code"], "TASK_NOT_STARTABLE");
             assert!(
@@ -2620,7 +2664,7 @@ mod tests {
             tokio_util::sync::CancellationToken::new(),
         );
 
-        let (code, body) = split(start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1")).await;
+        let (code, body) = split(start_task(&orchestrator, &db, LAUNCH_OWNER, "task-1", None)).await;
         assert_eq!(code, StatusCode::CONFLICT);
         assert_eq!(body["error"]["code"], "TASK_ALREADY_RUNNING");
     }
@@ -2630,11 +2674,11 @@ mod tests {
         let (_dir, db) = launch_db(TaskStatus::Queued, Some("write the changelog"));
         let orchestrator = launch_orchestrator(&db, true);
 
-        let (code, body) = split(start_task(&orchestrator, &db, LAUNCH_OWNER, "no-such-run")).await;
+        let (code, body) = split(start_task(&orchestrator, &db, LAUNCH_OWNER, "no-such-run", None)).await;
         assert_eq!(code, StatusCode::NOT_FOUND);
         assert_eq!(body["error"]["code"], "NOT_FOUND");
 
-        let (code, _) = split(start_task(&orchestrator, &db, "someone-else", "task-1")).await;
+        let (code, _) = split(start_task(&orchestrator, &db, "someone-else", "task-1", None)).await;
         assert_eq!(code, StatusCode::NOT_FOUND);
     }
 
@@ -2699,7 +2743,7 @@ mod tests {
         let orchestrator = launch_orchestrator(&db, true);
         with_session_logs(&orchestrator, logs.path(), false);
 
-        let (code, body) = split(resume_task(&orchestrator, &db, LAUNCH_OWNER, "task-1").await).await;
+        let (code, body) = split(resume_task(&orchestrator, &db, LAUNCH_OWNER, "task-1", None).await).await;
         assert_eq!(code, StatusCode::CONFLICT);
         assert_eq!(body["error"]["code"], "RESUME_DISABLED");
         let message = body["error"]["message"].as_str().unwrap();
@@ -2717,7 +2761,7 @@ mod tests {
             with_session_logs(&orchestrator, logs.path(), true);
 
             let (code, body) =
-                split(resume_task(&orchestrator, &db, LAUNCH_OWNER, "task-1").await).await;
+                split(resume_task(&orchestrator, &db, LAUNCH_OWNER, "task-1", None).await).await;
             assert_eq!(code, StatusCode::CONFLICT, "{status:?}");
             assert_eq!(body["error"]["code"], "TASK_NOT_RESUMABLE");
             assert!(
@@ -2739,7 +2783,7 @@ mod tests {
         let orchestrator = launch_orchestrator(&db, true);
         with_session_logs(&orchestrator, logs.path(), true);
 
-        let (code, body) = split(resume_task(&orchestrator, &db, LAUNCH_OWNER, "task-1").await).await;
+        let (code, body) = split(resume_task(&orchestrator, &db, LAUNCH_OWNER, "task-1", None).await).await;
         assert_eq!(code, StatusCode::CONFLICT);
         assert_eq!(body["error"]["code"], "RESUME_LOG_MISSING");
         let row = TaskRepository::new(&db).get("task-1").unwrap().unwrap();
@@ -2755,7 +2799,7 @@ mod tests {
         let orchestrator = launch_orchestrator(&db, true);
         with_session_logs(&orchestrator, logs.path(), true);
 
-        let (code, body) = split(resume_task(&orchestrator, &db, LAUNCH_OWNER, "task-1").await).await;
+        let (code, body) = split(resume_task(&orchestrator, &db, LAUNCH_OWNER, "task-1", None).await).await;
         assert_eq!(code, StatusCode::OK);
         assert_eq!(body["task_id"], "task-1");
         assert_eq!(body["session_id"], "s1");
@@ -2774,9 +2818,9 @@ mod tests {
         let orchestrator = launch_orchestrator(&db, true);
         with_session_logs(&orchestrator, logs.path(), true);
 
-        let (code, _) = split(resume_task(&orchestrator, &db, LAUNCH_OWNER, "nope").await).await;
+        let (code, _) = split(resume_task(&orchestrator, &db, LAUNCH_OWNER, "nope", None).await).await;
         assert_eq!(code, StatusCode::NOT_FOUND);
-        let (code, _) = split(resume_task(&orchestrator, &db, "someone-else", "task-1").await).await;
+        let (code, _) = split(resume_task(&orchestrator, &db, "someone-else", "task-1", None).await).await;
         assert_eq!(code, StatusCode::NOT_FOUND);
     }
 
@@ -2809,5 +2853,93 @@ mod tests {
         for word in ["cancel", "pause", "resume", START_ACTION] {
             assert!(message.contains(word), "the valid set must list {word}");
         }
+    }
+
+    // ── S5: the declaration survives the gap between parking and launching ──
+
+    /// **S5.** `POST /v1/tasks` only parks a row; something else dispatches it
+    /// later. The client's "I cannot answer an approval prompt" therefore has
+    /// to be stored, or a scripted create-then-start loses it between the two
+    /// calls and the run hangs on a prompt nobody will see.
+    #[tokio::test]
+    async fn a_parked_run_remembers_that_its_client_cannot_be_asked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::open(&dir.path().join("test.db")).expect("open db");
+        let ctx = SharedContext::new();
+        let lanes = openalpaca_core::lane::LaneManager::new();
+        let bus = EventBus::default();
+
+        let (status, body) = split(create_task(
+            &db,
+            &ctx,
+            &lanes,
+            &bus,
+            LAUNCH_OWNER,
+            CreateTaskRequest {
+                title: "Ship it".to_string(),
+                description: Some("do the thing".to_string()),
+                priority: None,
+                created_by: LAUNCH_OWNER.to_string(),
+                source_lane: "user-1:gui".to_string(),
+                unattended: true,
+            },
+        ))
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+
+        let id = body["task_id"].as_str().expect("an id").to_string();
+        assert!(
+            TaskRepository::new(&db).get(&id).unwrap().unwrap().unattended,
+            "the parked row carries the declaration"
+        );
+    }
+
+    /// …and a client that says nothing is attended, exactly as before.
+    #[tokio::test]
+    async fn a_parked_run_that_declares_nothing_is_attended() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::open(&dir.path().join("test.db")).expect("open db");
+        let (status, body) = split(create_task(
+            &db,
+            &SharedContext::new(),
+            &openalpaca_core::lane::LaneManager::new(),
+            &EventBus::default(),
+            LAUNCH_OWNER,
+            CreateTaskRequest {
+                title: "Ship it".to_string(),
+                description: None,
+                priority: None,
+                created_by: LAUNCH_OWNER.to_string(),
+                source_lane: "user-1:gui".to_string(),
+                unattended: false,
+            },
+        ))
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let id = body["task_id"].as_str().expect("an id").to_string();
+        assert!(!TaskRepository::new(&db).get(&id).unwrap().unwrap().unattended);
+    }
+
+    /// The launch verbs take the same field, and an absent one is the row's
+    /// own declaration rather than a silent `false`.
+    #[test]
+    fn the_action_body_reads_the_declaration_as_an_override() {
+        let quiet: TaskActionRequest =
+            serde_json::from_str(r#"{"action":"start"}"#).expect("parse");
+        assert_eq!(quiet.unattended, None, "absent means 'ask the row'");
+
+        let declared: TaskActionRequest =
+            serde_json::from_str(r#"{"action":"start","unattended":true}"#).expect("parse");
+        assert_eq!(declared.unattended, Some(true));
+
+        let attended: TaskActionRequest =
+            serde_json::from_str(r#"{"action":"resume","unattended":false}"#).expect("parse");
+        assert_eq!(attended.unattended, Some(false), "an explicit false overrides too");
+
+        // `rerun`'s body is optional and has the same field.
+        let rerun: RerunTaskRequest =
+            serde_json::from_str(r#"{"unattended":true}"#).expect("parse");
+        assert_eq!(rerun.unattended, Some(true));
+        assert_eq!(RerunTaskRequest::default().unattended, None);
     }
 }

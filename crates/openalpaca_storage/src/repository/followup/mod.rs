@@ -35,12 +35,17 @@ pub struct FollowupRecord {
     pub session_id: Option<String>,
     /// "queued" | "running" | "done" | "cancelled"
     pub status: String,
+    /// The turn that queued this item said it could not answer a tool
+    /// confirmation (S5), so the turn this item later runs as says the same.
+    /// `false` for every pre-042 row, which is today's behaviour.
+    pub unattended: bool,
     pub created_at: String,
     pub updated_at: String,
 }
 
 const SELECT_COLUMNS: &str = "id, lane_key, kind, content, principal_json, \
-     workspace_path, source_task_id, status, created_at, updated_at, session_id";
+     workspace_path, source_task_id, status, created_at, updated_at, session_id, \
+     unattended";
 
 fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<FollowupRecord> {
     Ok(FollowupRecord {
@@ -55,6 +60,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<FollowupRecord> {
         created_at: row.get(8)?,
         updated_at: row.get(9)?,
         session_id: row.get(10)?,
+        unattended: row.get::<_, i64>(11)? != 0,
     })
 }
 
@@ -93,6 +99,9 @@ impl<'a> FollowupRepository<'a> {
         principal_json: &str,
         workspace_path: Option<&str>,
         source_task_id: Option<&str>,
+        // S5 — the queueing turn's declaration, carried to the turn this
+        // item will run as.
+        unattended: bool,
     ) -> Result<i64> {
         self.db.with_connection(|conn| {
             let session_id: Option<String> = conn
@@ -105,8 +114,9 @@ impl<'a> FollowupRepository<'a> {
                 .context("Failed to resolve the lane's active session")?;
             conn.execute(
                 "INSERT INTO lane_followups \
-                 (lane_key, kind, content, principal_json, workspace_path, source_task_id, session_id) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 (lane_key, kind, content, principal_json, workspace_path, source_task_id, \
+                  session_id, unattended) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 rusqlite::params![
                     lane_key,
                     kind,
@@ -115,6 +125,7 @@ impl<'a> FollowupRepository<'a> {
                     workspace_path,
                     source_task_id,
                     session_id,
+                    unattended as i64,
                 ],
             )
             .context("Failed to insert lane followup")?;

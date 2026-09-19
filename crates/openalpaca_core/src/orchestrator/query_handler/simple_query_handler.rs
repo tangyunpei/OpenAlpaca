@@ -368,15 +368,27 @@ impl Orchestrator {
 
         // ── Resolve model context window (drives Layer 5 trimming + budget) ──
         //
-        // Default to 200_000 when no LLM router is present (echo-stub path) or
-        // when the loop names no model and the router's own default governs.
-        // GAP-13's override is the one thing that names a model here, and the
-        // route refuses an id the registry does not know — so a `Some` that
-        // reaches this lookup resolves, and the window is the real one.
-        let model_window = self.llm_router.as_ref()
-            .and_then(|r| config_for_loop.model.as_deref()
-                .and_then(|m| r.model_registry().get_model_info(m)))
-            .map(|info| info.context_window as usize)
+        // **S3 — the model that answers, not the model that was named.** This
+        // used to look the loop's *pinned* id up in the registry, which meant
+        // two lies at once: a turn that pins nothing (the ordinary case, where
+        // the router's own default governs) fell straight to 200 000, and a
+        // turn pinning an id whose provider is not configured did too. On the
+        // Ollama-only install the round records said
+        // `"context":{"window":200000}` while a 262 144-token local model was
+        // answering; on a small local model it would say 200 000 while 8 192
+        // was the truth, and the loop would never compact. `routed_*` walks
+        // L3's substitution ladder off the router's public accessors — the
+        // same reader the lead agent uses (M5) — and returns `None` for a
+        // window of 0, which must never reach compaction.
+        //
+        // 200 000 stays the default for the echo-stub path (no router at all)
+        // and for a registry that knows no window for the answering model.
+        let model_window = self
+            .llm_router
+            .as_ref()
+            .and_then(|r| {
+                crate::runner::routed_context_window(r, config_for_loop.model.as_deref())
+            })
             .unwrap_or(200_000);
 
         // ── Route system-prompt + message-list assembly through the layered
