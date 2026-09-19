@@ -22,6 +22,13 @@ cargo build -p openalpacad --release
 ./target/release/openalpacad
 ```
 
+The daemon takes **no arguments** — it is configured by files and environment
+(`OPENALPACA_HOME_STORE`, `OPENALPACA_CONFIG_DIR`), and `openalpaca daemon
+start|stop|status` is the usual way to run it. `--help`/`-h` and
+`--version`/`-V` print and exit 0; anything else is named on stderr with the
+usage and exits 2. All four are decided before the daemon touches anything, so
+asking for usage never creates a store, a lock, a master key or a database.
+
 ## macOS Package Install (No Cargo on target machine)
 
 Build package (builder machine):
@@ -67,7 +74,7 @@ root is the human's:
 
 ## Startup and Lifecycle
 
-1. Initialize tracing/logging.
+1. Parse the command line (none expected; `--help`/`--version` print and exit here), then initialize tracing/logging.
 2. Seed the `~/.openalpaca` home store, then move a legacy app directory into it
    — once, before the lock is taken, because the lock file itself moves
    (`store::ensure_store` + `store::migrate::move_app_root`; see

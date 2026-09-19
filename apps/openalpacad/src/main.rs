@@ -7,6 +7,7 @@
 //! - HTTP API for health checks and commands
 //! - WebSocket for real-time event streaming
 
+mod args;
 mod background;
 mod bootstrap;
 mod connector_bridge;
@@ -65,6 +66,28 @@ use uuid::Uuid;
 const FORCE_EXIT_GRACE: Duration = Duration::from_secs(10);
 
 fn main() -> Result<()> {
+    // W1: the command line is read FIRST — before the logger, the store, the
+    // lock, the master key, the discovery file and the database. Every one of
+    // those is a side effect on the machine's real `~/.openalpaca`, and a
+    // daemon that boots because someone typed `--help` has already done all of
+    // them by the time it could have printed anything.
+    match args::parse_args(std::env::args().skip(1)) {
+        args::ArgsOutcome::Run => {}
+        args::ArgsOutcome::Help => {
+            println!("{}", args::USAGE);
+            return Ok(());
+        }
+        args::ArgsOutcome::Version => {
+            println!("openalpacad {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        args::ArgsOutcome::Unknown(arg) => {
+            eprintln!("openalpacad: unknown argument '{arg}'");
+            eprintln!("{}", args::USAGE);
+            std::process::exit(2);
+        }
+    }
+
     // Initialize logging (before tokio, so resolve_config_base_dir() can use tracing)
     tracing_subscriber::fmt()
         .with_env_filter(
