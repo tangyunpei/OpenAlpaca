@@ -1769,6 +1769,55 @@ fn truncating_a_summary_keeps_the_runtime_line() {
     assert_eq!(truncate_summary(&prose, None, 10).chars().count(), 10);
 }
 
+/// **V5.** The edges the doc comment admits but nothing exercised: a note as
+/// long as the cap, a note longer than it, a cap of zero, and a multi-byte
+/// note. The function is total — never a panic, never longer than `max`.
+#[test]
+fn truncating_a_summary_is_total_at_its_edges() {
+    use super::outcome::truncate_summary;
+
+    let prose = "x".repeat(500);
+
+    // The note alone is longer than the whole cap: the note wins and the
+    // prose goes, cut to the cap.
+    let long_note = "N".repeat(120);
+    let summary = format!("{prose}\n\n{long_note}");
+    let cut = truncate_summary(&summary, Some(&long_note), 50);
+    assert_eq!(cut.chars().count(), 50);
+    assert!(cut.chars().all(|c| c == 'N'), "the note, nothing else: {cut}");
+
+    // Exactly at the boundary: `\n\n` + note is the whole budget.
+    let note = "Not run.";
+    let summary = format!("{prose}\n\n{note}");
+    let exact = note.chars().count() + 2;
+    let cut = truncate_summary(&summary, Some(note), exact);
+    assert_eq!(cut, note, "no room for prose leaves the note itself");
+
+    // One character of room for prose.
+    let cut = truncate_summary(&summary, Some(note), exact + 1);
+    assert_eq!(cut, format!("x\n\n{note}"));
+
+    // A cap of zero asks for nothing and gets nothing — not a panic.
+    assert_eq!(truncate_summary(&summary, Some(note), 0), "");
+    assert_eq!(truncate_summary(&prose, None, 0), "");
+
+    // Multi-byte throughout: the cut counts characters, so it never lands
+    // inside one.
+    let cjk_note = "未获批准，无法运行。";
+    let cjk_prose = "报告内容".repeat(200);
+    let cjk = format!("{cjk_prose}\n\n{cjk_note}");
+    let cut = truncate_summary(&cjk, Some(cjk_note), 40);
+    assert_eq!(cut.chars().count(), 40);
+    assert!(cut.ends_with(cjk_note), "the note survives whole: {cut}");
+
+    // A summary that does not actually end with the note (a caller that
+    // appended it differently) still comes back within the cap.
+    let odd = format!("{prose} {note} more prose");
+    let cut = truncate_summary(&odd, Some(note), 60);
+    assert_eq!(cut.chars().count(), 60);
+    assert!(cut.ends_with(note), "the note is still the tail: {cut}");
+}
+
 /// End to end through finalisation: the row a client reads carries the
 /// refusal, and carries it even when the model's own report is longer than
 /// the 2 000-character cap.

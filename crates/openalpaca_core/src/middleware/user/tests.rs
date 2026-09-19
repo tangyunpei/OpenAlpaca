@@ -163,6 +163,8 @@ fn test_prompt_block_empty_returns_empty() {
         projects: String::new(),
         preferences: String::new(),
         notes: String::new(),
+        preamble: String::new(),
+        extra_sections: Vec::new(),
     };
     assert!(user_to_prompt_block(&doc, None).is_empty());
 }
@@ -205,6 +207,8 @@ fn test_has_content_identity_only_is_not_enough() {
         projects: String::new(),
         preferences: String::new(),
         notes: String::new(),
+        preamble: String::new(),
+        extra_sections: Vec::new(),
     };
     assert!(
         !user_document_has_content(&doc),
@@ -231,6 +235,8 @@ fn test_has_content_identity_plus_one_section() {
         projects: String::new(),
         preferences: String::new(),
         notes: String::new(),
+        preamble: String::new(),
+        extra_sections: Vec::new(),
     };
     assert!(
         user_document_has_content(&doc),
@@ -253,6 +259,8 @@ fn test_has_content_no_identity_but_other_sections() {
         projects: String::new(),
         preferences: String::new(),
         notes: String::new(),
+        preamble: String::new(),
+        extra_sections: Vec::new(),
     };
     assert!(
         !user_document_has_content(&doc),
@@ -289,4 +297,65 @@ read_when:
     assert_eq!(doc.identity.get("Name"), Some(&"Alex".to_string()));
     assert_eq!(doc.identity.get("Company"), Some(&"Acme Corp".to_string()));
     assert_eq!(doc.identity.get("Role"), Some(&"CTO".to_string()));
+}
+
+// ── V5: a rewrite keeps what it does not own ─────────────────────────
+
+/// **V5.** The seeded template opens with a line in no section —
+/// "Learn about the person you're helping. Update this as you go." — and the
+/// first automatic extraction to fill a field deleted it, because parsing
+/// dropped everything above the first `##` and rendering wrote the canonical
+/// skeleton. Observed on a live install: the line was in the seeded file and
+/// gone from the rewritten one.
+#[test]
+fn a_rewrite_keeps_the_line_above_the_first_section() {
+    let mut doc = parse_user_markdown(VALID_TEMPLATE).expect("the template parses");
+    assert_eq!(
+        doc.preamble,
+        "Learn about the person you're helping. Update this as you go."
+    );
+
+    // What an extraction does: fill a field and write the file back.
+    doc.identity
+        .insert("Timezone".to_string(), "Asia/Taipei".to_string());
+    doc.communication_style = "terse".to_string();
+    let rewritten = render_user_markdown(&doc);
+
+    assert!(
+        rewritten.contains("Learn about the person you're helping."),
+        "the rewrite must not lose lines outside the sections it updates:\n{rewritten}"
+    );
+    assert!(rewritten.contains("* Timezone: Asia/Taipei"), "{rewritten}");
+
+    // And it round-trips: reading the rewritten file back gives the same doc.
+    let reparsed = parse_user_markdown(&rewritten).expect("the rewrite re-parses");
+    assert_eq!(reparsed.preamble, doc.preamble);
+    assert_eq!(reparsed.identity, doc.identity);
+    assert_eq!(reparsed.communication_style, doc.communication_style);
+}
+
+/// **V5.** A section somebody added by hand is not the rewriter's to delete
+/// either: it survives, after the sections this module knows.
+#[test]
+fn a_rewrite_keeps_a_section_it_does_not_know() {
+    let with_extra = format!(
+        "{}\n\n## Working Hours\n\nMornings, Asia/Taipei.\n",
+        POPULATED_DOC
+    );
+    let doc = parse_user_markdown(&with_extra).expect("the unknown section parses");
+    assert_eq!(
+        doc.extra_sections,
+        vec![(
+            "Working Hours".to_string(),
+            "Mornings, Asia/Taipei.".to_string()
+        )]
+    );
+
+    let rewritten = render_user_markdown(&doc);
+    assert!(
+        rewritten.contains("## Working Hours") && rewritten.contains("Mornings, Asia/Taipei."),
+        "the unknown section survives the rewrite:\n{rewritten}"
+    );
+    let reparsed = parse_user_markdown(&rewritten).expect("the rewrite re-parses");
+    assert_eq!(reparsed.extra_sections, doc.extra_sections);
 }

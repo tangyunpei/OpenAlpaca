@@ -20,6 +20,15 @@ pub struct UserFrontmatter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserDocument {
     pub frontmatter: UserFrontmatter,
+    /// Whatever stands between the `# USER.md` title and the first `##`
+    /// heading, verbatim (V5).
+    ///
+    /// The seeded template opens with "Learn about the person you're helping.
+    /// Update this as you go." — an instruction to whoever opens the file, in
+    /// no section. Parsing dropped it and rendering wrote the canonical
+    /// skeleton, so the first automatic extraction to touch the file deleted
+    /// it. A rewrite owns the sections it updates and nothing else.
+    pub preamble: String,
     /// Key-value pairs from `## Identity` (e.g. "Name" → "Alex").
     pub identity: HashMap<String, String>,
     pub communication_style: String,
@@ -27,6 +36,10 @@ pub struct UserDocument {
     pub projects: String,
     pub preferences: String,
     pub notes: String,
+    /// `## ` sections this module does not know, in the order they appeared,
+    /// as (heading, body) (V5). Kept for the same reason as [`Self::preamble`]:
+    /// a section somebody added by hand is not the rewriter's to delete.
+    pub extra_sections: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,23 +205,40 @@ fn classify_heading(title: &str) -> Section {
     }
 }
 
-fn parse_sections(
-    lines: &[String],
-) -> (
-    HashMap<String, String>,
-    String,
-    String,
-    String,
-    String,
-    String,
-) {
+/// Everything [`parse_user_markdown`] reads out of the body.
+struct ParsedSections {
+    preamble: String,
+    identity: HashMap<String, String>,
+    communication_style: String,
+    expertise: String,
+    projects: String,
+    preferences: String,
+    notes: String,
+    extra_sections: Vec<(String, String)>,
+}
+
+fn parse_sections(lines: &[String]) -> ParsedSections {
     let mut section = Section::Other;
     let mut identity = HashMap::new();
+    let mut preamble_lines: Vec<String> = Vec::new();
     let mut comm_lines: Vec<String> = Vec::new();
     let mut expertise_lines: Vec<String> = Vec::new();
     let mut projects_lines: Vec<String> = Vec::new();
     let mut preferences_lines: Vec<String> = Vec::new();
     let mut notes_lines: Vec<String> = Vec::new();
+    // V5: an unrecognised `## ` heading and its body, kept verbatim.
+    let mut extra_sections: Vec<(String, String)> = Vec::new();
+    let mut extra_lines: Vec<String> = Vec::new();
+    let mut extra_title: Option<String> = None;
+    let mut seen_heading = false;
+
+    let close_extra =
+        |title: &mut Option<String>, body: &mut Vec<String>, out: &mut Vec<(String, String)>| {
+            if let Some(name) = title.take() {
+                out.push((name, body.join("\n").trim().to_string()));
+            }
+            body.clear();
+        };
 
     for raw_line in lines {
         let line = raw_line.as_str();
@@ -216,12 +246,26 @@ fn parse_sections(
 
         // Section heading
         if let Some(title) = trimmed.strip_prefix("## ") {
+            close_extra(&mut extra_title, &mut extra_lines, &mut extra_sections);
+            seen_heading = true;
             section = classify_heading(title);
+            if matches!(section, Section::Other) {
+                extra_title = Some(title.trim().to_string());
+            }
             continue;
         }
 
         // Skip top-level heading (# USER.md ...)
         if trimmed.starts_with("# ") {
+            continue;
+        }
+
+        // V5: the text before the first `## ` belongs to nobody's section and
+        // used to be dropped on every rewrite.
+        if !seen_heading {
+            if !trimmed.is_empty() {
+                preamble_lines.push(trimmed.to_string());
+            }
             continue;
         }
 
@@ -258,18 +302,21 @@ fn parse_sections(
                     notes_lines.push(trimmed.to_string());
                 }
             }
-            Section::Other => {}
+            Section::Other => extra_lines.push(line.to_string()),
         }
     }
+    close_extra(&mut extra_title, &mut extra_lines, &mut extra_sections);
 
-    (
+    ParsedSections {
+        preamble: preamble_lines.join("\n"),
         identity,
-        comm_lines.join(" "),
-        expertise_lines.join(" "),
-        projects_lines.join(" "),
-        preferences_lines.join(" "),
-        notes_lines.join(" "),
-    )
+        communication_style: comm_lines.join(" "),
+        expertise: expertise_lines.join(" "),
+        projects: projects_lines.join(" "),
+        preferences: preferences_lines.join(" "),
+        notes: notes_lines.join(" "),
+        extra_sections,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -283,17 +330,18 @@ fn parse_sections(
 pub fn parse_user_markdown(input: &str) -> Result<UserDocument, UserParseError> {
     let (frontmatter_lines, body_lines) = split_frontmatter(input)?;
     let frontmatter = parse_frontmatter(&frontmatter_lines)?;
-    let (identity, communication_style, expertise, projects, preferences, notes) =
-        parse_sections(&body_lines);
+    let sections = parse_sections(&body_lines);
 
     Ok(UserDocument {
         frontmatter,
-        identity,
-        communication_style,
-        expertise,
-        projects,
-        preferences,
-        notes,
+        preamble: sections.preamble,
+        identity: sections.identity,
+        communication_style: sections.communication_style,
+        expertise: sections.expertise,
+        projects: sections.projects,
+        preferences: sections.preferences,
+        notes: sections.notes,
+        extra_sections: sections.extra_sections,
     })
 }
 
@@ -315,6 +363,12 @@ pub fn render_user_markdown(doc: &UserDocument) -> String {
     out.push_str("---\n\n");
 
     out.push_str("# USER.md -- About Your Human\n\n");
+
+    // V5: whatever stood above the first section stands there still.
+    if !doc.preamble.is_empty() {
+        out.push_str(&doc.preamble);
+        out.push_str("\n\n");
+    }
 
     // -- Identity --
     out.push_str("## Identity\n\n");
@@ -390,6 +444,16 @@ pub fn render_user_markdown(doc: &UserDocument) -> String {
     } else {
         out.push_str(&doc.notes);
         out.push('\n');
+    }
+
+    // V5: sections this module does not know come last, in the order they
+    // were read. A rewrite updates what it understands and keeps the rest.
+    for (title, body) in &doc.extra_sections {
+        out.push_str(&format!("\n## {title}\n\n"));
+        if !body.is_empty() {
+            out.push_str(body);
+            out.push('\n');
+        }
     }
 
     out
