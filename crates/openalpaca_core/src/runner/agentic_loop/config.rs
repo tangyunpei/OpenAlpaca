@@ -329,8 +329,13 @@ impl LoopResult {
         let reason = match &self.finish_reason {
             LoopFinishReason::Cancelled => return None,
             LoopFinishReason::MaxRounds => format!(
-                "I stopped after {} tool rounds without reaching an answer.",
-                self.rounds_used
+                "I stopped after {} tool {} without reaching an answer.",
+                self.rounds_used,
+                if self.rounds_used == 1 {
+                    "round"
+                } else {
+                    "rounds"
+                }
             ),
             LoopFinishReason::CostExceeded => {
                 "I stopped before reaching an answer: this turn hit its cost limit.".to_string()
@@ -347,9 +352,24 @@ impl LoopResult {
             }
         };
         Some(match self.last_tool_error {
-            Some(ref err) => format!("{reason} The last tool error was: {}", err.trim()),
+            Some(ref err) => format!("{reason} The last tool error was: {}", user_facing(err)),
             None => reason,
         })
+    }
+}
+
+/// A tool error as the person reading the turn should see it (W2).
+///
+/// `[tool_error] ` is the loop's own marker: it is how a tool result is
+/// recognised as a failure (`result_text.starts_with("[tool_error]")`) and it
+/// belongs in the transcript the model reads, not in a sentence addressed to a
+/// human. Only the leading marker goes — the message itself, hint and all, is
+/// what the reader needs.
+fn user_facing(err: &str) -> &str {
+    let err = err.trim();
+    match err.strip_prefix("[tool_error]") {
+        Some(rest) => rest.trim_start(),
+        None => err,
     }
 }
 

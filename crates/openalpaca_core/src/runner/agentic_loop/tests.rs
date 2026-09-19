@@ -3560,6 +3560,10 @@ fn a_turn_with_no_answer_names_the_reason() {
 
 /// **V3.** Where a tool error exists it is the second half of the line: "I
 /// stopped after N rounds" alone does not tell anyone what went wrong.
+///
+/// **W2.** And it reads as prose: `[tool_error] ` is the loop's own marker for
+/// recognising a failed result, not something to show the person who asked the
+/// question.
 #[test]
 fn the_no_answer_line_carries_the_last_tool_error() {
     let mut result = result_with(LoopFinishReason::MaxRounds, "");
@@ -3569,6 +3573,47 @@ fn the_no_answer_line_carries_the_last_tool_error() {
     assert!(
         line.contains("missing required parameter 'goal'"),
         "the reason the turn got nowhere: {line}"
+    );
+    assert!(
+        !line.contains("[tool_error]"),
+        "the internal marker is not shown to the reader: {line}"
+    );
+    assert!(
+        line.ends_with(
+            "The last tool error was: start_workflow: missing required parameter 'goal'"
+        ),
+        "only the marker goes — the message keeps its text: {line}"
+    );
+
+    // An error that never carried the marker is passed through untouched.
+    let mut plain = result_with(LoopFinishReason::MaxRounds, "");
+    plain.last_tool_error = Some("  shell_execute: exit status 1  ".to_string());
+    assert!(
+        plain
+            .no_answer_line()
+            .is_some_and(|l| l.ends_with("The last tool error was: shell_execute: exit status 1")),
+        "nothing but the marker is stripped"
+    );
+}
+
+/// **W2.** One round is one round. The line is a sentence a person reads, and
+/// "I stopped after 1 tool rounds" is the tell that nobody did.
+#[test]
+fn the_no_answer_line_counts_one_round_in_the_singular() {
+    let mut one = result_with(LoopFinishReason::MaxRounds, "");
+    one.rounds_used = 1;
+    let line = one.no_answer_line().expect("a line");
+    assert!(
+        line.contains("after 1 tool round without"),
+        "singular for one: {line}"
+    );
+
+    let mut two = result_with(LoopFinishReason::MaxRounds, "");
+    two.rounds_used = 2;
+    assert!(
+        two.no_answer_line()
+            .is_some_and(|l| l.contains("after 2 tool rounds without")),
+        "plural for the rest"
     );
 }
 
@@ -3614,10 +3659,19 @@ async fn the_loop_records_the_last_tool_error() {
         error.starts_with("[tool_error]"),
         "the tool's own error text: {error}"
     );
+    // W2: the marker stays on the *recorded* error — that is what the loop
+    // matches on — and is stripped from the line the turn shows.
+    let shown = result.no_answer_line().expect("a line");
     assert!(
-        result
-            .no_answer_line()
-            .is_some_and(|l| l.contains("[tool_error]")),
-        "and it reaches the line the turn shows"
+        shown.contains("The last tool error was: "),
+        "the recorded error reaches the line the turn shows: {shown}"
+    );
+    assert!(
+        !shown.contains("[tool_error]"),
+        "without the internal marker: {shown}"
+    );
+    assert!(
+        shown.contains(error.trim_start_matches("[tool_error] ").trim()),
+        "and with the message intact: {shown}"
     );
 }
