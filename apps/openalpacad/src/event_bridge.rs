@@ -431,6 +431,42 @@ pub fn spawn_event_bridge(
                         );
                     }
                 }
+                // T1: the twin. Announced for an answer, a timeout and a
+                // withdrawal alike, on both channels the request went out on.
+                openalpaca_core::events::SystemEvent::ToolConfirmationResolved {
+                    request_id,
+                    agent_id,
+                    tool_name,
+                    outcome,
+                    ref stream_id,
+                    ref lane_key,
+                    ref task_id,
+                    ..
+                } => {
+                    tracing::info!(
+                        "Tool confirmation resolved: tool={tool_name}, agent={agent_id}, \
+                         request={request_id}, outcome={}",
+                        outcome.as_str()
+                    );
+                    eb.tool_confirmation_resolved(
+                        &request_id,
+                        &agent_id,
+                        &tool_name,
+                        outcome,
+                        stream_id.as_deref(),
+                        lane_key.as_deref(),
+                        task_id.as_deref(),
+                    );
+                    if let (Some(csm), Some(sid)) = (&chat_streams, &stream_id) {
+                        let _ = csm.send(
+                            sid,
+                            openalpaca_core::chat::ChatStreamEvent::ConfirmationResolved {
+                                request_id,
+                                outcome,
+                            },
+                        );
+                    }
+                }
                 openalpaca_core::events::SystemEvent::ContextBudgetComputed {
                     request_id, model, window_size, fixed_zone_tokens, free_zone_tokens, buffer_size, ..
                 } => {

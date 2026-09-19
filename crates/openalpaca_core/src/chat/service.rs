@@ -612,7 +612,8 @@ mod tests {
                 ChatStreamEvent::Error { message } => panic!("stream error: {message}"),
                 ChatStreamEvent::Thinking
                 | ChatStreamEvent::Reasoning { .. }
-                | ChatStreamEvent::ConfirmationRequested { .. } => {}
+                | ChatStreamEvent::ConfirmationRequested { .. }
+                | ChatStreamEvent::ConfirmationResolved { .. } => {}
             }
         }
     }

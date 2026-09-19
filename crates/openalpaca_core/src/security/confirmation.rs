@@ -6,10 +6,13 @@
 //! so that any interface (CLI, GUI, Telegram) can deliver the user's decision.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use dashmap::{DashMap, DashSet};
 use tokio::sync::oneshot;
+
+pub use openalpaca_api::events::ConfirmationOutcome;
 
 /// A confirmation request describing the tool call awaiting approval.
 #[derive(Debug, Clone)]
@@ -78,6 +81,37 @@ impl ConfirmationBroker {
         self.pending.remove(request_id);
     }
 
+    /// Await one registered request's resolution, whatever shape it takes.
+    ///
+    /// The broker owns this, not the caller, because **a timeout is a
+    /// resolution** (T1): the wait that ran out its clock leaves the request
+    /// un-pending and reports `TimedOut`, exactly as an answer leaves it
+    /// un-pending and reports `Approved`/`Denied`. Before this the sandbox ran
+    /// its own `tokio::time::timeout` and simply returned an error, so the
+    /// only trace of an expired prompt was a log line — every client kept its
+    /// card up and its composer paused until it was reloaded.
+    ///
+    /// `rx` is the receiver [`request`](Self::request) handed back. The
+    /// request id is needed as well so the timeout can clear the map entry the
+    /// receiver knows nothing about.
+    pub async fn wait(
+        &self,
+        request_id: &str,
+        rx: oneshot::Receiver<ConfirmationResponse>,
+        timeout: Duration,
+    ) -> ConfirmationResolution {
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(response)) => ConfirmationResolution::Answered(response),
+            // The sender was dropped without an answer: someone withdrew the
+            // request from the map, so there is nothing left to clean up.
+            Ok(Err(_)) => ConfirmationResolution::Cancelled,
+            Err(_) => {
+                self.cancel(request_id);
+                ConfirmationResolution::TimedOut
+            }
+        }
+    }
+
     /// Number of pending confirmations (for diagnostics).
     pub fn pending_count(&self) -> usize {
         self.pending.len()
@@ -105,6 +139,33 @@ impl ConfirmationBroker {
 impl Default for ConfirmationBroker {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// How one awaited confirmation ended (T1).
+///
+/// Every arm is a resolution: the tool runs only on `Answered` with
+/// `approved = true`, and the other three are three different reasons it did
+/// not. Clients are told about all of them.
+#[derive(Debug, Clone)]
+pub enum ConfirmationResolution {
+    /// The person answered — approved or denied, with their scope.
+    Answered(ConfirmationResponse),
+    /// Nobody answered within the policy's confirmation timeout.
+    TimedOut,
+    /// The request was withdrawn from the broker without an answer.
+    Cancelled,
+}
+
+impl ConfirmationResolution {
+    /// The wire outcome this resolution announces.
+    pub fn outcome(&self) -> ConfirmationOutcome {
+        match self {
+            Self::Answered(response) if response.approved => ConfirmationOutcome::Approved,
+            Self::Answered(_) => ConfirmationOutcome::Denied,
+            Self::TimedOut => ConfirmationOutcome::TimedOut,
+            Self::Cancelled => ConfirmationOutcome::Cancelled,
+        }
     }
 }
 
@@ -258,6 +319,63 @@ mod tests {
         let _rx = broker.request(&make_request_for("r1", "task-1", "review_agent::a"));
         broker.cancel("r1");
         assert!(broker.pending_requests().is_empty());
+    }
+
+    /// T1: the bug's own shape. Nobody answers, the clock runs out, and the
+    /// broker must report that as a resolution — not merely stop waiting.
+    #[tokio::test]
+    async fn an_unanswered_wait_times_out_and_stops_being_pending() {
+        let broker = ConfirmationBroker::new();
+        let rx = broker.request(&make_request("r1"));
+
+        let resolution = broker
+            .wait("r1", rx, std::time::Duration::from_millis(20))
+            .await;
+
+        assert!(matches!(resolution, ConfirmationResolution::TimedOut));
+        assert_eq!(resolution.outcome(), ConfirmationOutcome::TimedOut);
+        assert_eq!(resolution.outcome().as_str(), "timed_out");
+        // The map entry the receiver knew nothing about is gone, so
+        // `GET /v1/chat/confirmations` stops listing it too.
+        assert!(broker.pending_requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_answered_wait_reports_the_answer_it_got() {
+        for (approved, expected) in [
+            (true, ConfirmationOutcome::Approved),
+            (false, ConfirmationOutcome::Denied),
+        ] {
+            let broker = ConfirmationBroker::new();
+            let rx = broker.request(&make_request("r1"));
+            broker
+                .respond(
+                    "r1",
+                    ConfirmationResponse {
+                        approved,
+                        approval_scope: None,
+                    },
+                )
+                .unwrap();
+
+            let resolution = broker
+                .wait("r1", rx, std::time::Duration::from_secs(30))
+                .await;
+            assert_eq!(resolution.outcome(), expected);
+            assert!(broker.pending_requests().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_withdrawn_wait_reports_cancelled() {
+        let broker = ConfirmationBroker::new();
+        let rx = broker.request(&make_request("r1"));
+        broker.cancel("r1");
+
+        let resolution = broker
+            .wait("r1", rx, std::time::Duration::from_secs(30))
+            .await;
+        assert_eq!(resolution.outcome(), ConfirmationOutcome::Cancelled);
     }
 
     #[tokio::test]

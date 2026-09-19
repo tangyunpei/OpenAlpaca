@@ -10,6 +10,38 @@ pub enum WakeEvent {
     FileChanged { path: String, change_type: String },
 }
 
+/// How a pending tool confirmation stopped being pending (T1).
+///
+/// Every exit from the broker's wait has one, including the two nobody
+/// answers: a client settles its card on any of them, and only needs to tell
+/// them apart to say *why* the tool did not run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfirmationOutcome {
+    /// The person said yes; the tool ran.
+    Approved,
+    /// The person said no.
+    Denied,
+    /// Nobody answered before the policy's confirmation timeout elapsed. The
+    /// tool did **not** run — a timeout is a denial with a different reason.
+    TimedOut,
+    /// The request was withdrawn from the broker without an answer (the run
+    /// went away). The tool did not run.
+    Cancelled,
+}
+
+impl ConfirmationOutcome {
+    /// The wire word, so log lines and tests never spell it a second way.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Approved => "approved",
+            Self::Denied => "denied",
+            Self::TimedOut => "timed_out",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
 /// Server events pushed to clients via WebSocket
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -195,6 +227,24 @@ pub enum ServerEvent {
         stream_id: Option<String>,
         lane_key: Option<String>,
         /// The run waiting on this prompt (GAP-10), or `null` outside one.
+        task_id: Option<String>,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
+    /// A pending tool confirmation stopped being pending (T1).
+    ///
+    /// Announced for **every** way a prompt leaves the broker, not only for an
+    /// answer: a wait that ran out its clock is a resolution too
+    /// (`ConfirmationOutcome::TimedOut`), and a client that hears only about
+    /// answers leaves its card up and its composer paused for ever.
+    ToolConfirmationResolved {
+        request_id: String,
+        agent_id: String,
+        tool_name: String,
+        outcome: ConfirmationOutcome,
+        stream_id: Option<String>,
+        lane_key: Option<String>,
+        /// The run that was waiting on this prompt, or `null` outside one.
         task_id: Option<String>,
         ts: DateTime<Utc>,
         instance_id: String,

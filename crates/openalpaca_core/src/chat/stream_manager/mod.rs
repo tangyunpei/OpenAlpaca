@@ -3,6 +3,7 @@
 //! Manages broadcast channels for chat streaming. Each active chat request
 //! gets a unique stream_id with a broadcast channel for SSE delivery.
 
+use crate::events::ConfirmationOutcome;
 use crate::gateway::{DelegationInfo, SkippedAttachment};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -53,6 +54,13 @@ pub enum ChatStreamEvent {
         request_id: String,
         tool_name: String,
         tool_arguments: serde_json::Value,
+    },
+    /// T1: the prompt above stopped being pending — answered, timed out or
+    /// withdrawn. The twin of `ConfirmationRequested`, and like it, it does
+    /// **not** terminate the stream.
+    ConfirmationResolved {
+        request_id: String,
+        outcome: ConfirmationOutcome,
     },
 }
 

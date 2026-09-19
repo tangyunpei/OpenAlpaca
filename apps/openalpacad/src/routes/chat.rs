@@ -557,6 +557,19 @@ fn sse_frame(event: &openalpaca_core::chat::ChatStreamEvent) -> (&'static str, S
             })
             .to_string(),
         ),
+        // T1. Like its twin it does not end the stream; unlike its twin it can
+        // arrive with nobody having answered, which is the whole point.
+        E::ConfirmationResolved {
+            request_id,
+            outcome,
+        } => (
+            "confirmation_resolved",
+            serde_json::json!({
+                "request_id": request_id,
+                "outcome": outcome.as_str(),
+            })
+            .to_string(),
+        ),
     }
 }
 

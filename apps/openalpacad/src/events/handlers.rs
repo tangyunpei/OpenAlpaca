@@ -2,7 +2,7 @@
 
 use super::EventBroadcaster;
 use chrono::Utc;
-use openalpaca_api::events::ServerEvent;
+use openalpaca_api::events::{ConfirmationOutcome, ServerEvent};
 
 impl EventBroadcaster {
     /// Broadcast a task status event and persist it
@@ -427,6 +427,38 @@ impl EventBroadcaster {
             agent_id: agent_id.to_string(),
             tool_name: tool_name.to_string(),
             tool_arguments: tool_arguments.clone(),
+            stream_id: stream_id.map(|s| s.to_string()),
+            lane_key: lane_key.map(|s| s.to_string()),
+            task_id: task_id.map(|t| t.to_string()),
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        };
+
+        self.persist(&event);
+        let _ = self.tx.send(event);
+    }
+
+    /// Broadcast the resolution of a pending tool confirmation (T1).
+    ///
+    /// The twin of [`tool_confirmation_requested`](Self::tool_confirmation_requested),
+    /// sent for every way a prompt stops being pending — including the two
+    /// nobody answered.
+    #[allow(clippy::too_many_arguments)]
+    pub fn tool_confirmation_resolved(
+        &self,
+        request_id: &str,
+        agent_id: &str,
+        tool_name: &str,
+        outcome: ConfirmationOutcome,
+        stream_id: Option<&str>,
+        lane_key: Option<&str>,
+        task_id: Option<&str>,
+    ) {
+        let event = ServerEvent::ToolConfirmationResolved {
+            request_id: request_id.to_string(),
+            agent_id: agent_id.to_string(),
+            tool_name: tool_name.to_string(),
+            outcome,
             stream_id: stream_id.map(|s| s.to_string()),
             lane_key: lane_key.map(|s| s.to_string()),
             task_id: task_id.map(|t| t.to_string()),

@@ -5,6 +5,9 @@ use uuid::Uuid;
 // Re-export WakeEvent from API so downstream code can still use
 // `openalpaca_core::events::WakeEvent` without breaking.
 pub use openalpaca_api::events::WakeEvent;
+// One vocabulary for "how did this prompt stop being pending" across the bus,
+// the WebSocket and the SSE stream (T1).
+pub use openalpaca_api::events::ConfirmationOutcome;
 
 /// Examples of system-wide events that flow through the EventBus.
 /// This replaces the loose JSON and separate API types for internal logic.
@@ -343,6 +346,25 @@ pub enum SystemEvent {
         lane_key: Option<String>,
         /// The run that is waiting on this prompt (GAP-10), or `None` outside
         /// one — the same attribution §4.4's derived `blocked` lane uses.
+        task_id: Option<String>,
+        timestamp: DateTime<Utc>,
+    },
+    /// A pending tool confirmation stopped being pending (T1).
+    ///
+    /// The twin of `ToolConfirmationRequested`, published for every exit from
+    /// the broker's wait — an answer, a timeout, a withdrawal. A GUI that only
+    /// hears about answers leaves the approval bar up and the composer paused
+    /// until the window is reloaded.
+    ToolConfirmationResolved {
+        request_id: String,
+        agent_id: String,
+        tool_name: String,
+        outcome: ConfirmationOutcome,
+        /// SSE stream ID for routing to the active chat stream
+        stream_id: Option<String>,
+        /// Lane key for routing to connectors (e.g. "telegram:12345")
+        lane_key: Option<String>,
+        /// The run that was waiting on this prompt, or `None` outside one.
         task_id: Option<String>,
         timestamp: DateTime<Utc>,
     },

@@ -548,6 +548,102 @@ async fn test_confirmation_timeout() {
     );
 }
 
+/// **T1.** A prompt nobody answered used to produce nothing at all: the log
+/// line said "timed out", the tool call failed, and no client heard a word —
+/// so the GUI kept the approval bar up and the composer paused until the
+/// window was reloaded. The timeout is announced now, exactly as an answer is,
+/// with the outcome that says which it was.
+#[tokio::test]
+async fn an_expired_confirmation_announces_itself_as_timed_out() {
+    let bus = EventBus::default();
+    let mut rx = bus.subscribe();
+    let mut sandbox = SandboxManager::new(make_registry(), bus, &CircuitBreakerConfig::default());
+    sandbox.set_confirmation_broker(Arc::new(ConfirmationBroker::new()));
+    let mut policy = make_policy("agent1");
+    policy.require_confirmation_for = vec!["web_search".to_string()];
+    policy.confirmation_timeout_secs = Some(1);
+    policy.stream_id = Some("stream-1".to_string());
+    let tc = make_tool_call("web_search");
+    let ctx = make_ctx_for_task("agent1", "t-1");
+
+    // Nobody answers.
+    let result = sandbox.execute_tool(&tc, &policy, &ctx).await;
+    assert!(result.unwrap_err().contains("timed out"));
+
+    // The request frame first, then its twin.
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        SystemEvent::ToolConfirmationRequested { .. }
+    ));
+    match rx.try_recv().unwrap() {
+        SystemEvent::ToolConfirmationResolved {
+            outcome,
+            tool_name,
+            task_id,
+            stream_id,
+            ..
+        } => {
+            assert_eq!(outcome, crate::events::ConfirmationOutcome::TimedOut);
+            assert_eq!(tool_name, "web_search");
+            // Routable to the same places the prompt went.
+            assert_eq!(task_id.as_deref(), Some("t-1"));
+            assert_eq!(stream_id.as_deref(), Some("stream-1"));
+        }
+        other => panic!("Expected ToolConfirmationResolved, got: {other:?}"),
+    }
+}
+
+/// …and an answer is announced with the outcome it was, so a second window
+/// showing the same card settles it too.
+#[tokio::test]
+async fn an_answered_confirmation_announces_the_answer() {
+    for (approved, expected) in [
+        (true, crate::events::ConfirmationOutcome::Approved),
+        (false, crate::events::ConfirmationOutcome::Denied),
+    ] {
+        let broker = Arc::new(ConfirmationBroker::new());
+        let bus = EventBus::default();
+        let mut rx = bus.subscribe();
+        let mut sandbox =
+            SandboxManager::new(make_registry(), bus, &CircuitBreakerConfig::default());
+        sandbox.set_confirmation_broker(broker.clone());
+
+        let mut policy = make_policy("agent1");
+        policy.require_confirmation_for = vec!["web_search".to_string()];
+        policy.confirmation_timeout_secs = Some(5);
+        let tc = make_tool_call("web_search");
+        let ctx = make_ctx("agent1");
+
+        let answering = broker.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let keys = answering.pending_keys();
+            answering
+                .respond(
+                    &keys[0],
+                    ConfirmationResponse {
+                        approved,
+                        approval_scope: None,
+                    },
+                )
+                .unwrap();
+        });
+
+        let _ = sandbox.execute_tool(&tc, &policy, &ctx).await;
+
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            SystemEvent::ToolConfirmationRequested { .. }
+        ));
+        match rx.try_recv().unwrap() {
+            SystemEvent::ToolConfirmationResolved { outcome, .. } => {
+                assert_eq!(outcome, expected);
+            }
+            other => panic!("Expected ToolConfirmationResolved, got: {other:?}"),
+        }
+    }
+}
+
 /// ADR-030's S4 refusal is a governance decision, not a failure of the tool —
 /// and a `Failed` extension's refusal quotes the extension's own error detail,
 /// which routinely says "timed out". Counted as a transient failure, a handful

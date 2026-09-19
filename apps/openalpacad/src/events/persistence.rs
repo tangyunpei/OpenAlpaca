@@ -307,6 +307,32 @@ impl EventBroadcaster {
                         None,
                     )
                 }
+                // T1: the audit row says how the prompt ended, so a run that
+                // stalled on an unanswered approval is legible afterwards and
+                // not only in the live log.
+                ServerEvent::ToolConfirmationResolved {
+                    request_id,
+                    agent_id,
+                    tool_name,
+                    outcome,
+                    task_id,
+                    ..
+                } => {
+                    let detail = serde_json::json!({
+                        "request_id": request_id,
+                        "agent_id": agent_id,
+                        "tool_name": tool_name,
+                        "task_id": task_id,
+                    });
+                    let result = serde_json::json!({ "outcome": outcome.as_str() });
+                    repo.log_for_task(
+                        "tool_confirmation_resolved",
+                        Some(agent_id),
+                        task_id.as_deref(),
+                        Some(&detail),
+                        Some(&result),
+                    )
+                }
                 // Log SOUL.md personality updates with actor attribution
                 ServerEvent::SoulUpdated {
                     actor,

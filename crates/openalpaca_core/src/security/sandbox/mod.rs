@@ -9,7 +9,9 @@ use crate::daemon_config::CircuitBreakerConfig;
 use crate::events::SystemEvent;
 use crate::security::capabilities::{Allowlist, CapabilityManager};
 use crate::security::circuit_breaker::{ToolCircuitBreaker, is_transient_tool_error};
-use crate::security::confirmation::{ConfirmationBroker, ConfirmationRequest};
+use crate::security::confirmation::{
+    ConfirmationBroker, ConfirmationRequest, ConfirmationResolution,
+};
 use crate::security::sanitizer::InputSanitizer;
 use crate::tools::extensions::is_withheld_refusal;
 use crate::tools::registry::ToolContext;
@@ -330,8 +332,26 @@ impl SandboxManager {
                     "Tool requires confirmation — awaiting user response (timeout: {timeout_secs}s)"
                 );
 
-                match tokio::time::timeout(timeout, rx).await {
-                    Ok(Ok(resp)) if resp.approved => {
+                let resolution = broker.wait(&request_id, rx, timeout).await;
+
+                // T1: every exit from the wait is announced, not just an
+                // answer. A timeout used to produce nothing at all, so a GUI
+                // that settles a card only on a resolution kept the approval
+                // bar up and the composer paused until the window reloaded.
+                let outcome = resolution.outcome();
+                self.bus.publish(SystemEvent::ToolConfirmationResolved {
+                    request_id: request_id.clone(),
+                    agent_id: agent_id.to_string(),
+                    tool_name: tool_call.name.clone(),
+                    outcome,
+                    stream_id: policy.stream_id.clone(),
+                    lane_key: policy.lane_key.clone(),
+                    task_id: ctx.task_id.clone(),
+                    timestamp: Utc::now(),
+                });
+
+                match resolution {
+                    ConfirmationResolution::Answered(resp) if resp.approved => {
                         tracing::info!(agent_id, tool = %tool_call.name, "Tool approved by user");
                         // Record the approval so subsequent invocations skip the prompt.
                         // Default to TheseArgs (safest) when the caller omits a scope.
@@ -342,16 +362,15 @@ impl SandboxManager {
                             .record(&tool_call.name, args_hash, scope);
                         // Fall through to circuit breaker + execution
                     }
-                    Ok(Ok(_)) => {
+                    ConfirmationResolution::Answered(_) => {
                         let reason = format!("Tool '{}' denied by user", tool_call.name);
                         tracing::info!(agent_id, tool = %tool_call.name, "Tool denied by user");
                         return Err(reason);
                     }
-                    Ok(Err(_)) => {
+                    ConfirmationResolution::Cancelled => {
                         return Err("Confirmation request cancelled".to_string());
                     }
-                    Err(_) => {
-                        broker.cancel(&request_id);
+                    ConfirmationResolution::TimedOut => {
                         return Err(format!(
                             "Tool '{}' confirmation timed out after {timeout_secs}s",
                             tool_call.name
