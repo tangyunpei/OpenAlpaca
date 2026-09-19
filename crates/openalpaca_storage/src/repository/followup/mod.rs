@@ -91,6 +91,10 @@ impl<'a> FollowupRepository<'a> {
     ///
     /// The row is pinned to the lane's active session as it is written (§5.3):
     /// the conversation the promise was made in is knowable now and not later.
+    ///
+    /// Eight columns, because the row is the contract: every one of them is a
+    /// column of `lane_followups` and none can be derived from the others.
+    #[allow(clippy::too_many_arguments)]
     pub fn queue(
         &self,
         lane_key: &str,
