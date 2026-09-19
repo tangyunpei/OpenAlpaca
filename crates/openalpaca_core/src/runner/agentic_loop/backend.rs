@@ -78,17 +78,24 @@ impl<'a> LlmBackend<'a> {
                         ephemeral_system_notice: ephemeral_system_notice.clone(),
                     };
                     match router.complete_streaming(stream_request).await {
-                        Ok(stream) => {
+                        Ok(routed) => {
                             // Forward events to callback while collecting
                             use futures_util::StreamExt;
                             let callback = Arc::clone(callback);
-                            let forwarding_stream = stream.map(move |event| {
+                            let forwarding_stream = routed.stream.map(move |event| {
                                 if let Ok(ref e) = event {
                                     callback(e);
                                 }
                                 event
                             });
-                            let model_str = model.clone().unwrap_or_else(|| router.default_model());
+                            // V4: the model the router actually called, not the
+                            // one this call asked for. A stream carries no
+                            // `model` of its own, so this used to be
+                            // `request.model` or the daemon default — which
+                            // labelled every locally-answered turn with the
+                            // Anthropic default and priced it against that
+                            // model's rates two statements below.
+                            let model_str = routed.model;
                             match tokio::time::timeout(
                                 max_stream_duration,
                                 openalpaca_llm::collect_stream(

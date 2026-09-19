@@ -249,15 +249,24 @@ fn resolve_history_session(
 /// `GET /v1/models`, which reads the same registry, so neither kind of
 /// refused id is selectable in the first place.
 ///
-/// Returns the model the turn will run on: the named one, or the router's
-/// current default when the request named none.
+/// Returns the model the turn will run on: the named one, or — when the
+/// request named none — the model a request naming none actually *reaches*.
+///
+/// **V4: the effective default, not the configured one.** The configured
+/// default may be an id no loaded provider serves, in which case the ladder
+/// substitutes (L3) and the turn is answered by something else entirely. A
+/// daemon running on a local Ollama with `default_model` still set to a Claude
+/// id reported that Claude id here, on the SSE `done`, in the event-bridge
+/// line and in the session log, for answers a local model wrote. `None` when
+/// nothing is routable at all — there is then no model to name, and the turn
+/// itself will fail at the router with `NoRoutableModel`.
 #[allow(clippy::result_large_err)]
 fn resolve_turn_model(
     router: Option<&openalpaca_llm::LlmRouter>,
     requested: Option<&str>,
 ) -> Result<Option<String>, Response> {
     let Some(requested) = requested else {
-        return Ok(router.map(|r| r.default_model()));
+        return Ok(router.and_then(|r| r.effective_default_model()));
     };
     let Some(router) = router else {
         // Nothing to validate against, and nothing that could run it.
@@ -1140,15 +1149,80 @@ mod tests {
         )
     }
 
+    /// A provider that answers nothing useful — enough to make a model
+    /// *routable*, which is what the effective default depends on.
+    struct StubLlm;
+
+    #[async_trait::async_trait]
+    impl openalpaca_llm::LlmProvider for StubLlm {
+        fn name(&self) -> &str {
+            "stub"
+        }
+        fn supports_tools(&self) -> bool {
+            false
+        }
+        async fn chat(
+            &self,
+            _request: openalpaca_llm::ChatRequest,
+        ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+            Err(openalpaca_llm::LlmError::NotConfigured)
+        }
+    }
+
+    /// A router with one loaded provider and `default` as its configured
+    /// default model.
+    fn router_serving(default: &str) -> openalpaca_llm::LlmRouter {
+        openalpaca_llm::LlmRouter::single_provider(
+            Arc::new(StubLlm),
+            openalpaca_llm::ProviderType::Anthropic,
+            default.to_string(),
+        )
+    }
+
     /// The default: no `model`, so the turn runs on the router's own default
     /// and the response says which that is.
     #[tokio::test]
     async fn a_turn_that_names_no_model_reports_the_daemon_default() {
-        let router = router_with(&[]);
+        let router = router_serving("claude-sonnet-4-6");
         assert_eq!(
             resolve_turn_model(Some(&router), None).expect("accepted"),
             Some("claude-sonnet-4-6".to_string())
         );
+    }
+
+    /// **V4.** A configured default nothing can serve is not what the turn
+    /// runs on: the ladder substitutes, and the echoed `model_used` is the
+    /// model that will actually answer. Before this the route echoed the
+    /// configured id, so a daemon running on a local model reported a Claude
+    /// one on every turn.
+    #[tokio::test]
+    async fn a_turn_reports_the_model_it_will_actually_reach() {
+        // Anthropic is the loaded provider; the configured default belongs to
+        // OpenAI, which is not loaded.
+        let router = router_serving("gpt-5.2");
+        let reported = resolve_turn_model(Some(&router), None).expect("accepted");
+        assert_ne!(
+            reported.as_deref(),
+            Some("gpt-5.2"),
+            "an unroutable configured default must not be echoed as the turn's model"
+        );
+        assert_eq!(
+            reported,
+            router.effective_default_model(),
+            "the route names exactly what the router would call"
+        );
+        assert!(
+            reported.is_some_and(|m| router.is_routable(&m)),
+            "and it is routable"
+        );
+    }
+
+    /// Nothing routable at all: no model to name, rather than a name nothing
+    /// can serve.
+    #[tokio::test]
+    async fn a_turn_names_no_model_when_nothing_is_routable() {
+        let router = router_with(&[]);
+        assert_eq!(resolve_turn_model(Some(&router), None).expect("accepted"), None);
     }
 
     /// A registered id is accepted and echoed back as the turn's model.

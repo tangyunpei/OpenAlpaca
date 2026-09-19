@@ -9,7 +9,7 @@ mod types;
 
 pub use fallback::{flatten_messages, truncate_messages_for_cli};
 pub use types::{
-    LlmCapacityInfo, LlmRouterError, ProviderEntry, RequestContext, RouterRequest,
+    LlmCapacityInfo, LlmRouterError, ProviderEntry, RequestContext, RoutedStream, RouterRequest,
 };
 
 use crate::LlmProvider;

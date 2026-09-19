@@ -53,7 +53,8 @@ pub use routing::rate_limiter::{
     CircuitState, RateLimitConfig, RateLimiterRegistry, backoff_with_jitter,
 };
 pub use routing::router::{
-    LlmCapacityInfo, LlmRouter, LlmRouterError, ProviderEntry, RequestContext, RouterRequest,
+    LlmCapacityInfo, LlmRouter, LlmRouterError, ProviderEntry, RequestContext, RoutedStream,
+    RouterRequest,
 };
 pub use streaming::collect_stream;
 pub use types::*;

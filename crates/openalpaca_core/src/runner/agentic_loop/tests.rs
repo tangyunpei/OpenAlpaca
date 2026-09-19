@@ -3348,3 +3348,136 @@ async fn a_steering_drain_is_narrated_with_its_request_ids() {
     // A main-loop turn carries no task_id — that absence is the signal.
     assert!(drained.task_id.is_none());
 }
+
+// ── V4: the model named is the model that answered ───────────────────
+
+/// A provider that answers with whatever model it was actually called with,
+/// and streams that same answer when asked to.
+///
+/// The streaming half is the point: a stream carries no `model` field, so the
+/// name on a streamed turn can only come from the router's own resolution.
+struct ModelEchoProvider;
+
+#[async_trait]
+impl LlmProvider for ModelEchoProvider {
+    fn name(&self) -> &str {
+        "model-echo"
+    }
+
+    fn supports_tools(&self) -> bool {
+        true
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        Ok(ChatResponse {
+            content: "answered".to_string(),
+            tool_calls: vec![],
+            // What a real provider echoes back in its body.
+            model: request.model.clone().unwrap_or_default(),
+            usage: Usage {
+                input_tokens: 4,
+                output_tokens: 2,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        })
+    }
+}
+
+/// The model the ladder settles on when the loop asks for one nothing serves:
+/// the only loaded provider's default.
+const EFFECTIVE_MODEL: &str = "claude-sonnet-4-20250514";
+const UNROUTABLE_MODEL: &str = "no-such-model-anywhere";
+
+fn echo_router() -> LlmRouter {
+    LlmRouter::single_provider(
+        Arc::new(ModelEchoProvider),
+        ProviderType::Anthropic,
+        EFFECTIVE_MODEL.to_string(),
+    )
+}
+
+/// **V4, non-streaming.** A turn pinned to a model nothing can serve is
+/// answered by the ladder's effective model, and that is the model the result
+/// names.
+#[tokio::test]
+async fn a_substituted_model_is_reported_on_the_non_streaming_path() {
+    let router = echo_router();
+    let config = LoopConfig {
+        model: Some(UNROUTABLE_MODEL.to_string()),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop_routed(
+        &router,
+        vec![ChatMessage::user("hello")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert_eq!(result.final_content, "answered");
+    assert_eq!(
+        result.model_used.as_deref(),
+        Some(EFFECTIVE_MODEL),
+        "the model that answered, never the unroutable one that was asked for"
+    );
+}
+
+/// **V4, streaming.** The same turn on the streaming rail. Before the fix the
+/// loop labelled it with `LoopConfig.model` — the requested id — so a local
+/// model's answer was reported, logged and priced as the daemon default.
+#[tokio::test]
+async fn a_substituted_model_is_reported_on_the_streaming_path() {
+    let router = echo_router();
+    let seen: Arc<std::sync::Mutex<usize>> = Arc::new(std::sync::Mutex::new(0));
+    let counter = Arc::clone(&seen);
+    let config = LoopConfig {
+        model: Some(UNROUTABLE_MODEL.to_string()),
+        stream_callback: Some(Arc::new(move |_event: &openalpaca_llm::StreamEvent| {
+            *counter.lock().unwrap_or_else(|p| p.into_inner()) += 1;
+        })),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop_routed(
+        &router,
+        vec![ChatMessage::user("hello")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(
+        *seen.lock().unwrap_or_else(|p| p.into_inner()) > 0,
+        "the turn really took the streaming rail"
+    );
+    assert_eq!(result.final_content, "answered");
+    assert_eq!(
+        result.model_used.as_deref(),
+        Some(EFFECTIVE_MODEL),
+        "a streamed turn names the model the router called, not the one requested"
+    );
+}

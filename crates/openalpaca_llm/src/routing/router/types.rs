@@ -39,6 +39,20 @@ pub struct RouterRequest {
     pub ephemeral_system_notice: Option<String>,
 }
 
+/// A started stream, and the model the router actually called (V4).
+///
+/// The caller cannot work the effective model out for itself: the ladder (L3)
+/// may answer a request for one id with another, and a stream carries no
+/// `model` field of its own the way a non-streaming response body does. It
+/// used to guess — `request.model` or the daemon default — so a turn answered
+/// by a local model was labelled with the Anthropic default end to end, and
+/// priced against it. The router resolved it; the router says so.
+pub struct RoutedStream {
+    /// The ladder's effective model: what answered, not what was asked for.
+    pub model: String,
+    pub stream: ChatStream,
+}
+
 /// Errors from the LLM router.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum LlmRouterError {

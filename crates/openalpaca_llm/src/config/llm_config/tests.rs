@@ -409,11 +409,11 @@ context = 262144
         );
 
         let router = super::build_router(&path).expect("router");
-        let stream = router
+        let routed = router
             .complete_streaming(request(None))
             .await
             .expect("the stream starts");
-        let collected = crate::streaming::collect_stream(stream, "local-model".to_string())
+        let collected = crate::streaming::collect_stream(routed.stream, routed.model)
             .await
             .expect("a stream that keeps producing is never cut");
 

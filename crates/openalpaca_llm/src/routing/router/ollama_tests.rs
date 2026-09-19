@@ -160,12 +160,13 @@ async fn a_keyless_provider_completes_through_the_streaming_path() {
     .await;
 
     let router = keyless_router(&server.base_url, "local-model");
-    let stream = router
+    let routed = router
         .complete_streaming(request("local-model"))
         .await
         .expect("a keyless provider must be able to stream");
+    assert_eq!(routed.model, "local-model", "the router names what it called");
 
-    let collected = crate::streaming::collect_stream(stream, "local-model".to_string())
+    let collected = crate::streaming::collect_stream(routed.stream, routed.model.clone())
         .await
         .expect("the stream completes");
     assert_eq!(collected.content, "streamed pong");
@@ -246,7 +247,8 @@ async fn a_streamed_local_turn_arrives_as_separate_events_with_usage() {
         router
             .complete_streaming(request("local-model"))
             .await
-            .expect("a keyless provider must be able to stream"),
+            .expect("a keyless provider must be able to stream")
+            .stream,
     )
     .await;
 
@@ -321,11 +323,11 @@ async fn a_trailing_usage_frame_is_not_dropped() {
     .await;
 
     let router = keyless_router(&server.base_url, "local-model");
-    let stream = router
+    let routed = router
         .complete_streaming(request("local-model"))
         .await
         .expect("the stream starts");
-    let collected = crate::streaming::collect_stream(stream, "local-model".to_string())
+    let collected = crate::streaming::collect_stream(routed.stream, routed.model)
         .await
         .expect("the stream completes");
 

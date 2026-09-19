@@ -11,10 +11,14 @@ impl LlmRouter {
     /// (up to `pool.len().min(3)` attempts). Does NOT fall back to other
     /// models — the caller (agentic loop) handles streaming→non-streaming
     /// fallback on final failure.
+    ///
+    /// Returns the stream **and the model it is being served by** (V4): the
+    /// ladder below may answer a request for one id with another, and only
+    /// this function knows which.
     pub async fn complete_streaming(
         &self,
         request: RouterRequest,
-    ) -> Result<ChatStream, LlmRouterError> {
+    ) -> Result<RoutedStream, LlmRouterError> {
         let permit = Arc::clone(&self.concurrency_limiter)
             .acquire_owned()
             .await
@@ -84,7 +88,12 @@ impl LlmRouter {
                 .chat_streaming_with_key(&key_guard.secret, chat_request)
                 .await
             {
-                Ok(stream) => return Ok(Box::pin(crate::streaming::PermitStream::new(stream, permit))),
+                Ok(stream) => {
+                    return Ok(RoutedStream {
+                        model: model.to_string(),
+                        stream: Box::pin(crate::streaming::PermitStream::new(stream, permit)),
+                    });
+                }
                 Err(LlmError::RateLimited { retry_after_ms }) => {
                     tracing::warn!(
                         model = model,
