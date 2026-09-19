@@ -51,6 +51,16 @@ function recorder<I, R>(record: (input: I) => void, reply: (input: I) => R) {
   });
 }
 
+/**
+ * The store root the daemon reports (S11). The section reads it from
+ * `GET /v1/status`, and the sensitive-key refusal names a file under it, so
+ * the double is the one fact those tests need rather than a whole query
+ * client.
+ */
+vi.mock("@/hooks/useConnection", () => ({
+  useHomeRoot: () => "/Volumes/work/store",
+}));
+
 vi.mock("@/hooks/useExtensions", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/hooks/useExtensions")>()),
   useExtensions: () => ({
@@ -511,11 +521,14 @@ describe("ExtensionsSection (ADR-030 §9.2)", () => {
     expect(
       screen.getByText(/api_key is a secret this plugin declares/),
     ).toBeInTheDocument();
+    // S11: the path is the daemon's own root, never the literal
+    // `~/.openalpaca` — the store moves with OPENALPACA_HOME_STORE.
     expect(
       screen.getByText(
-        /~\/\.openalpaca\/plugins\/\.config\/vault\.toml by hand/,
+        /\/Volumes\/work\/store\/plugins\/\.config\/vault\.toml by hand/,
       ),
     ).toBeInTheDocument();
+    expect(screen.queryByText(/~\/\.openalpaca/)).toBeNull();
     expect(screen.queryByText(/declared sensitive;/)).toBeNull();
   });
 });

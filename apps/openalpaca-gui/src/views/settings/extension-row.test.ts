@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import { extensionRow } from "./extension-fixture";
 import {
   extensionErrorCopy,
+  pluginConfigPath,
   extensionRowView,
   orderExtensions,
 } from "./extension-row";
@@ -410,13 +411,16 @@ describe("the install menu (GAP-24)", () => {
   });
 });
 
+/** The store root the daemon reports in these tests (S11). */
+const ROOT = "/Volumes/work/store";
+
 describe("extensionErrorCopy (§8's flat envelope)", () => {
   it("turns each refusal word into something a person can act on", () => {
-    expect(extensionErrorCopy("not_loaded")).toMatch(/Nothing is loaded/);
-    expect(extensionErrorCopy("store_unreadable")).toMatch(/cannot read/);
-    expect(extensionErrorCopy("not_orphaned")).toMatch(/still declared/);
-    expect(extensionErrorCopy("orphaned")).toMatch(/only Remove/);
-    expect(extensionErrorCopy("unsupported_for_kind")).toMatch(
+    expect(extensionErrorCopy("not_loaded", ROOT)).toMatch(/Nothing is loaded/);
+    expect(extensionErrorCopy("store_unreadable", ROOT)).toMatch(/cannot read/);
+    expect(extensionErrorCopy("not_orphaned", ROOT)).toMatch(/still declared/);
+    expect(extensionErrorCopy("orphaned", ROOT)).toMatch(/only Remove/);
+    expect(extensionErrorCopy("unsupported_for_kind", ROOT)).toMatch(
       /does not apply/,
     );
   });
@@ -435,7 +439,7 @@ describe("extensionErrorCopy (§8's flat envelope)", () => {
       ["busy", /starting or stopping/],
       ["copy_failed", /nothing changed/],
     ] as const) {
-      const copy = extensionErrorCopy(word);
+      const copy = extensionErrorCopy(word, ROOT);
       expect(copy, word).toMatch(expected);
       expect(copy, `${word} must not be shown as its raw word`).not.toBe(word);
     }
@@ -449,28 +453,53 @@ describe("extensionErrorCopy (§8's flat envelope)", () => {
    * names the key and where to write the reference by hand.
    */
   it("turns the sensitive-key 400 into the hand-edit path, naming the key", () => {
-    const copy = extensionErrorCopy(
+    const refusal =
       "permission denied: config key 'api_key' of plugin 'vault' is declared sensitive; " +
-        "store it as a secret reference, not in the plugin's TOML",
-    );
+      "store it as a secret reference, not in the plugin's TOML";
+    const copy = extensionErrorCopy(refusal, ROOT);
 
     expect(copy).toMatch(/^api_key is a secret this plugin declares/);
     expect(copy).toMatch(/nothing was written/);
-    expect(copy).toMatch(
-      /~\/\.openalpaca\/plugins\/\.config\/vault\.toml by hand/,
-    );
+    // S11: the daemon's own root, not the literal `~/.openalpaca` — the store
+    // moves with OPENALPACA_HOME_STORE, and this window is told where it is.
+    expect(copy).toContain("/Volumes/work/store/plugins/.config/vault.toml");
+    expect(copy).not.toContain("~/.openalpaca");
     expect(copy).toMatch(/then Reload/);
     // It must not repeat the daemon's own sentence, which ends in a shrug.
     expect(copy).not.toMatch(/declared sensitive;/);
+
+    // A daemon that has not answered yet names the place without inventing a
+    // path for it.
+    const unknown = extensionErrorCopy(refusal, null);
+    expect(unknown).toContain(
+      "the plugins directory of the home store, in .config/vault.toml",
+    );
+    expect(unknown).not.toContain("~/.openalpaca");
+  });
+
+  /** The path itself, including the tidying a trailing slash needs. */
+  it("names a plugin's config file under the root the daemon reported", () => {
+    expect(pluginConfigPath("/Users/dev/.openalpaca", "vault")).toBe(
+      "/Users/dev/.openalpaca/plugins/.config/vault.toml",
+    );
+    expect(pluginConfigPath("/Volumes/work/store/", "vault")).toBe(
+      "/Volumes/work/store/plugins/.config/vault.toml",
+    );
+    expect(pluginConfigPath("   ", "vault")).toBe(
+      "the plugins directory of the home store, in .config/vault.toml",
+    );
   });
 
   it("passes anything it does not recognise through verbatim", () => {
-    expect(extensionErrorCopy("Request failed with status 500")).toBe(
+    expect(extensionErrorCopy("Request failed with status 500", ROOT)).toBe(
       "Request failed with status 500",
     );
     // Shaped like the sensitive refusal but not it: still verbatim.
     expect(
-      extensionErrorCopy("config key 'api_key' of plugin 'vault' is unknown"),
+      extensionErrorCopy(
+        "config key 'api_key' of plugin 'vault' is unknown",
+        ROOT,
+      ),
     ).toBe("config key 'api_key' of plugin 'vault' is unknown");
   });
 });

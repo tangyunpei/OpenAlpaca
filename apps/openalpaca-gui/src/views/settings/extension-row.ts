@@ -362,12 +362,38 @@ const SENSITIVE_CONFIG =
   /config key '([^']*)' of plugin '([^']*)' is declared sensitive/;
 
 /**
+ * Where a plugin's hand-edited config lives, said in the daemon's own terms
+ * (S11).
+ *
+ * Not the literal `~/.openalpaca/plugins/.config/<plugin>.toml`:
+ * `OPENALPACA_HOME_STORE` moves the store, and this window is told where it
+ * actually is (`GET /v1/status`'s `home_root`, G7's thread). With no answer
+ * yet, the phrase names the place without inventing a path.
+ */
+export function pluginConfigPath(
+  homeRoot: string | null,
+  plugin: string,
+): string {
+  const root =
+    homeRoot === null || homeRoot.trim() === ""
+      ? null
+      : homeRoot.trim().replace(/\/+$/, "");
+  return root === null
+    ? `the plugins directory of the home store, in .config/${plugin}.toml`
+    : `${root}/plugins/.config/${plugin}.toml`;
+}
+
+/**
  * The flat `{"error": "<word>"}` envelope (§8, R20) as row copy.
  *
  * `parseErrorPayload` hands the word through as the message, so this is the
- * one place that knows what each word means to a person.
+ * one place that knows what each word means to a person. `homeRoot` is the
+ * daemon's own store root, for the one refusal that names a file in it.
  */
-export function extensionErrorCopy(message: string): string {
+export function extensionErrorCopy(
+  message: string,
+  homeRoot: string | null,
+): string {
   const sensitive = SENSITIVE_CONFIG.exec(message.trim());
   if (sensitive !== null) {
     const [, key, plugin] = sensitive;
@@ -378,8 +404,8 @@ export function extensionErrorCopy(message: string): string {
     return (
       `${key} is a secret this plugin declares, so it is never typed here and ` +
       `nothing was written. Put a reference to it in ` +
-      `~/.openalpaca/plugins/.config/${plugin}.toml by hand — the plaintext ` +
-      `values live there, secrets never do — then Reload.`
+      `${pluginConfigPath(homeRoot, plugin ?? "<plugin>")} by hand — the ` +
+      `plaintext values live there, secrets never do — then Reload.`
     );
   }
   switch (message.trim()) {

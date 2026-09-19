@@ -29,6 +29,7 @@
 import { useState } from "react";
 
 import { Button, Tag } from "@/components/ui";
+import { useHomeRoot } from "@/hooks/useConnection";
 import {
   useExtensions,
   useExtensionVerb,
@@ -58,6 +59,8 @@ export function ExtensionsSection() {
   const setConfig = useSetExtensionConfig();
   const update = useUpdatePlugin();
   const uninstall = useUninstallExtension();
+  // Where the daemon keeps its store, for copy that names a file in it (S11).
+  const homeRoot = useHomeRoot();
   const showToast = useUiStore((s) => s.showToast);
 
   /** Row-level copy for the last refusal, keyed by row (§8's flat envelope). */
@@ -83,7 +86,7 @@ export function ExtensionsSection() {
     uninstall.isPending;
 
   const onError = (row: ExtensionRow, error: Error) => {
-    const copy = extensionErrorCopy(error.message);
+    const copy = extensionErrorCopy(error.message, homeRoot);
     setFailure({ key: rowKey(row), copy });
     showToast(`${row.id} — ${copy}`);
   };

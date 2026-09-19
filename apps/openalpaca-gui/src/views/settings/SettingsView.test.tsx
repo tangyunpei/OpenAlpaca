@@ -87,6 +87,7 @@ vi.mock("@/hooks/useConnection", () => ({
     reconnect: vi.fn(),
   }),
   useDaemonStatus: () => query(daemonStatus),
+  useHomeRoot: () => daemonStatus.home_root,
 }));
 
 vi.mock("@/hooks/useTasks", () => ({

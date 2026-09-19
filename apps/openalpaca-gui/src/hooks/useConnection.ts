@@ -90,6 +90,21 @@ export function useResumeEnabled(): boolean {
   return status.data?.routing?.resume_enabled === true;
 }
 
+/**
+ * The daemon's own home-store root — `GET /v1/status`'s `home_root` — or
+ * `null` until it has answered (G7, S11).
+ *
+ * Copy that names a file under the store reads this rather than printing
+ * `~/.openalpaca`: `OPENALPACA_HOME_STORE` moves the root, and a path written
+ * from this side would then be a confident lie about where the owner's files
+ * are. It reads the same query the Connection panel does, keyed by this
+ * window's project, so asking from anywhere else costs a cache read.
+ */
+export function useHomeRoot(): string | null {
+  const projectPath = useProjectStore((s) => s.path);
+  return useDaemonStatus(projectPath).data?.home_root ?? null;
+}
+
 export interface ConnectionStatus {
   info: ConnectionInfo | null;
   health: HealthResponse | undefined;

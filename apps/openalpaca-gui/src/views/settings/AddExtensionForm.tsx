@@ -20,6 +20,7 @@
 import { useState } from "react";
 
 import { Button } from "@/components/ui";
+import { useHomeRoot } from "@/hooks/useConnection";
 import {
   useAddMcpServer,
   useInstallPlugin,
@@ -82,6 +83,9 @@ export function AddExtensionForm({ onDone, onCancel }: AddExtensionFormProps) {
 }
 
 function PluginForm({ onDone, onCancel }: AddExtensionFormProps) {
+  // The store root the daemon reports, for the one refusal that names a file
+  // in it (S11).
+  const homeRoot = useHomeRoot();
   const [path, setPath] = useState("");
   const [preview, setPreview] = useState<{
     manifest: ManifestSummary;
@@ -95,7 +99,7 @@ function PluginForm({ onDone, onCancel }: AddExtensionFormProps) {
 
   const refuse = (error: Error) => {
     setPreview(null);
-    const copy = extensionErrorCopy(error.message);
+    const copy = extensionErrorCopy(error.message, homeRoot);
     setFailure(copy);
     onDone(copy);
   };
@@ -225,6 +229,7 @@ export function ManifestPreview({
 }
 
 function McpForm({ onDone, onCancel }: AddExtensionFormProps) {
+  const homeRoot = useHomeRoot();
   const [name, setName] = useState("");
   const [transport, setTransport] = useState<"stdio" | "http">("stdio");
   const [command, setCommand] = useState("");
@@ -262,7 +267,7 @@ function McpForm({ onDone, onCancel }: AddExtensionFormProps) {
         onCancel();
       },
       onError: (error) => {
-        const copy = extensionErrorCopy(error.message);
+        const copy = extensionErrorCopy(error.message, homeRoot);
         setFailure(copy);
         onDone(copy);
       },
