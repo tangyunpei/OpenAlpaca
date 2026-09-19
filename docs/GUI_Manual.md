@@ -253,12 +253,18 @@ guesses a type on your behalf.
 
 **"Not sent to the model."** An attachment can reach the daemon and still not
 reach the model that answers: a local model with no vision cannot take an
-image, and a model with no native document part gets a document's extracted
-text instead (or a placeholder, when there is no text to extract). When that
-happens the turn shows a muted note under the answer naming each file and the
-daemon's reason, and the file is **not** listed among the ones the turn used.
-The note is live only — the daemon stores no record of a skip on the message —
-so a reloaded transcript shows the answer without it.
+image, one with no audio support cannot take a clip, and a model with no native
+document part gets a document's extracted text instead (or a placeholder, when
+there is no text to extract). Some turns reach no model at all, or reach one
+with a prompt of their own: a task command (`/tasks`, `/status`), a `/steer`,
+a message that is just a quoted send to a connector, and a skill a **plugin**
+provides — whose protocol carries a plain question and nothing else — all answer
+without your files, and say so rather than pretend otherwise. A `/slash` for an
+ordinary, file-based skill does carry them, exactly like an ordinary message. When a file does not reach the model the turn shows a
+muted note under the answer naming each one and the daemon's reason, and the
+file is **not** listed among the ones the turn used. The note is live only — the
+daemon stores no record of a skip on the message — so a reloaded transcript
+shows the answer without it.
 
 **A thinking model shows its thinking.** A local reasoning model can spend ten
 seconds or more before its first token. While the turn is thinking, the
