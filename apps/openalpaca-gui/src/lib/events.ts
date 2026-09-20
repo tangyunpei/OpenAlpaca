@@ -177,6 +177,21 @@ export class DaemonEventsClient {
   private socket: SocketLike | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectEnabled = false;
+  /**
+   * Which connection attempt is the current one.
+   *
+   * Bumped by every `connect()` and every `disconnect()`, captured before an
+   * await and compared after it: a continuation whose stamp is stale belongs
+   * to an attempt that was cancelled or superseded, and opening a socket for
+   * it is how the client used to end up holding two.
+   *
+   * `reconnectEnabled` cannot do this job. It answers "should we be
+   * connected?", and a second `connect()` sets it back to `true` before the
+   * first one's continuation runs — which is exactly the case that bites,
+   * under StrictMode's mount → cleanup → mount and under two clicks on
+   * Reconnect during one sidecar spawn.
+   */
+  private generation = 0;
   private backoffMs = BACKOFF_BASE_MS;
   private nextEventId = 0;
   private instanceId: string | null = null;
@@ -230,13 +245,17 @@ export class DaemonEventsClient {
     this.clearTimer();
     this.reconnectEnabled = true;
     this.backoffMs = BACKOFF_BASE_MS;
+    const gen = ++this.generation;
     this.setStatus("connecting");
 
     try {
       const info = await this.deps.bootstrap();
+      // Cancelled, or a newer attempt took over while we were waiting.
+      if (gen !== this.generation) return;
       this.adoptInstance(info.instanceId);
       this.openSocket(info);
     } catch (error) {
+      if (gen !== this.generation) return;
       this.lastError = error instanceof Error ? error.message : String(error);
       this.setStatus("error");
       this.scheduleReconnect();
@@ -246,6 +265,7 @@ export class DaemonEventsClient {
   /** Close the socket and stop reconnecting. */
   disconnect(): void {
     this.reconnectEnabled = false;
+    this.generation += 1;
     this.clearTimer();
     this.teardownSocket();
     this.setStatus("disconnected");
@@ -281,6 +301,10 @@ export class DaemonEventsClient {
   }
 
   private openSocket(info: ConnectionInfo): void {
+    // Never additive, whoever gets here: assigning over a live `this.socket`
+    // leaves it open, wired and unreachable by `teardownSocket()` for ever.
+    // A no-op on every path that already tore down.
+    this.teardownSocket();
     const socket = this.deps.createSocket(wsUrl(info, "/v1/events"));
     this.socket = socket;
 
@@ -356,17 +380,22 @@ export class DaemonEventsClient {
       this.reconnectTimer = null;
       this.backoffMs = nextBackoff(this.backoffMs);
       if (!this.reconnectEnabled) return;
+      // The ladder is an attempt like any other: a `connect()` that starts
+      // while `refresh()` is in flight re-enables the flag below, so only the
+      // stamp keeps this continuation from opening a socket over its.
+      const gen = ++this.generation;
 
       void this.deps
         .refresh()
         .then((info) => {
-          if (!this.reconnectEnabled) return;
+          if (!this.reconnectEnabled || gen !== this.generation) return;
           this.adoptInstance(info.instanceId);
           this.teardownSocket();
           this.setStatus("connecting");
           this.openSocket(info);
         })
         .catch(() => {
+          if (gen !== this.generation) return;
           this.scheduleReconnect();
         });
     }, delay);
