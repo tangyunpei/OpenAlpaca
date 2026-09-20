@@ -331,17 +331,34 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   The only production guard is `RunClaimGuard`
   (`orchestrator/query_handler/run_claim_guard.rs`): a chat turn may not
   claim a workflow it did not start. It reviews nothing when this turn's
-  `start_workflow` result cell holds an outcome; otherwise it scans the
-  answer for a token presented as a task/run id (a UUID, or the 8+ hex
-  short form a client prints, after a `task id` / `run id` cue) and asks
-  `TaskRepository::lane_has_task_id_prefix` whether any run on this lane
-  answers to it. An answer that states no id touches no database. A
-  quoted run that exists is ordinary conversation and is shipped
-  verbatim. A stated id that names nothing gets the corrective note
-  ("… no start_workflow call was made in this turn. Either call
-  start_workflow now, or answer without claiming a run was started."),
-  and on a second offence the runtime line "I did not start a workflow —
-  no run exists for that. Ask again and I will start one."
+  `start_workflow` result cell holds an outcome. Otherwise an answer is a
+  claim only when **both** halves hold (J2):
+
+  - *assertion* — the answer says a run was started in this turn: a start
+    phrase (`started`, `kicked off`, `launched`, `spun up`, `now running
+    in the background`, `I've queued`, `I've delegated`) within ~120
+    bytes of the stated id, or of the word workflow/run/job. A status
+    relay — "Task 9f4c… finished", "your workflow 372e… is still
+    running" — asserts no start and is **not reviewed at all**;
+  - *shape* — the token sits in an id position (after a `task id` /
+    `run id` / `task` cue and the punctuation a model wraps an id in) and
+    looks like an id: a UUID, or an 8+ hex run that is not a plain
+    number. Every decimal digit is a hex digit, so a date (`20260919`)
+    and a counter (`12345678`) are excluded by requiring one of `a`–`f`.
+
+  A token that passes both is checked with
+  `TaskRepository::owner_has_task_id_prefix`: does any run **this turn's
+  owner** started answer to it, whatever lane it started on (J1)? The
+  scope is `task_status`'s — `created_by`, not `source_lane` — so
+  relaying a run the CLI lane started into the GUI lane is true and is
+  left alone, while another owner's run never excuses a claim. The
+  identity is `ToolContext::created_by()`, the one `start_workflow`
+  stamps on the row. An answer that claims nothing touches no database. A
+  stated id that names nothing gets the corrective note ("… no
+  start_workflow call was made in this turn. Either call start_workflow
+  now, or answer without claiming a run was started."), and on a second
+  offence the runtime line "I did not start a workflow — no run exists
+  for that. Ask again and I will start one."
 
   **Streaming**: the first answer's text deltas have already been sent
   when the guard rejects it. `done.content` is authoritative (S13) — the
