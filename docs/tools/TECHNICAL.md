@@ -820,8 +820,11 @@ template's capabilities plus the names on the assembled surface; a template
 that granted nothing is not back-filled.
 
 A **subagent** gets `resolve_agent_tools()` for its template and a policy
-from `SandboxPolicy::from_constraints()`.  It does not inherit the lead's
-extension tools or `invoke_skill`.  A plugin-contributed agent template runs
+from `SandboxPolicy::from_constraints()`, widened by
+`admit_tool_surface()` with that same resolved surface
+([11.2](#112-sandboxpolicy)) — so the tools it is offered are the tools it
+may call.  It does not inherit the lead's extension tools or
+`invoke_skill`.  A plugin-contributed agent template runs
 through `runner/plugin_agent.rs` instead of the internal loop, with its
 tool requests proxied through the same sandbox.
 
@@ -1196,19 +1199,49 @@ How each caller fills the allow list:
 | Skill (file-based or nested) | The names of the tools resolved for it |
 | Plugin-backed skill | The resolved names; an empty list admits nothing |
 | Lead agent | Template capabilities + coordination names + the assembled surface |
-| Subagent | Template capabilities + `workspace_read`/`workspace_write` |
+| Subagent | Template capabilities + `workspace_read`/`workspace_write` + the surface those capabilities resolved to |
 
-The first three rows list **tool names**, and the lead's list is widened
-with the names on its assembled surface.  The subagent row lists only the
-template's **capability names** (`AgentTemplate::to_subagent()` copies
-`capabilities` into `allowed_capabilities`), and nothing adds the resolved
-tool names afterwards.  The check in 11.3 compares the called tool's name.
-So on a subagent a tool passes when its name is also a listed
-capability: `file_read`, `file_write`, `artifact_write`, `shell_execute`,
-`read_result`, the workspace tools, and any `<server>__<tool>`.  A built-in
-whose name differs from its capability — `web_search` and `web_fetch`
-(`web_access`), `memory_search` (`memory_read`), `send` (`messaging`) — is
-resolved onto the subagent's tool list but is not on its allow list.
+A template grants **capability names**; the check in 11.3 compares the
+called **tool's name**.  The two are the same word for `file_read`,
+`file_write`, `artifact_write`, `shell_execute`, `read_result`, the
+workspace tools and any `<server>__<tool>`, and different words wherever
+one capability is served by tools with names of their own: `web_access`
+is `web_search` and `web_fetch`, `memory_read` is `memory_search`,
+`messaging` is `send`.  So one rule holds for every row: **the allow list
+admits the tools the loop was handed.**  The first three rows build their
+list from the exposed definitions directly.  The lead and the subagent
+start from `from_constraints` — the template's capability names — and
+then call
+
+```rust
+impl SandboxPolicy {
+    pub fn admit_tool_surface(&mut self, defs: &[ToolDefinition]);
+}
+```
+
+with the surface they resolved: the lead's assembled surface
+(`runner/lead_agent/mod.rs`), and for a subagent the output of
+`resolve_agent_tools()` for its own template (`runner/lead_agent/tools.rs`,
+the spawn path).  A subagent granted `web_access` is therefore handed
+`web_search` and `web_fetch` **and** may call them.  A plugin-backed
+subagent's proxied tool calls are checked against the same policy.
+
+`admit_tool_surface` widens by the surface and by nothing else:
+
+- a tool that is registered but was not resolved onto this surface is
+  still refused — a `web_access`-only subagent cannot call `shell_execute`,
+  and a subagent never inherits the lead's extension tools or
+  `invoke_skill`;
+- the deny list is untouched and is checked first (11.3), and
+  `resolve_capabilities()` has already kept a tool that provides a denied
+  capability off the surface, so a denial wins either way;
+- a tool of an extension that is not `Enabled` is not registered, so it is
+  never on a resolved surface, and the gate in section 5 refuses it
+  regardless of any allow list;
+- an `Only` list that is **empty stays empty** — a template that granted
+  nothing is not back-filled from an assembled surface — and
+  `Unrestricted` is left alone;
+- names are lowercased and never duplicated.
 
 ### 11.3 Allowlist and CapabilityManager
 
@@ -1777,13 +1810,13 @@ Paths are under `crates/openalpaca_core/src/` unless they start with
 | `apps/openalpacad/src/managers/mcp/tests.rs` | MCP supervisor lifecycle |
 | `tools/url_validation.rs` (inline) | SSRF validation: all blocked categories, public URLs |
 | `tools/platform.rs` (inline) | Shell command creation |
-| `security/sandbox/tests.rs` | Full sandbox flow, capability denial, confirmation (incl. unattended and timed-out), approval cache, timeout |
+| `security/sandbox/tests.rs` | Full sandbox flow, capability denial, confirmation (incl. unattended and timed-out), approval cache, timeout, `admit_tool_surface` (empty stays empty, deny wins) |
 | `security/capabilities/tests.rs` | Deny/allow list logic, empty allow list |
 | `security/sanitizer/tests.rs` | Path traversal, command injection, null bytes, uploads |
 | `security/circuit_breaker/tests.rs` | State transitions, transient classification, pruning |
 | `security/confirmation.rs` (inline) | Broker lifecycle, resolutions, approval cache, canonical args hashing |
 | `runner/agentic_loop/tests.rs` | Tool call limiting, budget enforcement, result spill, loop behavior |
-| `runner/lead_agent/tests.rs` | Coordination tool behavior, spawn guards, the lead's surface and allow list |
+| `runner/lead_agent/tests.rs` | Coordination tool behavior, spawn guards, the lead's surface and allow list, a subagent's allow list at the spawn path (capability → tool name, deny wins, fail closed, plugin-backed) |
 
 ### Running Tests
 
