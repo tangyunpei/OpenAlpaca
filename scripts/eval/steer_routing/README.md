@@ -43,10 +43,17 @@ per-mode ack latency from the `orchestrator_latency` table, then asserts
 
 1. **API keys** — a resolvable `llm.toml`, found via `$OPENALPACA_CONFIG_DIR`
    or the repo's `config/llm.toml` (not checked in; the daemon seeds it from
-   `scripts/release/templates/config/llm.toml` on first start). Secrets
-   resolve per the config docs — for the eval, `secret_env` (or a plain
-   legacy `api_key`) is the simplest path; `secret_ref` (OS keychain) is not
-   resolved by the test.
+   `scripts/release/templates/config/llm.toml` on first start).
+   - `secret_env` (the key in an environment variable) is the simplest path
+     for the eval.
+   - `secret_ref` (OS keychain) is not resolved by the test.
+   - A `secret_encrypted` value decrypts only when `OPENALPACA_MASTER_KEY`
+     is exported.
+   - A key that cannot be resolved is skipped with a warning.
+   - The harness builds the router straight from the file and never runs
+     model discovery. It knows the built-in model catalogue plus the file's
+     `[models]` rows, and nothing a running daemon would discover on its own
+     (a local Ollama's installed models, for one).
 2. **Provider features** — the LLM providers are feature-gated; build the
    test with `--features live-eval`.
 3. **Opt-in env** — `OPENALPACA_LIVE_EVAL=1`. Without it the test exits
