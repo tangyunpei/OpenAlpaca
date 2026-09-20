@@ -185,7 +185,11 @@ pub fn start_workflow_tool_definition() -> ToolDefinition {
         description: "Start a background workflow for a substantial, multi-step task. A lead \
                        agent will plan the work, delegate to subagents, and post a completion \
                        report to this conversation when done. Use for real tasks (research, \
-                       builds, multi-file changes) — answer simple questions directly instead."
+                       builds, multi-file changes); whenever the user explicitly asks for a \
+                       workflow or a background run; and whenever the user asks to write or \
+                       save an artifact or a file, which only a workflow can do — answer simple \
+                       questions directly instead. This is the ONLY way to start a run: if you \
+                       do not call it, no workflow exists and no task id was issued."
             .to_string(),
         parameters: serde_json::json!({
             "type": "object",

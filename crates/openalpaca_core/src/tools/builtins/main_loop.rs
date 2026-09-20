@@ -91,6 +91,13 @@ pub fn main_loop_relay_guidance() -> &'static str {
      work as a follow-up, or wait for one to finish.\n\
      - When steer_workflow or queue_followup succeeds, confirm in your own words what was \
      passed along or queued.\n\
+     - A workflow starts ONLY through a start_workflow call in THIS turn. Never say one was \
+     started, and never state a task id, unless a start_workflow call in this turn returned \
+     it — task ids in earlier messages belong to earlier runs.\n\
+     - You have no file- or artifact-writing tool of your own. When the user asks for a \
+     workflow or a background run, or asks you to write or save an artifact or a file, call \
+     start_workflow instead of answering inline or saying you cannot. Small questions are \
+     still answered directly.\n\
      </workflow_relay_rules>"
 }
 
@@ -370,6 +377,49 @@ mod tests {
             },
             false,
         )
+    }
+
+    /// H2 — the relay rules say what the model may claim and when to delegate.
+    /// Snapshot-style: the block is a contract with the model, so the clauses
+    /// are pinned rather than eyeballed.
+    #[test]
+    fn the_relay_rules_forbid_an_unearned_claim_and_name_the_delegate_cases() {
+        let rules = main_loop_relay_guidance();
+        for clause in [
+            "starts ONLY through a start_workflow call in THIS turn",
+            "never state a task id",
+            "task ids in earlier messages belong to earlier runs",
+            "no file- or artifact-writing tool of your own",
+            "write or save an artifact or a file, call start_workflow",
+            "Small questions are still answered directly",
+        ] {
+            assert!(
+                rules.contains(clause),
+                "the relay rules must carry {clause:?}:\n{rules}"
+            );
+        }
+        // One block, still closed — the guidance is injected as a single
+        // user message and a stray tag would reach the model as prose.
+        assert!(rules.starts_with("<workflow_relay_rules>"));
+        assert!(rules.ends_with("</workflow_relay_rules>"));
+    }
+
+    /// H2's other half: `start_workflow`'s own description must agree with the
+    /// rules, or the model reads two different contracts in one prompt.
+    #[test]
+    fn start_workflow_describes_the_explicit_request_and_the_artifact_case() {
+        let description = start_workflow_tool_definition().description;
+        for clause in [
+            "substantial, multi-step task",
+            "explicitly asks for a workflow or a background run",
+            "asks to write or save an artifact or a file",
+            "ONLY way to start a run",
+        ] {
+            assert!(
+                description.contains(clause),
+                "start_workflow's description must carry {clause:?}:\n{description}"
+            );
+        }
     }
 
     #[test]
