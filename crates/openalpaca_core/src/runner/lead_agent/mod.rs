@@ -33,7 +33,6 @@ use crate::middleware::prompt::format_tool_guidance;
 use crate::prompt_ctx::ContextManager;
 use crate::prompt_ctx::section::ContextBundle;
 use crate::runner::{LoopConfig, LoopResult, run_agentic_loop_routed};
-use crate::security::capabilities::Allowlist;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::ToolRegistry;
 use crate::tools::registry::ToolContext;
@@ -373,20 +372,12 @@ pub async fn run_lead_agent(
     // allowlist must admit the final defs (extension tools, invoke_skill,
     // memory_search), mirroring how the main loop derives its policy from the
     // exposed definitions. Template denials still win: the sandbox checks the
-    // deny list first. Subagents are untouched — their policies are built from
-    // their own template constraints in the spawn path.
+    // deny list first. A subagent gets the same rule over its *own* surface —
+    // the tools its template's capabilities resolve to, never the lead's — in
+    // the spawn path (`tools.rs`).
     // An allow list that resolved to nothing stays empty: a template that
     // granted no capability must not be back-filled from the assembled surface.
-    if let Allowlist::Only(ref mut allowed) = sandbox_policy.allowed_capabilities
-        && !allowed.is_empty()
-    {
-        for def in &tools {
-            let name = def.name.to_lowercase();
-            if !allowed.contains(&name) {
-                allowed.push(name);
-            }
-        }
-    }
+    sandbox_policy.admit_tool_surface(&tools);
 
     // 6. Build system prompt from templates, sized against the window of the
     // model that will answer (M5) rather than a hard-coded 200 000.

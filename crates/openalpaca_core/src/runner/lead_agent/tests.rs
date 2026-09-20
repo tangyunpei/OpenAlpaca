@@ -2290,3 +2290,368 @@ async fn a_subagents_rounds_are_budgeted_against_the_model_that_answers() {
         );
     }
 }
+
+// ── A subagent's allow list admits the tools its capabilities resolve to ──
+
+/// A built-in backend that counts its calls and answers with one fixed
+/// string. It stands in for the real `web_search` — same tool name, same
+/// provided capability — so no test here touches the network.
+struct CountingBuiltIn {
+    calls: std::sync::atomic::AtomicUsize,
+    reply: &'static str,
+}
+
+impl CountingBuiltIn {
+    fn new(reply: &'static str) -> Arc<Self> {
+        Arc::new(Self {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            reply,
+        })
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl crate::tools::registry::BuiltInTool for CountingBuiltIn {
+    async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(self.reply.to_string())
+    }
+}
+
+/// Register a tool whose NAME differs from the capability it PROVIDES — the
+/// shape of `web_search`/`web_fetch` → `web_access`, `memory_search` →
+/// `memory_read`, `send` → `messaging`.
+fn register_capability_tool(
+    registry: &ToolRegistry,
+    name: &str,
+    capability: &str,
+    backend: Arc<CountingBuiltIn>,
+) {
+    registry
+        .register(crate::tools::registry::RegisteredTool {
+            definition: ToolDefinition {
+                name: name.to_string(),
+                description: format!("{name} tool"),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: crate::tools::registry::ToolBackend::BuiltIn(backend),
+            provides_capabilities: vec![capability.to_string()],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "test-0.0.0".into(),
+            author: "test".into(),
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+}
+
+/// A file-sourced worker template, as `config/agents/research_agent.md` is.
+fn register_worker_template(shared: &SharedContext, id: &str, capabilities: Vec<&str>, denied: Vec<&str>) {
+    let agent = crate::test_util::make_agent(id, capabilities);
+    let mut template = crate::test_util::template_from_agent(&agent);
+    template.frontmatter.denied_capabilities = denied.into_iter().map(str::to_string).collect();
+    assert!(matches!(
+        template.source,
+        crate::agent::template::AgentSource::Internal
+    ));
+    assert!(shared.agent_registry.register_template(template));
+}
+
+/// Drive the production spawn path — `SpawnSubagentTool::execute` — to the end
+/// of the subagent's loop, and hand back every security violation the run
+/// published.
+async fn spawn_and_finish(
+    provider: Arc<ScriptedProvider>,
+    registry: Arc<ToolRegistry>,
+    shared: Arc<SharedContext>,
+    agent_id: &str,
+) -> Vec<String> {
+    let bus = EventBus::new(256);
+    let mut rx = bus.subscribe();
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn_tool = SpawnSubagentTool::new(
+        scripted_router(provider),
+        registry,
+        shared,
+        bus,
+        None,
+        "task-1".to_string(),
+        "user-1".to_string(),
+        "test-lead".to_string(),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        None,
+        tracker.clone(),
+        0,
+        DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+        MemoryScopeContext::global_only(),
+        None,
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        false,
+    );
+
+    spawn_tool
+        .execute(&serde_json::json!({
+            "agent_id": agent_id,
+            "objective": "Find out how many alpacas live in Peru"
+        }))
+        .await
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !tracker.all_done() {
+        assert!(tokio::time::Instant::now() < deadline, "subagent never finished");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let mut violations = Vec::new();
+    while let Ok(e) = rx.try_recv() {
+        if let crate::events::SystemEvent::SecurityViolation { tool_name, reason, .. } = e {
+            violations.push(format!("{tool_name}: {reason}"));
+        }
+    }
+    violations
+}
+
+/// The tool results the model was shown in its `call`-th request.
+fn tool_results_seen(provider: &ScriptedProvider, call: usize) -> Vec<String> {
+    provider.seen_messages.lock().unwrap()[call]
+        .iter()
+        .filter(|m| m.role == openalpaca_llm::Role::Tool)
+        .map(|m| m.content.clone())
+        .collect()
+}
+
+fn one_tool_call_then_text(tool: &str) -> Arc<ScriptedProvider> {
+    ScriptedProvider::new(vec![
+        scripted_response(
+            "",
+            vec![openalpaca_llm::ToolCall {
+                id: "call-1".to_string(),
+                name: tool.to_string(),
+                arguments: serde_json::json!({"query": "alpacas in Peru"}),
+            }],
+        ),
+        scripted_response("about four million", vec![]),
+    ])
+}
+
+/// A template grants a CAPABILITY (`web_access`); the tools that provide it
+/// have their own NAMES (`web_search`, `web_fetch`). The subagent is handed
+/// `web_search` on its surface, so its sandbox must admit the call — a tool
+/// offered and then refused as "not in allow list" is a research agent that
+/// cannot search.
+#[tokio::test]
+async fn a_subagent_may_call_the_tool_its_capability_resolves_to() {
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "researcher", vec!["web_access"], vec![]);
+
+    let registry = Arc::new(ToolRegistry::default());
+    let web_search = CountingBuiltIn::new("FIXED SEARCH RESULT: 4.1 million alpacas");
+    register_capability_tool(&registry, "web_search", "web_access", web_search.clone());
+
+    let provider = one_tool_call_then_text("web_search");
+    let violations = spawn_and_finish(provider.clone(), registry, shared, "researcher").await;
+
+    // The subagent really was offered the tool…
+    assert!(
+        provider.tool_names(0).contains(&"web_search".to_string()),
+        "surface: {:?}",
+        provider.tool_names(0)
+    );
+    // …and the result the model read is the tool's, not a refusal.
+    let results = tool_results_seen(&provider, 1);
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert!(
+        results[0].contains("FIXED SEARCH RESULT"),
+        "the model was shown: {:?} (violations: {violations:?})",
+        results[0]
+    );
+    assert_eq!(web_search.calls(), 1, "the backend runs exactly once");
+    assert!(violations.is_empty(), "{violations:?}");
+}
+
+/// **Deny wins, by capability.** A template that grants `web_access` and
+/// denies it again resolves to a surface without `web_search`
+/// (`resolve_capabilities` withholds a tool that provides a denied
+/// capability), so nothing admits the name — and a model that calls it anyway
+/// is refused by the sandbox, not served.
+#[tokio::test]
+async fn a_denied_capability_keeps_its_tool_off_the_surface_and_out_of_the_allow_list() {
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "researcher", vec!["web_access"], vec!["web_access"]);
+
+    let registry = Arc::new(ToolRegistry::default());
+    let web_search = CountingBuiltIn::new("FIXED SEARCH RESULT");
+    register_capability_tool(&registry, "web_search", "web_access", web_search.clone());
+
+    let provider = one_tool_call_then_text("web_search");
+    let violations = spawn_and_finish(provider.clone(), registry, shared, "researcher").await;
+
+    assert!(
+        !provider.tool_names(0).contains(&"web_search".to_string()),
+        "a denied capability's tool must not be offered: {:?}",
+        provider.tool_names(0)
+    );
+    let results = tool_results_seen(&provider, 1);
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert!(
+        results[0].contains("not in allow list"),
+        "the direct call must be refused: {:?}",
+        results[0]
+    );
+    assert_eq!(web_search.calls(), 0, "a refused tool never runs");
+    assert_eq!(violations.len(), 1, "{violations:?}");
+}
+
+/// **Deny wins, by tool name.** Denying `web_search` itself leaves the
+/// capability's other tools alone and beats the admission the surface would
+/// otherwise have earned it: the sandbox reads the deny list first.
+#[tokio::test]
+async fn a_denied_tool_name_beats_the_surface_that_would_have_admitted_it() {
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "researcher", vec!["web_access"], vec!["web_search"]);
+
+    let registry = Arc::new(ToolRegistry::default());
+    let web_search = CountingBuiltIn::new("FIXED SEARCH RESULT");
+    register_capability_tool(&registry, "web_search", "web_access", web_search.clone());
+
+    let provider = one_tool_call_then_text("web_search");
+    let violations = spawn_and_finish(provider.clone(), registry, shared, "researcher").await;
+
+    let results = tool_results_seen(&provider, 1);
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert!(
+        results[0].contains("Capability 'web_search' denied"),
+        "deny is checked before allow: {:?}",
+        results[0]
+    );
+    assert_eq!(web_search.calls(), 0, "a denied tool never runs");
+    assert_eq!(violations.len(), 1, "{violations:?}");
+}
+
+/// **Fail closed.** The allow list is widened by the subagent's own surface
+/// and by nothing else: a tool that is registered but that none of the
+/// template's capabilities resolve to is still refused.
+#[tokio::test]
+async fn a_registered_tool_outside_the_subagents_surface_is_still_refused() {
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "researcher", vec!["web_access"], vec![]);
+
+    let registry = Arc::new(ToolRegistry::default());
+    let web_search = CountingBuiltIn::new("FIXED SEARCH RESULT");
+    let shell = CountingBuiltIn::new("SHELL RAN");
+    register_capability_tool(&registry, "web_search", "web_access", web_search.clone());
+    register_capability_tool(&registry, "shell_execute", "shell_execute", shell.clone());
+
+    let provider = one_tool_call_then_text("shell_execute");
+    let violations = spawn_and_finish(provider.clone(), registry, shared, "researcher").await;
+
+    let surface = provider.tool_names(0);
+    assert!(surface.contains(&"web_search".to_string()), "{surface:?}");
+    assert!(!surface.contains(&"shell_execute".to_string()), "{surface:?}");
+    let results = tool_results_seen(&provider, 1);
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert!(
+        results[0].contains("Capability 'shell_execute' not in allow list"),
+        "{:?}",
+        results[0]
+    );
+    assert_eq!(shell.calls(), 0, "an ungranted tool never runs");
+    assert_eq!(web_search.calls(), 0);
+    assert_eq!(violations.len(), 1, "{violations:?}");
+}
+
+/// A plugin executor that asks for one tool, then completes with whatever the
+/// daemon handed back for it.
+struct ToolRequestingPluginExecutor {
+    tool: &'static str,
+    fed_back: std::sync::Mutex<Option<serde_json::Value>>,
+}
+
+#[async_trait]
+impl openalpaca_api::plugin_traits::PluginAgentExecutor for ToolRequestingPluginExecutor {
+    async fn spawn(
+        &self,
+        _instance_id: &str,
+        _task_id: &str,
+        _instructions: &str,
+        _context: &serde_json::Value,
+    ) -> Result<bool, String> {
+        Ok(true)
+    }
+
+    async fn step(
+        &self,
+        _instance_id: &str,
+        tool_results: Option<&serde_json::Value>,
+    ) -> Result<(String, String, Vec<serde_json::Value>), String> {
+        match tool_results {
+            None => Ok((
+                "tool_request".to_string(),
+                String::new(),
+                vec![serde_json::json!({"tool": self.tool, "arguments": {"query": "alpacas"}})],
+            )),
+            Some(results) => {
+                *self.fed_back.lock().unwrap() = Some(results.clone());
+                Ok(("complete".to_string(), "plugin done".to_string(), vec![]))
+            }
+        }
+    }
+
+    async fn stop(&self, _instance_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn plugin_id(&self) -> &str {
+        "test_plugin"
+    }
+
+    fn agent_id(&self) -> &str {
+        "plugin_researcher"
+    }
+}
+
+/// A plugin-backed template runs no LLM loop, but its tool requests are
+/// proxied through the same sandbox under the same policy — so the same rule
+/// holds: the capability it was granted admits the tool that provides it.
+#[tokio::test]
+async fn a_plugin_backed_subagent_may_call_the_tool_its_capability_resolves_to() {
+    use crate::agent::template::AgentSource;
+
+    let executor = Arc::new(ToolRequestingPluginExecutor {
+        tool: "web_search",
+        fed_back: std::sync::Mutex::new(None),
+    });
+    let agent = crate::test_util::make_agent("plugin_researcher", vec!["web_access"]);
+    let mut template = crate::test_util::template_from_agent(&agent);
+    template.source = AgentSource::Plugin {
+        plugin_id: "test_plugin".to_string(),
+        executor: executor.clone(),
+    };
+    let shared = Arc::new(SharedContext::new());
+    assert!(shared.agent_registry.register_template(template));
+
+    let registry = Arc::new(ToolRegistry::default());
+    let web_search = CountingBuiltIn::new("FIXED SEARCH RESULT");
+    register_capability_tool(&registry, "web_search", "web_access", web_search.clone());
+
+    // No model is ever called on this branch.
+    let provider = ScriptedProvider::new(vec![]);
+    let violations =
+        spawn_and_finish(provider.clone(), registry, shared, "plugin_researcher").await;
+
+    assert_eq!(provider.calls(), 0);
+    let fed_back = executor.fed_back.lock().unwrap().clone().expect("no tool result fed back");
+    assert_eq!(fed_back[0]["tool"], "web_search");
+    assert_eq!(fed_back[0]["result"], "FIXED SEARCH RESULT", "{fed_back}");
+    assert_eq!(web_search.calls(), 1);
+    assert!(violations.is_empty(), "{violations:?}");
+}

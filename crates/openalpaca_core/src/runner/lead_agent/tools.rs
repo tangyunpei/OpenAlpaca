@@ -576,6 +576,14 @@ impl BuiltInTool for SpawnSubagentTool {
         let budget_tools_tokens = crate::runner::estimate_tools_tokens(&tools);
 
         let mut sandbox_policy = SandboxPolicy::from_constraints(&instance_id, &agent.constraints);
+        // The template grants capabilities; the sandbox is asked about tool
+        // names. `tools` is what those capabilities resolved to (step 6), so
+        // the allow list admits exactly that surface — otherwise a researcher
+        // granted `web_access` is handed `web_search` and then refused it as
+        // "not in allow list". Nothing beyond the surface is admitted, the
+        // deny list still wins, and this policy is also the one a
+        // plugin-backed template's proxied tool calls are checked against.
+        sandbox_policy.admit_tool_surface(&tools);
         // M6: inherited from the run — a subagent's confirmation reaches the
         // same (absent) responder as the lead's.
         sandbox_policy.unattended = self.unattended;
