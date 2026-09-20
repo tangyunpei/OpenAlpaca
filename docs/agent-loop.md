@@ -129,6 +129,16 @@ id, title, status, progress counters — injected deliberately outside the
 compose-engine layers (Tier-1/Tier-2 caches would serve stale status) —
 plus `<workflow_relay_rules>` relay guidance.
 
+**History provenance (H1)**: a turn that delegated stores its assistant
+row carrying the run's id (`gateway/persistence.rs`). When that row is
+replayed into a later turn's history it carries one fixed extra line —
+`[This run was started by a start_workflow tool call, which returned task
+<id>.]` (`orchestrator/context_builder.rs::delegation_provenance_line`) —
+so the model can tell its own reported delegations from prose it could
+imitate. The line exists **only in the replay**: the stored row, the
+transcript and every client read the text as written, and an assistant
+row with no `task_id` gets nothing.
+
 **Delegation contract**: `start_workflow`
 (`tools/builtins/start_workflow.rs`) enforces `max_workflows_per_lane`
 (tool mode only — never inside `dispatch_lead_agent`), dispatches the
@@ -307,6 +317,38 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
 - **Compaction telemetry** — each compaction publishes
   `SystemEvent::CompactionTriggered` on the event bus with utilization
   and summary metrics.
+- **Answer guard (H3)** — `LoopConfig.answer_guard`
+  (`runner/agentic_loop/answer_guard.rs`), consulted at the same point as
+  the steering completion guard: after the model returns text with no
+  tool calls, before the loop returns `Complete`. The guard owns the
+  judgement and supplies both strings; the **loop owns the policy** —
+  exactly one corrective round (paid for by a bonus round, so a turn on
+  its last affordable round still ends with content), and if the second
+  answer is rejected too, the guard's `replacement` becomes the turn's
+  content instead of the claim. `None` for every caller but the main
+  loop, which costs an un-guarded loop no branch at all.
+
+  The only production guard is `RunClaimGuard`
+  (`orchestrator/query_handler/run_claim_guard.rs`): a chat turn may not
+  claim a workflow it did not start. It reviews nothing when this turn's
+  `start_workflow` result cell holds an outcome; otherwise it scans the
+  answer for a token presented as a task/run id (a UUID, or the 8+ hex
+  short form a client prints, after a `task id` / `run id` cue) and asks
+  `TaskRepository::lane_has_task_id_prefix` whether any run on this lane
+  answers to it. An answer that states no id touches no database. A
+  quoted run that exists is ordinary conversation and is shipped
+  verbatim. A stated id that names nothing gets the corrective note
+  ("… no start_workflow call was made in this turn. Either call
+  start_workflow now, or answer without claiming a run was started."),
+  and on a second offence the runtime line "I did not start a workflow —
+  no run exists for that. Ask again and I will start one."
+
+  **Streaming**: the first answer's text deltas have already been sent
+  when the guard rejects it. `done.content` is authoritative (S13) — the
+  GUI replaces the bubble on `done`, and the corrected or replaced answer
+  is what is persisted as the assistant row. A client that only appends
+  deltas shows the rejected answer, then the second one, until `done`
+  settles it.
 
 ## System-Prompt Memoization
 
