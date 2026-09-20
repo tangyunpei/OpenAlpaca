@@ -1,91 +1,146 @@
 # OpenAlpaca QuickStart (macOS)
 
-Use this for the fastest path to package and install OpenAlpaca without Cargo on the target machine.
+From a source checkout to a first chat in five steps.
 
-## 1) Build Package (builder machine)
+There is no hosted download. You build the package once (step 1) and install it
+on any Mac of the same architecture; the machine you install on needs no Rust
+toolchain.
+
+On Linux, build with `package-linux.sh`, install the
+`openalpaca-linux-*.tar.gz` it writes, and start with `--daemon-only`
+([why](Installation_Manual.md#linux)). For Windows, and for every option not
+shown here, see the [Installation Manual](Installation_Manual.md).
+
+## 1. Build the package
+
+On a Mac with `cargo`, `bun` and `git`, from the repository root:
 
 ```bash
 ./scripts/release/package-macos.sh
 ```
 
-Requires `cargo`, `rustc`, `bun`, and `bunx` on the builder machine (the script builds the release binaries and the Tauri app bundle itself) and must run on macOS. The output is not codesigned; the installer removes the quarantine attribute automatically.
+It builds the release binaries and the desktop app, and writes:
 
-Artifact output:
-- `dist/openalpaca-macos-<target>-v<version>.tar.gz` (plus a `.sha256` checksum)
+- `dist/openalpaca-macos-<target>-v<version>.tar.gz`
+- `dist/openalpaca-macos-<target>-v<version>.tar.gz.sha256`
 
-For Linux/Windows, use `package-linux.sh`, `package-windows.ps1`, and `install-windows.ps1` in the same directory.
-
-## 2) Install Package (target machine)
+## 2. Install it
 
 ```bash
-./scripts/release/install.sh --file ./dist/openalpaca-macos-<target>-v<version>.tar.gz
+./scripts/release/install.sh --file ./dist/openalpaca-macos-*.tar.gz
 ```
 
-Or install from URL:
+If `dist/` holds more than one archive, name the one you want instead of the
+`*`. Nothing needs `sudo`. Installing on a different Mac? The archive carries
+its own `install.sh`; see
+[On a machine without the repository](Installation_Manual.md#on-a-machine-without-the-repository).
+
+Then make `openalpaca` visible in the current shell (new shells get it from the
+PATH block the installer adds to `~/.zshrc` and `~/.bashrc`):
 
 ```bash
-./scripts/release/install.sh --url https://example.com/openalpaca-macos-<target>-v<version>.tar.gz
-```
-
-Useful flags: `--prefix <dir>` (default `~/.local/openalpaca`), `--app-dir <dir>` (default `~/Applications`), and `--yes` to overwrite an existing install without prompting.
-
-## 3) Verify
-
-```bash
+export PATH="$HOME/.local/bin:$PATH"
 openalpaca --help
-openalpaca daemon start --daemon-only
-openalpaca daemon status
-openalpaca gui start
 ```
 
-On a first install, restart your shell (or run `export PATH="$HOME/.local/bin:$PATH"`) so `openalpaca` is found — the installer adds `~/.local/bin` to your PATH via `~/.zshrc` / `~/.bashrc`.
-
-The first daemon start also seeds `~/.openalpaca/config` with the agent templates, skills and tool config it carries in its binary, alongside `llm.toml`, `daemon.toml` and `mcp.toml`. A directory that already exists is left alone.
-
-## 4) Run on a Local Model (Ollama, no API key)
+## 3. Start it
 
 ```bash
-ollama pull <model>                       # whatever you want to run
-openalpaca config set ai.ollama.enabled true   # turn the provider on
-#   or the GUI:  Settings → Models & keys → the `ollama` switch
-#   or by hand:  [providers.ollama] enabled = true in ~/.openalpaca/config/llm.toml
-openalpaca llm models --refresh           # your installed tags, priced 0
+openalpaca daemon start      # starts the daemon and opens the desktop app
+openalpaca daemon status
+```
+
+Terminal only? Use `openalpaca daemon start --daemon-only`.
+
+The first start takes longer than later ones. It writes the default config,
+agent templates and skills into `~/.openalpaca/config`, and downloads the local
+embedding model (about 1 GB) into `~/.openalpaca/state/cache/fastembed`. The
+daemon answers no request until that download is done, so wait for
+`openalpaca daemon status` to report `Daemon is running` before step 4.
+
+## 4. Connect a model
+
+A fresh install has every provider switched off. Pick one.
+
+**A — a local model with [Ollama](https://ollama.com) (no API key)**
+
+```bash
+openalpaca config set ai.ollama.enabled true   # the only setup step
+ollama pull <model>                            # any chat model you want to run
+openalpaca llm models --refresh                # your installed tags, priced 0
+```
+
+**B — a cloud provider (`anthropic` or `openai`)**
+
+```bash
+openalpaca config set ai.anthropic.enabled true
+openalpaca llm keys add --provider anthropic   # prompts for the key, a source and a note
+```
+
+Keep this order: switch the provider on, then add the key. Both take effect
+without a restart. In the desktop app the same on/off switch is
+under Settings → Models & keys; the app has no key editor yet, so add a cloud
+key from the CLI.
+
+Check the result:
+
+```bash
+openalpaca llm status
+```
+
+With only Ollama enabled, the `Model:` line reads
+`<configured> — not available, using <your model>`. That is expected: the
+default config names a Claude model, and the router falls back to what you have
+and says so. [Local Models (Ollama)](Installation_Manual.md#local-models-ollama)
+explains how to pin your own model.
+
+## 5. Say hello
+
+```bash
 openalpaca chat --message "say hello in five words"
 ```
 
-Enabling the provider is the only action: the daemon then asks the running Ollama what is installed (its own `/api/tags` and `/api/show`) and registers every chat model it reports — **no API key, no `[models]` rows**, real context lengths, prices `0`, and replies that stream token by token. All three ways in write the same `enabled` field in `llm.toml`, and the daemon picks it up live — no restart. `openalpaca llm models --refresh` is what you run after a later `ollama pull`.
+`openalpaca chat` with no arguments opens an interactive session, and the
+desktop app has the same chat.
 
-Two things to expect: the seeded default model and every shipped agent template name a Claude id, so on an Ollama-only machine the router substitutes and says so (`openalpaca llm status` reads `configured: X — not available, using Y`); and the first boot downloads about 1 GB of local embedding model into `~/.openalpaca/state/cache/fastembed` unless you set `[embeddings] enabled = false`.
+**The first conversation is onboarding.** Until it knows who you are, the
+assistant asks about you instead of running tasks, and it cannot start
+workflows or use memory, MCP servers or plugins. Answer its questions and the
+full tool surface comes back on the next turn. To skip onboarding, delete
+`~/.openalpaca/config/orchestrator/BOOTSTRAP.md`. The next daemon start puts
+it back for as long as `USER.md` or `IDENTITY.md` beside it is still empty.
 
-**Onboarding comes first.** While `~/.openalpaca/config/orchestrator/BOOTSTRAP.md` is present the assistant is getting to know you, and the only tool it holds is `update_persona` — so a first message asking it to *run* something is answered truthfully with "I have no tool for that". Answer its questions, or delete `BOOTSTRAP.md`, and the ordinary tool surface (`start_workflow`, memory, your MCP servers and plugins) comes back on the next turn.
+## Where things are
 
-Full details, including the output-ceiling and timeout knobs: [Installation Manual → Local Models (Ollama)](Installation_Manual.md#local-models-ollama).
+| What | Path |
+|---|---|
+| CLI (symlink) | `~/.local/bin/openalpaca` |
+| Binaries | `~/.local/openalpaca` (`bin/openalpaca`, `libexec/openalpacad`) |
+| Desktop app | `~/Applications/openalpaca-gui.app` |
+| Config | `~/.openalpaca/config` |
+| Data, database, logs | `~/.openalpaca` (`state/` is the machine's; the rest is yours) |
 
-## Default Install Locations
+## Stop, upgrade, uninstall
 
-- CLI: `~/.local/bin/openalpaca` (symlink)
-- Install prefix: `~/.local/openalpaca` (CLI under `bin/`, daemon under `libexec/`)
-- GUI: `~/Applications/openalpaca-gui.app`
-- Data/config: `~/.openalpaca`
+```bash
+openalpaca daemon stop         # stops the daemon and the desktop app
+openalpaca daemon restart
+openalpaca daemon tail         # follow daemon events; -c N stops after N
+```
 
-On a machine that already ran an older install, first boot moves the previous
-`~/Library/Application Support/OpenAlpaca` (macOS) contents into the new
-location automatically (idempotent and resumable, but **not reversible**) —
-back that directory up first. A still-running old daemon blocks the move;
-start it there and stop it, or move the daemon binary aside, before
-launching the rebuilt one. See [Installation Manual](Installation_Manual.md#migrating-from-the-old-data-directory)
-for the fail-closed rules if both locations end up holding a database.
+- **Upgrade:** build a newer package, run `install.sh` again with `--yes`, then
+  `openalpaca daemon start`. The installer stops the running daemon; your data
+  and config are kept.
+- **Uninstall:** `./scripts/release/uninstall.sh`. It leaves `~/.openalpaca`
+  in place; delete that directory yourself for a complete cleanup.
+- **Coming from an older install** that kept its data under
+  `~/Library/Application Support/OpenAlpaca`? Read
+  [Migrating From the Old Data Directory](Installation_Manual.md#migrating-from-the-old-data-directory)
+  first — the move is automatic and not reversible.
 
-## Lifecycle & Uninstall
+## Next
 
-- Stop/restart: `openalpaca daemon stop`, `openalpaca daemon restart`, `openalpaca gui stop`
-- Follow daemon events: `openalpaca daemon tail` (`-c N` to limit)
-- Uninstall: `./scripts/release/uninstall.sh` (same `--prefix`, `--app-dir`, `--yes` flags)
-
-## Optional Overrides
-
-- `OPENALPACA_DAEMON_BIN=/abs/path/openalpacad`
-- `OPENALPACA_GUI_APP=/abs/path/openalpaca-gui.app`
-- `OPENALPACA_HOME_STORE=/abs/path` — moves the whole data/config root (default `~/.openalpaca`). Must be an absolute path; empty or relative values are rejected and the daemon refuses to start.
-
-For full details, see [Installation Manual](Installation_Manual.md).
+- [Installation Manual](Installation_Manual.md) — installer flags, install from
+  a URL, Linux and Windows, environment overrides, troubleshooting.
+- [CLI Manual](CLI_Manual.md) · [GUI Manual](GUI_Manual.md) ·
+  [Daemon Manual](Daemon_Manual.md)
