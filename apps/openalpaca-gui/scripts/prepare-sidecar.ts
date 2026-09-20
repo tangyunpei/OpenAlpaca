@@ -40,12 +40,7 @@ const destPath = join(binDir, sidecarName);
 
 // ── Source binary path ───────────────────────────────────────────────────
 const profile = isRelease ? "release" : "debug";
-const sourcePath = join(
-  workspaceRoot,
-  "target",
-  profile,
-  `openalpacad${ext}`
-);
+const sourcePath = join(workspaceRoot, "target", profile, `openalpacad${ext}`);
 
 // ── Skip rebuild if binary already exists and is up-to-date ──────────────
 function shouldRebuild(): boolean {
@@ -77,7 +72,9 @@ if (!existsSync(binDir)) {
 }
 
 if (!existsSync(sourcePath)) {
-  console.error(`[prepare-sidecar] ERROR: Expected binary at ${sourcePath} but it does not exist`);
+  console.error(
+    `[prepare-sidecar] ERROR: Expected binary at ${sourcePath} but it does not exist`,
+  );
   process.exit(1);
 }
 

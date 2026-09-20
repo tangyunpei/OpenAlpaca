@@ -534,6 +534,33 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
         sensitive: false,
         backend: ConfigBackend::DaemonToml,
     },
+    // -- Daemon: Execution – Artifacts --
+    ConfigKeyDef {
+        key: "daemon.execution.artifacts.max_artifact_bytes",
+        kind: ConfigKind::Int {
+            min: Some(1024),
+            max: Some(104_857_600),
+        },
+        default: Some("10485760"),
+        description: "Largest single artifact body an agent may write, in bytes",
+        category: "Daemon",
+        subcategory: Some("Execution"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.execution.artifacts.max_versions_per_artifact",
+        kind: ConfigKind::Int {
+            min: Some(1),
+            max: Some(200),
+        },
+        default: Some("20"),
+        description: "Versions retained per artifact before the oldest is pruned (the head is never pruned)",
+        category: "Daemon",
+        subcategory: Some("Execution"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
     // -- Daemon: Security --
     ConfigKeyDef {
         key: "daemon.security.max_input_length",
@@ -715,32 +742,6 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
         },
         default: Some("30"),
         description: "Chat stream stale timeout in seconds",
-        category: "Daemon",
-        subcategory: Some("Server"),
-        sensitive: false,
-        backend: ConfigBackend::DaemonToml,
-    },
-    ConfigKeyDef {
-        key: "daemon.server.stream_chunk_delay_ms",
-        kind: ConfigKind::Int {
-            min: Some(0),
-            max: Some(500),
-        },
-        default: Some("30"),
-        description: "Delay in milliseconds between streaming word chunks (0 = no delay)",
-        category: "Daemon",
-        subcategory: Some("Server"),
-        sensitive: false,
-        backend: ConfigBackend::DaemonToml,
-    },
-    ConfigKeyDef {
-        key: "daemon.server.stream_chunk_words",
-        kind: ConfigKind::Int {
-            min: Some(1),
-            max: Some(50),
-        },
-        default: Some("3"),
-        description: "Number of words per streaming delta chunk",
         category: "Daemon",
         subcategory: Some("Server"),
         sensitive: false,

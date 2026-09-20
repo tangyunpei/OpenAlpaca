@@ -84,3 +84,43 @@ async fn test_custom_poll_interval() {
 
     watcher.stop().await.unwrap();
 }
+
+/// L14. The poll watcher's own report that a watched file has gone is not a
+/// fault: deleting `config/orchestrator/BOOTSTRAP.md` is how onboarding ends,
+/// and the exact error the live daemon logged for it was an
+/// `ErrorKind::Io(NotFound)` carrying that path.
+#[test]
+fn a_deleted_watched_path_is_not_an_error() {
+    let bootstrap = std::path::PathBuf::from("/tmp/config/orchestrator/BOOTSTRAP.md");
+
+    let observed = notify::Error::io(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!(
+            "IO error for operation on {}: No such file or directory (os error 2)",
+            bootstrap.display()
+        ),
+    ))
+    .add_path(bootstrap);
+
+    assert_eq!(watch_error_level(&observed), tracing::Level::INFO);
+    assert_eq!(
+        watch_error_level(&notify::Error::path_not_found()),
+        tracing::Level::INFO
+    );
+}
+
+/// …and everything else the watcher cannot do still is one.
+#[test]
+fn a_watcher_that_cannot_do_its_job_is_still_an_error() {
+    assert_eq!(
+        watch_error_level(&notify::Error::generic("the backend gave up")),
+        tracing::Level::ERROR
+    );
+    assert_eq!(
+        watch_error_level(&notify::Error::io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "denied",
+        ))),
+        tracing::Level::ERROR
+    );
+}

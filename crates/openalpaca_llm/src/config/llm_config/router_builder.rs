@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing;
 
-use super::{LlmConfig, build_provider_with_runtime, parse_provider_type};
+use super::parse_provider_type;
 use super::router_config::LlmRouterConfig;
 use super::runtime::LlmRuntimeConfig;
 
@@ -20,10 +20,6 @@ fn resolve_key_secret(env_var: &str) -> Option<String> {
 }
 
 /// Build an LlmRouter from a config file path.
-///
-/// Auto-detects format:
-/// - If `providers` key is present → new hierarchical format
-/// - Otherwise → legacy flat format (wraps in single-provider router)
 pub fn build_router(path: &std::path::Path) -> Result<LlmRouter, LlmError> {
     build_router_with_secret_store(path, None)
 }
@@ -36,43 +32,10 @@ pub fn build_router_with_secret_store(
     let content = std::fs::read_to_string(path)
         .map_err(|e| LlmError::Config(format!("Failed to read {}: {}", path.display(), e)))?;
 
-    // Try parsing as a generic Value to detect format
-    let raw: toml::Value = toml::from_str(&content)
-        .map_err(|e| LlmError::Config(format!("Failed to parse {}: {}", path.display(), e)))?;
-
-    if raw.get("providers").is_some() {
-        build_router_from_hierarchical(&content, secret_store)
-    } else {
-        build_router_from_legacy(&content)
-    }
+    build_router_from_hierarchical(&content, secret_store)
 }
 
-/// Build router from legacy flat format (single provider).
-fn build_router_from_legacy(content: &str) -> Result<LlmRouter, LlmError> {
-    let config: LlmConfig = toml::from_str(content)
-        .map_err(|e| LlmError::Config(format!("Failed to parse legacy config: {}", e)))?;
-
-    let runtime = LlmRuntimeConfig::default();
-    let provider = build_provider_with_runtime(&config, Some(&runtime))?;
-    let provider_type = parse_provider_type(&config.provider)
-        .ok_or_else(|| LlmError::UnknownProvider(config.provider.clone()))?;
-
-    let default_model = config.model.unwrap_or_else(|| {
-        runtime
-            .provider_defaults
-            .get(config.provider.as_str())
-            .map(|d| d.default_model.clone())
-            .unwrap_or_else(|| "claude-sonnet-4-5-20250929".to_string())
-    });
-
-    Ok(LlmRouter::single_provider(
-        Arc::from(provider),
-        provider_type,
-        default_model,
-    ))
-}
-
-/// Build router from new hierarchical format.
+/// Build router from the hierarchical config format.
 #[allow(unused_variables, unused_mut, unreachable_code)]
 fn build_router_from_hierarchical(
     content: &str,
@@ -82,17 +45,11 @@ fn build_router_from_hierarchical(
         .map_err(|e| LlmError::Config(format!("Failed to parse router config: {}", e)))?;
 
     let runtime_config = LlmRuntimeConfig::from(&config);
+    // Read the ENABLE bit once, before anything is moved out of `config`: the
+    // provider loop below skips a disabled provider, and so must the catalogue
+    // (R58b).
+    let disabled = super::disabled_providers(&config);
     let mut providers_map: HashMap<ProviderType, ProviderEntry> = HashMap::new();
-
-    // Shared HTTP client for all providers (connection pool reuse).
-    // Only built when at least one provider feature is enabled (requires reqwest).
-    #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
-    let shared_client = reqwest::Client::builder()
-        .pool_max_idle_per_host(10)
-        .pool_idle_timeout(std::time::Duration::from_secs(90))
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
 
     // Build provider entries
     if let Some(ref providers) = config.providers {
@@ -149,9 +106,10 @@ fn build_router_from_hierarchical(
                             None
                         }
                     } else if let Some(ref encrypted) = key_config.secret_encrypted {
-                        // 3. Legacy encrypted (read-only, for pre-migration compat)
+                        // 3. AES-256-GCM local encryption — the no-keychain
+                        //    fallback tier, not a compat shim (P16).
                         if crate::keys::key_encryption::KeyEncryptor::is_encrypted(encrypted) {
-                            match crate::keys::key_encryption::KeyEncryptor::load_or_generate() {
+                            match crate::keys::key_encryption::KeyEncryptor::from_env() {
                                 Ok(enc) => match enc.decrypt(encrypted) {
                                     Ok(s) => Some(s),
                                     Err(e) => {
@@ -213,6 +171,14 @@ fn build_router_from_hierarchical(
             // Build the actual provider.
             // Skip providers that require keys but have none resolved.
             let prov_defaults = runtime_config.provider_defaults.get(provider_name);
+            // One client per provider, carrying that provider's own timeouts —
+            // the same resolution the runtime registration path performs, so
+            // the two cannot disagree (L7). Clients pool per host, and each
+            // provider has its own, so nothing is lost by not sharing one.
+            #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
+            let request_timeout = runtime_config.request_timeout_for(provider_name);
+            #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
+            let client = crate::providers::build_http_client(request_timeout);
             let provider: Box<dyn LlmProvider> = match &provider_type {
                 #[cfg(feature = "anthropic")]
                 ProviderType::Anthropic => {
@@ -230,12 +196,12 @@ fn build_router_from_hierarchical(
                     let max_tokens = provider_config
                         .default_max_tokens
                         .or_else(|| prov_defaults.map(|d| d.default_max_tokens));
-                    Box::new(crate::providers::anthropic::AnthropicProvider::with_client(
-                        shared_client.clone(),
-                        key,
-                        model,
-                        max_tokens,
-                    ))
+                    Box::new(
+                        crate::providers::anthropic::AnthropicProvider::with_client(
+                            client, key, model, max_tokens,
+                        )
+                        .with_request_timeout(request_timeout),
+                    )
                 }
                 #[cfg(feature = "openai")]
                 ProviderType::OpenAI => {
@@ -257,30 +223,41 @@ fn build_router_from_hierarchical(
                     let max_tokens = provider_config
                         .default_max_tokens
                         .or_else(|| prov_defaults.map(|d| d.default_max_tokens));
-                    Box::new(crate::providers::openai::OpenAiProvider::with_client(
-                        shared_client.clone(),
-                        key,
-                        model,
-                        base_url,
-                        max_tokens,
-                    ))
+                    Box::new(
+                        crate::providers::openai::OpenAiProvider::with_client(
+                            client, key, model, base_url, max_tokens,
+                        )
+                        .with_request_timeout(request_timeout),
+                    )
                 }
                 #[cfg(feature = "ollama")]
                 ProviderType::Ollama => {
+                    // An empty `default_model` is the seeded template's way of
+                    // saying "whatever is installed" (L4) — the catalogue
+                    // answers that, so it must never become a tag on the wire.
+                    // The router names the model on every request; this is only
+                    // the instance-level fallback for a caller that names none.
                     let model = provider_config
                         .default_model
                         .clone()
                         .or_else(|| prov_defaults.map(|d| d.default_model.clone()))
+                        .filter(|m| !m.trim().is_empty())
                         .unwrap_or_else(|| "llama3".to_string());
                     let base_url = provider_config
                         .base_url
                         .clone()
                         .or_else(|| prov_defaults.and_then(|d| d.base_url.clone()));
-                    Box::new(crate::providers::ollama::OllamaProvider::with_client(
-                        shared_client.clone(),
-                        model,
-                        base_url,
-                    ))
+                    // Read like the other two arms: the file's output ceiling
+                    // reaches the request body instead of the 4096 default (L6).
+                    let max_tokens = provider_config
+                        .default_max_tokens
+                        .or_else(|| prov_defaults.map(|d| d.default_max_tokens));
+                    Box::new(
+                        crate::providers::ollama::OllamaProvider::with_client(
+                            client, model, base_url, max_tokens,
+                        )
+                        .with_request_timeout(request_timeout),
+                    )
                 }
                 #[allow(unreachable_patterns)]
                 _ => {
@@ -298,12 +275,13 @@ fn build_router_from_hierarchical(
         }
     }
 
-    // Build model registry (config models override compiled defaults)
-    let model_registry = if let Some(ref models) = config.models {
-        ModelRegistry::with_defaults_and_config(models)
-    } else {
-        ModelRegistry::with_defaults()
-    };
+    // Build model registry (config models override compiled defaults, and a
+    // disabled provider contributes neither).
+    let no_models = HashMap::new();
+    let model_registry = ModelRegistry::with_defaults_and_config(
+        config.models.as_ref().unwrap_or(&no_models),
+        &disabled,
+    );
 
     // Default model
     let default_model = config
@@ -328,6 +306,10 @@ fn build_router_from_hierarchical(
             .or_insert_with(|| fallbacks.clone());
     }
 
+    // The registry handed in here is a placeholder: every `LlmRouter`
+    // constructor replaces it with the router's own, so pricing reads the same
+    // catalogue routing does — `[models]` rows and discovered models included
+    // (L8, `CostTracker::use_registry`).
     let cost_tracker = Arc::new(CostTracker::new(ModelRegistry::with_defaults()));
     let rate_limit_config = config.rate_limits.unwrap_or_default();
 

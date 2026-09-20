@@ -12,6 +12,17 @@ pub trait PluginToolExecutor: Send + Sync {
 
     /// The plugin this executor belongs to.
     fn plugin_id(&self) -> &str;
+
+    /// Which load of the plugin this handle belongs to (extension design
+    /// §3.0 Fact 3). The number rides inside the proxy, so no enum change is
+    /// needed on `ToolBackend::Plugin`; the extension gate reads it back
+    /// through `RegisteredTool::incarnation()` and refuses a handle from a
+    /// previous load as `Stale`.
+    ///
+    /// Default `0` so no existing implementor changes.
+    fn generation(&self) -> u64 {
+        0
+    }
 }
 
 /// Callback interface for executing tool calls requested by a plugin skill.
@@ -37,6 +48,15 @@ pub trait PluginSkillExecutor: Send + Sync {
 
     fn plugin_id(&self) -> &str;
     fn skill_id(&self) -> &str;
+
+    /// Which load of the plugin this bridge belongs to. The run-guard at
+    /// `invoke_plugin_skill` passes it to `ledger.begin_run`, so a run is never
+    /// started against a previous load (extension design §3.2 T3(b)).
+    ///
+    /// Default `0` so no existing implementor changes.
+    fn generation(&self) -> u64 {
+        0
+    }
 }
 
 /// Trait for executing agent tasks via a plugin subprocess.
@@ -69,4 +89,14 @@ pub trait PluginAgentExecutor: Send + Sync {
 
     fn plugin_id(&self) -> &str;
     fn agent_id(&self) -> &str;
+
+    /// Which load of the plugin this bridge belongs to. An in-flight subagent
+    /// holds a cloned executor, so a lead that spawns from that template after
+    /// a disable → re-enable is refused at the run-guard's pre-flight rather
+    /// than at its first RPC (extension design §3.2 T3(b)).
+    ///
+    /// Default `0` so no existing implementor changes.
+    fn generation(&self) -> u64 {
+        0
+    }
 }

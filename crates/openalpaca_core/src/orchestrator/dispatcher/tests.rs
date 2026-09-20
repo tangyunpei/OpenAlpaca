@@ -1,5 +1,6 @@
 use super::*;
 use crate::agent::subagent::SubAgent;
+use crate::memory::scope_context::MemoryScopeContext;
 use crate::test_util::{make_agent, template_from_agent};
 
 fn setup(agents: Vec<SubAgent>) -> TaskDispatcher {
@@ -143,7 +144,9 @@ fn test_dispatch_lead_agent_marks_agent_busy() {
         "user1",
         "user1:cli",
         "cli",
+        MemoryScopeContext::global_only(),
         None,
+        false,
     );
 
     assert!(result.is_ok());
@@ -179,7 +182,9 @@ fn test_dispatch_lead_agent_prefers_orchestration_capability() {
         "user1",
         "user1:cli",
         "cli",
+        MemoryScopeContext::global_only(),
         None,
+        false,
     );
 
     assert!(result.is_ok());
@@ -216,7 +221,9 @@ fn test_dispatch_lead_agent_fallback_to_any_idle_agent() {
         "user1",
         "user1:cli",
         "cli",
+        MemoryScopeContext::global_only(),
         None,
+        false,
     );
 
     assert!(result.is_ok());
@@ -239,9 +246,11 @@ fn test_dispatch_lead_agent_fallback_to_any_idle_agent() {
     );
 }
 
+/// L9. An install with no agent templates at all is the shape a packaged
+/// daemon really had, and it never clears on its own — so it must not be
+/// reported as the one thing that does.
 #[test]
-fn test_dispatch_lead_agent_fails_no_agents() {
-    // When no agents are available at all, should fail
+fn test_dispatch_lead_agent_says_no_templates_are_installed() {
     let dispatcher = setup(vec![]);
 
     let result = dispatcher.dispatch_lead_agent(
@@ -250,11 +259,58 @@ fn test_dispatch_lead_agent_fails_no_agents() {
         "user1",
         "user1:cli",
         "cli",
+        MemoryScopeContext::global_only(),
         None,
+        false,
     );
 
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("No agents available"));
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("No agent templates are installed") && err.contains("config/agents"),
+        "the message must name the cause and where the fix goes: {err}"
+    );
+    assert!(
+        !err.contains("busy"),
+        "nothing is busy — there is nothing at all: {err}"
+    );
+}
+
+/// …and the capacity case still reads as capacity.
+#[test]
+fn test_dispatch_lead_agent_fails_when_the_only_lead_is_busy() {
+    // `orchestration` makes the template a singleton, so the second dispatch
+    // finds the one instance already claimed.
+    let dispatcher = setup(vec![make_agent("lead-01", vec!["orchestration"])]);
+    dispatcher
+        .dispatch_lead_agent(
+            "First",
+            "First".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            None,
+            false,
+        )
+        .expect("the first dispatch claims the lead");
+
+    let err = dispatcher
+        .dispatch_lead_agent(
+            "Second",
+            "Second".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            None,
+            false,
+        )
+        .unwrap_err();
+
+    assert!(
+        err.contains("All agents are busy"),
+        "a template exists — this really is capacity: {err}"
+    );
 }
 
 #[test]
@@ -299,6 +355,135 @@ fn test_build_task_outcome_empty_content_failure() {
     let outcome = build_task_outcome(None, "t1", "", false);
     assert_eq!(outcome.outcome_kind, OutcomeKind::Failed);
     assert_eq!(outcome.summary, "Task failed.");
+}
+
+// ── M4: a run's artifacts are the ones it recorded ──────────────────
+
+/// A run row plus one file `artifact_write` recorded against it. The columns
+/// are set the way the artifact store sets them — `origin = 'produced'` and
+/// the run's `task_id` — because those two are what the accounting reads.
+fn run_with_produced_file(db: &Database, task_id: &str, file_id: &str, agent_id: &str) {
+    db.with_connection(|conn| {
+        conn.execute(
+            "INSERT OR IGNORE INTO task (id, title, created_by, source_lane)
+             VALUES (?1, 'A run', 'user1', 'user1:cli')",
+            [task_id],
+        )?;
+        conn.execute(
+            "INSERT INTO file_assets
+                (id, owner_id, sha256, filename, mime_type, size_bytes, storage_path,
+                 status, origin, kind, task_id, agent_id)
+             VALUES (?1, 'user1', 'sha', ?2, 'text/markdown', 12, '/tmp/x.md',
+                     'ready', 'produced', 'markdown', ?3, ?4)",
+            [
+                file_id,
+                format!("{file_id}.md").as_str(),
+                task_id,
+                agent_id,
+            ],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// **M4.** A lead-agent run has no `state_json` artifact pointers — the
+/// topology writes files through `artifact_write`, which records them in
+/// `file_assets`. The outcome used to say `text_only`, `artifact_count: 0`
+/// and "No artifacts were produced." for a run whose artifact was sitting in
+/// the store under its own task id.
+#[test]
+fn a_runs_own_artifact_is_counted_at_finalisation() {
+    use super::build_task_outcome;
+    use openalpaca_storage::OutcomeKind;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    run_with_produced_file(&db, "task-1", "01-alpaca-facts", "lead_agent::a1");
+
+    let outcome = build_task_outcome(Some(&db), "task-1", "Here is the report.", true);
+
+    assert_eq!(outcome.artifacts.len(), 1, "{outcome:?}");
+    assert_eq!(
+        outcome.artifacts[0].file_asset_id.as_deref(),
+        Some("01-alpaca-facts")
+    );
+    assert_eq!(outcome.artifacts[0].label, "01-alpaca-facts.md");
+    assert_eq!(
+        outcome.outcome_kind,
+        OutcomeKind::Mixed,
+        "a report plus a file is both"
+    );
+    assert!(
+        outcome.no_artifact_reason.is_none(),
+        "…and nothing claims none were produced"
+    );
+}
+
+/// **M4 addendum.** The same when a *subagent* of the run wrote it: the file
+/// carries the run's task id whichever lane produced it.
+#[test]
+fn a_subagents_artifact_is_counted_too() {
+    use super::build_task_outcome;
+    use openalpaca_storage::OutcomeKind;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    run_with_produced_file(&db, "task-1", "01-notes", "writing_agent::b2");
+
+    let outcome = build_task_outcome(Some(&db), "task-1", "", true);
+
+    assert_eq!(outcome.artifacts.len(), 1);
+    assert_eq!(outcome.artifacts[0].agent_id, "writing_agent::b2");
+    assert_eq!(
+        outcome.outcome_kind,
+        OutcomeKind::ArtifactOnly,
+        "no report of its own, but a file: {outcome:?}"
+    );
+}
+
+/// A run that produced nothing still says so — the merge adds facts, it does
+/// not invent them.
+#[test]
+fn a_run_that_produced_nothing_still_says_so() {
+    use super::build_task_outcome;
+    use openalpaca_storage::OutcomeKind;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    db.with_connection(|conn| {
+        conn.execute(
+            "INSERT INTO task (id, title, created_by, source_lane)
+             VALUES ('task-1', 'A run', 'user1', 'user1:cli')",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let outcome = build_task_outcome(Some(&db), "task-1", "Answered in chat.", true);
+    assert!(outcome.artifacts.is_empty());
+    assert_eq!(outcome.outcome_kind, OutcomeKind::TextOnly);
+    assert_eq!(
+        outcome.no_artifact_reason.as_deref(),
+        Some("No artifacts were produced.")
+    );
+}
+
+/// A failed run keeps saying it failed, even when it produced a file before
+/// it did.
+#[test]
+fn a_failed_run_with_a_file_is_still_failed() {
+    use super::build_task_outcome;
+    use openalpaca_storage::OutcomeKind;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    run_with_produced_file(&db, "task-1", "01-partial", "lead_agent::a1");
+
+    let outcome = build_task_outcome(Some(&db), "task-1", "Network timeout", false);
+    assert_eq!(outcome.outcome_kind, OutcomeKind::Failed);
+    assert_eq!(outcome.artifacts.len(), 1, "what it made is still recorded");
 }
 
 // ── Pipeline end-to-end: non-singleton agent + workspace artifact ────
@@ -371,6 +556,7 @@ fn test_finalize_task_emits_outcome_fields() {
     while let Ok(event) = rx.try_recv() {
         if let SystemEvent::TaskCompleted {
             task_id,
+            title,
             result_summary,
             outcome_kind,
             artifact_count,
@@ -379,6 +565,7 @@ fn test_finalize_task_emits_outcome_fields() {
         } = event
         {
             assert_eq!(task_id, "t1");
+            assert_eq!(title, "Test task");
             assert_eq!(result_summary, Some("All done".to_string()));
             assert_eq!(outcome_kind, Some("mixed".to_string()));
             assert_eq!(artifact_count, Some(2));
@@ -418,12 +605,14 @@ fn test_finalize_task_failed_emits_outcome_kind() {
     while let Ok(event) = rx.try_recv() {
         if let SystemEvent::TaskFailed {
             task_id,
+            title,
             error,
             outcome_kind,
             ..
         } = event
         {
             assert_eq!(task_id, "t2");
+            assert_eq!(title, "Failing task");
             assert_eq!(error, "Network timeout");
             assert_eq!(outcome_kind, Some("failed".to_string()));
             return;
@@ -448,6 +637,7 @@ fn test_finalize_task_none_outcome_fields() {
     while let Ok(event) = rx.try_recv() {
         if let SystemEvent::TaskCompleted {
             task_id,
+            title,
             outcome_kind,
             artifact_count,
             outcome_summary,
@@ -455,6 +645,7 @@ fn test_finalize_task_none_outcome_fields() {
         } = event
         {
             assert_eq!(task_id, "t3");
+            assert_eq!(title, "Legacy task");
             assert_eq!(outcome_kind, None);
             assert_eq!(artifact_count, None); // None preserved (unknown)
             assert_eq!(outcome_summary, None);
@@ -497,6 +688,10 @@ fn test_build_task_outcome_with_db_and_state_json() {
         outcome_json: None,
         outcome_kind: None,
         artifact_count: 0,
+        workspace_id: None,
+        source_task_id: None,
+        session_id: None,
+        unattended: false,
     };
     repo.create(&task).unwrap();
 
@@ -527,9 +722,7 @@ fn test_build_task_outcome_with_db_and_state_json() {
                 completed_at: Some(now),
             },
         ],
-        constraints: TaskConstraints {
-            pipeline_sequential: true,
-        },
+        constraints: TaskConstraints {},
         workspace: TaskWorkspace::default(),
         created_at: now,
         updated_at: now,
@@ -592,6 +785,10 @@ fn test_finalize_task_with_outcome_persists_and_reads_back() {
         outcome_json: None,
         outcome_kind: None,
         artifact_count: 0,
+        workspace_id: None,
+        source_task_id: None,
+        session_id: None,
+        unattended: false,
     };
     repo.create(&task).unwrap();
 
@@ -648,7 +845,91 @@ fn lifecycle_steering_msg(text: &str) -> crate::runner::steering::SteeringMsg {
         scope: crate::security::policy::Scope::Global,
         workspace_path: None,
         received_at: Utc::now(),
+        origin: crate::runner::steering::SteeringOrigin::User,
     }
+}
+
+/// §5.5 item 5: the run's session is the **turn's**, carried in by the caller
+/// that has one, not whatever the lane calls active by the time the dispatch
+/// runs. The window is real — a `create_session` landing during the main loop's
+/// LLM round — and it used to re-home the completion report, the artifact links
+/// and the run's JSONL into the new, empty conversation.
+#[tokio::test]
+async fn a_dispatch_binds_the_turns_session_even_after_the_lane_moved_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    let turn_session = repo
+        .create_session("user1:cli", "cli", None, Some("the turn"))
+        .unwrap()
+        .id;
+
+    let dispatcher = setup_with_router_and_db(
+        vec![make_agent("lead-01", vec!["orchestration"])],
+        DaemonConfig::default(),
+        db.clone(),
+    );
+
+    // The user opens a new chat while the round that decided to start this
+    // workflow is still in flight: the lane's active session is no longer the
+    // turn's.
+    let newer = repo
+        .create_session("user1:cli", "cli", None, Some("a new chat"))
+        .unwrap()
+        .id;
+    assert_eq!(
+        repo.active_session_id("user1:cli").unwrap().as_deref(),
+        Some(newer.as_str())
+    );
+
+    let outcome = dispatcher
+        .dispatch_lead_agent(
+            "Long running task",
+            "Carried session".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            Some(&turn_session),
+            false,
+        )
+        .unwrap();
+
+    let task = openalpaca_storage::repository::TaskRepository::new(&db)
+        .get(&outcome.task_id)
+        .unwrap()
+        .expect("the row is persisted at dispatch");
+    assert_eq!(
+        task.session_id.as_deref(),
+        Some(turn_session.as_str()),
+        "the carried session wins over the lane's current one"
+    );
+
+    // And with no turn to carry — a scheduled skill, `start`, `rerun` — the
+    // lane read is still the answer. A second dispatcher, because the first
+    // one's single lead instance is busy with the run above.
+    let second = setup_with_router_and_db(
+        vec![make_agent("lead-02", vec!["orchestration"])],
+        DaemonConfig::default(),
+        db.clone(),
+    );
+    let fallback = second
+        .dispatch_lead_agent(
+            "Another task",
+            "Lane fallback".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            None,
+            false,
+        )
+        .unwrap();
+    let task = openalpaca_storage::repository::TaskRepository::new(&db)
+        .get(&fallback.task_id)
+        .unwrap()
+        .expect("the row is persisted at dispatch");
+    assert_eq!(task.session_id.as_deref(), Some(newer.as_str()));
 }
 
 #[tokio::test]
@@ -670,7 +951,9 @@ async fn test_lead_agent_steering_attach_detach_and_leftover_conversion() {
             "user1",
             "user1:cli",
             "cli",
+            MemoryScopeContext::global_only(),
             None,
+            false,
         )
         .unwrap();
     let task_id = outcome.task_id;
@@ -739,6 +1022,79 @@ async fn test_lead_agent_steering_attach_detach_and_leftover_conversion() {
     assert!(repo.claim_next("user1:cli").unwrap().is_none());
 }
 
+/// Important 2: §5.6c's resume note is pushed onto the rail before the loop
+/// starts. If the loop exits before its first round boundary — cancelled, or
+/// a budget exit that returns drained-but-unsent messages — the leftover
+/// conversion used to file it as an `unprocessed_steering` follow-up, which
+/// the lane's next turn renders as "messages the user sent … act on them
+/// now": daemon-authored text attributed to the user, with the model told to
+/// act on it. A daemon-authored leftover is dropped (with a log line)
+/// instead.
+#[tokio::test]
+async fn a_daemon_authored_leftover_is_dropped_not_filed_as_a_user_followup() {
+    let mut config = DaemonConfig::default();
+    config.orchestrator.routing.steering_enabled = true;
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let dispatcher = setup_with_router_and_db(
+        vec![make_agent("lead-01", vec!["orchestration"])],
+        config,
+        db.clone(),
+    );
+
+    let outcome = dispatcher
+        .dispatch_lead_agent(
+            "Long running task",
+            "Resume note lifecycle".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            None,
+            false,
+        )
+        .unwrap();
+    let task_id = outcome.task_id;
+    let inbox = dispatcher
+        .shared_context
+        .steering_inbox(&task_id)
+        .expect("steering inbox must be registered at dispatch");
+
+    // The resume push, verbatim: the daemon's own narration, and a user's
+    // steer beside it so the skip is proved to be about provenance and not
+    // about the exit.
+    let mut note = lifecycle_steering_msg(&crate::session_log::replay::resume_interjection(
+        Utc::now(),
+    ));
+    note.origin = crate::runner::steering::SteeringOrigin::Daemon;
+    note.principal = crate::security::policy::Principal::System;
+    inbox.push(note).unwrap();
+    inbox.push(lifecycle_steering_msg("switch to staging")).unwrap();
+    assert!(dispatcher.shared_context.cancel_task(&task_id));
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while dispatcher.shared_context.steering_inbox(&task_id).is_some() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "steering detach timed out"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let repo = openalpaca_storage::repository::FollowupRepository::new(&db);
+    let rows = repo.list_queued_by_lane("user1:cli").unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "only the user's own interjection may become a follow-up: {rows:?}"
+    );
+    assert_eq!(rows[0].content, "switch to staging");
+    assert!(
+        !rows[0].content.contains("This run was interrupted"),
+        "the daemon's resume note must never reach the lane as a user message"
+    );
+}
+
 #[tokio::test]
 async fn test_lead_agent_lane_attachment_independent_of_steering_flag() {
     // steering_enabled=false: no inbox registers, but the lane attachment
@@ -761,7 +1117,9 @@ async fn test_lead_agent_lane_attachment_independent_of_steering_flag() {
             "user1",
             "user1:cli",
             "cli",
+            MemoryScopeContext::global_only(),
             None,
+            false,
         )
         .unwrap();
 
@@ -858,7 +1216,9 @@ async fn test_lead_agent_completion_report_persists_final_content_verbatim() {
             "user1",
             "user1:cli",
             "cli",
+            MemoryScopeContext::global_only(),
             None,
+            false,
         )
         .unwrap();
 
@@ -867,6 +1227,153 @@ async fn test_lead_agent_completion_report_persists_final_content_verbatim() {
     let msg = wait_for_conversation_message(&db, "user1:cli").await;
     assert_eq!(msg.role, "assistant");
     assert_eq!(msg.content, report);
+
+    // GAP-23: and it names the run it reports on, so a reload can rebuild the
+    // report card without the `task_status` frames this client happened to see.
+    let task_id = msg.task_id.expect("the completion report carries its run");
+    let exists: i64 = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT count(*) FROM task WHERE id = ?1",
+                [&task_id],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(exists, 1, "task_id should name a real run");
+}
+
+/// GAP-23's second link: the completion report carries `task_id` *and* one
+/// `role='artifact'` row per file the run produced — the message
+/// `RunReportCard` renders after a reload.
+#[test]
+fn test_completion_report_links_the_runs_produced_artifacts() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+
+    db.with_connection(|conn| {
+        conn.execute(
+            "INSERT INTO task (id, title, created_by, source_lane)
+             VALUES ('task-1', 'A run', 'user1', 'user1:cli'),
+                    ('task-2', 'Another run', 'user1', 'user1:cli')",
+            [],
+        )?;
+        for (id, origin, task) in [
+            ("produced-1", "produced", "task-1"),
+            ("produced-2", "produced", "task-1"),
+            // The user's own upload during the run — not the run's output.
+            ("upload-1", "upload", "task-1"),
+            // Another run's file.
+            ("elsewhere", "produced", "task-2"),
+        ] {
+            conn.execute(
+                "INSERT INTO file_assets (id, owner_id, sha256, filename, mime_type, size_bytes, storage_path, status, origin, task_id, kind)
+                 VALUES (?1, 'user1', ?1, ?2, 'text/markdown', 10, ?3, 'ready', ?4, ?5, 'markdown')",
+                [
+                    id.to_string(),
+                    format!("{id}.md"),
+                    format!("/tmp/{id}.md"),
+                    origin.to_string(),
+                    task.to_string(),
+                ],
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+
+    outcome::persist_completion_report(
+        &db,
+        "user1:cli",
+        "cli",
+        None,
+        "Done — two files written.".to_string(),
+        None,
+        0,
+        0,
+        0,
+        "task-1",
+    );
+
+    let messages = openalpaca_storage::ConversationRepository::new(&db)
+        .list_by_lane("user1:cli", 50, 0)
+        .unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].task_id.as_deref(), Some("task-1"));
+
+    let links = openalpaca_storage::FileAssetRepository::new(&db)
+        .artifact_links_for_messages(&[messages[0].id])
+        .unwrap();
+    let artifacts = links.get(&messages[0].id).expect("artifact links");
+    assert_eq!(
+        artifacts.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+        vec!["produced-1", "produced-2"],
+    );
+    assert_eq!(artifacts[0].name, "produced-1.md");
+    assert_eq!(artifacts[0].kind.as_deref(), Some("markdown"));
+}
+
+/// A run that wrote nothing still gets its run link — and no attachment rows.
+#[test]
+fn test_completion_report_with_no_artifacts_links_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+
+    outcome::persist_completion_report(
+        &db,
+        "user1:cli",
+        "cli",
+        None,
+        "Done — nothing to show.".to_string(),
+        None,
+        0,
+        0,
+        0,
+        "task-1",
+    );
+
+    let messages = openalpaca_storage::ConversationRepository::new(&db)
+        .list_by_lane("user1:cli", 50, 0)
+        .unwrap();
+    assert_eq!(messages[0].task_id.as_deref(), Some("task-1"));
+
+    let rows: i64 = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT count(*) FROM conversation_message_attachments",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(rows, 0);
+}
+
+/// The lead agent's `post_update` progress notes and the daemon's own notices
+/// go through the *plain* writer, which links nothing and stamps no run.
+#[test]
+fn test_plain_persist_conversation_leaves_the_run_link_null() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+
+    outcome::persist_conversation(
+        &db,
+        "user1:cli",
+        "cli",
+        None,
+        "Halfway there.".to_string(),
+        None,
+        0,
+        0,
+        0,
+        None,
+    );
+
+    let messages = openalpaca_storage::ConversationRepository::new(&db)
+        .list_by_lane("user1:cli", 50, 0)
+        .unwrap();
+    assert_eq!(messages.len(), 1);
+    assert!(messages[0].task_id.is_none());
 }
 
 #[tokio::test]
@@ -888,7 +1395,9 @@ async fn test_lead_agent_completion_report_empty_falls_back_to_template_with_sta
             "user1",
             "user1:cli",
             "cli",
+            MemoryScopeContext::global_only(),
             None,
+            false,
         )
         .unwrap();
 
@@ -902,5 +1411,881 @@ async fn test_lead_agent_completion_report_empty_falls_back_to_template_with_sta
         msg.content.contains("**Task failed: Doomed task**"),
         "missing template fallback: {}",
         msg.content
+    );
+}
+
+/// §4.7 item 3 — the run remembers its project across restart and rerun.
+///
+/// The value persisted is the **request's** workspace root, the field ruling
+/// R22 created for exactly this: a lane that sent no workspace leaves the
+/// column `NULL` rather than inheriting the daemon's current directory.
+#[test]
+fn dispatch_persists_the_requests_workspace_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let dispatcher = setup_with_config_and_db(
+        vec![make_agent("lead-01", vec!["orchestration"])],
+        DaemonConfig::default(),
+        Some(db.clone()),
+    );
+
+    let outcome = dispatcher
+        .dispatch_lead_agent(
+            "Ship the release",
+            "Ship the release".to_string(),
+            "user1",
+            "user1:gui",
+            "gui",
+            MemoryScopeContext {
+                workspace_id: Some("/Users/dev/openalpaca".to_string()),
+                request_workspace_root: Some("/Users/dev/openalpaca".to_string()),
+            },
+            None,
+            false,
+        )
+        .unwrap();
+
+    let task = openalpaca_storage::repository::TaskRepository::new(&db)
+        .get(&outcome.task_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        task.workspace_id.as_deref(),
+        Some("/Users/dev/openalpaca"),
+        "the run must remember the project the request named"
+    );
+}
+
+/// The connector shape: a CWD-derived `workspace_id` for memory scoping and no
+/// request root. The column stays `NULL` — a Telegram run belongs to no
+/// project, whatever directory the daemon was started in (R22).
+#[test]
+fn dispatch_without_a_request_workspace_leaves_workspace_id_null() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let dispatcher = setup_with_config_and_db(
+        vec![make_agent("lead-01", vec!["orchestration"])],
+        DaemonConfig::default(),
+        Some(db.clone()),
+    );
+
+    let outcome = dispatcher
+        .dispatch_lead_agent(
+            "Answer the question",
+            "Answer the question".to_string(),
+            "user1",
+            "user1:telegram",
+            "telegram",
+            MemoryScopeContext::new(Some("/where/the/daemon/started".to_string())),
+            None,
+            false,
+        )
+        .unwrap();
+
+    let task = openalpaca_storage::repository::TaskRepository::new(&db)
+        .get(&outcome.task_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        task.workspace_id, None,
+        "the daemon CWD must never be recorded as the run's project"
+    );
+}
+
+// ── R45: the run slot outlives the run ────────────────────────────────
+
+/// A registered cancellation token is what `claim_run_slot` reads to mean
+/// "this id is running" — it is D5's `start` lock
+/// (`context/shared/mod.rs`). The background half of a lead-agent run keeps
+/// working long after `run_lead_agent` returns: lane teardown, the steering
+/// close-and-drain, the `lead_agent_step_complete` state write, the agent
+/// destroy, usage, the completion report, the span close — and only then
+/// `finalize_task_with_outcome`, which is what writes the terminal status,
+/// the result and the outcome.
+///
+/// Release the slot before that and there is a stretch of awaits and DB
+/// round-trips in which the row still says `running` and the id is unclaimed —
+/// non-terminal, so R43's guard does not close it either. A `start` arriving
+/// there re-queues the row (`upsert_queued`) under a second lead agent, and
+/// then *this* run's tail writes its own summary, outcome and artifact count
+/// over the row that by now belongs to the other run.
+///
+/// So: sample the slot exactly as `start` would, and require that the first
+/// moment it is free, the row is already terminal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_run_slot_is_held_until_the_row_is_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let dispatcher = setup_with_router_and_db(
+        vec![make_agent("lead-01", vec!["orchestration"])],
+        DaemonConfig::default(),
+        db.clone(),
+    );
+
+    let task_id = dispatcher
+        .dispatch_lead_agent(
+            "Write the changelog",
+            "Run slot liveness".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            None,
+            false,
+        )
+        .unwrap()
+        .task_id;
+
+    let repo = openalpaca_storage::repository::TaskRepository::new(&db);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        // Precisely what `Orchestrator::start_task` does at this instant.
+        if dispatcher.shared_context.claim_run_slot(&task_id).is_some() {
+            let row = repo.get(&task_id).unwrap().expect("the run's row");
+            // Give the id back: nothing is running under our placeholder.
+            dispatcher
+                .shared_context
+                .remove_cancellation_token(&task_id);
+            assert!(
+                row.status.is_terminal(),
+                "the run slot was free while the row still said '{}' — a `start` \
+                 arriving here would re-queue the row under a second lead agent, \
+                 and this run's tail would then write its result over it",
+                row.status.as_str(),
+            );
+            assert!(
+                row.result_summary.is_some(),
+                "a terminal row must already carry the run's result",
+            );
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the lead agent execution never finished"
+        );
+        // A short sleep rather than a bare yield: the poll must not hot-spin
+        // against the wall-clock deadline on a loaded test runner.
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+}
+
+/// §5.3: the completion report is written into the session the run was
+/// *started from*, even after the user has opened another conversation on the
+/// same lane — the report belongs to the exchange that asked for the work.
+#[test]
+fn test_completion_report_lands_in_the_session_that_started_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+
+    let origin = repo
+        .get_or_create_active_session("user1:cli", "cli", None)
+        .unwrap();
+    let current = repo.create_session("user1:cli", "cli", None, None).unwrap();
+
+    outcome::persist_completion_report(
+        &db,
+        "user1:cli",
+        "cli",
+        Some(&origin.id),
+        "Done — while you were elsewhere.".to_string(),
+        None,
+        0,
+        0,
+        0,
+        "task-1",
+    );
+
+    let there = repo.list_by_session(&origin.id, 50, 0).unwrap();
+    assert_eq!(there.len(), 1, "the report lands in its own conversation");
+    assert_eq!(there[0].task_id.as_deref(), Some("task-1"));
+    assert_eq!(
+        repo.get_session(&origin.id).unwrap().unwrap().message_count,
+        1,
+        "and is counted there"
+    );
+
+    assert!(
+        repo.list_by_session(&current.id, 50, 0).unwrap().is_empty(),
+        "the conversation the user opened since is untouched"
+    );
+    assert_eq!(
+        repo.get_session(&current.id).unwrap().unwrap().status,
+        openalpaca_storage::SESSION_ACTIVE,
+        "and stays the live one — a report does not re-home the lane"
+    );
+}
+
+// ── S7: the run's own history row ────────────────────────────────────
+
+/// Poll `agent_task_history` until the run's rows land, or give up.
+async fn wait_for_agent_history(
+    db: &Database,
+    task_id: &str,
+) -> Vec<openalpaca_storage::AgentTaskHistory> {
+    let repo = openalpaca_storage::SubAgentRepository::new(db);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let rows = repo.get_history_for_task(task_id).unwrap_or_default();
+        if !rows.is_empty() {
+            return rows;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Vec::new();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// **S7.** `agent_task_history.agent_id` references `agent(id)`, and the
+/// `agent` table holds **templates**. A lead spawned from a non-singleton
+/// template runs as `{template}::{uuid8}`, which is no row at all — so the
+/// insert broke the foreign key and a successful run finished with
+/// `WARN … Failed to record agent task history`, leaving the run absent from
+/// the history the task surface reads.
+#[tokio::test]
+async fn a_leads_history_row_names_the_template_that_ran() {
+    use openalpaca_llm::{ChatResponse, FinishReason, ProviderType, Usage};
+
+    let mock_provider = Arc::new(e2e_mock::MockProvider::new(vec![ChatResponse {
+        content: "Done.".to_string(),
+        tool_calls: vec![],
+        model: "mock-model".to_string(),
+        usage: Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            ..Default::default()
+        },
+        finish_reason: FinishReason::Stop,
+        thinking: None,
+        parts: None,
+    }]));
+    let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
+        mock_provider,
+        ProviderType::Anthropic,
+        "mock-model".to_string(),
+    ));
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    // The template row the history's foreign key points at — what the daemon
+    // syncs from `config/agents/` at boot.
+    db.with_connection(|conn| {
+        conn.execute(
+            "INSERT INTO agent (id, name, template_id) VALUES ('worker-01', 'Worker', 'worker-01')",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    // No "orchestration" capability → a non-singleton template → the lead
+    // runs as an instance whose id is *not* the template id.
+    let dispatcher = setup_with_specific_router_and_db(
+        vec![make_agent("worker-01", vec!["web_search"])],
+        DaemonConfig::default(),
+        db.clone(),
+        router,
+    );
+
+    let outcome = dispatcher
+        .dispatch_lead_agent(
+            "Do the thing",
+            "The thing".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            None,
+            false,
+        )
+        .unwrap();
+
+    let rows = wait_for_agent_history(&db, &outcome.task_id).await;
+    assert_eq!(rows.len(), 1, "the run records exactly one lead row");
+    assert_eq!(rows[0].agent_id, "worker-01");
+    assert_eq!(rows[0].role, "lead_agent");
+
+    // …and this test only means something while the instance really is
+    // suffixed. `llm_call_log` is written from `lead_agent.id` a moment
+    // before the history row, so it is the durable witness of what ran.
+    let instance_id: String = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT agent_id FROM llm_call_log WHERE task_id = ?1",
+                [&outcome.task_id],
+                |row| row.get(0),
+            )?)
+        })
+        .expect("the lead's own call is logged");
+    assert!(
+        instance_id.starts_with("worker-01::"),
+        "expected a non-singleton instance id, got {instance_id}"
+    );
+}
+
+// ── S4: the report cannot lose a refusal ─────────────────────────────
+
+/// The note is the runtime's own words, and it names every tool once.
+#[test]
+fn the_refusal_note_names_what_could_not_be_approved() {
+    use super::outcome::unapprovable_note;
+
+    assert!(unapprovable_note(&[]).is_none(), "nothing refused, no note");
+
+    let one = unapprovable_note(&["artifact_write".to_string()]).expect("a note");
+    assert!(one.contains("artifact_write"), "{one}");
+    assert!(one.contains("tool was refused"), "{one}");
+    assert!(one.contains("GUI") && one.contains("openalpaca chat"), "{one}");
+
+    let two = unapprovable_note(&[
+        "artifact_write".to_string(),
+        "workspace_write".to_string(),
+    ])
+    .expect("a note");
+    assert!(two.contains("tools were refused"), "{two}");
+    assert!(two.contains("artifact_write, workspace_write"), "{two}");
+}
+
+/// **S4.** The cut is exactly where the refusal used to be lost: a summary
+/// long enough to be truncated is the one whose last line goes. The prose
+/// gives way; the runtime's line stays whole.
+#[test]
+fn truncating_a_summary_keeps_the_runtime_line() {
+    use super::outcome::truncate_summary;
+
+    let note = "Not run — approve it.";
+    let prose = "x".repeat(500);
+    let summary = format!("{prose}\n\n{note}");
+
+    let cut = truncate_summary(&summary, Some(note), 100);
+    assert_eq!(cut.chars().count(), 100);
+    assert!(cut.ends_with(note), "the note survives the cut: {cut}");
+    assert!(cut.starts_with("xxx"), "…after as much prose as fits: {cut}");
+
+    // Short enough: untouched.
+    assert_eq!(truncate_summary(&summary, Some(note), 10_000), summary);
+    // No note: the old behaviour, a plain head cut.
+    assert_eq!(truncate_summary(&prose, None, 10).chars().count(), 10);
+}
+
+/// **V5.** The edges the doc comment admits but nothing exercised: a note as
+/// long as the cap, a note longer than it, a cap of zero, and a multi-byte
+/// note. The function is total — never a panic, never longer than `max`.
+#[test]
+fn truncating_a_summary_is_total_at_its_edges() {
+    use super::outcome::truncate_summary;
+
+    let prose = "x".repeat(500);
+
+    // The note alone is longer than the whole cap: the note wins and the
+    // prose goes, cut to the cap.
+    let long_note = "N".repeat(120);
+    let summary = format!("{prose}\n\n{long_note}");
+    let cut = truncate_summary(&summary, Some(&long_note), 50);
+    assert_eq!(cut.chars().count(), 50);
+    assert!(cut.chars().all(|c| c == 'N'), "the note, nothing else: {cut}");
+
+    // Exactly at the boundary: `\n\n` + note is the whole budget.
+    let note = "Not run.";
+    let summary = format!("{prose}\n\n{note}");
+    let exact = note.chars().count() + 2;
+    let cut = truncate_summary(&summary, Some(note), exact);
+    assert_eq!(cut, note, "no room for prose leaves the note itself");
+
+    // One character of room for prose.
+    let cut = truncate_summary(&summary, Some(note), exact + 1);
+    assert_eq!(cut, format!("x\n\n{note}"));
+
+    // A cap of zero asks for nothing and gets nothing — not a panic.
+    assert_eq!(truncate_summary(&summary, Some(note), 0), "");
+    assert_eq!(truncate_summary(&prose, None, 0), "");
+
+    // Multi-byte throughout: the cut counts characters, so it never lands
+    // inside one.
+    let cjk_note = "未获批准，无法运行。";
+    let cjk_prose = "报告内容".repeat(200);
+    let cjk = format!("{cjk_prose}\n\n{cjk_note}");
+    let cut = truncate_summary(&cjk, Some(cjk_note), 40);
+    assert_eq!(cut.chars().count(), 40);
+    assert!(cut.ends_with(cjk_note), "the note survives whole: {cut}");
+
+    // A summary that does not actually end with the note (a caller that
+    // appended it differently) still comes back within the cap.
+    let odd = format!("{prose} {note} more prose");
+    let cut = truncate_summary(&odd, Some(note), 60);
+    assert_eq!(cut.chars().count(), 60);
+    assert!(cut.ends_with(note), "the note is still the tail: {cut}");
+}
+
+/// End to end through finalisation: the row a client reads carries the
+/// refusal, and carries it even when the model's own report is longer than
+/// the 2 000-character cap.
+#[test]
+fn a_finalised_run_reports_what_nobody_could_approve() {
+    use super::outcome::{MAX_SUMMARY_LENGTH, finalize_task_with_outcome};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    db.with_connection(|conn| {
+        conn.execute(
+            "INSERT INTO task (id, title, created_by, source_lane)
+             VALUES ('task-1', 'A run', 'user1', 'user1:cli')",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    // What the sandbox writes when nobody can answer (S4).
+    openalpaca_storage::repository::EventLogRepository::new(&db)
+        .log_for_task(
+            crate::security::sandbox::UNAPPROVABLE_EVENT_TYPE,
+            Some("lead_agent"),
+            Some("task-1"),
+            Some(&serde_json::json!({"tool_name": "artifact_write"})),
+            Some(&serde_json::json!({"outcome": "denied"})),
+        )
+        .unwrap();
+
+    let ctx = std::sync::Arc::new(crate::context::SharedContext::new());
+    ctx.task_registry
+        .register("task-1".to_string(), "A run".to_string());
+    let bus = crate::bus::EventBus::default();
+
+    // A report longer than the cap, so the truncation is the thing under test.
+    let report = format!("Done, with one snag: {}", "detail. ".repeat(400));
+    assert!(report.chars().count() > MAX_SUMMARY_LENGTH);
+
+    let outcome = finalize_task_with_outcome(&ctx, &bus, Some(&db), "task-1", &report, true);
+    assert!(
+        outcome.summary.contains("artifact_write"),
+        "the outcome carries the refusal: {}",
+        outcome.summary
+    );
+
+    let stored = openalpaca_storage::TaskRepository::new(&db)
+        .get("task-1")
+        .unwrap()
+        .unwrap()
+        .result_summary
+        .expect("a finished run has a summary");
+    assert!(
+        stored.chars().count() <= MAX_SUMMARY_LENGTH,
+        "still capped at {MAX_SUMMARY_LENGTH}, got {}",
+        stored.chars().count()
+    );
+    assert!(
+        stored.contains("artifact_write"),
+        "…and the cut kept the refusal: {stored}"
+    );
+    assert!(
+        stored.starts_with("Done, with one snag:"),
+        "…ahead of as much of the report as fits: {stored}"
+    );
+}
+
+/// A run nobody refused anything for reads exactly as it did before.
+#[test]
+fn a_run_with_nothing_refused_gains_no_note() {
+    use super::outcome::finalize_task_with_outcome;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    db.with_connection(|conn| {
+        conn.execute(
+            "INSERT INTO task (id, title, created_by, source_lane)
+             VALUES ('task-1', 'A run', 'user1', 'user1:cli')",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let ctx = std::sync::Arc::new(crate::context::SharedContext::new());
+    ctx.task_registry
+        .register("task-1".to_string(), "A run".to_string());
+
+    let outcome = finalize_task_with_outcome(
+        &ctx,
+        &crate::bus::EventBus::default(),
+        Some(&db),
+        "task-1",
+        "All done.",
+        true,
+    );
+    assert_eq!(outcome.summary, "All done.");
+}
+
+/// **S4.** The lead's step summary — which `build_outcome` joins into the
+/// run's `result_summary` — was cut at 500 characters beside a
+/// `MAX_SUMMARY_LENGTH = 2000`, so a report of 900 characters arrived
+/// mid-sentence. One cap, and it is the one the constant names.
+#[tokio::test]
+async fn a_long_report_survives_to_the_two_thousand_character_cap() {
+    use openalpaca_llm::{ChatResponse, FinishReason, ProviderType, Usage};
+
+    let report = format!("Report: {}", "one more finding. ".repeat(60));
+    assert!(report.chars().count() > 900 && report.chars().count() < 2000);
+
+    let mock_provider = Arc::new(e2e_mock::MockProvider::new(vec![ChatResponse {
+        content: report.clone(),
+        tool_calls: vec![],
+        model: "mock-model".to_string(),
+        usage: Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            ..Default::default()
+        },
+        finish_reason: FinishReason::Stop,
+        thinking: None,
+        parts: None,
+    }]));
+    let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
+        mock_provider,
+        ProviderType::Anthropic,
+        "mock-model".to_string(),
+    ));
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let dispatcher = setup_with_specific_router_and_db(
+        vec![make_agent("lead-01", vec!["orchestration"])],
+        DaemonConfig::default(),
+        db.clone(),
+        router,
+    );
+
+    let outcome = dispatcher
+        .dispatch_lead_agent(
+            "Do the thing",
+            "The thing".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            None,
+            false,
+        )
+        .unwrap();
+    wait_for_conversation_message(&db, "user1:cli").await;
+
+    let repo = openalpaca_storage::TaskRepository::new(&db);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let summary = loop {
+        if let Ok(Some(task)) = repo.get(&outcome.task_id)
+            && let Some(summary) = task.result_summary
+        {
+            break summary;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for the run's summary"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    assert_eq!(summary, report, "the whole report, not its first 500 chars");
+}
+
+// ── V2: the refusal row a real run writes ────────────────────────────
+
+/// A tool that would do something, if it were ever allowed to run.
+struct DangerTool;
+
+#[async_trait::async_trait]
+impl crate::tools::registry::BuiltInTool for DangerTool {
+    async fn execute(&self, _arguments: &serde_json::Value) -> Result<String, String> {
+        Ok("the tool ran".to_string())
+    }
+}
+
+/// The dispatcher of [`setup_with_specific_router_and_db`], with one extra
+/// tool registered in the registry the lead will assemble its surface from.
+fn setup_with_tool_and_router(
+    agents: Vec<SubAgent>,
+    db: Database,
+    router: Arc<openalpaca_llm::LlmRouter>,
+    tool_name: &str,
+) -> TaskDispatcher {
+    let ctx = Arc::new(SharedContext::new());
+    for a in &agents {
+        ctx.agent_registry.register_template(template_from_agent(a));
+        ctx.agent_registry.register(a.clone());
+    }
+    let tool_registry = Arc::new(crate::tools::ToolRegistry::default());
+    tool_registry
+        .register(crate::tools::registry::RegisteredTool {
+            definition: openalpaca_llm::ToolDefinition {
+                name: tool_name.to_string(),
+                description: "Does something that needs a human".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+                strict: None,
+                input_examples: None,
+            },
+            backend: crate::tools::registry::ToolBackend::BuiltIn(Arc::new(DangerTool)),
+            provides_capabilities: vec![tool_name.to_string()],
+            exempt_from_timeout: false,
+            annotations: None,
+            version: "1.0.0".to_string(),
+            author: "test".to_string(),
+            created_at: chrono::Utc::now(),
+        })
+        .expect("the test tool registers");
+
+    let bus = EventBus::default();
+    let sandbox = Arc::new(crate::security::sandbox::SandboxManager::with_defaults(
+        tool_registry.clone(),
+        bus.clone(),
+    ));
+    let gate = Arc::new(crate::security::gate::SecurityGate::new(sandbox));
+    TaskDispatcher::new(
+        ctx,
+        Arc::new(LaneManager::new()),
+        bus,
+        Some(router),
+        gate,
+        tool_registry,
+        Some(db),
+        None,
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        Arc::new(std::sync::RwLock::new(None)),
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+    )
+}
+
+/// **V2.** A real run, dispatched the way production dispatches one, whose
+/// lead calls a tool nobody can approve: the refusal reaches the run's report.
+///
+/// This goes through the production construction path on purpose. The S4 tests
+/// hand-built a `SandboxManager::with_db(...)`, and `with_db` had **no**
+/// production caller — every real sandbox was built with `new`, so the typed
+/// `tool_approval_unavailable` row the report reads was never written and the
+/// line was lost on every real run. Un-fixed, this test finds a report with no
+/// refusal in it.
+#[tokio::test]
+async fn a_real_unattended_run_reports_the_tool_nobody_could_approve() {
+    use openalpaca_llm::{ChatResponse, FinishReason, ProviderType, Usage};
+
+    let tool_name = "danger_tool";
+    let mock_provider = Arc::new(e2e_mock::MockProvider::new(vec![
+        // Round 1: the lead reaches for the tool.
+        ChatResponse {
+            content: String::new(),
+            tool_calls: vec![openalpaca_llm::ToolCall {
+                id: "tc_1".to_string(),
+                name: tool_name.to_string(),
+                arguments: serde_json::json!({}),
+            }],
+            model: "mock-model".to_string(),
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::ToolUse,
+            thinking: None,
+            parts: None,
+        },
+        // Round 2: it writes its report having been refused.
+        ChatResponse {
+            content: "I could not do it.".to_string(),
+            tool_calls: vec![],
+            model: "mock-model".to_string(),
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        },
+    ]));
+    let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
+        mock_provider,
+        ProviderType::Anthropic,
+        "mock-model".to_string(),
+    ));
+
+    // The lead carries the capability the tool provides, so the tool is on its
+    // surface, and names it as needing confirmation.
+    let mut lead = make_agent("lead-01", vec!["orchestration", tool_name]);
+    lead.constraints.allowed_capabilities =
+        vec!["orchestration".to_string(), tool_name.to_string()];
+    lead.constraints.require_confirmation_for = vec![tool_name.to_string()];
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let dispatcher = setup_with_tool_and_router(vec![lead], db.clone(), router, tool_name);
+
+    let outcome = dispatcher
+        .dispatch_lead_agent(
+            "Do the dangerous thing",
+            "The thing".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            None,
+            // M6/S5: nobody on the other end of a confirmation prompt.
+            true,
+        )
+        .unwrap();
+
+    let message = wait_for_conversation_message(&db, "user1:cli").await;
+    assert!(
+        message.content.contains(tool_name),
+        "the completion report must name what nobody could approve: {}",
+        message.content
+    );
+    assert!(
+        message.content.contains("could not ask anyone for approval"),
+        "…in the runtime's own words: {}",
+        message.content
+    );
+
+    // And the same line reached the row a client reads back.
+    let repo = openalpaca_storage::TaskRepository::new(&db);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let summary = loop {
+        if let Ok(Some(task)) = repo.get(&outcome.task_id)
+            && let Some(summary) = task.result_summary
+        {
+            break summary;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for the run's summary"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    assert!(
+        summary.contains(tool_name),
+        "the run's own summary carries it too: {summary}"
+    );
+}
+
+/// A provider that answers by *who is asking*, so a lead and its subagent can
+/// be scripted independently without depending on the order their rounds
+/// interleave. The lead is the caller whose surface carries `spawn_subagent`.
+struct LeadAndSubagentMock {
+    subagent_tool: String,
+}
+
+#[async_trait::async_trait]
+impl openalpaca_llm::LlmProvider for LeadAndSubagentMock {
+    fn name(&self) -> &str {
+        "lead-and-subagent-mock"
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    async fn chat(
+        &self,
+        request: openalpaca_llm::ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        use openalpaca_llm::{ChatResponse, FinishReason, ToolCall, Usage};
+        let tool_results = request
+            .messages
+            .iter()
+            .filter(|m| matches!(m.role, openalpaca_llm::Role::Tool))
+            .count();
+        let is_lead = request.tools.iter().any(|t| t.name == "spawn_subagent");
+
+        let call = |name: &str, args: serde_json::Value| ChatResponse {
+            content: String::new(),
+            tool_calls: vec![ToolCall {
+                id: format!("tc_{name}_{tool_results}"),
+                name: name.to_string(),
+                arguments: args,
+            }],
+            model: "mock-model".to_string(),
+            usage: Usage {
+                input_tokens: 5,
+                output_tokens: 2,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::ToolUse,
+            thinking: None,
+            parts: None,
+        };
+        let say = |text: &str| ChatResponse {
+            content: text.to_string(),
+            tool_calls: vec![],
+            model: "mock-model".to_string(),
+            usage: Usage {
+                input_tokens: 5,
+                output_tokens: 2,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        };
+
+        Ok(match (is_lead, tool_results) {
+            (true, 0) => call(
+                "spawn_subagent",
+                serde_json::json!({
+                    "agent_id": "worker",
+                    "objective": "do the dangerous thing"
+                }),
+            ),
+            (true, 1) => call("wait_for_subagents", serde_json::json!({})),
+            (true, _) => say("The worker reported back."),
+            (false, 0) => call(&self.subagent_tool, serde_json::json!({})),
+            (false, _) => say("I could not do it."),
+        })
+    }
+}
+
+/// **V2.** The refusal a *subagent* hit reaches the workflow's report.
+///
+/// Each agent of a run has its own `SandboxManager`; they all write their
+/// refusal rows against the run's `task_id`, which is how finalisation finds
+/// them. Un-fixed, the subagent's sandbox had no database either, so the run
+/// closed with no mention of what its worker could not do.
+#[tokio::test]
+async fn a_subagents_refusal_reaches_the_runs_report() {
+    use openalpaca_llm::ProviderType;
+
+    let tool_name = "danger_tool";
+    let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(LeadAndSubagentMock {
+            subagent_tool: tool_name.to_string(),
+        }),
+        ProviderType::Anthropic,
+        "mock-model".to_string(),
+    ));
+
+    let mut lead = make_agent("lead-01", vec!["orchestration"]);
+    lead.constraints.allowed_capabilities = vec!["orchestration".to_string()];
+    // The worker is the one holding the tool nobody can approve.
+    let mut worker = make_agent("worker", vec![tool_name]);
+    worker.constraints.allowed_capabilities = vec![tool_name.to_string()];
+    worker.constraints.require_confirmation_for = vec![tool_name.to_string()];
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    let dispatcher = setup_with_tool_and_router(vec![lead, worker], db.clone(), router, tool_name);
+
+    dispatcher
+        .dispatch_lead_agent(
+            "Delegate the dangerous thing",
+            "The thing".to_string(),
+            "user1",
+            "user1:cli",
+            "cli",
+            MemoryScopeContext::global_only(),
+            None,
+            true,
+        )
+        .unwrap();
+
+    let message = wait_for_conversation_message(&db, "user1:cli").await;
+    assert!(
+        message.content.contains(tool_name),
+        "the run's report must carry its subagent's refusal: {}",
+        message.content
     );
 }

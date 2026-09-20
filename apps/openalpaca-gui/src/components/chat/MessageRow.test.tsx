@@ -1,0 +1,215 @@
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+
+import { AssistantMessage, UserMessage, messageGapClass } from "./MessageRow";
+
+describe("messageGapClass (§8.3)", () => {
+  it("is the only thing density changes about a row", () => {
+    expect(messageGapClass(false)).toBe("mb-[30px]");
+    expect(messageGapClass(true)).toBe("mb-[20px]");
+  });
+});
+
+describe("UserMessage (§3.10)", () => {
+  it("renders the speaker label with the time, and no avatar or bubble", () => {
+    const { container } = render(
+      <UserMessage text="Audit the connectors" time="14:22" />,
+    );
+    expect(screen.getByText("You · 14:22")).toBeInTheDocument();
+    expect(screen.getByText("Audit the connectors")).toBeInTheDocument();
+    expect(container.querySelector("img")).toBeNull();
+  });
+
+  it("drops the time rather than printing a placeholder", () => {
+    render(<UserMessage text="hi" time={null} />);
+    expect(screen.getByText("You")).toBeInTheDocument();
+  });
+
+  it("shows the steer pill only for a steered message", () => {
+    const { rerender } = render(<UserMessage text="hi" time="14:22" />);
+    expect(screen.queryByText(/steer →/)).toBeNull();
+
+    rerender(
+      <UserMessage
+        text="hi"
+        time="14:22"
+        steer={{ mode: "steer", label: "connector audit" }}
+      />,
+    );
+    expect(screen.getByText("steer → connector audit")).toBeInTheDocument();
+
+    rerender(
+      <UserMessage
+        text="hi"
+        time="14:22"
+        steer={{ mode: "queue", label: "connector audit" }}
+      />,
+    );
+    expect(screen.getByText("follow-up → connector audit")).toBeInTheDocument();
+  });
+});
+
+describe("AssistantMessage (§3.10, §3.11)", () => {
+  it("renders the meta line straight from the done payload", () => {
+    render(
+      <AssistantMessage
+        text="Done."
+        meta={{
+          model: "claude-sonnet-4-6",
+          durationMs: 3800,
+          tokensIn: 1284,
+          tokensOut: 612,
+        }}
+      />,
+    );
+    expect(screen.getByText("Alpaca")).toBeInTheDocument();
+    expect(
+      screen.getByText("sonnet-4-6 · 3.8s · 1284/612 tok"),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the thinking indicator before the first delta and no meta", () => {
+    render(<AssistantMessage text="" streamPhase="thinking" />);
+    expect(screen.getByText("thinking…")).toBeInTheDocument();
+    expect(screen.queryByText(/tok$/)).toBeNull();
+  });
+
+  /**
+   * S2 — the thirteen seconds a thinking model spends before its first token
+   * used to show nothing at all. The reasoning is live, muted, and the
+   * indicator itself is the disclosure.
+   */
+  it("shows the live reasoning inside the thinking indicator", () => {
+    render(
+      <AssistantMessage
+        text=""
+        streamPhase="thinking"
+        reasoning="the user wants the capital of France"
+      />,
+    );
+
+    expect(
+      screen.getByText("the user wants the capital of France"),
+    ).toBeInTheDocument();
+    const toggle = screen.getByRole("button", { name: "thinking… (hide)" });
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("lets the reasoning be collapsed and reopened", () => {
+    render(
+      <AssistantMessage text="" streamPhase="thinking" reasoning="mulling" />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "thinking… (hide)" }));
+    expect(screen.queryByText("mulling")).toBeNull();
+
+    const closed = screen.getByRole("button", { name: "thinking… (show)" });
+    expect(closed).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(closed);
+    expect(screen.getByText("mulling")).toBeInTheDocument();
+  });
+
+  /**
+   * Capped, so a model that thinks for a minute cannot push the composer off
+   * the screen: the panel scrolls inside a fixed height instead of growing.
+   */
+  it("caps the reasoning panel's height rather than growing the row", () => {
+    const { container } = render(
+      <AssistantMessage
+        text=""
+        streamPhase="thinking"
+        reasoning={"a long thought. ".repeat(80)}
+      />,
+    );
+
+    const panel = container.querySelector("[class*='max-h-']");
+    expect(panel).not.toBeNull();
+    expect(panel?.className).toContain("overflow-y-auto");
+  });
+
+  it("shows no reasoning for a turn that has none, or that is past thinking", () => {
+    const { rerender } = render(
+      <AssistantMessage text="" streamPhase="thinking" />,
+    );
+    // No reasoning: the plain label, not a disclosure control.
+    expect(screen.getByText("thinking…")).toBeInTheDocument();
+    expect(screen.queryByRole("button")).toBeNull();
+
+    // A stored message carries none, and reasoning is never shown beside a
+    // finished answer.
+    rerender(
+      <AssistantMessage text="Paris." streamPhase={null} reasoning="mulling" />,
+    );
+    expect(screen.queryByText("mulling")).toBeNull();
+  });
+
+  it("swaps the indicator for the metadata line on done", () => {
+    const { rerender } = render(
+      <AssistantMessage text="par" streamPhase="streaming" />,
+    );
+    expect(screen.queryByText("thinking…")).toBeNull();
+
+    rerender(
+      <AssistantMessage
+        text="partial then whole"
+        streamPhase={null}
+        meta={{ model: "claude-sonnet-4-6", durationMs: 1200 }}
+      />,
+    );
+    expect(screen.getByText("sonnet-4-6 · 1.2s")).toBeInTheDocument();
+  });
+
+  it("renders inline code as a mono chip inside the paragraph", () => {
+    const { container } = render(
+      <AssistantMessage text="run `cargo tree` first" />,
+    );
+    const code = container.querySelector("code");
+    expect(code).not.toBeNull();
+    expect(code).toHaveTextContent("cargo tree");
+  });
+
+  /**
+   * G8 — a completion report, as the daemon's own template writes one. The
+   * transcript printed `- **Research:** …` verbatim while the Library's
+   * preview of the same bytes rendered properly.
+   */
+  it("renders a completion report's emphasis and bullets", () => {
+    const { container } = render(
+      <AssistantMessage
+        text={[
+          "Here is what the run found:",
+          "- **Research:** three connectors are stale",
+          "- **Next:** re-run the audit with `--refresh`",
+        ].join("\n")}
+      />,
+    );
+
+    const strong = [...container.querySelectorAll("strong")].map(
+      (node) => node.textContent,
+    );
+    expect(strong).toEqual(["Research:", "Next:"]);
+    expect(container.querySelectorAll("ul li")).toHaveLength(2);
+    expect(container.querySelector("code")).toHaveTextContent("--refresh");
+
+    // Nothing of the markup is left on screen as characters.
+    expect(container.textContent).not.toContain("**");
+    expect(container.textContent).toContain("three connectors are stale");
+  });
+
+  // GAP-23: the pill is the way back to the run a stored turn belongs to.
+  it("shows the run pill only for a message that names a run", () => {
+    const onOpen = vi.fn();
+    const { rerender } = render(<AssistantMessage text="Sure." />);
+    expect(screen.queryByText(/run →/)).toBeNull();
+
+    rerender(
+      <AssistantMessage
+        text="Starting that now."
+        run={{ label: "b41c8e02", onOpen }}
+      />,
+    );
+    const pill = screen.getByRole("button", { name: "run → b41c8e02" });
+    fireEvent.click(pill);
+    expect(onOpen).toHaveBeenCalledTimes(1);
+  });
+});

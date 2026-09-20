@@ -446,6 +446,78 @@ fn test_openai_reasoning_effort_mapping() {
     assert_eq!(body3["temperature"], 0.5); // temperature preserved
 }
 
+/// M2: `ThinkingConfig::Disabled` is how a small-budget internal call says it
+/// wants no reasoning. Ollama thinks unless told otherwise, so it must hear
+/// `reasoning_effort = "none"`; OpenAI has no "off" and rejects the key on a
+/// model that cannot reason, so the cloud flavour must still say nothing.
+#[test]
+fn test_disabled_thinking_asks_ollama_for_no_reasoning() {
+    use crate::providers::openai::request::build_request_body;
+
+    let request = ChatRequest {
+        messages: Arc::new(vec![ChatMessage::user("extract traits")]),
+        tools: Arc::new(vec![]),
+        model: None,
+        temperature: Some(0.2),
+        max_tokens: Some(256),
+        tool_choice: None,
+        enable_caching: false,
+        thinking: Some(ThinkingConfig::Disabled),
+        context_management: None,
+        ephemeral_system_notice: None,
+    };
+
+    let ollama = build_request_body("qwen3.8:27b", 8192, OpenAiFlavour::Ollama, &request);
+    assert_eq!(
+        ollama["reasoning_effort"], "none",
+        "a local thinking model must be told not to think for this call"
+    );
+    assert!(
+        ollama["temperature"].is_number(),
+        "asking for no reasoning does not strip temperature, unlike asking for more"
+    );
+
+    let cloud = build_request_body("gpt-4o", 4096, OpenAiFlavour::OpenAi, &request);
+    assert!(
+        cloud.get("reasoning_effort").is_none_or(|v| v.is_null()),
+        "OpenAI rejects reasoning_effort on a model that does not reason: {cloud}"
+    );
+}
+
+/// The Ollama flavour changes nothing else: `Enabled`/`Adaptive` map exactly as
+/// they do for OpenAI, and an absent `thinking` still says nothing at all.
+#[test]
+fn test_ollama_flavour_leaves_the_other_thinking_arms_alone() {
+    use crate::providers::openai::request::build_request_body;
+
+    let mut request = ChatRequest {
+        messages: Arc::new(vec![ChatMessage::user("think hard")]),
+        tools: Arc::new(vec![]),
+        model: None,
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        enable_caching: false,
+        thinking: None,
+        context_management: None,
+        ephemeral_system_notice: None,
+    };
+
+    let body = build_request_body("qwen3.8:27b", 8192, OpenAiFlavour::Ollama, &request);
+    assert!(
+        body.get("reasoning_effort").is_none_or(|v| v.is_null()),
+        "no thinking config means the model reasons as it normally would"
+    );
+
+    request.thinking = Some(ThinkingConfig::Adaptive);
+    let body = build_request_body("qwen3.8:27b", 8192, OpenAiFlavour::Ollama, &request);
+    assert_eq!(body["reasoning_effort"], "medium");
+
+    request.thinking = Some(ThinkingConfig::Enabled { budget_tokens: 2048 });
+    let body = build_request_body("qwen3.8:27b", 8192, OpenAiFlavour::Ollama, &request);
+    assert_eq!(body["reasoning_effort"], "high");
+}
+
 #[test]
 fn test_openai_reasoning_response_parsing() {
     let provider = OpenAiProvider::new("test-key".to_string(), None, None, None);
@@ -478,6 +550,39 @@ fn test_openai_reasoning_response_parsing() {
         Some("Let me think step by step about this problem...")
     );
     assert_eq!(response.model, "o3");
+}
+
+/// M1: Ollama 0.34 names the field `reasoning`, not `reasoning_content`.
+/// Reading only the OpenAI spelling dropped every thinking token a local model
+/// produced.
+#[test]
+fn test_ollama_reasoning_field_is_parsed() {
+    let provider = OpenAiProvider::new_without_auth(
+        "qwen3.8:27b".to_string(),
+        "http://localhost:11434/v1".to_string(),
+        None,
+    );
+    let response_json = serde_json::json!({
+        "id": "chatcmpl-244",
+        "model": "qwen3.8:27b",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "Hello, friend!",
+                "reasoning": "The user wants a simple hello in one short sentence."
+            },
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 47, "completion_tokens": 19, "total_tokens": 66}
+    });
+
+    let response = provider.parse_response(response_json).unwrap();
+    assert_eq!(response.content, "Hello, friend!");
+    assert_eq!(
+        response.thinking.as_deref(),
+        Some("The user wants a simple hello in one short sentence.")
+    );
 }
 
 #[test]
@@ -538,6 +643,297 @@ async fn test_openai_sse_reasoning_delta() {
     assert_eq!(text_parts.join(""), "The answer is 42.");
 }
 
+/// M1, the streamed half: a live Ollama frame is
+/// `{"delta":{"content":"","reasoning":"The"}}` — the empty `content` must not
+/// swallow the frame, and the reasoning text must arrive as the same
+/// `ThinkingDelta` Anthropic's thinking already uses.
+#[tokio::test]
+async fn test_ollama_sse_reasoning_delta() {
+    use futures_util::StreamExt;
+
+    let raw = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning\":\"The\"},\"finish_reason\":null}]}\n",
+        "\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\" user\"},\"finish_reason\":null}]}\n",
+        "\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n",
+        "\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":19,\"completion_tokens\":10}}\n",
+        "\n",
+        "data: [DONE]\n",
+        "\n",
+    );
+
+    let byte_stream = futures_util::stream::iter(vec![Ok(bytes::Bytes::from(raw))]);
+    let events: Vec<_> = parse_openai_sse(byte_stream).collect().await;
+
+    let mut thinking_parts = Vec::new();
+    let mut text_parts = Vec::new();
+    for event in &events {
+        match event.as_ref().unwrap() {
+            StreamEvent::ThinkingDelta { thinking } => thinking_parts.push(thinking.clone()),
+            StreamEvent::TextDelta { text } => text_parts.push(text.clone()),
+            _ => {}
+        }
+    }
+    assert_eq!(thinking_parts.join(""), "The user");
+    assert_eq!(text_parts.join(""), "Hi");
+}
+
+// ── V1: one frame, every event it carries ────────────────────────────
+
+/// Collect a raw SSE body into the events the parser yields, in order.
+async fn events_of(raw: &str) -> Vec<StreamEvent> {
+    use futures_util::StreamExt;
+    let byte_stream = futures_util::stream::iter(vec![Ok(bytes::Bytes::from(raw.to_string()))]);
+    parse_openai_sse(byte_stream)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .map(|e| e.expect("no stream error"))
+        .collect()
+}
+
+/// The arguments the accumulator would assemble for one tool index, exactly
+/// the way `collect_stream` does it.
+fn accumulated_args(events: &[StreamEvent], index: usize) -> String {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::InputJsonDelta {
+                index: i,
+                partial_json,
+            } if *i == index => Some(partial_json.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// **V1, the blocker.** Ollama sends a whole tool call in ONE frame: the `id`,
+/// the name and the complete `arguments` string together. The parser used to
+/// return the moment it saw `id` and drop everything after it in that frame,
+/// so every local-model tool call arrived with `input: {}` and the main loop
+/// spent its whole round budget on "missing required parameter".
+///
+/// Captured verbatim from a live `qwen3.8:27b-mtp-q8_0` run.
+#[tokio::test]
+async fn an_ollama_single_frame_tool_call_keeps_its_arguments() {
+    let raw = concat!(
+        r#"data: {"id":"chatcmpl-452","object":"chat.completion.chunk","created":1789787752,"model":"qwen3.8:27b-mtp-q8_0","system_fingerprint":"fp_ollama","choices":[{"index":0,"delta":{"content":"","reasoning":" notes"},"finish_reason":null}]}"#,
+        "\n\n",
+        r#"data: {"id":"chatcmpl-452","object":"chat.completion.chunk","created":1789787752,"model":"qwen3.8:27b-mtp-q8_0","system_fingerprint":"fp_ollama","choices":[{"index":0,"delta":{"content":"","tool_calls":[{"id":"call_8st7b155","index":0,"type":"function","function":{"name":"start_workflow","arguments":"{\"goal\":\"write alpaca notes\"}"}}]},"finish_reason":null}]}"#,
+        "\n\n",
+        r#"data: {"id":"chatcmpl-452","object":"chat.completion.chunk","created":1789787752,"model":"qwen3.8:27b-mtp-q8_0","system_fingerprint":"fp_ollama","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+        "\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    let events = events_of(raw).await;
+
+    let start = events
+        .iter()
+        .find_map(|e| match e {
+            StreamEvent::ToolUseStart { index, id, name } => Some((*index, id.clone(), name.clone())),
+            _ => None,
+        })
+        .expect("the frame announces the tool call");
+    assert_eq!(start, (0, "call_8st7b155".to_string(), "start_workflow".to_string()));
+
+    let args = accumulated_args(&events, 0);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&args).expect("the accumulated arguments are whole JSON");
+    assert_eq!(parsed, serde_json::json!({"goal": "write alpaca notes"}));
+
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            StreamEvent::Done {
+                finish_reason: FinishReason::ToolUse
+            }
+        )),
+        "the finish frame still closes the stream: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::ThinkingDelta { thinking } if thinking == " notes")),
+        "the reasoning frame before it is untouched: {events:?}"
+    );
+}
+
+/// **V1.** Two tool calls in one frame: both starts and both argument strings,
+/// each under its own index.
+#[tokio::test]
+async fn two_tool_calls_in_one_frame_both_survive() {
+    let raw = concat!(
+        r#"data: {"choices":[{"index":0,"delta":{"tool_calls":["#,
+        r#"{"id":"call_a","index":0,"type":"function","function":{"name":"first","arguments":"{\"a\":1}"}},"#,
+        r#"{"id":"call_b","index":1,"type":"function","function":{"name":"second","arguments":"{\"b\":2}"}}"#,
+        r#"]},"finish_reason":null}]}"#,
+        "\n\n",
+        r#"data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+        "\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    let events = events_of(raw).await;
+
+    let starts: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::ToolUseStart { index, name, .. } => Some((*index, name.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        starts,
+        vec![(0, "first".to_string()), (1, "second".to_string())],
+        "both calls are announced, in wire order: {events:?}"
+    );
+    assert_eq!(accumulated_args(&events, 0), r#"{"a":1}"#);
+    assert_eq!(accumulated_args(&events, 1), r#"{"b":2}"#);
+}
+
+/// **V1.** Content and a tool call in the same frame: the text is not swallowed
+/// by the tool call, and the tool call is not swallowed by the text.
+#[tokio::test]
+async fn content_and_a_tool_call_in_one_frame_both_survive() {
+    let raw = concat!(
+        r#"data: {"choices":[{"index":0,"delta":{"content":"Looking that up.","tool_calls":[{"id":"call_c","index":0,"type":"function","function":{"name":"search","arguments":"{\"q\":\"rust\"}"}}]},"finish_reason":null}]}"#,
+        "\n\n",
+        r#"data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+        "\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    let events = events_of(raw).await;
+
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "Looking that up.");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::ToolUseStart { name, .. } if name == "search")),
+        "the tool call in the same frame is not lost: {events:?}"
+    );
+    assert_eq!(accumulated_args(&events, 0), r#"{"q":"rust"}"#);
+}
+
+/// **V1.** A tool call and `finish_reason` in the same frame: the call, the
+/// usage and the done event all come out, in that order.
+#[tokio::test]
+async fn a_tool_call_and_finish_reason_in_one_frame_both_survive() {
+    let raw = concat!(
+        r#"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_d","index":0,"type":"function","function":{"name":"lookup","arguments":"{\"k\":\"v\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":7,"completion_tokens":3}}"#,
+        "\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    let events = events_of(raw).await;
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::ToolUseStart { name, .. } if name == "lookup")),
+        "the call is not eaten by the finish reason: {events:?}"
+    );
+    assert_eq!(accumulated_args(&events, 0), r#"{"k":"v"}"#);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::Usage(u) if u.input_tokens == 7 && u.output_tokens == 3)),
+        "the usage on the finish frame is still read: {events:?}"
+    );
+    let last = events.last().expect("some events");
+    assert!(
+        matches!(
+            last,
+            StreamEvent::Done {
+                finish_reason: FinishReason::ToolUse
+            }
+        ),
+        "done is last: {last:?}"
+    );
+}
+
+/// **V1.** A tool call whose arguments arrive empty (`""`) is still a tool
+/// call: the start is emitted, no empty argument delta is, and the accumulator
+/// turns "nothing" into `{}` rather than a parse error.
+#[tokio::test]
+async fn a_tool_call_with_no_arguments_is_still_a_call() {
+    let raw = concat!(
+        r#"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_e","index":0,"type":"function","function":{"name":"ping","arguments":""}}]},"finish_reason":null}]}"#,
+        "\n\n",
+        r#"data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+        "\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    let events = events_of(raw).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::ToolUseStart { name, .. } if name == "ping")),
+        "the call is announced: {events:?}"
+    );
+    assert_eq!(accumulated_args(&events, 0), "");
+
+    let response = crate::streaming::collect_stream(
+        Box::pin(futures_util::stream::iter(
+            events.into_iter().map(Ok).collect::<Vec<_>>(),
+        )),
+        "mock".to_string(),
+    )
+    .await
+    .expect("the stream collects");
+    assert_eq!(response.tool_calls.len(), 1);
+    assert_eq!(
+        response.tool_calls[0].arguments,
+        serde_json::json!({}),
+        "empty arguments become an empty object, never a parse failure"
+    );
+}
+
+/// **V1, end to end in this crate.** The captured Ollama body, through the
+/// parser and the accumulator both, is one tool call with its arguments —
+/// which is what the agentic loop executes.
+#[tokio::test]
+async fn the_captured_ollama_body_collects_into_a_tool_call_with_arguments() {
+    let raw = concat!(
+        r#"data: {"choices":[{"index":0,"delta":{"content":"","reasoning":"The user"},"finish_reason":null}]}"#,
+        "\n\n",
+        r#"data: {"choices":[{"index":0,"delta":{"content":"","tool_calls":[{"id":"call_8st7b155","index":0,"type":"function","function":{"name":"start_workflow","arguments":"{\"goal\":\"write alpaca notes\"}"}}]},"finish_reason":null}]}"#,
+        "\n\n",
+        r#"data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+        "\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    let byte_stream = futures_util::stream::iter(vec![Ok(bytes::Bytes::from(raw))]);
+    let response = crate::streaming::collect_stream(
+        Box::pin(parse_openai_sse(byte_stream)),
+        "qwen3.8:27b-mtp-q8_0".to_string(),
+    )
+    .await
+    .expect("the stream collects");
+
+    assert_eq!(response.tool_calls.len(), 1, "one tool call");
+    assert_eq!(response.tool_calls[0].name, "start_workflow");
+    assert_eq!(
+        response.tool_calls[0].arguments,
+        serde_json::json!({"goal": "write alpaca notes"}),
+        "the arguments reach the loop"
+    );
+    assert_eq!(response.finish_reason, FinishReason::ToolUse);
+    assert_eq!(response.thinking.as_deref(), Some("The user"));
+}
+
 #[test]
 fn test_openai_ephemeral_notice_placement() {
     use crate::types::{ChatMessage, ChatRequest};
@@ -559,7 +955,8 @@ fn test_openai_ephemeral_notice_placement() {
         ephemeral_system_notice: Some("[budget_notice]\nwatch out\n[/budget_notice]".to_string()),
     };
 
-    let body = super::request::build_request_body("gpt-test", 1024, &request);
+    let body =
+        super::request::build_request_body("gpt-test", 1024, OpenAiFlavour::OpenAi, &request);
     let messages = body["messages"].as_array().unwrap();
     let last = messages.last().unwrap();
     assert_eq!(last["role"], "system");

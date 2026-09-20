@@ -1,12 +1,16 @@
 mod agentic_loop;
 pub mod lead_agent;
+pub mod model_window;
 pub mod plugin_agent;
+pub mod span;
 pub mod steering;
 
 pub use agentic_loop::{
-    LoopConfig, LoopCostAccumulator, LoopFinishReason, LoopResult, run_agentic_loop,
-    run_agentic_loop_routed,
+    AnswerGuard, Correction, LoopConfig, LoopCostAccumulator, LoopFinishReason, LoopResult,
+    StreamCallback, run_agentic_loop, run_agentic_loop_routed,
 };
-pub(crate) use agentic_loop::{compress_context, estimate_messages_tokens};
+pub(crate) use agentic_loop::{compress_context, estimate_messages_tokens, estimate_tools_tokens};
 pub use lead_agent::{LeadAgentResult, run_lead_agent};
+pub use model_window::{routed_context_window, routed_model};
+pub use span::{close_span, open_span, span_detail_for, span_state_for};
 pub use steering::{SteeringInbox, SteeringMsg, SteeringPushError};

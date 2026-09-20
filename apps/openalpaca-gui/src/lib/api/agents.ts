@@ -1,173 +1,117 @@
-/**
- * REST API client for agent endpoints.
- */
+/** `/v1/agents*`, `/v1/agent-templates*`, `/v1/agent-instances`. */
 
-import { ensureConnection } from "./connection";
+import { apiFetch } from "../http";
 import type {
-  Agent,
-  AgentDetailResponse,
   AgentActionResponse,
+  AgentConfigFile,
   AgentConfigResponse,
-  UpdateAgentConfigRequest,
-  CreateAgentRequest,
-  CreateAgentFromTomlRequest,
-} from "../types";
+  AgentDetailResponse,
+  AgentInstance,
+  AgentTemplate,
+} from "./types";
 
-export interface ListAgentsQuery {
-  status?: string;
-  skill?: string;
-  limit?: number;
+/** `GET /v1/agent-templates` */
+export async function listAgentTemplates(
+  signal?: AbortSignal,
+): Promise<AgentTemplate[]> {
+  return await apiFetch<AgentTemplate[]>("/v1/agent-templates", { signal });
 }
 
-/** GET /v1/agents */
-export async function getAgents(query?: ListAgentsQuery): Promise<Agent[]> {
-  const conn = await ensureConnection();
-  const params = new URLSearchParams();
-  if (query?.status) params.set("status", query.status);
-  if (query?.skill) params.set("skill", query.skill);
-  if (query?.limit) params.set("limit", String(query.limit));
-  const qs = params.toString();
-
-  const response = await fetch(
-    `${conn.baseUrl}/v1/agents${qs ? `?${qs}` : ""}`,
-    { headers: { Authorization: `Bearer ${conn.token}` } },
+/** `GET /v1/agent-templates/{id}` */
+export async function getAgentTemplate(
+  id: string,
+  signal?: AbortSignal,
+): Promise<AgentTemplate> {
+  return await apiFetch<AgentTemplate>(
+    `/v1/agent-templates/${encodeURIComponent(id)}`,
+    { signal },
   );
-
-  if (!response.ok) {
-    throw new Error(`Failed to fetch agents: ${response.statusText}`);
-  }
-  return await response.json();
 }
 
-/** GET /v1/agents/{id} — returns agent + metrics */
-export async function getAgent(id: string): Promise<AgentDetailResponse> {
-  const conn = await ensureConnection();
-  const response = await fetch(`${conn.baseUrl}/v1/agents/${id}`, {
-    headers: { Authorization: `Bearer ${conn.token}` },
+/** `POST /v1/agent-templates` */
+export async function createAgentTemplate(
+  config: AgentConfigFile,
+): Promise<{ id: string; status: string }> {
+  return await apiFetch<{ id: string; status: string }>("/v1/agent-templates", {
+    method: "POST",
+    body: { config },
   });
-
-  if (!response.ok) {
-    throw new Error(`Failed to fetch agent ${id}: ${response.statusText}`);
-  }
-  return await response.json();
 }
 
-/** POST /v1/agents/{id}/action — action: "pause" | "resume" */
+/** `PUT /v1/agent-templates/{id}` */
+export async function updateAgentTemplate(
+  id: string,
+  config: AgentConfigFile,
+): Promise<{ id: string; status: string }> {
+  return await apiFetch<{ id: string; status: string }>(
+    `/v1/agent-templates/${encodeURIComponent(id)}`,
+    { method: "PUT", body: { config } },
+  );
+}
+
+/** `DELETE /v1/agent-templates/{id}` — archives the template. */
+export async function deleteAgentTemplate(
+  id: string,
+): Promise<{ id: string; status: string }> {
+  return await apiFetch<{ id: string; status: string }>(
+    `/v1/agent-templates/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+}
+
+/** `GET /v1/agent-instances` */
+export async function listAgentInstances(
+  signal?: AbortSignal,
+): Promise<AgentInstance[]> {
+  return await apiFetch<AgentInstance[]>("/v1/agent-instances", { signal });
+}
+
+/** `GET /v1/agents/{id}` — includes lifetime `metrics`. */
+export async function getAgent(
+  id: string,
+  signal?: AbortSignal,
+): Promise<AgentDetailResponse> {
+  return await apiFetch<AgentDetailResponse>(
+    `/v1/agents/${encodeURIComponent(id)}`,
+    { signal },
+  );
+}
+
+/** `GET /v1/agents/{id}/config` — carries the optimistic-lock version. */
+export async function getAgentConfig(
+  id: string,
+  signal?: AbortSignal,
+): Promise<AgentConfigResponse> {
+  return await apiFetch<AgentConfigResponse>(
+    `/v1/agents/${encodeURIComponent(id)}/config`,
+    {
+      signal,
+    },
+  );
+}
+
+/** `PUT /v1/agents/{id}/config` — 409 when `config_version` is stale. */
+export async function updateAgentConfig(
+  id: string,
+  config: AgentConfigFile,
+  configVersion: number,
+): Promise<void> {
+  await apiFetch<void>(`/v1/agents/${encodeURIComponent(id)}/config`, {
+    method: "PUT",
+    body: { config, config_version: configVersion },
+  });
+}
+
+/** `POST /v1/agents/{id}/action` — pauses/resumes a running *instance*. */
 export async function performAgentAction(
   id: string,
   action: "pause" | "resume",
 ): Promise<AgentActionResponse> {
-  const conn = await ensureConnection();
-  const response = await fetch(`${conn.baseUrl}/v1/agents/${id}/action`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${conn.token}`,
+  return await apiFetch<AgentActionResponse>(
+    `/v1/agents/${encodeURIComponent(id)}/action`,
+    {
+      method: "POST",
+      body: { action },
     },
-    body: JSON.stringify({ action }),
-  });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error || `Agent action ${action} failed: ${response.statusText}`);
-  }
-  return await response.json();
-}
-
-/** GET /v1/agents/{id}/config — returns config + config_version */
-export async function getAgentConfig(id: string): Promise<AgentConfigResponse> {
-  const conn = await ensureConnection();
-  const response = await fetch(`${conn.baseUrl}/v1/agents/${id}/config`, {
-    headers: { Authorization: `Bearer ${conn.token}` },
-  });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error || `Failed to fetch agent config: ${response.statusText}`);
-  }
-  return await response.json();
-}
-
-/** PUT /v1/agents/{id}/config — optimistic locking update */
-export async function updateAgentConfig(
-  id: string,
-  req: UpdateAgentConfigRequest,
-): Promise<{ agent_id: string; config_version: number; status: string }> {
-  const conn = await ensureConnection();
-  const response = await fetch(`${conn.baseUrl}/v1/agents/${id}/config`, {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${conn.token}`,
-    },
-    body: JSON.stringify(req),
-  });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    if (response.status === 409) {
-      throw new Error("CONFIG_CONFLICT");
-    }
-    throw new Error(data.error || `Failed to update agent config: ${response.statusText}`);
-  }
-  return await response.json();
-}
-
-/** POST /v1/agents — create new agent */
-export async function createAgent(
-  req: CreateAgentRequest,
-): Promise<{ agent_id: string; status: string }> {
-  const conn = await ensureConnection();
-  const response = await fetch(`${conn.baseUrl}/v1/agents`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${conn.token}`,
-    },
-    body: JSON.stringify(req),
-  });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error || `Failed to create agent: ${response.statusText}`);
-  }
-  return await response.json();
-}
-
-/** POST /v1/agents/from-toml — create from raw TOML */
-export async function createAgentFromToml(
-  req: CreateAgentFromTomlRequest,
-): Promise<{ agent_id: string; status: string }> {
-  const conn = await ensureConnection();
-  const response = await fetch(`${conn.baseUrl}/v1/agents/from-toml`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${conn.token}`,
-    },
-    body: JSON.stringify(req),
-  });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error || `Failed to create agent from TOML: ${response.statusText}`);
-  }
-  return await response.json();
-}
-
-/** DELETE /v1/agents/{id} — archive agent */
-export async function deleteAgent(
-  id: string,
-): Promise<{ agent_id: string; status: string }> {
-  const conn = await ensureConnection();
-  const response = await fetch(`${conn.baseUrl}/v1/agents/${id}`, {
-    method: "DELETE",
-    headers: { Authorization: `Bearer ${conn.token}` },
-  });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error || `Failed to delete agent: ${response.statusText}`);
-  }
-  return await response.json();
+  );
 }

@@ -18,11 +18,11 @@ tracing-subscriber.workspace = true
 [features]
 default = []
 # Enable Telegram connector
-telegram = ["dep:teloxide", "dep:sha2"]
+telegram = ["dep:teloxide"]
 # Enable iMessage connector (macOS only)
-imessage = ["dep:rusqlite", "dep:sha2"]
+imessage = ["dep:rusqlite"]
 # Enable Discord connector
-discord = ["dep:twilight-gateway", "dep:twilight-http", "dep:twilight-model", "dep:sha2", "dep:reqwest", "dep:rustls"]
+discord = ["dep:twilight-gateway", "dep:twilight-http", "dep:twilight-model", "dep:reqwest", "dep:rustls"]
 # Future: WeChat connector
 # wechat = []
 
@@ -56,9 +56,6 @@ teloxide = { workspace = true, optional = true }
 
 # Optional: iMessage (only when feature enabled, macOS only)
 rusqlite = { workspace = true, optional = true }
-
-# Optional: SHA-256 hashing for attachment dedup (telegram + imessage + discord)
-sha2 = { workspace = true, optional = true }
 
 # Optional: Discord (only when feature enabled)
 twilight-gateway = { workspace = true, optional = true }

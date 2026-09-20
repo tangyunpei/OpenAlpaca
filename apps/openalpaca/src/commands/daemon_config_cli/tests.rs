@@ -26,7 +26,7 @@ fn test_string_to_toml_value_int() {
 
 #[test]
 fn test_string_to_toml_value_float() {
-    assert_eq!(string_to_toml_value("3.14"), toml::Value::Float(3.14));
+    assert_eq!(string_to_toml_value("2.5"), toml::Value::Float(2.5));
 }
 
 #[test]

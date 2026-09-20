@@ -497,3 +497,34 @@ You are a test agent.
     assert_eq!(inst.capabilities[1].name, "workspace_read");
     assert_eq!(inst.capabilities[2].name, "workspace_write");
 }
+
+// ── GAP-24: an uninstall expires the withdrawal tombstones ───────────────
+
+/// C5 leaves a tombstone behind every withdrawn plugin template so
+/// `spawn_subagent` can say *who* took it away. Nothing expired those, because
+/// no uninstall path existed: after the plugin's directory is gone the
+/// tombstone would name a plugin that is not there any more, for good.
+///
+/// GAP-24's uninstall clears them by plugin, which is what lets a re-install
+/// under the same directory name start clean.
+#[test]
+fn clearing_a_plugins_tombstones_leaves_every_other_plugins_alone() {
+    let reg = AgentRegistry::new();
+    reg.remove_plugin_template("reader", "notion");
+    reg.remove_plugin_template("writer", "notion");
+    reg.remove_plugin_template("summarizer", "linear");
+
+    assert_eq!(reg.template_tombstone("reader").as_deref(), Some("notion"));
+
+    let cleared = reg.clear_plugin_tombstones("notion");
+
+    assert_eq!(cleared, 2, "both of notion's tombstones are expired");
+    assert!(reg.template_tombstone("reader").is_none());
+    assert!(reg.template_tombstone("writer").is_none());
+    assert_eq!(
+        reg.template_tombstone("summarizer").as_deref(),
+        Some("linear"),
+        "another plugin's tombstone is untouched"
+    );
+    assert_eq!(reg.clear_plugin_tombstones("notion"), 0, "idempotent");
+}

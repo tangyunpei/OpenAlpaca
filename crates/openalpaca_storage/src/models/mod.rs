@@ -2,6 +2,7 @@
 //!
 //! Organizes core, identity, and task models into a single module.
 
+pub mod artifact;
 pub mod conversation;
 mod core;
 pub mod feedback;
@@ -13,13 +14,14 @@ pub mod skill_health;
 pub mod subagent;
 pub mod task;
 
+pub use artifact::{ArtifactKind, ArtifactOrigin};
 pub use conversation::{Conversation, ConversationMessage};
 pub use core::{Agent, EventLog, Memory, MemoryRole};
-pub use file_asset::{AttachmentRef, FileAsset, FileAssetStatus};
+pub use file_asset::{AttachmentRef, FileAsset, FileAssetStatus, MessageArtifact};
 pub use identity::{ExternalIdentity, GlobalUser, LinkToken};
 pub use memory::{MemoryKind, MemoryScope, MemorySource, MemoryV2};
 pub use subagent::{AgentMetrics, AgentTaskHistory, SubAgentConfig};
 pub use feedback::MessageFeedback;
-pub use skill_execution::{SkillExecutionEntry, ToolExecutionEntry};
+pub use skill_execution::{PREVIEW_CHARS, SkillExecutionEntry, ToolExecutionEntry};
 pub use skill_health::SkillHealthMetrics;
 pub use task::{OutcomeKind, Task, TaskStatus};

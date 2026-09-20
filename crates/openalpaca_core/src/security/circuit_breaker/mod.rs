@@ -148,10 +148,26 @@ impl ToolCircuitBreaker {
         }
     }
 
-    /// Record a transient tool failure. Opens the circuit if the threshold is reached.
+    /// Record a transient tool failure that belongs to no run.
     ///
     /// Returns `true` if the circuit transitioned to Open (i.e., it was just tripped).
     pub fn record_failure(&self, agent_id: &str, tool_name: &str) -> bool {
+        self.record_failure_for_task(agent_id, tool_name, None)
+    }
+
+    /// Record a transient tool failure. Opens the circuit if the threshold is reached.
+    ///
+    /// `task_id` is the run whose call failed (GAP-10): a trip announced with
+    /// it shows up in that run's own event log rather than only in the global
+    /// one. `None` for a failure from outside any run.
+    ///
+    /// Returns `true` if the circuit transitioned to Open (i.e., it was just tripped).
+    pub fn record_failure_for_task(
+        &self,
+        agent_id: &str,
+        tool_name: &str,
+        task_id: Option<&str>,
+    ) -> bool {
         if !self.enabled {
             return false;
         }
@@ -201,6 +217,7 @@ impl ToolCircuitBreaker {
                         tool_name: tool_name.to_string(),
                         consecutive_failures: entry.consecutive_failures,
                         reset_after_secs: self.reset_timeout_secs,
+                        task_id: task_id.map(|t| t.to_string()),
                         timestamp: Utc::now(),
                     });
                     return true;

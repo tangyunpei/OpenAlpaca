@@ -94,7 +94,7 @@ fn build_api_keys_from_provider_config(
                     let enc = match encryptor {
                         Some(ref e) => e,
                         None => {
-                            encryptor = Some(KeyEncryptor::load_or_generate()?);
+                            encryptor = Some(KeyEncryptor::from_env()?);
                             encryptor.as_ref().unwrap()
                         }
                     };
@@ -171,6 +171,7 @@ mod tests {
             keys: Some(vec![key_config.clone()]),
             default_model: None,
             default_max_tokens: None,
+            request_timeout_secs: None,
         };
 
         let reload_keys = build_api_keys_from_provider_config(

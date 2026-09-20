@@ -9,32 +9,25 @@ pub mod routing;
 pub mod streaming;
 pub mod types;
 
-// TODO: Remove backward-compat re-exports once all consumers use canonical paths
-// (apps/ imports were updated in the reorganize branch; external consumers may remain)
-pub use config::settings_service;
-pub use keys::credential_discovery;
-pub use keys::key_encryption;
-pub use keys::key_pool;
-pub use keys::secret_store;
-pub use routing::cost_tracker;
-pub use routing::model_registry;
-pub use routing::provider_usage;
-pub use routing::rate_limiter;
-pub use routing::router;
+/// Loopback HTTP server used by the crate's own tests. Test-only: nothing in a
+/// shipped binary can reach it.
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use cli_backend::{
     ClaudeCodeCliProvider, CliBackendConfig, CliBackendStatus, CliBackendsConfig, CodexCliProvider,
     detect_cli_backends,
 };
 pub use config::llm_config::{
-    EmbeddingsConfig, EndpointsConfig, EnvVarsConfig, KeyConfig, LlmConfig, LlmRouterConfig,
-    LlmRuntimeConfig, ModelConfigEntry, OrchestratorLlmConfig, ProviderConfig, ProviderDefaults,
-    SecurityConfig, TimeoutsConfig, WebSearchConfig, build_provider, build_provider_with_runtime,
-    build_router, build_router_with_secret_store, collect_secret_refs, migrate_llm_secrets,
-    read_config, resolve_key_from_config, reverse_migrate_llm_secrets, write_config,
+    EmbeddingsConfig, EndpointsConfig, EnvVarsConfig, KeyConfig, LlmRouterConfig, LlmRuntimeConfig,
+    ModelConfigEntry, OrchestratorLlmConfig, ProviderConfig, ProviderDefaults, SecurityConfig,
+    TimeoutsConfig, WebSearchConfig, build_router, build_router_with_secret_store,
+    collect_secret_refs, migrate_llm_secrets, read_config, resolve_key_from_config,
+    reverse_migrate_llm_secrets, write_config,
 };
 pub use config::settings_service::{
-    LlmSettingsService, OrchestratorConfigResponse, UpdateOrchestratorRequest,
+    ConfigWriter, LlmSettingsService, OrchestratorConfigResponse, ProviderEnabledOutcome,
+    SetProviderEnabledError, UpdateOrchestratorRequest,
 };
 pub use embedder::{EmbedError, Embedder, build_embedder, build_embedder_with_runtime};
 pub use error::LlmError;
@@ -52,13 +45,16 @@ pub use keys::secret_store::{
 pub use routing::cost_tracker::{
     CacheStats, CallRecord, CostSnapshot, CostTracker, ModelUsageStats, UsageStats,
 };
-pub use routing::model_registry::{ModelEntry, ModelInfo, ModelRegistry, PricingInfo};
+pub use routing::model_registry::{
+    DiscoveredModel, ModelEntry, ModelInfo, ModelRegistry, PricingInfo, ProviderDiscovery,
+};
 pub use routing::provider_usage::{ExternalUsage, ProviderUsageSummary, ProviderUsageTracker};
 pub use routing::rate_limiter::{
     CircuitState, RateLimitConfig, RateLimiterRegistry, backoff_with_jitter,
 };
 pub use routing::router::{
-    LlmCapacityInfo, LlmRouter, LlmRouterError, ProviderEntry, RequestContext, RouterRequest,
+    LlmCapacityInfo, LlmRouter, LlmRouterError, ProviderEntry, RequestContext, RoutedStream,
+    RouterRequest,
 };
 pub use streaming::collect_stream;
 pub use types::*;
@@ -70,6 +66,17 @@ pub trait LlmProvider: Send + Sync {
     fn name(&self) -> &str;
     fn supports_tools(&self) -> bool;
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError>;
+
+    /// Whether a call to this provider needs an API key at all.
+    ///
+    /// A provider that runs on the owner's own machine does not (Ollama). The
+    /// router serves such a provider through a synthetic internal slot rather
+    /// than failing on an empty key pool, and its discovery is not gated on the
+    /// pool either — no placeholder key is ever written to config or shown to
+    /// the owner (L1).
+    fn requires_key(&self) -> bool {
+        true
+    }
 
     /// Chat using a specific API key. Default delegates to `chat()`.
     /// Providers override this to inject the key into their HTTP requests.
@@ -85,6 +92,24 @@ pub trait LlmProvider: Send + Sync {
     /// Default returns empty. Providers override with real API calls.
     async fn list_models_with_key(&self, _key: &str) -> Result<Vec<String>, LlmError> {
         Ok(vec![])
+    }
+
+    /// The provider's models, with whatever metadata its API volunteers.
+    ///
+    /// The default knows only the ids [`Self::list_models_with_key`] returns.
+    /// A provider that can say more — context length, image and tool support —
+    /// overrides this so the registry does not have to guess (L2). `key` is
+    /// empty for a provider that [needs none](Self::requires_key).
+    async fn discover_models(
+        &self,
+        key: &str,
+    ) -> Result<Vec<crate::routing::model_registry::DiscoveredModel>, LlmError> {
+        Ok(self
+            .list_models_with_key(key)
+            .await?
+            .into_iter()
+            .map(crate::routing::model_registry::DiscoveredModel::bare)
+            .collect())
     }
 
     /// Whether this provider supports streaming responses.

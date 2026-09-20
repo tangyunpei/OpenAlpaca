@@ -1,9 +1,10 @@
 use crate::agent::registry::AgentRegistry;
 use crate::runner::steering::SteeringInbox;
+use crate::session_log::{SessionLogHandle, SessionLogService};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio_util::sync::CancellationToken;
 
 /// Status of a task entry in the in-memory registry.
@@ -15,6 +16,12 @@ pub enum TaskEntryStatus {
     Failed,
     Cancelled,
     Paused,
+    /// A run a previous incarnation left in flight (§5.6b). The registry is
+    /// empty at boot, so nothing ever *enters* this state in memory — the
+    /// variant exists because [`TaskEntryStatus`] is the total projection of
+    /// `TaskStatus`, and a resurrected DB row must not be reported as
+    /// something it is not.
+    Interrupted,
 }
 
 impl TaskEntryStatus {
@@ -26,11 +33,15 @@ impl TaskEntryStatus {
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
             Self::Paused => "paused",
+            Self::Interrupted => "interrupted",
         }
     }
 
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Interrupted
+        )
     }
 }
 
@@ -140,6 +151,15 @@ pub struct SharedContext {
     steering_inboxes: DashMap<String, Arc<SteeringInbox>>,
     /// Active workflow task_ids per lane, keyed by lane_key.
     active_workflows_by_lane: DashMap<String, Vec<String>>,
+    /// The session event log service, parked here at boot the way the event
+    /// bus is (R28) so the runner can reach it without a global. `None` in
+    /// every context that has no home store — most tests.
+    session_log: OnceLock<Arc<SessionLogService>>,
+    /// The session log handle of each running workflow, keyed by task_id —
+    /// the exact analogue of `steering_inboxes` above, and for the same
+    /// reason: a producer that only knows the task id (`push_steering`) must
+    /// be able to narrate into the run's transcript.
+    task_session_logs: DashMap<String, SessionLogHandle>,
 }
 
 impl SharedContext {
@@ -150,16 +170,111 @@ impl SharedContext {
             cancellation_tokens: Mutex::new(HashMap::new()),
             steering_inboxes: DashMap::new(),
             active_workflows_by_lane: DashMap::new(),
+            session_log: OnceLock::new(),
+            task_session_logs: DashMap::new(),
         }
     }
 
+    /// Attach the session event log service. Called once, at daemon boot;
+    /// a second call is ignored (the first service keeps its writers).
+    pub fn set_session_log(&self, service: Arc<SessionLogService>) {
+        if self.session_log.set(service).is_err() {
+            tracing::warn!("Session log service already attached — keeping the first");
+        }
+    }
+
+    /// The session event log service, if this daemon has one.
+    pub fn session_log(&self) -> Option<&Arc<SessionLogService>> {
+        self.session_log.get()
+    }
+
+    /// Remember a running workflow's session log handle, so a producer that
+    /// only knows the task id can narrate into the right transcript.
+    pub fn register_task_session_log(&self, task_id: &str, handle: SessionLogHandle) {
+        self.task_session_logs.insert(task_id.to_string(), handle);
+    }
+
+    /// The session log of a running workflow, if one was registered.
+    pub fn task_session_log(&self, task_id: &str) -> Option<SessionLogHandle> {
+        self.task_session_logs.get(task_id).map(|e| e.value().clone())
+    }
+
+    /// Forget a workflow's session log (cleanup at detach, beside the
+    /// steering inbox's).
+    pub fn remove_task_session_log(&self, task_id: &str) {
+        self.task_session_logs.remove(task_id);
+    }
+
     /// Register a cancellation token for a task.
+    ///
+    /// A run takes its token from
+    /// [`run_cancellation_token`](Self::run_cancellation_token) instead, so that
+    /// a cancel which arrived against a claim is not replaced away.
     pub fn register_cancellation_token(&self, task_id: &str, token: CancellationToken) {
         let mut tokens = self
             .cancellation_tokens
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         tokens.insert(task_id.to_string(), token);
+    }
+
+    /// Claim the run slot for `task_id`: register a token iff none is
+    /// registered, and say whether the claim succeeded.
+    ///
+    /// The compare-and-set behind D5's `start` (`POST /v1/tasks/{id}/action
+    /// {"action":"start"}`), which re-launches a stored row **under its own
+    /// id**. A registered token is what "this id is already running" means
+    /// everywhere else in the daemon, so it is also the lock: reading the map
+    /// and then dispatching would let two simultaneous `start`s both pass, and
+    /// two lead agents on one task id fight over its `state_version` and its
+    /// run log.
+    ///
+    /// "Running" here means **through finalisation**, not "inside the agentic
+    /// loop" (R45): a lead agent's background half keeps writing to the row
+    /// long after its loop returns, and the terminal status and result land
+    /// last. So a run releases its token only after
+    /// `finalize_task_with_outcome` (`dispatcher/lead_agent.rs`) — otherwise
+    /// this claim would succeed on a row that still says `running`, and the
+    /// finishing run's result would land on the row the new one now owns.
+    ///
+    /// **The token this inserts is the run's own**, returned here and taken
+    /// again by the dispatch through
+    /// [`run_cancellation_token`](Self::run_cancellation_token). It used to be a
+    /// placeholder the dispatch replaced a few lines later, which swallowed any
+    /// `cancel` that landed in between — the row read `running`, `cancel_task`
+    /// answered `true`, and the cancelled token was then dropped on the floor
+    /// (final review, Minor). A caller that claims and then fails to dispatch
+    /// must [`remove_cancellation_token`](Self::remove_cancellation_token), or
+    /// the id stays claimed until the daemon restarts.
+    pub fn claim_run_slot(&self, task_id: &str) -> Option<CancellationToken> {
+        use std::collections::hash_map::Entry;
+        let mut tokens = self
+            .cancellation_tokens
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        match tokens.entry(task_id.to_string()) {
+            Entry::Occupied(_) => None,
+            Entry::Vacant(slot) => Some(slot.insert(CancellationToken::new()).clone()),
+        }
+    }
+
+    /// The token the run under `task_id` must watch: whatever a claim already
+    /// installed, or a fresh one registered now.
+    ///
+    /// This is the other half of [`claim_run_slot`](Self::claim_run_slot)'s
+    /// contract. A dispatch that minted its own token and registered it over the
+    /// claim's lost every cancel issued in the window between the two; taking
+    /// the claimed token means such a cancel is already set on the token the
+    /// agentic loop checks at the top of its first round.
+    pub fn run_cancellation_token(&self, task_id: &str) -> CancellationToken {
+        let mut tokens = self
+            .cancellation_tokens
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        tokens
+            .entry(task_id.to_string())
+            .or_default()
+            .clone()
     }
 
     /// Trigger cancellation for a task. Returns `true` if the token was found.
@@ -177,6 +292,10 @@ impl SharedContext {
     }
 
     /// Remove a cancellation token after the task has finished (cleanup).
+    ///
+    /// "Finished" means the row is terminal, not that the agentic loop
+    /// returned — see [`claim_run_slot`](Self::claim_run_slot) for why the
+    /// difference matters.
     pub fn remove_cancellation_token(&self, task_id: &str) {
         let mut tokens = self
             .cancellation_tokens

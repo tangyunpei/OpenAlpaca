@@ -83,6 +83,74 @@ fn test_sink_send_done_with_delegation() {
     }
 }
 
+/// **U3(c).** A turn whose *only* attachment was withheld has an empty
+/// `attachments_used` and a non-empty `attachments_skipped` — which is exactly
+/// the case the old two-function split dropped on the floor, because the
+/// caller picked `send_done` (no attachment info at all) whenever `used` was
+/// empty.
+#[test]
+fn the_done_frame_carries_what_never_reached_the_model() {
+    let mgr = ChatStreamManager::new();
+    let (_stream_id, mut rx, sink) = mgr.create_stream("user:gui");
+
+    let skipped = SkippedAttachment {
+        id: "img-1".to_string(),
+        reason: "the answering model does not support image input".to_string(),
+    };
+    sink.send_done_with_attachments(
+        "I cannot see it",
+        "qwen3:8b",
+        10,
+        5,
+        90,
+        Vec::new(),
+        vec![skipped.clone()],
+        None,
+    );
+
+    match rx.try_recv().unwrap() {
+        ChatStreamEvent::Done {
+            attachments_used,
+            attachments_skipped,
+            ..
+        } => {
+            assert!(attachments_used.is_none());
+            assert_eq!(attachments_skipped, Some(vec![skipped]));
+        }
+        other => panic!("Expected Done event, got {other:?}"),
+    }
+}
+
+/// Nothing withheld leaves the frame exactly as it was.
+#[test]
+fn a_clean_turn_omits_both_attachment_fields() {
+    let mgr = ChatStreamManager::new();
+    let (_stream_id, mut rx, sink) = mgr.create_stream("user:gui");
+
+    sink.send_done_with_attachments(
+        "hi",
+        "qwen3:8b",
+        1,
+        1,
+        1,
+        vec!["doc-1".to_string()],
+        Vec::new(),
+        None,
+    );
+
+    match rx.try_recv().unwrap() {
+        ChatStreamEvent::Done {
+            attachments_used,
+            attachments_skipped,
+            ..
+        } => {
+            assert_eq!(attachments_used, Some(vec!["doc-1".to_string()]));
+            assert!(attachments_skipped.is_none());
+        }
+        other => panic!("Expected Done event, got {other:?}"),
+    }
+}
+
 #[test]
 fn test_remove() {
     let mgr = ChatStreamManager::new();
@@ -139,70 +207,22 @@ fn test_sink_refreshes_last_active() {
     assert!(mgr.get_receiver(&stream_id).is_some());
 }
 
-// ── chunk_by_words tests ──────────────────────────────────────────
-
+/// **S2.** Reasoning reaches the stream as its own event, carrying the text —
+/// the placeholder `thinking` event keeps its own meaning ("started, nothing
+/// written yet") for a model that emits no reasoning at all.
 #[test]
-fn test_chunk_by_words_empty() {
-    assert!(chunk_by_words("", 3).is_empty());
-}
+fn sink_sends_reasoning_text() {
+    let mgr = ChatStreamManager::new();
+    let (_stream_id, mut rx, sink) = mgr.create_stream("user:gui");
 
-#[test]
-fn test_chunk_by_words_single_word() {
-    let chunks = chunk_by_words("hello", 3);
-    assert_eq!(chunks, vec!["hello"]);
-}
+    sink.send_thinking();
+    sink.send_reasoning("the user is asking a classic");
 
-#[test]
-fn test_chunk_by_words_exact_boundary() {
-    let chunks = chunk_by_words("one two three four five six", 3);
-    assert_eq!(chunks, vec!["one two three ", "four five six"]);
-}
-
-#[test]
-fn test_chunk_by_words_preserves_newlines() {
-    let text = "hello\nworld\nfoo bar";
-    let chunks = chunk_by_words(text, 2);
-    // "hello\nworld\n" then "foo bar"
-    assert_eq!(chunks.len(), 2);
-    // Concatenation must reproduce original
-    let reassembled: String = chunks.iter().copied().collect();
-    assert_eq!(reassembled, text);
-}
-
-#[test]
-fn test_chunk_by_words_preserves_multiple_spaces() {
-    let text = "hello   world   foo";
-    let chunks = chunk_by_words(text, 2);
-    let reassembled: String = chunks.iter().copied().collect();
-    assert_eq!(reassembled, text);
-}
-
-#[test]
-fn test_chunk_by_words_preserves_leading_whitespace() {
-    let text = "  hello world foo bar";
-    let chunks = chunk_by_words(text, 2);
-    let reassembled: String = chunks.iter().copied().collect();
-    assert_eq!(reassembled, text);
-}
-
-#[test]
-fn test_chunk_by_words_preserves_trailing_whitespace() {
-    let text = "hello world  ";
-    let chunks = chunk_by_words(text, 2);
-    let reassembled: String = chunks.iter().copied().collect();
-    assert_eq!(reassembled, text);
-}
-
-#[test]
-fn test_chunk_by_words_fewer_words_than_chunk_size() {
-    let chunks = chunk_by_words("hi there", 5);
-    assert_eq!(chunks, vec!["hi there"]);
-}
-
-#[test]
-fn test_chunk_by_words_code_block_with_indentation() {
-    let text = "```\n  fn main() {\n    println!(\"hello\");\n  }\n```";
-    let chunks = chunk_by_words(text, 3);
-    let reassembled: String = chunks.iter().copied().collect();
-    assert_eq!(reassembled, text);
+    assert!(matches!(rx.try_recv().unwrap(), ChatStreamEvent::Thinking));
+    match rx.try_recv().unwrap() {
+        ChatStreamEvent::Reasoning { text } => {
+            assert_eq!(text, "the user is asking a classic")
+        }
+        other => panic!("expected Reasoning, got {other:?}"),
+    }
 }

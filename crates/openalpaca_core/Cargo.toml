@@ -28,6 +28,9 @@ tokio-util.workspace = true
 chrono.workspace = true
 regex.workspace = true
 toml.workspace = true
+toml_edit.workspace = true
+file-lock.workspace = true
+tempfile.workspace = true
 dashmap.workspace = true
 reqwest.workspace = true
 futures-util.workspace = true
@@ -47,7 +50,6 @@ openalpaca_storage.workspace = true
 [dev-dependencies]
 # test-utils exposes McpClient::disconnected_for_tests for the MCP bridge tests.
 openalpaca_mcp = { path = "../openalpaca_mcp", features = ["test-utils"] }
-tempfile.workspace = true
 tracing-test.workspace = true
 # test-util enables tokio::test(start_paused) for the plugin-agent poll-loop tests.
 tokio = { workspace = true, features = ["test-util"] }

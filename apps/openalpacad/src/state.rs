@@ -8,6 +8,7 @@ use openalpaca_core::{
     agent::AgentConfigService,
     chat::{ChatService, ChatStreamManager},
     gateway::Gateway,
+    orchestrator::Orchestrator,
     security::confirmation::ConfirmationBroker,
 };
 use openalpaca_storage::Database;
@@ -16,12 +17,29 @@ use openalpaca_storage::Database;
 #[derive(Clone)]
 pub struct AppState {
     pub instance_id: String,
+    /// When this run began — stamped at the top of `async_main`, before the
+    /// listener binds, so `GET /v1/status`'s `uptime_secs` measures the
+    /// daemon's own life and not the process table's idea of it.
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    /// Whether `openalpaca daemon start` marked this run as the owner of
+    /// `store::daemon_log_path()` — read once, from
+    /// `store::MANAGED_LOG_ENV`, before anything else touches the
+    /// environment. `GET /v1/status`'s `log_path` is `null` whenever this is
+    /// `false`, even if `daemon.log` happens to exist: a GUI- or
+    /// `cargo run`-launched daemon must not claim a file some other daemon's
+    /// CLI manager wrote (Important #3, T44 fix round 1).
+    pub managed_log: bool,
     pub token: String,
     pub event_broadcaster: EventBroadcaster,
     pub db: Database,
     pub shutdown_tx: mpsc::Sender<()>,
     pub connector_manager: crate::managers::connector::ConnectorManager,
     pub gateway: Arc<Gateway>,
+    /// The same orchestrator the gateway's handler wraps, held directly for the
+    /// routes that address a *run* rather than send a message: `rerun` and
+    /// `start` (GAP-06) dispatch stored rows, which is orchestrator work with
+    /// no turn, no lane history and no model behind it.
+    pub orchestrator: Arc<Orchestrator>,
     pub llm_settings_service: Option<Arc<openalpaca_llm::LlmSettingsService>>,
     pub agent_config_service: Option<Arc<AgentConfigService>>,
     pub chat_service: Option<Arc<ChatService>>,
@@ -36,5 +54,12 @@ pub struct AppState {
     pub daemon_config_path: PathBuf,
     pub web_search_config: Arc<ArcSwap<openalpaca_llm::WebSearchConfig>>,
     pub confirmation_broker: Option<Arc<ConfirmationBroker>>,
-    pub plugin_manager: Option<Arc<openalpaca_plugins::PluginManager>>,
+    /// GAP-18's read path: `GET /v1/tools` renders the live registry. Cloned
+    /// **before** the registry moves into `Orchestrator::new` (`main.rs`), the
+    /// way the plugin manager's clone already is.
+    pub tool_registry: Arc<openalpaca_core::tools::ToolRegistry>,
+    /// The ENABLE axis (extension design §6.2 #15). Non-optional: both
+    /// supervisors are constructed unconditionally, so no "subsystem absent"
+    /// path exists to report and `/v1/extensions` has no `503`.
+    pub extensions: Arc<crate::managers::extensions::Extensions>,
 }

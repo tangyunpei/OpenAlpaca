@@ -262,7 +262,12 @@ async fn reader_task<R>(
                     .and_then(|m| m.as_str())
                     .unwrap_or("unknown error")
                     .to_string();
-                Err(PluginError::RpcError { code, message })
+                let data = err_obj.get("data").cloned();
+                Err(PluginError::RpcError {
+                    code,
+                    message,
+                    data,
+                })
             } else {
                 warn!(id, "response has neither result nor error");
                 continue;

@@ -8,6 +8,7 @@ pub mod intent;
 pub mod skill;
 pub mod task_state;
 
+mod attachment_adapt;
 mod bootstrap;
 mod context_builder;
 mod direct_send;
@@ -18,8 +19,10 @@ mod handlers;
 mod memory_ops;
 mod query_handler;
 mod summary;
+mod task_launch;
 mod task_ops;
 
+pub use task_launch::{RerunOutcome, StartOutcome, TaskLaunchError};
 pub use task_ops::{TaskActionError, apply_task_action};
 // Routing V2 shared cores, re-exported for the main-loop builtin tools
 // (`memory_store` / `memory_forget` / `task_status`).
@@ -28,6 +31,16 @@ pub(crate) use task_ops::task_status_query;
 
 pub use skill::catalog as skill_catalog;
 pub use skill::router as skill_router;
+
+/// Who the main loop is, for everything that attributes a tool call (T4).
+///
+/// The main loop is not an agent template, so it has no template id — and
+/// until now it had no id at all: `ToolContext.agent_id` was `None`, which
+/// every consumer rendered as the literal `unknown`, up to and including the
+/// GUI's confirmation card ("unknown is blocked on this"). This is the name
+/// the rest of the system already uses for this path, in the router's own
+/// WARN lines and in the CLI's log output.
+pub const MAIN_LOOP_AGENT_ID: &str = "orchestrator";
 
 #[cfg(test)]
 mod tests;
@@ -53,6 +66,14 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, RwLock};
 use uuid::Uuid;
+
+/// Takes a path out of the filesystem watcher's poll set (S8).
+///
+/// The watcher is `openalpaca_wake`'s and core cannot see it, so the daemon
+/// hands in a closure over its handle — the same inversion as
+/// [`ConnectorStatusProvider`], one function rather than a trait because the
+/// contract is one verb.
+pub type PathUnwatcher = Arc<dyn Fn(&std::path::Path) + Send + Sync>;
 
 /// Provides connector status to the orchestrator without core depending on openalpaca_connectors.
 /// Implemented at daemon level (same inversion pattern as MessageHandler, BuiltInTool).
@@ -106,6 +127,10 @@ pub struct FollowupItem {
     pub workspace_path: Option<String>,
     /// Task the item was queued from, if any.
     pub source_task_id: Option<String>,
+    /// S5 — the turn that queued this item could not answer a tool
+    /// confirmation, so neither can the turn it runs as. Read off the row, so
+    /// it survives a restart between the promise and the run.
+    pub unattended: bool,
 }
 
 /// Executes queued follow-ups. Implemented at daemon level over
@@ -169,6 +194,12 @@ pub struct Orchestrator {
     pub bootstrap_document: Arc<RwLock<Option<BootstrapDocument>>>,
     /// Path to BOOTSTRAP.md on disk (for deletion on completion).
     bootstrap_path: Arc<RwLock<Option<std::path::PathBuf>>>,
+    /// How to take a path out of the filesystem watcher's poll set (S8).
+    ///
+    /// Set by the daemon, which owns the watcher; `None` everywhere else.
+    /// Called *before* a path this process is about to delete goes away, so
+    /// the poll scanner never walks a file the daemon itself removed.
+    path_unwatcher: Arc<RwLock<Option<PathUnwatcher>>>,
     /// Daemon-level config (memory limits, costs, execution defaults, etc.).
     pub daemon_config: Arc<ArcSwap<DaemonConfig>>,
     /// Atomic guard to prevent concurrent bootstrap completion (race condition fix).
@@ -186,6 +217,11 @@ pub struct Orchestrator {
     /// Mirrors `llm_metadata_map`: populated when a dispatch creates a task,
     /// removed by bridge after reading.
     pub delegation_map: DashMap<Uuid, crate::gateway::DelegationInfo>,
+    /// U3 — per-request record of the turn's attachments that never reached
+    /// the model. Mirrors `delegation_map`: written by the attachment
+    /// adaptation, removed by the bridge after reading. Written only when
+    /// something was actually withheld, so an ordinary turn touches nothing.
+    pub attachments_skipped_map: DashMap<Uuid, Vec<crate::gateway::SkippedAttachment>>,
     /// Optional broker for interactive tool confirmation (set post-construction via `set_confirmation_broker()`).
     pub confirmation_broker: Arc<RwLock<Option<Arc<crate::security::confirmation::ConfirmationBroker>>>>,
     /// Context manager for resolving dynamic context (memory, user profile, etc.) via PromptBuilder.
@@ -336,12 +372,14 @@ impl Orchestrator {
             skill_router,
             bootstrap_document: Arc::new(RwLock::new(None)),
             bootstrap_path: Arc::new(RwLock::new(None)),
+            path_unwatcher: Arc::new(RwLock::new(None)),
             daemon_config,
             bootstrap_completing: AtomicBool::new(false),
             connector_status,
             connector_sender,
             llm_metadata_map: DashMap::new(),
             delegation_map: DashMap::new(),
+            attachments_skipped_map: DashMap::new(),
             confirmation_broker: Arc::new(RwLock::new(None)),
             context_manager,
             persona_version: Arc::new(AtomicU64::new(0)),
@@ -479,6 +517,28 @@ impl Orchestrator {
     pub fn set_bootstrap_path(&self, path: std::path::PathBuf) {
         if let Ok(mut guard) = self.bootstrap_path.write() {
             *guard = Some(path);
+        }
+    }
+
+    /// Set how a watched path is taken out of the poll set (S8).
+    ///
+    /// The filesystem watcher lives in `openalpaca_wake`, which core cannot
+    /// see; the daemon hands in a closure over its `FileWatchHandle`. Same
+    /// post-construction inversion as [`Self::set_bootstrap_path`].
+    pub fn set_path_unwatcher(&self, unwatch: PathUnwatcher) {
+        if let Ok(mut guard) = self.path_unwatcher.write() {
+            *guard = Some(unwatch);
+        }
+    }
+
+    /// Ask the watcher to stop polling `path`, if a daemon wired one in.
+    pub(super) fn unwatch_path(&self, path: &std::path::Path) {
+        let hook = match self.path_unwatcher.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        if let Some(hook) = hook {
+            hook(path);
         }
     }
 

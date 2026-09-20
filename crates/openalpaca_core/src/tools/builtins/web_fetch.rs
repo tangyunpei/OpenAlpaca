@@ -90,12 +90,14 @@ impl BuiltInTool for WebFetchTool {
         .map_err(|_| "Response body read timed out after 15s".to_string())?
         .map_err(|e: String| e)?;
 
-        // Truncate output to 8KB (char-boundary-safe)
-        let mut end = 8192.min(body.len());
-        while end > 0 && !body.is_char_boundary(end) {
-            end -= 1;
-        }
-        Ok(body[..end].to_string())
+        // §5.4 (P-16/C-2): the 8 KB cut that used to happen here is **gone**.
+        // It was unrelated to every other bound in the system and silently
+        // discarded the part of a page a model had asked for; the page now
+        // travels whole to the one place that decides what the model sees —
+        // the loop's `tool_result_inline_bytes`, which spills the rest to the
+        // session's `results/` where `read_result` can page it. The 1 MB
+        // download bound above still keeps this from being unbounded.
+        Ok(body)
     }
 }
 
@@ -104,10 +106,11 @@ pub(super) fn web_fetch_tool() -> RegisteredTool {
         definition: ToolDefinition {
             name: "web_fetch".to_string(),
             description: "Fetch and return the text content of a web page. Only text-based \
-                content types are supported (HTML, JSON, XML, plain text). Response is \
-                truncated to 8KB. Use web_search first to find relevant URLs, then \
-                web_fetch to retrieve specific pages. For downloading files, use \
-                shell_execute with curl instead."
+                content types are supported (HTML, JSON, XML, plain text). Up to 1MB is \
+                downloaded; a large page is spilled to the session's result store and you \
+                are handed the first part plus a result_ref to page with read_result. Use \
+                web_search first to find relevant URLs, then web_fetch to retrieve \
+                specific pages. For downloading files, use shell_execute with curl instead."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",

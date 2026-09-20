@@ -43,8 +43,8 @@ enabled, `check_subagent_status`, `wait_for_subagents`, plus
 `post_update` + `queue_followup` under steering) + workspace tools +
 `memory_search`, unioned with the same extension set as the main loop —
 every installed MCP-bridged (`<server>__<tool>`) and plugin-provided
-(`<plugin>::<tool>`) tool minus `execution.skill_defaults.global_tool_deny`
-— and a per-request `invoke_skill` instance, so the lead can run catalog
+(`<plugin>::<tool>`) tool whose extension is enabled — and a per-request
+`invoke_skill` instance, so the lead can run catalog
 skills and connected integrations itself or delegate them. The lead's
 `SandboxPolicy` allowlist is extended from the final tool definitions at
 run time (template denials still win); subagents stay template-scoped —
@@ -66,6 +66,18 @@ front door (below) IS a direct loop invocation per user turn
 (`orchestrator/query_handler/simple_query_handler.rs`); skill invocation
 invokes it too (`orchestrator/skill/invocation.rs`,
 `orchestrator/skill/invoke_executor.rs`).
+
+The two invocations that answer a user's turn — the main-loop front
+door and `skill/invocation.rs` — set `LoopConfig.stream_callback` from
+that turn's sink when a client is watching one
+(`chat::delta_forwarder`, one forwarder shared by both), so a
+`/slash` skill's answer and its reasoning reach the client delta by
+delta exactly like the main loop's (K1). A **plugin-contributed** skill
+does not: `invoke_plugin_skill` gets a finished answer back over the
+plugin protocol, so it keeps the chat service's single fallback delta —
+nothing simulates chunks for it. Every caller with nobody watching a
+stream (scheduled skills, connectors, the follow-up runner, the nested
+`invoke_skill` tool) passes no sink and runs the non-streaming path.
 
 ## The Main-Loop Front Door (Routing V2)
 
@@ -95,13 +107,13 @@ captured):
 
 **Tool surface** (`tools/builtins/main_loop.rs::main_loop_tool_set`):
 the base picks (keyword-suggested tools under
-`tool_selection = "core_union"`, or the whole registry minus the global
-deny list under `"full"`) unioned with a per-request set —
+`tool_selection = "core_union"`, or the whole registry under `"full"`)
+unioned with a per-request set —
 `start_workflow`, `task_status`, `memory_store` + `memory_forget`
 (DB-gated), the globally-registered `memory_search` definition, every
-installed extension tool (MCP-bridged `<server>__<tool>` and
-plugin-provided `<plugin>::<tool>`, minus
-`execution.skill_defaults.global_tool_deny` — the opt-out), and
+installed extension tool whose extension is enabled (MCP-bridged
+`<server>__<tool>` and plugin-provided `<plugin>::<tool>`; a disabled
+server or plugin contributes nothing on either surface), and
 `invoke_skill` (catalog-skill invocation through the nested-skill
 executor; present when an LLM router is configured). So installed
 MCP/plugin tools and `invoke_skill` are on the DEFAULT surface, not just
@@ -116,6 +128,16 @@ global registry. Budgets come from `main_loop_max_rounds` /
 id, title, status, progress counters — injected deliberately outside the
 compose-engine layers (Tier-1/Tier-2 caches would serve stale status) —
 plus `<workflow_relay_rules>` relay guidance.
+
+**History provenance (H1)**: a turn that delegated stores its assistant
+row carrying the run's id (`gateway/persistence.rs`). When that row is
+replayed into a later turn's history it carries one fixed extra line —
+`[This run was started by a start_workflow tool call, which returned task
+<id>.]` (`orchestrator/context_builder.rs::delegation_provenance_line`) —
+so the model can tell its own reported delegations from prose it could
+imitate. The line exists **only in the replay**: the stored row, the
+transcript and every client read the text as written, and an assistant
+row with no `task_id` gets nothing.
 
 **Delegation contract**: `start_workflow`
 (`tools/builtins/start_workflow.rs`) enforces `max_workflows_per_lane`
@@ -295,6 +317,77 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
 - **Compaction telemetry** — each compaction publishes
   `SystemEvent::CompactionTriggered` on the event bus with utilization
   and summary metrics.
+- **Answer guard (H3)** — `LoopConfig.answer_guard`
+  (`runner/agentic_loop/answer_guard.rs`), consulted at the same point as
+  the steering completion guard: after the model returns text with no
+  tool calls, before the loop returns `Complete`. The guard owns the
+  judgement and supplies both strings; the **loop owns the policy** —
+  exactly one corrective round (paid for by a bonus round, so a turn on
+  its last affordable round still ends with content), and if the second
+  answer is rejected too, the guard's `runtime_note` is **appended** to
+  that answer (`"{answer}\n\n{runtime_note}"`; the note alone when the
+  answer is blank). The answer is never taken away. `None` for every
+  caller but the main loop, which costs an un-guarded loop no branch at
+  all.
+
+  The only production guard is `RunClaimGuard`
+  (`orchestrator/query_handler/run_claim_guard.rs`). Together with H1 and
+  H2 it is the three-layer answer to a chat turn announcing a workflow it
+  never started:
+
+  1. **Provenance (H1)** — a delegating assistant row replays into later
+     history with one fixed line naming the `start_workflow` call and the
+     task it returned, so the model can tell its own reported delegations
+     from prose it could imitate (replay only; see *History provenance*
+     above).
+  2. **The rules (H2)** — `<workflow_relay_rules>` and
+     `start_workflow`'s own description agree that a run starts ONLY
+     through a call in this turn, that a task id may be stated only when
+     that call returned it, and that an explicit workflow request or an
+     ask to write or save an artifact IS that call.
+  3. **The guard (H3, N1–N3)** — because prompting is not a guarantee.
+
+  The guard's trigger is a **fact, not a reading of the sentence** (N1).
+  Rounds 13 and 14 tried to classify intent — was this sentence
+  *claiming a start*? — and failed in both directions at once: an
+  unrelated "Started reviewing your notes… task 1a2b3c9d already
+  finished" read as a claim, while ten ordinary ways to announce a start
+  slipped past the verb list. What is checkable is all that is left:
+
+  - the turn's `start_workflow` result cell is empty — a turn that did
+    delegate is skipped, its id is on `delegation`;
+  - the answer states a token in an **id position** (after a `task id` /
+    `task_id` / `run id` / `task` cue and the punctuation a model wraps
+    an id in) that **looks like an id**: a UUID, or an 8+ hex run that is
+    not a plain number. Every decimal digit is a hex digit, so a date
+    (`20260919`) and a counter (`12345678`) are excluded by requiring one
+    of `a`–`f`;
+  - the token matches no run of this turn's owner
+    (`TaskRepository::owner_has_task_id_prefix`, a prefix so the 8-hex
+    short form counts). The scope is `task_status`'s — `created_by`, not
+    `source_lane` (J1) — so relaying a run the CLI lane started into the
+    GUI lane is true and is left alone, while another owner's run never
+    excuses a claim. The identity is `ToolContext::created_by()`, the one
+    `start_workflow` stamps on the row.
+
+  An answer that states no id touches no database. Stating an id that
+  answers to nothing is an error whichever way it happened, so the
+  corrective round is never wasted on a truthful answer, and both
+  sentences the guard writes are true in either case (N2/N3): the note
+  names the id(s), says no task of this user has them and that no
+  `start_workflow` call was made in this turn, and gives both ways out —
+  call `start_workflow` now, or correct or remove the id; the runtime
+  line is *"Note from OpenAlpaca: no workflow was started in this turn,
+  and no task with id `<id>` exists. Ask again to start one."* The broad
+  trigger is safe precisely because the consequence is proportionate: a
+  false positive costs one round and one true line under the answer.
+
+  **Streaming**: the first answer's text deltas have already been sent
+  when the guard rejects it. `done.content` is authoritative (S13) — the
+  GUI replaces the bubble on `done`, and the corrected or annotated
+  answer is what is persisted as the assistant row. A client that only
+  appends deltas shows the rejected answer, then the second one, until
+  `done` settles it.
 
 ## System-Prompt Memoization
 

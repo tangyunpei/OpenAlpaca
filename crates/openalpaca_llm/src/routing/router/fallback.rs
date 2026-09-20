@@ -9,22 +9,36 @@ impl LlmRouter {
         original_model: &str,
         request: &RouterRequest,
     ) -> Result<ChatResponse, LlmRouterError> {
-        // 1. Try model-level fallback chains.
-        //    Per-request fallback_models override the global chain when non-empty.
-        let chain = if !request.fallback_models.is_empty() {
-            request.fallback_models.clone()
-        } else {
-            self.fallback_chains.get(original_model).cloned().unwrap_or_default()
-        };
-        for fallback_model in &chain {
-            match self.try_model(fallback_model, request).await {
-                Ok(response) => return Ok(response),
+        // 1. Walk the ladder (L3): the request's own chain, then the model's
+        //    configured chain, then `[orchestrator] fallback_models`, then the
+        //    effective default model. A rung nothing can serve is skipped
+        //    rather than attempted, and the model that does answer is
+        //    announced — the caller asked for a different one.
+        for fallback_model in self.substitution_ladder(original_model, &request.fallback_models) {
+            if !self.is_routable(&fallback_model) {
+                continue;
+            }
+            match self.try_model(&fallback_model, request).await {
+                Ok(response) => {
+                    self.note_substitution(original_model, &fallback_model);
+                    return Ok(response);
+                }
                 Err(_) => continue,
             }
         }
 
-        // 2. Try CLI backend fallback
-        let provider_type = self.model_registry.resolve_provider(original_model);
+        // 2. Try CLI backend fallback.
+        //
+        // Only for a provider that is actually loaded. The CLI backends are a
+        // map of their own, keyed by provider, and they outlive a
+        // `deregister_provider` — so without this gate a model whose provider
+        // the owner had just switched off could still be answered by Claude
+        // Code or Codex on that owner's machine. A disable unloads what it
+        // turns off, including its stand-in (R58c).
+        let provider_type = self
+            .model_registry
+            .resolve_provider(original_model)
+            .filter(|pt| self.has_provider(pt));
         if let Some(pt) = provider_type
             && let Some(cli_backend) = self.cli_backends.get(&pt)
         {
@@ -74,6 +88,11 @@ impl LlmRouter {
             }
         }
 
+        // Nothing on the ladder was even routable: this is not "the fallbacks
+        // failed", it is "no provider is switched on". Say which it is (L3).
+        if self.effective_default_model().is_none() {
+            return Err(LlmRouterError::NoRoutableModel);
+        }
         Err(LlmRouterError::AllFallbacksFailed)
     }
 }

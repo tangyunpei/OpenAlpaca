@@ -22,6 +22,7 @@ use crate::orchestrator::{ConversationContext, Orchestrator};
 use crate::prompt_ctx::SectionPriority;
 use crate::prompt_ctx::sources::{ContextRequest, ExecutionPath};
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
+use crate::security::capabilities::Allowlist;
 use crate::security::sandbox::SandboxManager;
 use crate::security::sandbox::SandboxPolicy;
 use crate::tools::builtins::ScriptToolBuiltIn;
@@ -46,6 +47,18 @@ impl Orchestrator {
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
         stream_id: Option<&str>,
+        // S5 — the client behind this turn cannot answer a confirmation.
+        unattended: bool,
+        // K1 — the turn's live text rail. A file-based skill's loop streams
+        // through it exactly like the main loop's; a plugin-backed skill
+        // cannot (its answer comes back finished over the plugin protocol)
+        // and keeps the chat service's single fallback delta.
+        turn_sink: Option<&crate::chat::TurnSinkHandle>,
+        // A1 — the turn's own attachments, already adapted. A file-based
+        // skill's loop carries them in its user message exactly as the main
+        // loop does; a plugin-backed skill takes a string over the plugin
+        // protocol and cannot, so it records them skipped.
+        attachments: Option<&crate::orchestrator::handler_attachments::TurnAttachments>,
     ) -> Result<SkillInvocationResult, String> {
         // Look up the catalog entry (for skill_dir) and load full skill (Level 2)
         let entry = self
@@ -68,6 +81,15 @@ impl Orchestrator {
             ref executor,
         } = entry.source
         {
+            // A1 — `skill/invoke` takes a plain query string over the plugin
+            // protocol: there is nowhere to put an image, and inlining a
+            // document's text into the query would be exactly the silent
+            // degradation the settled rules forbid. Say so instead.
+            self.skip_turn_attachments(
+                request_id,
+                attachments,
+                crate::orchestrator::handler_attachments::skipped::PLUGIN_SKILL,
+            );
             return self
                 .invoke_plugin_skill(
                     request_id,
@@ -81,6 +103,7 @@ impl Orchestrator {
                     scope_ctx,
                     stream_id,
                     &skill_doc,
+                    unattended,
                 )
                 .await;
         }
@@ -92,16 +115,24 @@ impl Orchestrator {
             String::new()
         };
 
-        // ── Resolve model context window (drives Layer 5 trimming + budget) ──
-        let model_window = self
-            .llm_router
-            .as_ref()
-            .and_then(|r| {
-                let default = r.default_model();
-                r.model_registry().get_model_info(&default)
-            })
-            .map(|info| info.context_window as usize)
-            .unwrap_or(200_000);
+        // ── Resolve the answering model ONCE (A1) ────────────────────────────
+        //
+        // S3's sibling site: the *configured* default is not necessarily the
+        // model that answers — on an install whose provider is not configured
+        // L3 substitutes one, and reading the pin's window budgets the skill
+        // against a window it will never get.
+        //
+        // This function used to resolve twice and disagree with itself: the
+        // window came from `routed_context_window(r, None)` — the router's
+        // configured default — while the multimodal adaptation walked the
+        // ladder from `config_for_loop.model`. One resolution now answers
+        // both, off the pin the loop will actually pass to the router. Both
+        // arms of the `config_for_loop` assembly below build from
+        // `self.loop_config`, so this **is** that pin. `None` (no router,
+        // nothing routable) means "change nothing"; `None` for the window
+        // (no registered window, or a window of 0) keeps the 200 000 default.
+        let answering = self.answering_model(self.loop_config.model.as_deref());
+        let model_window = answering.as_ref().and_then(|m| m.window).unwrap_or(200_000);
 
         // Extract prompt components
         let system_persona = match self.system_persona.read() {
@@ -145,11 +176,24 @@ impl Orchestrator {
         // Resolve tools via capability model, falling back to legacy name-based matching.
         // Intent-suggested tools are intentionally NOT merged here to maintain
         // skill-level tool isolation (P1-1 security fix).
+        //
+        // **S4 moment 2** on both branches (extension design §7.2, §6.2 #10):
+        // a capability whose every provider is gone — or a legacy allowed name
+        // whose owning extension is not `Enabled` — is announced with an
+        // attributed `warn!` + `ExtensionCapabilityWithheld {
+        // Moment::SurfaceAssembly }`. The **refusal** on total loss is C5's;
+        // this is the attribution that lands with the event. The dedup scope is
+        // the request, which has no `ToolContext` yet at this point.
+        let withheld_scope = request_id.to_string();
         let mut tool_defs: Vec<openalpaca_llm::ToolDefinition> =
             if !skill_doc.frontmatter.requires_capabilities.is_empty() {
                 // New path: capability-based resolution
+                let resolution = self
+                    .tool_registry
+                    .resolve_capabilities(&skill_doc.frontmatter.requires_capabilities, &[]);
                 self.tool_registry
-                    .tools_for_capabilities(&skill_doc.frontmatter.requires_capabilities)
+                    .announce_withheld(&resolution, None, Some(&withheld_scope));
+                resolution.defs
             } else if !skill_doc.frontmatter.tools.allow.is_empty() {
                 // Legacy fallback: direct tool name matching
                 let names = &skill_doc.frontmatter.tools.allow;
@@ -167,16 +211,46 @@ impl Orchestrator {
                         .filter(|n| !resolved_names.contains(&n.as_str()))
                         .map(|n| n.as_str())
                         .collect();
-                    tracing::warn!(
-                        "Skill '{}' references unknown tools: {:?}",
-                        skill_name,
-                        missing
+                    // Every miss the ledger attributes is announced with the
+                    // extension that took it; the rest keep today's
+                    // unattributed warning, because a typo and a withdrawal are
+                    // indistinguishable for a name nothing ever owned.
+                    let unattributed = self.tool_registry.announce_withheld_names(
+                        missing,
+                        None,
+                        Some(&withheld_scope),
                     );
+                    if !unattributed.is_empty() {
+                        tracing::warn!(
+                            "Skill '{}' references unknown tools: {:?}",
+                            skill_name,
+                            unattributed
+                        );
+                    }
                 }
                 resolved
             } else {
                 vec![]
             };
+
+        // **Fail closed — the total-loss refusal** (design §6.2 #10, §10
+        // case 3). One predicate across both resolution branches: refuse when
+        // **any** required capability is wholly withheld, or — on the legacy
+        // `tools.allow` branch — when every allowed name belongs to a
+        // withdrawn extension. Partial loss is never gating; it runs and
+        // carries the chat-visible prefix below. The SKILL.md body still tells
+        // the model to use the missing tool, so the reliable outcome of
+        // running anyway is a confidently fabricated result.
+        let requirements = self
+            .tool_registry
+            .skill_requirements(&skill_doc.frontmatter);
+        if !requirements.is_satisfiable() {
+            tracing::warn!(
+                skill = skill_name,
+                "Refusing skill: a required capability is wholly withheld"
+            );
+            return Err(requirements.refusal(skill_name));
+        }
 
         // Force-include persona tools during bootstrap mode
         if self.is_bootstrapping() {
@@ -189,16 +263,11 @@ impl Orchestrator {
             }
         }
 
-        // Apply deny list (both paths)
+        // Apply the skill's own deny list (both paths). There is no global
+        // per-tool deny — the ENABLE axis is per extension (design §11).
         let skill_deny = &skill_doc.frontmatter.tools.deny;
-        let global_deny = &self
-            .daemon_config
-            .load()
-            .execution
-            .skill_defaults
-            .global_tool_deny;
 
-        tool_defs.retain(|t| !skill_deny.contains(&t.name) && !global_deny.contains(&t.name));
+        tool_defs.retain(|t| !skill_deny.contains(&t.name));
 
         // Resolve script tools from skill's scripts/ directory
         let script_tool_defs: Vec<openalpaca_llm::ToolDefinition> = skill_doc
@@ -277,7 +346,7 @@ impl Orchestrator {
         let connector_summaries: Arc<Vec<ConnectorSummary>> =
             Arc::new(connector_summaries_vec);
 
-        let (tools_for_loop, policy_opt, config_for_loop);
+        let (tools_for_loop, policy_opt, mut config_for_loop);
         if !tool_defs.is_empty() {
             let tool_names_log: Vec<&str> =
                 tool_defs.iter().map(|d| d.name.as_str()).collect();
@@ -288,15 +357,12 @@ impl Orchestrator {
                 tool_names_log
             );
             let resolved: Vec<String> = tool_defs.iter().map(|t| t.name.clone()).collect();
-            let mut denied_caps: Vec<String> = skill_deny.clone();
-            for g in global_deny {
-                if !denied_caps.contains(g) {
-                    denied_caps.push(g.clone());
-                }
-            }
+            let denied_caps: Vec<String> = skill_deny.clone();
             policy_opt = Some(SandboxPolicy {
                 agent_id: "orchestrator".to_string(),
-                allowed_capabilities: resolved,
+                // Closed set: the skill may call exactly the tools resolved for
+                // it (this arm only runs when that resolution is non-empty).
+                allowed_capabilities: Allowlist::only(resolved),
                 denied_capabilities: denied_caps,
                 require_confirmation_for: skill_doc
                     .frontmatter
@@ -325,6 +391,14 @@ impl Orchestrator {
                     .load()
                     .security
                     .auto_approve_confirmations,
+                // M6/S5: inside the turn, yes — but "the turn" is not always
+                // a client that can answer. A `/slash` from a piped
+                // `openalpaca chat`, and every scheduled skill, reach the
+                // model through this tier and nothing else, so the
+                // declaration the caller made travels here too. `false`
+                // (the GUI, an interactive CLI, a connector) is today's
+                // behaviour exactly: raise the prompt and wait.
+                unattended,
             });
             let skill_cfg = &self.daemon_config.load().execution.skill_defaults;
             config_for_loop = LoopConfig {
@@ -345,6 +419,31 @@ impl Orchestrator {
             policy_opt = None;
             config_for_loop = self.loop_config.clone();
         }
+        // §5.4's one threshold, the same one the lead agent
+        // (`runner/lead_agent/mod.rs`), its subagents
+        // (`runner/lead_agent/tools.rs`) and the main loop
+        // (`query_handler/simple_query_handler.rs`) all set from the daemon
+        // config. A skill-invocation loop is an agentic loop like any other —
+        // without this it kept `LoopConfig`'s compiled 32 KiB fallback whatever
+        // `[orchestrator.sessions] tool_result_inline_bytes` said, so the one
+        // knob that bounds what a tool result costs the context did not reach
+        // the skill path at all. Set after both arms because both build their
+        // config from `self.loop_config`.
+        config_for_loop.tool_result_inline_bytes = self
+            .daemon_config
+            .load()
+            .orchestrator
+            .sessions
+            .tool_result_inline_bytes;
+
+        // **K1 — the skill tier streams like any other turn.** Set the same
+        // way the main loop sets it (`query_handler/simple_query_handler.rs`),
+        // from the same shared `delta_forwarder`, and set after both arms
+        // because both build their config from `self.loop_config` — which
+        // never carries a callback. With no sink (a scheduled skill, a
+        // connector, the follow-up runner, a nested `invoke_skill`) this is
+        // `None` and the loop takes the non-streaming path it always took.
+        config_for_loop.stream_callback = turn_sink.map(crate::chat::delta_forwarder);
 
         // ── Route system-prompt + message-list assembly through the layered
         // compose engine (Phase 5 Commit 1 — Skill Invocation migration).
@@ -481,12 +580,57 @@ impl Orchestrator {
             mode: DynamicContextMode::Default,
         };
 
+        // **U1 — the skill tier adapts too.** This handed the lane's history
+        // to the model exactly as it came out of the database: an image part
+        // replayed into a local model that has no vision reached the provider
+        // as an `image_url` it cannot serve, and a document part reached a
+        // model with no native document support with nothing done about its
+        // extracted text (U2). `answering` is the one resolution taken at the
+        // top of this function; `None` (no router, nothing routable) changes
+        // nothing.
+        let adapted_recent: Vec<ChatMessage> = match &answering {
+            None => ctx.recent_messages.clone(),
+            Some(model) => ctx
+                .recent_messages
+                .iter()
+                .map(|msg| match &msg.parts {
+                    None => msg.clone(),
+                    Some(parts) => {
+                        let mut adapted = msg.clone();
+                        adapted.parts = Some(self.adapt_parts_for_model(parts.clone(), model));
+                        adapted
+                    }
+                })
+                .collect(),
+        };
+
+        // **A1 — the turn's own attachments reach the skill's model.** This
+        // tier is a model-answering path like the main loop, and it was the
+        // only one that dropped the parts: a `/slash` with a file sent the
+        // model the bare question, and the turn's result still called the file
+        // used. The parts arrive adapted for the model the *turn* resolved;
+        // they are run through this tier's own resolution as well, because the
+        // two can differ (the tier does not honour `model_override`), and a
+        // part the answering model cannot take must never be sent. Already
+        // adapted for the same model, this is a no-op.
+        let current_user_turn = match attachments.map(|a| a.message_parts(query)) {
+            Some(parts) if !parts.is_empty() => {
+                let parts = crate::orchestrator::query_handler::sanitize_parts_for_dispatch(parts);
+                let parts = match &answering {
+                    Some(model) => self.adapt_parts_for_model(parts, model),
+                    None => parts,
+                };
+                Some(ChatMessage::user_with_parts(parts))
+            }
+            _ => Some(ChatMessage::user(query)),
+        };
+
         let history_input = HistoryInput {
             lane_tip_fingerprint: [0u8; 32],
             summary: ctx.summary.as_deref().map(Arc::<str>::from),
             summary_wrap_mode: SummaryWrapMode::UntrustedWrap,
-            recent_messages: Arc::new(ctx.recent_messages.clone()),
-            current_user_turn: Some(ChatMessage::user(query)),
+            recent_messages: Arc::new(adapted_recent),
+            current_user_turn,
             mode: HistoryMode::Default,
         };
 
@@ -525,7 +669,7 @@ impl Orchestrator {
             + composed.token_budget.dynamic_context_tokens)
             as usize;
         budget.register_section("system_prompt", system_prompt_tokens);
-        budget.register_section("tools", tools_for_loop.len() * 200);
+        budget.register_section("tools", crate::runner::estimate_tools_tokens(&tools_for_loop));
 
         // --- Context Budget Telemetry ---
         {
@@ -577,10 +721,15 @@ impl Orchestrator {
 
             // Per-request sandbox with ToolContext
             let tool_ctx = ToolContext {
-                agent_id: None,
+                // V5: the skill is the identity at hand. Left `None`, every
+                // event and every refusal this tier logged said
+                // `agent_id="unknown"`, so a refused tool could not be traced
+                // back to what invoked it.
+                agent_id: Some(format!("skill:{skill_name}")),
                 task_id: None,
                 owner_id: owner_id.map(|s| s.to_string()),
                 workspace_id: scope_ctx.workspace_id.clone(),
+                request_workspace_root: scope_ctx.request_workspace_root.clone(),
                 skill_stack: vec![skill_name.to_string()],
                 effective_constraints: None,
                 lane_key: Some(lane_key.to_string()),
@@ -589,6 +738,12 @@ impl Orchestrator {
                 principal: None,
                 scope: None,
                 workspace_path: None,
+                // No agent instance: this path is not a subagent lane.
+                agent_instance_id: None,
+                // Filled in by the sandbox at dispatch (T28), which owns the bus.
+                session_id: None,
+                session_log: None,
+                event_bus: None,
             };
             let needs_clone = !skill_doc.frontmatter.scripts.is_empty()
                 || !skill_doc.frontmatter.depends_on.is_empty();
@@ -627,7 +782,6 @@ impl Orchestrator {
                             .load()
                             .security
                             .auto_approve_confirmations, // auto_approve
-                        global_deny.clone(),            // global_tool_deny
                         self.daemon_config.load().security.circuit_breaker.clone(),
                         self.daemon_config
                             .load()
@@ -683,6 +837,11 @@ impl Orchestrator {
                 self.bus.clone(),
                 &self.daemon_config.load().security.circuit_breaker,
             );
+            // V2: as on the other tiers — a refusal that nobody could approve
+            // leaves a row, not only a bus event.
+            if let Some(ref db) = self.db {
+                per_request_sandbox.set_db(db.clone());
+            }
             if let Ok(guard) = self.confirmation_broker.read() {
                 if let Some(broker) = guard.as_ref() {
                     per_request_sandbox.set_confirmation_broker(broker.clone());
@@ -766,6 +925,9 @@ impl Orchestrator {
                 input_tokens: result.total_input_tokens,
                 output_tokens: result.total_output_tokens,
                 cost_usd: call_cost,
+                // A skill invocation is not a workflow — no run to attribute
+                // it to, and none invented (GAP-10).
+                task_id: None,
                 timestamp: Utc::now(),
             });
 
@@ -788,10 +950,52 @@ impl Orchestrator {
             inv_cost_usd = call_cost;
             inv_model_used = result.model_used.clone();
 
+            // **K2(b) — a skill turn never ends with nothing either.**
+            //
+            // The same few lines the main loop has
+            // (`query_handler/simple_query_handler.rs`, V3): a loop that
+            // exhausted its rounds, its cost budget or the model's output
+            // limit used to hand the client `""`, which on the skill tier
+            // then went through output validation and arrived as an empty
+            // answer. The runtime writes the line instead — the reason in the
+            // user's terms plus the last tool error — and it is the turn's
+            // content, so it streams, persists and returns like an answer.
+            //
+            // It bypasses validation and the `max_length` cut on purpose: it
+            // is the chat layer's sentence, not the skill's declared output,
+            // exactly as the partial-loss prefix below is. An LLM **error**
+            // keeps its error channel (V3's recorded deviation) and only its
+            // message changes.
+            let no_answer = result.no_answer_line();
             if let LoopFinishReason::Error(ref err) = result.finish_reason
                 && result.final_content.trim().is_empty()
             {
-                return Err(format!("LLM error: {}", err));
+                return Err(no_answer.unwrap_or_else(|| format!("LLM error: {}", err)));
+            }
+            if let Some(line) = no_answer {
+                tracing::warn!(
+                    request_id = %request_id,
+                    skill = skill_name,
+                    finish_reason = ?result.finish_reason,
+                    rounds = result.rounds_used,
+                    "Skill turn produced no answer text; answering with the runtime line"
+                );
+                return Ok(SkillInvocationResult {
+                    content: match requirements.chat_prefix() {
+                        Some(prefix) => format!("{prefix}{line}"),
+                        None => line,
+                    },
+                    finish_reason: inv_finish_reason,
+                    rounds_used: inv_rounds_used,
+                    tool_calls_made: inv_tool_calls_made,
+                    input_tokens: inv_input_tokens,
+                    output_tokens: inv_output_tokens,
+                    cost_usd: inv_cost_usd,
+                    model_used: inv_model_used,
+                    repair_attempted: false,
+                    repair_succeeded: false,
+                    validation_failures: Vec::new(),
+                });
             }
 
             // Post-hoc guard: detect hallucinated send confirmations.
@@ -904,6 +1108,16 @@ impl Orchestrator {
             validated
         };
 
+        // Partial loss runs, and says so (design §10 case 3): the user invoked
+        // this skill explicitly, so the result carries the chat-visible
+        // warning naming the extension whose tools it lost. Applied after
+        // validation and truncation — it is the chat layer, not the skill's
+        // declared output.
+        let validated = match requirements.chat_prefix() {
+            Some(prefix) => format!("{prefix}{validated}"),
+            None => validated,
+        };
+
         Ok(SkillInvocationResult {
             content: validated,
             finish_reason: inv_finish_reason,
@@ -944,32 +1158,30 @@ impl Orchestrator {
         scope_ctx: &MemoryScopeContext,
         stream_id: Option<&str>,
         skill_doc: &crate::middleware::skill::SkillDocument,
+        // S5 — as on the file-skill path: the client behind this turn may be
+        // one that cannot answer a confirmation.
+        unattended: bool,
     ) -> Result<SkillInvocationResult, String> {
         let fm = &skill_doc.frontmatter;
 
-        // Allowed tool set: capability-resolved names (same resolution as the
-        // file-based path), falling back to the legacy allow list.
-        let allowed: Vec<String> = if !fm.requires_capabilities.is_empty() {
-            self.tool_registry
-                .tools_for_capabilities(&fm.requires_capabilities)
-                .into_iter()
-                .map(|d| d.name)
-                .collect()
-        } else {
-            fm.tools.allow.clone()
-        };
-        let mut denied: Vec<String> = fm.tools.deny.clone();
-        for g in &self
-            .daemon_config
-            .load()
-            .execution
-            .skill_defaults
-            .global_tool_deny
-        {
-            if !denied.contains(g) {
-                denied.push(g.clone());
-            }
-        }
+        // The run-guard (design §3.2 T3(b)), taken at the only in-process entry
+        // point into the plugin's own `skill/invoke` loop — which never enters
+        // `ToolRegistry` for the run itself, only for the tool callbacks it
+        // makes. Pre-flight refuses a run against a plugin that is not
+        // `Enabled`, or against a *previous load* of an enabled one, before the
+        // first RPC is sent; the guard it returns is what T3's drain waits on,
+        // so a multi-minute `skill/invoke` is no longer invisible to a disable.
+        let extension =
+            crate::tools::extensions::ExtensionId::plugin(plugin_id.to_string());
+        let ledger = Arc::clone(self.tool_registry.extensions());
+        let _run_guard = ledger.begin_run(&extension, executor.generation())?;
+
+        // The dedup scope for the announcements below, matching the file-skill
+        // site: the request, which is what a skill invoked in a loop varies by.
+        let withheld_scope = request_id.to_string();
+        let (allowed, requirements) =
+            plugin_skill_allowlist(skill_name, fm, &self.tool_registry, &withheld_scope)?;
+        let denied: Vec<String> = fm.tools.deny.clone();
 
         let policy = SandboxPolicy {
             agent_id: format!("plugin:{plugin_id}"),
@@ -992,6 +1204,9 @@ impl Orchestrator {
                 .load()
                 .security
                 .auto_approve_confirmations,
+            // As above (S5): inside the turn that invoked it, whose client
+            // may be one that cannot answer.
+            unattended,
         };
 
         let mut sandbox = SandboxManager::new(
@@ -999,6 +1214,10 @@ impl Orchestrator {
             self.bus.clone(),
             &self.daemon_config.load().security.circuit_breaker,
         );
+        // V2: as above, for a plugin-contributed skill.
+        if let Some(ref db) = self.db {
+            sandbox.set_db(db.clone());
+        }
         if let Ok(guard) = self.confirmation_broker.read() {
             if let Some(broker) = guard.as_ref() {
                 sandbox.set_confirmation_broker(broker.clone());
@@ -1006,10 +1225,12 @@ impl Orchestrator {
         }
 
         let tool_ctx = ToolContext {
-            agent_id: None,
+            // V5, as on the file-skill tier above.
+            agent_id: Some(format!("skill:{skill_name}")),
             task_id: None,
             owner_id: owner_id.map(|s| s.to_string()),
             workspace_id: scope_ctx.workspace_id.clone(),
+            request_workspace_root: scope_ctx.request_workspace_root.clone(),
             skill_stack: vec![skill_name.to_string()],
             effective_constraints: None,
             lane_key: Some(lane_key.to_string()),
@@ -1018,6 +1239,12 @@ impl Orchestrator {
             principal: None,
             scope: None,
             workspace_path: None,
+            // No agent instance: this path is not a subagent lane.
+            agent_instance_id: None,
+            // Filled in by the sandbox at dispatch (T28), which owns the bus.
+            session_id: None,
+            session_log: None,
+            event_bus: None,
         };
 
         let callback = SandboxToolCallback {
@@ -1038,10 +1265,22 @@ impl Orchestrator {
             plugin = plugin_id,
             "Invoking plugin-backed skill"
         );
-        let content = executor
-            .invoke(query, &context, &callback)
+        // `run_scoped` owns the exit: a run torn down at the drain deadline
+        // fails with the S4 refusal, never with a broken-pipe string. The
+        // bridge rewrites the common cases itself; this is the belt-and-braces
+        // catch for any path that surfaced a raw one (design §3.2 T3(b)).
+        let content = ledger
+            .run_scoped(&extension, executor.invoke(query, &context, &callback))
             .await
             .map_err(|e| format!("Plugin skill '{skill_name}' failed: {e}"))?;
+
+        // Partial loss runs, and says so: the user invoked this skill
+        // explicitly, so the surviving provider's result carries the
+        // chat-visible warning naming the extension that went (§10 case 3).
+        let content = match requirements.chat_prefix() {
+            Some(prefix) => format!("{prefix}{content}"),
+            None => content,
+        };
 
         Ok(SkillInvocationResult {
             content,
@@ -1057,6 +1296,90 @@ impl Orchestrator {
             validation_failures: Vec::new(),
         })
     }
+}
+
+/// Resolve the allow list for a plugin-backed skill.
+///
+/// Capability-resolved names (same resolution as the file-based path), falling
+/// back to the legacy allow list. Either way the result is a closed set — a
+/// skill that names no tool gets none.
+///
+/// A skill that *does* declare `requires_capabilities` which resolve to nothing
+/// has lost the extension providing them (uninstalled, or disabled): it is
+/// refused up front rather than run without the tools it asked for.
+///
+/// **C5 — fail closed at the caller** (design §6.2 #10, #11): the refusal is
+/// the one predicate, `!skill_requirements(fm).is_satisfiable()`, on **both**
+/// resolution branches — any required capability wholly withheld, or every
+/// legacy allowed name withheld. `Allowlist::Only` at the callee is the second
+/// half: an empty list denies every non-ambient capability, so no future
+/// resolver can reopen the escalation by handing an empty vec to a policy.
+///
+/// Returns the requirements beside the allow list so a *partial* loss can carry
+/// its chat-visible prefix (§10 case 3) without a second index read.
+fn plugin_skill_allowlist(
+    skill_name: &str,
+    fm: &crate::middleware::skill::SkillFrontmatter,
+    tool_registry: &crate::tools::ToolRegistry,
+    withheld_scope: &str,
+) -> Result<(Allowlist, crate::tools::registry::SkillRequirements), String> {
+    let requirements = tool_registry.skill_requirements(fm);
+
+    if fm.requires_capabilities.is_empty() {
+        // The legacy `tools.allow` fallback is never resolved against the
+        // registry, so the same `owner_of` scan is what attributes it: a plugin
+        // skill whose allowed names went with a disabled extension is announced
+        // here rather than one refused call at a time by the gate's miss arm
+        // (extension design §6.2 #10), and refused up front on total loss.
+        tool_registry.announce_withheld_names(
+            fm.tools.allow.iter().map(String::as_str),
+            None,
+            Some(withheld_scope),
+        );
+        if !requirements.is_satisfiable() {
+            tracing::warn!(
+                skill = skill_name,
+                "Refusing plugin skill: every allowed tool belongs to a withdrawn extension"
+            );
+            return Err(requirements.refusal(skill_name));
+        }
+        return Ok((Allowlist::only(&fm.tools.allow), requirements));
+    }
+
+    let resolution = tool_registry.resolve_capabilities(&fm.requires_capabilities, &[]);
+    tool_registry.announce_withheld(&resolution, None, Some(withheld_scope));
+    let resolved: Vec<String> = resolution.defs.into_iter().map(|d| d.name).collect();
+
+    if !requirements.is_satisfiable() {
+        tracing::warn!(
+            skill = skill_name,
+            "Refusing plugin skill: a required capability is wholly withheld"
+        );
+        return Err(requirements.refusal(skill_name));
+    }
+
+    if resolved.is_empty() {
+        // A0's condition, kept and **not** folded into the predicate above.
+        // §6.2 #11 says the predicate covers "non-empty but resolves to
+        // nothing"; it does not, for a capability nothing ever recorded — an
+        // `unknown` (§7.2) is satisfiable by design so typos keep degrading
+        // silently, and a restart with the extension already disabled produces
+        // exactly that (§10 case 8). This is the empty allow list the
+        // escalation lived in, so it stays a refusal on its own terms.
+        let unresolved = fm.requires_capabilities.join(", ");
+        tracing::warn!(
+            skill = skill_name,
+            capabilities = %unresolved,
+            "Refusing plugin skill: required capabilities resolve to no tool"
+        );
+        return Err(format!(
+            "Skill '{skill_name}' requires capabilities that no installed tool provides \
+             ({unresolved}). The extension providing them is missing or disabled — \
+             refusing to run the skill rather than running it without them."
+        ));
+    }
+
+    Ok((Allowlist::only(resolved), requirements))
 }
 
 /// Adapter giving a plugin skill sandboxed tool access during `invoke()`.
@@ -1090,3 +1413,6 @@ impl openalpaca_api::plugin_traits::ToolCallbackExecutor for SandboxToolCallback
             .await
     }
 }
+
+#[cfg(test)]
+mod tests;

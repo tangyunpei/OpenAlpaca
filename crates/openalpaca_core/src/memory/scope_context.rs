@@ -1,27 +1,194 @@
-//! Memory scope context: carries workspace identity through the request lifecycle.
+//! Workspace scope context: carries workspace identity through the request lifecycle.
 //!
 //! Created once in `handle_message()` and threaded to all memory read/write call sites.
 //! Provides helpers for determining write scope and building cascading search scope lists.
+//!
+//! Two *different* workspace values travel here, and conflating them is the
+//! defect ruling R22 fixed:
+//!
+//! - [`workspace_id`](MemoryScopeContext::workspace_id) scopes **memory**. It
+//!   falls back to the daemon's current directory when the request carried no
+//!   workspace, which is right for memory and wrong for anything that writes
+//!   files.
+//! - [`request_workspace_root`](MemoryScopeContext::request_workspace_root)
+//!   scopes **content the request owns** (artifacts). It is set only when a
+//!   client actually sent a workspace path, and is `None` for connector lanes,
+//!   scheduled skills and every other turn without one.
+
+use std::path::{Path, PathBuf};
 
 use openalpaca_storage::models::memory::MemoryScope;
+use openalpaca_storage::store::{self, StoreScope};
 
-/// Carries workspace scope context for memory operations throughout a request.
-#[derive(Debug, Clone)]
+/// Whether a resolved workspace root is really the home store wearing a
+/// project's clothes.
+///
+/// `walk_up_for_marker` counts `.openalpaca` as a project marker, so a client
+/// path anywhere under `$HOME` with no closer `.git`/`.openalpaca` resolves to
+/// `$HOME` — and `$HOME`'s "project store" is `~/.openalpaca`, the home store
+/// itself. Treating that as `StoreScope::Project` makes `ensure_store` seed a
+/// project `.gitignore` into the home root, and would let a stray header claim
+/// the whole home directory as a project. Two shapes fold:
+///
+/// - the root's project store *is* the home root (the `$HOME` case), and
+/// - the root *is* the home root (a path pointing straight at `~/.openalpaca`).
+///
+/// A real project under the home directory — anything with its own marker —
+/// is untouched.
+///
+/// Public because the fold is a *rule*, not a detail of this struct: a re-base
+/// (`PATCH /v1/workspaces`) refuses either root that answers `true` here, for
+/// the same reason placement folds it — the home store's artifacts directory
+/// belongs to one identity space, and a project pointed at it would share it.
+pub fn resolves_to_the_home_store(root: &Path) -> bool {
+    let Ok(home) = store::home_root() else {
+        // No home directory to compare against: leave the root alone rather
+        // than silently demoting every request to the home store.
+        return false;
+    };
+    let home = canonical(&home);
+    if canonical(root) == home {
+        return true;
+    }
+    match store::store_root(&StoreScope::Project(root.to_path_buf())) {
+        Ok(project_store) => canonical(&project_store) == home,
+        // A relative root is not a project root; placement rejects it anyway.
+        Err(_) => false,
+    }
+}
+
+/// Canonicalise where the path exists, otherwise compare it as written — the
+/// home root need not exist yet on a first run.
+fn canonical(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Carries workspace scope context for a request.
+#[derive(Debug, Clone, Default)]
 pub struct MemoryScopeContext {
     /// Detected workspace root path as scope_id. `None` if no workspace detected
     /// (e.g., running outside a project directory, or from Telegram).
+    ///
+    /// Memory scoping only: on a request that carried no workspace this is
+    /// derived from the daemon's CWD, so it is **not** evidence that the turn
+    /// belongs to a project.
     pub workspace_id: Option<String>,
+    /// The project root the *request* supplied — `x-workspace-path` on
+    /// `/v1/chat`, `workspace_path` on `/v1/command` — resolved to its root.
+    /// `None` whenever no client sent one; never CWD-derived (R22), and never
+    /// a root whose store *is* the home store — `$HOME` is not a project (see
+    /// [`resolves_to_the_home_store`]).
+    ///
+    /// This is the only field that may place a file on disk, and it is what a
+    /// dispatched run records as its `task.workspace_id`.
+    pub request_workspace_root: Option<String>,
 }
 
 impl MemoryScopeContext {
-    /// Create a scope context with an optional workspace.
+    /// Create a scope context with an optional workspace for **memory scoping**.
+    ///
+    /// `request_workspace_root` stays `None`: a caller that has a
+    /// request-supplied workspace builds the context with
+    /// [`MemoryScopeContext::for_request`] instead.
     pub fn new(workspace_id: Option<String>) -> Self {
-        Self { workspace_id }
+        Self {
+            workspace_id,
+            request_workspace_root: None,
+        }
+    }
+
+    /// The workspace context of an incoming turn (R22) — the one place that
+    /// knows the rule.
+    ///
+    /// `workspace_path` is what the client sent, if anything. Memory scoping
+    /// falls back to the daemon's CWD so a developer's CLI turn still lands in
+    /// that project's memory; artifact placement does not, so
+    /// `request_workspace_root` is `Some` only on the client-sent branch.
+    ///
+    /// **The home store is not a workspace on either field.**
+    /// `walk_up_for_marker` counts `.openalpaca` as a project marker and both
+    /// launchers run the daemon with its CWD at `~/.openalpaca`, so without the
+    /// fold every turn that carried no workspace — every connector lane, every
+    /// scheduled skill — scoped its memory to `Workspace($HOME)`: a scope no
+    /// project turn's cascade ever reads again (the workflow-memory extraction
+    /// at `dispatcher/lead_agent.rs` writes into exactly this id). R22 chose the
+    /// CWD fallback for a *project* turn; `$HOME` is not one
+    /// (see [`resolves_to_the_home_store`]).
+    pub fn for_request(workspace_path: Option<&str>) -> Self {
+        Self::for_request_with_cwd(workspace_path, || std::env::current_dir().ok())
+    }
+
+    /// [`for_request`], answering from the filesystem rather than from the
+    /// marker walk's process-lifetime cache.
+    ///
+    /// Same rule, same fold — for the callers that answer *about* a directory
+    /// the user is changing rather than about the project a turn runs in: the
+    /// three `/v1/workspaces` routes. A cached answer there pins the ancestor
+    /// that a `422 WORKSPACE_NOT_A_ROOT` just told the caller to displace with a
+    /// marker of their own.
+    pub fn for_request_uncached(workspace_path: Option<&str>) -> Self {
+        Self::for_request_resolved(
+            workspace_path,
+            || std::env::current_dir().ok(),
+            crate::memory::workspace::resolve_workspace_id_uncached,
+        )
+    }
+
+    /// [`for_request`] with the daemon's working directory injected, so the
+    /// no-workspace branch is testable without moving the whole process.
+    fn for_request_with_cwd(
+        workspace_path: Option<&str>,
+        cwd: impl FnOnce() -> Option<PathBuf>,
+    ) -> Self {
+        Self::for_request_resolved(
+            workspace_path,
+            cwd,
+            crate::memory::workspace::resolve_workspace_id,
+        )
+    }
+
+    /// The one body behind [`for_request`] and [`for_request_uncached`]: the rule
+    /// (marker walk, canonicalisation, the home-store fold, CWD for memory
+    /// scoping only) written once, with the resolver as the single difference.
+    fn for_request_resolved(
+        workspace_path: Option<&str>,
+        cwd: impl FnOnce() -> Option<PathBuf>,
+        resolve: fn(&Path) -> Option<String>,
+    ) -> Self {
+        match workspace_path {
+            Some(path) => {
+                let root = resolve(Path::new(path))
+                    .filter(|r| !resolves_to_the_home_store(Path::new(r)));
+                Self {
+                    workspace_id: root.clone(),
+                    request_workspace_root: root,
+                }
+            }
+            None => {
+                tracing::debug!("No workspace_path in request, falling back to daemon CWD");
+                let workspace_id = cwd()
+                    .and_then(|d| resolve(&d))
+                    .filter(|r| !resolves_to_the_home_store(Path::new(r)));
+                Self {
+                    workspace_id,
+                    request_workspace_root: None,
+                }
+            }
+        }
+    }
+
+    /// Recover the request's workspace context from a `ToolContext` that was
+    /// built from one.
+    pub fn from_tool_context(ctx: &crate::tools::registry::ToolContext) -> Self {
+        Self {
+            workspace_id: ctx.workspace_id.clone(),
+            request_workspace_root: ctx.request_workspace_root.clone(),
+        }
     }
 
     /// Create a scope context with no workspace (Global-only).
     pub fn global_only() -> Self {
-        Self { workspace_id: None }
+        Self::default()
     }
 
     /// Determine the default scope and scope_id for a memory write.
@@ -99,5 +266,134 @@ mod tests {
     fn test_has_workspace() {
         assert!(MemoryScopeContext::new(Some("/ws".to_string())).has_workspace());
         assert!(!MemoryScopeContext::global_only().has_workspace());
+    }
+
+    /// R22, at the request path's own rule (`handlers.rs` calls exactly this).
+    /// A turn with no client workspace — every connector lane and every
+    /// scheduled skill — still gets a CWD-derived id for memory, and must get
+    /// **no** request root, whatever the daemon's current directory looks like.
+    /// This test process runs inside a `.git` checkout, so the CWD walk does
+    /// find a root: the point is that it stays out of the second field.
+    #[test]
+    fn for_request_without_a_workspace_carries_no_request_root() {
+        let ctx = MemoryScopeContext::for_request(None);
+        assert_eq!(
+            ctx.request_workspace_root, None,
+            "the daemon CWD must never become a request workspace root"
+        );
+        assert_eq!(
+            ctx.workspace_id,
+            std::env::current_dir()
+                .ok()
+                .and_then(|d| crate::memory::workspace::resolve_workspace_id(&d)),
+            "memory scoping keeps its CWD fallback"
+        );
+    }
+
+    /// T24 re-review carry-over. `walk_up_for_marker` treats `.openalpaca` as
+    /// a project marker, so any client path under `$HOME` with no closer
+    /// `.git`/`.openalpaca` resolves to `$HOME` itself — whose "project store"
+    /// *is* the home store. Left alone that hands placement
+    /// `StoreScope::Project($HOME)`, and `ensure_store` seeds a project
+    /// `.gitignore` into `~/.openalpaca`. `$HOME` is not a project: the
+    /// request root must be `None` so content takes the home store.
+    #[test]
+    fn a_path_resolving_to_the_home_store_is_not_a_project() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path().canonicalize().unwrap().join("home");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir(home.join(".openalpaca")).unwrap();
+        let _guard = crate::test_util::HomeStoreGuard::set(&home.join(".openalpaca"));
+
+        // A directory under `$HOME` carrying no marker of its own.
+        let loose = home.join("Documents");
+        std::fs::create_dir(&loose).unwrap();
+
+        let ctx = MemoryScopeContext::for_request(loose.to_str());
+        assert_eq!(
+            ctx.request_workspace_root, None,
+            "$HOME is not a project — placement must fall back to the home store"
+        );
+        // And it is not a memory workspace either: a `Workspace($HOME)` scope is
+        // one nothing else reads (final review D3).
+        assert_eq!(
+            ctx.workspace_id, None,
+            "$HOME is not a workspace for memory scoping either"
+        );
+
+        // The home store root itself resolves the same way (its parent carries
+        // the marker), and must fold too.
+        let ctx = MemoryScopeContext::for_request(home.join(".openalpaca").to_str());
+        assert_eq!(ctx.request_workspace_root, None);
+        assert_eq!(ctx.workspace_id, None);
+    }
+
+    /// The same fold on the branch that has no client path at all: both
+    /// launchers start the daemon with its CWD at `~/.openalpaca`
+    /// (`gui lib.rs`, `cli manager.rs`), so the CWD fallback used to make
+    /// `$HOME` the memory workspace of every connector turn and every scheduled
+    /// skill. The CWD is injected rather than changed: it is process-global.
+    #[test]
+    fn a_daemon_cwd_inside_the_home_store_is_not_a_workspace() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path().canonicalize().unwrap().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let home_store = home.join(".openalpaca");
+        std::fs::create_dir(&home_store).unwrap();
+        let _guard = crate::test_util::HomeStoreGuard::set(&home_store);
+
+        // Exactly where the launchers put it.
+        let ctx = MemoryScopeContext::for_request_with_cwd(None, || Some(home_store.clone()));
+        assert_eq!(
+            ctx.workspace_id, None,
+            "the home store is not a project to scope memory by"
+        );
+        assert_eq!(ctx.request_workspace_root, None);
+
+        // A loose directory under $HOME resolves to $HOME the same way.
+        let loose = home.join("Downloads");
+        std::fs::create_dir(&loose).unwrap();
+        let ctx = MemoryScopeContext::for_request_with_cwd(None, || Some(loose.clone()));
+        assert_eq!(ctx.workspace_id, None);
+
+        // A real project is still a project, CWD-derived or not.
+        let project = home.join("code").join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir(project.join(".git")).unwrap();
+        let ctx = MemoryScopeContext::for_request_with_cwd(None, || Some(project.clone()));
+        assert_eq!(ctx.workspace_id.as_deref(), project.to_str());
+        assert_eq!(
+            ctx.request_workspace_root, None,
+            "and the CWD still never becomes a request root (R22)"
+        );
+    }
+
+    /// The fold is narrow: a real project under the home directory keeps its
+    /// own store.
+    #[test]
+    fn a_real_project_under_home_is_still_a_project() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path().canonicalize().unwrap().join("home");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir(home.join(".openalpaca")).unwrap();
+        let _guard = crate::test_util::HomeStoreGuard::set(&home.join(".openalpaca"));
+
+        let project = home.join("code").join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir(project.join(".git")).unwrap();
+
+        let ctx = MemoryScopeContext::for_request(project.to_str());
+        assert_eq!(ctx.request_workspace_root.as_deref(), project.to_str());
+    }
+
+    #[test]
+    fn for_request_with_a_workspace_carries_both() {
+        let project = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(project.path().join(".git")).unwrap();
+        let root = project.path().canonicalize().unwrap();
+
+        let ctx = MemoryScopeContext::for_request(project.path().to_str());
+        assert_eq!(ctx.workspace_id.as_deref(), root.to_str());
+        assert_eq!(ctx.request_workspace_root.as_deref(), root.to_str());
     }
 }

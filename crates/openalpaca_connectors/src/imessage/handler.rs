@@ -165,6 +165,11 @@ impl IMessageConnector {
                 workspace_path: None,
                 stream_id: None,
                 lane_override: None,
+                model_override: None,
+                // M6: a chat platform can answer a confirmation — the
+                // connector renders the prompt in the conversation.
+                unattended: false,
+                turn_sink: None,
             })
             .await;
 

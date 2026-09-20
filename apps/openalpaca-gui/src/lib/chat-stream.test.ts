@@ -1,0 +1,450 @@
+import { describe, expect, it, vi } from "vitest";
+
+import {
+  attachChatStream,
+  capReasoning,
+  chatStreamReducer,
+  initialChatStreamState,
+  isBlocked,
+  REASONING_CAP,
+  type ChatStreamAction,
+  type ChatStreamDone,
+  type ChatStreamState,
+  type EventSourceLike,
+} from "./chat-stream";
+
+function run(actions: ChatStreamAction[]): ChatStreamState {
+  return actions.reduce(chatStreamReducer, initialChatStreamState);
+}
+
+const open: ChatStreamAction = {
+  type: "open",
+  streamId: "s1",
+  laneKey: "local:gui",
+};
+
+const doneData: ChatStreamDone = {
+  content: "the full authoritative reply",
+  model: "claude-sonnet-4-6",
+  tokens_in: 1284,
+  tokens_out: 612,
+  duration_ms: 3800,
+};
+
+describe("chatStreamReducer", () => {
+  it("walks opening → thinking → streaming → done", () => {
+    const state = run([
+      open,
+      { type: "thinking" },
+      { type: "delta", content: "the " },
+      { type: "delta", content: "full" },
+      { type: "done", data: doneData },
+    ]);
+
+    expect(state.phase).toBe("done");
+    expect(state.streamId).toBe("s1");
+    expect(state.laneKey).toBe("local:gui");
+    expect(state.deltaCount).toBe(2);
+    expect(state.terminal).toBe(true);
+  });
+
+  it("prefers done.content over the accumulated deltas", () => {
+    // The SSE bridge silently drops frames for a lagged client, so the buffer
+    // can be short. `done` is the source of truth.
+    const state = run([
+      open,
+      { type: "delta", content: "the " },
+      { type: "done", data: doneData },
+    ]);
+
+    expect(state.buffer).toBe("the ");
+    expect(state.content).toBe(doneData.content);
+    expect(state.result).toEqual(doneData);
+  });
+
+  it("ignores deltas that arrive after the terminal frame", () => {
+    const state = run([
+      open,
+      { type: "done", data: doneData },
+      { type: "delta", content: " stray" },
+    ]);
+
+    expect(state.content).toBe(doneData.content);
+    expect(state.deltaCount).toBe(0);
+  });
+
+  it("keeps the first terminal frame when error precedes done", () => {
+    const state = run([
+      open,
+      { type: "delta", content: "partial" },
+      { type: "server_error", message: "provider exploded" },
+      { type: "done", data: doneData },
+    ]);
+
+    expect(state.phase).toBe("error");
+    expect(state.error).toEqual({
+      message: "provider exploded",
+      transport: false,
+    });
+    expect(state.result).toBeNull();
+  });
+
+  it("ignores the transport error the browser fires after close()", () => {
+    const state = run([
+      open,
+      { type: "done", data: doneData },
+      { type: "transport_error", message: "Chat stream connection lost" },
+    ]);
+
+    expect(state.phase).toBe("done");
+    expect(state.error).toBeNull();
+  });
+
+  it("records a transport error while the stream is live", () => {
+    const state = run([
+      open,
+      { type: "transport_error", message: "socket died" },
+    ]);
+
+    expect(state.phase).toBe("error");
+    expect(state.error).toEqual({ message: "socket died", transport: true });
+  });
+
+  it("accepts a confirmation before any delta without terminating", () => {
+    const state = run([
+      open,
+      {
+        type: "confirmation",
+        request: {
+          request_id: "r1",
+          tool_name: "shell_execute",
+          tool_arguments: { cmd: "ls" },
+        },
+      },
+      { type: "delta", content: "resumed" },
+    ]);
+
+    expect(state.terminal).toBe(false);
+    expect(state.phase).toBe("streaming");
+    expect(isBlocked(state)).toBe(true);
+    expect(state.pendingConfirmations).toHaveLength(1);
+  });
+
+  it("dedupes a confirmation delivered on both SSE and the WebSocket", () => {
+    const request = {
+      request_id: "r1",
+      tool_name: "shell_execute",
+      tool_arguments: null,
+    };
+    const state = run([
+      open,
+      { type: "confirmation", request },
+      { type: "confirmation", request },
+    ]);
+
+    expect(state.pendingConfirmations).toHaveLength(1);
+  });
+
+  /**
+   * G1 — the serious one. A workflow's confirmation *always* arrives after the
+   * turn that started it went `done`, so the terminal guard on this case
+   * dropped every background run's prompt on the floor: no card, the Work pane
+   * still reading RUNNING, and the daemon waiting out its 300 s timeout.
+   */
+  it("accepts a confirmation raised after the turn finished", () => {
+    const state = run([
+      open,
+      { type: "done", data: doneData },
+      {
+        type: "confirmation",
+        request: {
+          request_id: "r-late",
+          tool_name: "artifact_write",
+          tool_arguments: { name: "notes.md" },
+        },
+      },
+    ]);
+
+    expect(state.pendingConfirmations).toHaveLength(1);
+    expect(state.pendingConfirmations[0]?.tool_name).toBe("artifact_write");
+    expect(isBlocked(state)).toBe(true);
+    // The answer itself is still finished — the prompt is not part of it.
+    expect(state.terminal).toBe(true);
+    expect(state.content).toBe(doneData.content);
+  });
+
+  /** A new conversation is the one thing that clears an unanswered prompt. */
+  it("drops pending confirmations on reset", () => {
+    const state = run([
+      open,
+      { type: "done", data: doneData },
+      {
+        type: "confirmation",
+        request: {
+          request_id: "r-late",
+          tool_name: "artifact_write",
+          tool_arguments: null,
+        },
+      },
+      { type: "reset" },
+    ]);
+    expect(state.pendingConfirmations).toHaveLength(0);
+  });
+
+  it("clears a resolved confirmation even after the stream finished", () => {
+    const state = run([
+      open,
+      {
+        type: "confirmation",
+        request: {
+          request_id: "r1",
+          tool_name: "shell_execute",
+          tool_arguments: null,
+        },
+      },
+      { type: "done", data: doneData },
+      { type: "confirmation_resolved", requestId: "r1" },
+    ]);
+
+    expect(state.pendingConfirmations).toHaveLength(0);
+    expect(isBlocked(state)).toBe(false);
+  });
+
+  it("does not rewind the phase when `thinking` arrives out of order", () => {
+    const state = run([
+      open,
+      { type: "delta", content: "hi" },
+      { type: "thinking" },
+    ]);
+    expect(state.phase).toBe("streaming");
+  });
+});
+
+// A minimal EventSource double: `emit` drives one named event.
+function fakeSource() {
+  const listeners = new Map<string, (event: { data?: unknown }) => void>();
+  const close = vi.fn();
+  const source: EventSourceLike = {
+    addEventListener: (type, listener) => listeners.set(type, listener),
+    close,
+  };
+  return {
+    source,
+    close,
+    emit(type: string, data?: unknown) {
+      listeners.get(type)?.(data === undefined ? {} : { data });
+    },
+  };
+}
+
+describe("reasoning (S2)", () => {
+  it("accumulates the model's thinking without touching the answer", () => {
+    const state = run([
+      open,
+      { type: "thinking" },
+      { type: "reasoning", text: "the user wants " },
+      { type: "reasoning", text: "the capital" },
+      { type: "delta", content: "Paris" },
+    ]);
+
+    expect(state.reasoning).toBe("the user wants the capital");
+    // Reasoning is not an answer: it never enters the buffer, never counts as
+    // a delta, and the rendered content is the answer alone.
+    expect(state.buffer).toBe("Paris");
+    expect(state.content).toBe("Paris");
+    expect(state.deltaCount).toBe(1);
+  });
+
+  it("leaves the phase to the frames that own it", () => {
+    // A turn that has only thought out loud still owes an answer, so the row
+    // stays in `thinking` — and reasoning arriving mid-stream must not rewind
+    // a turn that is already typing.
+    const opening = run([open, { type: "reasoning", text: "hmm" }]);
+    expect(opening.phase).toBe("opening");
+
+    const streaming = run([
+      open,
+      { type: "delta", content: "Par" },
+      { type: "reasoning", text: "second round" },
+    ]);
+    expect(streaming.phase).toBe("streaming");
+  });
+
+  it("keeps the tail once the cap is reached", () => {
+    const long = "x".repeat(REASONING_CAP + 40);
+    expect(capReasoning(long)).toHaveLength(REASONING_CAP);
+    expect(capReasoning(long + "END").endsWith("END")).toBe(true);
+
+    const state = run([
+      open,
+      { type: "reasoning", text: long },
+      { type: "reasoning", text: "…and so the answer is Paris" },
+    ]);
+    expect(state.reasoning).toHaveLength(REASONING_CAP);
+    expect(state.reasoning.endsWith("…and so the answer is Paris")).toBe(true);
+  });
+
+  it("ignores empty frames and anything after the turn is terminal", () => {
+    const empty = run([open, { type: "reasoning", text: "" }]);
+    expect(empty.reasoning).toBe("");
+
+    const late = run([
+      open,
+      { type: "done", data: doneData },
+      { type: "reasoning", text: "stray" },
+    ]);
+    expect(late.reasoning).toBe("");
+  });
+
+  it("is dropped when the conversation is reset", () => {
+    const state = run([
+      open,
+      { type: "reasoning", text: "thinking" },
+      { type: "reset" },
+    ]);
+    expect(state.reasoning).toBe("");
+  });
+});
+
+describe("attachChatStream", () => {
+  it("closes the stream on done so EventSource cannot auto-reconnect into a 404", () => {
+    const fake = fakeSource();
+    const actions: ChatStreamAction[] = [];
+    attachChatStream(fake.source, {
+      streamId: "s1",
+      laneKey: "local:gui",
+      onAction: (a) => actions.push(a),
+    });
+
+    fake.emit("delta", JSON.stringify({ content: "hi" }));
+    fake.emit("done", JSON.stringify(doneData));
+
+    expect(fake.close).toHaveBeenCalledTimes(1);
+    expect(actions.at(-1)).toEqual({ type: "done", data: doneData });
+  });
+
+  it("distinguishes a named server error from a transport failure", () => {
+    const withData = fakeSource();
+    const dataActions: ChatStreamAction[] = [];
+    attachChatStream(withData.source, {
+      streamId: "s1",
+      laneKey: "l",
+      onAction: (a) => dataActions.push(a),
+    });
+    withData.emit("error", JSON.stringify({ message: "CHAT_NOT_CONFIGURED" }));
+    expect(dataActions.at(-1)).toEqual({
+      type: "server_error",
+      message: "CHAT_NOT_CONFIGURED",
+    });
+
+    const noData = fakeSource();
+    const transportActions: ChatStreamAction[] = [];
+    attachChatStream(noData.source, {
+      streamId: "s1",
+      laneKey: "l",
+      onAction: (a) => transportActions.push(a),
+    });
+    noData.emit("error");
+    expect(transportActions.at(-1)).toEqual({
+      type: "transport_error",
+      message: "Chat stream connection lost",
+    });
+  });
+
+  it("does not close on a mid-stream confirmation", () => {
+    const fake = fakeSource();
+    const actions: ChatStreamAction[] = [];
+    attachChatStream(fake.source, {
+      streamId: "s1",
+      laneKey: "l",
+      onAction: (a) => actions.push(a),
+    });
+
+    fake.emit(
+      "confirmation_requested",
+      JSON.stringify({
+        request_id: "r1",
+        tool_name: "shell_execute",
+        tool_arguments: {},
+      }),
+    );
+
+    expect(fake.close).not.toHaveBeenCalled();
+    expect(actions.at(-1)).toMatchObject({ type: "confirmation" });
+  });
+
+  /**
+   * R1 — the card carries the stream that raised it.
+   *
+   * The SSE frame does not name one and does not have to: it *is* the stream,
+   * and the handle knows which. Without it a turn's terminal frame cannot tell
+   * its own prompt from one another client raised on the same shared lane.
+   */
+  it("stamps a confirmation with the stream it arrived on", () => {
+    const fake = fakeSource();
+    const actions: ChatStreamAction[] = [];
+    attachChatStream(fake.source, {
+      streamId: "s1",
+      laneKey: "l",
+      onAction: (a) => actions.push(a),
+    });
+
+    fake.emit(
+      "confirmation_requested",
+      JSON.stringify({
+        request_id: "r1",
+        tool_name: "shell_execute",
+        tool_arguments: {},
+      }),
+    );
+
+    expect(actions.at(-1)).toEqual({
+      type: "confirmation",
+      request: {
+        request_id: "r1",
+        tool_name: "shell_execute",
+        tool_arguments: {},
+        stream_id: "s1",
+      },
+    });
+  });
+
+  it("reports a malformed done frame as a server error", () => {
+    const fake = fakeSource();
+    const actions: ChatStreamAction[] = [];
+    attachChatStream(fake.source, {
+      streamId: "s1",
+      laneKey: "l",
+      onAction: (a) => actions.push(a),
+    });
+
+    fake.emit("done", "not json");
+
+    expect(actions.at(-1)).toMatchObject({ type: "server_error" });
+    expect(fake.close).toHaveBeenCalled();
+  });
+});
+
+describe("the reasoning frame on the wire (S2)", () => {
+  it("reads `text`, and never mistakes it for content", () => {
+    const fake = fakeSource();
+    const actions: ChatStreamAction[] = [];
+    attachChatStream(fake.source, {
+      streamId: "s1",
+      laneKey: "l",
+      onAction: (a) => actions.push(a),
+    });
+
+    fake.emit("reasoning", JSON.stringify({ text: "let me think" }));
+    expect(actions.at(-1)).toEqual({ type: "reasoning", text: "let me think" });
+
+    // A frame shaped like a delta is not one: `content` is not `text`.
+    fake.emit("reasoning", JSON.stringify({ content: "not the answer" }));
+    expect(actions.at(-1)).toEqual({ type: "reasoning", text: "let me think" });
+    fake.emit("reasoning", "not json");
+    expect(actions.at(-1)).toEqual({ type: "reasoning", text: "let me think" });
+
+    // And it does not end the stream.
+    expect(fake.close).not.toHaveBeenCalled();
+  });
+});

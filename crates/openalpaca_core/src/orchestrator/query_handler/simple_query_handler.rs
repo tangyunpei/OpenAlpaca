@@ -6,6 +6,7 @@ use super::{
     apply_send_keepalive, detect_active_send_hints, resolve_send_tool_choice,
     sanitize_parts_for_dispatch,
 };
+use crate::chat::delta_forwarder;
 use crate::compose::{
     ComposeOverrides, ComposeRequest, ConnectorSummary, DynamicContextInput, DynamicContextMode,
     HistoryInput, HistoryMode, PersonaInput, PersonaMode, StaticPromptInput, StaticPromptMode,
@@ -16,9 +17,10 @@ use crate::memory::scope_context::MemoryScopeContext;
 use crate::middleware::bootstrap::bootstrap_to_prompt_block;
 use crate::middleware::guard::{OutputGuard, detect_hallucinated_send};
 use crate::middleware::prompt::AgentPersona;
-use crate::orchestrator::{ConversationContext, Orchestrator};
+use crate::orchestrator::{ConversationContext, MAIN_LOOP_AGENT_ID, Orchestrator};
 use crate::prompt_ctx::{SectionPriority, sources::{ContextRequest, ExecutionPath}};
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
+use crate::security::capabilities::Allowlist;
 use crate::security::sandbox::SandboxManager;
 use crate::security::sandbox::SandboxPolicy;
 use crate::tools::registry::ToolContext;
@@ -41,8 +43,12 @@ impl Orchestrator {
         ctx: &ConversationContext,
         owner_id: Option<&str>,
         scope_ctx: &MemoryScopeContext,
-        current_parts: Option<&[ContentPart]>,
+        // A1 — the turn's own attachments, adapted and carrying their ids.
+        // The parts are read out of it below; the ids are what the one branch
+        // of this function that answers *without* a model has to report.
+        attachments: Option<&crate::orchestrator::handler_attachments::TurnAttachments>,
         stream_id: Option<&str>,
+        turn_sink: Option<&crate::chat::TurnSinkHandle>,
         loop_overrides: Option<super::LoopOverrides>,
     ) -> Result<String, String> {
         // Layer 1: Deterministic direct send — bypass LLM entirely
@@ -51,8 +57,21 @@ impl Orchestrator {
                 Ok(summary) => summary,
                 Err(e) => format!("\u{26a0}\u{fe0f} Send failed / 发送失败: {e}"),
             };
+            // A1 — this branch answers with no model at all: the send is
+            // executed and summarised here. The turn's files went nowhere.
+            self.skip_turn_attachments(
+                request_id,
+                attachments,
+                crate::orchestrator::handler_attachments::skipped::DIRECT_SEND,
+            );
             return Ok(response);
         }
+        // The turn's files followed by the message as typed — the shape this
+        // tier has always sent (A1 keeps the question out of the carrier so
+        // the skill tier can send its own parsed one instead).
+        let own_parts: Option<Vec<ContentPart>> =
+            attachments.map(|a| a.message_parts(&a.question));
+        let current_parts: Option<&[ContentPart]> = own_parts.as_deref();
 
         // ── Extract individual prompt parts ─────────────────────────────────
         let system_persona = match self.system_persona.read() {
@@ -119,10 +138,17 @@ impl Orchestrator {
         // loop-override resolution because the tool-mode main loop hands it
         // to `main_loop_tool_set` (identity for steer/followup re-entry).
         let tool_ctx = ToolContext {
-            agent_id: None,
+            // T4: the main loop is not an agent template, but it *is*
+            // somebody, and a confirmation card that reads "unknown is blocked
+            // on this" names nobody at all. `orchestrator` is what the rest of
+            // the system already calls this path (the router's own WARN
+            // lines), and it is what every event, audit row and artifact this
+            // turn produces is now attributed to.
+            agent_id: Some(MAIN_LOOP_AGENT_ID.to_string()),
             task_id: None,
             owner_id: owner_id.map(|s| s.to_string()),
             workspace_id: scope_ctx.workspace_id.clone(),
+            request_workspace_root: scope_ctx.request_workspace_root.clone(),
             skill_stack: vec![],
             effective_constraints: None,
             lane_key: Some(lane_key.to_string()),
@@ -134,10 +160,26 @@ impl Orchestrator {
             // items persist it for re-entry scope; None elsewhere (other
             // paths carry no tools that read it).
             workspace_path: match &loop_overrides {
-                Some(super::LoopOverrides::MainLoop { workspace_path }) => workspace_path.clone(),
+                Some(super::LoopOverrides::MainLoop { workspace_path, .. }) => {
+                    workspace_path.clone()
+                }
                 _ => None,
             },
+            // No agent instance: this path is not a subagent lane.
+            agent_instance_id: None,
+            // Filled in by the sandbox at dispatch (T28), which owns the bus.
+            session_id: None,
+            session_log: None,
+            event_bus: None,
         };
+
+        // M6: whether the client behind this turn can answer a confirmation
+        // at all. Only the main loop carries the declaration — every other
+        // path keeps today's behaviour.
+        let unattended = matches!(
+            &loop_overrides,
+            Some(super::LoopOverrides::MainLoop { unattended: true, .. })
+        );
 
         // Apply loop overrides if provided (main loop)
         let (tool_defs, override_max_rounds, override_max_tools, main_loop_set) =
@@ -145,9 +187,9 @@ impl Orchestrator {
                 Some(super::LoopOverrides::MainLoop { .. }) => {
                     // Routing V2 main loop: budgets from
                     // `[orchestrator.routing]`; tool surface = base picks ∪
-                    // the per-request set (core tools, MCP/plugin extension
-                    // tools minus the global deny list, `invoke_skill`, and —
-                    // when active — the workflow tools).
+                    // the per-request set (core tools, the enabled MCP/plugin
+                    // extension tools, `invoke_skill`, and — when active —
+                    // the workflow tools).
                     let routing = self.daemon_config.load().orchestrator.routing.clone();
                     let set = crate::tools::builtins::main_loop_tool_set(
                         self.task_dispatcher.clone(),
@@ -163,28 +205,24 @@ impl Orchestrator {
                         &self.tool_registry,
                         lane_key,
                         &tool_ctx,
+                        unattended,
                     );
                     // Base surface: suggested picks ("core_union", default) or
-                    // the whole registry minus the global deny list ("full").
-                    // Either way `set.definitions` is unioned in below, so
-                    // extension tools and `invoke_skill` are reachable in both
-                    // modes (deduped by name).
+                    // the whole registry ("full"). Either way
+                    // `set.definitions` is unioned in below, so extension
+                    // tools and `invoke_skill` are reachable in both modes
+                    // (deduped by name).
                     let mut defs: Vec<openalpaca_llm::ToolDefinition> =
                         if routing.tool_selection == "full" {
-                            let deny = self
-                                .daemon_config
-                                .load()
-                                .execution
-                                .skill_defaults
-                                .global_tool_deny
-                                .clone();
                             self.tool_registry
                                 .registered_tool_names()
                                 .iter()
-                                .filter(|n| !deny.contains(n))
-                                .filter_map(|n| {
-                                    self.tool_registry.get(n).map(|t| t.definition.clone())
-                                })
+                                .filter_map(|n| self.tool_registry.get(n))
+                                // The third assembly site: it never passes
+                                // through `extension_tool_defs`, so it carries
+                                // the same state filter (design §6.2 #2).
+                                .filter(|t| self.tool_registry.extension_is_available(t))
+                                .map(|t| t.definition.clone())
                                 .collect()
                         } else {
                             tool_defs
@@ -201,7 +239,11 @@ impl Orchestrator {
                         Some(set),
                     )
                 }
-                None => (tool_defs, None, None, None),
+                // `None` (no override at all) and `ModelOnly` (a model
+                // override that isn't the main loop — bootstrap, or an
+                // attachment-only forced-simple turn) both skip the main
+                // loop's tool-surface assembly.
+                _ => (tool_defs, None, None, None),
             };
 
         // Keep the guard/telemetry name list in sync with the actual surface
@@ -212,6 +254,52 @@ impl Orchestrator {
             tool_names
         };
 
+        // §5.5: a main-loop turn narrates into the lane's active session, with
+        // `task_id` absent — that absence is what tells a reader a record came
+        // from chat rather than from a run. The gateway resolved (and, on a
+        // project switch, created) this session moments ago for the same turn;
+        // this reads the answer back rather than re-deriving it, and a lane
+        // with no session simply has no log.
+        let session_log = match (self.shared_context.session_log(), self.db.as_ref()) {
+            (Some(service), Some(db)) => openalpaca_storage::ConversationRepository::new(db)
+                .active_session_id(lane_key)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(lane_key, "Failed to resolve the lane's session log: {e}");
+                    None
+                })
+                .map(|id| service.open(&id, Some(lane_key), Some(source), None)),
+            _ => None,
+        };
+
+        // §5.4's one threshold, shared by the spill and the inline cut.
+        let inline_bytes = self
+            .daemon_config
+            .load()
+            .orchestrator
+            .sessions
+            .tool_result_inline_bytes;
+
+        // GAP-13: the model this one turn runs on. The route validated the id
+        // against `model_registry()` before dispatch, so a name that reaches
+        // here resolves — which is what keeps the context window below honest
+        // instead of silently falling back to 200k. Without an override this is
+        // exactly `self.loop_config.model`, and either way the stored config is
+        // left alone: the override dies with the request.
+        let turn_model = match &loop_overrides {
+            Some(super::LoopOverrides::MainLoop { model_override, .. })
+            | Some(super::LoopOverrides::ModelOnly { model_override }) => model_override.clone(),
+            None => None,
+        }
+        .or_else(|| self.loop_config.model.clone());
+
+        // S1: the turn's live text rail. With a sink the loop takes the
+        // provider's streaming path and every text delta of every round
+        // reaches the client as it arrives; without one (a connector, a
+        // follow-up, a scheduled skill — nobody watching a stream) the loop
+        // is exactly as it was. The turn's `done` still carries the
+        // authoritative content, so a dropped delta costs a flicker.
+        let stream_callback = turn_sink.map(delta_forwarder);
+
         let (tools_for_loop, policy_opt, config_for_loop);
         if !tool_defs.is_empty() {
             tracing::info!(
@@ -220,13 +308,17 @@ impl Orchestrator {
                 tool_names
             );
 
-            // Lowercased: `check_agent_capability` lowercases the tool name
-            // and expects allow-list entries pre-normalized (matters for
-            // mixed-case MCP/plugin tool names on the default surface).
-            let resolved: Vec<String> = tool_defs.iter().map(|t| t.name.to_lowercase()).collect();
             policy_opt = Some(SandboxPolicy {
                 agent_id: "orchestrator".to_string(),
-                allowed_capabilities: resolved,
+                // Closed set: the main loop may call exactly the surface it was
+                // handed (this arm only runs when that surface is non-empty).
+                // `Allowlist::only` lowercases: `check_agent_capability`
+                // lowercases the tool name and compares verbatim, which
+                // matters for mixed-case MCP/plugin names on the default
+                // surface (X-23).
+                allowed_capabilities: Allowlist::only(
+                    tool_defs.iter().map(|t| t.name.as_str()),
+                ),
                 denied_capabilities: vec![],
                 require_confirmation_for: vec![],
                 max_tool_calls: None,
@@ -241,10 +333,30 @@ impl Orchestrator {
                         .confirmation_timeout_secs,
                 ),
                 auto_approve: self.daemon_config.load().security.auto_approve_confirmations,
+                // M6: the turn's own tools, refused at once rather than left
+                // waiting when the client said it cannot answer.
+                unattended,
             });
+            // H3 — the main loop's last look at its own answer. Built only
+            // here: the guard needs the turn's `start_workflow` cell to know
+            // whether a run was really started, and this turn's owner to know
+            // whether a stated id belongs to one of theirs (J1 — the same
+            // identity `start_workflow` stamps and `task_status` reads, not
+            // the lane). Every other loop leaves it `None`.
+            let answer_guard: Option<Arc<dyn crate::runner::AnswerGuard>> = main_loop_set
+                .as_ref()
+                .map(|set| {
+                    Arc::new(super::run_claim_guard::RunClaimGuard::new(
+                        set.start_workflow.clone(),
+                        self.db.clone(),
+                        lane_key,
+                        &tool_ctx.created_by(),
+                    )) as Arc<dyn crate::runner::AnswerGuard>
+                });
             config_for_loop = LoopConfig {
                 max_rounds: override_max_rounds.unwrap_or(4),
                 max_tools_per_round: override_max_tools.unwrap_or(2),
+                answer_guard,
                 initial_tool_choice: resolve_send_tool_choice(
                     tool_defs.iter().any(|d| d.name == "send"),
                 ),
@@ -252,22 +364,48 @@ impl Orchestrator {
                 // on the simple-query loop.
                 enable_caching: true,
                 thinking: None,
+                session_log: session_log.clone(),
+                tool_result_inline_bytes: inline_bytes,
+                model: turn_model,
+                stream_callback: stream_callback.clone(),
                 ..self.loop_config.clone()
             };
             tools_for_loop = tool_defs;
         } else {
             tools_for_loop = vec![];
             policy_opt = None;
-            config_for_loop = self.loop_config.clone();
+            config_for_loop = LoopConfig {
+                session_log: session_log.clone(),
+                tool_result_inline_bytes: inline_bytes,
+                model: turn_model,
+                stream_callback,
+                ..self.loop_config.clone()
+            };
         }
 
         // ── Resolve model context window (drives Layer 5 trimming + budget) ──
         //
-        // Default to 200_000 when no LLM router is present (echo-stub path).
-        let model_window = self.llm_router.as_ref()
-            .and_then(|r| config_for_loop.model.as_deref()
-                .and_then(|m| r.model_registry().get_model_info(m)))
-            .map(|info| info.context_window as usize)
+        // **S3 — the model that answers, not the model that was named.** This
+        // used to look the loop's *pinned* id up in the registry, which meant
+        // two lies at once: a turn that pins nothing (the ordinary case, where
+        // the router's own default governs) fell straight to 200 000, and a
+        // turn pinning an id whose provider is not configured did too. On the
+        // Ollama-only install the round records said
+        // `"context":{"window":200000}` while a 262 144-token local model was
+        // answering; on a small local model it would say 200 000 while 8 192
+        // was the truth, and the loop would never compact. `routed_*` walks
+        // L3's substitution ladder off the router's public accessors — the
+        // same reader the lead agent uses (M5) — and returns `None` for a
+        // window of 0, which must never reach compaction.
+        //
+        // 200 000 stays the default for the echo-stub path (no router at all)
+        // and for a registry that knows no window for the answering model.
+        let model_window = self
+            .llm_router
+            .as_ref()
+            .and_then(|r| {
+                crate::runner::routed_context_window(r, config_for_loop.model.as_deref())
+            })
             .unwrap_or(200_000);
 
         // ── Route system-prompt + message-list assembly through the layered
@@ -421,45 +559,59 @@ impl Orchestrator {
         // parts for the target model's capabilities here, BEFORE handing them
         // to compose(). Likewise, adapt `current_parts` before constructing the
         // `current_user_turn` ChatMessage.
+        //
+        // **U1 — the model that will answer.** This used to adapt against
+        // `config_for_loop.model.unwrap_or(router.default_model())` — the
+        // *configured* default. On a local-only install that id is not in the
+        // registry at all (a disabled provider's compiled defaults are
+        // pruned), so `supports_image` and `supports_document` both fell
+        // through `unwrap_or(false)` and the vision model that was about to
+        // answer received `[image attached — model does not support vision]`.
+        // `answering_model` walks L3's ladder through `runner::routed_model`
+        // — the same reader `model_window` above uses — and `None` (nothing
+        // routable) leaves every part alone so `NoRoutableModel` can speak.
         let (adapted_recent, current_user_turn): (Vec<ChatMessage>, Option<ChatMessage>) =
-            if let Some(ref router) = self.llm_router {
-                let default_model = router.default_model();
-                let target_model = config_for_loop
-                    .model
-                    .as_deref()
-                    .unwrap_or(&default_model)
-                    .to_string();
-                let recent: Vec<ChatMessage> = ctx
-                    .recent_messages
-                    .iter()
-                    .map(|msg| {
-                        if msg.parts.is_some() {
-                            let mut adapted = msg.clone();
-                            adapted.parts = Some(self.adapt_parts_for_model(
-                                sanitize_parts_for_dispatch(
-                                    msg.parts.clone().unwrap_or_default(),
-                                ),
-                                &target_model,
-                            ));
-                            adapted
-                        } else {
-                            msg.clone()
-                        }
-                    })
-                    .collect();
-                let cur = if let Some(parts) = current_parts {
-                    let adapted = self.adapt_parts_for_model(
-                        sanitize_parts_for_dispatch(parts.to_vec()),
-                        &target_model,
-                    );
-                    Some(ChatMessage::user_with_parts(adapted))
-                } else {
-                    Some(ChatMessage::user(query))
-                };
-                (recent, cur)
-            } else {
+            if self.llm_router.is_none() {
                 // Echo-stub path (no router) — pass messages through unchanged.
                 (ctx.recent_messages.clone(), Some(ChatMessage::user(query)))
+            } else {
+                // `None` here is "nothing at all is routable": every part is
+                // left exactly as it is rather than replaced by a placeholder
+                // claiming the model cannot read it.
+                let model = self.answering_model(config_for_loop.model.as_deref());
+                let recent: Vec<ChatMessage> = match &model {
+                    None => ctx.recent_messages.clone(),
+                    Some(model) => ctx
+                        .recent_messages
+                        .iter()
+                        .map(|msg| {
+                            if msg.parts.is_some() {
+                                let mut adapted = msg.clone();
+                                adapted.parts = Some(self.adapt_parts_for_model(
+                                    sanitize_parts_for_dispatch(
+                                        msg.parts.clone().unwrap_or_default(),
+                                    ),
+                                    model,
+                                ));
+                                adapted
+                            } else {
+                                msg.clone()
+                            }
+                        })
+                        .collect(),
+                };
+                let cur = match current_parts {
+                    Some(parts) => {
+                        let parts = sanitize_parts_for_dispatch(parts.to_vec());
+                        let parts = match &model {
+                            Some(model) => self.adapt_parts_for_model(parts, model),
+                            None => parts,
+                        };
+                        Some(ChatMessage::user_with_parts(parts))
+                    }
+                    None => Some(ChatMessage::user(query)),
+                };
+                (recent, cur)
             };
 
         // Resolve ConversationLane for Tier-2 cache activation (Component 4).
@@ -516,7 +668,7 @@ impl Orchestrator {
             + composed.token_budget.dynamic_context_tokens)
             as usize;
         budget.register_section("system_prompt", system_prompt_tokens);
-        budget.register_section("tools", tools_for_loop.len() * 200);
+        budget.register_section("tools", crate::runner::estimate_tools_tokens(&tools_for_loop));
 
         let (response_content, is_structured) = if let Some(ref router) = self.llm_router {
             // The messages vec came out of the compose engine above, which
@@ -635,6 +787,10 @@ impl Orchestrator {
                 self.bus.clone(),
                 &self.daemon_config.load().security.circuit_breaker,
             );
+            // V2: audit rows for what this turn's sandbox refused.
+            if let Some(ref db) = self.db {
+                per_request_sandbox.set_db(db.clone());
+            }
             if let Ok(guard) = self.confirmation_broker.read()
                 && let Some(broker) = guard.as_ref()
             {
@@ -721,6 +877,9 @@ impl Orchestrator {
                 input_tokens: result.total_input_tokens,
                 output_tokens: result.total_output_tokens,
                 cost_usd: call_cost,
+                // A main-loop turn belongs to no run — the same `None` the
+                // usage row beside it records (GAP-10).
+                task_id: None,
                 timestamp: Utc::now(),
             });
 
@@ -734,12 +893,34 @@ impl Orchestrator {
                 },
             );
 
-            // If LLM failed and produced no content, propagate as error
-            // so the Gateway doesn't persist an empty assistant message.
+            // **V3: a turn never ends with nothing.**
+            //
+            // A main loop that exhausted its rounds, its cost budget or the
+            // model's output limit used to return `""` — no deltas, no
+            // assistant row, and a client showing only the meta line. The
+            // runtime writes the line instead, naming the reason and the last
+            // tool error, and it is persisted, streamed and returned exactly
+            // like an answer.
+            //
+            // An LLM **error** keeps its error channel rather than becoming an
+            // ordinary-looking turn — every client that branches on failure
+            // (the CLI's exit code, the GUI's error state) would otherwise
+            // read a hard failure as a normal reply — but the message it
+            // carries is now the same runtime-authored line.
+            let no_answer = result.no_answer_line();
             if let LoopFinishReason::Error(ref err) = result.finish_reason
                 && result.final_content.trim().is_empty()
             {
-                return Err(format!("LLM error: {}", err));
+                return Err(no_answer.unwrap_or_else(|| format!("LLM error: {err}")));
+            }
+            if let Some(line) = no_answer {
+                tracing::warn!(
+                    request_id = %request_id,
+                    finish_reason = ?result.finish_reason,
+                    rounds = result.rounds_used,
+                    "Main-loop turn produced no answer text; answering with the runtime line"
+                );
+                return Ok(line);
             }
 
             // Post-hoc guard: detect hallucinated send confirmations.
@@ -801,6 +982,8 @@ impl Orchestrator {
         query: &str,
         lane_key: &str,
         ctx: &ConversationContext,
+        model_override: Option<String>,
+        turn_sink: Option<&crate::chat::TurnSinkHandle>,
     ) -> Result<String, String> {
         let router = self.llm_router.as_ref().ok_or_else(|| "No LLM router".to_string())?;
 
@@ -910,11 +1093,21 @@ impl Orchestrator {
 
         let messages: Vec<ChatMessage> = composed.messages.as_ref().clone();
 
+        // GAP-13 fix round 1 (finding #1): the social fast path is one of
+        // the branches that runs a model, so the request's override must
+        // reach `LoopConfig.model` here too — same fallback shape as
+        // `turn_model` above (override, else the daemon default, unchanged
+        // when the request named none).
         let config = LoopConfig {
             max_rounds: 1,
             max_tools_per_round: 0,
             enable_caching: false,
             thinking: None,
+            model: model_override.or_else(|| self.loop_config.model.clone()),
+            // S1: a three-word answer is still a streamed one — the same rail
+            // the main loop uses, so no branch of a chat turn is left with
+            // the client waiting for the whole reply.
+            stream_callback: turn_sink.map(delta_forwarder),
             ..self.loop_config.clone()
         };
 
@@ -989,6 +1182,8 @@ impl Orchestrator {
             input_tokens: result.total_input_tokens,
             output_tokens: result.total_output_tokens,
             cost_usd: call_cost,
+            // As above: a main-loop turn belongs to no run (GAP-10).
+            task_id: None,
             timestamp: Utc::now(),
         });
 
@@ -1001,10 +1196,21 @@ impl Orchestrator {
             },
         );
 
+        // V3, as on the main loop above: the social path runs a model too, and
+        // a turn of it that says nothing says why.
+        let no_answer = result.no_answer_line();
         if let LoopFinishReason::Error(ref err) = result.finish_reason
             && result.final_content.trim().is_empty()
         {
-            return Err(format!("LLM error: {}", err));
+            return Err(no_answer.unwrap_or_else(|| format!("LLM error: {err}")));
+        }
+        if let Some(line) = no_answer {
+            tracing::warn!(
+                request_id = %request_id,
+                finish_reason = ?result.finish_reason,
+                "Social turn produced no answer text; answering with the runtime line"
+            );
+            return Ok(line);
         }
 
         let response = result.final_content;

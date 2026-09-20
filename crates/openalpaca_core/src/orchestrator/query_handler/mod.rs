@@ -13,9 +13,36 @@ pub(super) enum LoopOverrides {
         /// into `ToolContext` so steer/followup items can restore scope on
         /// re-entry.
         workspace_path: Option<String>,
+        /// GAP-13 — the model this one turn runs on (`HandleRequest`'s field,
+        /// already validated against the registry by the route that accepted
+        /// it). It reaches `LoopConfig.model` for this loop and nothing else:
+        /// the orchestrator's own `loop_config` is never written, so the next
+        /// turn on the lane is back on the daemon default.
+        model_override: Option<String>,
+        /// M6 — the client that sent this turn said it cannot answer a tool
+        /// confirmation (a one-shot or piped `openalpaca chat`, a scheduled
+        /// skill). It reaches this turn's own sandbox policy and the
+        /// workflow it may start, so a tool needing approval is refused at
+        /// once with a message saying where it *can* be approved, instead of
+        /// waiting out the confirmation timeout with no responder.
+        ///
+        /// `false` — every client that says nothing — is today's behaviour.
+        unattended: bool,
+    },
+    /// GAP-13 fix round 1 (finding #1) — a turn that answers through
+    /// `handle_simple_query` but is *not* the Routing V2 main loop
+    /// (bootstrap onboarding, or an attachment-only forced-simple turn):
+    /// still runs a model for this one turn, so the request's override must
+    /// still reach `LoopConfig.model`, but none of `MainLoop`'s tool-surface
+    /// assembly (workflow context, steering leftovers, the per-request
+    /// tool set) applies — those are main-loop-only.
+    ModelOnly {
+        /// Same contract as `MainLoop::model_override`.
+        model_override: Option<String>,
     },
 }
 
+mod run_claim_guard;
 mod simple_query_handler;
 mod unprocessed_steering;
 mod workflow_context;
@@ -26,7 +53,11 @@ pub(super) use workflow_context::render_workflow_context_block;
 #[cfg(test)]
 mod tests;
 
-fn sanitize_parts_for_dispatch(parts: Vec<ContentPart>) -> Vec<ContentPart> {
+/// Shared by the two tiers that hand a turn's own parts to a model: the main
+/// loop and (A1) the skill tier.
+pub(in crate::orchestrator) fn sanitize_parts_for_dispatch(
+    parts: Vec<ContentPart>,
+) -> Vec<ContentPart> {
     parts
         .into_iter()
         .filter_map(|part| match part {

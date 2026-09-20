@@ -3,8 +3,8 @@
 //! A per-request tool letting the main conversational loop and the lead agent
 //! invoke any catalog skill by id or slash-command name. Execution is a thin
 //! adapter over the existing nested-skill machinery
-//! ([`SkillInvocationToolExecutor`]) — same sandbox policy, global tool deny,
-//! depth/cycle guards, and budget threading as `invoke_skill:*` dependency
+//! ([`SkillInvocationToolExecutor`]) — same sandbox policy, depth/cycle
+//! guards, and budget threading as `invoke_skill:*` dependency
 //! calls — wrapped with the chat tier's lifecycle events
 //! (`SkillInvocationStarted` / `SkillCompleted` / `SkillFailed`) and
 //! skill-execution telemetry (mirroring `orchestrator/skill/handler.rs`).
@@ -100,8 +100,22 @@ impl InvokeSkillTool {
         }
     }
 
+    /// The miss answer.
+    ///
+    /// Two changes from the bare "unknown skill" dump (design §6.2 #12,
+    /// §10 case 5(a)): the **tombstone** is consulted first, so a skill a
+    /// disabled plugin used to provide is attributed to that plugin instead of
+    /// reading as a typo; and the listing is **availability-filtered**, so it
+    /// never names a skill this tool would refuse.
     fn unknown_skill_error(&self, requested: &str) -> String {
-        let mut names = self.catalog.list_names();
+        if let Some(tomb) = self.catalog.tombstone(requested) {
+            return self.tool_registry.withdrawn_contribution_refusal(
+                "Skill",
+                &tomb.skill_id,
+                &tomb.plugin_id,
+            );
+        }
+        let mut names = self.catalog.available_names();
         names.sort();
         if names.is_empty() {
             format!("Unknown skill '{}'. No skills are available.", requested)
@@ -169,11 +183,10 @@ impl BuiltInTool for InvokeSkillTool {
         });
 
         // Snapshot hot-reloadable config values before the await.
-        let (auto_approve, global_tool_deny, circuit_breaker, confirmation_timeout_secs) = {
+        let (auto_approve, circuit_breaker, confirmation_timeout_secs) = {
             let cfg = self.daemon_config.load();
             (
                 cfg.security.auto_approve_confirmations,
-                cfg.execution.skill_defaults.global_tool_deny.clone(),
                 cfg.security.circuit_breaker.clone(),
                 cfg.execution.agent_defaults.confirmation_timeout_secs,
             )
@@ -196,7 +209,6 @@ impl BuiltInTool for InvokeSkillTool {
             Some(ctx.clone()),
             self.max_cost,
             auto_approve,
-            global_tool_deny,
             circuit_breaker,
             confirmation_timeout_secs,
         );

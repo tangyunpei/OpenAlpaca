@@ -1,164 +1,92 @@
 /**
- * REST API client for file upload/download endpoints.
+ * `/v1/files*` — upload, metadata, download, and host-side open.
+ *
+ * Reading content for a *preview* lives in `api/artifacts` instead: the content
+ * routes take `?token=` inline, so `artifactContentUrl` hands a browser a URL
+ * it can load and `getArtifactText` reads the characters. `downloadFile` here
+ * stays the blob a viewer saves.
  */
 
-import { save } from "@tauri-apps/plugin-dialog";
-import { writeFile } from "@tauri-apps/plugin-fs";
-import { ensureConnection } from "./connection";
-import type { FileUploadResponse, FileAsset, FileOpenResponse } from "../types";
+import { ApiError, apiFetch, apiFetchBlob } from "../http";
+import { workspaceHeader } from "../workspace-header";
+import type { FileAsset, FileOpenResponse, FileUploadResponse } from "./types";
 
-let systemOpenEndpointUnavailable = false;
-let systemOpenEndpointInstanceId: string | null = null;
-
-export type SaveFileWithDialogResult = "saved" | "cancelled" | "unavailable";
-
-/** POST /v1/files/upload — Upload a file via multipart form data. */
+/**
+ * `POST /v1/files/upload` — one file, multipart (U5).
+ *
+ * The shape is the CLI's, field for field (`DaemonClient::upload_file`): a
+ * single part named `file`, carrying the picked name and the browser's own
+ * media type. The daemon reads `multipart.next_field()`, so it is the *first*
+ * part that counts, and it validates the declared type against the file's
+ * magic bytes — which is why nothing here guesses a MIME type the picker did
+ * not give. A file the browser cannot type arrives as
+ * `application/octet-stream` and the daemon refuses it by name; inventing a
+ * type here would only move that refusal somewhere less honest.
+ *
+ * `x-workspace-path` travels with it for the same reason a chat turn carries
+ * it: the header is what picks the store the bytes land in (D2), so an upload
+ * for a turn in a project belongs in that project's store.
+ */
 export async function uploadFile(
   file: File,
-  onProgress?: (loaded: number, total: number) => void,
+  options: { workspacePath?: string | null; signal?: AbortSignal } = {},
 ): Promise<FileUploadResponse> {
-  const conn = await ensureConnection();
-  const formData = new FormData();
-  formData.append("file", file);
-
-  if (onProgress) {
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open("POST", `${conn.baseUrl}/v1/files/upload`);
-      xhr.setRequestHeader("Authorization", `Bearer ${conn.token}`);
-
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) onProgress(e.loaded, e.total);
-      };
-
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          try { resolve(JSON.parse(xhr.responseText)); }
-          catch { reject(new Error("Failed to parse upload response")); }
-        } else {
-          try {
-            const data = JSON.parse(xhr.responseText);
-            reject(new Error(data.error?.message || `Upload failed: ${xhr.statusText}`));
-          } catch { reject(new Error(`Upload failed: ${xhr.statusText}`)); }
-        }
-      };
-
-      xhr.onerror = () => reject(new Error("Upload network error"));
-      xhr.onabort = () => reject(new Error("Upload aborted"));
-      xhr.send(formData);
-    });
-  }
-
-  const response = await fetch(`${conn.baseUrl}/v1/files/upload`, {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  return await apiFetch<FileUploadResponse>("/v1/files/upload", {
     method: "POST",
-    headers: { Authorization: `Bearer ${conn.token}` },
-    body: formData,
+    formData: form,
+    headers: workspaceHeader(options.workspacePath),
+    signal: options.signal,
   });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Upload failed: ${response.statusText}`);
-  }
-  return await response.json();
-}
-
-/** GET /v1/files/{id} — Get file metadata. */
-export async function getFileMetadata(id: string): Promise<FileAsset> {
-  const conn = await ensureConnection();
-  const response = await fetch(`${conn.baseUrl}/v1/files/${encodeURIComponent(id)}`, {
-    headers: { Authorization: `Bearer ${conn.token}` },
-  });
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Failed to fetch file: ${response.statusText}`);
-  }
-  return await response.json();
-}
-
-/** GET /v1/files/{id}/content — Download file as Blob. */
-export async function downloadFile(id: string): Promise<Blob> {
-  const conn = await ensureConnection();
-  const response = await fetch(
-    `${conn.baseUrl}/v1/files/${encodeURIComponent(id)}/content`,
-    { headers: { Authorization: `Bearer ${conn.token}` } },
-  );
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Download failed: ${response.statusText}`);
-  }
-  return await response.blob();
-}
-
-/** POST /v1/files/{id}/open — Open file with system default app on daemon host. */
-export async function openFileWithSystemDefault(id: string): Promise<FileOpenResponse> {
-  const conn = await ensureConnection();
-  if (systemOpenEndpointInstanceId !== conn.instanceId) {
-    systemOpenEndpointInstanceId = conn.instanceId;
-    systemOpenEndpointUnavailable = false;
-  }
-
-  if (systemOpenEndpointUnavailable) {
-    throw new Error("System open endpoint unavailable");
-  }
-
-  const response = await fetch(`${conn.baseUrl}/v1/files/${encodeURIComponent(id)}/open`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${conn.token}` },
-  });
-
-  if (response.status === 404) {
-    // Route may be unavailable on an older daemon build; avoid retrying every click.
-    systemOpenEndpointUnavailable = true;
-    throw new Error("System open endpoint unavailable");
-  }
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.error?.message || `Open failed: ${response.statusText}`);
-  }
-
-  return await response.json();
-}
-
-function isPluginUnavailableError(error: unknown): boolean {
-  if (!error) return false;
-  const message = error instanceof Error ? error.message : String(error);
-  const normalized = message.toLowerCase();
-  return (
-    normalized.includes("plugin") ||
-    normalized.includes("not available") ||
-    normalized.includes("window.__tauri_internal") ||
-    normalized.includes("window.__tauri")
-  );
 }
 
 /**
- * Show native Save dialog via Tauri and persist blob to selected path.
- * Returns:
- * - "saved": user picked a path and save succeeded
- * - "cancelled": user cancelled dialog
- * - "unavailable": native API unavailable (fallback needed)
+ * What a failed upload says on the chip — the **daemon's** own sentence
+ * wherever there is one (`UNSUPPORTED_MIME`, `MIME_MISMATCH`, the size cap).
+ *
+ * Only a request that never reached the daemon gets a sentence of ours, and it
+ * says exactly that rather than dressing a transport failure as a refusal.
  */
-export async function saveBlobWithDialog(
-  filename: string,
-  blob: Blob,
-): Promise<SaveFileWithDialogResult> {
-  try {
-    const path = await save({ defaultPath: filename });
-    if (!path || (Array.isArray(path) && path.length === 0)) {
-      return "cancelled";
-    }
-
-    const targetPath = Array.isArray(path) ? path[0] : path;
-    const bytes = new Uint8Array(await blob.arrayBuffer());
-    await writeFile(targetPath, bytes);
-    return "saved";
-  } catch (error) {
-    if (isPluginUnavailableError(error)) {
-      return "unavailable";
-    }
-    throw error;
+export function uploadErrorMessage(cause: unknown): string {
+  if (cause instanceof ApiError) {
+    return cause.isTransport ? "Could not reach the daemon" : cause.message;
   }
+  return cause instanceof Error ? cause.message : "Upload failed";
+}
+
+/** `GET /v1/files/{id}` */
+export async function getFileMetadata(
+  id: string,
+  signal?: AbortSignal,
+): Promise<FileAsset> {
+  return await apiFetch<FileAsset>(`/v1/files/${encodeURIComponent(id)}`, {
+    signal,
+  });
+}
+
+/** `GET /v1/files/{id}/content` as a `Blob`. */
+export async function downloadFile(
+  id: string,
+  signal?: AbortSignal,
+): Promise<Blob> {
+  return await apiFetchBlob(`/v1/files/${encodeURIComponent(id)}/content`, {
+    signal,
+  });
+}
+
+/**
+ * `POST /v1/files/{id}/open` — opens with the daemon host's default app. Note
+ * this *opens*, it does not reveal in Finder; revealing needs a Tauri command
+ * that does not exist yet.
+ */
+export async function openFileWithSystemDefault(
+  id: string,
+): Promise<FileOpenResponse> {
+  return await apiFetch<FileOpenResponse>(
+    `/v1/files/${encodeURIComponent(id)}/open`,
+    {
+      method: "POST",
+    },
+  );
 }

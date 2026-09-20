@@ -16,7 +16,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
-use crate::paths;
+use crate::store;
 
 // ============================================================================
 // Data Structures
@@ -82,27 +82,14 @@ pub fn generate_token() -> String {
 // Directory & File Management
 // ============================================================================
 
-/// Ensures the app directory exists with proper permissions (700 on Unix).
-pub fn ensure_app_dir() -> anyhow::Result<PathBuf> {
-    let dir = paths::app_dir()?;
-    fs::create_dir_all(&dir).context("Failed to create app directory")?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        // Best effort: don't fail if permissions can't be set
-        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
-    }
-
-    Ok(dir)
-}
-
 /// Writes discovery.json atomically (write to tmp, then rename).
 /// Sets file permissions to 600 on Unix (owner read/write only).
 /// Cleans up tmp file on failure to prevent accumulation.
 pub fn write_discovery_atomic(d: &Discovery) -> anyhow::Result<PathBuf> {
-    ensure_app_dir()?;
-    let path = paths::discovery_path()?;
+    // `state_dir()` creates the directory (0700 on Unix) if it is missing;
+    // `discovery_path()` itself is a pure path query.
+    store::state_dir()?;
+    let path = store::discovery_path()?;
     let tmp = path.with_extension("json.tmp");
 
     let json = serde_json::to_vec_pretty(d).context("Failed to serialize discovery")?;
@@ -142,7 +129,7 @@ pub fn write_discovery_atomic(d: &Discovery) -> anyhow::Result<PathBuf> {
 /// Reads discovery.json if it exists.
 /// Returns None if the file doesn't exist, error if it exists but is invalid.
 pub fn read_discovery() -> anyhow::Result<Option<Discovery>> {
-    let path = paths::discovery_path()?;
+    let path = store::discovery_path()?;
     if !path.exists() {
         return Ok(None);
     }
@@ -153,7 +140,7 @@ pub fn read_discovery() -> anyhow::Result<Option<Discovery>> {
 
 /// Removes discovery.json (called during daemon shutdown).
 pub fn remove_discovery() -> anyhow::Result<()> {
-    let path = paths::discovery_path()?;
+    let path = store::discovery_path()?;
     if path.exists() {
         fs::remove_file(&path).context("Failed to remove discovery.json")?;
     }
@@ -198,8 +185,10 @@ pub fn is_process_alive(_pid: u32) -> bool {
 /// # Errors
 /// Returns error if the lock cannot be acquired (another daemon is running).
 pub fn acquire_single_instance_lock(block: bool) -> anyhow::Result<file_lock::FileLock> {
-    ensure_app_dir()?;
-    let lock_path = paths::lock_path()?;
+    // `state_dir()` creates the directory (0700 on Unix) if it is missing;
+    // `lock_path()` itself is a pure path query.
+    store::state_dir()?;
+    let lock_path = store::lock_path()?;
     let lock_path_str = lock_path.to_str().context("Lock path is not valid UTF-8")?;
 
     let options = file_lock::FileOptions::new()

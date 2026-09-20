@@ -185,9 +185,7 @@ Learn about the person you're helping. Update this as you go.
 
 ## Notes
 
-(Anything else. Build this over time.)
-
-The more you know, the better you can help. But remember -- you're learning about a person, not building a dossier. Respect the difference.
+(Anything else. Build this over time. The more you know, the better you can help -- but remember, you're learning about a person, not building a dossier. Respect the difference.)
 "#;
 
 fn ensure_user_template_file(config_base_dir: &Path) -> Result<PathBuf> {
@@ -550,6 +548,35 @@ pub fn bootstrap_bootstrap_document(
         Err(e) => {
             warn!("BOOTSTRAP parse failed: {e}; skipping onboarding");
             (None, None)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openalpaca_core::middleware::user::{parse_user_markdown, section_is_unset};
+
+    /// **S6.** The profile the daemon seeds on first boot must read as an
+    /// *empty* profile, or the automatic extraction's `set` action — which
+    /// fills only unset sections — fills nothing for the life of the install.
+    /// Every section's guidance is therefore one parenthetical run, which
+    /// `section_is_unset` recognises as guidance rather than content.
+    #[test]
+    fn a_seeded_user_profile_parses_as_unset() {
+        let doc = parse_user_markdown(DEFAULT_USER_TEMPLATE).expect("the seeded template parses");
+        assert!(doc.identity.is_empty(), "identity: {:?}", doc.identity);
+        for (name, section) in [
+            ("communication_style", &doc.communication_style),
+            ("expertise", &doc.expertise),
+            ("projects", &doc.projects),
+            ("preferences", &doc.preferences),
+            ("notes", &doc.notes),
+        ] {
+            assert!(
+                section_is_unset(section),
+                "{name} reads as content, so an extracted trait can never fill it: {section:?}"
+            );
         }
     }
 }

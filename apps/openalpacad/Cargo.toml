@@ -7,11 +7,15 @@ publish.workspace = true
 license.workspace = true
 [dependencies]
 anyhow.workspace = true
+thiserror.workspace = true
 arc-swap.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+# `x-workspace-path` is percent-encoded UTF-8 on the wire (R81) — the two read
+# sites decode it.
+urlencoding.workspace = true
 axum.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -28,6 +32,7 @@ openalpaca_storage = { workspace = true }
 openalpaca_wake = { workspace = true }
 openalpaca_mcp = { path = "../../crates/openalpaca_mcp" }
 toml.workspace = true
+toml_edit.workspace = true
 rand.workspace = true
 async-trait.workspace = true
 openalpaca_plugins = { workspace = true }
@@ -51,6 +56,9 @@ opener.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# `McpClient::disconnected_for_tests` — a client shell for a `ToolBackend::Mcp`
+# with no live server, which the `GET /v1/tools` origin tests need.
+openalpaca_mcp = { path = "../../crates/openalpaca_mcp", features = ["test-utils"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

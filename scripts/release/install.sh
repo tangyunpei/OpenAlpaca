@@ -130,11 +130,14 @@ sed_inplace() {
   fi
 }
 
+# The runtime data/config root: `<home>/.openalpaca` on every platform (it
+# does not follow the OS's data-directory convention — see
+# `crates/openalpaca_storage/src/store/mod.rs::home_root()`). The daemon's
+# own first-boot mover relocates a pre-root-move install's legacy directory
+# (`~/Library/Application Support/OpenAlpaca` on macOS, `~/.local/share/openalpaca`
+# on Linux) here automatically; this script never needs the old path.
 data_dir() {
-  case "$PLATFORM" in
-    macos) echo "$HOME/Library/Application Support/OpenAlpaca" ;;
-    linux) echo "$HOME/.local/share/openalpaca" ;;
-  esac
+  echo "$HOME/.openalpaca"
 }
 
 verify_sha_if_available() {
@@ -158,7 +161,7 @@ verify_sha_if_available() {
 
 stop_running_daemon_if_any() {
   local discovery_json
-  discovery_json="$(data_dir)/discovery.json"
+  discovery_json="$(data_dir)/state/discovery.json"
   if [[ ! -f "$discovery_json" ]]; then
     return 0
   fi

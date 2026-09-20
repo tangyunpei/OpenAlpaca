@@ -64,12 +64,23 @@ const DEFAULT_LLM_TOML: &str =
     include_str!("../../../../scripts/release/templates/config/llm.toml");
 const DEFAULT_DAEMON_TOML: &str =
     include_str!("../../../../scripts/release/templates/config/daemon.toml");
+/// The MCP declaration store. Seeded fully commented, because it is also the
+/// **toggle** store (extension design §5): every `watch_paths` push is guarded
+/// by `if path.exists()`, so without a seeded file the watcher never binds and
+/// a hand edit never applies.
+const DEFAULT_MCP_TOML: &str =
+    include_str!("../../../../scripts/release/templates/config/mcp.toml");
 
 /// Seed default configuration files if they don't exist yet.
 ///
 /// Called after `resolve_config_base_dir()` so that a fresh install (or GUI
 /// launching the daemon before `install.sh` runs) gets working defaults
 /// instead of an empty config directory.
+///
+/// The three files below, and then the content directories the daemon also
+/// carries — `agents/`, `skills/`, `tools/` (L9,
+/// [`super::content::seed_default_content`]). Same rule for all of them: write
+/// only what is absent.
 pub fn seed_default_configs(config_dir: &Path) {
     if let Err(e) = std::fs::create_dir_all(config_dir) {
         warn!("Cannot create config dir {}: {e}", config_dir.display());
@@ -91,4 +102,14 @@ pub fn seed_default_configs(config_dir: &Path) {
             Err(e) => warn!("Failed to seed {}: {e}", daemon_path.display()),
         }
     }
+
+    let mcp_path = config_dir.join("mcp.toml");
+    if !mcp_path.exists() {
+        match std::fs::write(&mcp_path, DEFAULT_MCP_TOML) {
+            Ok(()) => info!("Seeded default config: {}", mcp_path.display()),
+            Err(e) => warn!("Failed to seed {}: {e}", mcp_path.display()),
+        }
+    }
+
+    super::content::seed_default_content(config_dir);
 }

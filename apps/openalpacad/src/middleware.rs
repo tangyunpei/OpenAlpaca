@@ -7,11 +7,12 @@ use axum::{
     extract::State,
     http::{Request, StatusCode},
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use std::sync::Arc;
 
 use crate::AppState;
+use crate::routes::api_error;
 
 /// Middleware to validate Bearer token for protected HTTP endpoints
 pub async fn auth_middleware(
@@ -27,13 +28,13 @@ pub async fn auth_middleware(
             if token == state.token {
                 next.run(request).await
             } else {
-                (StatusCode::UNAUTHORIZED, "Invalid token").into_response()
+                api_error(StatusCode::UNAUTHORIZED, "unauthorized", "Invalid token")
             }
         }
-        _ => (
+        _ => api_error(
             StatusCode::UNAUTHORIZED,
+            "unauthorized",
             "Missing or invalid Authorization header",
-        )
-            .into_response(),
+        ),
     }
 }

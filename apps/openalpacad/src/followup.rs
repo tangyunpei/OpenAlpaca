@@ -47,6 +47,16 @@ impl FollowupRunner for GatewayFollowupRunner {
                     // on the ORIGINATING lane, not the "{principal}:internal"
                     // lane EventSource::Internal would derive.
                     lane_override: Some(item.lane_key),
+                    model_override: None,
+                    // **S5** — the flag of the turn that queued it. A
+                    // follow-up promised by a workflow a piped `openalpaca
+                    // chat` started runs minutes later, when that client is
+                    // long gone; raising a confirmation prompt there costs
+                    // the full timeout and then fails anyway. A follow-up
+                    // queued from the GUI keeps `false`, which is exactly
+                    // today's behaviour.
+                    unattended: item.unattended,
+                    turn_sink: None,
                 })
                 .await;
             if response.is_error {
@@ -69,11 +79,10 @@ mod tests {
     use async_trait::async_trait;
     use openalpaca_core::bus::EventBus;
     use openalpaca_core::context::SharedContext;
-    use openalpaca_core::gateway::{HandleResult, MessageHandler};
+    use openalpaca_core::gateway::{HandleRequest, HandleResult, MessageHandler};
     use openalpaca_core::lane::LaneManager;
     use openalpaca_core::security::policy::{Principal, Scope};
     use std::sync::Mutex;
-    use uuid::Uuid;
 
     /// (source, content, principal, lane_key) captured per handled turn.
     type RecordedCall = (String, String, Principal, String);
@@ -85,21 +94,13 @@ mod tests {
 
     #[async_trait]
     impl MessageHandler for StubHandler {
-        async fn handle(
-            &self,
-            _request_id: Uuid,
-            source: String,
-            content: String,
-            principal: Principal,
-            _scope: Scope,
-            lane_key: String,
-            _workspace_path: Option<String>,
-            _stream_id: Option<String>,
-        ) -> Result<HandleResult, String> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push((source, content, principal, lane_key));
+        async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
+            self.calls.lock().unwrap().push((
+                request.source,
+                request.content,
+                request.principal,
+                request.lane_key,
+            ));
             Ok(HandleResult::text("ack".to_string()))
         }
     }
@@ -123,6 +124,7 @@ mod tests {
                 &principal_json,
                 None,
                 Some("task-1"),
+                false,
             )
             .unwrap();
         let claimed = repo.claim_next("junpei:cli").unwrap().unwrap();
@@ -149,6 +151,7 @@ mod tests {
             scope: Scope::Global,
             workspace_path: claimed.workspace_path,
             source_task_id: claimed.source_task_id,
+            unattended: claimed.unattended,
         });
 
         // Wait for the spawned turn to reach the handler and mark the row done.
@@ -179,5 +182,77 @@ mod tests {
         // Row is terminal: done, not claimable, not queued.
         assert!(repo.claim_next("junpei:cli").unwrap().is_none());
         assert!(repo.list_queued_by_lane("junpei:cli").unwrap().is_empty());
+    }
+
+    /// **S5.** The declaration travels from the turn that promised the
+    /// follow-up to the turn that keeps it. A workflow a piped
+    /// `openalpaca chat` started queues a follow-up; minutes later the runner
+    /// re-enters it, and the client is long gone — a confirmation prompt
+    /// raised there costs the whole timeout and then fails.
+    #[tokio::test]
+    async fn a_followup_inherits_the_declaration_of_the_turn_that_queued_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("test.db")).unwrap();
+        let repo = FollowupRepository::new(&db);
+        let principal = Principal::User {
+            global_id: "junpei".to_string(),
+        };
+        let principal_json = serde_json::to_string(&principal).unwrap();
+        repo.queue(
+            "junpei:cli",
+            "followup",
+            "finish the audit",
+            &principal_json,
+            None,
+            Some("task-1"),
+            true,
+        )
+        .unwrap();
+        let claimed = repo.claim_next("junpei:cli").unwrap().unwrap();
+
+        let seen: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+        let gateway = Arc::new(Gateway::new(
+            Arc::new(SharedContext::new()),
+            Arc::new(LaneManager::new()),
+            Arc::new(DeclarationRecorder { seen: seen.clone() }),
+            EventBus::default(),
+            Some(db.clone()),
+        ));
+        GatewayFollowupRunner::new(gateway, db.clone()).spawn_followup(FollowupItem {
+            id: claimed.id,
+            lane_key: claimed.lane_key,
+            content: claimed.content,
+            principal: serde_json::from_str(&claimed.principal_json).unwrap(),
+            scope: Scope::Global,
+            workspace_path: claimed.workspace_path,
+            source_task_id: claimed.source_task_id,
+            unattended: claimed.unattended,
+        });
+
+        for _ in 0..200 {
+            if !seen.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            [true],
+            "the follow-up turn must carry the queueing turn's declaration"
+        );
+    }
+
+    /// Records only what this test is about: whether the turn declared it
+    /// cannot answer a confirmation.
+    struct DeclarationRecorder {
+        seen: Arc<Mutex<Vec<bool>>>,
+    }
+
+    #[async_trait]
+    impl MessageHandler for DeclarationRecorder {
+        async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
+            self.seen.lock().unwrap().push(request.unattended);
+            Ok(HandleResult::text("ack".to_string()))
+        }
     }
 }

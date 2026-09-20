@@ -1,6 +1,6 @@
 //! Types and validation helpers for file upload/retrieval routes.
 
-use axum::{Json, http::StatusCode, response::IntoResponse};
+use axum::{http::StatusCode, response::IntoResponse};
 use serde::Serialize;
 use std::path::{Path as FsPath, PathBuf};
 
@@ -58,7 +58,25 @@ pub struct FileOpenResponse {
     pub status: String,
 }
 
-pub(super) type OpenFileFn = fn(&str, &str, &str) -> Result<(), String>;
+/// `(storage_path, file_id, filename, stage)`.
+///
+/// `stage` is the Phase 3 item 6 decision, taken by [`open_asset_for_user`] from
+/// the row's `origin` and passed down rather than re-derived.
+///
+/// An **upload** is copied to `$TMPDIR/openalpaca-open/<id>-<name>` first. Two
+/// reasons, both still true after D2 gave uploads a real placement
+/// (`<store>/uploads/<date>/NN-<slug>.<ext>`, `openalpaca_storage::uploads`):
+/// the stored name is the store's own, so opening it in place would hand the
+/// user `03-quarterly-report.pdf` instead of the name they uploaded — and a row
+/// written before D2 is still a content-addressed blob under `state/assets/`
+/// with no extension at all until the boot `rehome` pass moves it, which the
+/// system opener cannot pick an application for. The staged copy restores the
+/// original filename in both cases.
+///
+/// A **produced** artifact already lives at a real path under its own name
+/// (§4.2's grammar), so it opens in place — no copy, and "Open" reveals the file
+/// the user actually has.
+pub(super) type OpenFileFn = fn(&str, &str, &str, bool) -> Result<(), String>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum OpenFileApiError {
@@ -111,8 +129,13 @@ pub(super) fn open_with_system_default(
     storage_path: &str,
     file_id: &str,
     filename: &str,
+    stage: bool,
 ) -> Result<(), String> {
-    let target = prepare_open_target_path(storage_path, file_id, filename)?;
+    let target = if stage {
+        prepare_open_target_path(storage_path, file_id, filename)?
+    } else {
+        PathBuf::from(storage_path)
+    };
     opener::open(target).map_err(|e| e.to_string())
 }
 
@@ -122,28 +145,26 @@ pub(super) async fn open_asset_for_user(
     local_user_id: &str,
     open_file_fn: OpenFileFn,
 ) -> Result<FileOpenResponse, OpenFileApiError> {
-    let repo = openalpaca_storage::FileAssetRepository::new(db);
-    let asset = match repo.get_by_id(file_id) {
-        Ok(Some(asset)) => {
-            if asset.owner_id != local_user_id {
-                tracing::debug!(
-                    file_id = %file_id,
-                    owner = %asset.owner_id,
-                    "File owner mismatch — returning 404"
-                );
-                return Err(OpenFileApiError::NotFound);
-            }
-            asset
+    // The owner-scoped read of `file_assets` that also carries `origin` — the
+    // one column this route needs and `FileAsset` does not have. Both writers
+    // fill the same table, so an upload reads back here exactly as before.
+    let asset = match openalpaca_storage::ArtifactStore::new(db).get(file_id, local_user_id) {
+        Ok(Some(asset)) => asset,
+        Ok(None) => {
+            tracing::debug!(file_id = %file_id, "File not found for this owner — returning 404");
+            return Err(OpenFileApiError::NotFound);
         }
-        Ok(None) => return Err(OpenFileApiError::NotFound),
         Err(e) => return Err(OpenFileApiError::Db(e.to_string())),
     };
 
+    let stage = asset.origin != openalpaca_storage::ArtifactOrigin::Produced;
     let storage_path = asset.storage_path;
-    let filename = asset.filename;
+    let filename = asset.name;
     let asset_id = asset.id;
-    match tokio::task::spawn_blocking(move || open_file_fn(&storage_path, &asset_id, &filename))
-        .await
+    match tokio::task::spawn_blocking(move || {
+        open_file_fn(&storage_path, &asset_id, &filename, stage)
+    })
+    .await
     {
         Ok(Ok(())) => {}
         Ok(Err(e)) => return Err(OpenFileApiError::OpenFailed(e)),
@@ -160,27 +181,11 @@ pub(super) async fn open_asset_for_user(
     })
 }
 
-#[derive(Serialize)]
-pub(super) struct ErrorResponse {
-    pub error: ErrorDetail,
-}
-
-#[derive(Serialize)]
-pub(super) struct ErrorDetail {
-    pub code: String,
-    pub message: String,
-}
-
+/// Delegates to the shared `{"error":{"code","message"}}` envelope in
+/// `routes::api_error` — collapses what used to be a byte-identical copy of
+/// the struct + builder duplicated in `chat_types.rs`.
 pub(super) fn error_response(status: StatusCode, code: &str, message: &str) -> impl IntoResponse {
-    (
-        status,
-        Json(ErrorResponse {
-            error: ErrorDetail {
-                code: code.to_string(),
-                message: message.to_string(),
-            },
-        }),
-    )
+    super::api_error(status, code, message)
 }
 
 pub(super) fn open_file_error_response(err: OpenFileApiError) -> axum::response::Response {

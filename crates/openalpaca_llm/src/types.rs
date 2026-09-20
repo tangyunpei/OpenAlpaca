@@ -289,7 +289,12 @@ pub struct ChatRequest {
     pub tool_choice: Option<ToolChoice>,
     /// Enable Anthropic prompt caching (non-Anthropic providers ignore this).
     pub enable_caching: bool,
-    /// Extended thinking config (Anthropic only). Non-Anthropic providers ignore this.
+    /// How much the caller wants this model to reason — the one request field
+    /// each provider maps to its own wire (M2). Anthropic reads it as extended
+    /// thinking; the OpenAI-compatible providers map it to `reasoning_effort`,
+    /// and `Disabled` reaches Ollama as `"none"` so a small-budget utility call
+    /// is not spent on thought before the answer. A provider with no such
+    /// control ignores it.
     pub thinking: Option<ThinkingConfig>,
     /// Context management configuration (Anthropic only). Other providers ignore this.
     pub context_management: Option<crate::context_management::ContextManagement>,

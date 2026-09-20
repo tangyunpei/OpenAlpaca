@@ -103,6 +103,42 @@ fn test_steering_inbox_registry() {
     assert!(ctx.remove_steering_inbox("t1").is_none());
 }
 
+/// The window between a `start`/`resume` claim and the dispatch: a `cancel`
+/// that lands there used to be set on a token the dispatch then replaced with
+/// one of its own, so the run began as if nothing had been asked. The claim's
+/// token is now the run's token, and `cancel_task` answering `true` means the
+/// run will see it.
+#[test]
+fn a_cancel_between_the_claim_and_the_dispatch_reaches_the_run() {
+    let ctx = SharedContext::new();
+    let claimed = ctx.claim_run_slot("t1").expect("the slot was free");
+    assert!(ctx.claim_run_slot("t1").is_none(), "the id is claimed");
+
+    // The cancel arrives before the dispatch has taken its token.
+    assert!(ctx.cancel_task("t1"), "a claimed id is cancellable");
+    assert!(claimed.is_cancelled());
+
+    // What the dispatch then runs with.
+    let run = ctx.run_cancellation_token("t1");
+    assert!(
+        run.is_cancelled(),
+        "the run starts already cancelled instead of losing the cancel"
+    );
+
+    // And a dispatch with no claim behind it still gets a live token.
+    let fresh = ctx.run_cancellation_token("t2");
+    assert!(!fresh.is_cancelled());
+    assert!(
+        ctx.claim_run_slot("t2").is_none(),
+        "which also holds the id: nothing else may start it"
+    );
+    assert!(ctx.cancel_task("t2"));
+    assert!(fresh.is_cancelled(), "and it is the token cancel_task reaches");
+
+    ctx.remove_cancellation_token("t1");
+    assert!(!ctx.cancel_task("t1"), "a finished run holds no token");
+}
+
 #[test]
 fn test_workflows_by_lane_registry() {
     let ctx = SharedContext::new();

@@ -1,11 +1,12 @@
+use super::handler_attachments::{TurnAttachments, skipped};
 use super::{Orchestrator, principal_id};
 use crate::events::SystemEvent;
+use crate::gateway::HandleRequest;
 use crate::memory::scope_context::MemoryScopeContext;
 use crate::security::gate::SecurityGate;
-use crate::security::policy::{Principal, Scope};
+use crate::security::policy::Principal;
 use crate::types::Capability;
 use chrono::Utc;
-use openalpaca_llm::ContentPart;
 use openalpaca_storage::repository::orchestrator_latency::{
     OrchestratorLatencyRecord, OrchestratorLatencyRepository,
 };
@@ -16,53 +17,45 @@ use super::intent::Intent;
 
 impl Orchestrator {
     /// Public entry point for processing a user message.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn handle_message(
+    pub async fn handle_message(&self, request: HandleRequest) -> Result<String, String> {
+        let model_input_content = request.content.clone();
+        self.handle_message_internal(request, model_input_content, false, None)
+            .await
+    }
+
+    /// Internal message handler that separates the model input from the intent source.
+    ///
+    /// `request.content` is the intent source — used only for intent
+    /// classification checks; `model_input_content` is used for LLM calls and
+    /// context building. The two differ on the attachment path, where the model
+    /// sees the message augmented with the files' extracted text.
+    ///
+    /// **A1 — every arm answers for its attachments.** `attachments` is the
+    /// turn's own files, already adapted for the model that will answer. An
+    /// arm either hands the parts to its model or calls
+    /// [`Orchestrator::skip_turn_attachments`] with a reason, so the bridge's
+    /// `attachments_used` / `attachments_skipped` stay a partition and `used`
+    /// keeps meaning "the model's request really carried it".
+    pub(super) async fn handle_message_internal(
         &self,
-        request_id: Uuid,
-        source: String,
-        content: String,
-        principal: Principal,
-        scope: Scope,
-        lane_key: String,
-        workspace_path: Option<String>,
-        stream_id: Option<String>,
+        request: HandleRequest,
+        model_input_content: String,
+        force_simple_query: bool,
+        attachments: Option<TurnAttachments>,
     ) -> Result<String, String> {
-        self.handle_message_internal(
+        let HandleRequest {
             request_id,
             source,
-            content.clone(),
-            content,
-            false,
-            None,
+            content: intent_source_content,
             principal,
             scope,
             lane_key,
             workspace_path,
             stream_id,
-        )
-        .await
-    }
-
-    /// Internal message handler that separates the model input from the intent source.
-    ///
-    /// `intent_source_content` is used only for intent classification checks.
-    /// `model_input_content` is used for LLM calls and context building.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) async fn handle_message_internal(
-        &self,
-        request_id: Uuid,
-        source: String,
-        model_input_content: String,
-        intent_source_content: String,
-        force_simple_query: bool,
-        current_parts: Option<Vec<ContentPart>>,
-        principal: Principal,
-        scope: Scope,
-        lane_key: String,
-        workspace_path: Option<String>,
-        stream_id: Option<String>,
-    ) -> Result<String, String> {
+            model_override,
+            unattended,
+            turn_sink,
+        } = request;
         let ack_start = Instant::now();
 
         // 1. Permission check via SecurityGate (wraps TrustGate)
@@ -85,17 +78,11 @@ impl Orchestrator {
             _ => None,
         };
 
-        // Resolve workspace context for memory scoping.
-        // Prefer request-provided workspace path (from GUI/CLI) over daemon CWD.
-        let workspace_id = if let Some(ref ws_path) = workspace_path {
-            crate::memory::workspace::resolve_workspace_id(std::path::Path::new(ws_path))
-        } else {
-            tracing::debug!("No workspace_path in request, falling back to daemon CWD");
-            std::env::current_dir()
-                .ok()
-                .and_then(|d| crate::memory::workspace::resolve_workspace_id(&d))
-        };
-        let scope_ctx = MemoryScopeContext::new(workspace_id);
+        // Resolve the turn's workspace context. Memory scoping prefers the
+        // request-provided path (GUI/CLI) and falls back to the daemon CWD;
+        // `request_workspace_root` is set only on the request branch, so
+        // content writers never inherit the CWD (R22 — see `for_request`).
+        let scope_ctx = MemoryScopeContext::for_request(workspace_path.as_deref());
 
         // 3. Try slash commands, task queries, and skill invocations first
         let intent = if force_simple_query {
@@ -132,14 +119,16 @@ impl Orchestrator {
                     }
                     _ => unreachable!(),
                 };
+                // A1 — a task command is answered with no model at all, so the
+                // turn's files went nowhere. Say so rather than let the bridge
+                // report them used.
+                self.skip_turn_attachments(request_id, attachments.as_ref(), skipped::TASK_OPS);
                 // Task ops skip the routing ladder entirely, but every routed
                 // message must still be observable (Routing V2 Phase 3):
                 // emit OrchestrationStage + the latency record before returning.
                 self.record_orchestration_stage(
                     request_id,
                     "task_ops".to_string(),
-                    0,
-                    0,
                     ack_start.elapsed().as_millis() as u64,
                     None,
                     None,
@@ -150,12 +139,19 @@ impl Orchestrator {
         }
 
         // 4. Build context ONCE for all remaining paths (D6: single dedup location)
-        let ctx = self.build_context(&lane_key, &model_input_content);
+        //
+        // The dedup key is the **raw** message, not the model input. The
+        // gateway persists this turn before the handler runs, so the last
+        // recent row *is* this turn; `build_context` drops it by comparing it
+        // to the current query. On the attachment path the model input is the
+        // augmented string (the files' extracted text wrapped around the
+        // question) and never equalled the stored content, so the turn's own
+        // message came back as history — the attachment reached the model
+        // twice, and U2 would have sent the whole document twice.
+        let ctx = self.build_context(&lane_key, &intent_source_content);
 
         // 5. Compute result — deterministic tiers, then the main loop.
         //    Track timing for observability (OrchestrationStage metrics).
-        //    `planner_ms`/`dispatch_ms` are kept at 0 for schema stability
-        //    (the planner ladder was deleted in Routing V2 Phase 5).
         let mode: String;
 
         let result: Result<String, String> = if !force_simple_query
@@ -167,6 +163,9 @@ impl Orchestrator {
             // model. With steering_enabled=false (rollback) this arm is
             // skipped and "/steer ..." routes like any other message.
             mode = "steered".to_string();
+            // A1 — a steer is a deterministic injection, not a turn a model
+            // answers; nothing carries the files into the running workflow.
+            self.skip_turn_attachments(request_id, attachments.as_ref(), skipped::STEER);
             self.handle_steer_prefix(
                 request_id,
                 steer_text,
@@ -194,8 +193,34 @@ impl Orchestrator {
                 owner_id,
                 &scope_ctx,
                 stream_id.as_deref(),
+                // S5: the deterministic skill tier is a *client-facing* tier
+                // — a `/slash` from a piped CLI and every scheduled skill
+                // reach the model here, not through the main loop — so the
+                // declaration has to arrive here too, or the turn sits out
+                // the whole confirmation timeout with nobody to answer.
+                unattended,
+                // K1: and for the same reason, the turn's live rail. A
+                // `/slash` answer used to reach the client as one delta after
+                // the whole generation — a silent minute on a local model —
+                // while the main loop two arms below streamed.
+                turn_sink.as_ref(),
+                // A1: and for the same reason again, the turn's own files. A
+                // `/slash` with an attachment reached the model as the bare
+                // question — no file, no name, and `attachments_used` saying
+                // it had arrived.
+                attachments.as_ref(),
             )
             .await
+        } else if let Some(reply) = self.withdrawn_skill_reply(&intent_source_content) {
+            // A `/slash` naming a skill a **disabled plugin** used to provide.
+            // The catalog's live indices were scrubbed at T2, so the command
+            // missed above and the message would otherwise have fallen through
+            // to the main loop as ordinary chat; the tombstone answers with the
+            // plugin that owns it instead (extension design §10 case 5(a)).
+            mode = "skill_withdrawn".to_string();
+            // A1 — the tombstone is a fixed sentence, written without a model.
+            self.skip_turn_attachments(request_id, attachments.as_ref(), skipped::NO_MODEL_TIER);
+            Ok(reply)
         } else if self.is_bootstrapping() {
             mode = "bootstrap".to_string();
             self.handle_simple_query(
@@ -209,9 +234,12 @@ impl Orchestrator {
                 &ctx,
                 owner_id,
                 &scope_ctx,
-                current_parts.as_deref(),
+                attachments.as_ref(),
                 stream_id.as_deref(),
-                None,
+                turn_sink.as_ref(),
+                Some(super::query_handler::LoopOverrides::ModelOnly {
+                    model_override: model_override.clone(),
+                }),
             )
             .await
         } else if force_simple_query {
@@ -227,9 +255,12 @@ impl Orchestrator {
                 &ctx,
                 owner_id,
                 &scope_ctx,
-                current_parts.as_deref(),
+                attachments.as_ref(),
                 stream_id.as_deref(),
-                None,
+                turn_sink.as_ref(),
+                Some(super::query_handler::LoopOverrides::ModelOnly {
+                    model_override: model_override.clone(),
+                }),
             )
             .await
         } else if self.llm_router.is_some()
@@ -248,8 +279,18 @@ impl Orchestrator {
         {
             // Social fast path: ultra-light prompt for "ok", "thanks", "好的" etc.
             mode = "social_fast_path".to_string();
-            self.handle_social_query(request_id, &model_input_content, &lane_key, &ctx)
-                .await
+            // A1 — this arm *does* reach a model, but with a prompt of its own
+            // that carries no parts. The turn's files did not reach it.
+            self.skip_turn_attachments(request_id, attachments.as_ref(), skipped::SOCIAL);
+            self.handle_social_query(
+                request_id,
+                &model_input_content,
+                &lane_key,
+                &ctx,
+                model_override.clone(),
+                turn_sink.as_ref(),
+            )
+            .await
         } else {
             // Routing V2 main loop: the front door for everything that
             // survived the deterministic tier and the social branch.
@@ -268,10 +309,15 @@ impl Orchestrator {
                 &ctx,
                 owner_id,
                 &scope_ctx,
-                current_parts.as_deref(),
+                attachments.as_ref(),
                 stream_id.as_deref(),
+                turn_sink.as_ref(),
                 Some(super::query_handler::LoopOverrides::MainLoop {
                     workspace_path: workspace_path.clone(),
+                    model_override: model_override.clone(),
+                    // M6: the turn's own declaration, carried into the tools
+                    // it may call and the workflow it may start.
+                    unattended,
                 }),
             )
             .await
@@ -280,7 +326,7 @@ impl Orchestrator {
         let ack_ms = ack_start.elapsed().as_millis() as u64;
 
         // Emit OrchestrationStage event + persist the latency record
-        self.record_orchestration_stage(request_id, mode, 0, 0, ack_ms, None, None);
+        self.record_orchestration_stage(request_id, mode, ack_ms, None, None);
 
         // 6 + 7. Summary update and user trait extraction run concurrently
         // in a background spawn (fire-and-forget, never blocks the response).
@@ -362,13 +408,10 @@ impl Orchestrator {
     /// Publish an `OrchestrationStage` event and persist the matching
     /// latency record (best-effort). Shared by the routing ladder and the
     /// task-ops early return so every routed message is observable.
-    #[allow(clippy::too_many_arguments)]
     fn record_orchestration_stage(
         &self,
         request_id: Uuid,
         mode: String,
-        planner_ms: u64,
-        dispatch_ms: u64,
         ack_ms: u64,
         fallback_reason: Option<String>,
         auto_promotion_reason: Option<String>,
@@ -376,8 +419,6 @@ impl Orchestrator {
         self.bus.publish(SystemEvent::OrchestrationStage {
             request_id,
             mode: mode.clone(),
-            planner_ms,
-            dispatch_ms,
             ack_ms,
             fallback_reason: fallback_reason.clone(),
             auto_promotion_reason: auto_promotion_reason.clone(),
@@ -390,8 +431,6 @@ impl Orchestrator {
                 id: None,
                 request_id: request_id.to_string(),
                 mode,
-                planner_ms,
-                dispatch_ms,
                 ack_ms,
                 fallback_reason,
                 auto_promotion_reason,

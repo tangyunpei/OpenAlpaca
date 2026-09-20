@@ -68,13 +68,18 @@ pub(super) fn workflow_contract_suffix(steering_attached: bool) -> String {
 /// `run_lead_agent` then concatenates `format_tool_guidance(...)` +
 /// `connector_suffix` inline before building the message vec. See the golden
 /// fixture `test_golden_lead_agent_byte_identical` for the invariant.
+/// `model_window` is the context window of the model that will actually
+/// answer this run (M5) — `runner::routed_context_window`, with the caller's
+/// own default when the registry knows none. It used to be a hard-coded
+/// 200 000 "because the lead agent always gets generous context", which is
+/// exactly wrong on a local model: the composer sized the prompt against a
+/// window the run does not have.
 pub fn build_lead_agent_prompt_from_templates(
     compose_engine: &ComposeEngine,
     base_persona: &str,
     templates: &[AgentTemplate],
+    model_window: usize,
 ) -> String {
-    // Use a large default window — lead agent always gets generous context.
-    let model_window: usize = 200_000;
 
     // Available agents catalog (High — important for delegation decisions).
     let agents_block = if templates.is_empty() {

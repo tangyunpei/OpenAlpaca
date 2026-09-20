@@ -11,6 +11,24 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
 
+/// One connector as the manager sees it — what `GET /v1/connectors` reports
+/// before the route adds the config- and message-derived fields (GAP-17, T49).
+#[derive(Debug, Clone)]
+pub struct ConnectorDetail {
+    /// The connector's unique id (`telegram`), which is also the `source` the
+    /// gateway stamps on every message it carries.
+    pub id: String,
+    /// The human-facing name, taken from the connector's own factory. Never
+    /// derived from the id by a table the connector is not in.
+    pub name: String,
+    /// `active` | `error` | `disabled` | `unconfigured`.
+    pub status: String,
+    /// Whether this manager holds a spawned handle for the connector. It is
+    /// **not** "is enabled" and **not** "is alive": a handle whose task has
+    /// exited is still registered, and reports `status: "error"`.
+    pub registered: bool,
+}
+
 /// Manages the lifecycle of platform connectors (Telegram, etc.)
 #[derive(Clone)]
 pub struct ConnectorManager {
@@ -93,8 +111,22 @@ impl ConnectorManager {
         info!("Started {} connectors", guard.len());
     }
 
-    /// List status of all potential connectors
+    /// List status of all potential connectors, as `(id, status)`.
+    ///
+    /// The prompt-injection cache ([`crate::connector_bridge`]) wants only
+    /// these two fields; it is a projection of [`Self::list_detail`] so the
+    /// status a prompt sees and the status the route serves cannot diverge.
     pub async fn list_status(&self) -> Vec<(String, String)> {
+        self.list_detail()
+            .await
+            .into_iter()
+            .map(|d| (d.id, d.status))
+            .collect()
+    }
+
+    /// Every compiled-in connector, with the name it gives itself and whether
+    /// this manager holds a handle for it (GAP-17, T49).
+    pub async fn list_detail(&self) -> Vec<ConnectorDetail> {
         // Collect (name, is_alive) pairs and release lock immediately
         let handle_info: Vec<(String, bool)> = {
             let guard = self.handles.lock().await;
@@ -115,6 +147,7 @@ impl ConnectorManager {
             // they are "configured" by virtue of being on the right platform.
             let token_optional = matches!(name, "imessage");
 
+            let registered = handle_info.iter().any(|(n, _)| n == name);
             let status = if let Some((_, alive)) = handle_info.iter().find(|(n, _)| n == name) {
                 if *alive {
                     "active".to_string()
@@ -141,7 +174,12 @@ impl ConnectorManager {
                     }
                 }
             };
-            statuses.push((name.to_string(), status));
+            statuses.push(ConnectorDetail {
+                id: name.to_string(),
+                name: factory.display_name().to_string(),
+                status,
+                registered,
+            });
         }
 
         statuses

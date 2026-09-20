@@ -24,6 +24,116 @@ enum ServerEvent {
         #[allow(dead_code)]
         instance_id: String,
     },
+    /// A produced artifact (plan §4.9). `task_id`/`agent_id` are absent for a
+    /// loose artifact — a chat turn that ran no workflow.
+    ArtifactWritten {
+        #[allow(dead_code)]
+        artifact_id: String,
+        #[allow(dead_code)]
+        task_id: Option<String>,
+        #[allow(dead_code)]
+        agent_id: Option<String>,
+        name: String,
+        kind: String,
+        version: u32,
+        path: String,
+        ts: DateTime<Utc>,
+        #[allow(dead_code)]
+        instance_id: String,
+    },
+    /// One subagent lane of a run opening or closing (GAP-09).
+    SubagentSpan {
+        #[allow(dead_code)]
+        task_id: String,
+        #[allow(dead_code)]
+        span_id: String,
+        label: String,
+        #[allow(dead_code)]
+        template_id: String,
+        #[allow(dead_code)]
+        agent_instance_id: String,
+        state: String,
+        detail: Option<String>,
+        #[allow(dead_code)]
+        started_at: String,
+        #[allow(dead_code)]
+        ended_at: Option<String>,
+        duration_ms: Option<i64>,
+        #[allow(dead_code)]
+        output_preview: Option<String>,
+        ts: DateTime<Utc>,
+        #[allow(dead_code)]
+        instance_id: String,
+    },
+    /// A conversation was created, activated, archived or deleted (§5.7) — or
+    /// one of its runs was found interrupted at boot (§5.6b), in which case
+    /// `task_id` names the run.
+    SessionChanged {
+        #[allow(dead_code)]
+        session_id: String,
+        lane_key: String,
+        status: String,
+        task_id: Option<String>,
+        ts: DateTime<Utc>,
+        #[allow(dead_code)]
+        instance_id: String,
+    },
+    /// A queued follow-up was cancelled before it ran (GAP-03).
+    FollowupCancelled {
+        lane_key: String,
+        followup_id: i64,
+        ts: DateTime<Utc>,
+        #[allow(dead_code)]
+        instance_id: String,
+    },
+    /// An extension's observed state changed — T5, E5, `mark_failed`, T5-deny,
+    /// T5-gone and the tool-list refresh (ADR-030).
+    ExtensionStateChanged {
+        kind: String,
+        id: String,
+        state: String,
+        #[allow(dead_code)]
+        generation: u64,
+        /// Only a server-driven `tools/list_changed` refresh sets it.
+        #[serde(default)]
+        tools_changed: bool,
+        ts: DateTime<Utc>,
+        #[allow(dead_code)]
+        instance_id: String,
+    },
+    /// S4 moments 1 and 2 — a capability was withheld from a caller.
+    ExtensionCapabilityWithheld {
+        kind: String,
+        id: String,
+        subject: String,
+        moment: String,
+        state: String,
+        #[allow(dead_code)]
+        scope: String,
+        stale: bool,
+        ts: DateTime<Utc>,
+        #[allow(dead_code)]
+        instance_id: String,
+    },
+    /// S4 moment 3 — T1 step 3's dependent scan, one per transition.
+    ExtensionCapabilityWithdrawn {
+        kind: String,
+        id: String,
+        state: String,
+        cause: String,
+        capabilities: Vec<String>,
+        tools: Vec<String>,
+        affected_templates: Vec<String>,
+        affected_skills: Vec<String>,
+        /// The cron-scheduled subset — the half that fires unattended, so it is
+        /// named separately rather than folded into the skills count.
+        affected_cron_skills: Vec<String>,
+        #[allow(dead_code)]
+        notice_lane: String,
+        ts: DateTime<Utc>,
+        #[allow(dead_code)]
+        instance_id: String,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -131,8 +241,573 @@ fn print_event(event: &ServerEvent) {
                 format!("[{}...]", &request_id[..8]).dimmed()
             );
         }
+        ServerEvent::ArtifactWritten {
+            name,
+            kind,
+            version,
+            path,
+            ts,
+            ..
+        } => {
+            let time = ts.format("%H:%M:%S").to_string();
+            println!(
+                "{} 📄 {} {} {} {}",
+                time.dimmed(),
+                "artifact".green(),
+                name.bold(),
+                format!("[{kind} v{version}]").cyan(),
+                path.dimmed()
+            );
+        }
+        ServerEvent::SubagentSpan {
+            label,
+            state,
+            detail,
+            duration_ms,
+            ts,
+            ..
+        } => {
+            let time = ts.format("%H:%M:%S").to_string();
+            let took = match duration_ms {
+                Some(ms) => format!(" {}", format_args!("{:.1}s", *ms as f64 / 1000.0)),
+                None => String::new(),
+            };
+            let why = match detail {
+                Some(d) if !d.is_empty() => format!(" — {d}"),
+                _ => String::new(),
+            };
+            println!(
+                "{} 🧵 {} {} {}{}",
+                time.dimmed(),
+                "lane".blue(),
+                label.bold(),
+                format!("[{state}{took}]").cyan(),
+                why.dimmed()
+            );
+        }
+        ServerEvent::SessionChanged {
+            lane_key,
+            status,
+            task_id,
+            ts,
+            ..
+        } => {
+            let time = ts.format("%H:%M:%S").to_string();
+            // §5.6b — the one status that is about a *run* rather than the
+            // conversation's own lifecycle, so it names the run.
+            let what = match task_id {
+                Some(id) => format!("[{status} {id}]"),
+                None => format!("[{status}]"),
+            };
+            let tint = if status == "interrupted" {
+                what.yellow()
+            } else {
+                what.cyan()
+            };
+            println!(
+                "{} 💬 {} {} {}",
+                time.dimmed(),
+                "session".magenta(),
+                lane_key.bold(),
+                tint
+            );
+        }
+        ServerEvent::FollowupCancelled {
+            lane_key,
+            followup_id,
+            ts,
+            ..
+        } => {
+            let time = ts.format("%H:%M:%S").to_string();
+            println!(
+                "{} 🗑 {} {} {}",
+                time.dimmed(),
+                "follow-up".magenta(),
+                lane_key.bold(),
+                format!("[cancelled #{followup_id}]").cyan()
+            );
+        }
+        ServerEvent::ExtensionStateChanged {
+            kind,
+            id,
+            state,
+            tools_changed,
+            ts,
+            ..
+        } => {
+            let time = ts.format("%H:%M:%S").to_string();
+            let what = if *tools_changed {
+                format!("[{state} · tools changed]")
+            } else {
+                format!("[{state}]")
+            };
+            // The states the owner has to act on read differently from the ones
+            // that are just the switch moving.
+            let tint = match state.as_str() {
+                "failed" | "unapproved" | "orphaned" | "removed" => what.yellow(),
+                _ => what.cyan(),
+            };
+            println!(
+                "{} 🧩 {} {} {}",
+                time.dimmed(),
+                "extension".blue(),
+                format!("{kind}/{id}").bold(),
+                tint
+            );
+        }
+        ServerEvent::ExtensionCapabilityWithheld {
+            kind,
+            id,
+            subject,
+            moment,
+            state,
+            stale,
+            ts,
+            ..
+        } => {
+            let time = ts.format("%H:%M:%S").to_string();
+            let stale_note = if *stale { " — stale handle" } else { "" };
+            println!(
+                "{} 🚫 {} {} {}{}",
+                time.dimmed(),
+                "withheld".yellow(),
+                subject.bold(),
+                format!("[{kind}/{id} {state} · {moment}]").cyan(),
+                stale_note.dimmed()
+            );
+        }
+        ServerEvent::ExtensionCapabilityWithdrawn {
+            kind,
+            id,
+            state,
+            cause,
+            capabilities,
+            tools,
+            affected_templates,
+            affected_skills,
+            affected_cron_skills,
+            ts,
+            ..
+        } => {
+            let time = ts.format("%H:%M:%S").to_string();
+            let lost = format!(
+                "[{cause} · {state} · {} tools, {} capabilities]",
+                tools.len(),
+                capabilities.len()
+            );
+            // The dependents are the half a person acts on, and a scheduled
+            // skill is the one that fails with nobody watching.
+            let mut affected = format!(
+                "→ {} templates, {} skills",
+                affected_templates.len(),
+                affected_skills.len()
+            );
+            if !affected_cron_skills.is_empty() {
+                affected.push_str(&format!(
+                    " ({} scheduled: {})",
+                    affected_cron_skills.len(),
+                    affected_cron_skills.join(", ")
+                ));
+            }
+            println!(
+                "{} 🧹 {} {} {} {}",
+                time.dimmed(),
+                "withdrawn".yellow(),
+                format!("{kind}/{id}").bold(),
+                lost.cyan(),
+                affected.dimmed()
+            );
+        }
         ServerEvent::Unknown => {
             println!("{} unknown event", "?".dimmed());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// T28 — `artifact_written` has a real arm, so `openalpaca tail` names the
+    /// deliverable instead of printing "unknown event".
+    #[test]
+    fn artifact_written_deserializes_into_its_own_variant() {
+        let frame = r#"{
+            "type": "artifact_written",
+            "artifact_id": "a-1",
+            "task_id": "t-1",
+            "agent_id": "writing_agent",
+            "name": "01-quarterly-report.md",
+            "kind": "markdown",
+            "version": 2,
+            "path": "/p/.openalpaca/artifacts/run/01-quarterly-report.md",
+            "ts": "2026-09-05T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#;
+        match serde_json::from_str::<ServerEvent>(frame).unwrap() {
+            ServerEvent::ArtifactWritten {
+                artifact_id,
+                name,
+                kind,
+                version,
+                path,
+                ..
+            } => {
+                assert_eq!(artifact_id, "a-1");
+                assert_eq!(name, "01-quarterly-report.md");
+                assert_eq!(kind, "markdown");
+                assert_eq!(version, 2);
+                assert_eq!(path, "/p/.openalpaca/artifacts/run/01-quarterly-report.md");
+            }
+            other => panic!("Expected ArtifactWritten, got {other:?}"),
+        }
+    }
+
+    /// The loose case: no run, no agent. Both are optional on the wire.
+    #[test]
+    fn artifact_written_tolerates_a_missing_task_and_agent() {
+        let frame = r#"{
+            "type": "artifact_written",
+            "artifact_id": "a-2",
+            "task_id": null,
+            "agent_id": null,
+            "name": "01-notes.md",
+            "kind": "markdown",
+            "version": 1,
+            "path": "/h/.openalpaca/artifacts/loose/01-notes.md",
+            "ts": "2026-09-05T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#;
+        let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
+        assert!(matches!(
+            event,
+            ServerEvent::ArtifactWritten {
+                task_id: None,
+                agent_id: None,
+                ..
+            }
+        ));
+        // The print arm must survive both halves being absent.
+        print_event(&event);
+    }
+
+    /// GAP-09 — a lane transition has its own arm, so `openalpaca tail` shows
+    /// the swimlane changing instead of "unknown event".
+    #[test]
+    fn subagent_span_deserializes_into_its_own_variant() {
+        let frame = r#"{
+            "type": "subagent_span",
+            "task_id": "t-1",
+            "span_id": "node-1",
+            "label": "review\u00b71",
+            "template_id": "review_agent",
+            "agent_instance_id": "review_agent::a1b2",
+            "state": "cancelled",
+            "detail": "cancelled before starting",
+            "started_at": "2026-09-05T10:00:00.000Z",
+            "ended_at": "2026-09-05T10:00:04.500Z",
+            "duration_ms": 4500,
+            "output_preview": null,
+            "ts": "2026-09-05T10:00:04Z",
+            "instance_id": "inst-1"
+        }"#;
+        let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
+        match &event {
+            ServerEvent::SubagentSpan {
+                span_id,
+                label,
+                state,
+                detail,
+                duration_ms,
+                ..
+            } => {
+                assert_eq!(span_id, "node-1");
+                assert_eq!(label, "review\u{b7}1");
+                assert_eq!(state, "cancelled");
+                assert_eq!(detail.as_deref(), Some("cancelled before starting"));
+                assert_eq!(*duration_ms, Some(4_500));
+            }
+            other => panic!("Expected SubagentSpan, got {other:?}"),
+        }
+        print_event(&event);
+    }
+
+    /// The open frame: no end, no duration, no detail. The print arm must not
+    /// invent any of them.
+    #[test]
+    fn subagent_span_tolerates_an_open_lane() {
+        let frame = r#"{
+            "type": "subagent_span",
+            "task_id": "t-1",
+            "span_id": "node-1",
+            "label": "review\u00b71",
+            "template_id": "review_agent",
+            "agent_instance_id": "review_agent::a1b2",
+            "state": "running",
+            "detail": null,
+            "started_at": "2026-09-05T10:00:00.000Z",
+            "ended_at": null,
+            "duration_ms": null,
+            "output_preview": null,
+            "ts": "2026-09-05T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#;
+        let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
+        assert!(matches!(
+            event,
+            ServerEvent::SubagentSpan {
+                ended_at: None,
+                duration_ms: None,
+                detail: None,
+                ..
+            }
+        ));
+        print_event(&event);
+    }
+
+    /// §5.6b — the boot sweep's frame names the run it interrupted, and
+    /// `openalpaca tail` prints it instead of "unknown event".
+    #[test]
+    fn an_interrupted_session_frame_names_its_run() {
+        let frame = r#"{
+            "type": "session_changed",
+            "session_id": "s-1",
+            "lane_key": "user1:gui",
+            "status": "interrupted",
+            "task_id": "t-9",
+            "ts": "2026-09-05T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#;
+        let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
+        match event {
+            ServerEvent::SessionChanged {
+                ref session_id,
+                ref status,
+                ref task_id,
+                ..
+            } => {
+                assert_eq!(session_id, "s-1");
+                assert_eq!(status, "interrupted");
+                assert_eq!(task_id.as_deref(), Some("t-9"));
+            }
+            other => panic!("Expected SessionChanged, got {other:?}"),
+        }
+        print_event(&event);
+    }
+
+    /// GAP-03 — a cancelled follow-up has its own arm.
+    #[test]
+    fn a_cancelled_followup_deserializes_into_its_own_variant() {
+        let frame = r#"{
+            "type": "followup_cancelled",
+            "lane_key": "user1:gui",
+            "followup_id": 7,
+            "ts": "2026-09-05T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#;
+        let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
+        match &event {
+            ServerEvent::FollowupCancelled {
+                lane_key,
+                followup_id,
+                ..
+            } => {
+                assert_eq!(lane_key, "user1:gui");
+                assert_eq!(*followup_id, 7);
+            }
+            other => panic!("Expected FollowupCancelled, got {other:?}"),
+        }
+        print_event(&event);
+    }
+
+    /// ADR-030 — the extension family. A state change names the extension and
+    /// the word the row now reads, instead of printing "unknown event".
+    #[test]
+    fn an_extension_state_change_deserializes_into_its_own_variant() {
+        let frame = r#"{
+            "type": "extension_state_changed",
+            "kind": "plugin",
+            "id": "notion",
+            "state": "failed",
+            "generation": 3,
+            "tools_changed": false,
+            "ts": "2026-09-05T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#;
+        let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
+        match &event {
+            ServerEvent::ExtensionStateChanged {
+                kind,
+                id,
+                state,
+                generation,
+                tools_changed,
+                ..
+            } => {
+                assert_eq!(kind, "plugin");
+                assert_eq!(id, "notion");
+                assert_eq!(state, "failed");
+                assert_eq!(*generation, 3);
+                assert!(!*tools_changed);
+            }
+            other => panic!("Expected ExtensionStateChanged, got {other:?}"),
+        }
+        print_event(&event);
+    }
+
+    /// `tools_changed` is defaulted on the wire, so a frame without it still
+    /// deserializes — and the refresh case renders its own note.
+    #[test]
+    fn an_extension_state_change_tolerates_a_missing_tools_changed() {
+        let frame = r#"{
+            "type": "extension_state_changed",
+            "kind": "mcp",
+            "id": "github",
+            "state": "enabled",
+            "generation": 1,
+            "ts": "2026-09-05T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#;
+        let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
+        assert!(matches!(
+            event,
+            ServerEvent::ExtensionStateChanged {
+                tools_changed: false,
+                ..
+            }
+        ));
+        print_event(&event);
+
+        let refreshed = serde_json::from_str::<ServerEvent>(
+            r#"{
+            "type": "extension_state_changed",
+            "kind": "mcp",
+            "id": "github",
+            "state": "enabled",
+            "generation": 1,
+            "tools_changed": true,
+            "ts": "2026-09-05T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#,
+        )
+        .unwrap();
+        print_event(&refreshed);
+    }
+
+    /// S4 moments 1 and 2 — the withholding names the subject and the moment.
+    #[test]
+    fn a_withheld_capability_deserializes_into_its_own_variant() {
+        let frame = r#"{
+            "type": "extension_capability_withheld",
+            "kind": "mcp",
+            "id": "github",
+            "subject": "github__create_issue",
+            "moment": "attempted_use",
+            "state": "disabled",
+            "scope": "task-1",
+            "stale": true,
+            "ts": "2026-09-05T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#;
+        let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
+        match &event {
+            ServerEvent::ExtensionCapabilityWithheld {
+                subject,
+                moment,
+                state,
+                stale,
+                ..
+            } => {
+                assert_eq!(subject, "github__create_issue");
+                assert_eq!(moment, "attempted_use");
+                assert_eq!(state, "disabled");
+                assert!(*stale);
+            }
+            other => panic!("Expected ExtensionCapabilityWithheld, got {other:?}"),
+        }
+        print_event(&event);
+    }
+
+    /// S4 moment 3 — T1 step 3's scan, with the scheduled subset named: that is
+    /// the half that fails with nobody watching.
+    #[test]
+    fn a_withdrawn_capability_deserializes_into_its_own_variant() {
+        let frame = r#"{
+            "type": "extension_capability_withdrawn",
+            "kind": "plugin",
+            "id": "notion",
+            "state": "disabling",
+            "cause": "disable",
+            "capabilities": ["net_read"],
+            "tools": ["notion::search", "notion::append"],
+            "affected_templates": ["reader"],
+            "affected_skills": ["digest", "weekly"],
+            "affected_cron_skills": ["weekly"],
+            "notice_lane": "owner:gui",
+            "ts": "2026-09-05T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#;
+        let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
+        match &event {
+            ServerEvent::ExtensionCapabilityWithdrawn {
+                cause,
+                state,
+                tools,
+                affected_skills,
+                affected_cron_skills,
+                ..
+            } => {
+                assert_eq!(cause, "disable");
+                assert_eq!(state, "disabling");
+                assert_eq!(tools.len(), 2);
+                assert_eq!(affected_skills.len(), 2);
+                assert_eq!(affected_cron_skills, &vec!["weekly".to_string()]);
+            }
+            other => panic!("Expected ExtensionCapabilityWithdrawn, got {other:?}"),
+        }
+        print_event(&event);
+    }
+
+    /// The empty scan: a transition that took nothing away still prints, and
+    /// the cron note is absent rather than empty.
+    #[test]
+    fn a_withdrawn_capability_tolerates_empty_dependents() {
+        let frame = r#"{
+            "type": "extension_capability_withdrawn",
+            "kind": "mcp",
+            "id": "github",
+            "state": "disabled",
+            "cause": "reload",
+            "capabilities": [],
+            "tools": [],
+            "affected_templates": [],
+            "affected_skills": [],
+            "affected_cron_skills": [],
+            "notice_lane": "owner:gui",
+            "ts": "2026-09-05T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#;
+        let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
+        print_event(&event);
+    }
+
+    /// A lifecycle transition carries no run; the arm must survive that.
+    #[test]
+    fn a_lifecycle_session_frame_carries_no_run() {
+        let frame = r#"{
+            "type": "session_changed",
+            "session_id": "s-1",
+            "lane_key": "user1:gui",
+            "status": "archived",
+            "task_id": null,
+            "ts": "2026-09-05T10:00:00Z",
+            "instance_id": "inst-1"
+        }"#;
+        let event = serde_json::from_str::<ServerEvent>(frame).unwrap();
+        assert!(matches!(
+            event,
+            ServerEvent::SessionChanged { task_id: None, .. }
+        ));
+        print_event(&event);
     }
 }

@@ -21,6 +21,9 @@ thiserror.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 toml.workspace = true
+# An `llm.toml` write is an in-place edit, so the owner's comments, key order
+# and unknown keys survive it (M3) — the same writer shape `mcp.toml` uses.
+toml_edit.workspace = true
 
 arc-swap.workspace = true
 aes-gcm.workspace = true
@@ -28,7 +31,6 @@ base64.workspace = true
 rand.workspace = true
 uuid.workspace = true
 keyring.workspace = true
-directories.workspace = true
 file-lock.workspace = true
 
 # Streaming support
@@ -49,4 +51,6 @@ tokio-util.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
+# `net`/`io-util` are for `src/test_support.rs`'s loopback HTTP server — the
+# crate has no HTTP-mock dependency and tests must never reach a real provider.
+tokio = { workspace = true, features = ["test-util", "net", "io-util"] }

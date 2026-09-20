@@ -107,10 +107,37 @@ pub(super) fn build_llm_router(
     }
 }
 
+/// `llm.toml`'s hook into the one atomic writer for hand-edited config
+/// (plan §1.4, P-11).
+///
+/// It lives in `openalpaca_core`, which sits above `openalpaca_llm`, so the
+/// settings service takes it by injection rather than naming it. Everything
+/// `mcp.toml` and `.permissions.toml` get — tmp → fsync → rotate → rename, five
+/// versions kept under `state/backups/` — `llm.toml` now gets too. The lock is
+/// the caller's: `persist_only` holds `llm.toml.lock` across the whole
+/// read-modify-write.
+///
+/// It is also where the daemon records what it wrote (R58a). The file watcher
+/// sees the daemon's own write exactly as it sees a hand edit; without the
+/// hash in `hashes` it would re-run the whole reload one poll interval later
+/// and put a just-disabled provider's `[models]` rows back. The hash goes in
+/// **before** the bytes land, so the watcher can never observe the new file
+/// without it.
+pub(crate) fn atomic_config_writer(
+    hashes: crate::hot_reload::ConfigHashes,
+) -> openalpaca_llm::ConfigWriter {
+    Arc::new(move |path: &Path, contents: &str| {
+        crate::hot_reload::record_own_config_write(&hashes, contents);
+        openalpaca_core::config_io::atomic_write_with_backup(path, contents)
+            .map_err(|e| e.to_string())
+    })
+}
+
 pub(super) async fn build_llm_settings_service(
     llm_router: &Option<Arc<openalpaca_llm::LlmRouter>>,
     llm_config_path: &Path,
     secret_store: &Arc<dyn openalpaca_llm::SecretStore>,
+    llm_config_hashes: &crate::hot_reload::ConfigHashes,
 ) -> Option<Arc<openalpaca_llm::LlmSettingsService>> {
     let service = if let Some(router) = llm_router {
         match openalpaca_llm::LlmSettingsService::new_with_secret_store(
@@ -120,7 +147,9 @@ pub(super) async fn build_llm_settings_service(
         ) {
             Ok(service) => {
                 info!("LLM settings service initialized");
-                Some(Arc::new(service))
+                Some(Arc::new(service.with_config_writer(atomic_config_writer(
+                    llm_config_hashes.clone(),
+                ))))
             }
             Err(e) => {
                 warn!("Failed to init LLM settings service: {e}");
@@ -151,12 +180,42 @@ pub(super) fn build_embedder(
                 .as_ref()
                 .and_then(|c| c.providers.as_ref())
                 .and_then(|p| p.get(&cfg.provider));
-            match openalpaca_llm::build_embedder(cfg, Some(&**secret_store), provider_config) {
+            // L11: a local model's ~1 GB of weights belongs inside the store,
+            // not in whatever directory the daemon was started from. Resolved
+            // only for the local backend, so a remote one does not create a
+            // cache directory nothing will ever use. A store that cannot be
+            // created is not a reason to refuse the embedder — it falls back
+            // to the library's own default with a WARN saying so, rather than
+            // silently putting a gigabyte somewhere unexpected.
+            let cache_dir = if cfg.provider == "local" {
+                match openalpaca_storage::store::embedding_cache_dir() {
+                    Ok(dir) => Some(dir),
+                    Err(e) => {
+                        warn!(
+                            "Cannot use the store for the embedding model cache ({e}); \
+                             falling back to the library default under the working directory"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            match openalpaca_llm::build_embedder(
+                cfg,
+                Some(&**secret_store),
+                provider_config,
+                cache_dir.as_deref(),
+            ) {
                 Ok(e) => {
                     info!(
-                        "Embedder initialized: {} ({}d)",
+                        "Embedder initialized: {} ({}d){}",
                         cfg.provider,
-                        e.dimensions()
+                        e.dimensions(),
+                        cache_dir
+                            .as_ref()
+                            .map(|d| format!(", cache {}", d.display()))
+                            .unwrap_or_default()
                     );
                     Some(e)
                 }

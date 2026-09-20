@@ -7,10 +7,13 @@ use crate::agent::subagent::AgentConstraints;
 use crate::bus::EventBus;
 use crate::daemon_config::CircuitBreakerConfig;
 use crate::events::SystemEvent;
-use crate::security::capabilities::CapabilityManager;
+use crate::security::capabilities::{Allowlist, CapabilityManager};
 use crate::security::circuit_breaker::{ToolCircuitBreaker, is_transient_tool_error};
-use crate::security::confirmation::{ConfirmationBroker, ConfirmationRequest};
+use crate::security::confirmation::{
+    ConfirmationBroker, ConfirmationRequest, ConfirmationResolution,
+};
 use crate::security::sanitizer::InputSanitizer;
+use crate::tools::extensions::is_withheld_refusal;
 use crate::tools::registry::ToolContext;
 use crate::tools::ToolRegistry;
 use chrono::Utc;
@@ -18,11 +21,21 @@ use openalpaca_llm::ToolCall;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// `event_log.event_type` for a tool an unattended run had to refuse (S4).
+///
+/// Its own word rather than a `security_violation` among the others: the
+/// completion report has to name exactly these, and it asks the log for them
+/// by this type. Written only by the [`SandboxPolicy::unattended`] arm —
+/// nothing else in the system can produce a refusal with no approver.
+pub const UNAPPROVABLE_EVENT_TYPE: &str = "tool_approval_unavailable";
+
 /// Policy governing what a sandboxed agent can do.
 #[derive(Debug, Clone)]
 pub struct SandboxPolicy {
     pub agent_id: String,
-    pub allowed_capabilities: Vec<String>,
+    /// The ALLOW axis. `Allowlist::Only(vec![])` admits nothing; a surface that
+    /// means "no allow-list restriction" must spell `Allowlist::Unrestricted`.
+    pub allowed_capabilities: Allowlist,
     pub denied_capabilities: Vec<String>,
     pub require_confirmation_for: Vec<String>,
     pub max_tool_calls: Option<u32>,
@@ -35,6 +48,20 @@ pub struct SandboxPolicy {
     pub confirmation_timeout_secs: Option<u64>,
     /// When true, skip interactive confirmations (from global config or per-agent).
     pub auto_approve: bool,
+    /// The client behind this work said it cannot answer a confirmation
+    /// prompt (M6): a one-shot or piped `openalpaca chat`, a scheduled skill.
+    ///
+    /// Such a prompt has no responder, so raising one means waiting out the
+    /// 300-second timeout for an answer that was never coming — five and a
+    /// half minutes per tool call, and then a failure. The tool is refused
+    /// immediately instead, in words the model and the completion report can
+    /// both act on. Fail-closed either way: this never approves anything, and
+    /// it is read *after* `auto_approve`, which is the owner's own explicit
+    /// decision.
+    ///
+    /// `false` — the default, and every client that says nothing — is
+    /// today's behaviour exactly: raise the prompt and wait.
+    pub unattended: bool,
 }
 
 impl SandboxPolicy {
@@ -42,7 +69,7 @@ impl SandboxPolicy {
     pub fn from_constraints(agent_id: &str, constraints: &AgentConstraints) -> Self {
         Self {
             agent_id: agent_id.to_string(),
-            allowed_capabilities: constraints.allowed_capabilities.clone(),
+            allowed_capabilities: Allowlist::from_agent_constraints(constraints),
             denied_capabilities: constraints.denied_capabilities.clone(),
             require_confirmation_for: constraints.require_confirmation_for.clone(),
             max_tool_calls: constraints.max_tool_calls,
@@ -51,6 +78,9 @@ impl SandboxPolicy {
             lane_key: None,
             confirmation_timeout_secs: None,
             auto_approve: constraints.auto_approve,
+            // Set by the caller that knows where the work came from; an agent
+            // template says nothing about it.
+            unattended: false,
         }
     }
 }
@@ -97,15 +127,21 @@ impl SandboxManager {
         circuit_breaker_config: &CircuitBreakerConfig,
         db: openalpaca_storage::Database,
     ) -> Self {
-        let circuit_breaker = ToolCircuitBreaker::new(circuit_breaker_config, bus.clone());
-        Self {
-            registry,
-            bus,
-            circuit_breaker,
-            db: Some(db),
-            confirmation_broker: None,
-            approval_cache: crate::security::confirmation::ApprovalCache::new(),
-        }
+        let mut sandbox = Self::new(registry, bus, circuit_breaker_config);
+        sandbox.set_db(db);
+        sandbox
+    }
+
+    /// Give this sandbox the audit database (V2).
+    ///
+    /// The same shape as [`Self::set_confirmation_broker`], and for the same
+    /// reason: the production sites build the sandbox first and hand it what
+    /// they hold afterwards. Without this the typed refusal row
+    /// ([`UNAPPROVABLE_EVENT_TYPE`]) that a workflow's completion report reads
+    /// was written by nothing — `with_db` had no production caller at all, so
+    /// the S4 tests passed and every real run lost the line.
+    pub fn set_db(&mut self, db: openalpaca_storage::Database) {
+        self.db = Some(db);
     }
 
     /// Create a new SandboxManager with default circuit breaker settings.
@@ -119,6 +155,15 @@ impl SandboxManager {
     /// Set the confirmation broker for interactive tool approval.
     pub fn set_confirmation_broker(&mut self, broker: Arc<ConfirmationBroker>) {
         self.confirmation_broker = Some(broker);
+    }
+
+    /// The registry this sandbox dispatches through.
+    ///
+    /// Exposed so the agentic loop can stamp `ext {kind, id, generation}` on
+    /// its `tool_call`/`tool_result` records (§5.4, P-17) — the extension
+    /// identity is derived from the registered tool and lives nowhere else.
+    pub fn registry(&self) -> &ToolRegistry {
+        &self.registry
     }
 
     /// Execute a tool call within the sandbox.
@@ -138,18 +183,22 @@ impl SandboxManager {
         ctx: &ToolContext,
     ) -> Result<String, String> {
         let agent_id = ctx.agent_id.as_deref().unwrap_or("unknown");
+        // The run every event below is attributed to (GAP-10); `None` for a
+        // call made outside a workflow.
+        let task_id = ctx.task_id.as_deref();
+        // Set only where the agentic loop is writing this call's records: it
+        // is what lets the session writer find this call's audit row and add
+        // the `log_seq` half to it (R51).
+        let session_id = ctx.session_id.as_deref();
 
         // 1. Capability check
-        let constraints = AgentConstraints {
-            allowed_capabilities: policy.allowed_capabilities.clone(),
-            denied_capabilities: policy.denied_capabilities.clone(),
-            ..Default::default()
-        };
-
-        if let Err(violation) =
-            CapabilityManager::check_agent_capability(agent_id, &tool_call.name, &constraints)
-        {
-            self.emit_security_violation(agent_id, &tool_call.name, &violation.to_string());
+        if let Err(violation) = CapabilityManager::check_agent_capability(
+            agent_id,
+            &tool_call.name,
+            &policy.allowed_capabilities,
+            &policy.denied_capabilities,
+        ) {
+            self.emit_security_violation(agent_id, &tool_call.name, &violation.to_string(), task_id);
             return Err(violation.to_string());
         }
 
@@ -162,7 +211,7 @@ impl SandboxManager {
             &registered,
             &shell_like,
         ) {
-            self.emit_security_violation(agent_id, &tool_call.name, &violation.to_string());
+            self.emit_security_violation(agent_id, &tool_call.name, &violation.to_string(), task_id);
             return Err(violation.to_string());
         }
 
@@ -194,12 +243,14 @@ impl SandboxManager {
                     let detail = serde_json::json!({
                         "tool_name": tool_call.name,
                         "reason": "auto_approve policy bypass",
+                        "task_id": task_id,
                     });
                     let result = serde_json::json!({ "outcome": "auto_approved" });
                     let repo = openalpaca_storage::repository::EventLogRepository::new(db);
-                    if let Err(e) = repo.log(
+                    if let Err(e) = repo.log_for_task(
                         "tool_auto_approved",
                         Some(agent_id),
+                        task_id,
                         Some(&detail),
                         Some(&result),
                     ) {
@@ -207,6 +258,39 @@ impl SandboxManager {
                     }
                 }
                 // Fall through to circuit breaker + execution
+            } else if policy.unattended {
+                // M6: nobody is listening. Say so now, in words the model can
+                // act on and the completion report can carry, instead of
+                // holding the run for the confirmation timeout and then
+                // failing anyway. Still fail-closed — nothing is approved.
+                let reason = format!(
+                    "Tool '{}' needs your approval, and this run cannot ask for it: \
+                     the client that started it said it cannot answer approval \
+                     prompts (a one-shot or piped `openalpaca chat`, or a scheduled \
+                     skill). Nothing was executed. Run this from the GUI, or from an \
+                     interactive `openalpaca chat`, and approve it there.",
+                    tool_call.name
+                );
+                tracing::info!(
+                    agent_id,
+                    tool = %tool_call.name,
+                    "Tool blocked: the originating client cannot answer confirmations"
+                );
+                // S4: the run's own ledger of what nobody could approve. The
+                // bus event is the same `SecurityViolation` M6 emitted — the
+                // event bridge and the GUI already read it — but the audit
+                // row is typed apart, so finalisation can ask the one
+                // question it needs answered ("what did this run have to
+                // refuse?") without parsing prose out of every violation the
+                // run produced.
+                self.emit_violation_as(
+                    UNAPPROVABLE_EVENT_TYPE,
+                    agent_id,
+                    &tool_call.name,
+                    &reason,
+                    task_id,
+                );
+                return Err(reason);
             } else if let Some(ref broker) = self.confirmation_broker {
                 let request_id = uuid::Uuid::new_v4().to_string();
                 let request = ConfirmationRequest {
@@ -216,6 +300,11 @@ impl SandboxManager {
                     tool_arguments: tool_call.arguments.clone(),
                     stream_id: policy.stream_id.clone(),
                     lane_key: policy.lane_key.clone(),
+                    // Attribution for the run timeline's derived `blocked`
+                    // lane (GAP-09): which run, and which of its lanes, is
+                    // actually waiting on this prompt.
+                    task_id: ctx.task_id.clone(),
+                    agent_instance_id: ctx.agent_instance_id.clone(),
                     timestamp: Utc::now(),
                 };
 
@@ -231,6 +320,7 @@ impl SandboxManager {
                     tool_arguments: tool_call.arguments.clone(),
                     stream_id: policy.stream_id.clone(),
                     lane_key: policy.lane_key.clone(),
+                    task_id: ctx.task_id.clone(),
                     timestamp: Utc::now(),
                 });
                 let timeout_secs = policy.confirmation_timeout_secs.unwrap_or(300);
@@ -242,8 +332,26 @@ impl SandboxManager {
                     "Tool requires confirmation — awaiting user response (timeout: {timeout_secs}s)"
                 );
 
-                match tokio::time::timeout(timeout, rx).await {
-                    Ok(Ok(resp)) if resp.approved => {
+                let resolution = broker.wait(&request_id, rx, timeout).await;
+
+                // T1: every exit from the wait is announced, not just an
+                // answer. A timeout used to produce nothing at all, so a GUI
+                // that settles a card only on a resolution kept the approval
+                // bar up and the composer paused until the window reloaded.
+                let outcome = resolution.outcome();
+                self.bus.publish(SystemEvent::ToolConfirmationResolved {
+                    request_id: request_id.clone(),
+                    agent_id: agent_id.to_string(),
+                    tool_name: tool_call.name.clone(),
+                    outcome,
+                    stream_id: policy.stream_id.clone(),
+                    lane_key: policy.lane_key.clone(),
+                    task_id: ctx.task_id.clone(),
+                    timestamp: Utc::now(),
+                });
+
+                match resolution {
+                    ConfirmationResolution::Answered(resp) if resp.approved => {
                         tracing::info!(agent_id, tool = %tool_call.name, "Tool approved by user");
                         // Record the approval so subsequent invocations skip the prompt.
                         // Default to TheseArgs (safest) when the caller omits a scope.
@@ -254,16 +362,15 @@ impl SandboxManager {
                             .record(&tool_call.name, args_hash, scope);
                         // Fall through to circuit breaker + execution
                     }
-                    Ok(Ok(_)) => {
+                    ConfirmationResolution::Answered(_) => {
                         let reason = format!("Tool '{}' denied by user", tool_call.name);
                         tracing::info!(agent_id, tool = %tool_call.name, "Tool denied by user");
                         return Err(reason);
                     }
-                    Ok(Err(_)) => {
+                    ConfirmationResolution::Cancelled => {
                         return Err("Confirmation request cancelled".to_string());
                     }
-                    Err(_) => {
-                        broker.cancel(&request_id);
+                    ConfirmationResolution::TimedOut => {
                         return Err(format!(
                             "Tool '{}' confirmation timed out after {timeout_secs}s",
                             tool_call.name
@@ -282,14 +389,14 @@ impl SandboxManager {
                     tool = %tool_call.name,
                     "Tool blocked: fail-closed"
                 );
-                self.emit_security_violation(agent_id, &tool_call.name, &reason);
+                self.emit_security_violation(agent_id, &tool_call.name, &reason, task_id);
                 return Err(reason);
             }
         }
 
         // 4. Circuit breaker check
         if let Err(reason) = self.circuit_breaker.check(agent_id, &tool_call.name) {
-            self.emit_tool_executed(agent_id, &tool_call.name, false, 0);
+            self.emit_tool_executed(agent_id, tool_call, false, 0, task_id, session_id);
             return Err(reason);
         }
 
@@ -303,7 +410,20 @@ impl SandboxManager {
         let registry = self.registry.clone();
         let tool_name = tool_call.name.clone();
         let arguments = tool_call.arguments.clone();
-        let ctx_owned = ctx.clone();
+        // The one place a per-call context is finalized before dispatch, so the
+        // one place the bus is threaded onto it: a tool that announces its own
+        // side effects (`artifact_write`'s `ArtifactWritten`) gets a handle
+        // without every runner construction site learning about it. Nothing
+        // here is keyed on the tool name — the sandbox hands out the bus, the
+        // tool decides whether it has anything to say. A caller that already
+        // supplied one keeps it.
+        let ctx_owned = {
+            let mut owned = ctx.clone();
+            if owned.event_bus.is_none() {
+                owned.event_bus = Some(self.bus.clone());
+            }
+            owned
+        };
 
         let start = std::time::Instant::now();
         let result = if is_exempt {
@@ -322,16 +442,23 @@ impl SandboxManager {
 
         match result {
             Ok(Ok(output)) => {
-                self.emit_tool_executed(agent_id, &tool_call.name, true, duration_ms);
+                self.emit_tool_executed(agent_id, tool_call, true, duration_ms, task_id, session_id);
                 self.circuit_breaker
                     .record_success(agent_id, &tool_call.name);
                 Ok(output)
             }
             Ok(Err(err)) => {
-                self.emit_tool_executed(agent_id, &tool_call.name, false, duration_ms);
-                if is_transient_tool_error(&err) {
+                self.emit_tool_executed(agent_id, tool_call, false, duration_ms, task_id, session_id);
+                // A withheld capability is a governance decision, not a failure
+                // of the tool (ADR-030's S4). The refusal quotes the
+                // extension's own error detail, which routinely contains
+                // "timed out" — so counting it let a few refused calls open the
+                // breaker for this agent, and an open breaker outlives the
+                // reload that fixes the extension. Nothing here backs off into
+                // success.
+                if is_transient_tool_error(&err) && !is_withheld_refusal(&err) {
                     self.circuit_breaker
-                        .record_failure(agent_id, &tool_call.name);
+                        .record_failure_for_task(agent_id, &tool_call.name, task_id);
                 }
                 Err(err)
             }
@@ -340,20 +467,53 @@ impl SandboxManager {
                     "Tool '{}' timed out after {}s",
                     tool_call.name, policy.max_tool_runtime_secs
                 );
-                self.emit_security_violation(agent_id, &tool_call.name, &reason);
+                self.emit_security_violation(agent_id, &tool_call.name, &reason, task_id);
                 // Timeouts are transient — record for circuit breaker
                 self.circuit_breaker
-                    .record_failure(agent_id, &tool_call.name);
+                    .record_failure_for_task(agent_id, &tool_call.name, task_id);
                 Err(reason)
             }
         }
     }
 
-    fn emit_security_violation(&self, agent_id: &str, tool_name: &str, reason: &str) {
+    /// `task_id` is the run the refused call belonged to (GAP-10), or `None`
+    /// outside one — never guessed from the agent.
+    fn emit_security_violation(
+        &self,
+        agent_id: &str,
+        tool_name: &str,
+        reason: &str,
+        task_id: Option<&str>,
+    ) {
+        self.emit_violation_as(
+            "security_violation",
+            agent_id,
+            tool_name,
+            reason,
+            task_id,
+        );
+    }
+
+    /// [`Self::emit_security_violation`], with the audit row's `event_type`
+    /// chosen by the caller (S4).
+    ///
+    /// The bus event is always `SecurityViolation` — there is one kind of
+    /// "the sandbox said no" as far as a client is concerned — but the
+    /// persisted row is what a later reader queries, and one of these
+    /// refusals is asked about by name.
+    fn emit_violation_as(
+        &self,
+        event_type: &str,
+        agent_id: &str,
+        tool_name: &str,
+        reason: &str,
+        task_id: Option<&str>,
+    ) {
         self.bus.publish(SystemEvent::SecurityViolation {
             agent_id: agent_id.to_string(),
             tool_name: tool_name.to_string(),
             reason: reason.to_string(),
+            task_id: task_id.map(|t| t.to_string()),
             timestamp: Utc::now(),
         });
 
@@ -362,12 +522,14 @@ impl SandboxManager {
             let detail = serde_json::json!({
                 "tool_name": tool_name,
                 "reason": reason,
+                "task_id": task_id,
             });
             let result = serde_json::json!({ "outcome": "denied" });
             let repo = openalpaca_storage::repository::EventLogRepository::new(db);
-            if let Err(e) = repo.log(
-                "security_violation",
+            if let Err(e) = repo.log_for_task(
+                event_type,
                 Some(agent_id),
+                task_id,
                 Some(&detail),
                 Some(&result),
             ) {
@@ -376,12 +538,29 @@ impl SandboxManager {
         }
     }
 
-    fn emit_tool_executed(&self, agent_id: &str, tool_name: &str, success: bool, duration_ms: u64) {
+    /// `session_id` is the turn's session when the agentic loop is logging
+    /// this call (§5.4). With the call's `tool_use_id` it is how the session
+    /// writer finds the audit row this event writes and merges its `log_seq`
+    /// and previews onto it (R51) — the daemon's insert itself is
+    /// unconditional, because the writer's copy is best-effort and an audit
+    /// row is not.
+    fn emit_tool_executed(
+        &self,
+        agent_id: &str,
+        tool_call: &ToolCall,
+        success: bool,
+        duration_ms: u64,
+        task_id: Option<&str>,
+        session_id: Option<&str>,
+    ) {
         self.bus.publish(SystemEvent::ToolExecuted {
             agent_id: agent_id.to_string(),
-            tool_name: tool_name.to_string(),
+            tool_name: tool_call.name.clone(),
             success,
             duration_ms,
+            task_id: task_id.map(|t| t.to_string()),
+            session_id: session_id.map(|s| s.to_string()),
+            tool_use_id: Some(tool_call.id.clone()).filter(|id| !id.is_empty()),
             timestamp: Utc::now(),
         });
     }

@@ -1,10 +1,16 @@
 .DS_Store
 node_modules
-/build
-/.svelte-kit
+/dist
 /package
 .env
 .env.*
 !.env.example
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Read-only copy of the retired SvelteKit daemon client, kept as a porting
+# reference while the React data layer is written. Not part of the build.
+.daemon-legacy-reference.ts
+
+# tsc -b incremental cache
+*.tsbuildinfo

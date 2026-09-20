@@ -135,7 +135,8 @@ pub async fn extract_task_memories(
         tool_choice: None,
         tools_token_estimate: None,
         enable_caching: false,
-        thinking: None,
+        // M2: an internal utility call, capped at 512 tokens — no reasoning.
+        thinking: Some(openalpaca_llm::ThinkingConfig::Disabled),
         context_management: None,
         fallback_models: Vec::new(),
         ephemeral_system_notice: None,
@@ -512,3 +513,44 @@ pub fn parse_json_response(content: &str) -> Option<serde_json::Value> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod thinking_tests {
+    use super::*;
+    use crate::test_util::{RecordingProvider, router_recording};
+    use openalpaca_llm::ThinkingConfig;
+
+    /// **M2.** Task-output knowledge extraction is an internal utility call on
+    /// a 512-token budget, and asks for no reasoning.
+    #[tokio::test]
+    async fn the_task_extractor_asks_for_no_reasoning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Database::open(&dir.path().join("t.db")).expect("db");
+        let provider = RecordingProvider::new(r#"{"extractions": []}"#);
+        let router = router_recording(provider.clone());
+
+        extract_task_memories(
+            TaskExtractionParams {
+                owner_id: "owner".to_string(),
+                task_id: "task-1".to_string(),
+                task_description: "summarise the store layout".to_string(),
+                task_output: "x".repeat(200),
+                source_path: "lead_agent".to_string(),
+                workspace_id: None,
+            },
+            db,
+            router,
+            None,
+            Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        )
+        .await;
+
+        let request = provider.first_request();
+        assert!(
+            matches!(request.thinking, Some(ThinkingConfig::Disabled)),
+            "the task extractor must ask for no reasoning, got {:?}",
+            request.thinking
+        );
+        assert_eq!(request.max_tokens, Some(512));
+    }
+}

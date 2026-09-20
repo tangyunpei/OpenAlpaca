@@ -10,8 +10,6 @@ pub struct OrchestratorLatencyRecord {
     pub id: Option<i64>,
     pub request_id: String,
     pub mode: String,
-    pub planner_ms: u64,
-    pub dispatch_ms: u64,
     pub ack_ms: u64,
     pub fallback_reason: Option<String>,
     pub auto_promotion_reason: Option<String>,
@@ -33,13 +31,11 @@ impl<'a> OrchestratorLatencyRepository<'a> {
         self.db.with_connection(|conn| {
             conn.execute(
                 "INSERT INTO orchestrator_latency \
-                 (request_id, mode, planner_ms, dispatch_ms, ack_ms, fallback_reason, auto_promotion_reason) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 (request_id, mode, ack_ms, fallback_reason, auto_promotion_reason) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
                 rusqlite::params![
                     record.request_id,
                     record.mode,
-                    record.planner_ms as i64,
-                    record.dispatch_ms as i64,
                     record.ack_ms as i64,
                     record.fallback_reason,
                     record.auto_promotion_reason,
@@ -60,7 +56,7 @@ impl<'a> OrchestratorLatencyRepository<'a> {
     ) -> Result<Vec<OrchestratorLatencyRecord>> {
         self.db.with_connection(|conn| {
             let mut sql = String::from(
-                "SELECT id, request_id, mode, planner_ms, dispatch_ms, ack_ms, \
+                "SELECT id, request_id, mode, ack_ms, \
                  fallback_reason, auto_promotion_reason, timestamp \
                  FROM orchestrator_latency WHERE 1=1",
             );
@@ -91,12 +87,10 @@ impl<'a> OrchestratorLatencyRepository<'a> {
                         id: row.get(0)?,
                         request_id: row.get(1)?,
                         mode: row.get(2)?,
-                        planner_ms: row.get::<_, i64>(3)? as u64,
-                        dispatch_ms: row.get::<_, i64>(4)? as u64,
-                        ack_ms: row.get::<_, i64>(5)? as u64,
-                        fallback_reason: row.get(6)?,
-                        auto_promotion_reason: row.get(7)?,
-                        timestamp: row.get(8)?,
+                        ack_ms: row.get::<_, i64>(3)? as u64,
+                        fallback_reason: row.get(4)?,
+                        auto_promotion_reason: row.get(5)?,
+                        timestamp: row.get(6)?,
                     })
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -136,14 +130,9 @@ impl<'a> OrchestratorLatencyRepository<'a> {
             let count = group.len();
 
             // Compute total_ms for percentiles
-            let mut totals: Vec<u64> = group
-                .iter()
-                .map(|r| r.planner_ms + r.dispatch_ms + r.ack_ms)
-                .collect();
+            let mut totals: Vec<u64> = group.iter().map(|r| r.ack_ms).collect();
             totals.sort_unstable();
 
-            let planner_sum: f64 = group.iter().map(|r| r.planner_ms as f64).sum();
-            let dispatch_sum: f64 = group.iter().map(|r| r.dispatch_ms as f64).sum();
             let ack_sum: f64 = group.iter().map(|r| r.ack_ms as f64).sum();
 
             let auto_promotion_count = group
@@ -158,8 +147,6 @@ impl<'a> OrchestratorLatencyRepository<'a> {
                 p50_total_ms: percentile(&totals, 50),
                 p95_total_ms: percentile(&totals, 95),
                 p99_total_ms: percentile(&totals, 99),
-                mean_planner_ms: planner_sum / count as f64,
-                mean_dispatch_ms: dispatch_sum / count as f64,
                 mean_ack_ms: ack_sum / count as f64,
                 auto_promotion_count,
                 fallback_count,
@@ -180,8 +167,6 @@ pub struct LatencyAggregate {
     pub p50_total_ms: u64,
     pub p95_total_ms: u64,
     pub p99_total_ms: u64,
-    pub mean_planner_ms: f64,
-    pub mean_dispatch_ms: f64,
     pub mean_ack_ms: f64,
     pub auto_promotion_count: usize,
     pub fallback_count: usize,

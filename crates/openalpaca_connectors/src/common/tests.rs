@@ -73,6 +73,8 @@ mod confirmation {
             tool_arguments: serde_json::json!({"cmd": "ls"}),
             stream_id: None,
             lane_key: Some("global1:discord".to_string()),
+            task_id: None,
+            agent_instance_id: None,
             timestamp: chrono::Utc::now(),
         }
     }
@@ -185,5 +187,140 @@ mod confirmation {
             assert_eq!(response.approved, expect_approved, "cmd={cmd}");
             assert_eq!(reply.contains("Approved"), expect_approved, "cmd={cmd}");
         }
+    }
+}
+
+// --- The shared upload writer (D2) ---------------------------------------
+//
+// `store_attachment` owns validation and the `ResolvedAttachment` shape and
+// nothing else: hashing, the owner-scoped sha256 dedup, placement and the row
+// come from `openalpaca_storage::UploadStore`, the same writer
+// `POST /v1/files/upload` calls. These tests pin that delegation — the
+// behaviours they assert are the writer's, observed from this caller.
+
+mod attachments {
+    use super::*;
+    use std::ffi::OsString;
+    use std::path::Path;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// Serializes every test here that re-points `OPENALPACA_HOME_STORE`; the
+    /// variable is process-global and every store accessor reads it on each
+    /// call. No test ever touches the real `~/.openalpaca`.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct HomeStoreGuard {
+        _lock: MutexGuard<'static, ()>,
+        prev: Option<OsString>,
+    }
+
+    impl HomeStoreGuard {
+        fn set(path: &Path) -> Self {
+            let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            let prev = std::env::var_os(openalpaca_storage::store::HOME_STORE_ENV);
+            // SAFETY: serialized by ENV_LOCK — this module's only writer.
+            unsafe { std::env::set_var(openalpaca_storage::store::HOME_STORE_ENV, path) };
+            Self { _lock: lock, prev }
+        }
+    }
+
+    impl Drop for HomeStoreGuard {
+        fn drop(&mut self) {
+            // SAFETY: as above — still holding ENV_LOCK.
+            match self.prev.take() {
+                Some(v) => unsafe {
+                    std::env::set_var(openalpaca_storage::store::HOME_STORE_ENV, v)
+                },
+                None => unsafe { std::env::remove_var(openalpaca_storage::store::HOME_STORE_ENV) },
+            }
+        }
+    }
+
+    const MAX_SIZE: u64 = 10 * 1024 * 1024;
+    const MAX_DIM: u32 = 8192;
+
+    fn store(db: &Database, owner: &str, name: &str, data: &[u8]) -> ResolvedAttachment {
+        store_attachment(db, owner, name, "text/plain", data, MAX_SIZE, MAX_DIM)
+            .expect("store_attachment")
+    }
+
+    /// D2: a connector attachment has no project signal, so its bytes take the
+    /// home store — `<home>/uploads/<YYYY-MM-DD>/NN-<slug>.<ext>`, never the
+    /// daemon's working directory.
+    #[test]
+    fn an_attachment_lands_in_the_home_store_uploads() {
+        let home = tempdir().unwrap();
+        let home_root = home.path().canonicalize().unwrap();
+        let _guard = HomeStoreGuard::set(&home_root);
+        let db = test_db();
+
+        let attachment = store(&db, "owner-1", "Photo Notes.TXT", b"hello");
+
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let expected = home_root
+            .join("uploads")
+            .join(&today)
+            .join("01-photo-notes.txt");
+        assert_eq!(
+            std::path::PathBuf::from(&attachment.storage_path),
+            expected,
+            "a connector attachment takes the home store"
+        );
+        assert_eq!(std::fs::read(&expected).unwrap(), b"hello");
+        // The name the user sees is the one they sent; only the file is slugified.
+        assert_eq!(attachment.filename, "Photo Notes.TXT");
+        assert_eq!(attachment.size_bytes, 5);
+        // The row is the writer's, and it counts as upload traffic.
+        let repo = openalpaca_storage::FileAssetRepository::new(&db);
+        let row = repo.get_by_id(&attachment.file_id).unwrap().expect("row");
+        assert_eq!(row.storage_path, attachment.storage_path);
+        assert_eq!(repo.total_storage_bytes().unwrap(), 5);
+    }
+
+    #[test]
+    fn the_same_bytes_dedup_to_the_first_row() {
+        let home = tempdir().unwrap();
+        let _guard = HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+        let db = test_db();
+
+        let first = store(&db, "owner-1", "notes.txt", b"hello");
+        // A different name, the same bytes — dedup keys off sha256, not the path.
+        let second = store(&db, "owner-1", "renamed.txt", b"hello");
+
+        assert_eq!(second.file_id, first.file_id);
+        assert_eq!(second.storage_path, first.storage_path);
+        assert_eq!(
+            openalpaca_storage::FileAssetRepository::new(&db)
+                .total_storage_bytes()
+                .unwrap(),
+            5,
+            "a dedup hit inserts no second row"
+        );
+    }
+
+    #[test]
+    fn validation_still_runs_before_the_writer() {
+        let home = tempdir().unwrap();
+        let _guard = HomeStoreGuard::set(&home.path().canonicalize().unwrap());
+        let db = test_db();
+
+        let err = store_attachment(
+            &db,
+            "owner-1",
+            "big.txt",
+            "text/plain",
+            b"hello",
+            1,
+            MAX_DIM,
+        )
+        .expect_err("a file over the cap is rejected");
+        assert!(err.contains("Upload validation failed"), "{err}");
+        assert_eq!(
+            openalpaca_storage::FileAssetRepository::new(&db)
+                .total_storage_bytes()
+                .unwrap(),
+            0,
+            "a rejected attachment writes nothing"
+        );
     }
 }

@@ -613,6 +613,11 @@ impl DiscordConnector {
                 workspace_path: None,
                 stream_id: None,
                 lane_override: None,
+                model_override: None,
+                // M6: a chat platform can answer a confirmation — the
+                // connector renders the prompt in the conversation.
+                unattended: false,
+                turn_sink: None,
             })
             .await;
 
@@ -798,6 +803,8 @@ mod tests {
             tool_arguments: serde_json::json!({"cmd": "ls"}),
             stream_id: None,
             lane_key: Some("global1:discord".to_string()),
+            task_id: None,
+            agent_instance_id: None,
             timestamp: chrono::Utc::now(),
         });
 

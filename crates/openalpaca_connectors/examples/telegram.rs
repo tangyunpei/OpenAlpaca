@@ -11,13 +11,11 @@ use openalpaca_core::{
     bus::EventBus,
     context::SharedContext,
     daemon_config::DaemonConfig,
-    gateway::{Gateway, HandleResult, MessageHandler},
+    gateway::{Gateway, HandleRequest, HandleResult, MessageHandler},
     lane::LaneManager,
-    security::policy::{Principal, Scope},
 };
-use openalpaca_storage::{Database, paths};
+use openalpaca_storage::store;
 use std::sync::Arc;
-use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -28,11 +26,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let token =
         std::env::var("TELOXIDE_TOKEN").expect("TELOXIDE_TOKEN environment variable not set");
 
-    // 3. Connect to the real system database (shared with Daemon)
-    let db_path = paths::database_path()?;
-    println!("Using Database: {}", db_path.display());
+    // 3. Connect to the real system database (shared with Daemon).
+    //    Through the store mover: `Database::open` creates what it does not
+    //    find, so opening the destination directly could pre-create an empty
+    //    database in the way of the one the mover is about to relocate.
+    println!("Using Database: {}", store::database_path()?.display());
 
-    let db = Database::open(&db_path)?;
+    let db = store::migrate::open_store_database()?;
     let bus = EventBus::default();
 
     println!("Starting Telegram Connector Example...");
@@ -43,18 +43,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     #[async_trait]
     impl MessageHandler for EchoHandler {
-        async fn handle(
-            &self,
-            _request_id: Uuid,
-            _source: String,
-            content: String,
-            _principal: Principal,
-            _scope: Scope,
-            _lane_key: String,
-            _workspace_path: Option<String>,
-            _stream_id: Option<String>,
-        ) -> Result<HandleResult, String> {
-            Ok(HandleResult::text(format!("Echo: {content}")))
+        async fn handle(&self, request: HandleRequest) -> Result<HandleResult, String> {
+            Ok(HandleResult::text(format!("Echo: {}", request.content)))
         }
     }
 

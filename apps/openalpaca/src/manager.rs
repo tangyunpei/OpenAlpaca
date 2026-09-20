@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use openalpaca_storage::discovery;
-use openalpaca_storage::paths;
+use openalpaca_storage::store;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -11,6 +11,18 @@ use sysinfo::System;
 const DAEMON_BIN_ENV: &str = "OPENALPACA_DAEMON_BIN";
 const GUI_APP_ENV: &str = "OPENALPACA_GUI_APP";
 const DAEMON_CONFIG_ENV: &str = "OPENALPACA_CONFIG_DIR";
+
+/// Rotate `daemon.log` once it is past 16 MB, and keep three generations —
+/// so the log costs at most four files, however long a daemon runs.
+///
+/// The file is the daemon's stdout and stderr: nothing else bounds it, and a
+/// long-lived daemon that logs at `info` will fill a disk given months. The
+/// caps are deliberately dumb — a size check at start, no timer, no
+/// compression, no dependency — because the alternative (a real in-daemon
+/// appender, and un-discarding the GUI sidecar's stdout) is a separate piece
+/// of work and this file must not grow unbounded while it waits.
+const LOG_MAX_BYTES: u64 = 16 * 1024 * 1024;
+const LOG_KEEP: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DaemonLaunch {
@@ -34,10 +46,23 @@ pub fn start_daemon() -> Result<()> {
     println!("🚀 Starting OpenAlpaca Daemon...");
 
     let runtime_dir = ensure_runtime_dirs()?;
-    let config_dir = runtime_dir.join("config");
-    let log_path = runtime_dir.join("daemon.log");
-    let log_file = fs::File::create(&log_path)
-        .with_context(|| format!("Failed to create daemon log file: {}", log_path.display()))?;
+    let config_dir = store::ensure_runtime_config_dir()?;
+    store::logs_dir().context("Failed to create the daemon log directory")?;
+    let log_path = store::daemon_log_path()?;
+    // Bound it before opening it: a log that is already past its cap becomes
+    // `daemon.log.1` and this run starts a fresh one. A rotation that fails is
+    // reported and not fatal — a daemon that will not start because its log
+    // could not be renamed would be the worse bug.
+    if let Err(e) = rotate_log(&log_path, LOG_MAX_BYTES, LOG_KEEP) {
+        println!("⚠️  Could not rotate the daemon log ({e}); appending to it as it is.");
+    }
+    // Append, not truncate: the rotation is what bounds the file, so a restart
+    // no longer silently discards the previous run's output.
+    let log_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("Failed to open daemon log file: {}", log_path.display()))?;
 
     let current_exe = std::env::current_exe().context("Failed to resolve current executable")?;
     let launch = resolve_daemon_launch(&current_exe)?;
@@ -134,8 +159,8 @@ pub fn start_gui() -> Result<()> {
             println!("✅ GUI started from {}.", app_path.display());
         }
         GuiLaunch::DevTauri { workspace_root } => {
-            let runtime_dir = ensure_runtime_dirs()?;
-            let log_path = runtime_dir.join("gui.log");
+            ensure_runtime_dirs()?;
+            let log_path = store::logs_dir()?.join("gui.log");
             let log_file = fs::File::create(&log_path).with_context(|| {
                 format!("Failed to create GUI log file: {}", log_path.display())
             })?;
@@ -193,6 +218,39 @@ pub fn stop_gui() -> Result<()> {
     Ok(())
 }
 
+/// Shift the log's generations down one when it is past `max_bytes`.
+///
+/// `daemon.log` → `.1` → `.2` → … → `.{keep}`, and whatever was at `.{keep}`
+/// is gone. A log that does not exist, or that is still under the cap, is left
+/// alone — the first start of a fresh install rotates nothing.
+fn rotate_log(path: &Path, max_bytes: u64, keep: usize) -> std::io::Result<()> {
+    match fs::metadata(path) {
+        Ok(meta) if meta.len() > max_bytes => {}
+        // Absent, or small enough: nothing to do. An unreadable log is not a
+        // reason to refuse to start, so it is treated the same way.
+        _ => return Ok(()),
+    }
+
+    // Oldest first, so no rename can overwrite a generation that has not moved
+    // yet. `keep` is the last one kept, which makes `.{keep}` the one dropped.
+    let _ = fs::remove_file(generation(path, keep));
+    for n in (1..keep).rev() {
+        let from = generation(path, n);
+        if from.exists() {
+            fs::rename(&from, generation(path, n + 1))?;
+        }
+    }
+    fs::rename(path, generation(path, 1))
+}
+
+/// `daemon.log` + `.n` — appended, never substituted, so the base name's own
+/// extension survives.
+fn generation(path: &Path, n: usize) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(format!(".{n}"));
+    PathBuf::from(name)
+}
+
 fn daemon_launch_command(launch: &DaemonLaunch, runtime_dir: &Path, config_dir: &Path) -> Command {
     let mut cmd = match launch {
         DaemonLaunch::Binary(path) => Command::new(path),
@@ -207,20 +265,18 @@ fn daemon_launch_command(launch: &DaemonLaunch, runtime_dir: &Path, config_dir: 
 
     cmd.current_dir(runtime_dir);
     cmd.env(DAEMON_CONFIG_ENV, config_dir);
+    // This run is the one that rotated and opened `daemon.log` for the child
+    // — mark it so `GET /v1/status` can tell it apart from a daemon the CLI
+    // never touched (Important #3, T44 fix round 1).
+    cmd.env(store::MANAGED_LOG_ENV, "1");
     cmd
 }
 
 fn ensure_runtime_dirs() -> Result<PathBuf> {
-    let app_dir = paths::app_dir().context("Failed to resolve OpenAlpaca app directory")?;
-    fs::create_dir_all(&app_dir)
-        .with_context(|| format!("Failed to create app directory: {}", app_dir.display()))?;
-    fs::create_dir_all(app_dir.join("config")).with_context(|| {
-        format!(
-            "Failed to create config directory: {}",
-            app_dir.join("config").display()
-        )
-    })?;
-    Ok(app_dir)
+    let home_root = store::ensure_store(&store::StoreScope::Home)
+        .context("Failed to create the OpenAlpaca home store")?;
+    store::ensure_runtime_config_dir().context("Failed to create the runtime config directory")?;
+    Ok(home_root)
 }
 
 fn resolve_daemon_launch(current_exe: &Path) -> Result<DaemonLaunch> {
@@ -239,6 +295,7 @@ fn resolve_daemon_launch_from_inputs(
         return Ok(DaemonLaunch::Binary(path));
     }
 
+    let current_exe = real_path(current_exe);
     let exe_dir = current_exe
         .parent()
         .context("Current executable has no parent directory")?;
@@ -263,7 +320,7 @@ fn resolve_daemon_launch_from_inputs(
         return Ok(DaemonLaunch::Binary(path));
     }
 
-    if let Some(workspace_root) = find_workspace_root(current_exe, "apps/openalpacad/Cargo.toml") {
+    if let Some(workspace_root) = find_workspace_root(&current_exe, "apps/openalpacad/Cargo.toml") {
         return Ok(DaemonLaunch::CargoRun { workspace_root });
     }
 
@@ -305,7 +362,7 @@ fn resolve_gui_launch_from_inputs(
     }
 
     if let Some(workspace_root) =
-        find_workspace_root(current_exe, "apps/openalpaca-gui/package.json")
+        find_workspace_root(&real_path(current_exe), "apps/openalpaca-gui/package.json")
     {
         return Ok(GuiLaunch::DevTauri { workspace_root });
     }
@@ -314,6 +371,23 @@ fn resolve_gui_launch_from_inputs(
         "Unable to locate GUI app bundle. Checked {}, ~/Applications, and /Applications.",
         GUI_APP_ENV
     );
+}
+
+/// The executable's own path, with every symlink on the way followed (L10).
+///
+/// `std::env::current_exe()` answers with the path the process was *launched
+/// through*, symlink and all. `install.sh` puts nothing but a link in
+/// `~/.local/bin` and leaves the real CLI in `$PREFIX/bin`, beside
+/// `$PREFIX/libexec/openalpacad` — so resolving from the link's own directory,
+/// every probe below (colocated, `../libexec`, the workspace walk-up) looks in
+/// `~/.local/bin`, finds nothing, and `openalpaca daemon start` fails on an
+/// installation that is perfectly correct.
+///
+/// A path that cannot be canonicalized — deleted under us, or a permission the
+/// process does not have — is used exactly as it came: worse resolution is a
+/// better answer than none.
+fn real_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn daemon_binary_name() -> &'static str {
@@ -409,14 +483,116 @@ mod tests {
         }
     }
 
+    /// Below the threshold the log is left exactly as it is: rotating a small
+    /// file would throw away the only copy of a short run's output.
+    #[test]
+    fn a_log_under_the_cap_is_not_rotated() {
+        let root = tempfile::TempDir::new().unwrap();
+        let log = root.path().join("daemon.log");
+        fs::write(&log, b"one short run\n").unwrap();
+
+        rotate_log(&log, LOG_MAX_BYTES, LOG_KEEP).expect("rotation should succeed");
+
+        assert_eq!(fs::read(&log).unwrap(), b"one short run\n");
+        assert!(!log.with_extension("log.1").exists());
+    }
+
+    /// A missing log is the ordinary first start, not an error.
+    #[test]
+    fn a_missing_log_is_not_an_error() {
+        let root = tempfile::TempDir::new().unwrap();
+        rotate_log(&root.path().join("daemon.log"), LOG_MAX_BYTES, LOG_KEEP)
+            .expect("a first start rotates nothing");
+    }
+
+    /// The real 16 MB threshold, exercised with a sparse file so the test does
+    /// not write 16 MB: past it, `daemon.log` becomes `daemon.log.1` and the
+    /// live name is free for a fresh file.
+    #[test]
+    fn a_log_over_sixteen_megabytes_is_rotated_to_dot_one() {
+        let root = tempfile::TempDir::new().unwrap();
+        let log = root.path().join("daemon.log");
+        fs::File::create(&log)
+            .unwrap()
+            .set_len(LOG_MAX_BYTES + 1)
+            .unwrap();
+
+        rotate_log(&log, LOG_MAX_BYTES, LOG_KEEP).expect("rotation should succeed");
+
+        assert!(!log.exists(), "the live name is free after a rotation");
+        let rotated = root.path().join("daemon.log.1");
+        assert_eq!(fs::metadata(&rotated).unwrap().len(), LOG_MAX_BYTES + 1);
+    }
+
+    /// Keep three: every generation shifts down one and the fourth is dropped,
+    /// so the log costs at most four files however long the daemon runs.
+    #[test]
+    fn rotation_keeps_three_generations_and_drops_the_oldest() {
+        let root = tempfile::TempDir::new().unwrap();
+        let log = root.path().join("daemon.log");
+        for (name, body) in [
+            ("daemon.log", "live"),
+            ("daemon.log.1", "gen1"),
+            ("daemon.log.2", "gen2"),
+            ("daemon.log.3", "gen3"),
+        ] {
+            fs::write(root.path().join(name), body).unwrap();
+        }
+
+        // A tiny cap: the keep rule is what is under test, not the threshold.
+        rotate_log(&log, 2, LOG_KEEP).expect("rotation should succeed");
+
+        assert!(!log.exists());
+        let read = |name: &str| fs::read_to_string(root.path().join(name)).unwrap();
+        assert_eq!(read("daemon.log.1"), "live");
+        assert_eq!(read("daemon.log.2"), "gen1");
+        assert_eq!(read("daemon.log.3"), "gen2");
+        assert!(
+            !root.path().join("daemon.log.4").exists(),
+            "the fourth generation is dropped, never accumulated"
+        );
+
+        // And again, to prove the shift is not a one-off.
+        fs::write(&log, "live-2").unwrap();
+        rotate_log(&log, 2, LOG_KEEP).expect("rotation should succeed");
+        assert_eq!(read("daemon.log.1"), "live-2");
+        assert_eq!(read("daemon.log.2"), "live");
+        assert_eq!(read("daemon.log.3"), "gen1");
+        assert!(!root.path().join("daemon.log.4").exists());
+    }
+
+    /// `GET /v1/status` must never hand a GUI- or `cargo run`-launched daemon
+    /// some earlier CLI daemon's leftover `daemon.log` just because the file
+    /// exists — so the manager marks every child it spawns as the log's
+    /// owner, and the daemon gates on the marker as well as the file
+    /// (Important #3, T44 fix round 1).
+    #[test]
+    fn daemon_launch_command_marks_the_child_as_the_logs_owner() {
+        let launch = DaemonLaunch::Binary(PathBuf::from("/usr/local/bin/openalpacad"));
+        let cmd = daemon_launch_command(
+            &launch,
+            Path::new("/tmp/runtime"),
+            Path::new("/tmp/config"),
+        );
+
+        let managed = cmd
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new(store::MANAGED_LOG_ENV))
+            .and_then(|(_, value)| value);
+        assert_eq!(managed, Some(std::ffi::OsStr::new("1")));
+    }
+
     #[test]
     fn daemon_resolution_prefers_env_then_colocated_then_libexec_then_path() {
         let root = tempfile::TempDir::new().unwrap();
-        let current_exe = root.path().join("bin/openalpaca");
-        let env_daemon = root.path().join("env/openalpacad");
-        let colocated = root.path().join("bin/openalpacad");
-        let libexec = root.path().join("libexec/openalpacad");
-        let path_daemon = root.path().join("path/openalpacad");
+        // Canonical, because the resolution follows symlinks now (L10) and a
+        // macOS temp root lives under one (`/var` → `/private/var`).
+        let root = root.path().canonicalize().unwrap();
+        let current_exe = root.join("bin/openalpaca");
+        let env_daemon = root.join("env/openalpacad");
+        let colocated = root.join("bin/openalpacad");
+        let libexec = root.join("libexec/openalpacad");
+        let path_daemon = root.join("path/openalpacad");
 
         touch_executable(&current_exe);
         touch_executable(&env_daemon);
@@ -453,13 +629,13 @@ mod tests {
     #[test]
     fn daemon_resolution_uses_dev_fallback_when_workspace_exists() {
         let root = tempfile::TempDir::new().unwrap();
-        let current_exe = root.path().join("target/debug/openalpaca");
+        let root = root.path().canonicalize().unwrap();
+        let current_exe = root.join("target/debug/openalpaca");
         touch_executable(&current_exe);
-        fs::write(root.path().join("Cargo.toml"), "[workspace]\n")
-            .expect("write workspace manifest");
-        fs::create_dir_all(root.path().join("apps/openalpacad")).expect("apps dir");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write workspace manifest");
+        fs::create_dir_all(root.join("apps/openalpacad")).expect("apps dir");
         fs::write(
-            root.path().join("apps/openalpacad/Cargo.toml"),
+            root.join("apps/openalpacad/Cargo.toml"),
             "[package]\nname=\"openalpacad\"\n",
         )
         .expect("write daemon manifest");
@@ -469,7 +645,72 @@ mod tests {
         assert_eq!(
             launch,
             DaemonLaunch::CargoRun {
-                workspace_root: root.path().to_path_buf()
+                workspace_root: root
+            }
+        );
+    }
+
+    /// L10: `install.sh` symlinks only the CLI into `~/.local/bin` and leaves
+    /// the daemon in `$PREFIX/libexec`. Resolving from the *link's* directory,
+    /// every probe misses and `openalpaca daemon start` fails on a correct
+    /// installation — the failure a probe compiled on this Mac confirmed.
+    #[test]
+    fn the_daemon_is_found_through_the_symlink_the_installer_puts_on_path() {
+        let root = tempfile::TempDir::new().unwrap();
+        let root = root.path().canonicalize().unwrap();
+
+        // The installer's layout: the real CLI and the daemon under $PREFIX,
+        // and nothing in ~/.local/bin but a link.
+        let real_cli = root.join("prefix/bin/openalpaca");
+        let libexec = root.join("prefix/libexec/openalpacad");
+        touch_executable(&real_cli);
+        touch_executable(&libexec);
+
+        let path_bin = root.join("local/bin");
+        fs::create_dir_all(&path_bin).expect("PATH dir");
+        let linked_cli = path_bin.join("openalpaca");
+        std::os::unix::fs::symlink(&real_cli, &linked_cli).expect("symlink the CLI");
+
+        let launch = resolve_daemon_launch_from_inputs(&linked_cli, None, None)
+            .expect("the daemon is beside the CLI the link points at");
+        assert_eq!(launch, DaemonLaunch::Binary(libexec));
+    }
+
+    /// The same link, for the GUI's own walk-up: a dev checkout reached
+    /// through a symlinked CLI still finds its workspace.
+    #[test]
+    fn the_gui_workspace_is_found_through_a_symlinked_cli() {
+        let root = tempfile::TempDir::new().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        // The checkout is *not* an ancestor of the link, so the walk-up only
+        // reaches it by following the link first.
+        let checkout = root.join("checkout");
+        let real_cli = checkout.join("target/debug/openalpaca");
+        touch_executable(&real_cli);
+        fs::write(checkout.join("Cargo.toml"), "[workspace]\n").expect("write workspace manifest");
+        fs::create_dir_all(checkout.join("apps/openalpaca-gui")).expect("gui dir");
+        fs::write(
+            checkout.join("apps/openalpaca-gui/package.json"),
+            "{ \"name\": \"openalpaca-gui\" }\n",
+        )
+        .expect("write gui package");
+
+        let path_bin = root.join("local/bin");
+        fs::create_dir_all(&path_bin).expect("PATH dir");
+        let linked_cli = path_bin.join("openalpaca");
+        std::os::unix::fs::symlink(&real_cli, &linked_cli).expect("symlink the CLI");
+
+        let launch = resolve_gui_launch_from_inputs(
+            &linked_cli,
+            None,
+            Some(root.join("home")),
+            &root.join("system/openalpaca-gui.app"),
+        )
+        .expect("dev fallback through the link");
+        assert_eq!(
+            launch,
+            GuiLaunch::DevTauri {
+                workspace_root: checkout
             }
         );
     }
@@ -512,13 +753,13 @@ mod tests {
     #[test]
     fn gui_resolution_uses_dev_fallback_when_workspace_exists() {
         let root = tempfile::TempDir::new().unwrap();
-        let current_exe = root.path().join("target/debug/openalpaca");
+        let root = root.path().canonicalize().unwrap();
+        let current_exe = root.join("target/debug/openalpaca");
         touch_executable(&current_exe);
-        fs::write(root.path().join("Cargo.toml"), "[workspace]\n")
-            .expect("write workspace manifest");
-        fs::create_dir_all(root.path().join("apps/openalpaca-gui")).expect("gui dir");
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write workspace manifest");
+        fs::create_dir_all(root.join("apps/openalpaca-gui")).expect("gui dir");
         fs::write(
-            root.path().join("apps/openalpaca-gui/package.json"),
+            root.join("apps/openalpaca-gui/package.json"),
             "{ \"name\": \"openalpaca-gui\" }\n",
         )
         .expect("write gui package");
@@ -526,14 +767,14 @@ mod tests {
         let launch = resolve_gui_launch_from_inputs(
             &current_exe,
             None,
-            Some(root.path().join("home")),
-            &root.path().join("system/openalpaca-gui.app"),
+            Some(root.join("home")),
+            &root.join("system/openalpaca-gui.app"),
         )
         .expect("dev fallback");
         assert_eq!(
             launch,
             GuiLaunch::DevTauri {
-                workspace_root: root.path().to_path_buf()
+                workspace_root: root
             }
         );
     }

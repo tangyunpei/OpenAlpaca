@@ -3,7 +3,8 @@
 //! Manages broadcast channels for chat streaming. Each active chat request
 //! gets a unique stream_id with a broadcast channel for SSE delivery.
 
-use crate::gateway::DelegationInfo;
+use crate::events::ConfirmationOutcome;
+use crate::gateway::{DelegationInfo, SkippedAttachment};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -15,7 +16,19 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum ChatStreamEvent {
+    /// The turn has started and no text has been produced yet — the
+    /// placeholder a client shows as "thinking…". Still sent for a model that
+    /// emits no reasoning of its own.
     Thinking,
+    /// S2: the model's own reasoning, as it is produced.
+    ///
+    /// Shown live and thrown away: it is never persisted, never part of
+    /// `Done.content`, and never replayed by the history route. A client
+    /// renders it beside the thinking indicator and drops it when the answer
+    /// starts.
+    Reasoning {
+        text: String,
+    },
     Delta {
         content: String,
     },
@@ -27,6 +40,10 @@ pub enum ChatStreamEvent {
         duration_ms: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         attachments_used: Option<Vec<String>>,
+        /// U3 — the turn's attachments that never reached the model, each with
+        /// a reason. Omitted when there are none, like `attachments_used`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        attachments_skipped: Option<Vec<SkippedAttachment>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         delegation: Option<DelegationInfo>,
     },
@@ -37,6 +54,13 @@ pub enum ChatStreamEvent {
         request_id: String,
         tool_name: String,
         tool_arguments: serde_json::Value,
+    },
+    /// T1: the prompt above stopped being pending — answered, timed out or
+    /// withdrawn. The twin of `ConfirmationRequested`, and like it, it does
+    /// **not** terminate the stream.
+    ConfirmationResolved {
+        request_id: String,
+        outcome: ConfirmationOutcome,
     },
 }
 
@@ -66,6 +90,14 @@ impl StreamSink {
         self.send_event(ChatStreamEvent::Thinking);
     }
 
+    /// Send one piece of the model's reasoning (S2). Live only — nothing
+    /// downstream keeps it.
+    pub fn send_reasoning(&self, text: &str) {
+        self.send_event(ChatStreamEvent::Reasoning {
+            text: text.to_string(),
+        });
+    }
+
     /// Send a delta chunk of the response.
     pub fn send_delta(&self, content: &str) {
         self.send_event(ChatStreamEvent::Delta {
@@ -83,18 +115,25 @@ impl StreamSink {
         duration_ms: u64,
         delegation: Option<DelegationInfo>,
     ) {
-        self.send_event(ChatStreamEvent::Done {
-            content: content.to_string(),
-            model: model.to_string(),
+        self.send_done_with_attachments(
+            content,
+            model,
             tokens_in,
             tokens_out,
             duration_ms,
-            attachments_used: None,
+            Vec::new(),
+            Vec::new(),
             delegation,
-        });
+        );
     }
 
     /// Send the final Done event with attachment info.
+    ///
+    /// U3: `attachments_skipped` travels beside `attachments_used` and is
+    /// omitted from the frame the same way — a turn that withheld nothing is
+    /// byte-identical to what it always was. A turn whose *every* attachment
+    /// was withheld has an empty `used` and a non-empty `skipped`, which is
+    /// why the two are one call rather than two.
     #[allow(clippy::too_many_arguments)]
     pub fn send_done_with_attachments(
         &self,
@@ -104,20 +143,17 @@ impl StreamSink {
         tokens_out: u64,
         duration_ms: u64,
         attachments_used: Vec<String>,
+        attachments_skipped: Vec<SkippedAttachment>,
         delegation: Option<DelegationInfo>,
     ) {
-        let att = if attachments_used.is_empty() {
-            None
-        } else {
-            Some(attachments_used)
-        };
         self.send_event(ChatStreamEvent::Done {
             content: content.to_string(),
             model: model.to_string(),
             tokens_in,
             tokens_out,
             duration_ms,
-            attachments_used: att,
+            attachments_used: (!attachments_used.is_empty()).then_some(attachments_used),
+            attachments_skipped: (!attachments_skipped.is_empty()).then_some(attachments_skipped),
             delegation,
         });
     }
@@ -135,53 +171,17 @@ impl StreamSink {
     }
 }
 
-/// Split text into chunks of approximately `words_per_chunk` words,
-/// preserving exact byte content (whitespace, newlines, indentation).
-///
-/// Each returned `&str` is a direct slice of the input — no characters are
-/// added, removed, or reordered. Concatenating all chunks reproduces the
-/// original text exactly.
-///
-/// The algorithm counts whitespace→non-whitespace transitions (word starts).
-/// After every `words_per_chunk` words, it splits at the preceding whitespace
-/// boundary. The final chunk contains any remaining text.
-pub fn chunk_by_words(text: &str, words_per_chunk: usize) -> Vec<&str> {
-    if text.is_empty() || words_per_chunk == 0 {
-        return if text.is_empty() { vec![] } else { vec![text] };
+/// S1: an SSE chat stream is where a turn's live text goes. The provider's
+/// deltas reach this sink from inside the agentic loop, one `Delta` frame
+/// each, while the turn is still running.
+impl crate::chat::turn_sink::TurnSink for StreamSink {
+    fn text_delta(&self, text: &str) {
+        self.send_delta(text);
     }
 
-    let mut chunks = Vec::new();
-    let mut chunk_start = 0;
-    let mut word_count = 0;
-    let mut in_word = false;
-    #[allow(unused_assignments)]
-    let mut last_word_boundary = 0; // byte offset of the start of the current word
-
-    for (i, ch) in text.char_indices() {
-        let is_ws = ch.is_whitespace();
-        if !is_ws && !in_word {
-            // Entering a new word
-            word_count += 1;
-            last_word_boundary = i;
-            in_word = true;
-
-            if word_count > words_per_chunk && last_word_boundary > chunk_start {
-                // Cut before this new word
-                chunks.push(&text[chunk_start..last_word_boundary]);
-                chunk_start = last_word_boundary;
-                word_count = 1;
-            }
-        } else if is_ws {
-            in_word = false;
-        }
+    fn reasoning_delta(&self, text: &str) {
+        self.send_reasoning(text);
     }
-
-    // Remainder
-    if chunk_start < text.len() {
-        chunks.push(&text[chunk_start..]);
-    }
-
-    chunks
 }
 
 struct StreamEntry {
@@ -215,7 +215,14 @@ impl ChatStreamManager {
     ) -> (String, broadcast::Receiver<ChatStreamEvent>, StreamSink) {
         let stream_id = Uuid::new_v4().to_string();
         let now = Instant::now();
-        let (tx, rx) = broadcast::channel(128);
+        // Sized for the model's own token deltas (S1), not for the handful
+        // of word chunks the simulated streaming used to send: a local model
+        // at ~60 tokens/s fills 128 slots in two seconds, and a subscriber
+        // that falls that far behind loses the deltas it skipped. `Done`
+        // still arrives — it is the last event in the buffer, and its content
+        // is authoritative — so the cost of a lag is a flicker, but there is
+        // no reason to invite one.
+        let (tx, rx) = broadcast::channel(1024);
         let last_active = Arc::new(Mutex::new(now));
         let sink = StreamSink {
             stream_id: stream_id.clone(),

@@ -42,8 +42,13 @@ pub enum LlmCommands {
         #[arg(long, value_enum, default_value = "table")]
         format: OutputFormat,
     },
-    /// List available models
+    /// List the models this daemon can route to
     Models {
+        /// Ask every enabled provider what it has installed first. A provider
+        /// that needs no key (Ollama) is asked exactly like one that does, so
+        /// a freshly pulled local model appears without restarting the daemon.
+        #[arg(long)]
+        refresh: bool,
         /// Output format
         #[arg(long, value_enum, default_value = "table")]
         format: OutputFormat,
@@ -95,7 +100,9 @@ pub async fn run(args: LlmArgs) -> Result<()> {
             daily,
             format,
         } => llm_status::llm_usage(agent, date, key, daily, format).await,
-        LlmCommands::Models { format } => llm_status::llm_models(format).await,
+        LlmCommands::Models { refresh, format } => {
+            llm_status::llm_models(refresh, format).await
+        }
         LlmCommands::Strategy { provider, strategy } => {
             llm_status::llm_strategy(&provider, &strategy).await
         }

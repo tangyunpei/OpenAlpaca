@@ -47,6 +47,8 @@ fn test_custom_registry() {
             supports_audio: false,
             supports_document: false,
             supports_reasoning: false,
+            supports_tools: true,
+            declared: true,
         },
     );
     let registry = ModelRegistry::new(models);
@@ -72,6 +74,8 @@ fn test_register_model() {
             supports_audio: false,
             supports_document: false,
             supports_reasoning: false,
+            supports_tools: true,
+            declared: true,
         },
     );
     assert_eq!(
@@ -96,6 +100,8 @@ fn test_register_if_absent() {
             supports_audio: false,
             supports_document: false,
             supports_reasoning: false,
+            supports_tools: true,
+            declared: true,
         },
     );
     assert_eq!(
@@ -116,6 +122,8 @@ fn test_register_if_absent() {
             supports_audio: false,
             supports_document: false,
             supports_reasoning: false,
+            supports_tools: true,
+            declared: true,
         },
     );
     assert_eq!(
@@ -145,6 +153,8 @@ fn test_register_discovered() {
             supports_audio: false,
             supports_document: false,
             supports_reasoning: false,
+            supports_tools: true,
+            declared: true,
         },
     );
     let info = registry.get_model_info("gpt-5.2").unwrap();
@@ -165,6 +175,8 @@ fn test_register_discovered() {
             supports_audio: false,
             supports_document: false,
             supports_reasoning: false,
+            supports_tools: true,
+            declared: true,
         },
     );
     let info = registry.get_model_info("new-api-model").unwrap();
@@ -192,6 +204,8 @@ fn test_list_discovered_models() {
             supports_audio: false,
             supports_document: false,
             supports_reasoning: false,
+            supports_tools: true,
+            declared: true,
         },
     );
 
@@ -231,4 +245,42 @@ fn test_o_series_models_registered() {
     // Non-reasoning models should not have supports_reasoning
     let gpt = registry.get_model_info("gpt-5.2").unwrap();
     assert!(!gpt.supports_reasoning);
+}
+
+#[test]
+fn restoring_a_providers_defaults_puts_back_only_what_is_missing() {
+    let registry = ModelRegistry::with_defaults();
+    // A discovered entry the owner's daemon learned from the API.
+    let mut discovered = registry.get_model_info("gpt-5.2").unwrap();
+    discovered.discovered = true;
+    discovered.input_price_per_million = 999.0;
+    registry.register("gpt-5.2".to_string(), discovered);
+
+    let anthropic_before = registry.model_ids().len() - {
+        let removed = registry.remove_by_provider(&ProviderType::OpenAI);
+        assert!(removed.contains(&"gpt-5.2".to_string()));
+        removed.len()
+    };
+    assert!(registry.resolve_provider("gpt-5.2").is_none());
+
+    let restored = registry.restore_defaults_for_provider(&ProviderType::OpenAI);
+    assert!(restored > 0);
+    assert_eq!(
+        registry.resolve_provider("gpt-5.2"),
+        Some(ProviderType::OpenAI)
+    );
+    // Anthropic was never touched by either half.
+    assert!(registry.resolve_provider("claude-sonnet-4-6").is_some());
+    assert!(anthropic_before > 0);
+
+    // A second restore is a no-op: what is already there wins, so a
+    // rediscovered price is not overwritten by its compiled default.
+    let mut priced = registry.get_model_info("gpt-5.2").unwrap();
+    priced.input_price_per_million = 42.0;
+    registry.register("gpt-5.2".to_string(), priced);
+    assert_eq!(registry.restore_defaults_for_provider(&ProviderType::OpenAI), 0);
+    assert_eq!(
+        registry.get_model_info("gpt-5.2").unwrap().input_price_per_million,
+        42.0
+    );
 }

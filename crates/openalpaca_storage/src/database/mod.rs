@@ -186,12 +186,21 @@ impl Database {
 
             // 0. File assets (FK: message_attachments -> file_assets, conversation_messages)
             tx.execute("DELETE FROM conversation_message_attachments", [])?;
+            // 036: versions reference file_assets (ON DELETE CASCADE) — named
+            // for the same reason `subagent_span` is below: the reset does not
+            // depend on foreign_keys being enabled.
+            tx.execute("DELETE FROM artifact_versions", [])?;
             tx.execute("DELETE FROM file_assets", [])?;
 
             // 0. Conversation history (children first: feedback -> messages -> conversations)
             tx.execute("DELETE FROM message_feedback", [])?;
             tx.execute("DELETE FROM conversation_messages", [])?;
-            tx.execute("DELETE FROM conversations", [])?;
+            // Migration 039 rebuilt `conversations` as `session`.
+            tx.execute("DELETE FROM session", [])?;
+            // 033: queued follow-ups reference no table, so nothing cascades
+            // them away. Left behind, `GatewayFollowupRunner` would fire them
+            // as turns against the database the user just wiped.
+            tx.execute("DELETE FROM lane_followups", [])?;
 
             // 0. LLM Usage (no FKs, safe to delete first)
             tx.execute("DELETE FROM llm_call_log", [])?;
@@ -210,6 +219,9 @@ impl Database {
 
             // 1. Task System
             tx.execute("DELETE FROM task_agent_assignment", [])?;
+            // 037: spans reference task (ON DELETE CASCADE) — explicit so the
+            // reset does not depend on foreign_keys being enabled.
+            tx.execute("DELETE FROM subagent_span", [])?;
             tx.execute("DELETE FROM task", [])?;
 
             // 1. Identity, Config & Preference System

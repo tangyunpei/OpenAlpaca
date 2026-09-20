@@ -157,6 +157,11 @@ pub enum TaskLaneStatus {
     Failed,
     Cancelled,
     Paused,
+    /// The daemon went away while the run was in flight (§5.6b). A task lane
+    /// is per-execution and is removed at teardown, so no lane of *this*
+    /// incarnation ever reaches it; the variant keeps the projection from
+    /// `TaskEntryStatus` total rather than folding a crash into `Cancelled`.
+    Interrupted,
 }
 
 impl TaskLaneStatus {
@@ -168,6 +173,7 @@ impl TaskLaneStatus {
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
             Self::Paused => "paused",
+            Self::Interrupted => "interrupted",
         }
     }
 }

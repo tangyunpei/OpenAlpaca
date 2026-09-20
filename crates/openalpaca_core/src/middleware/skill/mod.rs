@@ -50,9 +50,8 @@ impl std::error::Error for SkillParseError {}
 /// Use this for lightweight catalog scanning at startup — does NOT parse the body.
 pub fn parse_skill_frontmatter(input: &str) -> Result<SkillFrontmatter, SkillParseError> {
     let (yaml_str, _body_lines) = parser::extract_frontmatter_str(input)?;
-    let mut fm: SkillFrontmatter =
+    let fm: SkillFrontmatter =
         serde_yaml::from_str(yaml_str).map_err(|e| SkillParseError::InvalidYaml(e.to_string()))?;
-    fm.apply_legacy_compat();
     fm.validate()?;
     Ok(fm)
 }
@@ -60,9 +59,8 @@ pub fn parse_skill_frontmatter(input: &str) -> Result<SkillFrontmatter, SkillPar
 /// Parse the full SKILL.md file including body sections (Level 2).
 pub fn parse_skill_markdown(input: &str) -> Result<SkillDocument, SkillParseError> {
     let (yaml_str, body_lines) = parser::extract_frontmatter_str(input)?;
-    let mut frontmatter: SkillFrontmatter =
+    let frontmatter: SkillFrontmatter =
         serde_yaml::from_str(yaml_str).map_err(|e| SkillParseError::InvalidYaml(e.to_string()))?;
-    frontmatter.apply_legacy_compat();
     frontmatter.validate()?;
     let (body, sections) = parser::parse_body_sections(&body_lines);
 

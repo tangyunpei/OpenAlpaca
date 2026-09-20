@@ -29,6 +29,12 @@ pub struct StartWorkflowTool {
     shared_context: Arc<SharedContext>,
     bus: EventBus,
     routing: RoutingConfig,
+    /// M6 — the client that sent this turn said it cannot answer a tool
+    /// confirmation. Carried into the workflow this turn starts: the run
+    /// outlives the turn, so the fact has to travel with it or the first
+    /// `artifact_write` blocks for the whole confirmation timeout with
+    /// nobody to answer.
+    unattended: bool,
     /// Result cell: the outcome of the (single) successful dispatch this
     /// request made, if any.
     outcome: Arc<Mutex<Option<DispatchOutcome>>>,
@@ -40,12 +46,14 @@ impl StartWorkflowTool {
         shared_context: Arc<SharedContext>,
         bus: EventBus,
         routing: RoutingConfig,
+        unattended: bool,
     ) -> Self {
         Self {
             task_dispatcher,
             shared_context,
             bus,
             routing,
+            unattended,
             outcome: Arc::new(Mutex::new(None)),
         }
     }
@@ -108,17 +116,7 @@ impl BuiltInTool for StartWorkflowTool {
         }
 
         // 2. Dispatch the lead-agent workflow (detached background execution).
-        let created_by = match &ctx.principal {
-            Some(crate::security::policy::Principal::System) => "system".to_string(),
-            Some(crate::security::policy::Principal::User { global_id }) => global_id.clone(),
-            Some(crate::security::policy::Principal::External { provider, id }) => {
-                format!("{}:{}", provider, id)
-            }
-            None => ctx
-                .owner_id
-                .clone()
-                .unwrap_or_else(|| "system".to_string()),
-        };
+        let created_by = ctx.created_by();
         let source = ctx.source.as_deref().unwrap_or("internal");
         let outcome = self.task_dispatcher.dispatch_lead_agent(
             goal,
@@ -126,7 +124,17 @@ impl BuiltInTool for StartWorkflowTool {
             &created_by,
             lane_key,
             source,
-            ctx.workspace_id.clone(),
+            // Both halves of the turn's workspace identity travel into the
+            // workflow: the memory-scoping id and the request-supplied root
+            // that alone may place artifacts (R22).
+            crate::memory::scope_context::MemoryScopeContext::from_tool_context(ctx),
+            // §5.5 item 5: the turn's own conversation, not whichever one the
+            // lane calls active by the time this dispatch runs — the LLM round
+            // that produced this tool call gave the user time to open another.
+            ctx.session_id.as_deref(),
+            // M6: the run inherits the turn's answer to "can anyone approve a
+            // tool here?".
+            self.unattended,
         )?;
 
         // 3. Store the outcome in the result cell for the caller.
@@ -167,7 +175,11 @@ pub fn start_workflow_tool_definition() -> ToolDefinition {
         description: "Start a background workflow for a substantial, multi-step task. A lead \
                        agent will plan the work, delegate to subagents, and post a completion \
                        report to this conversation when done. Use for real tasks (research, \
-                       builds, multi-file changes) — answer simple questions directly instead."
+                       builds, multi-file changes); whenever the user explicitly asks for a \
+                       workflow or a background run; and whenever the user asks to write or \
+                       save an artifact or a file, which only a workflow can do — answer simple \
+                       questions directly instead. This is the ONLY way to start a run: if you \
+                       do not call it, no workflow exists and no task id was issued."
             .to_string(),
         parameters: serde_json::json!({
             "type": "object",
@@ -267,6 +279,7 @@ mod tests {
             shared.clone(),
             bus.clone(),
             routing_with_cap(3),
+false,
         );
         assert!(tool.outcome().is_none());
 
@@ -315,7 +328,7 @@ mod tests {
     async fn test_start_workflow_generates_title_when_omitted() {
         let (shared, dispatcher, bus) = setup();
         let tool =
-            StartWorkflowTool::new(dispatcher, shared, bus, routing_with_cap(3));
+            StartWorkflowTool::new(dispatcher, shared, bus, routing_with_cap(3), false);
 
         tool.execute_with_context(
             &serde_json::json!({"goal": "please research the Rust borrow checker"}),
@@ -340,6 +353,7 @@ mod tests {
             shared.clone(),
             bus.clone(),
             routing_with_cap(1),
+false,
         );
 
         // Lane already at the cap.
@@ -385,6 +399,7 @@ mod tests {
             shared,
             bus.clone(),
             routing_with_cap(3),
+false,
         );
 
         tool.execute_with_context(
@@ -430,7 +445,7 @@ mod tests {
     async fn test_start_workflow_requires_lane_context() {
         let (shared, dispatcher, bus) = setup();
         let tool =
-            StartWorkflowTool::new(dispatcher, shared.clone(), bus, routing_with_cap(3));
+            StartWorkflowTool::new(dispatcher, shared.clone(), bus, routing_with_cap(3), false);
 
         let err = tool
             .execute_with_context(

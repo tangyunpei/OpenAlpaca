@@ -1,241 +1,74 @@
-//! MCP server bootstrap: loads `config/mcp.toml`, connects to enabled servers
-//! with per-server timeouts, registers discovered tools into the tool registry.
+//! MCP server bootstrap.
 //!
-//! The entry point is [`register_mcp_servers`], wired into
-//! `build_tool_registry` during `initialize_services`.
+//! Boot is now the [`McpSupervisor`](crate::managers::mcp::McpSupervisor)'s
+//! **first `reconcile_all()`** — not a separate code path (extension design
+//! §5). Three things follow from that, and they are the whole of this file's
+//! change in C2:
+//!
+//! * a disabled server builds a **listable `Disabled` record** instead of the
+//!   bare `continue` that made it invisible (and silently depressed the boot
+//!   log's `connected/total` ratio);
+//! * servers are brought up with `join_all` rather than one at a time, so the
+//!   first request after boot sees a connected or a `Failed` record, never a
+//!   pending one;
+//! * a `config/mcp.toml` that does not parse is **no longer fatal** — it used
+//!   to `?`-propagate through `services/tools.rs` and `services/mod.rs` and
+//!   stop the daemon booting at all, with no fall-back-to-defaults. It now
+//!   registers one pseudo-record naming the parse error and boots.
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
+use arc_swap::ArcSwap;
+use openalpaca_core::bus::EventBus;
+use openalpaca_core::daemon_config::DaemonConfig;
 use openalpaca_core::tools::ToolRegistry;
-use openalpaca_core::tools::mcp::{
-    McpConfig, McpDefaults, McpServerConfig, McpServerStatus, McpServerSummary,
-    bridge, config::HttpAuthConfig, config::LoadError,
-};
-use openalpaca_mcp::{Implementation, McpClient, McpClientConfig, TransportKind};
+use openalpaca_core::tools::extensions::ExtensionSupervisor;
 
-/// Load config/mcp.toml and connect to all enabled servers. Registers their
-/// tools into the provided `ToolRegistry`. Registered tools hold `Arc`s to
-/// their `McpClient`, which keeps the client connections alive for the
-/// daemon's lifetime.
-pub(super) async fn register_mcp_servers(
+use crate::managers::mcp::McpSupervisor;
+
+/// Build the MCP supervisor over `config/mcp.toml`, reconcile it once, and
+/// start its crash reaper.
+///
+/// Registered tools hold `Arc`s to their `McpClient`, but the supervisor holds
+/// its own outside the registry — teardown must never depend on dropping the
+/// last registry `Arc`, because `McpClient` has no `Drop` impl and an implicit
+/// drop performs no close at all.
+pub(super) async fn build_mcp_supervisor(
     config_base_dir: &Path,
     tool_registry: &Arc<ToolRegistry>,
-) -> anyhow::Result<()> {
-    let config_path = config_base_dir.join("mcp.toml");
-
-    let config = match McpConfig::load(&config_path) {
-        Ok(cfg) => cfg,
-        Err(LoadError::NotFound(_)) => {
-            tracing::info!(
-                path = %config_path.display(),
-                "no config/mcp.toml — no MCP servers to register"
-            );
-            return Ok(());
-        }
-        Err(e) => {
-            return Err(anyhow::anyhow!(
-                "failed to load {}: {e}",
-                config_path.display()
-            ));
-        }
-    };
-
-    let mut connected = 0usize;
-    let mut total = 0usize;
-
-    for (server_name, server_cfg) in config.servers {
-        total += 1;
-        if !server_cfg.is_enabled() {
-            tracing::info!(server_name = %server_name, "MCP server disabled by config");
-            continue;
-        }
-
-        let summary =
-            connect_and_register_one(&server_name, &server_cfg, &config.defaults, tool_registry)
-                .await;
-        if matches!(summary.status, McpServerStatus::Connected { .. }) {
-            connected += 1;
-        }
-    }
-
-    tracing::info!(connected, total, "MCP server bootstrap complete");
-
-    Ok(())
-}
-
-async fn connect_and_register_one(
-    server_name: &str,
-    server_cfg: &McpServerConfig,
-    defaults: &McpDefaults,
-    tool_registry: &Arc<ToolRegistry>,
-) -> McpServerSummary {
-    let transport_kind = server_cfg.transport_kind();
-    let mut summary = McpServerSummary {
-        server_name: server_name.to_string(),
-        transport_kind,
-        status: McpServerStatus::Failed {
-            reason: "(pending)".into(),
-        },
-        discovered_tools: Vec::new(),
-    };
-
-    tracing::info!(server_name = %server_name, transport_kind = %transport_kind, "MCP server starting");
-
-    let client_config = match build_client_config(server_name, server_cfg, defaults) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(server_name = %server_name, reason = %e, "MCP server config invalid");
-            summary.status = McpServerStatus::Failed { reason: e };
-            return summary;
-        }
-    };
-
-    let connect_timeout = Duration::from_secs(
-        server_cfg
-            .connect_timeout_secs()
-            .unwrap_or(defaults.connect_timeout_secs),
+    daemon_config: &Arc<ArcSwap<DaemonConfig>>,
+    bus: &EventBus,
+    skill_catalog: &Arc<openalpaca_core::orchestrator::skill_catalog::SkillCatalog>,
+    agent_registry: &Arc<openalpaca_core::agent::AgentRegistry>,
+    default_lane_key: &str,
+) -> Arc<McpSupervisor> {
+    let supervisor = McpSupervisor::new(
+        config_base_dir.join("mcp.toml"),
+        Arc::clone(tool_registry),
+        Arc::clone(daemon_config),
+        bus.clone(),
+        // T1 step 3's dependent scan reads both registries and writes its cron
+        // notice to the default lane (extension design §7.3). `PluginManager`
+        // already holds the same two handles.
+        Some(Arc::clone(skill_catalog)),
+        Some(Arc::clone(agent_registry)),
+        default_lane_key,
     );
-    let client = match tokio::time::timeout(connect_timeout, McpClient::connect(client_config)).await {
-        Ok(Ok(c)) => Arc::new(c),
-        Ok(Err(e)) => {
-            tracing::warn!(server_name = %server_name, error = %e, "MCP server connect failed");
-            summary.status = McpServerStatus::Failed { reason: format!("connect: {e}") };
-            return summary;
-        }
-        Err(_elapsed) => {
-            tracing::warn!(server_name = %server_name, timeout = ?connect_timeout, "MCP server connect timed out");
-            summary.status = McpServerStatus::Failed {
-                reason: format!("timeout after {connect_timeout:?}"),
-            };
-            return summary;
-        }
-    };
 
-    let server_info = client.server_info().cloned();
-    let protocol_version = client.protocol_version().cloned();
-    let server_version = server_info
-        .as_ref()
-        .map(|i| i.version.as_str())
-        .unwrap_or("unknown");
+    supervisor.reconcile_all().await;
 
-    let tools = match client.list_tools(None).await {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::warn!(server_name = %server_name, error = %e, "MCP list_tools failed");
-            summary.status = McpServerStatus::Failed { reason: format!("list_tools: {e}") };
-            return summary;
-        }
-    };
-
-    let mut registered_names = Vec::new();
-    let mut skipped = 0;
-    for tool in tools {
-        let reg = bridge::rmcp_tool_to_registered(
-            server_name,
-            server_version,
-            tool,
-            Arc::clone(&client),
-        );
-        let name = reg.definition.name.clone();
-        match tool_registry.register(reg) {
-            Ok(()) => registered_names.push(name),
-            Err(e) => {
-                tracing::warn!(
-                    server_name = %server_name,
-                    tool = %name,
-                    error = %e,
-                    "MCP tool registration failed"
-                );
-                skipped += 1;
-            }
-        }
-    }
-
+    let rows = supervisor.list().await;
+    let connected = rows.iter().filter(|r| r.state.is_enabled()).count();
     tracing::info!(
-        server_name = %server_name,
-        tool_count = registered_names.len(),
-        skipped,
-        "MCP server registered tools"
+        connected,
+        total = rows.len(),
+        "MCP server bootstrap complete"
     );
 
-    summary.status = McpServerStatus::Connected {
-        server_version: server_info
-            .map(|i| i.version.clone())
-            .unwrap_or_default(),
-        protocol_version: protocol_version
-            .map(|v| format!("{v:?}"))
-            .unwrap_or_default(),
-    };
-    summary.discovered_tools = registered_names;
-    summary
-}
-
-fn build_client_config(
-    server_name: &str,
-    server_cfg: &McpServerConfig,
-    defaults: &McpDefaults,
-) -> Result<McpClientConfig, String> {
-    let request_timeout = Duration::from_secs(
-        server_cfg.request_timeout_secs().unwrap_or(defaults.request_timeout_secs),
-    );
-
-    let transport = match server_cfg {
-        McpServerConfig::Stdio { command, args, env, cwd, .. } => TransportKind::Stdio {
-            command: command.clone(),
-            args: args.clone(),
-            env: env.clone(),
-            cwd: cwd.clone(),
-        },
-        McpServerConfig::Http { url, auth, extra_headers, .. } => {
-            let resolved_auth = resolve_http_auth(server_name, auth.as_ref())?;
-            TransportKind::Http {
-                url: url.clone(),
-                auth: resolved_auth,
-                extra_headers: extra_headers.clone(),
-            }
-        }
-    };
-
-    Ok(McpClientConfig {
-        server_name: server_name.to_string(),
-        transport,
-        client_info: Implementation {
-            name: "openalpaca-mcp".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            ..Default::default()
-        },
-        request_timeout,
-        max_reconnect_attempts: defaults.max_reconnect_attempts,
-        reconnect_backoff_ms: defaults.reconnect_backoff_ms,
-    })
-}
-
-fn resolve_http_auth(
-    server_name: &str,
-    auth: Option<&HttpAuthConfig>,
-) -> Result<Option<openalpaca_mcp::HttpAuth>, String> {
-    use openalpaca_mcp::HttpAuth;
-    match auth {
-        None => Ok(None),
-        Some(HttpAuthConfig::Bearer { bearer }) => Ok(Some(HttpAuth::Bearer(bearer.clone()))),
-        Some(HttpAuthConfig::BearerEnv { bearer_env }) => match std::env::var(bearer_env) {
-            Ok(val) => Ok(Some(HttpAuth::Bearer(val))),
-            Err(_) => Err(format!(
-                "missing env var '{bearer_env}' for bearer_env on server '{server_name}'"
-            )),
-        },
-        Some(HttpAuthConfig::ApiKey { api_key_header, api_key_env }) => {
-            match std::env::var(api_key_env) {
-                Ok(val) => Ok(Some(HttpAuth::ApiKey {
-                    header: api_key_header.clone(),
-                    value: val,
-                })),
-                Err(_) => Err(format!(
-                    "missing env var '{api_key_env}' for api_key_env on server '{server_name}'"
-                )),
-            }
-        }
-    }
+    // The reaper is **not** started here: it is started after
+    // `load_agent_templates` (`services/mod.rs`), so a boot-window crash's
+    // dependent scan can name the templates that declare the lost capabilities
+    // rather than reporting an empty set (C4 review).
+    supervisor
 }

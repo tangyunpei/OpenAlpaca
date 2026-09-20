@@ -56,10 +56,20 @@ impl Orchestrator {
         // Both populated — complete bootstrap
         tracing::info!("Bootstrap onboarding complete! Identity and user profile populated.");
 
-        // Delete BOOTSTRAP.md from disk
+        // Delete BOOTSTRAP.md from disk.
+        //
+        // **S8 — stop polling it first.** The wake watcher polls this exact
+        // path, and a poll that walks a file this process has just removed
+        // logs `WARN notify::poll::data: walkdir error scanning … NotFound`
+        // naming the file. The hot-reload watcher unwatches it too, but only
+        // once it has been *told* the file is gone — which is the scan that
+        // already warned. Deleting it ourselves means we know first, so the
+        // path leaves the poll set before there is anything to trip over. A
+        // hand-deleted BOOTSTRAP.md still goes the reactive way.
         if let Ok(guard) = self.bootstrap_path.read()
             && let Some(ref path) = *guard
         {
+            self.unwatch_path(path);
             match std::fs::remove_file(path) {
                 Ok(()) => tracing::info!("Deleted BOOTSTRAP.md: {}", path.display()),
                 Err(e) => tracing::warn!("Failed to delete BOOTSTRAP.md: {e}"),

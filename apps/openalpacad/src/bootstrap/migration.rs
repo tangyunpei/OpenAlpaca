@@ -1,28 +1,25 @@
 //! Utility functions and data migration helpers.
 
-use openalpaca_storage::repository::TaskRepository;
-use openalpaca_storage::{ConfigRepository, ConversationRepository, Database, IdentityRepository};
+use openalpaca_storage::repository::SubagentSpanRepository;
+use openalpaca_storage::{ConfigRepository, Database, IdentityRepository};
 use std::path::Path;
 
-/// Startup orphan sweep (Routing V2 Phase 3): mark every non-terminal task
-/// (queued / running / paused) as failed. In-flight execution never survives
-/// a daemon restart — the tokio tasks driving them are gone — so any task
-/// left non-terminal in the DB is an orphan that would otherwise look alive
-/// forever in /status output and lane workflow context.
+/// Startup span sweep (plan Phase 4, GAP-09): close every `subagent_span`
+/// left `running` on a task that is already terminal, as
+/// `cancelled` / `"interrupted"`.
 ///
-/// CALL-ORDER GUARANTEE: this must run right after the database opens and
-/// BEFORE any ingress can create or resume work — i.e. before
-/// `WakeManager::start()` (scheduler/watcher events) and before
-/// `ConnectorManager::start_all()` (chat ingress) in `async_main`. Tasks
-/// created after the sweep belong to this daemon generation and must not be
-/// touched.
+/// CALL-ORDER GUARANTEE: this must run immediately after
+/// [`sweep_interrupted_runs`](super::sweep_interrupted_runs), which is what
+/// makes the previous generation's tasks terminal in the first place, and
+/// before the router serves — a span opened by *this* daemon must never be
+/// swept.
 ///
-/// Non-fatal: failure is logged but doesn't prevent daemon startup.
-pub fn sweep_orphaned_tasks(db: &Database) {
-    match TaskRepository::new(db).fail_all_non_terminal("daemon restarted — task orphaned") {
+/// Idempotent: the second boot after a crash matches nothing. Non-fatal.
+pub fn close_orphaned_spans(db: &Database) {
+    match SubagentSpanRepository::new(db).close_orphans() {
         Ok(0) => {}
-        Ok(count) => tracing::info!("Startup orphan sweep: failed {count} orphaned task(s)"),
-        Err(e) => tracing::warn!("Startup orphan sweep failed (non-fatal): {e}"),
+        Ok(count) => tracing::info!("Startup span sweep: interrupted {count} orphaned span(s)"),
+        Err(e) => tracing::warn!("Startup span sweep failed (non-fatal): {e}"),
     }
 }
 
@@ -36,9 +33,8 @@ pub fn is_same_file_path(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Resolve the stable local user ID from the database. On first run, if legacy
-/// `gui_user:gui` messages exist, adopt `"gui_user"` to preserve history continuity.
-/// Otherwise generate a UUID.
+/// Resolve the stable local user ID from the database: the persisted id if one
+/// exists, otherwise a freshly minted UUID that is persisted for future runs.
 pub fn resolve_local_user_id(db: &Database) -> String {
     let config_repo = ConfigRepository::new(db);
 
@@ -47,13 +43,7 @@ pub fn resolve_local_user_id(db: &Database) -> String {
         return id;
     }
 
-    // Check for legacy gui_user:gui history
-    let conv_repo = ConversationRepository::new(db);
-    let local_user_id = if conv_repo.count_by_lane("gui_user:gui").unwrap_or(0) > 0 {
-        "gui_user".to_string() // Preserve existing history
-    } else {
-        uuid::Uuid::new_v4().to_string()
-    };
+    let local_user_id = uuid::Uuid::new_v4().to_string();
 
     // Persist for future runs
     let _ = config_repo.set("identity.local_user_id", &local_user_id, "string");
@@ -72,63 +62,4 @@ pub fn resolve_local_user_id(db: &Database) -> String {
     }
 
     local_user_id
-}
-
-/// Migrate conversation summaries from the preference table to the conversations table.
-/// Idempotent: runs every startup but does nothing if no preference rows remain.
-/// Non-fatal: failure is logged but doesn't prevent daemon startup.
-pub fn migrate_preference_summaries(db: &Database) {
-    if let Err(e) = db.with_connection(|conn| {
-        // Find all preference rows with conversation_summary
-        let mut stmt = conn.prepare(
-            "SELECT user_id, value, version FROM preference WHERE key = 'conversation_summary'",
-        )?;
-        let rows: Vec<(String, String, i64)> = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-            .filter_map(Result::ok)
-            .collect();
-
-        if rows.is_empty() {
-            return Ok(());
-        }
-
-        let tx = conn.unchecked_transaction()?;
-        let mut migrated = 0usize;
-        for (lane_key, value, pref_version) in &rows {
-            let parsed: serde_json::Value = match serde_json::from_str(value) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let summary = parsed.get("summary").and_then(|s| s.as_str()).unwrap_or("");
-            let last_id = parsed
-                .get("last_summarized_message_id")
-                .and_then(|n| n.as_i64())
-                .unwrap_or(0);
-
-            // Only update if conversation row exists
-            let updated = tx.execute(
-                "UPDATE conversations SET summary = ?1, summary_version = ?2,
-                 last_summarized_message_id = ?3, summary_updated_at = datetime('now')
-                 WHERE lane_key = ?4",
-                (summary, pref_version, last_id, lane_key.as_str()),
-            )?;
-
-            if updated > 0 {
-                tx.execute(
-                    "DELETE FROM preference WHERE user_id = ?1 AND key = 'conversation_summary'",
-                    [lane_key],
-                )?;
-                migrated += 1;
-            }
-        }
-        tx.commit()?;
-        if migrated > 0 {
-            tracing::info!(
-                "Migrated {migrated} conversation summaries from preference -> conversations"
-            );
-        }
-        Ok(())
-    }) {
-        tracing::warn!("Summary migration failed (non-fatal): {e}");
-    }
 }

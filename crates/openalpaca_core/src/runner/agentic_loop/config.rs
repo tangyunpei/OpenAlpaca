@@ -1,6 +1,8 @@
 use crate::agent::subagent::AgentConstraints;
 use crate::bus::EventBus;
+use crate::runner::agentic_loop::AnswerGuard;
 use crate::runner::steering::SteeringInbox;
+use crate::session_log::SessionLogHandle;
 use crate::security::capabilities::CapabilityManager;
 use openalpaca_llm::{ModelRegistry, StreamEvent, ThinkingConfig, ToolChoice};
 use std::sync::Arc;
@@ -68,6 +70,30 @@ pub struct LoopConfig {
     /// and injects them as `<user_interjection>` user messages. `None`
     /// (default) disables steering entirely.
     pub steering: Option<Arc<SteeringInbox>>,
+    /// The session event log this loop narrates into (§5.5) — rounds, tool
+    /// calls and their payloads, steering drains, compaction, and the exit.
+    /// The identical pattern to `steering` above: `None` (default) means the
+    /// loop writes nothing, which is what every non-session caller wants.
+    pub session_log: Option<SessionLogHandle>,
+    /// The 037 span every record of this loop belongs to (P-20): the lead's
+    /// `lead::<task_id>` or a subagent's node id. `None` for a main-loop turn,
+    /// which has no span.
+    pub span_id: Option<String>,
+    /// `[orchestrator.sessions] tool_result_inline_bytes` (§5.4, P-16/C-2):
+    /// above it a tool result is spilled to the session's `results/` and the
+    /// model is handed the stub that names it. With no `session_log` there is
+    /// nowhere to spill, so the same number is the head-only cut instead —
+    /// one threshold, never two.
+    pub tool_result_inline_bytes: usize,
+    /// H3 — the last look at the answer before the loop returns `Complete`.
+    ///
+    /// `Some` only on the Routing V2 main loop, whose guard objects to an
+    /// answer stating a task id no run of this turn's owner answers to. The
+    /// loop grants the guard exactly one corrective round and then **appends**
+    /// the guard's own line to whatever the model said (N3) — the answer is
+    /// never taken away. `None` (every other caller: the lead, subagents,
+    /// skills, compaction) reviews nothing and costs nothing.
+    pub answer_guard: Option<Arc<dyn AnswerGuard>>,
 }
 
 impl Clone for LoopConfig {
@@ -92,6 +118,10 @@ impl Clone for LoopConfig {
             event_bus: self.event_bus.clone(),
             experimental_ephemeral_pressure: self.experimental_ephemeral_pressure,
             steering: self.steering.clone(),
+            session_log: self.session_log.clone(),
+            span_id: self.span_id.clone(),
+            tool_result_inline_bytes: self.tool_result_inline_bytes,
+            answer_guard: self.answer_guard.clone(),
         }
     }
 }
@@ -117,6 +147,10 @@ impl std::fmt::Debug for LoopConfig {
                 &self.experimental_ephemeral_pressure,
             )
             .field("steering", &self.steering.is_some())
+            .field("session_log", &self.session_log.is_some())
+            .field("span_id", &self.span_id)
+            .field("tool_result_inline_bytes", &self.tool_result_inline_bytes)
+            .field("answer_guard", &self.answer_guard.is_some())
             .finish()
     }
 }
@@ -143,6 +177,10 @@ impl Default for LoopConfig {
             event_bus: None,
             experimental_ephemeral_pressure: false,
             steering: None,
+            session_log: None,
+            span_id: None,
+            tool_result_inline_bytes: super::tool_helpers::MAX_TOOL_RESULT_SIZE,
+            answer_guard: None,
         }
     }
 }
@@ -209,6 +247,10 @@ impl LoopConfig {
             event_bus: None,
             experimental_ephemeral_pressure: false,
             steering: None,
+            session_log: None,
+            span_id: None,
+            tool_result_inline_bytes: super::tool_helpers::MAX_TOOL_RESULT_SIZE,
+            answer_guard: None,
         }
     }
 
@@ -273,6 +315,76 @@ pub struct LoopResult {
     pub elapsed: Duration,
     /// Accumulated cost for this loop invocation (from CostTracker for Router, local estimate for Direct).
     pub estimated_cost: f64,
+    /// The last tool result that came back an error, verbatim (V3).
+    ///
+    /// A turn that ends with no answer usually ends that way because a tool
+    /// kept failing, and "I stopped after 8 rounds" is only half an answer
+    /// without the reason. `None` when no tool failed — the loop tracks the
+    /// last one, not a list: the reader wants the one it stopped on.
+    pub last_tool_error: Option<String>,
+}
+
+impl LoopResult {
+    /// The line a turn shows when it produced no answer text of its own (V3).
+    ///
+    /// `None` when there is genuine content, and for `Cancelled` — a turn the
+    /// user stopped is not a turn that failed to speak, and it keeps whatever
+    /// its caller already does.
+    ///
+    /// The vocabulary is the lead's ([`completion_status_line`]), rewritten
+    /// for a chat turn: the same four reasons, named the way the person who
+    /// asked the question would name them.
+    ///
+    /// [`completion_status_line`]: crate::orchestrator::dispatcher::completion_status_line
+    pub fn no_answer_line(&self) -> Option<String> {
+        if !self.final_content.trim().is_empty() {
+            return None;
+        }
+        let reason = match &self.finish_reason {
+            LoopFinishReason::Cancelled => return None,
+            LoopFinishReason::MaxRounds => format!(
+                "I stopped after {} tool {} without reaching an answer.",
+                self.rounds_used,
+                if self.rounds_used == 1 {
+                    "round"
+                } else {
+                    "rounds"
+                }
+            ),
+            LoopFinishReason::CostExceeded => {
+                "I stopped before reaching an answer: this turn hit its cost limit.".to_string()
+            }
+            LoopFinishReason::Truncated => {
+                "I stopped before reaching an answer: the reply hit the model's output limit."
+                    .to_string()
+            }
+            LoopFinishReason::Error(e) => {
+                format!("I could not finish this turn: {e}")
+            }
+            LoopFinishReason::Complete => {
+                "I finished this turn without writing an answer.".to_string()
+            }
+        };
+        Some(match self.last_tool_error {
+            Some(ref err) => format!("{reason} The last tool error was: {}", user_facing(err)),
+            None => reason,
+        })
+    }
+}
+
+/// A tool error as the person reading the turn should see it (W2).
+///
+/// `[tool_error] ` is the loop's own marker: it is how a tool result is
+/// recognised as a failure (`result_text.starts_with("[tool_error]")`) and it
+/// belongs in the transcript the model reads, not in a sentence addressed to a
+/// human. Only the leading marker goes — the message itself, hint and all, is
+/// what the reader needs.
+fn user_facing(err: &str) -> &str {
+    let err = err.trim();
+    match err.strip_prefix("[tool_error]") {
+        Some(rest) => rest.trim_start(),
+        None => err,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

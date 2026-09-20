@@ -42,10 +42,6 @@ pub struct ChatStreamsConfig {
     pub cleanup_interval_secs: u64,
     /// Seconds after which a stream is considered stale.
     pub stale_timeout_secs: u64,
-    /// Delay in milliseconds between streaming word chunks. 0 = no delay (all deltas at once).
-    pub stream_chunk_delay_ms: u64,
-    /// Number of words per delta chunk sent to SSE clients.
-    pub stream_chunk_words: usize,
 }
 
 impl Default for ChatStreamsConfig {
@@ -53,8 +49,6 @@ impl Default for ChatStreamsConfig {
         Self {
             cleanup_interval_secs: 60,
             stale_timeout_secs: 30,
-            stream_chunk_delay_ms: 30,
-            stream_chunk_words: 3,
         }
     }
 }

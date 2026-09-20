@@ -205,7 +205,7 @@ Controls which tools the skill can use. **Ignored when `requires_capabilities` i
 | Field | Type | Default | Status | Description |
 |-------|------|---------|--------|-------------|
 | `tools.allow` | `Vec<String>` | `[]` | ENFORCED | Tool allowlist (legacy name-based path). Only these tools are available during the skill's agentic loop. Empty (with no `requires_capabilities`) means no tools. |
-| `tools.deny` | `Vec<String>` | `[]` | ENFORCED | Tool denylist. Removed from the resolved tool set (both resolution paths), combined with the global deny list (`execution.skill_defaults.global_tool_deny` in `daemon.toml`). |
+| `tools.deny` | `Vec<String>` | `[]` | ENFORCED | Tool denylist. Removed from the resolved tool set (both resolution paths) and folded into the sandbox policy's denied capabilities. |
 | `tools.defaults` | `HashMap<String, Value>` | `{}` | DEPRECATED | No runtime effect. A non-empty map triggers a scan-time deprecation warning. |
 | `tools.rate_limit` | `RateLimitConfig` | `{max_calls: null}` | ENFORCED | `max_calls` is enforced as a total cap for the invocation. |
 
@@ -359,19 +359,11 @@ The LLM sees tools `skill_script:lint_code` and `skill_script:analyze_deps`. Whe
 
 For a working example, see the shipped `create-skill` skill (`config/skills/create-skill/`), which bundles four shell scripts.
 
-### 4.10 Legacy Fields
+### 4.10 Ignored Fields
 
-These fields exist for backward compatibility with older skill definitions. They are parsed but **never serialized** (`#[serde(skip_serializing)]`). At parse time, they are mapped to their modern equivalents via `apply_legacy_compat()`.
+The `command`, `trigger_patterns`, `tools_required`, and `auto_load` legacy-compat fields — and the `apply_legacy_compat()` bridge that mapped them onto `invoke.slash`, `routing.intent`, `tools.allow`, and `invoke.mode` — were deleted from `SkillFrontmatter` in a purge (no tracked skill under `config/skills/` used them, and plugin-contributed skills already build the new schema directly). Write skills against `invoke`, `routing`, and `tools`; the old field names are no longer recognized.
 
-| Legacy Field | Type | Default | Maps To | Condition |
-|-------------|------|---------|---------|-----------|
-| `command` | `Option<String>` | `None` | `invoke.slash` (with `/` prefix) | Only if `invoke.slash` is `None` |
-| `auto_load` | `bool` | `false` | `invoke.mode = "auto"` | Only if `invoke.mode` is still `"manual"` |
-| `trigger_patterns` | `Vec<String>` | `[]` | `routing.intent` | Only if `routing.intent` is empty |
-| `tools_required` | `Vec<String>` | `[]` | `tools.allow` | Only if `tools.allow` is empty |
-| `read_when` | `Vec<String>` | `[]` | *(dropped — parsed and ignored)* | — |
-
-**Migration**: New-spec fields always take precedence over legacy fields. If both are present, legacy values are ignored.
+One field remains harmless to leave in older frontmatter: `read_when` (`Vec<String>`) is not a `SkillFrontmatter` field, so it is parsed as ordinary YAML and then silently dropped — it has no effect.
 
 ---
 
@@ -522,7 +514,7 @@ The invocation handler builds the tool set as follows:
 2. **Legacy path** — otherwise, if `tools.allow` is non-empty: resolve each name against the tool registry. Unknown names trigger a warning (`Skill '<x>' references unknown tools: [...]`) but don't block invocation.
 3. Otherwise: no tools (pure LLM prompt).
 4. **Bootstrap exception**: during persona bootstrap mode, `update_persona` is force-added to the tool set even if not allowed.
-5. **Deny lists**: remove tools in `tools.deny` and in the global deny list (`execution.skill_defaults.global_tool_deny` in `daemon.toml`). Applies to both resolution paths.
+5. **Deny list**: remove tools in `tools.deny`. Applies to both resolution paths. There is no global per-tool deny list — a whole MCP server or plugin is switched off with `openalpaca ext disable <kind> <id>`, and its tools then resolve to nothing here (the skill is refused if that leaves a required capability wholly withheld).
 6. Append `skill_script:*` tools from `scripts` (Section 4.9) and `invoke_skill:*` tools from `depends_on` (Section 8).
 
 Intent-suggested tools from the orchestrator are intentionally **not** merged, preserving skill-level tool isolation.
@@ -537,7 +529,6 @@ The skill agentic loop runs with limits from `daemon.toml` `[execution.skill_def
 |-----|---------|---------|
 | `max_rounds` | `6` | Maximum LLM round-trips per invocation. |
 | `max_tools_per_round` | `3` | Maximum tool calls per round. |
-| `global_tool_deny` | `[]` | Tool names denied for all skills. |
 | `router_auto_select_threshold` | `0.65` | See Section 5. |
 | `router_suggest_threshold` | `0.45` | See Section 5. |
 
@@ -722,7 +713,7 @@ tools:
     - shell_execute
     - web_fetch
     - memory_search
-  deny:                          # Removed from allow (combined with global deny)
+  deny:                          # Removed from allow
     - update_persona
   rate_limit:
     max_calls: 50                # Total tool-call cap for the invocation
@@ -979,9 +970,6 @@ Created from `depends_on` (Section 8); like script tools, they are invocation-sc
 
 **Deprecation warnings at startup**
 - `context.summarize.enabled: true` and non-empty `tools.defaults` produce "is deprecated and has no effect" warnings in the catalog's validation errors. Remove the fields.
-
-**Legacy fields ignored when new-spec fields are present**
-- Legacy compat only applies when the corresponding new field is empty/None. If both `command` and `invoke.slash` are set, `command` is ignored.
 
 ### Script-Related Errors
 

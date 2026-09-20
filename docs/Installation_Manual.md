@@ -108,13 +108,46 @@ Defaults after install:
 - Daemon binary: `~/.local/openalpaca/libexec/openalpacad`
 - CLI symlink: `~/.local/bin/openalpaca`
 - GUI app: `~/Applications/openalpaca-gui.app`
-- Runtime root: `~/Library/Application Support/OpenAlpaca`
-- Runtime config: `~/Library/Application Support/OpenAlpaca/config`
-- Runtime DB: `~/Library/Application Support/OpenAlpaca/openalpaca.db`
+- Runtime root: `~/.openalpaca`
+- Runtime config: `~/.openalpaca/config`
+- Runtime DB: `~/.openalpaca/state/openalpaca.db`
 
 When the CLI launches the daemon, it sets `OPENALPACA_CONFIG_DIR` to the
 runtime config directory above — that is the config the installed daemon
 actually reads (not any repo checkout).
+
+Override the whole runtime root with `OPENALPACA_HOME_STORE=/abs/path`. It
+must be an absolute path — an empty or relative value is rejected and the
+daemon refuses to start.
+
+## Migrating From the Old Data Directory
+
+Older installs kept everything under `~/Library/Application Support/OpenAlpaca`
+(macOS) / `~/.local/share/openalpaca` (Linux). The rebuilt **daemon** moves
+that directory's contents into the new `~/.openalpaca` layout on its first
+boot, before it takes the singleton lock. On the CLI side exactly one command
+runs the same move itself — `openalpaca config` (in every form: `set`, `get`,
+`list`, `reset`, and the bare interactive editor), because it is the only one
+that opens the database directly instead of asking the daemon. Every other
+`openalpaca` subcommand talks to the running daemon over HTTP, so for those the
+move is whatever the daemon already did. It is one move either way:
+
+- The move is **idempotent and resumable** (a process killed mid-move
+  finishes on the next boot) but **not reversible** — back up the old
+  directory before upgrading if you want to keep a fallback.
+- A **still-running old daemon blocks the move**: stop it first (`openalpaca
+  daemon stop` against the old install, or kill the process holding
+  `openalpacad.lock` in the old directory).
+- If **both** the old directory and `~/.openalpaca/state` end up holding an
+  `openalpaca.db`, the mover refuses to choose between them and aborts before
+  it renames anything: the daemon exits instead of starting, and `openalpaca
+  config` exits instead of reading the database. The error names both paths;
+  move one aside and start again. Every other CLI command is unaffected in
+  itself — it opens no database — but it needs a daemon that will not start
+  until the two are one.
+- Anything the mover doesn't recognize left behind in the old directory
+  produces a boot warning (check the daemon log) rather than being deleted
+  silently.
 
 ## Run and Verify
 
@@ -124,6 +157,164 @@ openalpaca daemon start --daemon-only
 openalpaca daemon status
 openalpaca gui start
 ```
+
+A first boot also writes the content the daemon carries in its own binary into
+`~/.openalpaca/config`: `llm.toml`, `daemon.toml`, `mcp.toml`, the nine agent
+templates (`agents/`), the skills (`skills/`) and the tool config (`tools/`).
+The rule is per directory: a directory that already exists is left
+alone entirely, even one you emptied on purpose, and inside a directory being
+filled an existing file is never overwritten. Without the templates the first
+workflow request has no lead agent to run and says so.
+
+## Local Models (Ollama)
+
+OpenAlpaca can run entirely on models served by an [Ollama](https://ollama.com)
+you run yourself. **No API key is involved anywhere**, and a local model is
+priced at zero, so the cost caps never bite.
+
+### 1. Install Ollama and pull a model
+
+```bash
+ollama pull <model>          # e.g. a tools-capable chat model
+ollama list                  # the tags the daemon will discover
+```
+
+Ollama serves on `http://localhost:11434`; the daemon's default `base_url` is
+that address plus the OpenAI-compatibility suffix,
+`http://localhost:11434/v1`. Change `[providers.ollama] base_url` in
+`~/.openalpaca/config/llm.toml` if yours listens elsewhere.
+
+### 2. Turn the provider on
+
+Enabling it is the only action required — the seeded `llm.toml` ships
+`[providers.ollama] enabled = false` and everything else already set.
+
+- **GUI**: Settings → Models & keys, the `ollama` row's switch. The row reads
+  `no key needed` instead of offering a key editor, and the toast reports how
+  many models the daemon found.
+- **CLI**: `openalpaca config set ai.ollama.enabled true`. It is the same
+  switch, written through the config schema
+  (`ai.<provider>.enabled`, backend `llm.toml`), so it is validated rather
+  than hand-typed — and Ollama is exempt from the key-format check, so no key
+  is asked for. The interactive `openalpaca config` TUI has the same row under
+  API-Keys → Ollama.
+- **By hand**: set `enabled = true` under `[providers.ollama]` in
+  `~/.openalpaca/config/llm.toml` and save.
+
+All three write the same file, and the config watcher registers any provider
+the file enables that the router is not already holding — one that was
+disabled or missing at boot — discovery included, so no restart is needed.
+
+### 3. What discovery does
+
+When the provider is registered — at boot, on the enable, on a hot reload, on a
+refresh — the daemon asks the running Ollama what is installed, using Ollama's
+own API rather than the OpenAI-compatible one:
+
+- `GET /api/tags` for the list of installed tags.
+- `POST /api/show` per tag for its real context length and its capabilities.
+
+Each **chat** model it reports is registered with input and output price `0`,
+the context window `/api/show` gave (8192 when it does not say), image support
+from the `vision` capability and tool support from `tools`. A model whose
+capabilities omit `completion` — an embedding-only model — is deliberately not
+registered: it is not something a turn could use. Nothing needs an API key and
+nothing needs a `[models]` row; a `[models."<id>"]` row you write by hand still
+overrides the discovered fields.
+
+```bash
+openalpaca llm models                 # the catalogue as it stands
+openalpaca llm models --refresh       # ask every provider again, then list
+```
+
+`--refresh` is the command for "I just pulled a model and it is not in the
+list": it reaches keyless providers too, so the new tag appears without
+restarting the daemon or editing a line of config. The GUI's `Refresh models`
+button in Settings → Models & keys does the same. A model you removed from
+Ollama is withdrawn at the next refresh (a row you declared in `[models]` is
+kept on disk — it simply stops being offered).
+
+If Ollama is not running, the provider still registers, with zero models and
+one `WARN`; the enable's answer carries the reason rather than a bare zero, so
+an empty list is never mistaken for "nothing installed".
+
+### 4. What you should see
+
+```bash
+openalpaca llm status     # Key Health: · ollama — no key needed
+openalpaca llm models     # your tags, provider ollama, prices 0, TOOLS column
+openalpaca chat --message "say hello in five words"
+```
+
+- **No key.** `llm status` prints `· ollama — no key needed` for a keyless
+  provider, never a `✗`, and `llm keys list` gives it a row saying the same.
+- **Cost 0.** Prices come from the router's live catalogue, so a discovered
+  local model costs nothing: usage shows real token counts against `$0.00`.
+- **Streaming.** A local reply arrives token by token — the provider's own
+  deltas, forwarded as it produces them — and the token counts come back on the
+  stream itself. A thinking model's reasoning comes with it, on its own
+  `reasoning` frame: the GUI shows it in the thinking indicator and the CLI
+  dims it at a terminal, so the ten seconds before the first token no longer
+  look like a hang. Nothing stores reasoning; it is live or it is gone.
+- **The configured model may not be yours.** Every shipped agent template, and
+  the seeded `[orchestrator] model`, names a Claude id. Those are right when
+  Anthropic is configured and fall through a fallback ladder when it is not:
+  the request ends up on the first routable model, preferring one that can use
+  tools. The substitution is never silent — `openalpaca llm status` reads
+  `configured: X — not available, using Y`, Settings → Models & keys shows the
+  same sentence, and the daemon logs one `WARN` per pair. Set `[orchestrator] model`
+  to one of your local tags to stop substituting. With nothing routable at all,
+  one error names the fix instead of "Unknown model".
+
+### 5. Knobs worth knowing
+
+All in `~/.openalpaca/config/llm.toml`:
+
+| Key | Default (seeded) | What it does |
+|---|---|---|
+| `[providers.ollama] default_model` | `""` | Empty means "whatever is installed" — the router picks a discovered model, preferring a tools-capable one. Name a tag to pin it. |
+| `[providers.ollama] default_max_tokens` | `8192` | The output ceiling for one answer (the cloud default is 4096). A request that names its own `max_tokens` still wins. |
+| `[providers.ollama] request_timeout_secs` | `600` | Wall clock for one **non-streaming** call to this provider. |
+| `[timeouts] llm_request_timeout_secs` | `120` | The same budget for any provider that sets no override. |
+
+You should not need a `[models]` row at all — discovery fills the catalogue —
+but one you write by hand still overrides what was discovered, field by field:
+
+| Key under `[models."<tag>"]` | What it overrides |
+|---|---|
+| `provider` | Which provider serves the tag. Required in the row. |
+| `input_price` / `output_price` | Dollars per million tokens. Discovery says `0`; say otherwise if you are costing your own hardware. |
+| `context` | The context window. Discovery uses `/api/show`, or `8192` when it does not say. |
+| `supports_image` | Discovery reads it from the `vision` capability. |
+| `supports_tools` | **Defaults to true when omitted**, here and in discovery, and is *recorded, not enforced*: nothing withholds tools from a call because of it. What it changes is the effective-model ladder, which prefers a tool-capable model when it has to choose one for you (L3). Set `false` on a tag that cannot take tools so the ladder stops picking it. |
+| `supports_audio` / `supports_document` / `supports_reasoning` | Declared capabilities for the same row. |
+
+A **streamed** reply is not bound by the timeouts above: the HTTP layer bounds
+the connect (30 s) and the gap between reads, not the total, so a long
+generation is never cut mid-answer. Two idle bounds then sit over a stalled
+stream, and the tighter one always wins:
+
+- the loop's **90 s** with no SSE chunk (`STREAM_IDLE_TIMEOUT`,
+  `crates/openalpaca_llm/src/streaming.rs`). This is the one that fires. The
+  turn is not lost: the loop logs the stall and retries it **without**
+  streaming, where the per-provider total (600 s for the seeded Ollama) then
+  applies from the start;
+- the HTTP read timeout, which *is* `request_timeout_secs` — 600 s for Ollama.
+  At ten minutes it is far past the 90 s, so it is only reached if the loop is
+  not the one consuming the stream.
+
+A model that is still loading into memory can exceed 90 s before its first
+token. That is the case to watch: warm the model once (`ollama run <tag>` and
+one prompt) before a long agent run, or raise the ceiling in the source
+constant — it is not configuration today.
+
+### 6. The embedding model
+
+Memory search embeds locally by default (`[embeddings] provider = "local"`),
+and the first boot downloads about 1 GB of model before the daemon reports
+ready. It is cached at `~/.openalpaca/state/cache/fastembed` — inside the
+store, regenerable, safe to delete at the cost of one re-download. Set
+`[embeddings] enabled = false` if you would rather skip it.
 
 ## Runtime Overrides
 
@@ -142,7 +333,9 @@ Re-run installer with a newer artifact:
 
 Upgrade keeps:
 
-- `~/Library/Application Support/OpenAlpaca` data and config
+- `~/.openalpaca` data and config (see [Migrating From the Old Data
+  Directory](#migrating-from-the-old-data-directory) if you're upgrading from
+  a pre-root-move install)
 
 Upgrade replaces:
 
@@ -164,16 +357,21 @@ It stops a running daemon, then removes:
 - the `~/.local/bin/openalpaca` symlink
 - the PATH block from `~/.zshrc` and `~/.bashrc`
 
-User data at `~/Library/Application Support/OpenAlpaca` is **not** removed;
-delete it manually for a complete cleanup.
+User data at `~/.openalpaca` is **not** removed; delete it manually for a
+complete cleanup.
 
 ## Other Platforms
 
 - **Linux**: `install.sh` / `uninstall.sh` work as-is. Differences from macOS:
   the GUI is an AppImage installed to `<prefix>/gui/openalpaca-gui.AppImage`
-  (with a desktop entry and icon under `~/.local/share/`), `--app-dir` is
-  ignored, and the data dir is `~/.local/share/openalpaca`. Build artifacts
-  with `./scripts/release/package-linux.sh` on a Linux machine
+  (with a desktop entry and icon under `~/.local/share/`) and `--app-dir` is
+  ignored; the data dir is the same `~/.openalpaca` as macOS (the store root
+  is `<home>/.openalpaca` on every platform — it does not follow the
+  platform's data-directory convention). A pre-root-move install's legacy
+  data lived at `~/.local/share/openalpaca` and is moved on first boot of the
+  rebuilt binaries; see [Migrating From the Old Data
+  Directory](#migrating-from-the-old-data-directory). Build artifacts with
+  `./scripts/release/package-linux.sh` on a Linux machine
   (`x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu`).
 - **Windows**: use the PowerShell scripts `scripts/release/package-windows.ps1`,
   `install-windows.ps1`, and `uninstall-windows.ps1`.
@@ -189,4 +387,9 @@ delete it manually for a complete cleanup.
     The installer already runs best-effort quarantine removal; if needed:
     - `xattr -dr com.apple.quarantine ~/Applications/openalpaca-gui.app`
 - Daemon not starting
-  - Check `~/Library/Application Support/OpenAlpaca/daemon.log`.
+  - Check `~/.openalpaca/state/logs/daemon.log`.
+- `two databases: ... has not moved yet and ... already exists` at startup
+  - Both the old and new data directories hold an `openalpaca.db`. Keep the
+    one you want (the legacy file is the older install's data), move or
+    remove the other, and restart. See [Migrating From the Old Data
+    Directory](#migrating-from-the-old-data-directory).

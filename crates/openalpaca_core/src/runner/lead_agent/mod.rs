@@ -28,10 +28,12 @@ use crate::agent::template::AgentTemplate;
 use crate::bus::EventBus;
 use crate::context::SharedContext;
 use crate::daemon_config::DaemonConfig;
+use crate::memory::scope_context::MemoryScopeContext;
 use crate::middleware::prompt::format_tool_guidance;
 use crate::prompt_ctx::ContextManager;
 use crate::prompt_ctx::section::ContextBundle;
 use crate::runner::{LoopConfig, LoopResult, run_agentic_loop_routed};
+use crate::security::capabilities::Allowlist;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::ToolRegistry;
 use crate::tools::registry::ToolContext;
@@ -84,14 +86,31 @@ pub async fn run_lead_agent(
     lane_key: &str,
     source: &str,
     daemon_config: &Arc<ArcSwap<DaemonConfig>>,
-    workspace_id: Option<String>,
+    workspace: MemoryScopeContext,
     cancel_token: Option<CancellationToken>,
     steering_inbox: Option<Arc<crate::runner::steering::SteeringInbox>>,
+    // The run's session event log (§5.5), handed to the lead's own loop and
+    // to every subagent it spawns — one log per session, `span_id` telling
+    // the lanes apart — plus the lead's own 037 span id, stamped on every
+    // record its loop writes.
+    session_log: Option<crate::session_log::SessionLogHandle>,
+    lead_span_id: &str,
     connector_guidance: &str,
     confirmation_broker: Option<Arc<crate::security::confirmation::ConfirmationBroker>>,
     skill_catalog: Arc<crate::orchestrator::skill_catalog::SkillCatalog>,
     context_manager: Arc<ContextManager>,
     compose_engine: Arc<crate::compose::ComposeEngine>,
+    // §5.6c (S2, opt-in): an interrupted run's history, rebuilt from the
+    // session log, to be spliced in behind the objective. `None` for every
+    // ordinary dispatch — this is the only thing a resume does differently.
+    resume: Option<crate::session_log::replay::ResumeHistory>,
+    // M6 — the client that started this run said it cannot answer a tool
+    // confirmation (a one-shot or piped `openalpaca chat`, a scheduled
+    // skill). The lead and every subagent it spawns then refuse a tool that
+    // needs approval at once, with a message naming where it can be
+    // approved, instead of holding the run for the confirmation timeout with
+    // no responder. Never an approval: fail-closed stays.
+    unattended: bool,
 ) -> LeadAgentResult {
     tracing::info!(
         lead_agent = %lead_agent.id,
@@ -140,18 +159,41 @@ pub async fn run_lead_agent(
     if let Some(mem_tool) = tool_registry.get("memory_search") {
         tools.push(mem_tool.definition.clone());
     }
+    // artifact_write (plan §4.6) — the lead writes deliverables itself as well
+    // as delegating them. Offered only where the lead's own template declares
+    // the capability: the lead's surface is assembled here rather than resolved
+    // from the template, so this is the listing that keeps it a per-template
+    // grant instead of an ambient one.
+    if lead_agent
+        .capabilities
+        .iter()
+        .any(|c| c.name == "artifact_write")
+        && let Some(tool) = tool_registry.get("artifact_write")
+    {
+        tools.push(tool.definition.clone());
+    }
+    // `read_result` (R84) — the same per-template grant, for the same reason:
+    // the lead's surface is assembled here, so a capability its template
+    // declares reaches the model only if this listing offers it. The spill stub
+    // the lead sees names `read_result`; without this the lead was told to page
+    // with a tool that was not on its surface, and a large result was a 2 KiB
+    // preview with no way back to the bytes. Gated on the template so it stays a
+    // grant (owner decision T15 — the ambient set — is untouched).
+    if lead_agent
+        .capabilities
+        .iter()
+        .any(|c| c.name == "read_result")
+        && let Some(tool) = tool_registry.get("read_result")
+    {
+        tools.push(tool.definition.clone());
+    }
     // Extension tools (MCP-bridged `<server>__<tool>` + plugin-provided
-    // `<plugin>::<tool>`) join the lead surface by default, minus the global
-    // tool deny list — same union-minus-deny policy as the main loop
-    // (tool/skill wiring, Chunk 3). Definitions only: their backends already
-    // live in the global registry the per-request clone below carries.
-    let global_tool_deny = daemon_config
-        .load()
-        .execution
-        .skill_defaults
-        .global_tool_deny
-        .clone();
-    tools.extend(tool_registry.extension_tool_defs(&global_tool_deny));
+    // `<plugin>::<tool>`) join the lead surface by default, less those whose
+    // extension is not enabled — same policy as the main loop (tool/skill
+    // wiring, Chunk 3); there is no per-tool opt-out (design §1 S1, §11).
+    // Definitions only: their backends already live in the global registry
+    // the per-request clone below carries.
+    tools.extend(tool_registry.extension_tool_defs());
     // invoke_skill: per-request catalog-skill invocation over the nested-skill
     // executor (same instance as the main loop's). Budget ceiling = this
     // lead's own loop budget (defaults + agent constraint overrides).
@@ -196,11 +238,13 @@ pub async fn run_lead_agent(
             .execution
             .lead_agent_defaults
             .max_concurrent_subagents,
-        workspace_id.clone(),
+        workspace.clone(),
         confirmation_broker.clone(),
         context_manager,
         parent_bundle,
         compose_engine.clone(),
+        // M6: every subagent of this run inherits the run's answer.
+        unattended,
     ));
 
     let check_status_tool = Arc::new(CheckSubagentStatusTool {
@@ -213,9 +257,12 @@ pub async fn run_lead_agent(
 
     let tool_ctx = ToolContext {
         agent_id: Some(lead_agent.id.clone()),
+        // The lead's own lane (GAP-09's derived `blocked`).
+        agent_instance_id: Some(lead_agent.id.clone()),
         task_id: Some(task_id.to_string()),
         owner_id: Some(created_by.to_string()),
-        workspace_id: workspace_id.clone(),
+        workspace_id: workspace.workspace_id.clone(),
+        request_workspace_root: workspace.request_workspace_root.clone(),
         skill_stack: vec![],
         effective_constraints: None,
         lane_key: Some(lane_key.to_string()),
@@ -224,6 +271,10 @@ pub async fn run_lead_agent(
         principal: None,
         scope: None,
         workspace_path: None,
+        // Filled in by the sandbox at dispatch (T28), which owns the bus.
+        session_id: None,
+        session_log: None,
+        event_bus: None,
     };
 
     // Build a per-request ToolRegistry containing the base tools plus
@@ -280,6 +331,9 @@ pub async fn run_lead_agent(
                 task_id.to_string(),
                 lane_key.to_string(),
                 created_by.to_string(),
+                // S5: a follow-up this run promises is run later by a runner,
+                // long after the client that started the run has gone.
+                unattended,
             )),
         );
     }
@@ -291,6 +345,13 @@ pub async fn run_lead_agent(
         bus.clone(),
         &daemon_config.load().security.circuit_breaker,
     );
+    // V2: the audit rows a refusal writes — including the typed
+    // `tool_approval_unavailable` row the run's completion report reads back
+    // at finalisation. Best-effort inside the sandbox; absent here it was
+    // written by nobody.
+    if let Some(ref db) = db {
+        sandbox.set_db(db.clone());
+    }
     if let Some(ref broker) = confirmation_broker {
         sandbox.set_confirmation_broker(broker.clone());
     }
@@ -305,26 +366,40 @@ pub async fn run_lead_agent(
     if daemon_config.load().security.auto_approve_confirmations {
         sandbox_policy.auto_approve = true;
     }
+    // M6: read after `auto_approve`, so an owner who switched that on still
+    // gets what they asked for.
+    sandbox_policy.unattended = unattended;
     // The lead's tool surface is assembled here, not in its template — so the
     // allowlist must admit the final defs (extension tools, invoke_skill,
     // memory_search), mirroring how the main loop derives its policy from the
     // exposed definitions. Template denials still win: the sandbox checks the
     // deny list first. Subagents are untouched — their policies are built from
     // their own template constraints in the spawn path.
-    if !sandbox_policy.allowed_capabilities.is_empty() {
+    // An allow list that resolved to nothing stays empty: a template that
+    // granted no capability must not be back-filled from the assembled surface.
+    if let Allowlist::Only(ref mut allowed) = sandbox_policy.allowed_capabilities
+        && !allowed.is_empty()
+    {
         for def in &tools {
             let name = def.name.to_lowercase();
-            if !sandbox_policy.allowed_capabilities.contains(&name) {
-                sandbox_policy.allowed_capabilities.push(name);
+            if !allowed.contains(&name) {
+                allowed.push(name);
             }
         }
     }
 
-    // 6. Build system prompt from templates
+    // 6. Build system prompt from templates, sized against the window of the
+    // model that will answer (M5) rather than a hard-coded 200 000.
+    let prompt_window = crate::runner::routed_context_window(
+        router.as_ref(),
+        lead_agent.llm_config.model.as_deref(),
+    )
+    .unwrap_or(200_000);
     let system_prompt = build_lead_agent_prompt_from_templates(
         compose_engine.as_ref(),
         &lead_agent.preset.persona,
         &worker_templates,
+        prompt_window,
     );
     let tool_guidance = format_tool_guidance(&tools);
     let connector_suffix = if !connector_guidance.is_empty() {
@@ -356,9 +431,7 @@ pub async fn run_lead_agent(
         } else {
             None
         };
-        let scope_ctx = workspace_id
-            .as_ref()
-            .map(|ws| crate::memory::scope_context::MemoryScopeContext::new(Some(ws.clone())));
+        let scope_ctx = workspace.has_workspace().then(|| workspace.clone());
         let memories = if let Some(ref ctx) = scope_ctx {
             let cascade_scopes = ctx.cascade_scopes();
             repo.search_hybrid_cascade(
@@ -391,18 +464,17 @@ pub async fn run_lead_agent(
             }
 
             let mut block = String::from("### RETRIEVED MEMORY ###\n");
-            // Derive memory budget from the model's context window so it scales
-            // with the available context (context_budget is not yet constructed).
-            let model_window = {
-                let default_model = router.default_model();
-                let mid = lead_agent.llm_config.model.as_deref()
-                    .unwrap_or(&default_model);
-                router.model_registry()
-                    .get_model_info(mid)
-                    .map(|i| i.context_window)
-                    .unwrap_or(128_000)
-            };
-            let mut budget = (model_window as usize / 20).max(500).min(8000);
+            // Derive memory budget from the context window of the model that
+            // will actually answer (M5) so it scales with the available
+            // context (context_budget is not yet constructed). A registry
+            // that knows no window — and a window of 0, which must never
+            // divide anything — keeps this site's own default.
+            let model_window = crate::runner::routed_context_window(
+                router.as_ref(),
+                lead_agent.llm_config.model.as_deref(),
+            )
+            .unwrap_or(128_000);
+            let mut budget = (model_window / 20).clamp(500, 8000);
             for m in &memories {
                 let entry = format!(
                     "- [{}] {}\n",
@@ -427,6 +499,72 @@ pub async fn run_lead_agent(
 
     messages.push(ChatMessage::user(task_description));
 
+    // 7b. §5.6c — the replayed history.
+    //
+    // It goes in **here**, after the persona layers and the objective and
+    // before anything the loop will add, because that is the shape the loop
+    // itself produced the first time: `messages[0..=1]` is the pair every
+    // compaction is forbidden to touch, and the rounds follow it. The
+    // recorded calls arrive as messages and nothing dispatches them — a
+    // replay re-primes context, it never re-runs work.
+    if let Some(history) = resume {
+        let plan = history.plan;
+        tracing::info!(
+            task_id = task_id,
+            rounds = plan.rounds,
+            tool_results = plan.tool_results,
+            from_seq = ?plan.from_seq,
+            to_seq = ?plan.to_seq,
+            dropped_incomplete_rounds = plan.dropped_incomplete_rounds,
+            "Resuming an interrupted run over its replayed history"
+        );
+        // The `resume` record names the slice of the log this run was primed
+        // from, so the transcript says where the seam is.
+        if let Some(ref log) = session_log {
+            log.emit(
+                crate::session_log::Record::new(crate::session_log::RecordType::Resume)
+                    .task(Some(task_id))
+                    .span(Some(lead_span_id))
+                    .agent(Some(&lead_agent.id))
+                    .with_data(serde_json::json!({
+                        "from_seq": plan.from_seq,
+                        "to_seq": plan.to_seq,
+                        "rounds": plan.rounds,
+                        "tool_results": plan.tool_results,
+                        "compacted_from_seq": plan.compacted_from_seq,
+                        "compacted_rounds_dropped": plan.compacted_rounds_dropped,
+                        "dropped_incomplete_rounds": plan.dropped_incomplete_rounds,
+                        "trimmed_from_seq": plan.trimmed_from_seq,
+                        "trimmed_reason": plan.trim_reason,
+                        "spills_referenced": plan.spills_referenced,
+                        "missing_spills": plan.missing_spills,
+                        "interjection": if history.inline_note.is_some() {
+                            "inline"
+                        } else {
+                            "steering_rail"
+                        },
+                    })),
+            );
+        }
+        messages.extend(plan.messages);
+        // The rail carried the note whenever there was a rail; this is the
+        // same text in the same wrapper for the run that had none — daemon
+        // origin included, so both paths present it as a `<system_note>`
+        // rather than as an instruction the user never gave.
+        if let Some(note) = history.inline_note {
+            messages.push(ChatMessage::user(&crate::runner::steering::SteeringMsg {
+                text: note,
+                request_id: uuid::Uuid::new_v4(),
+                principal: crate::security::policy::Principal::System,
+                scope: crate::security::policy::Scope::Global,
+                workspace_path: None,
+                received_at: chrono::Utc::now(),
+                origin: crate::runner::steering::SteeringOrigin::Daemon,
+            }
+            .to_interjection()));
+        }
+    }
+
     // 8. Build LoopConfig from lead agent defaults + agent constraint overrides
     let mut loop_config = LoopConfig::from_lead_agent(
         &daemon_config.load().execution.lead_agent_defaults,
@@ -445,38 +583,70 @@ pub async fn run_lead_agent(
         daemon_config.load().experimental.ephemeral_pressure_layer;
     // Routing V2: the loop drains this inbox at its round boundary.
     loop_config.steering = steering_inbox;
+    // §5.5: the lead's rounds, tool calls, drains and exit are narrated into
+    // the run's session log, under the lead's own span.
+    loop_config.session_log = session_log.clone();
+    loop_config.span_id = Some(lead_span_id.to_string());
+    // §5.4's one threshold: above it a tool result is spilled to the session's
+    // `results/` rather than cut head-only.
+    loop_config.tool_result_inline_bytes = daemon_config
+        .load()
+        .orchestrator
+        .sessions
+        .tool_result_inline_bytes;
 
-    // Instantiate ContextBudgetManager for budget-aware compaction
-    let context_budget = {
-        let default_model = router.default_model();
-        let model_id = lead_agent.llm_config.model.as_deref()
-            .unwrap_or(&default_model);
-        let context_window = router.model_registry()
-            .get_model_info(model_id)
-            .map(|info| info.context_window as usize)
-            .unwrap_or(200_000);
+    // Instantiate ContextBudgetManager for budget-aware compaction, against
+    // the window of the model that will answer (M5): the template's pin when
+    // it is routable, otherwise whatever L3 substitutes for it. A lead pinned
+    // to Claude on an Ollama-only install is budgeted at the local model's
+    // window, so the loop compacts before the provider refuses the request.
+    //
+    // **S3** — and with its fixed zone registered. The sections used to be
+    // registered on a throwaway snapshot built for the telemetry below, so
+    // the budget the loop actually ran on believed its system prompt and
+    // tools cost nothing: every `round` record reported
+    // `system_prompt: 0, tools: 0`, and `should_compact` compared the
+    // messages alone against the trigger. On a 200 000-token cloud model that
+    // is a rounding error; on an 8 192-token local model the fixed zone *is*
+    // the budget, and the loop would sail past the window without compacting.
+    let mut context_budget = {
+        let context_window = crate::runner::routed_context_window(
+            router.as_ref(),
+            lead_agent.llm_config.model.as_deref(),
+        )
+        .unwrap_or(200_000);
         crate::context_budget::ContextBudgetManager::new(
             context_window,
             &daemon_config.load().execution.context,
         )
     };
+    // Estimate system prompt tokens (chars / 4 heuristic)
+    context_budget.register_section("system_prompt", full_system.len() / 4);
+    context_budget.register_section("tools", crate::runner::estimate_tools_tokens(&tools));
 
     // --- Context Budget Telemetry ---
     {
+        // The model the window was read from, which is the model that will
+        // answer — naming the unroutable pin beside a local model's window
+        // (M5) would make the event a lie.
         let default_model = router.default_model();
-        let model_id = lead_agent.llm_config.model.as_deref()
-            .unwrap_or(&default_model);
+        let model_id = crate::runner::routed_model(
+            router.as_ref(),
+            lead_agent.llm_config.model.as_deref(),
+        )
+        .unwrap_or_else(|| {
+            lead_agent
+                .llm_config
+                .model
+                .clone()
+                .unwrap_or_else(|| default_model.clone())
+        });
+        let model_id = model_id.as_str();
         let model_window = context_budget.model_context_window();
         let request_id = uuid::Uuid::new_v4();
-        // Estimate system prompt tokens (chars / 4 heuristic)
-        let system_prompt_tokens = full_system.len() / 4;
-        let mut budget_snapshot =
-            crate::context_budget::ContextBudgetManager::new(
-                model_window,
-                &daemon_config.load().execution.context,
-            );
-        budget_snapshot.register_section("system_prompt", system_prompt_tokens);
-        budget_snapshot.register_section("tools", tools.len() * 200);
+        // The run's own budget, not a copy of it (S3): what this event
+        // reports is what the loop will compact against.
+        let budget_snapshot = &context_budget;
 
         tracing::debug!(
             request_id = %request_id,

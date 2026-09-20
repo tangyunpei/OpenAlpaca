@@ -9,6 +9,8 @@ capabilities:
   - "memory_read"
   - "workspace_read"
   - "workspace_write"
+  - "artifact_write"
+  - "read_result"
 temperature: 0.3
 verbosity: "detailed"
 model: "claude-sonnet-4-6"

@@ -20,6 +20,28 @@ const DEBOUNCE_MS: u128 = 100;
 /// under sandboxed environments. Polling is slower but predictable and testable.
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
+/// At what level the poll watcher reports one of its own failures (L14).
+///
+/// A watched path that no longer exists is not a fault. Deleting
+/// `config/orchestrator/BOOTSTRAP.md` is the *designed* end of onboarding, and
+/// the poll watcher reports the removal as an IO `NotFound` before the
+/// orchestrator's unwatch lands — so the one moment the system worked exactly
+/// as intended printed an `ERROR` naming the file the owner had just been told
+/// to delete. That reads as `INFO`; everything else the watcher cannot do is
+/// still an `ERROR`.
+fn watch_error_level(e: &notify::Error) -> tracing::Level {
+    let gone = match &e.kind {
+        notify::ErrorKind::PathNotFound => true,
+        notify::ErrorKind::Io(io) => io.kind() == std::io::ErrorKind::NotFound,
+        _ => false,
+    };
+    if gone {
+        tracing::Level::INFO
+    } else {
+        tracing::Level::ERROR
+    }
+}
+
 /// Watcher for filesystem changes
 pub struct FilesystemWatcher {
     paths: Vec<PathBuf>,
@@ -120,7 +142,13 @@ impl EventWatcher for FilesystemWatcher {
                             }
                         }
                     }
-                    Err(e) => error!("Watch error: {:?}", e),
+                    Err(e) => match watch_error_level(&e) {
+                        tracing::Level::INFO => info!(
+                            "Watched path is gone; it will stop being polled: {:?}",
+                            e.paths
+                        ),
+                        _ => error!("Watch error: {:?}", e),
+                    },
                 }
             },
             Config::default().with_poll_interval(self.poll_interval),

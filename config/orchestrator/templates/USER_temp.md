@@ -34,6 +34,4 @@ Learn about the person you're helping. Update this as you go.
 
 ## Notes
 
-(Anything else. Build this over time.)
-
-The more you know, the better you can help. But remember -- you're learning about a person, not building a dossier. Respect the difference.
+(Anything else. Build this over time. The more you know, the better you can help -- but remember, you're learning about a person, not building a dossier. Respect the difference.)

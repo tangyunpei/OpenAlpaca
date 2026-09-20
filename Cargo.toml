@@ -111,9 +111,20 @@ libc = "0.2.180"
 tempfile = "3.24.0"
 sqlite-vec = "0.1.6"
 fastembed = "4"
+# Already vendored transitively (pdf-extract → openalpacad); promoted to a
+# direct dependency for the artifact-grammar slugifier's NFKD step (store/artifact.rs).
+unicode-normalization = "0.1.25"
+# The artifact store's line diff: the write-time added/removed counts and the
+# unified patch `GET /v1/artifacts/{id}/diff` serves both come out of one
+# `TextDiff`, so the two can never disagree. Pure Rust, no build script,
+# no non-optional dependencies, default features only (`std` + `text`).
+similar = "3.2.0"
 
 # config
 toml = "0.9"
+# Format-preserving TOML editing for the atomic config writer
+# (openalpaca_core::config_io) — every comment in a hand-authored file survives.
+toml_edit = "0.25"
 dashmap = "6"
 which = "8"
 tokio-util = { version = "0.7", features = ["rt"] }
@@ -148,7 +159,6 @@ calamine = "0.26"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 opener = "0.8"
 tauri-plugin-dialog = "2"
-tauri-plugin-fs = "2"
 
 # Internal Crates (continued)
 openalpaca_connectors = { path = "crates/openalpaca_connectors" }

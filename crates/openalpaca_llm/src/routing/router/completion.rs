@@ -11,34 +11,57 @@ impl LlmRouter {
     /// (up to `pool.len().min(3)` attempts). Does NOT fall back to other
     /// models — the caller (agentic loop) handles streaming→non-streaming
     /// fallback on final failure.
+    ///
+    /// Returns the stream **and the model it is being served by** (V4): the
+    /// ladder below may answer a request for one id with another, and only
+    /// this function knows which.
     pub async fn complete_streaming(
         &self,
         request: RouterRequest,
-    ) -> Result<ChatStream, LlmRouterError> {
+    ) -> Result<RoutedStream, LlmRouterError> {
         let permit = Arc::clone(&self.concurrency_limiter)
             .acquire_owned()
             .await
             .map_err(|_| LlmRouterError::MaxRetriesExceeded)?;
 
         let default = self.default_model();
-        let model = request.model.as_deref().unwrap_or(&default);
+        let requested = request.model.as_deref().unwrap_or(&default);
+        // L3: an id nothing can serve no longer dies here. Resolve it against
+        // the ladder first — the caller's chain, the model's, the
+        // orchestrator's, the effective default — and say so when it moves.
+        let model = self
+            .resolve_routable(requested, &request.fallback_models)
+            .ok_or(LlmRouterError::NoRoutableModel)?;
+        let model = model.as_str();
 
         let provider_type = self
             .model_registry
             .resolve_provider(model)
             .ok_or_else(|| LlmRouterError::UnknownModel(model.to_string()))?;
 
+        // As in `try_model`: the `Ref` must not outlive the lookup (R59).
         let entry = self
-            .providers
-            .get(&provider_type)
+            .provider_entry(&provider_type)
             .ok_or_else(|| LlmRouterError::ProviderNotConfigured(provider_type.to_string()))?;
 
         let pool = entry.key_pool.load();
-        let max_attempts = pool.len().min(3);
+        // Same as the non-streaming ladder: an empty pool on a provider that
+        // needs no key is served through the synthetic slot, and there is
+        // exactly one of those to rotate through (L1). Without this the loop
+        // body never ran — `pool.len().min(3)` is 0 — and the owner saw
+        // "All keys are rate-limited" for a provider that has no keys to limit.
+        let keyless = (pool.is_empty() && !entry.provider.requires_key())
+            .then(|| super::keyless_slot(entry.provider.name()));
+        let max_attempts = if keyless.is_some() {
+            1
+        } else {
+            pool.len().min(3)
+        };
 
         for attempt in 0..max_attempts {
             let key_guard = match pool.acquire().await {
                 Ok(guard) => guard,
+                Err(_) if keyless.is_some() => keyless.clone().expect("checked above"),
                 Err(KeyPoolError::NoApiCompatibleKeys) => {
                     return Err(LlmRouterError::NoApiCompatibleKeys);
                 }
@@ -65,7 +88,12 @@ impl LlmRouter {
                 .chat_streaming_with_key(&key_guard.secret, chat_request)
                 .await
             {
-                Ok(stream) => return Ok(Box::pin(crate::streaming::PermitStream::new(stream, permit))),
+                Ok(stream) => {
+                    return Ok(RoutedStream {
+                        model: model.to_string(),
+                        stream: Box::pin(crate::streaming::PermitStream::new(stream, permit)),
+                    });
+                }
                 Err(LlmError::RateLimited { retry_after_ms }) => {
                     tracing::warn!(
                         model = model,
@@ -107,7 +135,14 @@ impl LlmRouter {
     /// Complete a request: resolve provider, acquire key, call, handle retries/fallbacks.
     pub async fn complete(&self, request: RouterRequest) -> Result<ChatResponse, LlmRouterError> {
         let default = self.default_model();
-        let model = request.model.as_deref().unwrap_or(&default);
+        let requested = request.model.as_deref().unwrap_or(&default);
+        // See `complete_streaming`: the ladder runs before the call, so an
+        // unroutable pin is answered by a routable model instead of failing
+        // past the fallback chain entirely (L3).
+        let model = self
+            .resolve_routable(requested, &request.fallback_models)
+            .ok_or(LlmRouterError::NoRoutableModel)?;
+        let model = model.as_str();
 
         // Acquire concurrency permit — limits parallel in-flight API calls
         // to prevent rate-limit stampedes from parallel subagents.
@@ -141,6 +176,16 @@ impl LlmRouter {
                 );
                 self.try_fallback(model, &request).await
             }
+            // The provider was unloaded between the ladder and the call — a
+            // disable landing mid-request. Take the ladder's next rung rather
+            // than handing the caller a bare "Unknown model".
+            Err(LlmRouterError::UnknownModel(_)) | Err(LlmRouterError::ProviderNotConfigured(_)) => {
+                tracing::warn!(
+                    model = model,
+                    "Model became unroutable during the call. Trying fallback chain."
+                );
+                self.try_fallback(model, &request).await
+            }
             // Transient errors (529 Overloaded, 500+) should also try fallback models
             Err(LlmRouterError::Llm(ref llm_err)) if llm_err.is_transient() => {
                 tracing::warn!(
@@ -165,11 +210,14 @@ impl LlmRouter {
             .resolve_provider(model)
             .ok_or_else(|| LlmRouterError::UnknownModel(model.to_string()))?;
 
+        // Take the entry *out* of the map — two `Arc` clones — and drop the
+        // `Ref` before awaiting anything. Holding it across the call would make
+        // `deregister_provider`'s synchronous shard write lock wait for the
+        // network, parking the worker thread that issued the disable (R59).
         let entry = self
-            .providers
-            .get(&provider_type)
+            .provider_entry(&provider_type)
             .ok_or_else(|| LlmRouterError::ProviderNotConfigured(provider_type.to_string()))?;
 
-        self.execute_with_retry(entry.value(), model, request).await
+        self.execute_with_retry(&entry, model, request).await
     }
 }

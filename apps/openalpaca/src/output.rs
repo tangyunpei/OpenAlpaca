@@ -57,12 +57,26 @@ pub fn print_detail<T: Serialize>(item: &T, format: OutputFormat) {
     }
 }
 
+/// A dollar figure, four decimals, with negative zero erased (L12).
+///
+/// `openalpaca llm status` printed `Daily cost: $-0.0000`. Nothing was refunded:
+/// IEEE `-0.0` — which a sum of priced-at-zero calls can land on — formats with
+/// its sign, and an owner reading a minus sign against their spend is being
+/// told something untrue. `-0.0 == 0.0` is what erases it; every other figure,
+/// including a genuinely negative one, prints exactly as it came.
+pub fn format_usd(value: f64) -> String {
+    let value = if value == 0.0 { 0.0 } else { value };
+    format!("${value:.4}")
+}
+
 /// Colorize a status string based on common patterns.
 pub fn status_color(status: &str) -> ColoredString {
     match status.to_lowercase().as_str() {
         "running" | "active" | "ok" | "idle" | "success" | "completed" => status.green(),
         "failed" | "error" | "disabled" | "cancelled" => status.red(),
-        "paused" | "waiting" | "queued" | "pending" => status.yellow(),
+        // `interrupted` (§5.6b) is terminal but is not a failure — the daemon
+        // went away — so it is not painted red.
+        "paused" | "waiting" | "queued" | "pending" | "interrupted" => status.yellow(),
         _ => status.dimmed(),
     }
 }

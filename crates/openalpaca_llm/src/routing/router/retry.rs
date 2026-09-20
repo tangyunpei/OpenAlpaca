@@ -24,6 +24,13 @@ impl LlmRouter {
         }
 
         let pool = entry.key_pool.load();
+        // A provider that needs no key has an empty pool by design, and an
+        // empty pool refuses every acquire. Serve it through the synthetic
+        // slot instead, so the call is made and still gets a rate limiter of
+        // its own (L1). A keyless provider that *does* have keys configured
+        // (an authenticating proxy in front of Ollama) keeps using them.
+        let keyless = (pool.is_empty() && !entry.provider.requires_key())
+            .then(|| super::keyless_slot(entry.provider.name()));
         let rate_config = self.rate_limiter_registry.config();
         let max_retries = pool.len().max(rate_config.max_transient_retries);
         let estimated_tokens = estimate_request_tokens(request);
@@ -40,6 +47,7 @@ impl LlmRouter {
             for attempt in 0..max_retries {
                 let key_guard = match pool.acquire().await {
                     Ok(guard) => guard,
+                    Err(_) if keyless.is_some() => keyless.clone().expect("checked above"),
                     Err(KeyPoolError::NoApiCompatibleKeys) => {
                         return Err(LlmRouterError::NoApiCompatibleKeys);
                     }
@@ -101,6 +109,23 @@ impl LlmRouter {
                             cache_read_tokens: response.usage.cache_read_input_tokens,
                         };
                         self.cost_tracker.record(&record).await;
+
+                        // The tokens were spent, so they are booked above —
+                        // but an answer with nothing in it is not an answer.
+                        // Say which failure it was here, once, instead of
+                        // letting every caller rediscover it as a parse error
+                        // on an empty string (M2).
+                        if let Some(empty) = crate::error::empty_completion_error(&response) {
+                            tracing::warn!(
+                                model = %response.model,
+                                output_tokens = response.usage.output_tokens,
+                                max_tokens = ?request.max_tokens,
+                                finish_reason = ?response.finish_reason,
+                                reasoned = response.thinking.is_some(),
+                                "Model returned an empty completion"
+                            );
+                            return Err(LlmRouterError::Llm(empty));
+                        }
 
                         return Ok(response);
                     }
