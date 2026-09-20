@@ -822,8 +822,11 @@ that granted nothing is not back-filled.
 A **subagent** gets `resolve_agent_tools()` for its template and a policy
 from `SandboxPolicy::from_constraints()`, widened by
 `admit_tool_surface()` with that same resolved surface
-([11.2](#112-sandboxpolicy)) — so the tools it is offered are the tools it
-may call.  It does not inherit the lead's extension tools or
+([11.2](#112-sandboxpolicy)) — so a tool it is offered is a tool its
+allow list admits.  The one exception is a template that denies a tool by
+*name*: the surface is filtered by capability, so the tool is still
+offered, and the sandbox refuses the call because the deny list is checked
+first.  A subagent does not inherit the lead's extension tools or
 `invoke_skill`.  A plugin-contributed agent template runs
 through `runner/plugin_agent.rs` instead of the internal loop, with its
 tool requests proxied through the same sandbox.
@@ -1226,15 +1229,22 @@ the spawn path).  A subagent granted `web_access` is therefore handed
 `web_search` and `web_fetch` **and** may call them.  A plugin-backed
 subagent's proxied tool calls are checked against the same policy.
 
-`admit_tool_surface` widens by the surface and by nothing else:
+`admit_tool_surface` adds the names on the surface and nothing else:
 
-- a tool that is registered but was not resolved onto this surface is
-  still refused — a `web_access`-only subagent cannot call `shell_execute`,
-  and a subagent never inherits the lead's extension tools or
-  `invoke_skill`;
-- the deny list is untouched and is checked first (11.3), and
-  `resolve_capabilities()` has already kept a tool that provides a denied
-  capability off the surface, so a denial wins either way;
+- a tool that is registered but was not resolved onto this surface gains
+  nothing from it — a `web_access`-only subagent cannot call
+  `shell_execute`, and a subagent never inherits the lead's extension tools
+  or `invoke_skill`;
+- the list still carries the template's capability *strings*, and the check
+  is a name match, so a registered tool whose **name equals** one of those
+  strings is admitted whether or not it is on the surface.  That was true
+  before the widening and is unchanged by it; none of the nine shipped
+  templates lists a string that names an off-surface tool;
+- the deny list is untouched and is checked first (11.3).  For a subagent,
+  `resolve_capabilities()` has also kept a tool that provides a denied
+  capability off the surface, so it is never added.  The lead's surface is
+  assembled by hand rather than resolved, so there only the name check
+  applies: a lead template must deny a tool by name to refuse it;
 - a tool of an extension that is not `Enabled` is not registered, so it is
   never on a resolved surface, and the gate in section 5 refuses it
   regardless of any allow list;

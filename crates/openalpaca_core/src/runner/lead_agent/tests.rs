@@ -1440,7 +1440,10 @@ fn test_plain_subagent_does_not_inherit_extension_tools() {
     let template = crate::test_util::template_from_agent(&agent);
     let subagent = template.to_subagent("researcher-1", "task-1");
 
-    // Its allowlist is template-scoped: declared capability + workspace only.
+    // The list its *constraints* spell is template-scoped: declared capability
+    // + workspace only. (At the spawn path that list is then widened with the
+    // subagent's own resolved surface — never the lead's; the spawn-path tests
+    // below cover that.)
     let allowed = &subagent.constraints.allowed_capabilities;
     assert!(allowed.iter().any(|c| c == "research"));
     let allowlist = Allowlist::from_agent_constraints(&subagent.constraints);

@@ -97,13 +97,19 @@ impl SandboxPolicy {
     /// building their list from the exposed definitions: *the allow list
     /// admits the tools this loop was handed*.
     ///
-    /// It widens by the surface and by nothing else, so it stays fail-closed:
+    /// It adds the names on the surface and nothing else, so it stays
+    /// fail-closed:
     ///
-    /// * a tool that is registered but was not resolved onto this surface is
-    ///   still refused;
-    /// * the deny list is untouched and is checked first, so a denial wins
-    ///   over anything admitted here (and `resolve_capabilities` has already
-    ///   kept a tool that provides a denied capability off the surface);
+    /// * a tool that is registered but was not resolved onto this surface
+    ///   gains nothing from this call. (The list still carries the template's
+    ///   capability strings and the check is a name match, so a tool whose
+    ///   *name* equals one of those strings is admitted with or without this
+    ///   method — unchanged by it.)
+    /// * the deny list is untouched and is checked first, so a denial by tool
+    ///   name wins over anything admitted here. A subagent's surface comes
+    ///   from `resolve_capabilities`, which has also kept a tool that provides
+    ///   a denied capability off it; the lead's surface is assembled by hand,
+    ///   so there only the name check applies.
     /// * an allow list that resolved to **nothing stays empty** — a template
     ///   that granted no capability is not back-filled from an assembled
     ///   surface;
