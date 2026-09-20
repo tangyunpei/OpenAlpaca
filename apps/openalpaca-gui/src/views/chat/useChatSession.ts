@@ -446,6 +446,8 @@ export function useChatSession(): ChatSession {
   // The picker's project governs where an upload's bytes land (D2), the same
   // way it governs the turn that will carry them.
   const attachments = useComposerAttachments(projectPath);
+  /** Stable (`useCallback(…, [])`), so the session reset can depend on it. */
+  const clearAttachments = attachments.clear;
 
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState<PendingTurn | null>(null);
@@ -926,6 +928,20 @@ export function useChatSession(): ChatSession {
    * A change while a turn is in flight is that turn's own doing — R48 archives
    * and reopens mid-turn — so the id is adopted and nothing is cleared;
    * clearing would close the `EventSource` the user is watching.
+   *
+   * The composer's attachment chips go with them (F6). A file picked in one
+   * conversation was still on screen in the next and rode its first message:
+   * the daemon scopes a file asset by owner alone, so it accepted it without
+   * comment and the turn was persisted carrying it. An upload still in flight
+   * at that moment lands as a no-op — `clear()` empties the list its `.then`
+   * maps over — so nothing resurfaces afterwards. The `names` map is left
+   * alone on purpose: the skipped-attachments note is read from it *after* a
+   * send, and it is right for it to outlive the chips.
+   *
+   * The draft *text* is deliberately not cleared here. It is window-level in
+   * this build — nothing else clears it on a switch either — and making the
+   * composer conversation-scoped is a decision about per-conversation drafts,
+   * not a fix (PR #31 review, finding 6).
    */
   const shownSession = useRef<string | null | undefined>(undefined);
   useEffect(() => {
@@ -949,11 +965,18 @@ export function useChatSession(): ChatSession {
     setArtifacts([]);
     clearResolutions();
     setSteers([]);
+    clearAttachments();
     setConfirmationMeta({});
     firstSeenAtMs.current.clear();
     started.current.clear();
     stream.reset();
-  }, [history.data, stream.active, stream.reset, clearResolutions]);
+  }, [
+    history.data,
+    stream.active,
+    stream.reset,
+    clearResolutions,
+    clearAttachments,
+  ]);
 
   const items = useMemo(
     () =>

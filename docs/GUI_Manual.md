@@ -262,8 +262,12 @@ the daemon's own refusal — `MIME type 'application/zip' is not allowed`,
 `Declared MIME … doesn't match detected …`, the size limit. A refused chip
 never travels; `✗` removes any chip. **Send is off while an upload is in
 flight**, so a turn can never go out missing a file you attached, and the chips
-clear only once the daemon has accepted the turn — if it refuses one, your
-files are still there and are not re-uploaded.
+clear once the daemon has accepted the turn — if it refuses one, your files are
+still there and are not re-uploaded. They also clear when you switch to another
+conversation or start a new chat: the files belonged to the conversation you
+attached them in, and a chip left behind used to be sent with the next
+conversation's first message. Re-attach them if you meant them for the new one.
+(The text you had typed is *not* cleared — it stays with the window.)
 
 Ten files per turn (the daemon's `[upload] max_files_per_message`); an eleventh
 pick is refused in the window with the same sentence the daemon would have

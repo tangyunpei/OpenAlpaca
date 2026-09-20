@@ -358,6 +358,30 @@ async function settleSnapshot(): Promise<void> {
   });
 }
 
+/* ── the composer's attachments, shared by the U5 and I5 blocks ─────────── */
+
+function fileInput(): HTMLInputElement {
+  const node = document.querySelector<HTMLInputElement>('input[type="file"]');
+  if (node === null) throw new Error("no file input in the composer");
+  return node;
+}
+
+function textFile(name: string, body = "codeword: alpaca"): File {
+  return new File([body], name, { type: "text/plain" });
+}
+
+/** Pick files through the hidden input, the way the Attach button does. */
+async function pick(...files: File[]): Promise<void> {
+  await act(async () => {
+    fireEvent.change(fileInput(), { target: { files } });
+  });
+}
+
+/** The bodies of every `POST /v1/files/upload` this test made. */
+function uploads(): RecordedRequest[] {
+  return requests.filter((request) => request.url.includes("/v1/files/upload"));
+}
+
 /**
  * `GET /v1/status`'s body — the store roots, this request's project, and the
  * `llm` block the composer seeds its model from (G9).
@@ -2951,6 +2975,116 @@ describe("ChatView — switching conversations (I5)", () => {
     expect(screen.getByText("first message on this lane")).toBeInTheDocument();
     expect(screen.getByText("Answered.")).toBeInTheDocument();
   });
+
+  /**
+   * F6 — a file attached in one conversation rode the next conversation's
+   * first message. The chips live in `useChatSession`, which spans every
+   * conversation, and the session-change reset cleared nine session-local
+   * things without them.
+   */
+  it("drops the composer's chips, so the next conversation sends none", async () => {
+    historyReply = () =>
+      json({
+        messages: [],
+        total: 0,
+        lane_key: "user:gui",
+        session_id: "sess-a",
+      });
+    renderChat();
+    await screen.findByLabelText("Message");
+
+    await pick(textFile("salary-review.pdf"));
+    await waitFor(() => expect(uploads()).toHaveLength(1));
+    await screen.findByLabelText("ready");
+
+    historyReply = () =>
+      json({
+        messages: [],
+        total: 0,
+        lane_key: "user:gui",
+        session_id: "sess-b",
+      });
+    fireEvent.click(screen.getByRole("button", { name: "New chat" }));
+
+    await waitFor(() =>
+      expect(screen.queryByRole("list", { name: "Attachments" })).toBeNull(),
+    );
+
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "what's the release order?" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    });
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+
+    expect(chatBody().attachments).toEqual([]);
+    // Nothing was re-uploaded either: the file is the other conversation's.
+    expect(uploads()).toHaveLength(1);
+  });
+
+  /** An upload still in flight lands as a no-op — it never draws a chip. */
+  it("never resurrects a chip whose upload finished after the switch", async () => {
+    let release: (() => void) | null = null;
+    uploadReply = async (form) => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const file = form.get("file");
+      const name = file instanceof File ? file.name : "unnamed";
+      return json({
+        id: `file-${name}`,
+        filename: name,
+        mime_type: "text/plain",
+        size_bytes: 3,
+        status: "uploaded",
+      });
+    };
+    historyReply = () =>
+      json({
+        messages: [],
+        total: 0,
+        lane_key: "user:gui",
+        session_id: "sess-a",
+      });
+    renderChat();
+    await screen.findByLabelText("Message");
+
+    await pick(textFile("slow.pdf"));
+    expect(await screen.findByText("uploading…")).toBeInTheDocument();
+
+    historyReply = () =>
+      json({
+        messages: [],
+        total: 0,
+        lane_key: "user:gui",
+        session_id: "sess-b",
+      });
+    fireEvent.click(screen.getByRole("button", { name: "New chat" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("list", { name: "Attachments" })).toBeNull(),
+    );
+
+    await act(async () => {
+      release?.();
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByRole("list", { name: "Attachments" })).toBeNull();
+    expect(screen.queryByText("slow.pdf")).toBeNull();
+    expect(screen.queryByLabelText("ready")).toBeNull();
+
+    // And the turn the new conversation does send carries nothing.
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "what's the release order?" },
+    });
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    });
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    expect(chatBody().attachments).toEqual([]);
+  });
 });
 
 /**
@@ -3212,30 +3346,6 @@ describe("ChatView — a run the daemon never finished (§5.6b)", () => {
  * the wire rather than on a spy.
  */
 describe("ChatView — composer attachments (U5, U3)", () => {
-  function fileInput(): HTMLInputElement {
-    const node = document.querySelector<HTMLInputElement>('input[type="file"]');
-    if (node === null) throw new Error("no file input in the composer");
-    return node;
-  }
-
-  function textFile(name: string, body = "codeword: alpaca"): File {
-    return new File([body], name, { type: "text/plain" });
-  }
-
-  /** Pick files through the hidden input, the way the Attach button does. */
-  async function pick(...files: File[]): Promise<void> {
-    await act(async () => {
-      fireEvent.change(fileInput(), { target: { files } });
-    });
-  }
-
-  /** The bodies of every `POST /v1/files/upload` this test made. */
-  function uploads(): RecordedRequest[] {
-    return requests.filter((request) =>
-      request.url.includes("/v1/files/upload"),
-    );
-  }
-
   it("uploads a picked file and sends the id the daemon gave it", async () => {
     renderChat();
     await screen.findByLabelText("Message");
