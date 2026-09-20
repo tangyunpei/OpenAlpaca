@@ -216,7 +216,14 @@ export function invalidationKeysFor(
     // card only updates on a refetch, so this needs the same invalidation as
     // the tool-execution frames above (task-33 review #1: it used to return
     // `[]`, which is why the earlier comment on those frames sat next to it).
+    //
+    // Its twin needs it for the same reason and one more: the resolution is
+    // often the last thing a stalled run logs, so without this arm the card
+    // kept the `awaiting approval` line and showed no denial or timeout at
+    // all until some unrelated later frame happened to name the same run
+    // (PR #31 review, finding 3).
     case "tool_confirmation_requested":
+    case "tool_confirmation_resolved":
       return invalidateRunLog(event.task_id);
 
     case "command_received":

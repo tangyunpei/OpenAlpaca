@@ -61,6 +61,7 @@ export const RUN_LOG_EVENT_TYPES = [
   "subagent_span",
   "artifact_written",
   "tool_confirmation_requested",
+  "tool_confirmation_resolved",
 ] as const;
 
 /** `event_type` → the design's five tones. */
@@ -68,6 +69,7 @@ function tagFor(eventType: string): RunEventTag {
   switch (eventType) {
     case "tool_executed":
     case "tool_confirmation_requested":
+    case "tool_confirmation_resolved":
     case "tool_auto_approved":
     case "security_violation":
     case "circuit_breaker_tripped":
@@ -83,9 +85,35 @@ function tagFor(eventType: string): RunEventTag {
   }
 }
 
+/** A row's `detail` or `result` as a bag of fields — `{}` when it is neither. */
+function blob(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
 function str(detail: Record<string, unknown>, key: string): string | null {
   const value = detail[key];
   return typeof value === "string" && value !== "" ? value : null;
+}
+
+/**
+ * The wire outcome → the word the row wears.
+ *
+ * `approved` and `denied` already read as English; the other two do not, and
+ * `cancelled` means the run went away before anyone answered, which is a
+ * withdrawal rather than a decision. An outcome this build does not know is
+ * printed as the daemon spelled it — naming it is honest, guessing is not.
+ */
+function outcomeWord(outcome: string): string {
+  switch (outcome) {
+    case "timed_out":
+      return "timed out";
+    case "cancelled":
+      return "withdrawn";
+    default:
+      return outcome;
+  }
 }
 
 function num(detail: Record<string, unknown>, key: string): number | null {
@@ -95,10 +123,7 @@ function num(detail: Record<string, unknown>, key: string): number | null {
 
 /** The row's own sentence, or the bare `event_type` when the blob cannot fill one. */
 function textFor(record: EventLogRecord): string {
-  const detail =
-    typeof record.detail === "object" && record.detail !== null
-      ? (record.detail as Record<string, unknown>)
-      : {};
+  const detail = blob(record.detail);
 
   switch (record.event_type) {
     case "task_status": {
@@ -139,6 +164,16 @@ function textFor(record: EventLogRecord): string {
     case "tool_confirmation_requested": {
       const tool = str(detail, "tool_name");
       return tool === null ? record.event_type : `${tool} · awaiting approval`;
+    }
+    // How the prompt ended (T1). The outcome is the one sentence on this card
+    // that is *not* in `detail`: `events/persistence.rs` writes it into the
+    // row's separate `result` blob, and without it a denial or a timeout read
+    // back as the bare literal `tool_confirmation_resolved`.
+    case "tool_confirmation_resolved": {
+      const tool = str(detail, "tool_name");
+      const outcome = str(blob(record.result), "outcome");
+      if (tool === null || outcome === null) return record.event_type;
+      return `${tool} · ${outcomeWord(outcome)}`;
     }
     case "tool_auto_approved": {
       const tool = str(detail, "tool_name");
