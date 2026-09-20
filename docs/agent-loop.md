@@ -21,7 +21,7 @@ siblings); `cache_markers` lives in the provider layer and carries only
 | # | Span | Responsibility | Code |
 |---|------|---|---|
 | 1 | `loop.step.cancellation_check` | Check the CancellationToken; return Cancelled if set | `runner/agentic_loop/mod.rs` step 1 |
-| 2 | `loop.step.max_rounds_check` | Return MaxRounds if the round counter reached `config.max_rounds` | step 2 |
+| 2 | `loop.step.max_rounds_check` | Return MaxRounds if the round counter reached the effective cap (`config.max_rounds` plus any bonus rounds) | step 2 |
 | 3 | `loop.step.cost_check` | Accumulate round cost; return CostExceeded if over `config.max_cost` | step 3 |
 | 4 | `loop.step.compaction` | Graduated budget-aware history compaction | step 4 |
 | 5 | `loop.step.build_request` | Assemble `RouterRequest` for this iteration | step 5 |
@@ -30,6 +30,72 @@ siblings); `cache_markers` lives in the provider layer and carries only
 | 8 | `loop.step.llm_call` | Dispatch `backend.complete(...)` under `tokio::select!` with the cancel token | step 8 |
 | 9 | `loop.step.response_parse` | Parse the `ChatResponse`; split into tool-call branch or final-text branch | step 9 |
 | 10 | `loop.step.persist_or_tools` | Execute tools (parallel via `join_all`) OR persist final text and return | step 10 |
+
+Two details of the budget checks:
+
+- **The cost cap is per invocation.** Before round 0 the loop records the
+  agent's cumulative cost as a baseline, and step 3 adds only the growth
+  since then. The main loop reuses one agent id (`orchestrator`) across
+  every turn, so without the baseline a long-lived daemon would trip
+  `CostExceeded` before its first call. The defaults are $1 per turn or
+  subagent (`[execution.agent_defaults] max_cost`) and $5 per lead
+  (`[execution.lead_agent_defaults] max_cost`); an agent template's
+  `max_cost_per_task` overrides either (the shipped `lead_agent`
+  template sets `3.0`). There is no overall daily budget for turns or
+  workflows. Three background jobs that run outside this loop — memory
+  extraction, conversation summaries and task-output extraction — each
+  carry a small daily ceiling under `[orchestrator.costs]`.
+- **The round cap can stretch, within a ceiling.** The effective cap is
+  `max_rounds` plus any steering bonus and the answer guard's one bonus
+  round, never more than `2 × max_rounds`.
+
+## How a Loop Ends
+
+Every invocation returns a `LoopResult` whose `finish_reason` is one of
+six values (`runner/agentic_loop/config.rs`). With a session log
+attached, the exit is also written as a `workflow_done` record using the
+lower-case word in the second column.
+
+| `LoopFinishReason` | Log word | When |
+|---|---|---|
+| `Complete` | `complete` | The model answered with no tool calls, and neither the steering completion guard nor the answer guard asked for another round. |
+| `MaxRounds` | `max_rounds` | Step 2: the round counter reached the effective cap. |
+| `CostExceeded` | `cost_exceeded` | Step 3: this invocation's accumulated cost passed `max_cost`. |
+| `Truncated` | `truncated` | The model stopped on its output limit three times running. The first two times the loop appends the partial text and a "continue from where you left off" message (`MAX_TOKENS_RETRIES = 2`); the third returns the partial text. |
+| `Cancelled` | `cancelled` | The cancel token fired — at the top of a round, during the LLM call, or during a retry backoff. |
+| `Error(msg)` | `error` | A non-transient LLM error, a transient one that outlived its retries, or a runtime model-access denial. |
+
+`final_content` is the model's answer on `Complete` and the partial text
+on `Truncated`. On every other exit it is the last assistant text the
+loop saw, which may be empty. Drained steering messages that never
+reached an LLM call are pushed back to the inbox on every early exit, so
+the cleanup path can file them.
+
+**The no-answer line.** A chat turn must not end with nothing.
+`LoopResult::no_answer_line()` returns `None` when there is answer text,
+and `None` for `Cancelled`; otherwise it returns one runtime-authored
+sentence:
+
+| Exit | Sentence |
+|---|---|
+| `MaxRounds` | "I stopped after N tool round(s) without reaching an answer." |
+| `CostExceeded` | "I stopped before reaching an answer: this turn hit its cost limit." |
+| `Truncated` | "I stopped before reaching an answer: the reply hit the model's output limit." |
+| `Error(e)` | "I could not finish this turn: e" |
+| `Complete` | "I finished this turn without writing an answer." |
+
+When a tool failed during the turn, " The last tool error was: …" is
+appended — the last failing result, capped at 600 bytes, with the loop's
+internal `[tool_error]` marker stripped. The line is used by the tiers
+that answer a user's turn with a model: the main loop and the social
+fast path (both in `query_handler/simple_query_handler.rs`) and the
+file-based skill tier (`skill/invocation.rs`). It becomes the turn's content everywhere — the
+stored assistant message, the one fallback delta, `done.content`. An
+`Error` exit with no text is the exception in one respect: the handler
+returns it as an error with that line as the message, so the turn still
+ends on the SSE `error` frame and no assistant message is stored. A
+lead-agent workflow does not use this line; it has its own fallback (see
+[The Completion Report](#the-completion-report)).
 
 ## How Topologies Invoke the Loop
 
@@ -41,7 +107,9 @@ siblings); `cache_markers` lives in the provider layer and carries only
 coordination tools (`spawn_subagent`, `spawn_subagents_batch` when
 enabled, `check_subagent_status`, `wait_for_subagents`, plus
 `post_update` + `queue_followup` under steering) + workspace tools +
-`memory_search`, unioned with the same extension set as the main loop —
+`memory_search`, plus `artifact_write` and `read_result` when the lead's
+own template declares those capabilities (the shipped `lead_agent`
+template does), unioned with the same extension set as the main loop —
 every installed MCP-bridged (`<server>__<tool>`) and plugin-provided
 (`<plugin>::<tool>`) tool whose extension is enabled — and a per-request
 `invoke_skill` instance, so the lead can run catalog
@@ -67,17 +135,47 @@ front door (below) IS a direct loop invocation per user turn
 invokes it too (`orchestrator/skill/invocation.rs`,
 `orchestrator/skill/invoke_executor.rs`).
 
-The two invocations that answer a user's turn — the main-loop front
-door and `skill/invocation.rs` — set `LoopConfig.stream_callback` from
-that turn's sink when a client is watching one
-(`chat::delta_forwarder`, one forwarder shared by both), so a
-`/slash` skill's answer and its reasoning reach the client delta by
-delta exactly like the main loop's (K1). A **plugin-contributed** skill
-does not: `invoke_plugin_skill` gets a finished answer back over the
-plugin protocol, so it keeps the chat service's single fallback delta —
-nothing simulates chunks for it. Every caller with nobody watching a
-stream (scheduled skills, connectors, the follow-up runner, the nested
-`invoke_skill` tool) passes no sink and runs the non-streaming path.
+## Streaming
+
+The invocations that answer a user's turn — the main-loop front door,
+the social fast path beside it (a one-round, no-tools loop), and
+`skill/invocation.rs` — set `LoopConfig.stream_callback` from that
+turn's sink when a client is watching one
+(`chat::delta_forwarder` in `chat/turn_sink.rs`, one forwarder shared by
+all of them), so a `/slash` skill's answer and its reasoning reach the client
+delta by delta exactly like the main loop's. The forwarder passes on two
+provider events and nothing else: `TextDelta` becomes the SSE `delta`,
+`ThinkingDelta` becomes the SSE `reasoning`. Tool-call, usage, done and
+error events stay inside the loop.
+
+A **plugin-contributed** skill does not stream: `invoke_plugin_skill`
+gets a finished answer back over the plugin protocol, so it keeps the
+chat service's single fallback delta — nothing simulates chunks for it.
+Every caller with nobody watching a stream (scheduled skills,
+connectors, the follow-up runner, the nested `invoke_skill` tool, the
+lead and its subagents) passes no sink and runs the non-streaming path.
+
+With a callback set and a router backend, step 8 tries
+`LlmRouter::complete_streaming` first and **falls back to the
+non-streaming call** — same round, no extra round charged — when:
+
+- the streaming request itself fails;
+- collecting the stream fails, which includes 90 s of silence between
+  chunks (`STREAM_IDLE_TIMEOUT`, `openalpaca_llm/src/streaming.rs`);
+- the collection outlives `LoopConfig.max_stream_duration` (600 s).
+
+`complete_streaming` returns `RoutedStream { model, stream }`. A stream
+carries no model id of its own, and the router is the only code that
+knows which rung of its fallback ladder it settled on, so the loop takes
+`.stream` and reports `.model`. That id is what reaches
+`LoopResult.model_used`, the cost tracker, the usage row and the SSE
+`done` frame — the model that answered, not the model that was asked
+for.
+
+Because a multi-round turn streams the text written before each tool
+call, the deltas of a turn need not add up to its answer.
+`LoopResult.final_content` — `done.content` on the wire — is
+authoritative.
 
 ## The Main-Loop Front Door (Routing V2)
 
@@ -110,7 +208,10 @@ the base picks (keyword-suggested tools under
 `tool_selection = "core_union"`, or the whole registry under `"full"`)
 unioned with a per-request set —
 `start_workflow`, `task_status`, `memory_store` + `memory_forget`
-(DB-gated), the globally-registered `memory_search` definition, every
+(DB-gated), the globally-registered `memory_search` definition,
+`read_result` (only when the daemon has both a session log and a
+database — the one case where a result can spill, see
+[Tool Results and the Spill](#tool-results-and-the-spill)), every
 installed extension tool whose extension is enabled (MCP-bridged
 `<server>__<tool>` and plugin-provided `<plugin>::<tool>`; a disabled
 server or plugin contributes nothing on either surface), and
@@ -129,7 +230,7 @@ id, title, status, progress counters — injected deliberately outside the
 compose-engine layers (Tier-1/Tier-2 caches would serve stale status) —
 plus `<workflow_relay_rules>` relay guidance.
 
-**History provenance (H1)**: a turn that delegated stores its assistant
+**History provenance**: a turn that delegated stores its assistant
 row carrying the run's id (`gateway/persistence.rs`). When that row is
 replayed into a later turn's history it carries one fixed extra line —
 `[This run was started by a start_workflow tool call, which returned task
@@ -201,11 +302,24 @@ When a lead-agent workflow finishes
 user-facing completion report: the lead prompt carries an unconditional
 `<completion_report>` contract (`runner/lead_agent/prompt.rs`), and the
 spawn persists `LoopResult.final_content` verbatim to the lane
-conversation (`persist_conversation`). The legacy `format_task_result`
+conversation (`persist_completion_report`), into the session the run was
+started from. The legacy `format_task_result`
 template is only the fallback for empty final content (budget / cancel /
 error exits). Non-`Complete` finish reasons get a one-line status prefix
-either way (`outcome.rs::completion_status_line`). `TaskCompleted`
-events carry a 500-char excerpt; the full report lives in lane history
+either way (`outcome.rs::completion_status_line`).
+
+When a tool was refused because the run could not ask anyone for
+approval (an `unattended` run — see the Daemon Manual's
+[Tool confirmations](Daemon_Manual.md#tool-confirmations)), the runtime
+appends one line of its own at the end of the report: *"Not run — this
+run could not ask anyone for approval, so the following tool(s) were
+refused: …"* (`outcome.rs::unapprovable_note`). The tool names are read
+from the run's audit rows, which the lead's and every subagent's sandbox
+write, so a refusal inside a subagent is reported too.
+
+The task's `result_summary` and the `TaskCompleted` event carry the
+report cut to 2 000 characters (`MAX_SUMMARY_LENGTH`); the cut keeps the
+runtime's "Not run" line whole. The full report lives in lane history
 and the task outcome record.
 
 ## The Follow-up Runner
@@ -223,7 +337,10 @@ hands it to the
 re-enters through `Gateway::handle_event` as a fresh turn —
 `EventSource::Internal` with `lane_override` for lane continuity — so it
 can answer inline or start its own workflow through the normal front
-door.
+door. A queued row keeps the `unattended` declaration of the turn that
+queued it (`lane_followups.unattended`, migration 042), so a follow-up
+started hours later still knows whether anybody can answer an approval
+prompt.
 
 ## Routing Mode Strings
 
@@ -244,7 +361,7 @@ only the `/steer ` prefix emits `steered`.
 
 ## Hermes Compliance Matrix
 
-```
+```text
 Hermes step      OpenAlpaca      Notes
 ──────────────────────────────────────────────────────────────────────
 1. task_id       Compliant       Pre-loop
@@ -271,7 +388,7 @@ ephemeral_pressure_layer = true
 
 Triggers when `max(cost_ratio, rounds_ratio) >= 0.8`. Notice content:
 
-```
+```text
 [budget_notice]
 Budget status: {rounds_used}/{max_rounds} rounds ({rp}%), ${cost_used}/${max_cost} spent ({cp}%).
 Prefer concluding the current task over opening new tool calls. ...
@@ -295,99 +412,194 @@ Three of Anthropic's four allowed `cache_control: ephemeral` markers:
 
 Verify via `usage.cache_read_input_tokens` in the `ChatResponse`.
 
+## Context Budget and Compaction
+
+Step 4 compacts history against a `ContextBudgetManager`
+(`context_budget/budget.rs`), one per loop invocation. The main loop, the
+file-based skill tier, the lead and every subagent each get one; a caller
+that passes none (the social fast path, tests) never compacts.
+
+- **The window is the answering model's.** Each caller resolves it
+  through `runner::routed_model` / `routed_context_window`
+  (`runner/model_window.rs`), which walk the router's substitution ladder
+  the same way the router does. The skill tier resolves the model once and
+  reads both the window and the media capabilities off it, so it cannot
+  budget against one model while adapting attachments for another. On a
+  local-only install the template's pinned cloud model is not routable,
+  the call is answered by a local model with a much smaller window, and
+  that smaller window is what the budget uses. When the registry knows no
+  window for the model, the caller's own default applies (200 000 tokens
+  in all four callers).
+- **Trigger.** `fixed zone + message tokens >= window − buffer`, where the
+  fixed zone is the system prompt plus the tool definitions and the buffer
+  is `window × [execution.context] autocompact_buffer_ratio` (default
+  0.165).
+- **Tiers.** The starting tier is picked from utilization
+  (`total / window`), and the compactor climbs one tier at a time — never
+  down — until the messages are back under the trigger or the tiers run
+  out (`prompt_ctx/compaction/graduated.rs`). With the default buffer the
+  trigger sits at 83.5% of the window, so a default install starts at
+  `HeuristicSummary` or `LlmSummary`; the lower tiers are the starting
+  point only with a larger `autocompact_buffer_ratio`.
+
+  | Utilization | Tier | What it does |
+  |---|---|---|
+  | ≥ 60% | `TruncateToolResults` | Cuts tool results longer than 200 bytes to half their size. |
+  | ≥ 70% | `DropMultimedia` | Replaces image, audio and document parts with one-line text placeholders. |
+  | ≥ 75% | `DiscardSocial` | Removes small-talk user messages and the replies to them. Keeps the system message, the first query and the last `min_recent_messages` (default 4). |
+  | ≥ 80% | `HeuristicSummary` | Replaces older rounds with a compact summary built without a model (`runner/agentic_loop/context.rs::compress_context`). |
+  | ≥ 85% | `LlmSummary` | Extracts memories and summarises older messages with an LLM call. Cancellable: a cancel restores the messages untouched. |
+
+- **Never compacted away.** `<user_interjection>` steering messages are
+  exempt from discard and truncation.
+- **Narration.** Each compaction publishes
+  `SystemEvent::CompactionTriggered` (utilization and message counts) and,
+  with a session log attached, writes a `compaction` record with the tier,
+  the token counts before and after, and the running total of dropped
+  tokens.
+
+## Tool Results and the Spill
+
+One threshold decides what happens to a large tool result:
+`[orchestrator.sessions] tool_result_inline_bytes` (default 32 KiB,
+`MAX_TOOL_RESULT_SIZE` when a caller sets nothing).
+
+| Result | Loop has a session log | Loop has none |
+|---|---|---|
+| At or under the threshold | Inline, unchanged. | Inline, unchanged. |
+| Over it, succeeded | **Spilled**: the whole result is written to the session's `results/` directory, and the model receives a stub — the size, the first 2 KB, and `result_ref=file:results/…` with the instruction to page it with `read_result`. | Cut inline at the threshold, at a sentence, line or word boundary, with a marker naming how much is shown. |
+| Over it, failed | The model's copy keeps the **head and tail** (half the threshold each), because a compiler or test failure sits at the end. The full bytes are still spilled to the log. | Head and tail, same cut. |
+
+If the spill record could not be handed to the log writer, the model gets
+the inline cut instead of a stub — a stub must never promise a file that
+will not exist.
+
+`read_result` is a scoped builtin (`tools/builtins/read_result.rs`) and a
+**grant, not ambient**:
+
+- the main loop offers it when the daemon has a session log and a
+  database;
+- the lead offers it when its own template declares the capability;
+- a subagent gets it when its template declares it. All nine shipped
+  templates in `config/agents/` do. An agent whose template does not name
+  `read_result` is refused it and reads a stub it cannot follow.
+
 ## Loop Guardrails
 
 Beyond the round/cost checks in steps 2–3, the loop enforces:
 
 - **Per-round tool cap** — at most `config.max_tools_per_round` tool
-  calls execute per round; and when a sandbox policy sets
-  `max_tool_calls`, calls are partitioned into executable vs
-  over-budget, with over-budget calls returning stub error results
-  instead of executing.
+  calls execute per round; the rest get a "max tools per round exceeded"
+  error result. When a sandbox policy sets `max_tool_calls`, calls are
+  partitioned into executable vs over-budget, with over-budget calls
+  returning stub error results instead of executing.
 - **Runtime model-access check** — the router may fall back to a
   different model than requested; after each response the actual
   `response.model` is checked against the agent's constraints via
-  `CapabilityManager::check_model_access`. A violation ends the loop
-  with `LoopFinishReason::Error`.
+  `CapabilityManager::check_model_access`. A violation publishes
+  `SystemEvent::ModelAccessDenied` and ends the loop with
+  `LoopFinishReason::Error`.
 - **Thinking-block exclusion** — extended-thinking text is logged but
-  explicitly omitted from the `ChatMessage` appended to history.
-- **Transient LLM-error retry** — a `consecutive_llm_errors` counter
-  drives exponential backoff on transient failures and resets to zero
-  on any success.
-- **Compaction telemetry** — each compaction publishes
-  `SystemEvent::CompactionTriggered` on the event bus with utilization
-  and summary metrics.
-- **Answer guard (H3)** — `LoopConfig.answer_guard`
+  explicitly omitted from the `ChatMessage` appended to history. It can
+  be streamed to a watching client (see [Streaming](#streaming)) and is
+  persisted nowhere.
+- **Transient LLM-error retry** (router backend only) — a transient
+  failure is retried up to 3 times in a row, with a 2 s, 4 s, 8 s backoff
+  (capped at 30 s) that a cancellation interrupts. Each retry **costs a
+  round**, and retries stop once `max_rounds` is used up. The counter
+  resets to zero on any success. Anything else ends the loop with
+  `Error`.
+- **Approval prompts live in the sandbox, not the loop.** A tool on the
+  confirm list blocks inside `SandboxManager::execute_tool` until it is
+  approved, denied, times out or is withdrawn; the loop only sees the
+  tool's result. A run that declared itself `unattended` has such a tool
+  refused at once. The contract is in the Daemon Manual's
+  [Tool confirmations](Daemon_Manual.md#tool-confirmations).
+- **Compaction telemetry** — see
+  [Context Budget and Compaction](#context-budget-and-compaction).
+- **Answer guard** — `LoopConfig.answer_guard`
   (`runner/agentic_loop/answer_guard.rs`), consulted at the same point as
   the steering completion guard: after the model returns text with no
   tool calls, before the loop returns `Complete`. The guard owns the
-  judgement and supplies both strings; the **loop owns the policy** —
-  exactly one corrective round (paid for by a bonus round, so a turn on
-  its last affordable round still ends with content), and if the second
-  answer is rejected too, the guard's `runtime_note` is **appended** to
-  that answer (`"{answer}\n\n{runtime_note}"`; the note alone when the
-  answer is blank). The answer is never taken away. `None` for every
-  caller but the main loop, which costs an un-guarded loop no branch at
-  all.
+  judgement and supplies both strings; the **loop owns the policy**:
+  1. The first rejection buys exactly one corrective round. The rejected
+     answer stays in history and the guard's `note` follows it as a user
+     message. The round is paid for by a bonus round, so a turn on its
+     last affordable round still ends with content.
+  2. If the second answer is rejected too, the guard's `runtime_note` is
+     **appended** to that answer (`"{answer}\n\n{runtime_note}"`; the note
+     alone when the answer is blank). The answer is never taken away.
 
-  The only production guard is `RunClaimGuard`
-  (`orchestrator/query_handler/run_claim_guard.rs`). Together with H1 and
-  H2 it is the three-layer answer to a chat turn announcing a workflow it
-  never started:
+  It is `None` for every caller but the main loop, and an un-guarded loop
+  does not even branch.
 
-  1. **Provenance (H1)** — a delegating assistant row replays into later
-     history with one fixed line naming the `start_workflow` call and the
-     task it returned, so the model can tell its own reported delegations
-     from prose it could imitate (replay only; see *History provenance*
-     above).
-  2. **The rules (H2)** — `<workflow_relay_rules>` and
-     `start_workflow`'s own description agree that a run starts ONLY
-     through a call in this turn, that a task id may be stated only when
-     that call returned it, and that an explicit workflow request or an
-     ask to write or save an artifact IS that call.
-  3. **The guard (H3, N1–N3)** — because prompting is not a guarantee.
+### The run-claim guard
 
-  The guard's trigger is a **fact, not a reading of the sentence** (N1).
-  Rounds 13 and 14 tried to classify intent — was this sentence
-  *claiming a start*? — and failed in both directions at once: an
-  unrelated "Started reviewing your notes… task 1a2b3c9d already
-  finished" read as a claim, while ten ordinary ways to announce a start
-  slipped past the verb list. What is checkable is all that is left:
+The only production guard is `RunClaimGuard`
+(`orchestrator/query_handler/run_claim_guard.rs`). It is the last of
+three layers that keep a chat turn from announcing a workflow it never
+started:
 
-  - the turn's `start_workflow` result cell is empty — a turn that did
-    delegate is skipped, its id is on `delegation`;
-  - the answer states a token in an **id position** (after a `task id` /
-    `task_id` / `run id` / `task` cue and the punctuation a model wraps
-    an id in) that **looks like an id**: a UUID, or an 8+ hex run that is
-    not a plain number. Every decimal digit is a hex digit, so a date
-    (`20260919`) and a counter (`12345678`) are excluded by requiring one
-    of `a`–`f`;
-  - the token matches no run of this turn's owner
-    (`TaskRepository::owner_has_task_id_prefix`, a prefix so the 8-hex
-    short form counts). The scope is `task_status`'s — `created_by`, not
-    `source_lane` (J1) — so relaying a run the CLI lane started into the
-    GUI lane is true and is left alone, while another owner's run never
-    excuses a claim. The identity is `ToolContext::created_by()`, the one
-    `start_workflow` stamps on the row.
+1. **Provenance** — a delegating assistant row replays into later
+   history with one fixed line naming the `start_workflow` call and the
+   task it returned, so the model can tell its own reported delegations
+   from prose it could imitate (replay only; see *History provenance*
+   above).
+2. **The rules** — `<workflow_relay_rules>` and `start_workflow`'s own
+   description agree that a run starts ONLY through a call in this turn,
+   that a task id may be stated only when that call returned it, and that
+   an explicit workflow request or an ask to write or save an artifact IS
+   that call.
+3. **The guard** — because prompting is not a guarantee.
 
-  An answer that states no id touches no database. Stating an id that
-  answers to nothing is an error whichever way it happened, so the
-  corrective round is never wasted on a truthful answer, and both
-  sentences the guard writes are true in either case (N2/N3): the note
-  names the id(s), says no task of this user has them and that no
-  `start_workflow` call was made in this turn, and gives both ways out —
-  call `start_workflow` now, or correct or remove the id; the runtime
-  line is *"Note from OpenAlpaca: no workflow was started in this turn,
-  and no task with id `<id>` exists. Ask again to start one."* The broad
-  trigger is safe precisely because the consequence is proportionate: a
-  false positive costs one round and one true line under the answer.
+The guard's trigger is three **facts**, not a reading of the sentence. It
+does not try to decide whether the prose *means* to claim a start:
 
-  **Streaming**: the first answer's text deltas have already been sent
-  when the guard rejects it. `done.content` is authoritative (S13) — the
-  GUI replaces the bubble on `done`, and the corrected or annotated
-  answer is what is persisted as the assistant row. A client that only
-  appends deltas shows the rejected answer, then the second one, until
-  `done` settles it.
+- The turn's `start_workflow` result cell is empty. A turn that did
+  delegate is skipped; its id is on `delegation`.
+- The answer states a token in an **id position** — after a `task id` /
+  `task_id` / `task-id` / `taskid` / `run id` / `run_id` / `task` cue and
+  the punctuation a model wraps an id in — that **looks like an id**: a
+  UUID, or a run of 8 or more hex digits that is not a plain number.
+  Every decimal digit is a hex digit, so a date (`20260919`) and a counter
+  (`12345678`) are excluded by requiring one of `a`–`f`.
+- The token matches no run of this turn's owner
+  (`TaskRepository::owner_has_task_id_prefix`, a prefix so the 8-hex short
+  form counts). The scope is the owner (`created_by`), not the lane, so
+  relaying a run the CLI lane started into the GUI lane is true and is
+  left alone, while another owner's run never excuses a claim. The
+  identity is `ToolContext::created_by()`, the same one `start_workflow`
+  stamps on the row and `task_status` reads back.
+
+An answer that states no id touches no database, and a failed lookup
+makes the guard say nothing at all. Both sentences the guard writes are
+true whether the model invented a start or mis-recalled a status:
+
+- The corrective note names the id(s), says no task of this user has them
+  and that no `start_workflow` call was made in this turn, and gives both
+  ways out — call `start_workflow` now, or correct or remove the id.
+- The runtime line is *"Note from OpenAlpaca: no workflow was started in
+  this turn, and no task with id `<id>` exists. Ask again to start one."*
+
+The broad trigger is safe because the consequence is proportionate: a
+false positive costs one round and one true line under the answer.
+
+**Streaming**: the first answer's text deltas have already been sent
+when the guard rejects it. `done.content` is authoritative — the GUI
+replaces the bubble on `done`, and the corrected or annotated answer is
+what is persisted as the assistant message. A client that only appends
+deltas shows the rejected answer, then the second one, until `done`
+settles it.
+
+### The send-confirmation check
+
+One more post-hoc check lives in the main-loop handler rather than in the
+loop (`query_handler/simple_query_handler.rs`). When the turn carried a
+send intent, a send tool was on the surface, no tool ran, and the answer
+still reads as a send confirmation, the answer is **replaced** by a
+bilingual warning that the message was NOT actually sent. Unlike the
+run-claim guard it takes the answer away, which is why it only fires
+with an actual send-intent signal.
 
 ## System-Prompt Memoization
 
