@@ -324,48 +324,70 @@ Beyond the round/cost checks in steps 2–3, the loop enforces:
   judgement and supplies both strings; the **loop owns the policy** —
   exactly one corrective round (paid for by a bonus round, so a turn on
   its last affordable round still ends with content), and if the second
-  answer is rejected too, the guard's `replacement` becomes the turn's
-  content instead of the claim. `None` for every caller but the main
-  loop, which costs an un-guarded loop no branch at all.
+  answer is rejected too, the guard's `runtime_note` is **appended** to
+  that answer (`"{answer}\n\n{runtime_note}"`; the note alone when the
+  answer is blank). The answer is never taken away. `None` for every
+  caller but the main loop, which costs an un-guarded loop no branch at
+  all.
 
   The only production guard is `RunClaimGuard`
-  (`orchestrator/query_handler/run_claim_guard.rs`): a chat turn may not
-  claim a workflow it did not start. It reviews nothing when this turn's
-  `start_workflow` result cell holds an outcome. Otherwise an answer is a
-  claim only when **both** halves hold (J2):
+  (`orchestrator/query_handler/run_claim_guard.rs`). Together with H1 and
+  H2 it is the three-layer answer to a chat turn announcing a workflow it
+  never started:
 
-  - *assertion* — the answer says a run was started in this turn: a start
-    phrase (`started`, `kicked off`, `launched`, `spun up`, `now running
-    in the background`, `I've queued`, `I've delegated`) within ~120
-    bytes of the stated id, or of the word workflow/run/job. A status
-    relay — "Task 9f4c… finished", "your workflow 372e… is still
-    running" — asserts no start and is **not reviewed at all**;
-  - *shape* — the token sits in an id position (after a `task id` /
-    `run id` / `task` cue and the punctuation a model wraps an id in) and
-    looks like an id: a UUID, or an 8+ hex run that is not a plain
-    number. Every decimal digit is a hex digit, so a date (`20260919`)
-    and a counter (`12345678`) are excluded by requiring one of `a`–`f`.
+  1. **Provenance (H1)** — a delegating assistant row replays into later
+     history with one fixed line naming the `start_workflow` call and the
+     task it returned, so the model can tell its own reported delegations
+     from prose it could imitate (replay only; see *History provenance*
+     above).
+  2. **The rules (H2)** — `<workflow_relay_rules>` and
+     `start_workflow`'s own description agree that a run starts ONLY
+     through a call in this turn, that a task id may be stated only when
+     that call returned it, and that an explicit workflow request or an
+     ask to write or save an artifact IS that call.
+  3. **The guard (H3, N1–N3)** — because prompting is not a guarantee.
 
-  A token that passes both is checked with
-  `TaskRepository::owner_has_task_id_prefix`: does any run **this turn's
-  owner** started answer to it, whatever lane it started on (J1)? The
-  scope is `task_status`'s — `created_by`, not `source_lane` — so
-  relaying a run the CLI lane started into the GUI lane is true and is
-  left alone, while another owner's run never excuses a claim. The
-  identity is `ToolContext::created_by()`, the one `start_workflow`
-  stamps on the row. An answer that claims nothing touches no database. A
-  stated id that names nothing gets the corrective note ("… no
-  start_workflow call was made in this turn. Either call start_workflow
-  now, or answer without claiming a run was started."), and on a second
-  offence the runtime line "I did not start a workflow — no run exists
-  for that. Ask again and I will start one."
+  The guard's trigger is a **fact, not a reading of the sentence** (N1).
+  Rounds 13 and 14 tried to classify intent — was this sentence
+  *claiming a start*? — and failed in both directions at once: an
+  unrelated "Started reviewing your notes… task 1a2b3c9d already
+  finished" read as a claim, while ten ordinary ways to announce a start
+  slipped past the verb list. What is checkable is all that is left:
+
+  - the turn's `start_workflow` result cell is empty — a turn that did
+    delegate is skipped, its id is on `delegation`;
+  - the answer states a token in an **id position** (after a `task id` /
+    `task_id` / `run id` / `task` cue and the punctuation a model wraps
+    an id in) that **looks like an id**: a UUID, or an 8+ hex run that is
+    not a plain number. Every decimal digit is a hex digit, so a date
+    (`20260919`) and a counter (`12345678`) are excluded by requiring one
+    of `a`–`f`;
+  - the token matches no run of this turn's owner
+    (`TaskRepository::owner_has_task_id_prefix`, a prefix so the 8-hex
+    short form counts). The scope is `task_status`'s — `created_by`, not
+    `source_lane` (J1) — so relaying a run the CLI lane started into the
+    GUI lane is true and is left alone, while another owner's run never
+    excuses a claim. The identity is `ToolContext::created_by()`, the one
+    `start_workflow` stamps on the row.
+
+  An answer that states no id touches no database. Stating an id that
+  answers to nothing is an error whichever way it happened, so the
+  corrective round is never wasted on a truthful answer, and both
+  sentences the guard writes are true in either case (N2/N3): the note
+  names the id(s), says no task of this user has them and that no
+  `start_workflow` call was made in this turn, and gives both ways out —
+  call `start_workflow` now, or correct or remove the id; the runtime
+  line is *"Note from OpenAlpaca: no workflow was started in this turn,
+  and no task with id `<id>` exists. Ask again to start one."* The broad
+  trigger is safe precisely because the consequence is proportionate: a
+  false positive costs one round and one true line under the answer.
 
   **Streaming**: the first answer's text deltas have already been sent
   when the guard rejects it. `done.content` is authoritative (S13) — the
-  GUI replaces the bubble on `done`, and the corrected or replaced answer
-  is what is persisted as the assistant row. A client that only appends
-  deltas shows the rejected answer, then the second one, until `done`
-  settles it.
+  GUI replaces the bubble on `done`, and the corrected or annotated
+  answer is what is persisted as the assistant row. A client that only
+  appends deltas shows the rejected answer, then the second one, until
+  `done` settles it.
 
 ## System-Prompt Memoization
 
