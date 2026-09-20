@@ -211,6 +211,44 @@ impl<'a> TaskRepository<'a> {
         })
     }
 
+    /// Does any run on `lane_key` have an id beginning with `prefix`?
+    ///
+    /// H3's "is this a real run?" question, asked the way a model states an id:
+    /// a chat reply quotes a short form (`9f4c2b71`) as often as the whole
+    /// UUID, so equality would call a truthfully quoted run fabricated. Lane
+    /// scoped because that is the claim being checked — *this* conversation
+    /// has such a run — and because it keeps one lane's ids out of another's
+    /// answer.
+    ///
+    /// `prefix` is matched literally: `%`, `_` and `\` in it are escaped, so a
+    /// caller cannot turn a fabricated id into a wildcard that matches
+    /// anything. An empty prefix matches nothing rather than every row.
+    pub fn lane_has_task_id_prefix(&self, lane_key: &str, prefix: &str) -> Result<bool> {
+        if prefix.is_empty() {
+            return Ok(false);
+        }
+        let escaped = prefix
+            .to_lowercase()
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        self.db
+            .with_connection(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT 1 FROM task WHERE source_lane = ?1 \
+                     AND lower(id) LIKE ?2 ESCAPE '\\' LIMIT 1",
+                )?;
+                let found = stmt
+                    .query_row(rusqlite::params![lane_key, format!("{escaped}%")], |_| {
+                        Ok(())
+                    })
+                    .optional()?
+                    .is_some();
+                Ok(found)
+            })
+            .context("Failed to look up a task id prefix on a lane")
+    }
+
     /// `id -> title` for the ids that exist — the list routes' join (R26).
     ///
     /// Two columns, one statement per [`TITLES_FOR_CHUNK`] ids, all inside a

@@ -4272,6 +4272,89 @@ fn a_new_session_starts_the_context_window_clean() {
     assert_eq!(ctx.recent_messages.len(), 1);
 }
 
+// ── H1: history says where a delegation came from ───────────────────
+
+/// A replayed assistant row that started a workflow carries the provenance
+/// line; an ordinary one does not; and neither stored row is touched.
+#[test]
+fn a_delegating_row_replays_with_its_provenance_and_an_ordinary_one_does_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let (orch, _) = make_tool_mode_orchestrator_with_db(
+        None,
+        "ok",
+        DaemonConfig::default(),
+        Vec::new(),
+        Some(db.clone()),
+    );
+
+    let repo = openalpaca_storage::ConversationRepository::new(&db);
+    repo.get_or_create_active_session("user1:cli", "cli", None)
+        .unwrap();
+
+    let delegating = "Started a background workflow called \"Guanaco fiber notes\".";
+    let ordinary = "A guanaco is a camelid.";
+    repo.insert(&openalpaca_storage::ConversationMessage {
+        lane_key: "user1:cli".to_string(),
+        role: "user".to_string(),
+        content: "start a workflow".to_string(),
+        ..Default::default()
+    })
+    .unwrap();
+    repo.insert(&openalpaca_storage::ConversationMessage {
+        lane_key: "user1:cli".to_string(),
+        role: "assistant".to_string(),
+        content: delegating.to_string(),
+        task_id: Some("9f4c2b71-1bc2-4a3d-8e55-0c1d2e3f4a5b".to_string()),
+        ..Default::default()
+    })
+    .unwrap();
+    repo.insert(&openalpaca_storage::ConversationMessage {
+        lane_key: "user1:cli".to_string(),
+        role: "assistant".to_string(),
+        content: ordinary.to_string(),
+        ..Default::default()
+    })
+    .unwrap();
+
+    let ctx = orch.build_context("user1:cli", "go");
+    assert_eq!(ctx.recent_messages.len(), 3);
+
+    let replayed_delegation = ctx.recent_messages[1].content.clone();
+    assert_eq!(
+        replayed_delegation,
+        format!(
+            "{delegating}\n{}",
+            crate::orchestrator::context_builder::delegation_provenance_line(
+                "9f4c2b71-1bc2-4a3d-8e55-0c1d2e3f4a5b"
+            )
+        ),
+        "a delegating row must replay with exactly one provenance line appended"
+    );
+    assert!(
+        replayed_delegation.contains("start_workflow tool call"),
+        "the line must name the tool call: {replayed_delegation}"
+    );
+    assert_eq!(
+        ctx.recent_messages[2].content, ordinary,
+        "an ordinary assistant row must replay verbatim"
+    );
+    assert_eq!(
+        ctx.recent_messages[0].content, "start a workflow",
+        "a user row must replay verbatim"
+    );
+
+    // The stored rows — what the transcript and every client read — are
+    // untouched: the line exists only in the replay.
+    let stored = repo.list_recent_by_lane("user1:cli", 10).unwrap();
+    assert_eq!(stored[1].content, delegating);
+    assert_eq!(stored[2].content, ordinary);
+    assert!(
+        !stored.iter().any(|m| m.content.contains("start_workflow")),
+        "no stored row may carry the provenance line"
+    );
+}
+
 // ── GAP-13: the per-request model override ──────────────────────────
 
 /// A turn that names a model runs on it: `HandleRequest.model_override` →
@@ -6307,4 +6390,352 @@ async fn an_attachment_turn_is_not_replayed_as_its_own_history() {
         "the attached document reached the model {occurrences} times, not once: {:?}",
         request.messages
     );
+}
+
+// ── H3: a chat turn never claims a workflow it did not start ────────
+
+/// One scripted answer per main-loop call. The lead agent a dispatch spawns
+/// runs on the same router, so the script is served only to the caller whose
+/// surface carries `start_workflow` — the main loop — and everyone else gets a
+/// plain answer (round 4's "answers by who is asking" precedent).
+enum ScriptStep {
+    Say(&'static str),
+    Call(&'static str, serde_json::Value),
+}
+
+struct ScriptedTurnLlm {
+    steps: std::sync::Mutex<std::collections::VecDeque<ScriptStep>>,
+    /// Main-loop requests only, in order.
+    requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
+}
+
+impl ScriptedTurnLlm {
+    fn new(
+        steps: Vec<ScriptStep>,
+        requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
+    ) -> Self {
+        Self {
+            steps: std::sync::Mutex::new(steps.into_iter().collect()),
+            requests,
+        }
+    }
+}
+
+#[async_trait]
+impl openalpaca_llm::LlmProvider for ScriptedTurnLlm {
+    fn name(&self) -> &str {
+        "scripted-turn-mock"
+    }
+    fn supports_tools(&self) -> bool {
+        true
+    }
+    async fn chat(
+        &self,
+        request: ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        use openalpaca_llm::{ChatResponse, FinishReason, Usage};
+        let is_main_loop = request.tools.iter().any(|t| t.name == "start_workflow");
+        let usage = Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            ..Default::default()
+        };
+        if !is_main_loop {
+            // The detached lead agent (or any other caller) — not the script.
+            return Ok(ChatResponse {
+                content: "lead agent done".to_string(),
+                tool_calls: vec![],
+                model: "mock-model".to_string(),
+                usage,
+                finish_reason: FinishReason::Stop,
+                thinking: None,
+                parts: None,
+            });
+        }
+        self.requests
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(request.clone());
+        let step = self
+            .steps
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .pop_front();
+        Ok(match step {
+            Some(ScriptStep::Call(name, args)) => ChatResponse {
+                content: String::new(),
+                tool_calls: vec![openalpaca_llm::ToolCall {
+                    id: "tc_1".to_string(),
+                    name: name.to_string(),
+                    arguments: args,
+                }],
+                model: "mock-model".to_string(),
+                usage,
+                finish_reason: FinishReason::ToolUse,
+                thinking: None,
+                parts: None,
+            },
+            Some(ScriptStep::Say(text)) => ChatResponse {
+                content: text.to_string(),
+                tool_calls: vec![],
+                model: "mock-model".to_string(),
+                usage,
+                finish_reason: FinishReason::Stop,
+                thinking: None,
+                parts: None,
+            },
+            // The script ran out — anything the loop asks beyond it is a bug
+            // the assertions should see, so say something recognisable.
+            None => ChatResponse {
+                content: "off script".to_string(),
+                tool_calls: vec![],
+                model: "mock-model".to_string(),
+                usage,
+                finish_reason: FinishReason::Stop,
+                thinking: None,
+                parts: None,
+            },
+        })
+    }
+}
+
+/// The sentence the live GUI session produced: the form of a real delegation,
+/// with an id no run answers to, and no tool call behind it.
+const FABRICATED: &str = "Started a background workflow called \"Guanaco fiber notes\" \
+                          (task id: `9f4c2b71`) — it will post its results here.";
+
+const GUARD_NOTE: &str = "no start_workflow call was made in this turn";
+const GUARD_LINE: &str =
+    "I did not start a workflow — no run exists for that. Ask again and I will start one.";
+
+fn scripted_turn_orchestrator(
+    steps: Vec<ScriptStep>,
+    db: openalpaca_storage::Database,
+) -> (Orchestrator, Arc<std::sync::Mutex<Vec<ChatRequest>>>) {
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let router = openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(ScriptedTurnLlm::new(steps, requests.clone())),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    );
+    let orch = make_orchestrator_with_llm_agents_and_config(
+        Arc::new(router),
+        vec![make_agent("lead", vec!["orchestration"])],
+        DaemonConfig::default(),
+        Some(db),
+    );
+    (orch, requests)
+}
+
+/// A fabricated delegation is told so, once, and the model then does the thing
+/// it claimed: the turn ends on a real run.
+#[tokio::test]
+async fn a_fabricated_delegation_gets_one_corrective_round_and_then_the_tool() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let (orch, requests) = scripted_turn_orchestrator(
+        vec![
+            ScriptStep::Say(FABRICATED),
+            ScriptStep::Call(
+                "start_workflow",
+                serde_json::json!({
+                    "goal": "Write a two-sentence markdown artifact about guanacos",
+                    "title": "Guanaco fiber notes"
+                }),
+            ),
+            ScriptStep::Say("Started it — the run is under way now."),
+        ],
+        db,
+    );
+
+    let request_id = Uuid::new_v4();
+    let reply = send_tool_mode(
+        &orch,
+        request_id,
+        "Start a workflow that writes a two-sentence markdown artifact about guanacos",
+    )
+    .await;
+
+    assert_eq!(reply, "Started it — the run is under way now.");
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        3,
+        "one corrective round, then the tool round, then the answer"
+    );
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|m| m.content.contains(GUARD_NOTE)),
+        "the corrective note never reached the model: {:?}",
+        requests[1].messages.last().map(|m| m.content.clone())
+    );
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|m| m.content.contains("Guanaco fiber notes")),
+        "the rejected answer must stay in history so the model can see what it said"
+    );
+
+    // And the run the model finally started is real.
+    let delegation = orch
+        .delegation_map
+        .get(&request_id)
+        .expect("the corrective round produced a real delegation");
+    assert_eq!(delegation.title, "Guanaco fiber notes");
+}
+
+/// Said twice, it is not shipped: the runtime answers instead, and the
+/// fabricated id is nowhere in what the turn returns — which is verbatim what
+/// `GatewayPersistence::persist_assistant_message` writes as the row.
+#[tokio::test]
+async fn a_twice_fabricated_delegation_ends_on_the_runtime_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let (orch, requests) = scripted_turn_orchestrator(
+        vec![
+            ScriptStep::Say(FABRICATED),
+            ScriptStep::Say(
+                "It is running — task id 9f4c2b71 — and I will report back when it finishes.",
+            ),
+        ],
+        db,
+    );
+
+    let request_id = Uuid::new_v4();
+    let reply = send_tool_mode(
+        &orch,
+        request_id,
+        "Start a workflow that writes a two-sentence markdown artifact about guanacos",
+    )
+    .await;
+
+    assert_eq!(reply, GUARD_LINE);
+    assert!(
+        !reply.contains("9f4c2b71"),
+        "the fabricated id must not survive into the turn's content"
+    );
+    assert!(
+        !reply.contains("Guanaco"),
+        "nor the title of the run that does not exist"
+    );
+    assert!(
+        orch.delegation_map.get(&request_id).is_none(),
+        "no delegation was recorded, because none happened"
+    );
+    assert_eq!(orch.shared_context.task_registry.count(), 0);
+
+    // Exactly one corrective round — the guard never loops.
+    assert_eq!(requests.lock().unwrap().len(), 2);
+}
+
+/// A turn that really delegated may say so, id and all: the guard reads the
+/// `start_workflow` result cell, not the prose.
+#[tokio::test]
+async fn a_truthful_delegation_is_shipped_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let (orch, requests) = scripted_turn_orchestrator(
+        vec![
+            ScriptStep::Call(
+                "start_workflow",
+                serde_json::json!({"goal": "Research guanaco fibre", "title": "Guanaco fibre"}),
+            ),
+            ScriptStep::Say("Started \"Guanaco fibre\" (task id: 9f4c2b71) — keep chatting."),
+        ],
+        db,
+    );
+
+    let request_id = Uuid::new_v4();
+    let reply = send_tool_mode(&orch, request_id, "Research guanaco fibre for me").await;
+
+    assert_eq!(
+        reply,
+        "Started \"Guanaco fibre\" (task id: 9f4c2b71) — keep chatting."
+    );
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        2,
+        "the tool round and the answer — no corrective round"
+    );
+    assert!(orch.delegation_map.get(&request_id).is_some());
+}
+
+/// Quoting a run that exists on this lane is ordinary conversation, whether
+/// the model writes the whole id or the short form a client prints.
+#[tokio::test]
+async fn quoting_an_existing_run_on_this_lane_is_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let repo = openalpaca_storage::repository::TaskRepository::new(&db);
+    let mut task = make_test_task();
+    task.id = "aabbccdd-1111-2222-3333-444455556666".to_string();
+    task.source_lane = "user1:cli".to_string();
+    repo.create(&task).unwrap();
+
+    let (orch, requests) = scripted_turn_orchestrator(
+        vec![ScriptStep::Say(
+            "That was run aabbccdd (task id: aabbccdd-1111-2222-3333-444455556666) — it finished.",
+        )],
+        db,
+    );
+
+    let reply = send_tool_mode(
+        &orch,
+        Uuid::new_v4(),
+        "Which run wrote the guanaco notes again?",
+    )
+    .await;
+
+    assert_eq!(
+        reply,
+        "That was run aabbccdd (task id: aabbccdd-1111-2222-3333-444455556666) — it finished."
+    );
+    assert_eq!(requests.lock().unwrap().len(), 1, "no corrective round");
+}
+
+/// A run that exists on *another* lane is not this lane's to claim.
+#[tokio::test]
+async fn a_run_on_another_lane_does_not_excuse_the_claim() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let repo = openalpaca_storage::repository::TaskRepository::new(&db);
+    let mut task = make_test_task();
+    task.id = "aabbccdd-1111-2222-3333-444455556666".to_string();
+    task.source_lane = "user2:telegram".to_string();
+    repo.create(&task).unwrap();
+
+    let claim = "Started it (task id: aabbccdd-1111-2222-3333-444455556666).";
+    let (orch, requests) = scripted_turn_orchestrator(
+        vec![ScriptStep::Say(claim), ScriptStep::Say(claim)],
+        db,
+    );
+
+    let reply = send_tool_mode(&orch, Uuid::new_v4(), "Kick off the guanaco write-up").await;
+    assert_eq!(reply, GUARD_LINE);
+    assert_eq!(requests.lock().unwrap().len(), 2);
+}
+
+/// An ordinary answer that states no id costs nothing: one call, no
+/// correction, and the guard never reaches the database.
+#[tokio::test]
+async fn an_answer_that_states_no_id_is_never_reviewed_twice() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let (orch, requests) = scripted_turn_orchestrator(
+        vec![ScriptStep::Say(
+            "A guanaco's fibre is finer than a llama's, at about 16 microns.",
+        )],
+        db,
+    );
+
+    let reply = send_tool_mode(&orch, Uuid::new_v4(), "How fine is guanaco fibre?").await;
+    assert_eq!(
+        reply,
+        "A guanaco's fibre is finer than a llama's, at about 16 microns."
+    );
+    assert_eq!(requests.lock().unwrap().len(), 1);
 }

@@ -684,3 +684,55 @@ fn titles_for_chunks_past_the_in_limit() {
     assert_eq!(titles.get("t00000").map(String::as_str), Some("Run 0"));
     assert_eq!(titles.get("t01199").map(String::as_str), Some("Run 1199"));
 }
+
+// ── H3: does a stated id belong to a run on this lane? ──────────────
+
+#[test]
+fn a_lane_id_prefix_matches_the_short_form_and_the_whole_id() {
+    let db = setup_db();
+    let repo = TaskRepository::new(&db);
+
+    let mut task = make_task("9f4c2b71-1bc2-4a3d-8e55-0c1d2e3f4a5b", "Guanaco fibre");
+    task.source_lane = "user1:cli".to_string();
+    repo.create(&task).unwrap();
+
+    // The whole id, the short form a client prints, and mixed case.
+    for stated in [
+        "9f4c2b71-1bc2-4a3d-8e55-0c1d2e3f4a5b",
+        "9f4c2b71",
+        "9F4C2B71",
+    ] {
+        assert!(
+            repo.lane_has_task_id_prefix("user1:cli", stated).unwrap(),
+            "{stated} names this lane's run"
+        );
+    }
+
+    // An id nothing answers to, an id on another lane, and an empty prefix.
+    assert!(!repo.lane_has_task_id_prefix("user1:cli", "aabbccdd").unwrap());
+    assert!(
+        !repo
+            .lane_has_task_id_prefix("user2:telegram", "9f4c2b71")
+            .unwrap()
+    );
+    assert!(!repo.lane_has_task_id_prefix("user1:cli", "").unwrap());
+}
+
+/// A prefix is matched literally: a caller cannot turn a fabricated id into a
+/// wildcard that says every run is real.
+#[test]
+fn a_lane_id_prefix_is_never_a_wildcard() {
+    let db = setup_db();
+    let repo = TaskRepository::new(&db);
+
+    let mut task = make_task("9f4c2b71-1bc2-4a3d-8e55-0c1d2e3f4a5b", "Guanaco fibre");
+    task.source_lane = "user1:cli".to_string();
+    repo.create(&task).unwrap();
+
+    for wildcard in ["%", "9f4c2b71%aaaa", "_________", "\\"] {
+        assert!(
+            !repo.lane_has_task_id_prefix("user1:cli", wildcard).unwrap(),
+            "{wildcard} must match nothing"
+        );
+    }
+}

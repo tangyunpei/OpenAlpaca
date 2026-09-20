@@ -3675,3 +3675,165 @@ async fn the_loop_records_the_last_tool_error() {
         "and with the message intact: {shown}"
     );
 }
+
+// ── H3: the loop's answer-guard policy ──────────────────────────────
+
+/// A guard that objects to every answer containing `reject`, and remembers
+/// each answer it was shown.
+struct CountingGuard {
+    reject: &'static str,
+    seen: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl AnswerGuard for CountingGuard {
+    fn review(&self, answer: &str) -> Option<Correction> {
+        self.seen
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(answer.to_string());
+        answer.contains(self.reject).then(|| Correction {
+            note: "say it properly".to_string(),
+            replacement: "the runtime line".to_string(),
+        })
+    }
+}
+
+/// One objection buys one more round, and an answer the guard accepts is the
+/// turn's answer.
+#[tokio::test]
+async fn the_answer_guard_spends_one_round_and_then_accepts() {
+    let provider = MockProvider::new(vec![
+        Ok(MockProvider::simple_response("a false claim")),
+        Ok(MockProvider::simple_response("the honest answer")),
+    ]);
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let config = LoopConfig {
+        max_rounds: 2,
+        answer_guard: Some(Arc::new(CountingGuard {
+            reject: "false",
+            seen: seen.clone(),
+        })),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop(
+        &provider,
+        vec![ChatMessage::user("start something")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+    assert_eq!(result.final_content, "the honest answer");
+    assert_eq!(result.rounds_used, 2);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec!["a false claim".to_string(), "the honest answer".to_string()]
+    );
+}
+
+/// Said twice, the guard's own line is the turn's content — and the loop never
+/// asks a third time.
+#[tokio::test]
+async fn the_answer_guard_replaces_a_repeated_claim_and_stops() {
+    let provider = MockProvider::new(vec![Ok(MockProvider::simple_response("a false claim"))]);
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let config = LoopConfig {
+        max_rounds: 2,
+        answer_guard: Some(Arc::new(CountingGuard {
+            reject: "false",
+            seen: seen.clone(),
+        })),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop(
+        &provider,
+        vec![ChatMessage::user("start something")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert_eq!(result.finish_reason, LoopFinishReason::Complete);
+    assert_eq!(result.final_content, "the runtime line");
+    assert_eq!(seen.lock().unwrap().len(), 2, "reviewed exactly twice");
+}
+
+/// The corrective round is paid for by a bonus, not out of the turn's budget:
+/// a guard that objects on the last affordable round still gets its round, and
+/// the turn still ends with content rather than `MaxRounds` and nothing.
+#[tokio::test]
+async fn the_corrective_round_does_not_cost_the_turn_its_answer() {
+    let provider = MockProvider::new(vec![
+        Ok(MockProvider::simple_response("a false claim")),
+        Ok(MockProvider::simple_response("the honest answer")),
+    ]);
+    let config = LoopConfig {
+        // One round is all the turn could otherwise afford.
+        max_rounds: 1,
+        answer_guard: Some(Arc::new(CountingGuard {
+            reject: "false",
+            seen: Arc::new(std::sync::Mutex::new(Vec::new())),
+        })),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop(
+        &provider,
+        vec![ChatMessage::user("start something")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert_eq!(result.final_content, "the honest answer");
+    assert_eq!(result.rounds_used, 2);
+}
+
+/// No guard, no branch: the loop behaves exactly as it did for every caller
+/// that configures none.
+#[tokio::test]
+async fn a_loop_without_a_guard_ships_whatever_the_model_said() {
+    let provider = MockProvider::new(vec![Ok(MockProvider::simple_response("a false claim"))]);
+    let config = LoopConfig {
+        max_rounds: 2,
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop(
+        &provider,
+        vec![ChatMessage::user("start something")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert_eq!(result.final_content, "a false claim");
+    assert_eq!(result.rounds_used, 1);
+}

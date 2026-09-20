@@ -1,5 +1,6 @@
 use crate::agent::subagent::AgentConstraints;
 use crate::bus::EventBus;
+use crate::runner::agentic_loop::AnswerGuard;
 use crate::runner::steering::SteeringInbox;
 use crate::session_log::SessionLogHandle;
 use crate::security::capabilities::CapabilityManager;
@@ -84,6 +85,15 @@ pub struct LoopConfig {
     /// nowhere to spill, so the same number is the head-only cut instead —
     /// one threshold, never two.
     pub tool_result_inline_bytes: usize,
+    /// H3 — the last look at the answer before the loop returns `Complete`.
+    ///
+    /// `Some` only on the Routing V2 main loop, whose guard refuses an answer
+    /// that claims a run this turn never started. The loop grants the guard
+    /// exactly one corrective round and then ships the guard's own
+    /// replacement line rather than the claim. `None` (every other caller:
+    /// the lead, subagents, skills, compaction) reviews nothing and costs
+    /// nothing.
+    pub answer_guard: Option<Arc<dyn AnswerGuard>>,
 }
 
 impl Clone for LoopConfig {
@@ -111,6 +121,7 @@ impl Clone for LoopConfig {
             session_log: self.session_log.clone(),
             span_id: self.span_id.clone(),
             tool_result_inline_bytes: self.tool_result_inline_bytes,
+            answer_guard: self.answer_guard.clone(),
         }
     }
 }
@@ -139,6 +150,7 @@ impl std::fmt::Debug for LoopConfig {
             .field("session_log", &self.session_log.is_some())
             .field("span_id", &self.span_id)
             .field("tool_result_inline_bytes", &self.tool_result_inline_bytes)
+            .field("answer_guard", &self.answer_guard.is_some())
             .finish()
     }
 }
@@ -168,6 +180,7 @@ impl Default for LoopConfig {
             session_log: None,
             span_id: None,
             tool_result_inline_bytes: super::tool_helpers::MAX_TOOL_RESULT_SIZE,
+            answer_guard: None,
         }
     }
 }
@@ -237,6 +250,7 @@ impl LoopConfig {
             session_log: None,
             span_id: None,
             tool_result_inline_bytes: super::tool_helpers::MAX_TOOL_RESULT_SIZE,
+            answer_guard: None,
         }
     }
 

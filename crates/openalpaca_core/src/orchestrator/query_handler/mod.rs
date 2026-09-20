@@ -42,6 +42,7 @@ pub(super) enum LoopOverrides {
     },
 }
 
+mod run_claim_guard;
 mod simple_query_handler;
 mod unprocessed_steering;
 mod workflow_context;

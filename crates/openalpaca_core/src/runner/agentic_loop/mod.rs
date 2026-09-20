@@ -1,3 +1,4 @@
+mod answer_guard;
 mod backend;
 mod cost;
 
@@ -7,6 +8,7 @@ mod context;
 mod tool_helpers;
 
 // Public API (unchanged from before the split)
+pub use answer_guard::{AnswerGuard, Correction};
 pub use config::{LoopConfig, LoopFinishReason, LoopResult, StreamCallback};
 
 // Internal re-exports so the core loop and tests can access submodule items
@@ -446,6 +448,12 @@ async fn run_agentic_loop_core(
     // them, so budget exits can re-append unsent messages to the inbox for
     // follow-up conversion.
     let mut steering_bonus_rounds: usize = 0;
+    // H3 — the one corrective round the answer guard may spend, and the bonus
+    // that pays for it. Without the bonus a turn that fabricates a run on its
+    // last affordable round would exit `MaxRounds` with no content at all,
+    // trading a false answer for no answer.
+    let mut guard_corrections: usize = 0;
+    let mut guard_bonus_rounds: usize = 0;
     // P-14: what this run's compactions have taken out of its context so far,
     // in tokens. Cumulative across every compaction the loop performs, which
     // is what makes a later `compaction` record readable on its own.
@@ -510,7 +518,7 @@ async fn run_agentic_loop_core(
         // Steering drains extend the budget by STEERING_ROUNDS_BONUS each,
         // capped at 2× max_rounds. With no steering the bonus is 0 and this
         // is exactly `state.rounds >= config.max_rounds`.
-        let effective_max_rounds = (config.max_rounds + steering_bonus_rounds)
+        let effective_max_rounds = (config.max_rounds + steering_bonus_rounds + guard_bonus_rounds)
             .min(config.max_rounds.saturating_mul(2));
         {
             let _span = tracing::info_span!(
@@ -1298,6 +1306,48 @@ async fn run_agentic_loop_core(
                         pending_steering.extend(drained);
                         continue;
                     }
+                }
+
+                // ── Answer guard (H3) ──────────────────────────────
+                // The last look before this text becomes the turn's answer.
+                // The guard owns the judgement; the loop owns the policy —
+                // exactly one corrective round, then the guard's own line
+                // instead of the claim. A loop with no guard (everything but
+                // the main loop) does not even branch.
+                if let Some(ref guard) = config.answer_guard
+                    && let Some(correction) = guard.review(&response.content)
+                {
+                    if guard_corrections == 0 {
+                        guard_corrections += 1;
+                        guard_bonus_rounds = 1;
+                        persist_span.in_scope(|| {
+                            tracing::warn!(
+                                agent_id = agent_id,
+                                round = state.rounds,
+                                "Answer guard rejected the turn's answer; granting one corrective round"
+                            );
+                        });
+                        Arc::make_mut(&mut messages)
+                            .push(ChatMessage::assistant(&response.content));
+                        Arc::make_mut(&mut messages)
+                            .push(ChatMessage::user(&correction.note));
+                        continue;
+                    }
+                    // Said again after being told. The runtime answers in the
+                    // model's place rather than shipping the claim; this
+                    // content is what is persisted, what `done` carries, and
+                    // what a reconciling client ends on.
+                    persist_span.in_scope(|| {
+                        tracing::warn!(
+                            agent_id = agent_id,
+                            round = state.rounds,
+                            "Answer guard rejected the corrected answer too; replacing it"
+                        );
+                    });
+                    return state.result_with_content(
+                        correction.replacement,
+                        LoopFinishReason::Complete,
+                    );
                 }
 
                 // No tool calls → done

@@ -337,9 +337,23 @@ impl Orchestrator {
                 // waiting when the client said it cannot answer.
                 unattended,
             });
+            // H3 — the main loop's last look at its own answer. Built only
+            // here: the guard needs the turn's `start_workflow` cell to know
+            // whether a run was really started, and the lane to know whether a
+            // stated id belongs to one. Every other loop leaves it `None`.
+            let answer_guard: Option<Arc<dyn crate::runner::AnswerGuard>> = main_loop_set
+                .as_ref()
+                .map(|set| {
+                    Arc::new(super::run_claim_guard::RunClaimGuard::new(
+                        set.start_workflow.clone(),
+                        self.db.clone(),
+                        lane_key,
+                    )) as Arc<dyn crate::runner::AnswerGuard>
+                });
             config_for_loop = LoopConfig {
                 max_rounds: override_max_rounds.unwrap_or(4),
                 max_tools_per_round: override_max_tools.unwrap_or(2),
+                answer_guard,
                 initial_tool_choice: resolve_send_tool_choice(
                     tool_defs.iter().any(|d| d.name == "send"),
                 ),

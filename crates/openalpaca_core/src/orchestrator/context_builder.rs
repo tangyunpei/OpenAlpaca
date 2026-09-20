@@ -2,6 +2,26 @@ use super::{ConversationContext, Orchestrator};
 use openalpaca_llm::{ChatMessage, ContentPart};
 use openalpaca_storage::ConversationRepository;
 
+/// H1 — the one line that says where a replayed delegation came from.
+///
+/// A turn that delegated stores its assistant row carrying the run's id
+/// (GAP-23, `gateway/persistence.rs`). Replayed as bare prose, "Started a
+/// background workflow called … (task id: …)" is just a sentence the model can
+/// imitate — and a local model did, in a turn that called no tool at all. The
+/// line is appended to the **replayed copy only**: the stored row, the
+/// transcript and everything the user sees are untouched, and an ordinary
+/// assistant row gets nothing.
+///
+/// Deterministic and fixed: one line, no timestamps, no counts, so a cache
+/// keyed on the lane tip still sees byte-identical history for the same rows.
+/// One recent row on its way to becoming a [`ChatMessage`]: `(id, role,
+/// content, content_json, task_id)`.
+type RecentRow = (i64, String, String, Option<String>, Option<String>);
+
+pub(super) fn delegation_provenance_line(task_id: &str) -> String {
+    format!("[This run was started by a start_workflow tool call, which returned task {task_id}.]")
+}
+
 impl Orchestrator {
     /// Build the full conversation context for a turn: loads history, deduplicates
     /// the current user message (Bug A fix, D6), loads unsummarized older messages
@@ -49,7 +69,9 @@ impl Orchestrator {
 
         // Step 3: Build canonical list and dedup current query
         // Include content_json for multimodal message reconstruction
-        let mut chat_rows: Vec<(i64, String, String, Option<String>)> = raw_messages
+        // `task_id` rides along (H1): an assistant row that carries one was the
+        // turn that started a workflow, and the replay says so.
+        let mut chat_rows: Vec<RecentRow> = raw_messages
             .iter()
             .filter(|msg| {
                 (msg.role == "user" || msg.role == "assistant")
@@ -61,6 +83,7 @@ impl Orchestrator {
                     msg.role.clone(),
                     msg.content.clone(),
                     msg.content_json.clone(),
+                    msg.task_id.clone(),
                 )
             })
             .collect();
@@ -68,7 +91,7 @@ impl Orchestrator {
         // Dedup (D6) — if the last row matches current_query, drop it (Bug A fix).
         let should_dedup = chat_rows
             .last()
-            .map(|(_, role, content, _)| role == "user" && content == current_query)
+            .map(|(_, role, content, _, _)| role == "user" && content == current_query)
             .unwrap_or(false);
         if should_dedup {
             tracing::debug!("Dedup: dropping duplicate user message from recent window");
@@ -78,7 +101,7 @@ impl Orchestrator {
         // Step 4: Get first_recent_id for the ID-range query
         let first_recent_id = chat_rows
             .first()
-            .map(|(id, _, _, _)| *id)
+            .map(|(id, _, _, _, _)| *id)
             .unwrap_or(i64::MAX);
 
         // Step 5: Load unsummarized older messages via ID-range query (fixes 120-window bug)
@@ -108,10 +131,19 @@ impl Orchestrator {
         // Step 6: Convert recent chat_rows to ChatMessage, restoring multimodal parts
         let recent_messages: Vec<ChatMessage> = chat_rows
             .iter()
-            .map(|(_, role, content, content_json)| {
+            .map(|(_, role, content, content_json, task_id)| {
                 let mut msg = match role.as_str() {
                     "user" => ChatMessage::user(content),
-                    _ => ChatMessage::assistant(content),
+                    // H1 — a delegating assistant row replays with its
+                    // provenance. Only this branch: a user row's `task_id`
+                    // (there is none today) would be somebody else's fact.
+                    _ => match task_id.as_deref().filter(|id| !id.is_empty()) {
+                        Some(id) => ChatMessage::assistant(&format!(
+                            "{content}\n{}",
+                            delegation_provenance_line(id)
+                        )),
+                        None => ChatMessage::assistant(content),
+                    },
                 };
                 // Reconstruct parts from content_json when present
                 if let Some(json_str) = content_json
