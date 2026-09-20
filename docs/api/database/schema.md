@@ -128,25 +128,6 @@ task_id TEXT
 session_id TEXT
 ```
 
-### `conversations` (table)
-
-Source migration: `014_conversation_summary.sql`
-
-```sql
-id TEXT PRIMARY KEY
-lane_key TEXT NOT NULL UNIQUE
-source TEXT NOT NULL
-title TEXT DEFAULT ''
-message_count INTEGER DEFAULT 0
-last_message_at TEXT
-created_at TEXT NOT NULL DEFAULT (datetime('now'))
-updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-summary TEXT NOT NULL DEFAULT ''
-summary_version INTEGER NOT NULL DEFAULT 0
-last_summarized_message_id INTEGER NOT NULL DEFAULT 0
-summary_updated_at TEXT
-```
-
 ### `discovered_models` (table)
 
 Source migration: `010_discovered_models.sql`
@@ -163,7 +144,7 @@ PRIMARY KEY (model_id)
 
 ### `dispatch_decisions` (table)
 
-Source migration: `025_dispatch_decision_error_message.sql`
+Source migration: `035_drop_planner_telemetry.sql`
 
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT
@@ -174,7 +155,6 @@ reason TEXT NOT NULL
 agent_count INTEGER DEFAULT 0
 dag_node_count INTEGER
 predictability_score REAL
-planner_requested_mode TEXT
 timestamp TEXT DEFAULT (datetime('now'))
 error_message TEXT
 ```
@@ -359,14 +339,12 @@ FOREIGN KEY (message_id) REFERENCES conversation_messages(id) ON DELETE CASCADE
 
 ### `orchestrator_latency` (table)
 
-Source migration: `022_orchestrator_latency.sql`
+Source migration: `035_drop_planner_telemetry.sql`
 
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT
 request_id TEXT NOT NULL
 mode TEXT NOT NULL
-planner_ms INTEGER DEFAULT 0
-dispatch_ms INTEGER DEFAULT 0
 ack_ms INTEGER DEFAULT 0
 fallback_reason TEXT
 auto_promotion_reason TEXT
@@ -547,7 +525,6 @@ result_ref TEXT
 
 | Name | Table | Kind | Columns/Expr | Source |
 |---|---|---|---|---|
-| `idx_agent_status` | `agent` | `INDEX` | `status` | `007_subagents.sql` |
 | `idx_agent_task_history` | `agent_task_history` | `INDEX` | `agent_id, completed_at DESC` | `007_subagents.sql` |
 | `idx_artifact_versions_artifact` | `artifact_versions` | `INDEX` | `artifact_id, version DESC` | `036_artifact_store.sql` |
 | `idx_conversation_map_provider` | `conversation_map` | `INDEX` | `provider, provider_conversation_id` | `003_identity.sql` |
@@ -557,8 +534,6 @@ result_ref TEXT
 | `idx_conv_msg_lane_id` | `conversation_messages` | `INDEX` | `lane_key, id` | `014_conversation_summary.sql` |
 | `idx_conv_msg_session` | `conversation_messages` | `INDEX` | `session_id, id` | `039_sessions.sql` |
 | `idx_conv_msg_task` | `conversation_messages` | `INDEX` | `task_id` | `038_message_run_links.sql` |
-| `idx_conversations_source` | `conversations` | `INDEX` | `source` | `011_unified_conversations.sql` |
-| `idx_conversations_updated` | `conversations` | `INDEX` | `updated_at DESC` | `011_unified_conversations.sql` |
 | `idx_discovered_models_provider` | `discovered_models` | `INDEX` | `provider` | `010_discovered_models.sql` |
 | `idx_dd_mode` | `dispatch_decisions` | `INDEX` | `mode, timestamp DESC` | `024_dispatch_decision_request_id.sql` |
 | `idx_dd_request` | `dispatch_decisions` | `INDEX` | `request_id` | `024_dispatch_decision_request_id.sql` |
@@ -579,7 +554,6 @@ result_ref TEXT
 | `idx_llm_call_log_agent` | `llm_call_log` | `INDEX` | `agent_id, timestamp DESC` | `008_llm_usage.sql` |
 | `idx_llm_call_log_task` | `llm_call_log` | `INDEX` | `task_id, timestamp DESC` | `008_llm_usage.sql` |
 | `idx_llm_call_log_timestamp` | `llm_call_log` | `INDEX` | `timestamp` | `040_llm_call_log_timestamp_index.sql` |
-| `idx_memory_agent` | `memory` | `INDEX` | `agent_id` | `001_init.sql` |
 | `idx_memory_content_hash` | `memory` | `UNIQUE` | `owner_id, scope, scope_id, content_hash` | `026_memory_scope_dedup.sql` |
 | `idx_memory_decay` | `memory` | `INDEX` | `owner_id, kind, last_accessed_at` | `018_memory_lifecycle.sql` |
 | `idx_memory_importance` | `memory` | `INDEX` | `owner_id, importance` | `018_memory_lifecycle.sql` |
@@ -588,7 +562,6 @@ result_ref TEXT
 | `idx_memory_owner_kind` | `memory` | `INDEX` | `owner_id, kind` | `015_memory_v2.sql` |
 | `idx_memory_owner_scope` | `memory` | `INDEX` | `owner_id, scope, scope_id` | `015_memory_v2.sql` |
 | `idx_memory_supersedes` | `memory` | `INDEX` | `supersedes_id` | `018_memory_lifecycle.sql` |
-| `idx_memory_timestamp` | `memory` | `INDEX` | `timestamp` | `001_init.sql` |
 | `idx_mf_feedback` | `message_feedback` | `INDEX` | `feedback` | `031_message_feedback.sql` |
 | `idx_orch_latency_mode` | `orchestrator_latency` | `INDEX` | `mode, timestamp DESC` | `022_orchestrator_latency.sql` |
 | `idx_orch_latency_ts` | `orchestrator_latency` | `INDEX` | `timestamp DESC` | `022_orchestrator_latency.sql` |
