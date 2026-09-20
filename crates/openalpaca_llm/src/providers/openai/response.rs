@@ -8,11 +8,17 @@ use crate::types::*;
 /// Reading only the first name dropped every thinking token a local model
 /// produced, so a thinking model showed dead air where the indicator belongs
 /// (M1). Both names are accepted, `reasoning_content` first.
+///
+/// Emptiness is decided **per key**, inside the closure: a gateway that always
+/// emits `reasoning_content` — empty when it has nothing of its own — while
+/// passing the vendor's `reasoning` through beside it used to short-circuit on
+/// the empty first name and return `None`, because `find_map` stops at the
+/// first `Some` and the filter then ran once on that already-chosen value
+/// (F7). A present-but-empty name is now skipped, not matched.
 pub(crate) fn reasoning_text(message: &serde_json::Value) -> Option<String> {
     ["reasoning_content", "reasoning"]
         .iter()
-        .find_map(|name| message[*name].as_str())
-        .filter(|s| !s.is_empty())
+        .find_map(|name| message[*name].as_str().filter(|s| !s.is_empty()))
         .map(|s| s.to_string())
 }
 
