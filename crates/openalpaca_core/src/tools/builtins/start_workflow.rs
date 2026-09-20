@@ -116,17 +116,7 @@ impl BuiltInTool for StartWorkflowTool {
         }
 
         // 2. Dispatch the lead-agent workflow (detached background execution).
-        let created_by = match &ctx.principal {
-            Some(crate::security::policy::Principal::System) => "system".to_string(),
-            Some(crate::security::policy::Principal::User { global_id }) => global_id.clone(),
-            Some(crate::security::policy::Principal::External { provider, id }) => {
-                format!("{}:{}", provider, id)
-            }
-            None => ctx
-                .owner_id
-                .clone()
-                .unwrap_or_else(|| "system".to_string()),
-        };
+        let created_by = ctx.created_by();
         let source = ctx.source.as_deref().unwrap_or("internal");
         let outcome = self.task_dispatcher.dispatch_lead_agent(
             goal,

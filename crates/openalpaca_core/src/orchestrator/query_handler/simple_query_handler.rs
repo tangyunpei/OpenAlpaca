@@ -339,8 +339,10 @@ impl Orchestrator {
             });
             // H3 — the main loop's last look at its own answer. Built only
             // here: the guard needs the turn's `start_workflow` cell to know
-            // whether a run was really started, and the lane to know whether a
-            // stated id belongs to one. Every other loop leaves it `None`.
+            // whether a run was really started, and this turn's owner to know
+            // whether a stated id belongs to one of theirs (J1 — the same
+            // identity `start_workflow` stamps and `task_status` reads, not
+            // the lane). Every other loop leaves it `None`.
             let answer_guard: Option<Arc<dyn crate::runner::AnswerGuard>> = main_loop_set
                 .as_ref()
                 .map(|set| {
@@ -348,6 +350,7 @@ impl Orchestrator {
                         set.start_workflow.clone(),
                         self.db.clone(),
                         lane_key,
+                        &tool_ctx.created_by(),
                     )) as Arc<dyn crate::runner::AnswerGuard>
                 });
             config_for_loop = LoopConfig {

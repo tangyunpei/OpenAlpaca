@@ -685,10 +685,10 @@ fn titles_for_chunks_past_the_in_limit() {
     assert_eq!(titles.get("t01199").map(String::as_str), Some("Run 1199"));
 }
 
-// ── H3: does a stated id belong to a run on this lane? ──────────────
+// ── H3/J1: does a stated id belong to a run of this owner? ──────────
 
 #[test]
-fn a_lane_id_prefix_matches_the_short_form_and_the_whole_id() {
+fn an_owner_id_prefix_matches_the_short_form_and_the_whole_id() {
     let db = setup_db();
     let repo = TaskRepository::new(&db);
 
@@ -703,25 +703,43 @@ fn a_lane_id_prefix_matches_the_short_form_and_the_whole_id() {
         "9F4C2B71",
     ] {
         assert!(
-            repo.lane_has_task_id_prefix("user1:cli", stated).unwrap(),
-            "{stated} names this lane's run"
+            repo.owner_has_task_id_prefix("user1", stated).unwrap(),
+            "{stated} names this owner's run"
         );
     }
 
-    // An id nothing answers to, an id on another lane, and an empty prefix.
-    assert!(!repo.lane_has_task_id_prefix("user1:cli", "aabbccdd").unwrap());
-    assert!(
-        !repo
-            .lane_has_task_id_prefix("user2:telegram", "9f4c2b71")
-            .unwrap()
-    );
-    assert!(!repo.lane_has_task_id_prefix("user1:cli", "").unwrap());
+    // An id nothing answers to, an id of another owner, and an empty prefix.
+    assert!(!repo.owner_has_task_id_prefix("user1", "aabbccdd").unwrap());
+    assert!(!repo.owner_has_task_id_prefix("user2", "9f4c2b71").unwrap());
+    assert!(!repo.owner_has_task_id_prefix("user1", "").unwrap());
+}
+
+/// J1 — the run is the owner's whichever lane started it: `task_status`
+/// answers about all of them, so a relay of one into another lane is true.
+#[test]
+fn an_owner_id_prefix_ignores_the_lane_that_started_the_run() {
+    let db = setup_db();
+    let repo = TaskRepository::new(&db);
+
+    let mut mine = make_task("9f4c2b71-1bc2-4a3d-8e55-0c1d2e3f4a5b", "Guanaco fibre");
+    mine.source_lane = "user1:cli".to_string();
+    repo.create(&mine).unwrap();
+
+    let mut theirs = make_task("aabbccdd-1111-2222-3333-444455556666", "Someone else's");
+    theirs.created_by = "user2".to_string();
+    theirs.source_lane = "user1:cli".to_string();
+    repo.create(&theirs).unwrap();
+
+    // Started on the CLI lane, asked about from the GUI lane: still real.
+    assert!(repo.owner_has_task_id_prefix("user1", "9f4c2b71").unwrap());
+    // Another owner's run, even one that shares this lane, is not mine.
+    assert!(!repo.owner_has_task_id_prefix("user1", "aabbccdd").unwrap());
 }
 
 /// A prefix is matched literally: a caller cannot turn a fabricated id into a
 /// wildcard that says every run is real.
 #[test]
-fn a_lane_id_prefix_is_never_a_wildcard() {
+fn an_owner_id_prefix_is_never_a_wildcard() {
     let db = setup_db();
     let repo = TaskRepository::new(&db);
 
@@ -731,7 +749,7 @@ fn a_lane_id_prefix_is_never_a_wildcard() {
 
     for wildcard in ["%", "9f4c2b71%aaaa", "_________", "\\"] {
         assert!(
-            !repo.lane_has_task_id_prefix("user1:cli", wildcard).unwrap(),
+            !repo.owner_has_task_id_prefix("user1", wildcard).unwrap(),
             "{wildcard} must match nothing"
         );
     }

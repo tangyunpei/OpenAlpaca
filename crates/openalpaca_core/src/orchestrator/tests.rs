@@ -6598,8 +6598,10 @@ async fn a_twice_fabricated_delegation_ends_on_the_runtime_line() {
     let (orch, requests) = scripted_turn_orchestrator(
         vec![
             ScriptStep::Say(FABRICATED),
+            // Said again, and again as a *start* (J2: a bare status relay
+            // claims nothing and is not reviewed at all).
             ScriptStep::Say(
-                "It is running — task id 9f4c2b71 — and I will report back when it finishes.",
+                "I've queued it — task id 9f4c2b71 — and I will report back when it finishes.",
             ),
         ],
         db,
@@ -6664,24 +6666,22 @@ async fn a_truthful_delegation_is_shipped_untouched() {
     assert!(orch.delegation_map.get(&request_id).is_some());
 }
 
-/// Quoting a run that exists on this lane is ordinary conversation, whether
-/// the model writes the whole id or the short form a client prints.
+/// Quoting a run that exists is ordinary conversation, whether the model
+/// writes the whole id or the short form a client prints.
 #[tokio::test]
-async fn quoting_an_existing_run_on_this_lane_is_untouched() {
+async fn quoting_an_existing_run_of_this_owner_is_untouched() {
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
     let repo = openalpaca_storage::repository::TaskRepository::new(&db);
     let mut task = make_test_task();
     task.id = "aabbccdd-1111-2222-3333-444455556666".to_string();
+    task.created_by = "user1".to_string();
     task.source_lane = "user1:cli".to_string();
     repo.create(&task).unwrap();
 
-    let (orch, requests) = scripted_turn_orchestrator(
-        vec![ScriptStep::Say(
-            "That was run aabbccdd (task id: aabbccdd-1111-2222-3333-444455556666) — it finished.",
-        )],
-        db,
-    );
+    let answer = "Started it earlier (task id: aabbccdd-1111-2222-3333-444455556666) \
+                  and it has already finished.";
+    let (orch, requests) = scripted_turn_orchestrator(vec![ScriptStep::Say(answer)], db);
 
     let reply = send_tool_mode(
         &orch,
@@ -6690,22 +6690,71 @@ async fn quoting_an_existing_run_on_this_lane_is_untouched() {
     )
     .await;
 
-    assert_eq!(
-        reply,
-        "That was run aabbccdd (task id: aabbccdd-1111-2222-3333-444455556666) — it finished."
-    );
+    assert_eq!(reply, answer);
     assert_eq!(requests.lock().unwrap().len(), 1, "no corrective round");
 }
 
-/// A run that exists on *another* lane is not this lane's to claim.
+/// J1 — a real task is real whichever lane started it. `task_status` answers
+/// about every run this owner started, so relaying one the CLI lane started
+/// into this lane is true: bare, and after a real `task_status` call.
 #[tokio::test]
-async fn a_run_on_another_lane_does_not_excuse_the_claim() {
+async fn a_run_of_this_owner_on_another_lane_is_not_a_fabrication() {
+    const ID: &str = "aabbccdd-1111-2222-3333-444455556666";
+
+    for script in [
+        // A bare quote, phrased as the start it was.
+        vec![ScriptStep::Say(
+            "Started it on the CLI earlier (task id: aabbccdd-1111-2222-3333-444455556666).",
+        )],
+        // And the same claim after the tool that answers about it.
+        vec![
+            ScriptStep::Call(
+                "task_status",
+                serde_json::json!({ "task_id": ID }),
+            ),
+            ScriptStep::Say(
+                "Started it on the CLI earlier (task id: aabbccdd-1111-2222-3333-444455556666).",
+            ),
+        ],
+    ] {
+        let expected_calls = script.len();
+        let dir = tempfile::tempdir().unwrap();
+        let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+        let repo = openalpaca_storage::repository::TaskRepository::new(&db);
+        let mut task = make_test_task();
+        task.id = ID.to_string();
+        task.created_by = "user1".to_string();
+        // Started by the CLI lane; this turn arrives on another one.
+        task.source_lane = "user1:gui".to_string();
+        repo.create(&task).unwrap();
+
+        let (orch, requests) = scripted_turn_orchestrator(script, db);
+        let reply = send_tool_mode(&orch, Uuid::new_v4(), "What happened to the guanaco run?").await;
+
+        assert_eq!(
+            reply,
+            "Started it on the CLI earlier (task id: aabbccdd-1111-2222-3333-444455556666).",
+            "the owner's own run, relayed from another lane, was called a fabrication"
+        );
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            expected_calls,
+            "no corrective round"
+        );
+    }
+}
+
+/// A run that belongs to *somebody else* is not this owner's to claim, even
+/// when it shares the lane.
+#[tokio::test]
+async fn a_run_of_another_owner_does_not_excuse_the_claim() {
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
     let repo = openalpaca_storage::repository::TaskRepository::new(&db);
     let mut task = make_test_task();
     task.id = "aabbccdd-1111-2222-3333-444455556666".to_string();
-    task.source_lane = "user2:telegram".to_string();
+    task.created_by = "somebody-else".to_string();
+    task.source_lane = "user1:cli".to_string();
     repo.create(&task).unwrap();
 
     let claim = "Started it (task id: aabbccdd-1111-2222-3333-444455556666).";
@@ -6717,6 +6766,20 @@ async fn a_run_on_another_lane_does_not_excuse_the_claim() {
     let reply = send_tool_mode(&orch, Uuid::new_v4(), "Kick off the guanaco write-up").await;
     assert_eq!(reply, GUARD_LINE);
     assert_eq!(requests.lock().unwrap().len(), 2);
+}
+
+/// J2 — a status relay claims no start, so it is not reviewed at all: not even
+/// an id nothing answers to costs the turn a round.
+#[tokio::test]
+async fn a_status_relay_is_not_reviewed_even_with_an_unknown_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let relay = "Task 9f4c2b71 finished a while ago — it wrote two artifacts.";
+    let (orch, requests) = scripted_turn_orchestrator(vec![ScriptStep::Say(relay)], db);
+
+    let reply = send_tool_mode(&orch, Uuid::new_v4(), "Did the guanaco run finish?").await;
+    assert_eq!(reply, relay);
+    assert_eq!(requests.lock().unwrap().len(), 1, "no corrective round");
 }
 
 /// An ordinary answer that states no id costs nothing: one call, no

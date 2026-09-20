@@ -138,6 +138,24 @@ impl ToolContext {
         next.skill_stack.push(skill_id.into());
         next
     }
+
+    /// Who a run this context starts — or asks about — belongs to.
+    ///
+    /// The `task.created_by` value, resolved from the principal first and the
+    /// owner id second. One function because three callers must agree on it or
+    /// the owner's own runs stop being the owner's: `start_workflow` writes it,
+    /// `task_status` reads by it, and the main loop's run-claim guard (J1) asks
+    /// whether a stated id is one of them.
+    pub fn created_by(&self) -> String {
+        match &self.principal {
+            Some(crate::security::policy::Principal::System) => "system".to_string(),
+            Some(crate::security::policy::Principal::User { global_id }) => global_id.clone(),
+            Some(crate::security::policy::Principal::External { provider, id }) => {
+                format!("{provider}:{id}")
+            }
+            None => self.owner_id.clone().unwrap_or_else(|| "system".to_string()),
+        }
+    }
 }
 
 /// Coarse permission tier derived from MCP tool annotations.

@@ -47,17 +47,7 @@ impl BuiltInTool for TaskStatusTool {
 
         // Identity from context (same resolution as `start_workflow`'s
         // created_by): principal id first, then owner_id, then system.
-        let created_by = match &ctx.principal {
-            Some(crate::security::policy::Principal::System) => "system".to_string(),
-            Some(crate::security::policy::Principal::User { global_id }) => global_id.clone(),
-            Some(crate::security::policy::Principal::External { provider, id }) => {
-                format!("{}:{}", provider, id)
-            }
-            None => ctx
-                .owner_id
-                .clone()
-                .unwrap_or_else(|| "system".to_string()),
-        };
+        let created_by = ctx.created_by();
 
         task_status_query(self.db.as_ref(), &self.shared_context, task_id, &created_by)
     }

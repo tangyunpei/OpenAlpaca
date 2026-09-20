@@ -211,19 +211,23 @@ impl<'a> TaskRepository<'a> {
         })
     }
 
-    /// Does any run on `lane_key` have an id beginning with `prefix`?
+    /// Does any run created by `created_by` have an id beginning with `prefix`?
     ///
     /// H3's "is this a real run?" question, asked the way a model states an id:
     /// a chat reply quotes a short form (`9f4c2b71`) as often as the whole
-    /// UUID, so equality would call a truthfully quoted run fabricated. Lane
-    /// scoped because that is the claim being checked — *this* conversation
-    /// has such a run — and because it keeps one lane's ids out of another's
-    /// answer.
+    /// UUID, so equality would call a truthfully quoted run fabricated.
+    ///
+    /// **Owner scoped, not lane scoped** (J1). The main loop's own
+    /// `task_status` tool answers about the owner's runs across every lane
+    /// ([`Self::list_by_creator`] / [`Self::list_active_by_creator`], both
+    /// `WHERE created_by = ?`), so a reply relaying a run the CLI lane started
+    /// into the GUI lane is truthful and must not be called fabricated. What
+    /// the owner may not do is claim somebody else's run.
     ///
     /// `prefix` is matched literally: `%`, `_` and `\` in it are escaped, so a
     /// caller cannot turn a fabricated id into a wildcard that matches
     /// anything. An empty prefix matches nothing rather than every row.
-    pub fn lane_has_task_id_prefix(&self, lane_key: &str, prefix: &str) -> Result<bool> {
+    pub fn owner_has_task_id_prefix(&self, created_by: &str, prefix: &str) -> Result<bool> {
         if prefix.is_empty() {
             return Ok(false);
         }
@@ -234,19 +238,21 @@ impl<'a> TaskRepository<'a> {
             .replace('_', "\\_");
         self.db
             .with_connection(|conn| {
+                // `idx_task_created_by` (006) carries the equality; the LIKE
+                // only filters what it returns.
                 let mut stmt = conn.prepare(
-                    "SELECT 1 FROM task WHERE source_lane = ?1 \
+                    "SELECT 1 FROM task WHERE created_by = ?1 \
                      AND lower(id) LIKE ?2 ESCAPE '\\' LIMIT 1",
                 )?;
                 let found = stmt
-                    .query_row(rusqlite::params![lane_key, format!("{escaped}%")], |_| {
+                    .query_row(rusqlite::params![created_by, format!("{escaped}%")], |_| {
                         Ok(())
                     })
                     .optional()?
                     .is_some();
                 Ok(found)
             })
-            .context("Failed to look up a task id prefix on a lane")
+            .context("Failed to look up a task id prefix for an owner")
     }
 
     /// `id -> title` for the ids that exist — the list routes' join (R26).

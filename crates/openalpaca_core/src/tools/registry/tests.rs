@@ -2731,3 +2731,42 @@ async fn the_gate_refuses_a_disabled_plugins_tool_whatever_its_author_says() {
     assert!(err.contains("plugin 'notion' is disabled by the owner"), "{err}");
     assert!(!err.contains("not found"), "{err}");
 }
+
+/// J1 — `start_workflow` stamps `created_by`, `task_status` reads by it and
+/// the run-claim guard checks against it, so the three read one function.
+#[test]
+fn created_by_resolves_the_principal_before_the_owner_id() {
+    use crate::security::policy::Principal;
+
+    let with = |principal: Option<Principal>, owner: Option<&str>| ToolContext {
+        principal,
+        owner_id: owner.map(str::to_string),
+        ..Default::default()
+    }
+    .created_by();
+
+    // The principal wins, whatever the owner id says.
+    assert_eq!(
+        with(
+            Some(Principal::User {
+                global_id: "user1".to_string()
+            }),
+            Some("someone-else")
+        ),
+        "user1"
+    );
+    assert_eq!(
+        with(
+            Some(Principal::External {
+                provider: "telegram".to_string(),
+                id: "42".to_string()
+            }),
+            None
+        ),
+        "telegram:42"
+    );
+    assert_eq!(with(Some(Principal::System), Some("user1")), "system");
+    // No principal: the owner id, then the system.
+    assert_eq!(with(None, Some("user1")), "user1");
+    assert_eq!(with(None, None), "system");
+}
