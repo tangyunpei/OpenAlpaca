@@ -55,3 +55,7 @@ Each entry: what went wrong → the rule that prevents it.
 ## 2026-09 — An unquoted heredoc executes the backticks inside it
 **What happened:** I patched a spec file with `python3 - <<EOF … EOF` whose Python text contained Markdown backticks around `scripts/release/install.sh`. The shell ran that as a command substitution: the installer was executed (it exited at its argument check, so nothing was installed), and the substituted text vanished from the spec.
 **Rule:** Any heredoc carrying code, Markdown or file paths is quoted — `<<'EOF'` — and values it needs are passed as arguments or environment variables, never interpolated. When a command prints output that does not belong to it, stop and check what actually ran before continuing.
+
+## 2026-09 — "Facts the controller verified" must actually be verified
+**What happened:** The brief I gave the documentation agents listed "there is no daily budget" and "$5 per workflow" as facts they could rely on. I had copied both from `CLAUDE.md`. The agents, told to trust only the code, found both incomplete: three background jobs carry daily ceilings, and the shipped `lead_agent` template overrides the $5 default with $3. The brief's own rule — another document is a map, not evidence — had not been applied to the brief.
+**Rule:** Anything handed to subagents as a settled fact is checked against the code first, or labelled "from CLAUDE.md, verify". When an agent's finding contradicts the brief, correct the brief before the next agent reads it, and correct the document the wrong fact came from.
