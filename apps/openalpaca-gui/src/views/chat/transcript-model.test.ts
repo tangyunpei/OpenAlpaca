@@ -437,6 +437,8 @@ describe("buildTranscript", () => {
             resolution: "approved",
             note: "shell_execute approved",
             at: "2026-08-31T14:28:00Z",
+            agentId: "review_agent",
+            taskId: "run-1",
           },
         ],
       }),

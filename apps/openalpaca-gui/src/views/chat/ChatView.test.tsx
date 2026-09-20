@@ -1525,6 +1525,31 @@ describe("ChatView — a settle signal never retires a live prompt (R1, R2)", ()
  * the upgrade pass runs over a list that does not contain it yet.
  */
 describe("ChatView — a confirmation whose tool reported first (G6)", () => {
+  /**
+   * The SSE frame draws the card; its WS twin says who it was raised for.
+   * Both are emitted from the same frame in the sandbox, and it is the twin's
+   * `agent_id`/`task_id` that lets the execution be matched to this row (F5).
+   */
+  async function raiseMainLoopCard(source: FakeEventSource) {
+    await act(async () => {
+      source.emit("confirmation_requested", {
+        request_id: "req-1",
+        tool_name: "artifact_write",
+        tool_arguments: { name: "notes.md" },
+      });
+      emitServerEvent({
+        type: "tool_confirmation_requested",
+        request_id: "req-1",
+        agent_id: "orchestrator",
+        tool_name: "artifact_write",
+        tool_arguments: { name: "notes.md" },
+        stream_id: null,
+        lane_key: "user:gui",
+        task_id: null,
+      });
+    });
+  }
+
   it("settles the card with the outcome it already saw", async () => {
     // Hold the answer open, exactly as a slow round trip would.
     let release = (): void => {};
@@ -1535,13 +1560,7 @@ describe("ChatView — a confirmation whose tool reported first (G6)", () => {
 
     renderChat();
     const source = await sendMessage("write the notes");
-    await act(async () => {
-      source.emit("confirmation_requested", {
-        request_id: "req-1",
-        tool_name: "artifact_write",
-        tool_arguments: { name: "notes.md" },
-      });
-    });
+    await raiseMainLoopCard(source);
 
     fireEvent.click(screen.getByRole("button", { name: /Approve/ }));
 
@@ -1549,7 +1568,7 @@ describe("ChatView — a confirmation whose tool reported first (G6)", () => {
     await act(async () => {
       emitServerEvent({
         type: "tool_executed",
-        agent_id: "lead_agent",
+        agent_id: "orchestrator",
         tool_name: "artifact_write",
         success: true,
         duration_ms: 1400,
@@ -1572,13 +1591,7 @@ describe("ChatView — a confirmation whose tool reported first (G6)", () => {
   it("upgrades a card that was drawn before the tool reported", async () => {
     renderChat();
     const source = await sendMessage("write the notes");
-    await act(async () => {
-      source.emit("confirmation_requested", {
-        request_id: "req-1",
-        tool_name: "artifact_write",
-        tool_arguments: { name: "notes.md" },
-      });
-    });
+    await raiseMainLoopCard(source);
 
     fireEvent.click(screen.getByRole("button", { name: /Approve/ }));
     expect(
@@ -1588,7 +1601,7 @@ describe("ChatView — a confirmation whose tool reported first (G6)", () => {
     await act(async () => {
       emitServerEvent({
         type: "tool_executed",
-        agent_id: "lead_agent",
+        agent_id: "orchestrator",
         tool_name: "artifact_write",
         success: false,
         duration_ms: 9000,
@@ -1601,6 +1614,88 @@ describe("ChatView — a confirmation whose tool reported first (G6)", () => {
         "artifact_write approved · failed after 9.0s, the agent continued without it.",
       ),
     ).toBeInTheDocument();
+  });
+
+  /**
+   * F5 — chat runs alongside workflows, so a background subagent's own call of
+   * the same tool arrives on the same socket. It is not this row's outcome,
+   * and taking it was permanent: the real frame, 40 s later, found no row
+   * still waiting to correct.
+   */
+  it("ignores another agent's execution of the same tool, in both orders", async () => {
+    renderChat();
+    const source = await sendMessage("write the notes");
+    await raiseMainLoopCard(source);
+
+    fireEvent.click(screen.getByRole("button", { name: /Approve/ }));
+    expect(
+      await screen.findByText(/artifact_write approved · waiting/),
+    ).toBeInTheDocument();
+
+    // A subagent of a background workflow finishes its own call.
+    await act(async () => {
+      emitServerEvent({
+        type: "tool_executed",
+        agent_id: "researcher",
+        tool_name: "artifact_write",
+        success: false,
+        duration_ms: 200,
+        task_id: "a1b2",
+      });
+    });
+    expect(
+      screen.getByText(/artifact_write approved · waiting/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/failed after 0\.2s/)).toBeNull();
+
+    // The row is still waiting, so its own call can still settle it.
+    await act(async () => {
+      emitServerEvent({
+        type: "tool_executed",
+        agent_id: "orchestrator",
+        tool_name: "artifact_write",
+        success: true,
+        duration_ms: 40000,
+        task_id: null,
+      });
+    });
+    expect(
+      await screen.findByText(
+        "artifact_write approved · returned in 40.0s, the agent resumed.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("ignores a foreign run that reported before the answer landed", async () => {
+    let release = (): void => {};
+    confirmationReply = () =>
+      new Promise<Response>((resolve) => {
+        release = () => resolve(new Response("", { status: 200 }));
+      });
+
+    renderChat();
+    const source = await sendMessage("write the notes");
+    await raiseMainLoopCard(source);
+
+    fireEvent.click(screen.getByRole("button", { name: /Approve/ }));
+    await act(async () => {
+      emitServerEvent({
+        type: "tool_executed",
+        agent_id: "researcher",
+        tool_name: "artifact_write",
+        success: false,
+        duration_ms: 200,
+        task_id: "a1b2",
+      });
+    });
+    await act(async () => {
+      release();
+    });
+
+    expect(
+      await screen.findByText(/artifact_write approved · waiting/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/failed after 0\.2s/)).toBeNull();
   });
 });
 

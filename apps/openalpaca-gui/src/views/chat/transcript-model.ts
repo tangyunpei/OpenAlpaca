@@ -94,6 +94,16 @@ export interface ResolutionEntry {
   resolution: Resolution;
   note: string;
   at: string;
+  /**
+   * Who the prompt was raised for, from `confirmationMeta` (F5). It is what
+   * lets a `tool_executed` frame settle *this* row and no other: the frames
+   * share no request id, so without it every approved row waiting on a tool
+   * of that name took the first execution of it anywhere in the daemon.
+   * `null` when the WS twin never named one — such a row declines the
+   * upgrade rather than borrowing a stranger's outcome.
+   */
+  agentId: string | null;
+  taskId: string | null;
 }
 
 /** The optimistic user turn, shown until history catches up. */

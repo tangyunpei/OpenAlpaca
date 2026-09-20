@@ -23,6 +23,8 @@
 
 import { create } from "zustand";
 
+import { sameToolOwner, type ToolOwner } from "@/components/chat";
+
 import type { ResolutionEntry } from "./transcript-model";
 
 interface ResolutionState {
@@ -31,10 +33,16 @@ interface ResolutionState {
   add: (entry: ResolutionEntry) => void;
   /**
    * G6 — an approved row's note said "waiting" until the tool reported. The
-   * `tool_executed` frame names the tool, not the request, so every approved
-   * row still waiting on that tool takes the finished note.
+   * `tool_executed` frame names the tool, not the request, so an approved row
+   * still waiting on that tool takes the finished note.
+   *
+   * F5 — the name alone is not enough. The socket carries every lane's
+   * frames, so the tool a background workflow's subagent ran rewrote this
+   * window's row with an outcome that was not its call's, and the real frame
+   * arriving 40 s later found no row still waiting to correct. The owner is
+   * the other half of the match: same tool, same agent, same run.
    */
-  noteToolRun: (toolName: string, note: string) => void;
+  noteToolRun: (toolName: string, owner: ToolOwner, note: string) => void;
   /** The conversation changed; these rows belonged to the previous one. */
   clear: () => void;
 }
@@ -54,11 +62,12 @@ export const useResolutions = create<ResolutionState>((set) => ({
         : { rows: [...state.rows, entry] },
     ),
 
-  noteToolRun: (toolName, note) =>
+  noteToolRun: (toolName, owner, note) =>
     set((state) => ({
       rows: state.rows.map((row) =>
         row.resolution === "approved" &&
-        row.note.startsWith(waitingNotePrefix(toolName))
+        row.note.startsWith(waitingNotePrefix(toolName)) &&
+        sameToolOwner(owner, row)
           ? { ...row, note }
           : row,
       ),

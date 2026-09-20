@@ -59,6 +59,7 @@ import {
   timedOutResolutionNote,
   type DraftAttachment,
   type Resolution,
+  type ToolOwner,
   type ToolRun,
 } from "@/components/chat";
 import { toUiStatus, type UiStatus } from "@/components/ui";
@@ -764,6 +765,11 @@ export function useChatSession(): ChatSession {
       resolution: "timed_out",
       note: timedOutResolutionNote(shown.tool_name),
       at: event.ts,
+      // Straight off the frame that ended it — the same pair the card was
+      // raised with. Nothing upgrades a timed-out row (the tool did not run),
+      // but the row says who it belonged to all the same.
+      agentId: event.agent_id,
+      taskId: event.task_id,
     });
   });
 
@@ -818,10 +824,17 @@ export function useChatSession(): ChatSession {
         success: event.success,
         duration: formatDurationMs(event.duration_ms),
         atMs: Date.now(),
+        // Who ran it, and in which run — the pair a card can be matched on
+        // (F5). This subscriber is unfiltered on purpose: the frame may be
+        // for a card that does not exist yet, and the match happens where the
+        // card is, not here.
+        agentId: event.agent_id,
+        taskId: event.task_id,
       },
     ];
     noteToolRun(
       event.tool_name,
+      { agentId: event.agent_id, taskId: event.task_id },
       executedResolutionNote(
         event.tool_name,
         event.success,
@@ -1185,6 +1198,14 @@ export function useChatSession(): ChatSession {
       // When the answer went out — the earliest a `tool_executed` for it can
       // be this one's (G6).
       const answeredAtMs = Date.now();
+      // Who it was raised for (F5). `confirmationMeta` is filled by the WS
+      // twin of the frame that drew the card; a card whose twin has not
+      // landed leaves the row unowned, and an unowned row is never upgraded.
+      const meta = confirmationMetaRef.current[target.requestId];
+      const owner: ToolOwner = {
+        agentId: meta?.agentId ?? null,
+        taskId: meta?.taskId ?? null,
+      };
 
       respondRef.current.mutate(
         {
@@ -1203,9 +1224,15 @@ export function useChatSession(): ChatSession {
               note: resolutionNote(
                 resolution,
                 target.toolName,
-                settlingRun(toolRuns.current, target.toolName, answeredAtMs),
+                settlingRun(
+                  toolRuns.current,
+                  target.toolName,
+                  answeredAtMs,
+                  owner,
+                ),
               ),
               at: new Date().toISOString(),
+              ...owner,
             });
           },
           onError: (error: Error) => {
