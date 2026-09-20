@@ -374,7 +374,13 @@ complete cleanup.
   `./scripts/release/package-linux.sh` on a Linux machine
   (`x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu`).
 - **Windows**: use the PowerShell scripts `scripts/release/package-windows.ps1`,
-  `install-windows.ps1`, and `uninstall-windows.ps1`.
+  `install-windows.ps1`, and `uninstall-windows.ps1`. The data root is the same
+  `<home>\.openalpaca` — `%USERPROFILE%\.openalpaca`, or `%OPENALPACA_HOME_STORE%`
+  when that is set to an absolute path — with config staged under
+  `%USERPROFILE%\.openalpaca\config` and the running daemon's `discovery.json`
+  under `%USERPROFILE%\.openalpaca\state`; the installer and uninstaller stop a
+  running daemon by that file and stop nothing else. Uninstalling leaves that
+  root in place, exactly as on macOS and Linux.
 
 ## Troubleshooting
 

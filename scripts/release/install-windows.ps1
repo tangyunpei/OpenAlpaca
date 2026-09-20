@@ -12,13 +12,17 @@
     Installation directory. Default: $env:LOCALAPPDATA\OpenAlpaca
 .PARAMETER Yes
     Non-interactive mode: skip confirmation prompts.
+.PARAMETER DotSourceOnly
+    Define this script's functions in the caller's scope and return without
+    installing anything. Used by scripts/release/tests/WindowsScripts.Tests.ps1.
 #>
 [CmdletBinding()]
 param(
     [string]$File,
     [string]$Url,
     [string]$Prefix,
-    [switch]$Yes
+    [switch]$Yes,
+    [switch]$DotSourceOnly
 )
 
 Set-StrictMode -Version Latest
@@ -73,32 +77,77 @@ function Compute-SHA256($path) {
     return (Get-FileHash $path -Algorithm SHA256).Hash.ToLower()
 }
 
-function Stop-RunningDaemon {
-    $dataDir = Join-Path $env:APPDATA 'OpenAlpaca\data'
-    $discoveryJson = Join-Path $dataDir 'discovery.json'
-    if (-not (Test-Path $discoveryJson)) { return }
+# The runtime data/config root: `%OPENALPACA_HOME_STORE%` when set, else
+# `<home>\.openalpaca` — the same root the daemon computes
+# (`crates/openalpaca_storage/src/store/mod.rs::home_root()`), which does not
+# follow the OS's data-directory convention on any platform.
+function Get-DataRoot {
+    $override = [Environment]::GetEnvironmentVariable('OPENALPACA_HOME_STORE')
+    if ($override) {
+        if (-not [System.IO.Path]::IsPathRooted($override)) {
+            Die "OPENALPACA_HOME_STORE must be an absolute path, got '$override'"
+        }
+        return $override
+    }
+    return (Join-Path $env:USERPROFILE '.openalpaca')
+}
 
+# `<root>\config` — the config directory the daemon reads.
+function Get-ConfigDir {
+    return (Join-Path (Get-DataRoot) 'config')
+}
+
+# `<root>\state\discovery.json` — where a running daemon publishes its pid.
+function Get-DiscoveryPath {
+    return (Join-Path (Get-DataRoot) 'state\discovery.json')
+}
+
+# The pid from discovery.json, but only when it belongs to a live `openalpacad`
+# process: a stale file naming a pid the OS has since handed to something else
+# must never get that something else killed.
+function Get-RunningDaemonPid {
+    $discoveryJson = Get-DiscoveryPath
+    if (-not (Test-Path $discoveryJson)) { return $null }
+
+    $daemonPid = $null
     try {
         $discovery = Get-Content $discoveryJson -Raw | ConvertFrom-Json
-        $pid = $discovery.pid
-        if ($pid) {
-            $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
-            if ($proc) {
-                Write-Host "Stopping running daemon (pid=$pid)..."
-                Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
-                $waited = 0
-                while ($waited -lt 10) {
-                    Start-Sleep -Seconds 1
-                    $waited++
-                    $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
-                    if (-not $proc) { break }
-                }
-            }
-        }
+        $daemonPid = $discovery.pid
     } catch {
-        # Ignore errors parsing discovery.json
+        Write-Host "Warning: no readable pid in $discoveryJson; assuming no daemon is running."
+        return $null
     }
+    if (-not $daemonPid) { return $null }
+
+    $proc = Get-Process -Id $daemonPid -ErrorAction SilentlyContinue
+    if (-not $proc) { return $null }
+    if ($proc.ProcessName -ne 'openalpacad') {
+        Write-Host "Warning: $discoveryJson names pid $daemonPid, which is '$($proc.ProcessName)', not openalpacad. Leaving it alone."
+        return $null
+    }
+    return [int]$daemonPid
 }
+
+function Stop-RunningDaemon {
+    $daemonPid = Get-RunningDaemonPid
+    if (-not $daemonPid) { return }
+
+    Write-Host "Stopping running daemon (pid=$daemonPid)..."
+    Stop-Process -Id $daemonPid -Force -ErrorAction SilentlyContinue
+    $waited = 0
+    while ($waited -lt 10) {
+        Start-Sleep -Seconds 1
+        $waited++
+        if (-not (Get-Process -Id $daemonPid -ErrorAction SilentlyContinue)) { return }
+    }
+    Die "The OpenAlpaca daemon (pid=$daemonPid) is still running after 10s. Stop it, then run this script again."
+}
+
+# ── Dot-source guard ─────────────────────────────────────────
+# `. .\install-windows.ps1 -DotSourceOnly` defines the functions above in the
+# caller's scope and installs nothing (scripts/release/tests).
+
+if ($DotSourceOnly) { return }
 
 # ── Defaults ──────────────────────────────────────────────────
 
@@ -232,8 +281,7 @@ if (Test-Path $msiSource) {
 
 # ── Install config ───────────────────────────────────────────
 
-$dataDir   = Join-Path $env:APPDATA 'OpenAlpaca\data'
-$configDir = Join-Path $dataDir 'config'
+$configDir = Get-ConfigDir
 New-Item -ItemType Directory -Force -Path $configDir | Out-Null
 Copy-MissingTree (Join-Path $packageRoot 'config') $configDir
 
