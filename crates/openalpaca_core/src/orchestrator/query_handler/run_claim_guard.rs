@@ -1,4 +1,4 @@
-//! H3 — a chat turn never claims a workflow it did not start.
+//! H3 — a chat turn never states a task id that answers to nothing.
 //!
 //! The observed failure: on a lane whose history already held three real
 //! delegations, a local model answered *"Started a background workflow called
@@ -9,27 +9,31 @@
 //! H1 (history provenance) and H2 (the relay rules) make that less likely.
 //! This is the part that does not depend on the model reading anything: the
 //! [`AnswerGuard`] the main loop hands its agentic loop, which reads the
-//! finished answer, and — narrowly — refuses one that claims to have started a
-//! run no run answers to.
+//! finished answer before it becomes the turn's content.
 //!
-//! **Narrow on purpose, and narrowed again in J1/J2.** A false positive is
-//! worse than the lie it guards against: on a second offence the runtime
-//! itself replaces a *truthful* answer with "I did not start a workflow". So
-//! three things must all hold before an answer is even looked up:
+//! **The trigger is a fact, not a reading of the sentence (N1).** Rounds 13
+//! and 14 tried to decide from prose whether the model was *claiming a start*;
+//! both directions failed at once — an unrelated "Started reviewing your
+//! notes… task 1a2b3c9d already finished" read as a claim, while ten natural
+//! ways to announce a start slipped through. Guessing intent is the wrong
+//! tool. What is left is checkable:
 //!
 //! 1. the turn's own `start_workflow` cell is empty (it really did not
-//!    delegate);
-//! 2. the answer **asserts a start** — a start verb near a stated id or near
-//!    the word workflow/run/job. A status relay ("Task 9f4c… finished", "your
-//!    workflow 372e… is still running") claims no start and is never reviewed;
-//! 3. the token it states **looks like a run id** — a UUID, or an 8+ hex run
-//!    that is not a plain number. A date, a counter and a bare number are not
-//!    ids however they are introduced.
+//!    delegate — a turn that did is skipped, its id is on `delegation`);
+//! 2. the answer states a token in an **id position** (after a `task id` /
+//!    `run id` / `task` cue and the punctuation a model wraps an id in) that
+//!    **looks like a run id** — a UUID, or an 8+ hex run that is not a plain
+//!    number, so a date, a counter and a bare number are never ids;
+//! 3. that token matches **no task of this turn's owner** — `created_by`, not
+//!    the lane (J1): `task_status` answers about every run this owner started,
+//!    so relaying one lane's run into another is true and must be left alone.
 //!
-//! And the existence check is the owner's, not the lane's (J1): `task_status`
-//! answers about every run this owner started, so relaying one lane's run into
-//! another is true and must be left alone. A turn that stated no id pays one
-//! string scan and touches no database.
+//! Stating an id nothing answers to is an error in every case — a fabricated
+//! start and a mis-recalled status alike — so the corrective round is never
+//! wasted on a truthful answer, and the consequence is proportionate: one
+//! corrective round, and then a runtime-authored line **appended** to whatever
+//! the model said (N3). The answer is never taken away. A turn that stated no
+//! id pays one string scan and touches no database.
 
 use std::sync::Arc;
 
@@ -37,16 +41,6 @@ use openalpaca_storage::{Database, repository::TaskRepository};
 
 use crate::runner::{AnswerGuard, Correction};
 use crate::tools::builtins::StartWorkflowTool;
-
-/// What the model is told when it claims a run it did not start.
-const CORRECTIVE_NOTE: &str = "You said a workflow was started, but no start_workflow call was \
-                               made in this turn. Either call start_workflow now, or answer \
-                               without claiming a run was started.";
-
-/// What the user reads when the model claims it again anyway. The runtime
-/// speaking in its own voice, in the pattern of V3's no-answer line.
-const REPLACEMENT_LINE: &str = "I did not start a workflow — no run exists for that. Ask again \
-                                and I will start one.";
 
 /// The main loop's answer guard.
 ///
@@ -88,30 +82,22 @@ impl AnswerGuard for RunClaimGuard {
         if self.start_workflow.outcome().is_some() {
             return None;
         }
-        // Cheapest possible on the ordinary turn: nothing claimed, nothing to
+        // Cheapest possible on the ordinary turn: nothing stated, nothing to
         // do, no query.
-        let claimed = claimed_run_ids(answer);
-        if claimed.is_empty() {
+        let stated = stated_run_ids(answer);
+        if stated.is_empty() {
             return None;
         }
         let db = self.db.as_ref()?;
         let repo = TaskRepository::new(db);
-        for id in &claimed {
+        let mut unknown: Vec<String> = Vec::new();
+        for id in &stated {
             match repo.owner_has_task_id_prefix(&self.created_by, id) {
                 // Quoting a run that exists is ordinary conversation.
                 Ok(true) => continue,
-                Ok(false) => {
-                    tracing::warn!(
-                        lane_key = %self.lane_key,
-                        claimed_id = %id,
-                        "Main-loop answer claims a run id that matches no task of this owner"
-                    );
-                    return Some(Correction {
-                        note: CORRECTIVE_NOTE.to_string(),
-                        replacement: REPLACEMENT_LINE.to_string(),
-                    });
-                }
-                // A failed lookup must not invent a lie: say nothing.
+                Ok(false) => unknown.push(id.clone()),
+                // A failed lookup must not invent a lie: say nothing at all,
+                // about any of the ids.
                 Err(e) => {
                     tracing::warn!(
                         lane_key = %self.lane_key,
@@ -121,7 +107,64 @@ impl AnswerGuard for RunClaimGuard {
                 }
             }
         }
-        None
+        if unknown.is_empty() {
+            return None;
+        }
+        tracing::warn!(
+            lane_key = %self.lane_key,
+            claimed_ids = %unknown.join(", "),
+            "Main-loop answer states a task id that matches no task of this owner"
+        );
+        Some(Correction {
+            note: corrective_note(&unknown),
+            runtime_note: runtime_note(&unknown),
+        })
+    }
+}
+
+/// What the model is told, once, about the id(s) it stated (N2).
+///
+/// True whether it fabricated a start or mis-recalled an id, which is why it
+/// names both ways out instead of assuming which happened.
+fn corrective_note(ids: &[String]) -> String {
+    let (subject, those, them) = if ids.len() == 1 {
+        ("task id", "that id", "the id")
+    } else {
+        ("task ids", "those ids", "them")
+    };
+    format!(
+        "Your answer states {subject} {}, but no task of this user has {those}, and no \
+         start_workflow call was made in this turn. If a run was meant to be started, call \
+         start_workflow now; otherwise correct or remove {them}.",
+        join_and(ids)
+    )
+}
+
+/// What the reader sees appended beneath the answer if the id is still there
+/// after the corrective round (N3).
+///
+/// Two verifiable facts and one instruction — never a denial of what the model
+/// said, because the guard cannot know whether the sentence was a fabricated
+/// start or a mis-remembered status.
+fn runtime_note(ids: &[String]) -> String {
+    let (noun, verb) = if ids.len() == 1 {
+        ("no task with id", "exists")
+    } else {
+        ("no tasks with ids", "exist")
+    };
+    format!(
+        "Note from OpenAlpaca: no workflow was started in this turn, and {noun} {} {verb}. \
+         Ask again to start one.",
+        join_and(ids)
+    )
+}
+
+/// "a", "a and b", "a, b and c".
+fn join_and(ids: &[String]) -> String {
+    match ids {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
 }
 
@@ -145,55 +188,15 @@ const ID_CUES: [&str; 7] = [
 /// "task list" yields nothing.
 const ID_LEAD_IN: [char; 10] = [':', '=', '`', '*', '"', '\'', '(', '[', '#', ' '];
 
-/// The words with which an answer asserts that a run was started *in this
-/// turn* (J2). Short, lower-case, and phrases rather than bare verbs where a
-/// bare verb would swallow a status relay: "is still running" must not read as
-/// a start, so only "now running in the background" does.
-const START_CUES: [&str; 9] = [
-    "started",
-    "kicked off",
-    "launched",
-    "spun up",
-    "now running in the background",
-    "i've queued",
-    "i have queued",
-    "i've delegated",
-    "i have delegated",
-];
-
-/// The things a start verb may be asserted *of*. Matched as whole words.
-const START_SUBJECTS: [&str; 3] = ["workflow", "run", "job"];
-
-/// How far apart a start verb and the thing it is asserted of may sit and
-/// still belong to the same claim — roughly a long sentence.
-const NEAR_WINDOW_BYTES: usize = 120;
-
-/// Ids an answer presents as a task/run id **while claiming to have started
-/// one**, lowercased and deduplicated.
+/// Ids an answer states in an id position, lowercased and deduplicated.
 ///
-/// Two conditions, both required (J2):
-///
-/// - *assertion* — the answer says a run was started: a [`START_CUES`] phrase
-///   within [`NEAR_WINDOW_BYTES`] of the stated id, or of a [`START_SUBJECTS`]
-///   word. Without one the answer is relaying status, not claiming a start,
-///   and nothing in it is a claim.
-/// - *shape* — the token sits in an id position (after an [`ID_CUES`] cue and
-///   the punctuation a model wraps an id in) and looks like one: see
-///   [`is_run_id`].
-pub(super) fn claimed_run_ids(answer: &str) -> Vec<String> {
+/// One condition, checkable without reading the sentence (N1): the token sits
+/// after an [`ID_CUES`] cue and the punctuation a model wraps an id in, and it
+/// looks like a run id ([`is_run_id`]). Whether the surrounding prose *means*
+/// to claim a start is not asked — the guard's consequence is a fact appended
+/// to the answer, so a broad trigger is harmless and a narrow one is not.
+pub(super) fn stated_run_ids(answer: &str) -> Vec<String> {
     let haystack = normalized(answer);
-    // The cheapest of the two conditions, and the one that rules out every
-    // status relay: no start verb anywhere, nothing here is a start claim.
-    let starts = occurrences(&haystack, &START_CUES);
-    if starts.is_empty() {
-        return Vec::new();
-    }
-    // "Started a background workflow …" asserts a start for the whole answer,
-    // however far the id then sits from the verb.
-    let subject_asserted = word_occurrences(&haystack, &START_SUBJECTS)
-        .into_iter()
-        .any(|at| near_any(&starts, at));
-
     let bytes = haystack.as_bytes();
     let mut found: Vec<String> = Vec::new();
 
@@ -231,11 +234,6 @@ pub(super) fn claimed_run_ids(answer: &str) -> Vec<String> {
             if !is_run_id(token) {
                 continue;
             }
-            // The assertion has to reach this id: either the answer asserts a
-            // start of a workflow/run/job, or a start verb sits beside the id.
-            if !subject_asserted && !near_any(&starts, start) {
-                continue;
-            }
             let token = token.to_string();
             if !found.contains(&token) {
                 found.push(token);
@@ -245,52 +243,15 @@ pub(super) fn claimed_run_ids(answer: &str) -> Vec<String> {
     found
 }
 
-/// Lower-cased for scanning, with the typographic apostrophe folded to `'` so
-/// "I’ve queued" reads like "i've queued".
+/// Lower-cased for scanning.
 ///
-/// [`str::to_ascii_lowercase`] preserves byte length, so every offset taken
-/// below indexes this string and its tokens are sliced from it.
+/// [`str::to_ascii_lowercase`] maps each byte to one byte, so every offset
+/// taken below indexes this string and the tokens sliced out of it are the
+/// answer's own bytes, lowercased. Nothing else is folded — an earlier
+/// apostrophe fold existed only for the start-phrase list N1 deleted, and it
+/// *shrank* the string, which would have made these offsets a lie.
 fn normalized(answer: &str) -> String {
-    answer.to_ascii_lowercase().replace('\u{2019}', "'")
-}
-
-/// Byte offsets of every occurrence of every needle.
-fn occurrences(haystack: &str, needles: &[&str]) -> Vec<usize> {
-    let mut at = Vec::new();
-    for needle in needles {
-        let mut from = 0usize;
-        while let Some(hit) = haystack[from..].find(needle) {
-            at.push(from + hit);
-            from += hit + needle.len();
-        }
-    }
-    at
-}
-
-/// As [`occurrences`], but only where the needle is a whole word — "run" must
-/// not be found inside "running" or "overrun".
-fn word_occurrences(haystack: &str, words: &[&str]) -> Vec<usize> {
-    let bytes = haystack.as_bytes();
-    let mut at = Vec::new();
-    for word in words {
-        let mut from = 0usize;
-        while let Some(hit) = haystack[from..].find(word) {
-            let start = from + hit;
-            let end = start + word.len();
-            from = end;
-            let open = start == 0 || !(bytes[start - 1] as char).is_ascii_alphanumeric();
-            let close = end >= bytes.len() || !(bytes[end] as char).is_ascii_alphanumeric();
-            if open && close {
-                at.push(start);
-            }
-        }
-    }
-    at
-}
-
-/// Is any of `cues` within [`NEAR_WINDOW_BYTES`] of `at`?
-fn near_any(cues: &[usize], at: usize) -> bool {
-    cues.iter().any(|c| c.abs_diff(at) <= NEAR_WINDOW_BYTES)
+    answer.to_ascii_lowercase()
 }
 
 /// A UUID, or a hex run of 8+ digits that is **not** a plain number.
@@ -333,7 +294,7 @@ mod tests {
     fn the_fabricated_sentence_states_an_id() {
         let answer = "Started a background workflow called \"Guanaco fiber notes\" \
                       (task id: `9f4c2b71`) — it will post its results here.";
-        assert_eq!(claimed_run_ids(answer), vec!["9f4c2b71".to_string()]);
+        assert_eq!(stated_run_ids(answer), vec!["9f4c2b71".to_string()]);
     }
 
     #[test]
@@ -345,7 +306,7 @@ mod tests {
             "Task **9f4c2b71-1bc2-4a3d-8e55-0c1d2e3f4a5b** started.",
         ] {
             assert_eq!(
-                claimed_run_ids(answer),
+                stated_run_ids(answer),
                 vec!["9f4c2b71-1bc2-4a3d-8e55-0c1d2e3f4a5b".to_string()],
                 "missed the id in: {answer}"
             );
@@ -364,117 +325,92 @@ mod tests {
             "See commit deadbeefcafe12x for the fix.",
         ] {
             assert!(
-                claimed_run_ids(answer).is_empty(),
+                stated_run_ids(answer).is_empty(),
                 "false positive in: {answer} -> {:?}",
-                claimed_run_ids(answer)
+                stated_run_ids(answer)
             );
         }
     }
 
-    /// J2 — the three sentences the round-13 re-review found the guard
-    /// rejecting. None of them is a claim.
-    #[test]
-    fn the_reviewers_false_positives_are_not_claims() {
-        for answer in [
-            "Task 20260919 is the daily digest job.",
-            "Run id 12345678 is just a counter.",
-            "Task #1a2b3c4d is the accent colour in the palette.",
-        ] {
-            assert!(
-                claimed_run_ids(answer).is_empty(),
-                "false positive in: {answer} -> {:?}",
-                claimed_run_ids(answer)
-            );
-        }
-    }
-
-    /// J2, shape — the two numbers stay non-ids even when a start really is
-    /// asserted of them, because a plain number is never a run id.
+    /// The shape rule, which N1 keeps: a plain number in an id position is
+    /// never an id, however the sentence introduces it.
     #[test]
     fn a_date_and_a_counter_are_never_ids() {
         for answer in [
+            "Task 20260919 is the daily digest job.",
+            "Run id 12345678 is just a counter.",
             "I started the digest job. Task 20260919 is the one that runs nightly.",
             "I launched it: run id 12345678 is just a counter, not an id.",
         ] {
             assert!(
-                claimed_run_ids(answer).is_empty(),
+                stated_run_ids(answer).is_empty(),
                 "false positive in: {answer} -> {:?}",
-                claimed_run_ids(answer)
+                stated_run_ids(answer)
             );
         }
     }
 
-    /// The colour differs from a claim only in the assertion: a hex token in
-    /// an id position IS a claim once a start is asserted beside it. Pinned so
-    /// the boundary is visible rather than accidental.
+    /// N1 — a hex token in an id position is stated as an id whatever the
+    /// sentence is doing with it. The colour is a false positive by design:
+    /// its cost is one corrective round and, at worst, a true line appended.
     #[test]
-    fn a_hex_token_beside_a_start_verb_is_still_a_claim() {
+    fn a_hex_token_in_an_id_position_is_stated() {
         assert_eq!(
-            claimed_run_ids("Started it — task #1a2b3c4d."),
+            stated_run_ids("Task #1a2b3c4d is the accent colour in the palette."),
             vec!["1a2b3c4d".to_string()]
         );
     }
 
-    /// J2, assertion — relaying what a run is doing claims no start.
+    /// N1 — the ten phrasings the round-14 re-review walked through the old
+    /// start-verb list. No verb list is consulted any more, so all ten are
+    /// caught by the same rule as the literal one.
     #[test]
-    fn a_status_relay_asserts_nothing_and_is_not_a_claim() {
+    fn every_way_of_announcing_a_start_is_caught() {
+        const ID: &str = "9f4c2b71-1bc2-4a3d-8e55-0c1d2e3f4a5b";
         for answer in [
-            "Task 9f4c2b71 finished — it wrote two artifacts.",
-            "Your workflow 372e0f11 is still running.",
-            "Task id 9f4c2b71 is still running in the background.",
-            "task_id=9f4c2b71 failed after four rounds.",
-            "The run with task id 9f4c2b71-1bc2-4a3d-8e55-0c1d2e3f4a5b is paused.",
+            "I've kicked it off (task id: 9f4c2b71-1bc2-4a3d-8e55-0c1d2e3f4a5b).",
+            "It's running in the background now — task id 9f4c2b71-1bc2-4a3d-8e55-0c1d2e3f4a5b.",
+            "I fired off the workflow; task_id=9f4c2b71-1bc2-4a3d-8e55-0c1d2e3f4a5b.",
+            "Off it goes. Task 9f4c2b71-1bc2-4a3d-8e55-0c1d2e3f4a5b will report back.",
+            "Consider it handled — run id 9f4c2b71-1bc2-4a3d-8e55-0c1d2e3f4a5b.",
+            "That's under way: task id `9f4c2b71-1bc2-4a3d-8e55-0c1d2e3f4a5b`.",
+            "I've set a background job going, task id 9f4c2b71-1bc2-4a3d-8e55-0c1d2e3f4a5b.",
+            "On it! task-id 9f4c2b71-1bc2-4a3d-8e55-0c1d2e3f4a5b",
+            "Handed it to a subagent — task 9f4c2b71-1bc2-4a3d-8e55-0c1d2e3f4a5b.",
+            "Your notes are being written up now (task id: \
+             9f4c2b71-1bc2-4a3d-8e55-0c1d2e3f4a5b).",
         ] {
-            assert!(
-                claimed_run_ids(answer).is_empty(),
-                "a status relay was read as a claim: {answer} -> {:?}",
-                claimed_run_ids(answer)
+            assert_eq!(
+                stated_run_ids(answer),
+                vec![ID.to_string()],
+                "slipped through: {answer}"
             );
         }
     }
 
-    /// …and the same sentence with a start asserted of it is a claim again.
+    /// N1 — a status relay states an id like any other sentence. Round 14
+    /// exempted these; the exemption is what let a fabricated status through.
     #[test]
-    fn the_same_id_with_a_start_verb_is_a_claim() {
-        assert_eq!(
-            claimed_run_ids("I've queued it — task id 9f4c2b71 — and it is now running."),
-            vec!["9f4c2b71".to_string()]
-        );
-        assert_eq!(
-            claimed_run_ids("Your workflow is now running in the background (task id: 9f4c2b71)."),
-            vec!["9f4c2b71".to_string()]
-        );
-    }
-
-    /// A start verb far away from both the id and any workflow/run/job word
-    /// does not turn a relay into a claim.
-    #[test]
-    fn a_distant_start_verb_does_not_reach_the_id() {
-        let answer = format!(
-            "I started reading the guanaco notes you saved. {}Task 9f4c2b71 finished earlier.",
-            "Their fibre is about sixteen microns across, finer than a llama's. ".repeat(3),
-        );
-        assert!(
-            claimed_run_ids(&answer).is_empty(),
-            "reached too far: {:?}",
-            claimed_run_ids(&answer)
-        );
+    fn a_status_relay_states_its_id_too() {
+        for answer in [
+            "Task 9f4c2b71 finished — it wrote two artifacts.",
+            "Task id 9f4c2b71 is still running in the background.",
+            "task_id=9f4c2b71 failed after four rounds.",
+        ] {
+            assert_eq!(
+                stated_run_ids(answer),
+                vec!["9f4c2b71".to_string()],
+                "missed the id in: {answer}"
+            );
+        }
     }
 
     #[test]
     fn two_stated_ids_are_both_reported_once() {
         let answer = "Started two: task id 9f4c2b71 and task id aabbccdd, plus task id 9f4c2b71.";
         assert_eq!(
-            claimed_run_ids(answer),
+            stated_run_ids(answer),
             vec!["9f4c2b71".to_string(), "aabbccdd".to_string()]
-        );
-    }
-
-    #[test]
-    fn a_typographic_apostrophe_reads_like_a_plain_one() {
-        assert_eq!(
-            claimed_run_ids("I\u{2019}ve queued it (task id: 9f4c2b71)."),
-            vec!["9f4c2b71".to_string()]
         );
     }
 
@@ -484,5 +420,38 @@ mod tests {
         assert!(!is_uuid_shaped("9f4c2b71-1bc2-4a3d-8e55"));
         assert!(!is_uuid_shaped("9f4c2b71-1bc2-4a3d-8e55-0c1d2e3f4a5b-extra"));
         assert!(!is_uuid_shaped("9f4c2b71"));
+    }
+
+    /// N2/N3 — both sentences are true in both cases the guard can fire on,
+    /// and both name the id.
+    #[test]
+    fn both_notes_name_the_id_and_state_only_facts() {
+        let one = vec!["9f4c2b71".to_string()];
+        let note = corrective_note(&one);
+        assert_eq!(
+            note,
+            "Your answer states task id 9f4c2b71, but no task of this user has that id, and no \
+             start_workflow call was made in this turn. If a run was meant to be started, call \
+             start_workflow now; otherwise correct or remove the id."
+        );
+        assert_eq!(
+            runtime_note(&one),
+            "Note from OpenAlpaca: no workflow was started in this turn, and no task with id \
+             9f4c2b71 exists. Ask again to start one."
+        );
+
+        let two = vec!["9f4c2b71".to_string(), "aabbccdd".to_string()];
+        assert!(corrective_note(&two).contains("task ids 9f4c2b71 and aabbccdd"));
+        let plural = runtime_note(&two);
+        assert!(
+            plural.contains("no tasks with ids 9f4c2b71 and aabbccdd exist"),
+            "plural reads wrong: {plural}"
+        );
+    }
+
+    #[test]
+    fn three_ids_read_as_a_list() {
+        let three = ["a".to_string(), "b".to_string(), "c".to_string()];
+        assert_eq!(join_and(&three), "a, b and c");
     }
 }

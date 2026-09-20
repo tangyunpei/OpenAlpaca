@@ -7,24 +7,27 @@
 //! refuse to ship what it read.
 //!
 //! The loop owns the policy (at most **one** corrective round per turn, then
-//! the replacement); an implementation owns the judgement. The only production
-//! implementation is the main loop's fabricated-run guard
+//! the runtime's own note appended to whatever the model said); an
+//! implementation owns the judgement. The only production implementation is
+//! the main loop's run-claim guard
 //! (`orchestrator::query_handler::run_claim_guard`), and a loop with no guard
 //! configured — every non-main-loop caller — behaves exactly as it did.
 
 /// What a guard wants done about an answer it rejects.
 ///
 /// Both strings are supplied by the guard and neither is composed by the loop:
-/// the note is what the model is told, the replacement is what the user reads
-/// if the model says it again anyway.
+/// the note is what the model is told, the runtime note is what the user reads
+/// beneath the answer if the model says it again anyway.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Correction {
     /// Appended to the conversation as a user message for the one corrective
     /// round the loop grants.
     pub note: String,
-    /// The turn's content when the corrective round produced the same problem
-    /// — the runtime speaking in place of the model, rather than shipping it.
-    pub replacement: String,
+    /// Appended to the turn's content when the corrective round produced the
+    /// same problem — the runtime speaking **beside** the model, not in its
+    /// place (N3). The answer is never taken away, so a line that fires on a
+    /// true-but-mis-recalled answer costs the reader nothing but a fact.
+    pub runtime_note: String,
 }
 
 /// Reviews the answer the loop is about to return as `Complete`.
@@ -55,7 +58,7 @@ mod tests {
                 .push(answer.to_string());
             answer.contains(self.reject).then(|| Correction {
                 note: "note".to_string(),
-                replacement: "replacement".to_string(),
+                runtime_note: "runtime note".to_string(),
             })
         }
     }
@@ -79,6 +82,6 @@ mod tests {
         };
         let correction = guard.review("a lie").expect("rejected");
         assert_eq!(correction.note, "note");
-        assert_eq!(correction.replacement, "replacement");
+        assert_eq!(correction.runtime_note, "runtime note");
     }
 }

@@ -87,12 +87,12 @@ pub struct LoopConfig {
     pub tool_result_inline_bytes: usize,
     /// H3 — the last look at the answer before the loop returns `Complete`.
     ///
-    /// `Some` only on the Routing V2 main loop, whose guard refuses an answer
-    /// that claims a run this turn never started. The loop grants the guard
-    /// exactly one corrective round and then ships the guard's own
-    /// replacement line rather than the claim. `None` (every other caller:
-    /// the lead, subagents, skills, compaction) reviews nothing and costs
-    /// nothing.
+    /// `Some` only on the Routing V2 main loop, whose guard objects to an
+    /// answer stating a task id no run of this turn's owner answers to. The
+    /// loop grants the guard exactly one corrective round and then **appends**
+    /// the guard's own line to whatever the model said (N3) — the answer is
+    /// never taken away. `None` (every other caller: the lead, subagents,
+    /// skills, compaction) reviews nothing and costs nothing.
     pub answer_guard: Option<Arc<dyn AnswerGuard>>,
 }
 

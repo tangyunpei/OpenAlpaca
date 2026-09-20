@@ -1312,8 +1312,9 @@ async fn run_agentic_loop_core(
                 // The last look before this text becomes the turn's answer.
                 // The guard owns the judgement; the loop owns the policy —
                 // exactly one corrective round, then the guard's own line
-                // instead of the claim. A loop with no guard (everything but
-                // the main loop) does not even branch.
+                // appended to the answer (N3: the runtime adds a fact, it
+                // does not take the answer away). A loop with no guard
+                // (everything but the main loop) does not even branch.
                 if let Some(ref guard) = config.answer_guard
                     && let Some(correction) = guard.review(&response.content)
                 {
@@ -1333,21 +1334,25 @@ async fn run_agentic_loop_core(
                             .push(ChatMessage::user(&correction.note));
                         continue;
                     }
-                    // Said again after being told. The runtime answers in the
-                    // model's place rather than shipping the claim; this
-                    // content is what is persisted, what `done` carries, and
-                    // what a reconciling client ends on.
+                    // Said again after being told. The answer still ships —
+                    // the runtime appends one line of its own beneath it, so
+                    // a guard that misjudged a true answer costs the reader a
+                    // fact rather than the answer. This content is what is
+                    // persisted, what `done` carries, and what a reconciling
+                    // client ends on.
                     persist_span.in_scope(|| {
                         tracing::warn!(
                             agent_id = agent_id,
                             round = state.rounds,
-                            "Answer guard rejected the corrected answer too; replacing it"
+                            "Answer guard rejected the corrected answer too; appending its note"
                         );
                     });
-                    return state.result_with_content(
-                        correction.replacement,
-                        LoopFinishReason::Complete,
-                    );
+                    let annotated = if response.content.trim().is_empty() {
+                        correction.runtime_note
+                    } else {
+                        format!("{}\n\n{}", response.content, correction.runtime_note)
+                    };
+                    return state.result_with_content(annotated, LoopFinishReason::Complete);
                 }
 
                 // No tool calls → done

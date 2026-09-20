@@ -3693,7 +3693,7 @@ impl AnswerGuard for CountingGuard {
             .push(answer.to_string());
         answer.contains(self.reject).then(|| Correction {
             note: "say it properly".to_string(),
-            replacement: "the runtime line".to_string(),
+            runtime_note: "the runtime line".to_string(),
         })
     }
 }
@@ -3739,10 +3739,10 @@ async fn the_answer_guard_spends_one_round_and_then_accepts() {
     );
 }
 
-/// Said twice, the guard's own line is the turn's content — and the loop never
-/// asks a third time.
+/// Said twice, the answer still ships: the guard's own line is **appended** to
+/// it (N3), and the loop never asks a third time.
 #[tokio::test]
-async fn the_answer_guard_replaces_a_repeated_claim_and_stops() {
+async fn the_answer_guard_appends_its_note_to_a_repeated_claim_and_stops() {
     let provider = MockProvider::new(vec![Ok(MockProvider::simple_response("a false claim"))]);
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let config = LoopConfig {
@@ -3769,8 +3769,43 @@ async fn the_answer_guard_replaces_a_repeated_claim_and_stops() {
     .await;
 
     assert_eq!(result.finish_reason, LoopFinishReason::Complete);
-    assert_eq!(result.final_content, "the runtime line");
+    assert_eq!(result.final_content, "a false claim\n\nthe runtime line");
     assert_eq!(seen.lock().unwrap().len(), 2, "reviewed exactly twice");
+}
+
+/// A rejected answer with no text of its own is the one case where the
+/// runtime's line stands alone — there is nothing to append it to.
+#[tokio::test]
+async fn an_empty_repeated_answer_is_just_the_runtime_line() {
+    let provider = MockProvider::new(vec![
+        Ok(MockProvider::simple_response("a false claim")),
+        Ok(MockProvider::simple_response("   ")),
+    ]);
+    let config = LoopConfig {
+        max_rounds: 2,
+        answer_guard: Some(Arc::new(CountingGuard {
+            // Objects to everything, including the blank second answer.
+            reject: "",
+            seen: Arc::new(std::sync::Mutex::new(Vec::new())),
+        })),
+        ..Default::default()
+    };
+
+    let result = run_agentic_loop(
+        &provider,
+        vec![ChatMessage::user("start something")],
+        vec![],
+        &config,
+        None,
+        "test",
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert_eq!(result.final_content, "the runtime line");
 }
 
 /// The corrective round is paid for by a bonus, not out of the turn's budget:

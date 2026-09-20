@@ -6505,8 +6505,15 @@ const FABRICATED: &str = "Started a background workflow called \"Guanaco fiber n
                           (task id: `9f4c2b71`) — it will post its results here.";
 
 const GUARD_NOTE: &str = "no start_workflow call was made in this turn";
-const GUARD_LINE: &str =
-    "I did not start a workflow — no run exists for that. Ask again and I will start one.";
+
+/// N3 — the line the runtime appends beneath an answer that still states an id
+/// nothing answers to. Two facts and an instruction; the answer stays.
+fn guard_line(id: &str) -> String {
+    format!(
+        "Note from OpenAlpaca: no workflow was started in this turn, and no task with id {id} \
+         exists. Ask again to start one."
+    )
+}
 
 fn scripted_turn_orchestrator(
     steps: Vec<ScriptStep>,
@@ -6588,22 +6595,17 @@ async fn a_fabricated_delegation_gets_one_corrective_round_and_then_the_tool() {
     assert_eq!(delegation.title, "Guanaco fiber notes");
 }
 
-/// Said twice, it is not shipped: the runtime answers instead, and the
-/// fabricated id is nowhere in what the turn returns — which is verbatim what
+/// Said twice, the answer is still shipped — with the runtime's own line
+/// appended beneath it (N3). What the turn returns is verbatim what
 /// `GatewayPersistence::persist_assistant_message` writes as the row.
 #[tokio::test]
-async fn a_twice_fabricated_delegation_ends_on_the_runtime_line() {
+async fn a_twice_fabricated_delegation_keeps_the_answer_and_adds_the_note() {
+    const SECOND: &str =
+        "I've queued it — task id 9f4c2b71 — and I will report back when it finishes.";
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
     let (orch, requests) = scripted_turn_orchestrator(
-        vec![
-            ScriptStep::Say(FABRICATED),
-            // Said again, and again as a *start* (J2: a bare status relay
-            // claims nothing and is not reviewed at all).
-            ScriptStep::Say(
-                "I've queued it — task id 9f4c2b71 — and I will report back when it finishes.",
-            ),
-        ],
+        vec![ScriptStep::Say(FABRICATED), ScriptStep::Say(SECOND)],
         db,
     );
 
@@ -6615,15 +6617,7 @@ async fn a_twice_fabricated_delegation_ends_on_the_runtime_line() {
     )
     .await;
 
-    assert_eq!(reply, GUARD_LINE);
-    assert!(
-        !reply.contains("9f4c2b71"),
-        "the fabricated id must not survive into the turn's content"
-    );
-    assert!(
-        !reply.contains("Guanaco"),
-        "nor the title of the run that does not exist"
-    );
+    assert_eq!(reply, format!("{SECOND}\n\n{}", guard_line("9f4c2b71")));
     assert!(
         orch.delegation_map.get(&request_id).is_none(),
         "no delegation was recorded, because none happened"
@@ -6764,21 +6758,74 @@ async fn a_run_of_another_owner_does_not_excuse_the_claim() {
     );
 
     let reply = send_tool_mode(&orch, Uuid::new_v4(), "Kick off the guanaco write-up").await;
-    assert_eq!(reply, GUARD_LINE);
+    assert_eq!(
+        reply,
+        format!(
+            "{claim}\n\n{}",
+            guard_line("aabbccdd-1111-2222-3333-444455556666")
+        )
+    );
     assert_eq!(requests.lock().unwrap().len(), 2);
 }
 
-/// J2 — a status relay claims no start, so it is not reviewed at all: not even
-/// an id nothing answers to costs the turn a round.
+/// N1/N3 — a status relay about a run that does not exist is an error too. It
+/// gets the same one corrective round, and if the id is still there the answer
+/// is **preserved** with the runtime's line beneath it.
 #[tokio::test]
-async fn a_status_relay_is_not_reviewed_even_with_an_unknown_id() {
+async fn a_status_relay_with_an_unknown_id_is_corrected_then_annotated() {
+    const RELAY: &str = "Task 9f4c2b71 finished a while ago — it wrote two artifacts.";
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
-    let relay = "Task 9f4c2b71 finished a while ago — it wrote two artifacts.";
-    let (orch, requests) = scripted_turn_orchestrator(vec![ScriptStep::Say(relay)], db);
+    let (orch, requests) = scripted_turn_orchestrator(
+        vec![ScriptStep::Say(RELAY), ScriptStep::Say(RELAY)],
+        db,
+    );
 
     let reply = send_tool_mode(&orch, Uuid::new_v4(), "Did the guanaco run finish?").await;
-    assert_eq!(reply, relay);
+
+    assert!(
+        reply.starts_with(RELAY),
+        "the model's own answer must survive: {reply}"
+    );
+    assert_eq!(reply, format!("{RELAY}\n\n{}", guard_line("9f4c2b71")));
+    assert!(
+        reply.contains("9f4c2b71"),
+        "the note names the id it is about"
+    );
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2, "exactly one corrective round");
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|m| m.content.contains(GUARD_NOTE) && m.content.contains("9f4c2b71")),
+        "the corrective note must name the id: {:?}",
+        requests[1].messages.last().map(|m| m.content.clone())
+    );
+}
+
+/// N1/N4 — one stray id must not veto a whole multi-topic answer. "Started
+/// reviewing your notes" is not a delegation claim, and the id it mentions is
+/// a real run of this owner, so the turn is untouched.
+#[tokio::test]
+async fn a_real_id_beside_unrelated_start_prose_is_untouched() {
+    const ID: &str = "1a2b3c9d-1111-2222-3333-444455556666";
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let repo = openalpaca_storage::repository::TaskRepository::new(&db);
+    let mut task = make_test_task();
+    task.id = ID.to_string();
+    task.created_by = "user1".to_string();
+    task.source_lane = "user1:cli".to_string();
+    repo.create(&task).unwrap();
+
+    let answer = "Started reviewing your notes just now. By the way, task \
+                  1a2b3c9d-1111-2222-3333-444455556666 already finished.";
+    let (orch, requests) = scripted_turn_orchestrator(vec![ScriptStep::Say(answer)], db);
+
+    let reply = send_tool_mode(&orch, Uuid::new_v4(), "Anything I should know?").await;
+    assert_eq!(reply, answer);
     assert_eq!(requests.lock().unwrap().len(), 1, "no corrective round");
 }
 
