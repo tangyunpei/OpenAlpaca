@@ -209,7 +209,7 @@ bun run check && bun run test && bun run format:check && bun run build
 
 ## Status and limitations
 
-- **Moving target.** Config keys, API routes and the database schema change between commits. The schema is at migration 042.
+- **Moving target.** Config keys, API routes and the database schema change between commits. `001_baseline.sql` initializes schema version 42; existing version-42 databases remain usable, but earlier development schemas are no longer upgraded.
 - **Platforms.** Developed on macOS. CI builds and tests on Linux. Windows has packaging scripts, but CI does not build the Rust workspace there.
 - **Plugins** can add tools, skills and agent templates. Plugin connectors and plugin LLM providers are declared in the manifest format but not wired. They do not work.
 - **MCP** is client-side and tools only. MCP resources and prompts are stubs. Serving MCP is not a goal.

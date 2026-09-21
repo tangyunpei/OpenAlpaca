@@ -4,7 +4,7 @@
 > `crates/openalpaca_core/src/security`, `crates/openalpaca_core/src/runner`,
 > `crates/openalpaca_core/src/orchestrator/skill`, `apps/openalpacad/src/services`,
 > `apps/openalpacad/src/managers` and the shipped `config/`. Workspace version 0.1.0,
-> migration head 042.
+> schema version 42 (the `001_baseline.sql` baseline).
 >
 > Code-level reference for the OpenAlpaca tool system.  For architecture
 > and design rationale see the companion [DESIGN.md](./DESIGN.md).  Struct
@@ -1565,7 +1565,7 @@ pub(super) fn format_tool_error_with_hint(tool_name: &str, msg: &str) -> String
 
 ### Database Tables
 
-Created by migration `030_skill_tool_execution_log.sql` and extended since.
+Defined in `crates/openalpaca_storage/src/migrations/001_baseline.sql` (schema version 42).
 The generated [schema reference](../api/database/schema.md) is
 authoritative.
 
@@ -1581,10 +1581,10 @@ authoritative.
 | `duration_ms` | INTEGER NOT NULL | Execution time |
 | `error_message` | TEXT | Error text if failed |
 | `timestamp` | TEXT | Defaults to `datetime('now')` |
-| `session_id`, `task_id` | TEXT | The session and run the call belonged to (039) |
-| `log_seq` | INTEGER | Position of the call in the session log (039) |
-| `args_preview`, `result_preview` | TEXT | Bounded previews (039) |
-| `result_ref` | TEXT | The `results/` reference when the result spilled (039) |
+| `session_id`, `task_id` | TEXT | The session and run the call belonged to |
+| `log_seq` | INTEGER | Position of the call in the session log |
+| `args_preview`, `result_preview` | TEXT | Bounded previews |
+| `result_ref` | TEXT | The `results/` reference when the result spilled |
 
 **Indexes:** `idx_tel_tool_ts (tool_name, timestamp DESC)`,
 `idx_tel_request (request_id)`, `idx_tel_session (session_id, id)`,
@@ -1613,7 +1613,7 @@ authoritative.
 | `was_auto_selected` | INTEGER | Router auto-selection flag |
 | `repair_attempted` / `repair_succeeded` | INTEGER | Output-repair flags |
 | `timestamp` | TEXT | Defaults to `datetime('now')` |
-| `response_message_id` | INTEGER | The assistant message the run produced (031) |
+| `response_message_id` | INTEGER | The assistant message the run produced |
 
 **Indexes:** unique `idx_sel_request_id (request_id)`,
 `idx_sel_skill_ts (skill_id, timestamp DESC)`,

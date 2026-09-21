@@ -326,7 +326,7 @@ and the task outcome record.
 
 `queue_followup` (lead-agent tool, plus a main-loop variant on
 workflow-attached lanes) writes `followup` rows into `lane_followups`
-(migration 033) with the originating principal/scope/workspace. When a
+with the originating principal/scope/workspace. When a
 workflow finalizes and `followup_autostart = true` (default), the spawn
 claims the lane's next `followup` row (`FollowupRepository::claim_next`
 — which never claims `unprocessed_steering`; those rows are surfaced by
@@ -338,7 +338,7 @@ re-enters through `Gateway::handle_event` as a fresh turn —
 `EventSource::Internal` with `lane_override` for lane continuity — so it
 can answer inline or start its own workflow through the normal front
 door. A queued row keeps the `unattended` declaration of the turn that
-queued it (`lane_followups.unattended`, migration 042), so a follow-up
+queued it (`lane_followups.unattended`), so a follow-up
 started hours later still knows whether anybody can answer an approval
 prompt.
 

@@ -384,8 +384,9 @@ Emits the existing `ServerEvent::WorkflowSteered`. This is a thin wrapper over t
 **UI needs:** the `Queue follow-up` button on every run card, the composer's
 `follow-up → connector audit` mode, and a visible pending-follow-ups list.
 
-**Why nothing fits:** follow-ups exist in storage — migration `033_lane_followups.sql`,
-`FollowupRepository { queue, ... }`, model
+**Why nothing fits:** follow-ups exist in storage — the `lane_followups` table
+(migration `033` at filing; part of `crates/openalpaca_storage/src/migrations/001_baseline.sql`
+since the squash), `FollowupRepository { queue, ... }`, model
 `FollowupRecord { id: i64, lane_key, kind: "followup"|"unprocessed_steering", content, principal_json, workspace_path?, source_task_id?, status: "queued"|"running"|"done"|"cancelled", created_at, updated_at }`
 — and `ServerEvent::FollowupQueued` is emitted. But
 `grep -rn "followup" apps/openalpacad/src/routes/ apps/openalpacad/src/router.rs`
@@ -474,8 +475,9 @@ and the `Diff v1→v2` tab with `+9 −2` counts and a rendered unified diff.
 
 **Why nothing fits:** nothing versioned exists anywhere. `file_assets` has a single
 row per file with `created_at`/`updated_at`; there is no history table
-(`ls crates/openalpaca_storage/src/migrations/` — 034 migrations, none about file or
-artifact versions), and `FileAssetRepository` has no revision methods. `state_version`
+(the migration history at filing was 34 files, none of them about file or
+artifact versions — `artifact_versions` arrived with the fix below), and
+`FileAssetRepository` has no revision methods. `state_version`
 on `Task` is an optimistic-lock counter, not content history.
 
 **Proposal (extends GAP-04):**
@@ -1016,9 +1018,9 @@ Plan reference: `tasks/api-fix-plan.md` §Phase 8 item 8.
 `{ status, version, pid, instance_id }`. Uptime is _derivable_ client-side from
 `discovery.json.started_at`, but that field is **not** on `ConnectionInfo`
 (`{ base_url, token, instance_id }` only — `discovery/mod.rs:264`), so the React client
-cannot see it without a new Tauri command. The migration count is compile-time
-(`crates/openalpaca_storage/src/migrations/`, highest `034_drop_context_compaction_log.sql`)
-and never surfaced. Nothing anywhere returns a log path
+cannot see it without a new Tauri command. The schema version is compile-time
+(`crates/openalpaca_storage/src/migrations/`, whose registry is now the single
+`001_baseline.sql` at version 42) and never surfaced. Nothing anywhere returns a log path
 (`grep -rn "log_path" apps/openalpacad/src/routes/` → nothing).
 
 **Proposal:**
