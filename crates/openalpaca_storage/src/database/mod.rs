@@ -70,7 +70,7 @@ impl Database {
             conn: Arc::new(Mutex::new(conn)),
         };
 
-        db.run_migrations()?;
+        db.run_migrations(path)?;
 
         info!("Database initialized: {}", path.display());
         Ok(db)
@@ -104,9 +104,38 @@ impl Database {
     }
 
     /// Run all pending migrations
-    fn run_migrations(&self) -> Result<()> {
+    ///
+    /// `path` is the database file this connection was opened from; it is used
+    /// only to name the file in the legacy-refusal message, which is otherwise
+    /// unactionable — the store root is overridable with `OPENALPACA_HOME_STORE`,
+    /// so "this database" identifies nothing.
+    fn run_migrations(&self, path: &Path) -> Result<()> {
         let current_version = self.schema_version()?;
         debug!("Current schema version: {}", current_version);
+
+        // The baseline creates the final schema directly; it cannot upgrade a
+        // partially migrated development database. Refuse before executing SQL
+        // so its existing schema and rows remain available to an older build.
+        //
+        // The message names the file rather than prescribing a reset verb:
+        // `openalpaca config reset --factory` opens the database before it
+        // reaches the action (`apps/openalpaca/src/commands/config.rs`), so it
+        // dies on this very guard, and `factory_reset` below deletes rows
+        // without touching `schema_version` — the database would come back at
+        // the same unsupported version. Deleting the file is the remedy that
+        // works from here.
+        if current_version > 0 && current_version < migrations::BASELINE_VERSION {
+            let file = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+            anyhow::bail!(
+                "Unsupported legacy schema version {current_version}: this build starts at schema \
+                 version {baseline} and cannot upgrade a database created by an older one. \
+                 Delete {file} (together with its -wal and -shm files) to start fresh, which \
+                 discards every task, message and memory stored in it, or open it with a build \
+                 from before the migrations were squashed into the baseline.",
+                baseline = migrations::BASELINE_VERSION,
+                file = file.display(),
+            );
+        }
 
         let pending: Vec<&Migration> = migrations::MIGRATIONS
             .iter()

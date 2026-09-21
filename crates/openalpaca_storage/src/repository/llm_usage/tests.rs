@@ -195,12 +195,6 @@ fn test_empty_results() {
     assert!(daily.is_empty());
 }
 
-#[test]
-fn test_schema_version() {
-    let db = setup_db();
-    assert_eq!(db.schema_version().unwrap(), 42);
-}
-
 fn call_log_for_task(task_id: &str, cost_usd: f64) -> LlmCallLog {
     LlmCallLog {
         id: None,

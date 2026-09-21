@@ -168,15 +168,14 @@ fn test_dispatch_decision_error_message_roundtrip() {
 }
 
 #[test]
-fn test_migration_025_creates_error_message_schema() {
+fn test_request_and_task_ids_round_trip() {
     let db = setup_db();
-    assert_eq!(db.schema_version().unwrap(), 42);
 
     // Verify request_id column works
     let repo = DispatchDecisionRepository::new(&db);
     repo.record(&DispatchDecisionRecord {
         id: None,
-        request_id: "migration-024-test".to_string(),
+        request_id: "request-with-task".to_string(),
         task_id: Some("task-test".to_string()),
         mode: "lead_agent".to_string(),
         reason: "test".to_string(),
@@ -190,6 +189,6 @@ fn test_migration_025_creates_error_message_schema() {
 
     let records = repo.query(None, None, None, 1).unwrap();
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0].request_id, "migration-024-test");
+    assert_eq!(records[0].request_id, "request-with-task");
     assert_eq!(records[0].task_id.as_deref(), Some("task-test"));
 }

@@ -6,13 +6,13 @@
 
 - DB path resolver: `openalpaca_storage::paths::database_path()`
 - Migrations entrypoint: `openalpaca_storage::migrations::MIGRATIONS`
-- Registered migrations: 42
+- Registered migrations: 1
 
 ## Tables
 
 ### `agent` (table)
 
-Source migration: `021_agent_template_id_not_null.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 id TEXT PRIMARY KEY
@@ -34,7 +34,7 @@ template_id TEXT NOT NULL DEFAULT ''
 
 ### `agent_metrics` (table)
 
-Source migration: `007_subagents.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 agent_id TEXT PRIMARY KEY REFERENCES agent(id) ON DELETE CASCADE
@@ -48,7 +48,7 @@ updated_at TEXT DEFAULT (datetime('now'))
 
 ### `agent_task_history` (table)
 
-Source migration: `007_subagents.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 id TEXT PRIMARY KEY
@@ -62,7 +62,7 @@ completed_at TEXT DEFAULT (datetime('now'))
 
 ### `artifact_versions` (table)
 
-Source migration: `036_artifact_store.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 artifact_id TEXT NOT NULL REFERENCES file_assets(id) ON DELETE CASCADE
@@ -80,7 +80,7 @@ PRIMARY KEY (artifact_id, version)
 
 ### `conversation_map` (table)
 
-Source migration: `011_unified_conversations.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT
@@ -88,14 +88,14 @@ provider TEXT NOT NULL
 provider_conversation_id TEXT NOT NULL
 global_user_id TEXT
 created_at TEXT DEFAULT (datetime('now'))
+lane_key TEXT
 FOREIGN KEY (global_user_id) REFERENCES global_user(id)
 UNIQUE(provider, provider_conversation_id)
-lane_key TEXT
 ```
 
 ### `conversation_message_attachments` (table)
 
-Source migration: `028_message_attachments.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT
@@ -109,7 +109,7 @@ created_at TEXT NOT NULL DEFAULT (datetime('now'))
 
 ### `conversation_messages` (table)
 
-Source migration: `039_sessions.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT
@@ -130,7 +130,7 @@ session_id TEXT
 
 ### `discovered_models` (table)
 
-Source migration: `010_discovered_models.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 model_id TEXT NOT NULL
@@ -144,7 +144,7 @@ PRIMARY KEY (model_id)
 
 ### `dispatch_decisions` (table)
 
-Source migration: `035_drop_planner_telemetry.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT
@@ -161,7 +161,7 @@ error_message TEXT
 
 ### `event_log` (table)
 
-Source migration: `037_run_observability.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT
@@ -175,7 +175,7 @@ task_id TEXT
 
 ### `external_identity` (table)
 
-Source migration: `003_identity.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT
@@ -192,7 +192,7 @@ UNIQUE(provider, provider_user_id)
 
 ### `file_assets` (table)
 
-Source migration: `036_artifact_store.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 id TEXT PRIMARY KEY
@@ -224,7 +224,7 @@ missing_since TEXT
 
 ### `global_user` (table)
 
-Source migration: `003_identity.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 id TEXT PRIMARY KEY
@@ -235,7 +235,7 @@ updated_at TEXT DEFAULT (datetime('now'))
 
 ### `lane_followups` (table)
 
-Source migration: `042_unattended_declaration.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT
@@ -254,7 +254,7 @@ unattended INTEGER NOT NULL DEFAULT 0
 
 ### `link_token` (table)
 
-Source migration: `003_identity.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT
@@ -268,7 +268,7 @@ FOREIGN KEY (global_user_id) REFERENCES global_user(id)
 
 ### `llm_call_log` (table)
 
-Source migration: `008_llm_usage.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT
@@ -288,7 +288,7 @@ error_message TEXT
 
 ### `llm_usage_daily` (table)
 
-Source migration: `008_llm_usage.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 date TEXT NOT NULL
@@ -303,7 +303,7 @@ PRIMARY KEY (date, agent_id, model)
 
 ### `memory` (table)
 
-Source migration: `018_memory_lifecycle.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT
@@ -325,7 +325,7 @@ last_accessed_at TEXT
 
 ### `message_feedback` (table)
 
-Source migration: `031_message_feedback.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT
@@ -339,7 +339,7 @@ FOREIGN KEY (message_id) REFERENCES conversation_messages(id) ON DELETE CASCADE
 
 ### `orchestrator_latency` (table)
 
-Source migration: `035_drop_planner_telemetry.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT
@@ -353,7 +353,7 @@ timestamp TEXT DEFAULT (datetime('now'))
 
 ### `preference` (table)
 
-Source migration: `005_preference.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT
@@ -368,7 +368,7 @@ UNIQUE(user_id, key)
 
 ### `schema_version` (table)
 
-Source migration: `001_init.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 version INTEGER PRIMARY KEY
@@ -376,7 +376,7 @@ version INTEGER PRIMARY KEY
 
 ### `session` (table)
 
-Source migration: `039_sessions.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 id TEXT PRIMARY KEY
@@ -398,7 +398,7 @@ updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 
 ### `skill_execution_log` (table)
 
-Source migration: `031_message_feedback.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT
@@ -427,7 +427,7 @@ response_message_id INTEGER
 
 ### `subagent_span` (table)
 
-Source migration: `037_run_observability.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 id TEXT PRIMARY KEY
@@ -446,7 +446,7 @@ output_preview TEXT
 
 ### `system_config` (table)
 
-Source migration: `004_config.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 key TEXT PRIMARY KEY
@@ -457,7 +457,7 @@ updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 
 ### `task` (table)
 
-Source migration: `042_unattended_declaration.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 id TEXT PRIMARY KEY
@@ -486,7 +486,7 @@ unattended INTEGER NOT NULL DEFAULT 0
 
 ### `task_agent_assignment` (table)
 
-Source migration: `012_assignment_output.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 id TEXT PRIMARY KEY
@@ -502,7 +502,7 @@ result_output TEXT
 
 ### `tool_execution_log` (table)
 
-Source migration: `039_sessions.sql`
+Source migration: `001_baseline.sql`
 
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT
@@ -525,75 +525,75 @@ result_ref TEXT
 
 | Name | Table | Kind | Columns/Expr | Source |
 |---|---|---|---|---|
-| `idx_agent_task_history` | `agent_task_history` | `INDEX` | `agent_id, completed_at DESC` | `007_subagents.sql` |
-| `idx_artifact_versions_artifact` | `artifact_versions` | `INDEX` | `artifact_id, version DESC` | `036_artifact_store.sql` |
-| `idx_conversation_map_provider` | `conversation_map` | `INDEX` | `provider, provider_conversation_id` | `003_identity.sql` |
-| `idx_msg_attach_message` | `conversation_message_attachments` | `INDEX` | `message_id` | `028_message_attachments.sql` |
-| `idx_conv_msg_created` | `conversation_messages` | `INDEX` | `created_at` | `009_conversation_messages.sql` |
-| `idx_conv_msg_lane` | `conversation_messages` | `INDEX` | `lane_key` | `009_conversation_messages.sql` |
-| `idx_conv_msg_lane_id` | `conversation_messages` | `INDEX` | `lane_key, id` | `014_conversation_summary.sql` |
-| `idx_conv_msg_session` | `conversation_messages` | `INDEX` | `session_id, id` | `039_sessions.sql` |
-| `idx_conv_msg_task` | `conversation_messages` | `INDEX` | `task_id` | `038_message_run_links.sql` |
-| `idx_discovered_models_provider` | `discovered_models` | `INDEX` | `provider` | `010_discovered_models.sql` |
-| `idx_dd_mode` | `dispatch_decisions` | `INDEX` | `mode, timestamp DESC` | `024_dispatch_decision_request_id.sql` |
-| `idx_dd_request` | `dispatch_decisions` | `INDEX` | `request_id` | `024_dispatch_decision_request_id.sql` |
-| `idx_dd_ts` | `dispatch_decisions` | `INDEX` | `timestamp DESC` | `024_dispatch_decision_request_id.sql` |
-| `idx_event_log_agent` | `event_log` | `INDEX` | `agent_id` | `001_init.sql` |
-| `idx_event_log_task` | `event_log` | `INDEX` | `task_id` | `037_run_observability.sql` |
-| `idx_event_log_timestamp` | `event_log` | `INDEX` | `timestamp` | `001_init.sql` |
-| `idx_event_log_type` | `event_log` | `INDEX` | `event_type` | `001_init.sql` |
-| `idx_external_identity_global_user` | `external_identity` | `INDEX` | `global_user_id` | `003_identity.sql` |
-| `idx_external_identity_provider` | `external_identity` | `INDEX` | `provider, provider_user_id` | `003_identity.sql` |
-| `idx_file_assets_origin` | `file_assets` | `INDEX` | `origin, created_at DESC` | `036_artifact_store.sql` |
-| `idx_file_assets_owner` | `file_assets` | `INDEX` | `owner_id` | `027_file_assets.sql` |
-| `idx_file_assets_project` | `file_assets` | `INDEX` | `project_root` | `036_artifact_store.sql` |
-| `idx_file_assets_sha256` | `file_assets` | `INDEX` | `sha256` | `027_file_assets.sql` |
-| `idx_file_assets_task` | `file_assets` | `INDEX` | `task_id` | `036_artifact_store.sql` |
-| `idx_lane_followups_lane_status` | `lane_followups` | `INDEX` | `lane_key, status, id` | `033_lane_followups.sql` |
-| `idx_link_token_token` | `link_token` | `INDEX` | `token` | `003_identity.sql` |
-| `idx_llm_call_log_agent` | `llm_call_log` | `INDEX` | `agent_id, timestamp DESC` | `008_llm_usage.sql` |
-| `idx_llm_call_log_task` | `llm_call_log` | `INDEX` | `task_id, timestamp DESC` | `008_llm_usage.sql` |
-| `idx_llm_call_log_timestamp` | `llm_call_log` | `INDEX` | `timestamp` | `040_llm_call_log_timestamp_index.sql` |
-| `idx_memory_content_hash` | `memory` | `UNIQUE` | `owner_id, scope, scope_id, content_hash` | `026_memory_scope_dedup.sql` |
-| `idx_memory_decay` | `memory` | `INDEX` | `owner_id, kind, last_accessed_at` | `018_memory_lifecycle.sql` |
-| `idx_memory_importance` | `memory` | `INDEX` | `owner_id, importance` | `018_memory_lifecycle.sql` |
-| `idx_memory_owner` | `memory` | `INDEX` | `owner_id` | `015_memory_v2.sql` |
-| `idx_memory_owner_created` | `memory` | `INDEX` | `owner_id, created_at DESC` | `019_memory_fixes.sql` |
-| `idx_memory_owner_kind` | `memory` | `INDEX` | `owner_id, kind` | `015_memory_v2.sql` |
-| `idx_memory_owner_scope` | `memory` | `INDEX` | `owner_id, scope, scope_id` | `015_memory_v2.sql` |
-| `idx_memory_supersedes` | `memory` | `INDEX` | `supersedes_id` | `018_memory_lifecycle.sql` |
-| `idx_mf_feedback` | `message_feedback` | `INDEX` | `feedback` | `031_message_feedback.sql` |
-| `idx_orch_latency_mode` | `orchestrator_latency` | `INDEX` | `mode, timestamp DESC` | `022_orchestrator_latency.sql` |
-| `idx_orch_latency_ts` | `orchestrator_latency` | `INDEX` | `timestamp DESC` | `022_orchestrator_latency.sql` |
-| `idx_preference_user` | `preference` | `INDEX` | `user_id` | `005_preference.sql` |
-| `idx_session_source` | `session` | `INDEX` | `source` | `039_sessions.sql` |
-| `idx_session_updated` | `session` | `INDEX` | `updated_at DESC` | `039_sessions.sql` |
-| `idx_session_workspace` | `session` | `INDEX` | `workspace_id, updated_at DESC` | `039_sessions.sql` |
-| `idx_sel_agent` | `skill_execution_log` | `INDEX` | `agent_id, skill_id` | `030_skill_tool_execution_log.sql` |
-| `idx_sel_request_id` | `skill_execution_log` | `UNIQUE` | `request_id` | `030_skill_tool_execution_log.sql` |
-| `idx_sel_response_msg` | `skill_execution_log` | `INDEX` | `response_message_id` | `031_message_feedback.sql` |
-| `idx_sel_skill_ts` | `skill_execution_log` | `INDEX` | `skill_id, timestamp DESC` | `030_skill_tool_execution_log.sql` |
-| `idx_sel_status` | `skill_execution_log` | `INDEX` | `skill_id, status` | `030_skill_tool_execution_log.sql` |
-| `idx_sel_timestamp` | `skill_execution_log` | `INDEX` | `timestamp, skill_id` | `041_execution_log_timestamp_indexes.sql` |
-| `idx_subagent_span_label` | `subagent_span` | `UNIQUE` | `task_id, label` | `037_run_observability.sql` |
-| `idx_subagent_span_state` | `subagent_span` | `INDEX` | `state` | `037_run_observability.sql` |
-| `idx_subagent_span_task` | `subagent_span` | `INDEX` | `task_id, started_at` | `037_run_observability.sql` |
-| `idx_task_created_by` | `task` | `INDEX` | `created_by` | `006_tasks.sql` |
-| `idx_task_session` | `task` | `INDEX` | `session_id` | `039_sessions.sql` |
-| `idx_task_source` | `task` | `INDEX` | `source_task_id` | `037_run_observability.sql` |
-| `idx_task_status` | `task` | `INDEX` | `status` | `006_tasks.sql` |
-| `idx_task_workspace` | `task` | `INDEX` | `workspace_id` | `036_artifact_store.sql` |
-| `idx_task_agent_task` | `task_agent_assignment` | `INDEX` | `task_id` | `006_tasks.sql` |
-| `idx_tel_request` | `tool_execution_log` | `INDEX` | `request_id` | `030_skill_tool_execution_log.sql` |
-| `idx_tel_session` | `tool_execution_log` | `INDEX` | `session_id, id` | `039_sessions.sql` |
-| `idx_tel_task` | `tool_execution_log` | `INDEX` | `task_id, id` | `039_sessions.sql` |
-| `idx_tel_timestamp` | `tool_execution_log` | `INDEX` | `timestamp, tool_name` | `041_execution_log_timestamp_indexes.sql` |
-| `idx_tel_tool_ts` | `tool_execution_log` | `INDEX` | `tool_name, timestamp DESC` | `030_skill_tool_execution_log.sql` |
+| `idx_agent_task_history` | `agent_task_history` | `INDEX` | `agent_id, completed_at DESC` | `001_baseline.sql` |
+| `idx_artifact_versions_artifact` | `artifact_versions` | `INDEX` | `artifact_id, version DESC` | `001_baseline.sql` |
+| `idx_conversation_map_provider` | `conversation_map` | `INDEX` | `provider, provider_conversation_id` | `001_baseline.sql` |
+| `idx_msg_attach_message` | `conversation_message_attachments` | `INDEX` | `message_id` | `001_baseline.sql` |
+| `idx_conv_msg_created` | `conversation_messages` | `INDEX` | `created_at` | `001_baseline.sql` |
+| `idx_conv_msg_lane` | `conversation_messages` | `INDEX` | `lane_key` | `001_baseline.sql` |
+| `idx_conv_msg_lane_id` | `conversation_messages` | `INDEX` | `lane_key, id` | `001_baseline.sql` |
+| `idx_conv_msg_session` | `conversation_messages` | `INDEX` | `session_id, id` | `001_baseline.sql` |
+| `idx_conv_msg_task` | `conversation_messages` | `INDEX` | `task_id` | `001_baseline.sql` |
+| `idx_discovered_models_provider` | `discovered_models` | `INDEX` | `provider` | `001_baseline.sql` |
+| `idx_dd_mode` | `dispatch_decisions` | `INDEX` | `mode, timestamp DESC` | `001_baseline.sql` |
+| `idx_dd_request` | `dispatch_decisions` | `INDEX` | `request_id` | `001_baseline.sql` |
+| `idx_dd_ts` | `dispatch_decisions` | `INDEX` | `timestamp DESC` | `001_baseline.sql` |
+| `idx_event_log_agent` | `event_log` | `INDEX` | `agent_id` | `001_baseline.sql` |
+| `idx_event_log_task` | `event_log` | `INDEX` | `task_id` | `001_baseline.sql` |
+| `idx_event_log_timestamp` | `event_log` | `INDEX` | `timestamp` | `001_baseline.sql` |
+| `idx_event_log_type` | `event_log` | `INDEX` | `event_type` | `001_baseline.sql` |
+| `idx_external_identity_global_user` | `external_identity` | `INDEX` | `global_user_id` | `001_baseline.sql` |
+| `idx_external_identity_provider` | `external_identity` | `INDEX` | `provider, provider_user_id` | `001_baseline.sql` |
+| `idx_file_assets_origin` | `file_assets` | `INDEX` | `origin, created_at DESC` | `001_baseline.sql` |
+| `idx_file_assets_owner` | `file_assets` | `INDEX` | `owner_id` | `001_baseline.sql` |
+| `idx_file_assets_project` | `file_assets` | `INDEX` | `project_root` | `001_baseline.sql` |
+| `idx_file_assets_sha256` | `file_assets` | `INDEX` | `sha256` | `001_baseline.sql` |
+| `idx_file_assets_task` | `file_assets` | `INDEX` | `task_id` | `001_baseline.sql` |
+| `idx_lane_followups_lane_status` | `lane_followups` | `INDEX` | `lane_key, status, id` | `001_baseline.sql` |
+| `idx_link_token_token` | `link_token` | `INDEX` | `token` | `001_baseline.sql` |
+| `idx_llm_call_log_agent` | `llm_call_log` | `INDEX` | `agent_id, timestamp DESC` | `001_baseline.sql` |
+| `idx_llm_call_log_task` | `llm_call_log` | `INDEX` | `task_id, timestamp DESC` | `001_baseline.sql` |
+| `idx_llm_call_log_timestamp` | `llm_call_log` | `INDEX` | `timestamp` | `001_baseline.sql` |
+| `idx_memory_content_hash` | `memory` | `UNIQUE` | `owner_id, scope, scope_id, content_hash` | `001_baseline.sql` |
+| `idx_memory_decay` | `memory` | `INDEX` | `owner_id, kind, last_accessed_at` | `001_baseline.sql` |
+| `idx_memory_importance` | `memory` | `INDEX` | `owner_id, importance` | `001_baseline.sql` |
+| `idx_memory_owner` | `memory` | `INDEX` | `owner_id` | `001_baseline.sql` |
+| `idx_memory_owner_created` | `memory` | `INDEX` | `owner_id, created_at DESC` | `001_baseline.sql` |
+| `idx_memory_owner_kind` | `memory` | `INDEX` | `owner_id, kind` | `001_baseline.sql` |
+| `idx_memory_owner_scope` | `memory` | `INDEX` | `owner_id, scope, scope_id` | `001_baseline.sql` |
+| `idx_memory_supersedes` | `memory` | `INDEX` | `supersedes_id` | `001_baseline.sql` |
+| `idx_mf_feedback` | `message_feedback` | `INDEX` | `feedback` | `001_baseline.sql` |
+| `idx_orch_latency_mode` | `orchestrator_latency` | `INDEX` | `mode, timestamp DESC` | `001_baseline.sql` |
+| `idx_orch_latency_ts` | `orchestrator_latency` | `INDEX` | `timestamp DESC` | `001_baseline.sql` |
+| `idx_preference_user` | `preference` | `INDEX` | `user_id` | `001_baseline.sql` |
+| `idx_session_source` | `session` | `INDEX` | `source` | `001_baseline.sql` |
+| `idx_session_updated` | `session` | `INDEX` | `updated_at DESC` | `001_baseline.sql` |
+| `idx_session_workspace` | `session` | `INDEX` | `workspace_id, updated_at DESC` | `001_baseline.sql` |
+| `idx_sel_agent` | `skill_execution_log` | `INDEX` | `agent_id, skill_id` | `001_baseline.sql` |
+| `idx_sel_request_id` | `skill_execution_log` | `UNIQUE` | `request_id` | `001_baseline.sql` |
+| `idx_sel_response_msg` | `skill_execution_log` | `INDEX` | `response_message_id` | `001_baseline.sql` |
+| `idx_sel_skill_ts` | `skill_execution_log` | `INDEX` | `skill_id, timestamp DESC` | `001_baseline.sql` |
+| `idx_sel_status` | `skill_execution_log` | `INDEX` | `skill_id, status` | `001_baseline.sql` |
+| `idx_sel_timestamp` | `skill_execution_log` | `INDEX` | `timestamp, skill_id` | `001_baseline.sql` |
+| `idx_subagent_span_label` | `subagent_span` | `UNIQUE` | `task_id, label` | `001_baseline.sql` |
+| `idx_subagent_span_state` | `subagent_span` | `INDEX` | `state` | `001_baseline.sql` |
+| `idx_subagent_span_task` | `subagent_span` | `INDEX` | `task_id, started_at` | `001_baseline.sql` |
+| `idx_task_created_by` | `task` | `INDEX` | `created_by` | `001_baseline.sql` |
+| `idx_task_session` | `task` | `INDEX` | `session_id` | `001_baseline.sql` |
+| `idx_task_source` | `task` | `INDEX` | `source_task_id` | `001_baseline.sql` |
+| `idx_task_status` | `task` | `INDEX` | `status` | `001_baseline.sql` |
+| `idx_task_workspace` | `task` | `INDEX` | `workspace_id` | `001_baseline.sql` |
+| `idx_task_agent_task` | `task_agent_assignment` | `INDEX` | `task_id` | `001_baseline.sql` |
+| `idx_tel_request` | `tool_execution_log` | `INDEX` | `request_id` | `001_baseline.sql` |
+| `idx_tel_session` | `tool_execution_log` | `INDEX` | `session_id, id` | `001_baseline.sql` |
+| `idx_tel_task` | `tool_execution_log` | `INDEX` | `task_id, id` | `001_baseline.sql` |
+| `idx_tel_timestamp` | `tool_execution_log` | `INDEX` | `timestamp, tool_name` | `001_baseline.sql` |
+| `idx_tel_tool_ts` | `tool_execution_log` | `INDEX` | `tool_name, timestamp DESC` | `001_baseline.sql` |
 
 ## Triggers
 
 | Name | Source |
 |---|---|
-| `memory_ad` | `015_memory_v2.sql` |
-| `memory_ai` | `015_memory_v2.sql` |
-| `memory_au` | `018_memory_lifecycle.sql` |
+| `memory_ad` | `001_baseline.sql` |
+| `memory_ai` | `001_baseline.sql` |
+| `memory_au` | `001_baseline.sql` |
