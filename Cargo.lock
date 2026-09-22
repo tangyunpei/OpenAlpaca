@@ -1634,29 +1634,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c34f04666d835ff5d62e058c3995147c06f42fe86ff053337632bca83e42702d"
 
 [[package]]
-name = "env_filter"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "900d271a03799a1ee8d1ca9b19893b48ca674a9284fefcfb85f05e74ed314217"
-dependencies = [
- "log",
- "regex",
-]
-
-[[package]]
-name = "env_logger"
-version = "0.11.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de671bd27a75a797dc9ae289ba1e77276e75e2026408aab65185384e2d5cd3f6"
-dependencies = [
- "anstream",
- "anstyle",
- "env_filter",
- "jiff",
- "log",
-]
-
-[[package]]
 name = "equator"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4129,9 +4106,7 @@ dependencies = [
  "colored",
  "console 0.16.4",
  "dialoguer",
- "env_logger",
  "futures-util",
- "log",
  "mime_guess",
  "nix 0.31.3",
  "openalpaca_core",
@@ -4144,7 +4119,6 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "tokio",
- "tokio-stream",
  "tokio-tungstenite 0.28.0",
  "toml 0.9.12+spec-1.1.0",
  "urlencoding",
@@ -4159,7 +4133,6 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
- "uuid",
 ]
 
 [[package]]
@@ -4176,7 +4149,6 @@ dependencies = [
  "reqwest 0.13.4",
  "rusqlite",
  "rustls",
- "serde",
  "serde_json",
  "teloxide",
  "tempfile",
@@ -4261,7 +4233,6 @@ dependencies = [
  "file-lock",
  "futures-util",
  "keyring",
- "pin-project-lite",
  "rand 0.10.2",
  "reqwest 0.13.4",
  "serde",
@@ -4284,7 +4255,6 @@ dependencies = [
  "async-trait",
  "reqwest 0.13.4",
  "rmcp",
- "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
@@ -4301,7 +4271,6 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "chrono",
- "notify",
  "openalpaca_api",
  "openalpaca_connectors",
  "openalpaca_core",
@@ -4315,7 +4284,6 @@ dependencies = [
  "toml 0.9.12+spec-1.1.0",
  "toml_edit 0.25.13+spec-1.1.0",
  "tracing",
- "uuid",
 ]
 
 [[package]]
