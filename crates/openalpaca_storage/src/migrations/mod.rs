@@ -1,8 +1,8 @@
 //! Embedded database schema and subsequent migrations.
 //!
-//! The unreleased migration history is squashed into one baseline. Its version
-//! remains 42 so databases already at that schema can reopen without changes.
-//! Older development databases are not upgraded by the baseline.
+//! The unreleased migration history starts fresh at baseline version 1.
+//! The database runner records each migration in `schema_migrations` atomically
+//! with its SQL. Earlier development databases are not upgraded.
 
 /// A database migration.
 pub struct Migration {
@@ -11,12 +11,10 @@ pub struct Migration {
     pub sql: &'static str,
 }
 
-/// Migrations in execution order. Future schema changes start at version 43.
+/// Migrations in execution order. Append future schema changes at version 2 onward.
+/// SQL files contain schema/data changes only; the runner records their versions.
 pub static MIGRATIONS: &[Migration] = &[Migration {
-    version: 42,
+    version: 1,
     name: "baseline",
     sql: include_str!("001_baseline.sql"),
 }];
-
-/// Oldest supported populated schema; zero represents a fresh database.
-pub const BASELINE_VERSION: i32 = MIGRATIONS[0].version;

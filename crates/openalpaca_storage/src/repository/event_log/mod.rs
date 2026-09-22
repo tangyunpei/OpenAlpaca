@@ -112,37 +112,35 @@ impl<'a> EventLogRepository<'a> {
     pub fn query(&self, query: &EventLogQuery<'_>) -> Result<Vec<EventLog>> {
         let mut sql = format!("SELECT {COLUMNS} FROM event_log");
         let mut clauses: Vec<&str> = Vec::new();
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        let mut params: Vec<rusqlite::types::Value> = Vec::new();
 
         if let Some(task_id) = query.task_id {
             clauses.push("task_id = ?");
-            params.push(Box::new(task_id.to_string()));
+            params.push(task_id.to_string().into());
         }
         if let Some(agent_id) = query.agent_id {
             clauses.push("agent_id = ?");
-            params.push(Box::new(agent_id.to_string()));
+            params.push(agent_id.to_string().into());
         }
         if let Some(event_type) = query.event_type {
             clauses.push("event_type = ?");
-            params.push(Box::new(event_type.to_string()));
+            params.push(event_type.to_string().into());
         }
         if let Some(before) = query.before {
             clauses.push("id < ?");
-            params.push(Box::new(before));
+            params.push(before.into());
         }
         if !clauses.is_empty() {
             sql.push_str(" WHERE ");
             sql.push_str(&clauses.join(" AND "));
         }
         sql.push_str(" ORDER BY id DESC LIMIT ?");
-        params.push(Box::new(query.limit as i64));
+        params.push((query.limit as i64).into());
 
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(&sql)?;
             let mut events = Vec::new();
-            let mut rows = stmt.query(rusqlite::params_from_iter(
-                params.iter().map(|p| p.as_ref()),
-            ))?;
+            let mut rows = stmt.query(rusqlite::params_from_iter(params))?;
             while let Some(row) = rows.next()? {
                 events.push(Self::row_to_event(row)?);
             }

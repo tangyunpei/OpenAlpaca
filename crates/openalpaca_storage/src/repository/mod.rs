@@ -2,7 +2,6 @@
 //!
 //! Provides CRUD operations for all entities.
 
-pub mod agent;
 pub mod config;
 pub mod conversation;
 pub mod dispatch_decision;
@@ -20,7 +19,6 @@ pub mod subagent;
 pub mod subagent_span;
 pub mod task;
 
-pub use agent::AgentRepository;
 pub use config::ConfigRepository;
 pub use conversation::{
     ConversationRepository, SESSION_ACTIVE, SESSION_ARCHIVED, SessionFilter,

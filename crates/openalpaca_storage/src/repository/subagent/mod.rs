@@ -1,9 +1,10 @@
 //! Repository for SubAgent configuration, metrics, and task history
 
+use crate::sql::parse_datetime_or_now;
 use crate::Database;
 use crate::models::subagent::{AgentMetrics, AgentTaskHistory, SubAgentConfig};
 use anyhow::{Context, Result};
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::Utc;
 use rusqlite::{OptionalExtension, Row};
 
 /// Repository for SubAgent operations.
@@ -286,8 +287,8 @@ impl<'a> SubAgentRepository<'a> {
                 .unwrap_or_else(|| "{}".to_string()),
             constraints_json: row.get(10)?,
             llm_config_json: row.get(11)?,
-            created_at: parse_datetime(&created_str),
-            updated_at: updated_str.as_deref().map(parse_datetime),
+            created_at: parse_datetime_or_now(&created_str),
+            updated_at: updated_str.as_deref().map(parse_datetime_or_now),
         })
     }
 
@@ -301,7 +302,7 @@ impl<'a> SubAgentRepository<'a> {
             total_runtime_seconds: row.get(3)?,
             average_runtime_seconds: row.get(4)?,
             success_rate: row.get(5)?,
-            updated_at: parse_datetime(&updated_str),
+            updated_at: parse_datetime_or_now(&updated_str),
         })
     }
 
@@ -315,16 +316,9 @@ impl<'a> SubAgentRepository<'a> {
             role: row.get(3)?,
             status: row.get(4)?,
             runtime_seconds: row.get(5)?,
-            completed_at: parse_datetime(&completed_str),
+            completed_at: parse_datetime_or_now(&completed_str),
         })
     }
-}
-
-/// Parse a SQLite datetime string into DateTime<Utc>.
-fn parse_datetime(s: &str) -> DateTime<Utc> {
-    NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
-        .map(|ndt| ndt.and_utc())
-        .unwrap_or_else(|_| Utc::now())
 }
 
 #[cfg(test)]

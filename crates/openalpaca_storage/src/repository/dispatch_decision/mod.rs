@@ -66,29 +66,26 @@ impl<'a> DispatchDecisionRepository<'a> {
                  predictability_score, error_message, timestamp \
                  FROM dispatch_decisions WHERE 1=1",
             );
-            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            let mut params: Vec<rusqlite::types::Value> = Vec::new();
 
             if let Some(m) = mode {
                 sql.push_str(" AND mode = ?");
-                params.push(Box::new(m.to_string()));
+                params.push(m.to_string().into());
             }
             if let Some(f) = from {
                 sql.push_str(" AND timestamp >= ?");
-                params.push(Box::new(f.to_string()));
+                params.push(f.to_string().into());
             }
             if let Some(t) = to {
                 sql.push_str(" AND timestamp <= ?");
-                params.push(Box::new(t.to_string()));
+                params.push(t.to_string().into());
             }
             sql.push_str(" ORDER BY timestamp DESC LIMIT ?");
-            params.push(Box::new(limit as i64));
-
-            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-                params.iter().map(|p| p.as_ref()).collect();
+            params.push((limit as i64).into());
 
             let mut stmt = conn.prepare(&sql)?;
             let rows = stmt
-                .query_map(param_refs.as_slice(), |row| {
+                .query_map(rusqlite::params_from_iter(params), |row| {
                     Ok(DispatchDecisionRecord {
                         id: row.get(0)?,
                         request_id: row.get(1)?,

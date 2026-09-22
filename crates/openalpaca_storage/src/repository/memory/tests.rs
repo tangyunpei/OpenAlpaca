@@ -884,3 +884,48 @@ fn test_get_delete_owner_scoped() {
     let mem = repo.get_for_owner(id_b, "owner-B").unwrap();
     assert!(mem.is_some(), "Owner B's memory should be unaffected");
 }
+
+#[test]
+fn optional_search_filters_bind_in_every_combination() {
+    let db = test_db();
+    let repo = MemoryRepository::new(&db);
+    let mut rows = Vec::new();
+    for (index, (owner, kind, scope, scope_id)) in [
+        ("owner", MemoryKind::Fact, MemoryScope::Global, ""),
+        ("owner", MemoryKind::Fact, MemoryScope::Workspace, "a"),
+        ("owner", MemoryKind::Preference, MemoryScope::Workspace, "a"),
+        ("owner", MemoryKind::Fact, MemoryScope::Workspace, "b"),
+        ("other", MemoryKind::Fact, MemoryScope::Workspace, "a"),
+    ].into_iter().enumerate() {
+        let id = repo.add(owner, kind, scope, scope_id, MemorySource::Conversation,
+            &format!("searchable fact {index}"), None, 0.5, 0.7).unwrap();
+        let mut embedding = vec![0.0f32; 768];
+        embedding[0] = index as f32;
+        repo.insert_embedding(id, &embedding).unwrap();
+        rows.push((id, owner, kind, scope, scope_id, index));
+    }
+    for mask in 0..8 {
+        let kind = (mask & 1 != 0).then_some(MemoryKind::Fact);
+        let scope = (mask & 2 != 0).then_some(MemoryScope::Workspace);
+        let scope_id = (mask & 4 != 0).then_some("a");
+        let mut actual = repo.search_fts("owner", "searchable", 10, kind, scope, scope_id)
+            .unwrap().into_iter().map(|m| m.id).collect::<Vec<_>>();
+        let mut expected = rows.iter().filter(|(_, owner, k, s, sid, _)|
+            *owner == "owner" && kind.is_none_or(|v| v == *k)
+            && scope.is_none_or(|v| v == *s) && scope_id.is_none_or(|v| v == *sid))
+            .map(|row| row.0).collect::<Vec<_>>();
+        actual.sort_unstable(); expected.sort_unstable();
+        assert_eq!(actual, expected, "FTS filter mask {mask}");
+
+        let threshold = (mask & 1 != 0).then_some(2.0);
+        let actual = repo.search_vec("owner", &vec![0.0; 768], 10, threshold, scope, scope_id)
+            .unwrap().into_iter().map(|m| m.id).collect::<Vec<_>>();
+        let expected = rows.iter().filter(|(_, owner, _, s, sid, distance)|
+            *owner == "owner" && threshold.is_none_or(|v| (*distance as f64) < v)
+            && scope.is_none_or(|v| v == *s) && scope_id.is_none_or(|v| v == *sid))
+            .map(|row| row.0).collect::<Vec<_>>();
+        assert_eq!(actual, expected, "vector filter mask {mask}");
+    }
+    assert_eq!(repo.search_fts("owner", "searchable", 1, None, None, None).unwrap().len(), 1);
+    assert_eq!(repo.search_vec("owner", &vec![0.0; 768], 1, None, None, None).unwrap()[0].id, rows[0].0);
+}

@@ -5,17 +5,21 @@ use tempfile::tempdir;
 fn test_database_creation() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("test.db");
-
     let db = Database::open(&db_path).unwrap();
     assert!(db_path.exists());
-    assert_eq!(db.schema_version().unwrap(), migrations::BASELINE_VERSION);
+    assert_eq!(db.schema_version().unwrap(), 1);
+    db.with_connection(|conn| {
+        assert_eq!(recorded_versions(conn, "schema_migrations"), vec![1]);
+        assert!(!table_exists(conn, "schema_version"));
+        Ok(())
+    })
+    .unwrap();
 }
 
 #[test]
 fn reopening_a_current_database_preserves_its_data_and_version() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("test.db");
-
     {
         let db = Database::open(&db_path).unwrap();
         db.with_connection(|conn| {
@@ -29,9 +33,8 @@ fn reopening_a_current_database_preserves_its_data_and_version() {
         })
         .unwrap();
     }
-
     let db = Database::open(&db_path).unwrap();
-    assert_eq!(db.schema_version().unwrap(), migrations::BASELINE_VERSION);
+    assert_eq!(db.schema_version().unwrap(), 1);
     db.with_connection(|conn| {
         let (title, content): (String, String) = conn.query_row(
             "SELECT s.title, m.content FROM session s
@@ -42,108 +45,306 @@ fn reopening_a_current_database_preserves_its_data_and_version() {
         )?;
         assert_eq!(title, "Keep this conversation");
         assert_eq!(content, "Keep this message");
+        assert_eq!(recorded_versions(conn, "schema_migrations"), vec![1]);
+        Ok(())
+    })
+    .unwrap();
+}
 
-        let versions = conn
-            .prepare("SELECT version FROM schema_version ORDER BY version")?
-            .query_map([], |row| row.get::<_, i32>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        assert_eq!(versions, vec![migrations::BASELINE_VERSION]);
+fn table_exists(conn: &Connection, table: &str) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+        [table],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+fn recorded_versions(conn: &Connection, table: &str) -> Vec<i32> {
+    // Test-only callers supply one of the two fixed ledger names below.
+    assert!(matches!(table, "schema_version" | "schema_migrations"));
+    conn.prepare(&format!("SELECT version FROM {table} ORDER BY version"))
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
+fn seed_preserved_data(conn: &Connection) {
+    conn.execute_batch(
+        "CREATE TABLE preserved_data (id INTEGER PRIMARY KEY, content TEXT NOT NULL);
+         INSERT INTO preserved_data VALUES (7, 'Do not discard');",
+    )
+    .unwrap();
+}
+
+#[derive(Debug, PartialEq)]
+struct DatabaseSnapshot {
+    schema: Vec<(String, Option<String>)>,
+    rows: Vec<(i64, String)>,
+    ledgers: Vec<(String, Vec<i32>)>,
+    journal_mode: String,
+}
+
+fn snapshot(conn: &Connection) -> DatabaseSnapshot {
+    DatabaseSnapshot {
+        schema: conn
+            .prepare("SELECT name, sql FROM sqlite_master ORDER BY name")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap(),
+        rows: conn
+            .prepare("SELECT id, content FROM preserved_data ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap(),
+        ledgers: ["schema_version", "schema_migrations"]
+            .into_iter()
+            .filter(|table| table_exists(conn, table))
+            .map(|table| (table.to_string(), recorded_versions(conn, table)))
+            .collect(),
+        journal_mode: conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap(),
+    }
+}
+
+fn assert_open_refused_unchanged(path: &Path, expected_error: &str) {
+    let before = snapshot(&Connection::open(path).unwrap());
+    assert_eq!(
+        before.journal_mode, "delete",
+        "fixture must expose premature WAL changes"
+    );
+    let error = Database::open(path)
+        .err()
+        .expect("database must be refused");
+    let message = format!("{error:#}");
+    assert!(message.contains(expected_error), "{message}");
+    let absolute = std::path::absolute(path).unwrap();
+    assert!(
+        message.contains(&absolute.display().to_string()),
+        "refusal must name its database: {message}"
+    );
+    assert_eq!(
+        snapshot(&Connection::open(path).unwrap()),
+        before,
+        "refusal must preserve schema, data, ledger and persistent journal mode"
+    );
+}
+
+#[test]
+fn old_version_one_and_later_development_databases_are_refused_unchanged() {
+    let dir = tempdir().unwrap();
+    // Old 1 is the critical collision: its number matches the new baseline,
+    // but its ledger and schema belong to an entirely different history.
+    for version in [1, 41, 42] {
+        let path = dir.path().join(format!("legacy-{version}.db"));
+        {
+            let conn = Connection::open(&path).unwrap();
+            seed_preserved_data(&conn);
+            conn.execute_batch("CREATE TABLE schema_version (version INTEGER PRIMARY KEY);")
+                .unwrap();
+            conn.execute("INSERT INTO schema_version VALUES (?1)", [version])
+                .unwrap();
+        }
+        assert_open_refused_unchanged(&path, "Unsupported untracked database");
+    }
+}
+
+#[test]
+fn a_populated_database_without_any_ledger_is_refused_unchanged() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("untracked.db");
+    seed_preserved_data(&Connection::open(&path).unwrap());
+    assert_open_refused_unchanged(&path, "Unsupported untracked database");
+}
+
+#[test]
+fn an_empty_or_newer_migration_history_is_refused_unchanged() {
+    let dir = tempdir().unwrap();
+    for (name, versions) in [("empty", vec![]), ("newer", vec![1, 2]), ("zero", vec![0])] {
+        let path = dir.path().join(format!("{name}.db"));
+        {
+            let conn = Connection::open(&path).unwrap();
+            seed_preserved_data(&conn);
+            conn.execute_batch("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);")
+                .unwrap();
+            for version in versions {
+                conn.execute("INSERT INTO schema_migrations VALUES (?1)", [version])
+                    .unwrap();
+            }
+        }
+        assert_open_refused_unchanged(&path, "Unsupported migration history");
+    }
+}
+
+/// Construct the pre-migration connection so a test can supply the registry of
+/// a future build without changing the production migration list.
+fn unmigrated_database(path: &Path) -> Database {
+    ensure_vec_extension();
+    Database {
+        conn: Arc::new(Mutex::new(Connection::open(path).unwrap())),
+    }
+}
+
+#[test]
+fn a_gapped_history_is_refused_even_when_its_latest_version_is_supported() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("gapped.db");
+    let db = unmigrated_database(&path);
+    let before = db
+        .with_connection(|conn| {
+            seed_preserved_data(conn);
+            conn.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);
+             INSERT INTO schema_migrations VALUES (1), (3);",
+            )?;
+            Ok(snapshot(conn))
+        })
+        .unwrap();
+    let registry = [
+        Migration {
+            version: 1,
+            name: "first",
+            sql: "SELECT 1;",
+        },
+        Migration {
+            version: 2,
+            name: "second",
+            sql: "SELECT 1;",
+        },
+        Migration {
+            version: 3,
+            name: "third",
+            sql: "SELECT 1;",
+        },
+    ];
+    let error = db.run_migrations(&path, &registry).unwrap_err();
+    assert!(format!("{error:#}").contains("Unsupported migration history"));
+    assert_eq!(
+        db.with_connection(|conn| Ok(snapshot(conn))).unwrap(),
+        before
+    );
+}
+
+fn registry_with_second(sql: &'static str) -> [Migration; 2] {
+    [
+        Migration {
+            version: 1,
+            name: "baseline",
+            sql: migrations::MIGRATIONS[0].sql,
+        },
+        Migration {
+            version: 2,
+            name: "second",
+            sql,
+        },
+    ]
+}
+
+#[test]
+fn a_future_second_migration_applies_once_and_reopens_with_data_intact() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("future.db");
+    let registry = registry_with_second(
+        "ALTER TABLE preserved_data ADD COLUMN applications INTEGER NOT NULL DEFAULT 0;
+         UPDATE preserved_data SET applications = applications + 1;",
+    );
+    {
+        let db = Database::open(&path).unwrap();
+        db.with_connection(|conn| {
+            seed_preserved_data(conn);
+            Ok(())
+        })
+        .unwrap();
+        db.run_migrations(&path, &registry).unwrap();
+        assert_eq!(db.schema_version().unwrap(), 2);
+    }
+    // Simulate reopening with the future build's registry. The current public
+    // opener correctly refuses version 2 until that migration ships.
+    let db = unmigrated_database(&path);
+    db.run_migrations(&path, &registry).unwrap();
+    db.with_connection(|conn| {
+        assert_eq!(recorded_versions(conn, "schema_migrations"), vec![1, 2]);
+        let row: (i64, String, i64) = conn.query_row(
+            "SELECT id, content, applications FROM preserved_data",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(row, (7, "Do not discard".into(), 1));
         Ok(())
     })
     .unwrap();
 }
 
 #[test]
-fn an_unsupported_old_database_is_refused_without_changing_its_schema_or_data() {
+fn a_failed_second_migration_rolls_back_its_schema_data_and_ledger() {
     let dir = tempdir().unwrap();
-    for version in [1, migrations::BASELINE_VERSION - 1] {
-        let db_path = dir.path().join(format!("legacy-{version}.db"));
-        let original_schema = {
-            let conn = Connection::open(&db_path).unwrap();
-            conn.execute_batch(
-                "CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
-                 CREATE TABLE legacy_data (id INTEGER PRIMARY KEY, content TEXT NOT NULL);
-                 INSERT INTO legacy_data (id, content) VALUES (7, 'Do not discard');",
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO schema_version (version) VALUES (?1)",
-                [version],
-            )
-            .unwrap();
-            conn.prepare("SELECT name, sql FROM sqlite_master ORDER BY name")
-                .unwrap()
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-                })
-                .unwrap()
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap()
-        };
+    let path = dir.path().join("failed-second.db");
+    let db = Database::open(&path).unwrap();
+    let before = db
+        .with_connection(|conn| {
+            seed_preserved_data(conn);
+            Ok(snapshot(conn))
+        })
+        .unwrap();
+    let registry = registry_with_second(
+        "CREATE TABLE partially_migrated (id INTEGER PRIMARY KEY);
+         UPDATE preserved_data SET content = 'must roll back';
+         INSERT INTO table_that_does_not_exist VALUES (1);",
+    );
+    let error = db.run_migrations(&path, &registry).unwrap_err();
+    assert!(format!("{error:#}").contains("Failed to run migration second"));
+    assert_eq!(
+        db.with_connection(|conn| Ok(snapshot(conn))).unwrap(),
+        before
+    );
+    drop(db);
+    let reopened = Database::open(&path).unwrap();
+    assert_eq!(reopened.schema_version().unwrap(), 1);
+    assert_eq!(
+        reopened.with_connection(|conn| Ok(snapshot(conn))).unwrap(),
+        before
+    );
+}
 
-        let error = Database::open(&db_path)
-            .err()
-            .unwrap_or_else(|| panic!("legacy version {version} must be refused"));
-        let message = format!("{error:#}");
-        assert!(
-            message.contains(&format!("Unsupported legacy schema version {version}")),
-            "opening an old database must deliberately refuse it: {message}"
-        );
-        // The remedy is deleting the file, so the refusal has to say which file.
-        // The store root is overridable, and a developer reading this line in a
-        // log has no other way to find out.
-        let named = std::path::absolute(&db_path).unwrap();
-        assert!(
-            message.contains(&named.display().to_string()),
-            "the refusal must name the database file by its full path ({}): {message}",
-            named.display()
-        );
-        assert!(
-            message.contains(&format!("schema version {}", migrations::BASELINE_VERSION)),
-            "the refusal must name the version this build starts at: {message}"
-        );
-        assert!(
-            message.contains("Delete "),
-            "the refusal must prescribe deleting that file: {message}"
-        );
-
-        let conn = Connection::open(&db_path).unwrap();
-        let schema = conn
-            .prepare("SELECT name, sql FROM sqlite_master ORDER BY name")
-            .unwrap()
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-            })
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
+#[test]
+fn a_failed_fresh_baseline_rolls_back_the_ledger_as_well_as_its_tables() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("failed-baseline.db");
+    let db = unmigrated_database(&path);
+    let registry = [Migration {
+        version: 1,
+        name: "broken baseline",
+        sql: "CREATE TABLE partially_initialized (value TEXT);
+              INSERT INTO partially_initialized VALUES ('must roll back');
+              INSERT INTO table_that_does_not_exist VALUES (1);",
+    }];
+    assert!(db.run_migrations(&path, &registry).is_err());
+    assert_eq!(db.schema_version().unwrap(), 0);
+    db.with_connection(|conn| {
+        let objects: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'",
+            [],
+            |row| row.get(0),
+        )?;
         assert_eq!(
-            schema, original_schema,
-            "refusal must leave the schema intact"
+            objects, 0,
+            "neither partial schema nor an empty ledger may survive"
         );
-        let rows = conn
-            .prepare("SELECT id, content FROM legacy_data ORDER BY id")
-            .unwrap()
-            .query_map([], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            })
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        assert_eq!(rows, vec![(7, "Do not discard".to_string())]);
-        let versions = conn
-            .prepare("SELECT version FROM schema_version ORDER BY version")
-            .unwrap()
-            .query_map([], |row| row.get::<_, i32>(0))
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        assert_eq!(
-            versions,
-            vec![version],
-            "refusal must not advance the version"
-        );
-    }
+        let journal: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        assert_eq!(journal, "delete");
+        Ok(())
+    })
+    .unwrap();
+    drop(db);
+    // A failed first attempt stays a fresh database and can be retried.
+    assert_eq!(Database::open(&path).unwrap().schema_version().unwrap(), 1);
 }
 
 #[test]

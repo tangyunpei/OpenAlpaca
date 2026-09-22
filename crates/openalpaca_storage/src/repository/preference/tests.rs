@@ -1,10 +1,6 @@
 use super::*;
-use tempfile::tempdir;
 
-fn setup_db() -> Database {
-    let dir = tempdir().unwrap();
-    Database::open(&dir.path().join("test.db")).unwrap()
-}
+use crate::test_util::test_db as setup_db;
 
 #[test]
 fn test_set_and_get() {

@@ -7,7 +7,7 @@
 use super::*;
 use crate::FileAssetRepository;
 use crate::store::store_root;
-use crate::store::tests::{HomeStoreGuard, interim_blob_path};
+use crate::store::tests::HomeStoreGuard;
 use chrono::TimeZone;
 use std::path::PathBuf;
 use tempfile::{TempDir, tempdir};
@@ -587,55 +587,6 @@ fn a_re_upload_heals_a_row_already_marked_missing() {
         None,
         "the mark described the address the re-write replaced"
     );
-}
-
-// ============================================================================
-// The rows that predate D2
-// ============================================================================
-
-/// Existing content-addressed blobs stay where they are — moving them is the
-/// boot-time re-home's job, never a `put`'s: their `storage_path` is untouched
-/// by a new upload, they still resolve, and a duplicate of their bytes dedups to
-/// them rather than being re-placed under `uploads/`.
-#[test]
-fn pre_d2_content_addressed_rows_still_resolve_and_still_dedup() {
-    let fx = Fixture::new();
-
-    // A row exactly as the pre-D2 writer left it: sharded under state/assets,
-    // no project_root, no rel_path.
-    let sha = crate::content_io::sha256_hex(b"legacy");
-    let legacy_path = interim_blob_path(&sha);
-    std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
-    std::fs::write(&legacy_path, b"legacy").unwrap();
-    fx.repo()
-        .insert(&FileAsset {
-            id: "legacy-1".to_string(),
-            owner_id: "owner-1".to_string(),
-            sha256: sha,
-            filename: "legacy.bin".to_string(),
-            mime_type: "application/octet-stream".to_string(),
-            size_bytes: 6,
-            storage_path: legacy_path.to_string_lossy().to_string(),
-            status: FileAssetStatus::Ready,
-            extracted_text: None,
-            extract_error: None,
-            metadata_json: None,
-            created_at: String::new(),
-            updated_at: String::new(),
-        })
-        .unwrap();
-
-    // A new upload does not disturb it.
-    fx.put("owner-1", "new.txt", b"new bytes");
-    let legacy = fx.repo().get_by_id("legacy-1").unwrap().expect("row");
-    assert_eq!(legacy.storage_path, legacy_path.to_string_lossy());
-    assert_eq!(std::fs::read(&legacy_path).unwrap(), b"legacy");
-
-    // And re-uploading its bytes dedups to it — nothing is re-placed.
-    let again = fx.put("owner-1", "legacy-again.bin", b"legacy");
-    assert!(again.deduped);
-    assert_eq!(again.asset.id, "legacy-1");
-    assert_eq!(again.asset.storage_path, legacy_path.to_string_lossy());
 }
 
 // ============================================================================

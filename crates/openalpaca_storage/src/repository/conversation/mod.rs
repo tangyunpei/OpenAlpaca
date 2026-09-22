@@ -11,6 +11,7 @@
 //! `ConversationRepository`, `ConversationMessage`): renaming them is churn
 //! with no behaviour change. Read "conversation" as "session" throughout.
 
+use crate::sql::escape_like;
 use crate::Database;
 use crate::models::conversation::{Conversation, ConversationMessage};
 use anyhow::Result;
@@ -61,20 +62,6 @@ pub struct SessionFilter<'a> {
     pub offset: i64,
 }
 
-/// Escapes a user-supplied `LIKE` needle so `%`, `_` and the escape character
-/// itself match literally. Paired with `ESCAPE '\'` on every pattern built from
-/// it — without both halves a search for `100%` matches every row.
-fn escape_like(needle: &str) -> String {
-    let mut out = String::with_capacity(needle.len());
-    for ch in needle.chars() {
-        if matches!(ch, '\\' | '%' | '_') {
-            out.push('\\');
-        }
-        out.push(ch);
-    }
-    out
-}
-
 /// Repository for conversation message CRUD operations
 pub struct ConversationRepository<'a> {
     db: &'a Database,
@@ -94,26 +81,7 @@ impl<'a> ConversationRepository<'a> {
     /// has been persisted through the gateway yet) stores `NULL`, exactly as
     /// every pre-039 row that predates the column.
     pub fn insert(&self, msg: &ConversationMessage) -> Result<i64> {
-        self.db.with_connection(|conn| {
-            let session_id = Self::resolve_session_id(conn, msg)?;
-            conn.execute(
-                "INSERT INTO conversation_messages (lane_key, role, content, source, model, tokens_in, tokens_out, duration_ms, task_id, session_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                (
-                    &msg.lane_key,
-                    &msg.role,
-                    &msg.content,
-                    &msg.source,
-                    &msg.model,
-                    msg.tokens_in,
-                    msg.tokens_out,
-                    msg.duration_ms,
-                    &msg.task_id,
-                    &session_id,
-                ),
-            )?;
-            Ok(conn.last_insert_rowid())
-        })
+        self.insert_message(msg, None)
     }
 
     /// Insert a conversation message with structured content (multimodal).
@@ -122,6 +90,14 @@ impl<'a> ConversationRepository<'a> {
         msg: &ConversationMessage,
         content_json: &str,
         display_text: &str,
+    ) -> Result<i64> {
+        self.insert_message(msg, Some((content_json, display_text)))
+    }
+
+    fn insert_message(
+        &self,
+        msg: &ConversationMessage,
+        structured: Option<(&str, &str)>,
     ) -> Result<i64> {
         self.db.with_connection(|conn| {
             let session_id = Self::resolve_session_id(conn, msg)?;
@@ -137,8 +113,8 @@ impl<'a> ConversationRepository<'a> {
                     msg.tokens_in,
                     msg.tokens_out,
                     msg.duration_ms,
-                    content_json,
-                    display_text,
+                    structured.map(|(content, _)| content),
+                    structured.map(|(_, display)| display),
                     &msg.task_id,
                     &session_id,
                 ),

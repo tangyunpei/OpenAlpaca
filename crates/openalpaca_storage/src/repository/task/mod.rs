@@ -2,10 +2,11 @@
 
 use std::collections::HashMap;
 
+use crate::sql::{escape_like, parse_datetime_or_now};
 use crate::Database;
 use crate::models::task::{OutcomeKind, Task, TaskStatus};
 use anyhow::{Context, Result};
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::Utc;
 use rusqlite::{OptionalExtension, Row};
 
 /// One row the boot sweep is about to call `interrupted` (§5.6b).
@@ -231,11 +232,7 @@ impl<'a> TaskRepository<'a> {
         if prefix.is_empty() {
             return Ok(false);
         }
-        let escaped = prefix
-            .to_lowercase()
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
+        let escaped = escape_like(&prefix.to_lowercase());
         self.db
             .with_connection(|conn| {
                 // `idx_task_created_by` (006) carries the equality; the LIKE
@@ -546,9 +543,9 @@ impl<'a> TaskRepository<'a> {
             result_summary: row.get(7)?,
             created_by: row.get(8)?,
             source_lane: row.get(9)?,
-            created_at: parse_datetime(&created_str),
-            updated_at: parse_datetime(&updated_str),
-            completed_at: completed_str.as_deref().map(parse_datetime),
+            created_at: parse_datetime_or_now(&created_str),
+            updated_at: parse_datetime_or_now(&updated_str),
+            completed_at: completed_str.as_deref().map(parse_datetime_or_now),
             state_json: row.get(13)?,
             state_version: row.get(14)?,
             outcome_json: row.get(15)?,
@@ -563,13 +560,6 @@ impl<'a> TaskRepository<'a> {
         })
     }
 
-}
-
-/// Parse a SQLite datetime string into DateTime<Utc>.
-fn parse_datetime(s: &str) -> DateTime<Utc> {
-    NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
-        .map(|ndt| ndt.and_utc())
-        .unwrap_or_else(|_| Utc::now())
 }
 
 #[cfg(test)]

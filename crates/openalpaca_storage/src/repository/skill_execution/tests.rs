@@ -1,11 +1,7 @@
 use super::*;
 use crate::Database;
-use tempfile::tempdir;
 
-fn setup_db() -> Database {
-    let dir = tempdir().unwrap();
-    Database::open(&dir.path().join("test.db")).unwrap()
-}
+use crate::test_util::test_db as setup_db;
 
 fn make_skill_entry(request_id: &str, skill_id: &str, status: &str) -> SkillExecutionEntry {
     SkillExecutionEntry {

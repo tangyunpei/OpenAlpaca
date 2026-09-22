@@ -1,14 +1,6 @@
--- Baseline schema: the final state of the unreleased 001-042 migration history.
--- Keep version 42 so existing databases at this schema reopen unchanged.
--- Fresh databases create this schema directly; older development schemas are
--- rejected by Database::open rather than upgraded or reset automatically.
--- All statements run inside the database migration transaction.
-
--- Version tracking
-
-CREATE TABLE schema_version (
-    version INTEGER PRIMARY KEY
-);
+-- Initial application schema, version 1.
+-- Database::open creates and records schema_migrations in the same transaction.
+-- Append future changes as new migrations; keep version bookkeeping out of SQL.
 
 -- Identity and configuration
 
@@ -555,5 +547,3 @@ CREATE INDEX idx_tel_session ON tool_execution_log(session_id, id);
 CREATE INDEX idx_tel_task ON tool_execution_log(task_id, id);
 CREATE INDEX idx_tel_timestamp ON tool_execution_log(timestamp, tool_name);
 CREATE INDEX idx_tel_tool_ts ON tool_execution_log(tool_name, timestamp DESC);
-
-INSERT INTO schema_version(version) VALUES (42);

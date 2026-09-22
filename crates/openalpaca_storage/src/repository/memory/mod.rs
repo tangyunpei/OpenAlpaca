@@ -156,44 +156,25 @@ impl<'a> MemoryRepository<'a> {
         kind_filter: Option<MemoryKind>,
     ) -> Result<(Vec<MemoryV2>, i64)> {
         self.db.with_connection(|conn| {
-            // Count query
-            let (count_sql, total): (String, i64) = if let Some(ref kind) = kind_filter {
-                let sql = "SELECT COUNT(*) FROM memory WHERE owner_id = ?1 AND kind = ?2";
-                let total =
-                    conn.query_row(sql, rusqlite::params![owner_id, kind.as_str()], |r| {
-                        r.get(0)
-                    })?;
-                (sql.to_string(), total)
-            } else {
-                let sql = "SELECT COUNT(*) FROM memory WHERE owner_id = ?1";
-                let total = conn.query_row(sql, [owner_id], |r| r.get(0))?;
-                (sql.to_string(), total)
-            };
-            let _ = count_sql;
-
-            // Data query
-            let mut sql = format!("SELECT {ALL_COLUMNS_PLAIN} FROM memory WHERE owner_id = ?1");
-            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
-                vec![Box::new(owner_id.to_string())];
-            let mut param_idx = 2;
-
-            if let Some(ref kind) = kind_filter {
-                sql.push_str(&format!(" AND kind = ?{param_idx}"));
-                params.push(Box::new(kind.as_str().to_string()));
-                param_idx += 1;
+            let mut predicate = String::from("owner_id = ?");
+            let mut params: Vec<rusqlite::types::Value> = vec![owner_id.to_string().into()];
+            if let Some(kind) = kind_filter {
+                predicate.push_str(" AND kind = ?");
+                params.push(kind.as_str().to_string().into());
             }
-
-            sql.push_str(&format!(
-                " ORDER BY created_at DESC LIMIT ?{param_idx} OFFSET ?{}",
-                param_idx + 1
-            ));
-            params.push(Box::new(limit as i64));
-            params.push(Box::new(offset as i64));
-
-            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-                params.iter().map(|p| p.as_ref()).collect();
+            let total = conn.query_row(
+                &format!("SELECT COUNT(*) FROM memory WHERE {predicate}"),
+                rusqlite::params_from_iter(&params),
+                |row| row.get(0),
+            )?;
+            let sql = format!(
+                "SELECT {ALL_COLUMNS_PLAIN} FROM memory WHERE {predicate} \
+                 ORDER BY created_at DESC LIMIT ? OFFSET ?"
+            );
+            params.push((limit as i64).into());
+            params.push((offset as i64).into());
             let mut stmt = conn.prepare(&sql)?;
-            let mut rows = stmt.query(param_refs.as_slice())?;
+            let mut rows = stmt.query(rusqlite::params_from_iter(params))?;
             let mut memories = Vec::new();
             while let Some(row) = rows.next()? {
                 memories.push(row_to_memory_v2(row)?);

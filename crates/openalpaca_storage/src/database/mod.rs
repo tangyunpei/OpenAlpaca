@@ -1,10 +1,10 @@
 //! Database management for OpenAlpaca
 //!
-//! Provides connection pooling and migration management using rusqlite.
+//! Provides a shared connection and transactional migrations using rusqlite.
 
 use crate::migrations::{self, Migration};
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 use sqlite_vec::sqlite3_vec_init;
 use std::path::Path;
 use std::sync::{Arc, Mutex, Once};
@@ -49,16 +49,9 @@ impl Database {
         let conn = Connection::open(path)
             .with_context(|| format!("Failed to open database: {}", path.display()))?;
 
-        // PRAGMA settings for optimal performance
-        // - journal_mode=WAL: Better concurrency (DB-level, persists)
-        // - synchronous=NORMAL: Safe with WAL, faster writes
-        // - foreign_keys=ON: Enforce referential integrity
-        // - busy_timeout=5000: Wait up to 5s before "database is locked"
-        // - temp_store=MEMORY: Faster temp tables for FTS queries
+        // Connection-local settings may be applied before validating the database.
         conn.execute_batch(
             r#"
-            PRAGMA journal_mode = WAL;
-            PRAGMA synchronous = NORMAL;
             PRAGMA foreign_keys = ON;
             PRAGMA busy_timeout = 5000;
             PRAGMA temp_store = MEMORY;
@@ -70,7 +63,12 @@ impl Database {
             conn: Arc::new(Mutex::new(conn)),
         };
 
-        db.run_migrations(path)?;
+        db.run_migrations(path, migrations::MIGRATIONS)?;
+        // WAL persists in the file: enable it only after accepting the schema.
+        db.with_connection(|conn| {
+            conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
+            Ok(())
+        })?;
 
         info!("Database initialized: {}", path.display());
         Ok(db)
@@ -83,9 +81,9 @@ impl Database {
             p.into_inner()
         });
 
-        // Check if schema_version table exists
+        // The status API keeps its schema_version name; the ledger is runner-owned.
         let exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version')",
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations')",
             [],
             |row| row.get(0),
         )?;
@@ -95,7 +93,7 @@ impl Database {
         }
 
         let version: i32 = conn.query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
             [],
             |row| row.get(0),
         )?;
@@ -103,66 +101,75 @@ impl Database {
         Ok(version)
     }
 
-    /// Run all pending migrations
-    ///
-    /// `path` is the database file this connection was opened from; it is used
-    /// only to name the file in the legacy-refusal message, which is otherwise
-    /// unactionable — the store root is overridable with `OPENALPACA_HOME_STORE`,
-    /// so "this database" identifies nothing.
-    fn run_migrations(&self, path: &Path) -> Result<()> {
-        let current_version = self.schema_version()?;
-        debug!("Current schema version: {}", current_version);
-
-        // The baseline creates the final schema directly; it cannot upgrade a
-        // partially migrated development database. Refuse before executing SQL
-        // so its existing schema and rows remain available to an older build.
-        //
-        // The message names the file rather than prescribing a reset verb:
-        // `openalpaca config reset --factory` opens the database before it
-        // reaches the action (`apps/openalpaca/src/commands/config.rs`), so it
-        // dies on this very guard, and `factory_reset` below deletes rows
-        // without touching `schema_version` — the database would come back at
-        // the same unsupported version. Deleting the file is the remedy that
-        // works from here.
-        if current_version > 0 && current_version < migrations::BASELINE_VERSION {
-            let file = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-            anyhow::bail!(
-                "Unsupported legacy schema version {current_version}: this build starts at schema \
-                 version {baseline} and cannot upgrade a database created by an older one. \
-                 Delete {file} (together with its -wal and -shm files) to start fresh, which \
-                 discards every task, message and memory stored in it, or open it with a build \
-                 from before the migrations were squashed into the baseline.",
-                baseline = migrations::BASELINE_VERSION,
-                file = file.display(),
-            );
-        }
-
-        let pending: Vec<&Migration> = migrations::MIGRATIONS
-            .iter()
-            .filter(|m| m.version > current_version)
-            .collect();
-
-        if pending.is_empty() {
-            debug!("No pending migrations");
-            return Ok(());
-        }
-
+    /// Validate the ledger and apply its missing suffix in one transaction.
+    fn run_migrations(&self, path: &Path, migrations: &[Migration]) -> Result<()> {
         let mut conn = self.conn.lock().unwrap_or_else(|p| {
             error!("Database mutex poisoned, recovering");
             p.into_inner()
         });
 
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("Failed to begin migration transaction")?;
+        let has_ledger: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations')",
+            [],
+            |row| row.get(0),
+        )?;
+        let applied = if has_ledger {
+            let versions = tx
+                .prepare("SELECT version FROM schema_migrations ORDER BY version")?
+                .query_map([], |row| row.get::<_, i32>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            anyhow::ensure!(
+                !versions.is_empty()
+                    && versions.len() <= migrations.len()
+                    && versions
+                        .iter()
+                        .zip(migrations)
+                        .all(|(v, m)| *v == m.version),
+                "Unsupported migration history in {}: expected a prefix of this build's \
+                 migrations (latest version {}). Use a compatible build or back up and \
+                 remove this database to start fresh.",
+                std::path::absolute(path)
+                    .unwrap_or_else(|_| path.to_path_buf())
+                    .display(),
+                migrations.last().map_or(0, |m| m.version),
+            );
+            versions.len()
+        } else {
+            let populated: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name NOT GLOB 'sqlite_*')",
+                [],
+                |row| row.get(0),
+            )?;
+            anyhow::ensure!(
+                !populated,
+                "Unsupported untracked database at {}: a fresh database is required. \
+                 Back up and remove this database together with its -wal and -shm files \
+                 to start fresh; this discards its stored data. No automatic import is supported.",
+                std::path::absolute(path)
+                    .unwrap_or_else(|_| path.to_path_buf())
+                    .display(),
+            );
+            tx.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY CHECK(version > 0));",
+            )?;
+            0
+        };
 
-        for migration in pending {
+        debug!("Already applied {} migrations", applied);
+        for migration in &migrations[applied..] {
             info!(
                 "Running migration {}: {}",
                 migration.version, migration.name
             );
             tx.execute_batch(migration.sql)
                 .with_context(|| format!("Failed to run migration {}", migration.name))?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version) VALUES (?1)",
+                [migration.version],
+            )?;
         }
 
         tx.commit()
@@ -170,10 +177,7 @@ impl Database {
 
         info!(
             "Migrations complete, schema version: {}",
-            migrations::MIGRATIONS
-                .last()
-                .map(|m| m.version)
-                .unwrap_or(0)
+            migrations.last().map(|m| m.version).unwrap_or(0)
         );
 
         Ok(())

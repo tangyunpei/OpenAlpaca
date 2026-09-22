@@ -1,9 +1,6 @@
 use super::*;
 
-fn setup_db() -> Database {
-    let dir = tempfile::tempdir().unwrap();
-    Database::open(&dir.path().join("test.db")).unwrap()
-}
+use crate::test_util::test_db as setup_db;
 
 fn queue_item(repo: &FollowupRepository<'_>, lane: &str, kind: &str, content: &str) -> i64 {
     repo.queue(lane, kind, content, "\"System\"", None, Some("task-1"), false)

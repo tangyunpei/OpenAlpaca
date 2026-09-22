@@ -1,9 +1,6 @@
 use super::*;
 
-fn setup_db() -> crate::Database {
-    let dir = tempfile::tempdir().unwrap();
-    crate::Database::open(&dir.path().join("test.db")).unwrap()
-}
+use crate::test_util::test_db as setup_db;
 
 #[test]
 fn test_percentile_single_record() {

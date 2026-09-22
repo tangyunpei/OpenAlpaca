@@ -42,40 +42,29 @@ impl<'a> MemoryRepository<'a> {
             let mut sql = format!(
                 "SELECT {ALL_COLUMNS} FROM memory m
                  JOIN memory_fts fts ON m.id = fts.rowid
-                 WHERE memory_fts MATCH ?1 AND m.owner_id = ?2"
+                 WHERE memory_fts MATCH ? AND m.owner_id = ?"
             );
-            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
-                vec![Box::new(safe_query), Box::new(owner_id.to_string())];
-            let mut param_idx = 3;
+            let mut params: Vec<rusqlite::types::Value> =
+                vec![safe_query.into(), owner_id.to_string().into()];
 
             if let Some(kind) = kind_filter {
-                sql.push_str(&format!(" AND m.kind = ?{param_idx}"));
-                params.push(Box::new(kind.as_str().to_string()));
-                param_idx += 1;
+                sql.push_str(" AND m.kind = ?");
+                params.push((kind.as_str().to_string()).into());
             }
             if let Some(scope) = scope_filter {
-                sql.push_str(&format!(" AND m.scope = ?{param_idx}"));
-                params.push(Box::new(scope.as_str().to_string()));
-                param_idx += 1;
+                sql.push_str(" AND m.scope = ?");
+                params.push((scope.as_str().to_string()).into());
             }
             if let Some(sid) = scope_id_filter {
-                sql.push_str(&format!(" AND m.scope_id = ?{param_idx}"));
-                params.push(Box::new(sid.to_string()));
-                let _ = param_idx; // suppress unused warning
+                sql.push_str(" AND m.scope_id = ?");
+                params.push(sid.to_string().into());
             }
 
             sql.push_str(" ORDER BY rank LIMIT ?");
-            params.push(Box::new(limit as i64));
+            params.push((limit as i64).into());
 
-            // Renumber the final LIMIT param
-            let limit_idx = params.len();
-            // Fix: the LIMIT placeholder needs its index
-            let sql = sql.replacen("LIMIT ?", &format!("LIMIT ?{limit_idx}"), 1);
-
-            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-                params.iter().map(|p| p.as_ref()).collect();
             let mut stmt = conn.prepare(&sql)?;
-            let mut rows = stmt.query(param_refs.as_slice())?;
+            let mut rows = stmt.query(rusqlite::params_from_iter(params))?;
 
             let mut memories = Vec::new();
             while let Some(row) = rows.next()? {
@@ -108,41 +97,35 @@ impl<'a> MemoryRepository<'a> {
                 "SELECT {ALL_COLUMNS}, v.distance FROM memory m
                  JOIN (
                      SELECT memory_id, distance FROM memory_vec
-                     WHERE embedding MATCH ?1 AND k = ?2
+                     WHERE embedding MATCH ? AND k = ?
                  ) v ON m.id = v.memory_id
-                 WHERE m.owner_id = ?3"
+                 WHERE m.owner_id = ?"
             );
-            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
-                vec![Box::new(blob), Box::new(k), Box::new(owner_id.to_string())];
-            let mut param_idx = 4;
+            let mut params: Vec<rusqlite::types::Value> =
+                vec![blob.into(), k.into(), owner_id.to_string().into()];
 
             // Distance threshold filtering
             if let Some(threshold) = distance_threshold {
-                sql.push_str(&format!(" AND v.distance < ?{param_idx}"));
-                params.push(Box::new(threshold));
-                param_idx += 1;
+                sql.push_str(" AND v.distance < ?");
+                params.push(threshold.into());
             }
 
             // Scope filtering (post-KNN, on the memory table)
             if let Some(scope) = scope_filter {
-                sql.push_str(&format!(" AND m.scope = ?{param_idx}"));
-                params.push(Box::new(scope.as_str().to_string()));
-                param_idx += 1;
+                sql.push_str(" AND m.scope = ?");
+                params.push((scope.as_str().to_string()).into());
             }
 
             if let Some(sid) = scope_id_filter {
-                sql.push_str(&format!(" AND m.scope_id = ?{param_idx}"));
-                params.push(Box::new(sid.to_string()));
-                param_idx += 1;
+                sql.push_str(" AND m.scope_id = ?");
+                params.push(sid.to_string().into());
             }
 
-            sql.push_str(&format!(" ORDER BY v.distance ASC LIMIT ?{param_idx}"));
-            params.push(Box::new(limit as i64));
+            sql.push_str(" ORDER BY v.distance ASC LIMIT ?");
+            params.push((limit as i64).into());
 
-            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-                params.iter().map(|p| p.as_ref()).collect();
             let mut stmt = conn.prepare(&sql)?;
-            let mut rows = stmt.query(param_refs.as_slice())?;
+            let mut rows = stmt.query(rusqlite::params_from_iter(params))?;
             let mut results = Vec::new();
             while let Some(row) = rows.next()? {
                 results.push(row_to_memory_v2(row)?);

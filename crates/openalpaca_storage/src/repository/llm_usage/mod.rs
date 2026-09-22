@@ -1,8 +1,9 @@
 //! Repository for LLM call logging and usage tracking
 
+use crate::sql::parse_datetime_or_now;
 use crate::Database;
 use anyhow::{Context, Result};
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use rusqlite::Row;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -427,7 +428,7 @@ impl<'a> LlmUsageRepository<'a> {
         let ts_str: String = row.get(1)?;
         Ok(LlmCallLog {
             id: row.get(0)?,
-            timestamp: parse_datetime(&ts_str),
+            timestamp: parse_datetime_or_now(&ts_str),
             agent_id: row.get(2)?,
             task_id: row.get(3)?,
             provider: row.get(4)?,
@@ -443,11 +444,6 @@ impl<'a> LlmUsageRepository<'a> {
     }
 }
 
-fn parse_datetime(s: &str) -> DateTime<Utc> {
-    NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
-        .map(|ndt| ndt.and_utc())
-        .unwrap_or_else(|_| Utc::now())
-}
 
 #[cfg(test)]
 mod tests;

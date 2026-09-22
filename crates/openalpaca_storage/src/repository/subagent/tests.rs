@@ -1,12 +1,8 @@
 use super::*;
 use crate::models::task::{Task, TaskStatus};
 use crate::repository::task::TaskRepository;
-use tempfile::tempdir;
 
-fn setup_db() -> Database {
-    let dir = tempdir().unwrap();
-    Database::open(&dir.path().join("test.db")).unwrap()
-}
+use crate::test_util::test_db as setup_db;
 
 fn make_config(id: &str, name: &str) -> SubAgentConfig {
     SubAgentConfig {

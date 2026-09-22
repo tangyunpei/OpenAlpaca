@@ -1032,3 +1032,26 @@ fn message_counts_by_source_ignores_unattributed_rows() {
         .unwrap();
     assert!(counts.is_empty(), "an unattributed row counts for nobody");
 }
+
+#[test]
+fn plain_insert_ignores_structured_fields_and_both_entries_resolve_session() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+    let session = repo.get_or_create_active_session("user:gui", "gui", None).unwrap();
+    let message = ConversationMessage {
+        lane_key: "user:gui".to_string(),
+        role: "assistant".to_string(),
+        content: "plain".to_string(),
+        content_json: Some("ignored".to_string()),
+        display_text: Some("ignored".to_string()),
+        ..Default::default()
+    };
+    repo.insert(&message).unwrap();
+    repo.insert_with_structured(&message, r#"{"parts":[]}"#, "structured").unwrap();
+    let messages = repo.list_by_lane("user:gui", 50, 0).unwrap();
+    assert!(messages[0].content_json.is_none());
+    assert!(messages[0].display_text.is_none());
+    assert_eq!(messages[1].content_json.as_deref(), Some(r#"{"parts":[]}"#));
+    assert_eq!(messages[1].display_text.as_deref(), Some("structured"));
+    assert!(messages.iter().all(|m| m.session_id.as_deref() == Some(session.id.as_str())));
+}

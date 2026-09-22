@@ -1,10 +1,10 @@
 //! Repository for skill and tool execution telemetry
 
+use crate::sql::{parse_datetime};
 use crate::models::skill_execution::{PREVIEW_CHARS, SkillExecutionEntry, ToolExecutionEntry};
 use crate::models::skill_health::SkillHealthMetrics;
 use crate::Database;
 use anyhow::{Context, Result};
-use chrono::{DateTime, NaiveDateTime, Utc};
 use std::collections::HashMap;
 
 
@@ -419,11 +419,6 @@ fn clamp_preview(s: &str) -> String {
     s.chars().take(PREVIEW_CHARS).collect()
 }
 
-fn parse_datetime(s: &str) -> Option<DateTime<Utc>> {
-    NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
-        .ok()
-        .map(|ndt| ndt.and_utc())
-}
 
 /// Resolve a value read out of `skill_execution_log.skill_id` onto the catalog
 /// id that owns it. Returns `None` when no entry claims the key.

@@ -36,6 +36,14 @@ use directories::BaseDirs;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Open the current home-store database, creating its private state directory.
+/// Older development directory layouts are no longer imported automatically.
+pub fn open_database() -> Result<crate::Database> {
+    let path = state_dir()?.join("openalpaca.db");
+    crate::Database::open(&path)
+        .with_context(|| format!("Failed to open {}", path.display()))
+}
+
 /// Environment override for the home root (D4). Absolute paths only.
 pub const HOME_STORE_ENV: &str = "OPENALPACA_HOME_STORE";
 
@@ -91,8 +99,7 @@ pub fn state_dir() -> Result<PathBuf> {
     state_dir_in(&home_root()?)
 }
 
-/// [`state_dir`] under an explicit root — for the mover, which works on the two
-/// roots it was given rather than on the ambient one.
+/// [`state_dir`] under an explicit root, also used by isolated tests.
 pub(crate) fn state_dir_in(root: &Path) -> Result<PathBuf> {
     let dir = root.join("state");
     create_private_dir(&dir)?;
@@ -186,18 +193,6 @@ pub fn backups_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// `state/assets` — where uploads lived before D2, content-addressed as
-/// `ab/cd/<sha256>`.
-///
-/// Nothing writes here any more: [`crate::uploads::UploadStore`] is the one
-/// upload writer and it places bytes under `uploads/`. The directory exists only
-/// on an installation that predates D2, and only until the boot-time re-home
-/// ([`crate::uploads::rehome_pre_d2_uploads`]) has emptied and removed it — the
-/// one caller left. Nothing new is to be designed against it.
-pub fn interim_assets_dir() -> Result<PathBuf> {
-    Ok(state_dir_path()?.join("assets"))
-}
-
 /// `home_root()/plugins` — user-dropped plugin directories. Created if missing.
 pub fn plugins_dir() -> Result<PathBuf> {
     let dir = home_root()?.join("plugins");
@@ -214,7 +209,7 @@ pub fn plugins_dir() -> Result<PathBuf> {
 /// and asking must not materialise a store. Use [`ensure_runtime_config_dir`]
 /// where something is about to be written.
 ///
-/// The *semantics* of `OPENALPACA_CONFIG_DIR` are untouched by the root move:
+/// `OPENALPACA_CONFIG_DIR` resolves an existing configuration directory:
 /// a dev run from the repo still resolves `./config` through the exe/CWD walk-up.
 pub fn runtime_config_dir() -> Result<PathBuf> {
     Ok(home_root()?.join("config"))
