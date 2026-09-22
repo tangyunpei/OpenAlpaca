@@ -1,9 +1,11 @@
 # Crate simplification implementation — 2026-09-21
 
 Base: `97a42a39bd59de6f00d1b51f6fd1150ab1fe08c2`, branch
-`chore/deps-upgrade-and-simplify`. The owner authorized implementation of the
+`chore/crate-simplification`. The owner authorized implementation of the
 crate-by-crate review and corresponding Obsidian updates. The app has never
-been distributed. Changes are local and uncommitted.
+been distributed. The work is committed: thirteen commits on that branch, one
+per crate or app group plus the workspace scaffold removal and a documentation
+pass, with a clean working tree. The branch is not pushed.
 
 ## Review disposition
 
@@ -155,6 +157,21 @@ openalpaca_connectors --lib --features openalpaca_connectors/telegram,openalpaca
 the daemon rerun used `cargo test --offline -p openalpacad --bin openalpacad
 notification::tests::`. Live external services and the owner's database were
 not used by the tests.
+
+## Gates on the committed branch
+
+The four CI gates were re-run once the thirteen commits were in place, on a
+clean tree:
+
+| Gate | Result |
+|---|---|
+| `cargo test --workspace --exclude openalpaca_gui` | 3,458 passed |
+| `cargo clippy --workspace --exclude openalpaca_gui --all-targets` | 0 errors |
+| GUI `bun run check` / `bun run test` / `bun run format:check` / `bun run build` | All passed; 973 tests |
+| `python3 scripts/gen_api_docs.py --check` | No drift |
+
+The two sections above record the runs made while the work was still in the
+working tree; this one records the state of the finished branch.
 
 ## Corresponding documentation
 

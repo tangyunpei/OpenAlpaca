@@ -129,7 +129,7 @@ More detail: [docs/agent-loop.md](docs/agent-loop.md) and [docs/Daemon_Manual.md
 
 ## Project layout
 
-A Rust workspace (edition 2024) with three apps and ten library crates.
+A Rust workspace (edition 2024) with three apps and eight library crates.
 
 | Path | What it is |
 |---|---|
