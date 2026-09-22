@@ -43,20 +43,6 @@ pub fn print_list<T: Serialize + TableRow>(items: &[T], format: OutputFormat) {
     }
 }
 
-/// Print a single item detail in the chosen format.
-#[allow(dead_code)]
-pub fn print_detail<T: Serialize>(item: &T, format: OutputFormat) {
-    match format {
-        OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(item).unwrap_or_default());
-        }
-        OutputFormat::Table => {
-            // For detail view, just pretty-print the JSON with indentation
-            println!("{}", serde_json::to_string_pretty(item).unwrap_or_default());
-        }
-    }
-}
-
 /// A dollar figure, four decimals, with negative zero erased (L12).
 ///
 /// `openalpaca llm status` printed `Daily cost: $-0.0000`. Nothing was refunded:
