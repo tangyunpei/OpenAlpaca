@@ -364,13 +364,16 @@ async fn create_interactive() -> Result<()> {
         .with_prompt("Agent name")
         .interact_text()?;
 
-    // 2. Description
+    // 2. Agent id — becomes <config_dir>/<id>.toml on the daemon
+    let id = agent_client::prompt_agent_id(&theme, &name)?;
+
+    // 3. Description
     let description: String = Input::with_theme(&theme)
         .with_prompt("Description")
         .allow_empty(true)
         .interact_text()?;
 
-    // 3. Model — try to fetch from daemon, fall back to free text
+    // 4. Model — try to fetch from daemon, fall back to free text
     let model = match get_model_list().await {
         Ok(models) if !models.is_empty() => {
             let display: Vec<String> = models.to_vec();
@@ -389,7 +392,7 @@ async fn create_interactive() -> Result<()> {
         }
     };
 
-    // 4. Skills
+    // 5. Skills
     let skills_input: String = Input::with_theme(&theme)
         .with_prompt("Skills (comma-separated, e.g., research,code_review)")
         .allow_empty(true)
@@ -400,26 +403,27 @@ async fn create_interactive() -> Result<()> {
         .filter(|s| !s.is_empty())
         .collect();
 
-    // 5. Max cost per task
+    // 6. Max cost per task
     let max_cost_input: String = Input::with_theme(&theme)
         .with_prompt("Max cost per task (USD, 0 for unlimited)")
         .default("0".to_string())
         .interact_text()?;
     let max_cost: f64 = max_cost_input.parse().unwrap_or(0.0);
 
-    // 6. Persona
+    // 7. Persona
     let persona: String = Input::with_theme(&theme)
         .with_prompt("Persona/system prompt")
         .allow_empty(true)
         .interact_text()?;
 
     let config = AgentDraft {
+        id: &id,
         name: &name,
         description: &description,
         model: &model,
         skills: &skills,
         max_cost,
-        persona: (!persona.is_empty()).then_some(persona.as_str()),
+        persona: &persona,
         temperature: None,
     }
     .config();

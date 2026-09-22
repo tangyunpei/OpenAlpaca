@@ -1432,13 +1432,16 @@ fn interactive_create_agent() -> Result<()> {
         return Ok(());
     }
 
-    // 2. Description
+    // 2. Agent id — becomes <config_dir>/<id>.toml on the daemon
+    let id = agent_client::prompt_agent_id(&theme, &name)?;
+
+    // 3. Description
     let description: String = Input::with_theme(&theme)
         .with_prompt("Description")
         .allow_empty(true)
         .interact_text()?;
 
-    // 3. Model — try to fetch available models, fall back to free text
+    // 4. Model — try to fetch available models, fall back to free text
     let model = match fetch_model_list() {
         Ok(models) if !models.is_empty() => {
             let mut display = models.clone();
@@ -1461,13 +1464,13 @@ fn interactive_create_agent() -> Result<()> {
             .interact_text()?,
     };
 
-    // 4. Persona
+    // 5. Persona
     let persona: String = Input::with_theme(&theme)
         .with_prompt("Persona / system prompt")
         .default("You are a helpful assistant.".to_string())
         .interact_text()?;
 
-    // 5. Skills
+    // 6. Skills
     let skills_input: String = Input::with_theme(&theme)
         .with_prompt("Skills (comma-separated, e.g., research,code_review)")
         .allow_empty(true)
@@ -1478,14 +1481,14 @@ fn interactive_create_agent() -> Result<()> {
         .filter(|s| !s.is_empty())
         .collect();
 
-    // 6. Max cost per task
+    // 7. Max cost per task
     let max_cost_input: String = Input::with_theme(&theme)
         .with_prompt("Max cost per task (USD, 0 for unlimited)")
         .default("0".to_string())
         .interact_text()?;
     let max_cost: f64 = max_cost_input.parse().unwrap_or(0.0);
 
-    // 7. Temperature
+    // 8. Temperature
     let temp_input: String = Input::with_theme(&theme)
         .with_prompt("Temperature (0.0-1.0)")
         .default("0.5".to_string())
@@ -1493,12 +1496,13 @@ fn interactive_create_agent() -> Result<()> {
     let temperature: f64 = temp_input.parse().unwrap_or(0.5);
 
     let agent_config = AgentDraft {
+        id: &id,
         name: &name,
         description: &description,
         model: &model,
         skills: &skills,
         max_cost,
-        persona: Some(&persona),
+        persona: &persona,
         temperature: Some(temperature),
     }
     .config();
@@ -1507,6 +1511,7 @@ fn interactive_create_agent() -> Result<()> {
     println!();
     println!("{}", style("Agent summary:").bold());
     println!("  {} {}", style("Name:").dim(), &name);
+    println!("  {} {}", style("Id:").dim(), &id);
     if !description.is_empty() {
         println!("  {} {}", style("Desc:").dim(), &description);
     }

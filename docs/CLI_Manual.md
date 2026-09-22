@@ -278,7 +278,8 @@ openalpaca agents remove <agent_id>
 
 Notes:
 - `openalpaca agents` with no subcommand enters interactive creation mode. So does `agents create` with no flags.
-- `--from-file <path>` creates the agent from a TOML file.
+- Interactive creation asks for the agent's name, then its **id**, then the rest (description, model, skills, cost cap, persona). The id is the agent's own name on the daemon and becomes its config file, so it may contain only ASCII letters, digits, `-` and `_`, and may be at most 64 characters long. When a suggestion can be derived from the name — lowercased, with every run of anything else collapsed to a single hyphen — it is offered and Enter accepts it; a name that leaves nothing usable, such as one written in another script, is offered nothing and the id is typed in full. Anything the rule rejects is asked for again. The interactive agent screen in the `openalpaca config` TUI asks the same way.
+- `--from-file <path>` creates the agent from a TOML file. The `agent.id` in that file has to satisfy the same rule — the daemon enforces it itself, whichever route the agent came in by.
 - `set` takes a dotted config path, for example `openalpaca agents set <agent_id> llm.model <model-id>`. Every section on the way to the last key must already exist in the agent's config (`agents config <agent_id>` shows it). The value is read as a number, then `true`/`false`, then a string.
 - `remove` archives the agent.
 
