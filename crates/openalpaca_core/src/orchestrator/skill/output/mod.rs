@@ -14,31 +14,6 @@ pub enum OutputValidationError {
     InvalidJson(String),
 }
 
-impl OutputValidationError {
-    /// Generate a repair prompt that can be appended to the conversation
-    /// and re-sent to the LLM for a self-repair attempt.
-    /// Currently unused; reserved for future LLM-based self-repair (Phase 3+).
-    #[allow(dead_code)]
-    pub fn repair_prompt(&self) -> String {
-        match self {
-            Self::MissingSections(sections) => {
-                format!(
-                    "Your output is missing required sections: {}. \
-                     Please add them as H2 headings (## SectionName).",
-                    sections.join(", ")
-                )
-            }
-            Self::InvalidJson(err) => {
-                format!(
-                    "Your output must be valid JSON. Parse error: {}. \
-                     Please output only valid JSON.",
-                    err
-                )
-            }
-        }
-    }
-}
-
 impl std::fmt::Display for OutputValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

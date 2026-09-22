@@ -77,23 +77,6 @@ fn test_json_extracted_from_braces() {
 }
 
 #[test]
-fn test_repair_prompt_missing_sections() {
-    let err =
-        OutputValidationError::MissingSections(vec!["Summary".to_string(), "Details".to_string()]);
-    let prompt = err.repair_prompt();
-    assert!(prompt.contains("Summary, Details"));
-    assert!(prompt.contains("## SectionName"));
-}
-
-#[test]
-fn test_repair_prompt_invalid_json() {
-    let err = OutputValidationError::InvalidJson("unexpected token".to_string());
-    let prompt = err.repair_prompt();
-    assert!(prompt.contains("unexpected token"));
-    assert!(prompt.contains("valid JSON"));
-}
-
-#[test]
 fn test_max_tokens_warning_does_not_reject() {
     let output = "x".repeat(1000);
     let config = OutputConfig {
