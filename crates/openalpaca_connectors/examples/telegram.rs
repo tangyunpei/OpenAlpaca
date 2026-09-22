@@ -32,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    database in the way of the one the mover is about to relocate.
     println!("Using Database: {}", store::database_path()?.display());
 
-    let db = store::migrate::open_store_database()?;
+    let db = store::open_database()?;
     let bus = EventBus::default();
 
     println!("Starting Telegram Connector Example...");
@@ -64,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Note: In a real app, you'd spawn this or run in background
     // For the example, we run it blocking.
     let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let shutdown_token = connector.run_with_signal(running).await;
+    let shutdown_token = connector.start(running);
 
     // Simulate running for a bit
     tokio::signal::ctrl_c().await.unwrap();

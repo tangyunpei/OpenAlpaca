@@ -1,10 +1,11 @@
 //! Telegram message handling: dispatch, link/unlink commands, attachments.
 
-use super::delivery::{download_telegram_file, send_with_retry};
-use super::rate_limiter::ChatRateLimiter;
 use super::TelegramConnector;
+use super::delivery::{download_telegram_file, send_with_retry};
+use super::ChatRateLimiter;
 use crate::common::{
-    LinkResult, format_denial_message, handle_link_token, redact_token, resolve_principal,
+    LinkResult, format_denial_message, handle_link_token, intercept_confirmation_reply,
+    redact_token, resolve_principal,
 };
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
@@ -13,7 +14,7 @@ use openalpaca_core::{
     bus::EventBus,
     daemon_config::DaemonConfig,
     gateway::{Gateway, GatewayRequest, ResolvedAttachment},
-    security::confirmation::{ConfirmationBroker, ConfirmationResponse},
+    security::confirmation::ConfirmationBroker,
     security::policy::Scope,
     types::Capability,
 };
@@ -58,57 +59,13 @@ impl TelegramConnector {
             text.chars().take(50).collect::<String>()
         );
 
-        // Intercept confirmation responses (/yes, /y, /no, /n)
-        let text_lower = text.trim().to_lowercase();
-        if matches!(text_lower.as_str(), "/yes" | "/y" | "/no" | "/n") {
-            if let Some(broker) = confirmation_broker.as_ref() {
-                let request_id = pending_confirmations
-                    .get_mut(&chat_id.0)
-                    .and_then(|mut q| q.pop_front());
-
-                if let Some(request_id) = request_id {
-                    let approved = matches!(text_lower.as_str(), "/yes" | "/y");
-                    let remaining = pending_confirmations
-                        .get(&chat_id.0)
-                        .map(|q| q.len())
-                        .unwrap_or(0);
-                    let reply = if approved {
-                        if remaining > 0 {
-                            format!("Approved. Tool execution will proceed.\n({} more pending — reply /yes or /no)", remaining)
-                        } else {
-                            "Approved. Tool execution will proceed.".to_string()
-                        }
-                    } else if remaining > 0 {
-                        format!("Denied. Tool execution has been cancelled.\n({} more pending — reply /yes or /no)", remaining)
-                    } else {
-                        "Denied. Tool execution has been cancelled.".to_string()
-                    };
-
-                    match broker.respond(
-                        &request_id,
-                        ConfirmationResponse {
-                            approved,
-                            approval_scope: None,
-                        },
-                    ) {
-                        Ok(()) => {
-                            info!(
-                                "Confirmation {} for request {} in chat {}",
-                                if approved { "approved" } else { "denied" },
-                                request_id,
-                                chat_id
-                            );
-                        }
-                        Err(e) => {
-                            warn!("Failed to deliver confirmation response: {}", e);
-                        }
-                    }
-
-                    bot.send_message(chat_id, &reply).await?;
-                    return Ok(());
-                }
-                // No pending confirmation — fall through to normal handling
-            }
+        // Confirmations bypass normal message throttling, as on other connectors.
+        if let Some(broker) = confirmation_broker.as_ref()
+            && let Some(reply) =
+                intercept_confirmation_reply(&text, &chat_id.0, broker, &pending_confirmations)
+        {
+            bot.send_message(chat_id, &reply).await?;
+            return Ok(());
         }
 
         // Check rate limiter

@@ -1,2 +1,2 @@
 mod connector;
-pub use connector::{DiscordConnector, chunk_message, send_with_retry};
+pub use connector::{DiscordConnector, send_with_retry};

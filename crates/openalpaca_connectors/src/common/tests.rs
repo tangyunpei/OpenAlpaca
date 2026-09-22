@@ -1,15 +1,16 @@
 use super::*;
 use openalpaca_storage::Database;
-use tempfile::tempdir;
+use tempfile::{TempDir, tempdir};
 
-fn test_db() -> Database {
+fn test_db() -> (TempDir, Database) {
     let dir = tempdir().unwrap();
-    Database::open(&dir.path().join("test.db")).unwrap()
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    (dir, db)
 }
 
 #[test]
 fn test_resolve_principal_untrusted() {
-    let db = test_db();
+    let (_db_dir, db) = test_db();
     let repo = IdentityRepository::new(&db);
 
     // Test untrusted
@@ -19,7 +20,7 @@ fn test_resolve_principal_untrusted() {
 
 #[test]
 fn test_resolve_principal_trusted() {
-    let db = test_db();
+    let (_db_dir, db) = test_db();
     let repo = IdentityRepository::new(&db);
 
     // Link user first
@@ -36,7 +37,7 @@ fn test_resolve_principal_trusted() {
 
 #[test]
 fn test_handle_link_token_flow() {
-    let db = test_db();
+    let (_db_dir, db) = test_db();
     let repo = IdentityRepository::new(&db);
 
     repo.create_global_user("global1", None).unwrap();
@@ -252,7 +253,7 @@ mod attachments {
         let home = tempdir().unwrap();
         let home_root = home.path().canonicalize().unwrap();
         let _guard = HomeStoreGuard::set(&home_root);
-        let db = test_db();
+        let (_db_dir, db) = test_db();
 
         let attachment = store(&db, "owner-1", "Photo Notes.TXT", b"hello");
 
@@ -281,7 +282,7 @@ mod attachments {
     fn the_same_bytes_dedup_to_the_first_row() {
         let home = tempdir().unwrap();
         let _guard = HomeStoreGuard::set(&home.path().canonicalize().unwrap());
-        let db = test_db();
+        let (_db_dir, db) = test_db();
 
         let first = store(&db, "owner-1", "notes.txt", b"hello");
         // A different name, the same bytes — dedup keys off sha256, not the path.
@@ -302,7 +303,7 @@ mod attachments {
     fn validation_still_runs_before_the_writer() {
         let home = tempdir().unwrap();
         let _guard = HomeStoreGuard::set(&home.path().canonicalize().unwrap());
-        let db = test_db();
+        let (_db_dir, db) = test_db();
 
         let err = store_attachment(
             &db,

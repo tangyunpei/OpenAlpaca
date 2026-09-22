@@ -23,9 +23,9 @@ use openalpaca_core::{
     types::Capability,
 };
 use openalpaca_storage::{Database, IdentityRepository, PreferenceRepository};
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use twilight_gateway::{EventTypeFlags, Intents, Shard, ShardId, StreamExt as _};
@@ -37,43 +37,11 @@ const DISCORD_MAX_LENGTH: usize = 2000;
 /// Split a message into chunks that fit within Discord's message limit.
 /// Prefers splitting at paragraph boundaries (\n\n), then sentence boundaries (. ),
 /// then falls back to hard cut at a valid UTF-8 char boundary.
-pub fn chunk_message(text: &str) -> Vec<String> {
-    if text.len() <= DISCORD_MAX_LENGTH {
-        return vec![text.to_string()];
-    }
-
-    let mut chunks = Vec::new();
-    let mut remaining = text;
-
-    while !remaining.is_empty() {
-        if remaining.len() <= DISCORD_MAX_LENGTH {
-            chunks.push(remaining.to_string());
-            break;
-        }
-
-        // Find a safe byte boundary to slice up to (avoids panic on multi-byte UTF-8)
-        let boundary = remaining.floor_char_boundary(DISCORD_MAX_LENGTH);
-        let slice = &remaining[..boundary];
-
-        // Try paragraph boundary
-        let split_at = slice
-            .rfind("\n\n")
-            .map(|i| i + 2) // include the newlines
-            // Try sentence boundary
-            .or_else(|| slice.rfind(". ").map(|i| i + 2))
-            // Try any newline
-            .or_else(|| slice.rfind('\n').map(|i| i + 1))
-            // Hard cut at safe char boundary
-            .unwrap_or(boundary);
-
-        chunks.push(remaining[..split_at].to_string());
-        remaining = &remaining[split_at..];
-    }
-
-    chunks
+pub(super) fn chunk_message(text: &str) -> Vec<String> {
+    crate::common::chunk_message(text, DISCORD_MAX_LENGTH)
 }
 
-/// Send a message with exponential backoff retry (3 attempts: 1s, 2s, 4s).
+/// Send a message with exponential backoff retry (3 attempts, with 1s and 2s delays).
 pub async fn send_with_retry(
     http: &twilight_http::Client,
     channel_id: twilight_model::id::Id<twilight_model::id::marker::ChannelMarker>,
@@ -97,7 +65,7 @@ pub async fn send_with_retry(
                         );
                         return Err(format!("Send failed after {max_retries} retries: {e}"));
                     }
-                    let delay = Duration::from_secs(1 << (attempts - 1)); // 1s, 2s, 4s
+                    let delay = Duration::from_secs(1 << (attempts - 1)); // 1s, 2s
                     warn!(
                         "Discord send failed (attempt {}/{}), retrying in {:?}: {}",
                         attempts, max_retries, delay, e
@@ -136,33 +104,7 @@ fn resolve_confirmation_channel(db: &Database, lane_key: &str) -> Option<u64> {
         .filter(|id| *id != 0)
 }
 
-/// Simple per-channel rate limiter. Allows at most 1 message per `min_interval` per channel.
-struct ChannelRateLimiter {
-    last_sent: Mutex<HashMap<u64, Instant>>,
-    min_interval: Duration,
-}
-
-impl ChannelRateLimiter {
-    fn new(min_interval: Duration) -> Self {
-        Self {
-            last_sent: Mutex::new(HashMap::new()),
-            min_interval,
-        }
-    }
-
-    /// Check if a message can be sent to this channel. Returns wait duration if rate limited.
-    fn check(&self, channel_id: u64) -> Option<Duration> {
-        let mut map = self.last_sent.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(last) = map.get(&channel_id) {
-            let elapsed = last.elapsed();
-            if elapsed < self.min_interval {
-                return Some(self.min_interval - elapsed);
-            }
-        }
-        map.insert(channel_id, Instant::now());
-        None
-    }
-}
+type ChannelRateLimiter = crate::common::KeyedRateLimiter<u64>;
 
 /// DiscordConnector manages the Discord bot lifecycle and message handling.
 ///
@@ -221,11 +163,12 @@ impl DiscordConnector {
             .install_default()
             .ok();
 
-        let intents =
-            Intents::GUILD_MESSAGES | Intents::DIRECT_MESSAGES | Intents::MESSAGE_CONTENT;
+        let intents = Intents::GUILD_MESSAGES | Intents::DIRECT_MESSAGES | Intents::MESSAGE_CONTENT;
         let mut shard = Shard::new(ShardId::ONE, self.token.clone(), intents);
         let http = Arc::new(twilight_http::Client::new(self.token.clone()));
-        let mut bot_user_id: Option<twilight_model::id::Id<twilight_model::id::marker::UserMarker>> = None;
+        let mut bot_user_id: Option<
+            twilight_model::id::Id<twilight_model::id::marker::UserMarker>,
+        > = None;
 
         // Spawn confirmation listener (if broker available)
         if self.confirmation_broker.is_some() {
@@ -317,12 +260,9 @@ impl DiscordConnector {
                         let prompt =
                             format_confirmation_prompt(&tool_name, &tool_arguments, queue_len);
 
-                        if let Err(e) = send_with_retry(
-                            &http,
-                            twilight_model::id::Id::new(channel_id),
-                            &prompt,
-                        )
-                        .await
+                        if let Err(e) =
+                            send_with_retry(&http, twilight_model::id::Id::new(channel_id), &prompt)
+                                .await
                         {
                             error!(
                                 "Failed to send confirmation prompt to channel {}: {}",
@@ -505,13 +445,14 @@ impl DiscordConnector {
             match identity_repo.unlink_external_identity(external_identity_id) {
                 Ok(()) => {
                     info!("Unlinked discord:{}", user_id);
-                    let _ = send_with_retry(http, channel_id, "Account unlinked successfully.")
-                        .await;
+                    let _ =
+                        send_with_retry(http, channel_id, "Account unlinked successfully.").await;
                 }
                 Err(e) => {
                     error!("Unlink error: {e}");
-                    let _ = send_with_retry(http, channel_id, "An error occurred during unlinking.")
-                        .await;
+                    let _ =
+                        send_with_retry(http, channel_id, "An error occurred during unlinking.")
+                            .await;
                 }
             }
             return Ok(());
@@ -634,9 +575,12 @@ impl DiscordConnector {
         // Step 11: Persist discord.last_channel_id for cross-channel delivery
         if let Some(ref gid) = global_id {
             let pref_repo = PreferenceRepository::new(&self.db);
-            if let Err(e) =
-                pref_repo.set(gid, "discord.last_channel_id", &channel_id.to_string(), None)
-            {
+            if let Err(e) = pref_repo.set(
+                gid,
+                "discord.last_channel_id",
+                &channel_id.to_string(),
+                None,
+            ) {
                 warn!("Failed to persist discord.last_channel_id: {e}");
             }
         }
@@ -674,78 +618,14 @@ impl Connector for DiscordConnector {
 mod tests {
     use super::*;
 
+    /// Chunking itself is covered exhaustively in `common::delivery`; this
+    /// asserts only that the Discord wrapper passes Discord's own limit.
     #[test]
-    fn test_chunk_message_short() {
-        let text = "Hello, world!";
-        let chunks = chunk_message(text);
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0], "Hello, world!");
-    }
-
-    #[test]
-    fn test_chunk_message_exact_limit() {
-        let text = "a".repeat(DISCORD_MAX_LENGTH);
-        let chunks = chunk_message(&text);
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].len(), DISCORD_MAX_LENGTH);
-    }
-
-    #[test]
-    fn test_chunk_message_over_limit() {
-        let text = "a".repeat(DISCORD_MAX_LENGTH + 100);
-        let chunks = chunk_message(&text);
+    fn wrapper_chunks_at_the_discord_limit() {
+        let chunks = chunk_message(&"a".repeat(DISCORD_MAX_LENGTH + 100));
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].len(), DISCORD_MAX_LENGTH);
         assert_eq!(chunks[1].len(), 100);
-    }
-
-    #[test]
-    fn test_chunk_message_paragraph_split() {
-        let para1 = "a".repeat(1500);
-        let para2 = "b".repeat(1000);
-        let text = format!("{}\n\n{}", para1, para2);
-        let chunks = chunk_message(&text);
-        assert_eq!(chunks.len(), 2);
-        assert!(chunks[0].ends_with('\n'));
-    }
-
-    #[test]
-    fn test_chunk_message_empty() {
-        let chunks = chunk_message("");
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0], "");
-    }
-
-    #[test]
-    fn test_chunk_message_multibyte_utf8() {
-        // 3-byte chars: each char is 3 bytes
-        let text = "\u{4e16}".repeat(700); // 700 * 3 = 2100 bytes > 2000
-        let chunks = chunk_message(&text);
-        assert!(chunks.len() >= 2);
-        // Verify no panic from slicing mid-character
-        for chunk in &chunks {
-            assert!(chunk.is_char_boundary(chunk.len()));
-        }
-    }
-
-    #[test]
-    fn test_rate_limiter_allows_first() {
-        let limiter = ChannelRateLimiter::new(Duration::from_secs(1));
-        assert!(limiter.check(12345).is_none());
-    }
-
-    #[test]
-    fn test_rate_limiter_blocks_second() {
-        let limiter = ChannelRateLimiter::new(Duration::from_secs(1));
-        limiter.check(12345);
-        assert!(limiter.check(12345).is_some());
-    }
-
-    #[test]
-    fn test_rate_limiter_different_channels() {
-        let limiter = ChannelRateLimiter::new(Duration::from_secs(1));
-        limiter.check(12345);
-        assert!(limiter.check(67890).is_none());
     }
 
     fn test_db() -> Database {
@@ -816,13 +696,10 @@ mod tests {
             .push_back("req-discord-1".to_string());
 
         // Reply from a different channel falls through to normal processing
-        assert!(
-            intercept_confirmation_reply("/yes", &999u64, &broker, &pending).is_none()
-        );
+        assert!(intercept_confirmation_reply("/yes", &999u64, &broker, &pending).is_none());
 
         // Reply from the prompted channel approves via the broker
-        let reply =
-            intercept_confirmation_reply("/yes", &111222333u64, &broker, &pending).unwrap();
+        let reply = intercept_confirmation_reply("/yes", &111222333u64, &broker, &pending).unwrap();
         assert!(reply.contains("Approved"));
         assert!(rx.try_recv().unwrap().approved);
     }

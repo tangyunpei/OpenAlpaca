@@ -1,5 +1,10 @@
 //! Common utilities shared across all connectors.
 
+#[cfg(any(feature = "telegram", feature = "discord", test))]
+mod delivery;
+#[cfg(any(feature = "telegram", feature = "discord"))]
+pub(crate) use delivery::{KeyedRateLimiter, chunk_message};
+
 use openalpaca_core::gateway::ResolvedAttachment;
 use openalpaca_core::security::policy::Principal;
 use openalpaca_storage::store::StoreScope;

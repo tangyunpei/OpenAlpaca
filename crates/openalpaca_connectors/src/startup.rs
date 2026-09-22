@@ -5,8 +5,8 @@ use openalpaca_core::bus::EventBus;
 use openalpaca_core::daemon_config::DaemonConfig;
 use openalpaca_core::gateway::Gateway;
 use openalpaca_storage::Database;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 #[allow(unused_imports)]
 use tracing::{info, warn};
 
@@ -127,11 +127,10 @@ pub fn spawn_telegram_connector(
 /// `false` when the dispatcher task exits (via `RunningGuard` drop), so
 /// `is_alive()` accurately reflects whether the Telegram connector is running.
 #[cfg(feature = "telegram")]
-fn spawn_telegram(connector: crate::telegram::TelegramConnector) -> (ShutdownToken, Arc<AtomicBool>) {
+fn spawn_telegram(
+    connector: crate::telegram::TelegramConnector,
+) -> (ShutdownToken, Arc<AtomicBool>) {
     let running = Arc::new(AtomicBool::new(true));
-    let token = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current()
-            .block_on(async { connector.run_with_signal(running.clone()).await })
-    });
+    let token = connector.start(running.clone());
     (token, running)
 }
