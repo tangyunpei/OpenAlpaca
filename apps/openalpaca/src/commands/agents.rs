@@ -6,7 +6,9 @@ use colored::Colorize;
 use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
 use serde::{Deserialize, Serialize};
 
+use super::agent_client::{self, AgentDetailItem as AgentItemFull, AgentDraft};
 use crate::client::DaemonClient;
+use crate::output::truncate;
 use crate::output::{OutputFormat, TableRow, print_list, status_color};
 
 #[derive(Args)]
@@ -66,9 +68,6 @@ pub enum AgentsCommands {
         /// Create from TOML file
         #[arg(long)]
         from_file: Option<String>,
-        /// Interactive creation mode
-        #[arg(long)]
-        interactive: bool,
     },
     /// Remove (archive) an agent
     Remove {
@@ -98,19 +97,6 @@ struct AgentDetail {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct AgentItemFull {
-    id: String,
-    name: String,
-    status: String,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    skills: Option<Vec<String>>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 struct AgentMetricsInfo {
     #[serde(default)]
     tasks_completed: Option<i64>,
@@ -120,12 +106,6 @@ struct AgentMetricsInfo {
     total_cost_usd: Option<f64>,
     #[serde(default)]
     success_rate: Option<f64>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct AgentConfigResponse {
-    config: serde_json::Value,
-    config_version: u64,
 }
 
 impl TableRow for AgentItem {
@@ -158,14 +138,6 @@ impl TableRow for AgentItem {
     }
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}...", &s[..max.saturating_sub(3)])
-    } else {
-        s.to_string()
-    }
-}
-
 // ── Command runner ───────────────────────────────────────────────
 
 pub async fn run(args: AgentsArgs) -> Result<()> {
@@ -188,14 +160,9 @@ pub async fn run(args: AgentsArgs) -> Result<()> {
             key_path,
             value,
         } => agent_set(&agent_id, &key_path, &value).await,
-        AgentsCommands::Create {
-            from_file,
-            interactive,
-        } => {
+        AgentsCommands::Create { from_file } => {
             if let Some(ref path) = from_file {
                 create_from_file(path).await
-            } else if interactive {
-                create_interactive().await
             } else {
                 // Default: interactive mode
                 create_interactive().await
@@ -267,9 +234,7 @@ async fn agent_status(agent_id: &str, format: OutputFormat) -> Result<()> {
 
 async fn agent_config(agent_id: &str, format: OutputFormat) -> Result<()> {
     let client = DaemonClient::connect()?;
-    let config: AgentConfigResponse = client
-        .get(&format!("/v1/agents/{}/config", agent_id))
-        .await?;
+    let config = agent_client::config(&client, agent_id).await?;
 
     match format {
         OutputFormat::Json => {
@@ -292,10 +257,7 @@ async fn agent_config(agent_id: &str, format: OutputFormat) -> Result<()> {
 
 async fn agent_action(agent_id: &str, action: &str) -> Result<()> {
     let client = DaemonClient::connect()?;
-    let body = serde_json::json!({ "action": action });
-    let result: serde_json::Value = client
-        .post(&format!("/v1/agents/{}/action", agent_id), &body)
-        .await?;
+    let result = agent_client::action(&client, agent_id, action).await?;
 
     let status = result["status"].as_str().unwrap_or("unknown");
     println!(
@@ -311,9 +273,7 @@ async fn agent_set(agent_id: &str, key_path: &str, value: &str) -> Result<()> {
     let client = DaemonClient::connect()?;
 
     // 1. Get current config
-    let config_resp: AgentConfigResponse = client
-        .get(&format!("/v1/agents/{}/config", agent_id))
-        .await?;
+    let config_resp = agent_client::config(&client, agent_id).await?;
 
     let mut config = config_resp.config;
     let version = config_resp.config_version;
@@ -356,16 +316,8 @@ async fn agent_set(agent_id: &str, key_path: &str, value: &str) -> Result<()> {
         }
     }
 
-    // 3. PUT updated config with optimistic lock
-    let body = serde_json::json!({
-        "config": config,
-        "config_version": version,
-    });
-
-    match client
-        .put::<_, serde_json::Value>(&format!("/v1/agents/{}/config", agent_id), &body)
-        .await
-    {
+    // The shared request preserves the optimistic version from the read.
+    match agent_client::save_config(&client, agent_id, &config, version).await {
         Ok(result) => {
             let new_version = result["config_version"].as_u64().unwrap_or(version + 1);
             println!(
@@ -461,28 +413,18 @@ async fn create_interactive() -> Result<()> {
         .allow_empty(true)
         .interact_text()?;
 
-    // Build the config
-    let mut config = serde_json::json!({
-        "name": name,
-        "description": description,
-        "llm": {
-            "model": model,
-        },
-        "skills": skills,
-    });
-
-    if max_cost > 0.0 {
-        config["constraints"] = serde_json::json!({
-            "max_cost_per_task": max_cost,
-        });
+    let config = AgentDraft {
+        name: &name,
+        description: &description,
+        model: &model,
+        skills: &skills,
+        max_cost,
+        persona: (!persona.is_empty()).then_some(persona.as_str()),
+        temperature: None,
     }
-    if !persona.is_empty() {
-        config["persona"] = serde_json::Value::String(persona);
-    }
-
+    .config();
     let client = DaemonClient::connect()?;
-    let body = serde_json::json!({ "config": config });
-    let result: serde_json::Value = client.post("/v1/agents", &body).await?;
+    let result = agent_client::create(&client, &config).await?;
 
     let agent_id = result["agent_id"].as_str().unwrap_or("unknown");
     println!("{} Agent created: {}", "✓".green(), agent_id);
@@ -490,13 +432,7 @@ async fn create_interactive() -> Result<()> {
 }
 
 async fn get_model_list() -> Result<Vec<String>> {
-    let client = DaemonClient::connect()?;
-    let models: Vec<serde_json::Value> = client.get("/v1/models").await?;
-    let names: Vec<String> = models
-        .iter()
-        .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
-        .collect();
-    Ok(names)
+    agent_client::models(&DaemonClient::connect()?).await
 }
 
 async fn remove_agent(agent_id: &str) -> Result<()> {
@@ -514,11 +450,28 @@ async fn remove_agent(agent_id: &str) -> Result<()> {
     }
 
     let client = DaemonClient::connect()?;
-    let result: serde_json::Value = client
-        .delete_req(&format!("/v1/agents/{}", agent_id))
-        .await?;
+    let result = agent_client::remove(&client, agent_id).await?;
 
     let status = result["status"].as_str().unwrap_or("archived");
     println!("{} Agent {} -> {}", "✓".green(), agent_id, status);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unicode_agent_names_render_in_tables_without_truncating_json() {
+        let name = "中文名称".repeat(12);
+        let item = AgentItem {
+            id: "agent-1".into(),
+            name: name.clone(),
+            status: "idle".into(),
+            model: None,
+            skills: None,
+        };
+        assert!(item.table_row().contains(&truncate(&name, 20)));
+        assert_eq!(serde_json::to_value(&item).unwrap()["name"], name);
+    }
 }

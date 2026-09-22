@@ -50,6 +50,7 @@ use colored::Colorize;
 use serde::{Deserialize, Serialize};
 
 use crate::client::DaemonClient;
+use crate::output::truncate;
 use crate::output::{OutputFormat, TableRow, print_list, status_color};
 
 #[derive(Args)]
@@ -290,22 +291,6 @@ impl TableRow for ExtensionRow {
     }
 }
 
-/// Fit a cell to `max` **characters**, ellipsis included.
-///
-/// Char-safe by construction: byte-slicing `&s[..max - 3]` panics whenever the
-/// cut lands inside a multibyte character, and every string here — a server id,
-/// a plugin directory name, a daemon-generated `reason` — can hold one. `ext`
-/// is the surface an operator reaches for when something is already wrong, so
-/// it must not be the thing that panics.
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let keep = max.saturating_sub(3);
-    let head: String = s.chars().take(keep).collect();
-    format!("{head}...")
-}
-
 /// `mcp` and `plugin` are the only kinds. Refused here rather than sent, so the
 /// error names the two words instead of reading as a missing extension.
 fn check_kind(kind: &str) -> Result<()> {
@@ -390,11 +375,7 @@ pub(crate) fn print_row(row: &ExtensionRow) {
     }
     println!("{} {}", "State:".dimmed(), status_color(&row.state));
     if let Some(reason) = &row.reason {
-        let actionable = if row.actionable {
-            " (actionable)"
-        } else {
-            ""
-        };
+        let actionable = if row.actionable { " (actionable)" } else { "" };
         println!("{} {}{}", "Reason:".dimmed(), reason, actionable);
     }
     if let Some(detail) = &row.detail {
@@ -460,7 +441,11 @@ async fn remove(id: &str) -> Result<()> {
     let _: serde_json::Value = client
         .delete_req(&format!("/v1/extensions/plugin/{id}"))
         .await?;
-    println!("{} removed the permissions entry for '{}'", "ok".green(), id);
+    println!(
+        "{} removed the permissions entry for '{}'",
+        "ok".green(),
+        id
+    );
     Ok(())
 }
 
@@ -603,7 +588,12 @@ struct ManifestSummary {
 }
 
 fn print_manifest(manifest: &ManifestSummary) {
-    println!("{} {} v{}", "Plugin:".dimmed(), manifest.name, manifest.version);
+    println!(
+        "{} {} v{}",
+        "Plugin:".dimmed(),
+        manifest.name,
+        manifest.version
+    );
     if !manifest.description.is_empty() {
         println!("{} {}", "Description:".dimmed(), manifest.description);
     }
@@ -635,9 +625,11 @@ async fn install(path: &str, dry_run: bool) -> Result<()> {
         println!(
             "{}",
             if response.installed {
-                "A plugin of this name is already installed; `ext update` would replace it.".dimmed()
+                "A plugin of this name is already installed; `ext update` would replace it."
+                    .dimmed()
             } else {
-                "Nothing was copied. `ext install` would land this, turned on but unapproved.".dimmed()
+                "Nothing was copied. `ext install` would land this, turned on but unapproved."
+                    .dimmed()
             }
         );
         return Ok(());
@@ -864,7 +856,10 @@ mod tests {
         ));
         assert!(matches!(
             parse(&["ext", "uninstall", "mcp", "github", "--purge-data"]),
-            ExtCommands::Uninstall { purge_data: true, .. }
+            ExtCommands::Uninstall {
+                purge_data: true,
+                ..
+            }
         ));
         assert!(matches!(
             parse(&["ext", "mcp", "remove", "github"]),
@@ -904,8 +899,19 @@ mod tests {
     #[test]
     fn an_mcp_add_body_carries_only_what_was_asked_for() {
         let body = mcp_add_body(parse_mcp(&[
-            "ext", "mcp", "add", "github", "--command", "npx", "--arg", "-y", "--arg",
-            "@modelcontextprotocol/server-github", "--env", "RUST_LOG=debug=1", "--env-from",
+            "ext",
+            "mcp",
+            "add",
+            "github",
+            "--command",
+            "npx",
+            "--arg",
+            "-y",
+            "--arg",
+            "@modelcontextprotocol/server-github",
+            "--env",
+            "RUST_LOG=debug=1",
+            "--env-from",
             "GITHUB_TOKEN=GH_PAT",
         ]))
         .expect("a stdio declaration");
@@ -925,9 +931,19 @@ mod tests {
         );
 
         let body = mcp_add_body(parse_mcp(&[
-            "ext", "mcp", "add", "remote", "--transport", "http", "--url",
-            "https://example.com/mcp", "--bearer-env", "TOKEN", "--header-from",
-            "Authorization=REMOTE_TOKEN", "--disabled",
+            "ext",
+            "mcp",
+            "add",
+            "remote",
+            "--transport",
+            "http",
+            "--url",
+            "https://example.com/mcp",
+            "--bearer-env",
+            "TOKEN",
+            "--header-from",
+            "Authorization=REMOTE_TOKEN",
+            "--disabled",
         ]))
         .expect("an http declaration");
         assert_eq!(
@@ -949,22 +965,47 @@ mod tests {
     #[test]
     fn a_malformed_env_entry_is_refused_locally() {
         let error = mcp_add_body(parse_mcp(&[
-            "ext", "mcp", "add", "srv", "--command", "x", "--env", "NOPE",
+            "ext",
+            "mcp",
+            "add",
+            "srv",
+            "--command",
+            "x",
+            "--env",
+            "NOPE",
         ]))
         .unwrap_err()
         .to_string();
         assert!(error.contains("--env expects KEY=VALUE"), "got: {error}");
 
         let error = mcp_add_body(parse_mcp(&[
-            "ext", "mcp", "add", "srv", "--command", "x", "--env-from", "NOPE",
+            "ext",
+            "mcp",
+            "add",
+            "srv",
+            "--command",
+            "x",
+            "--env-from",
+            "NOPE",
         ]))
         .unwrap_err()
         .to_string();
-        assert!(error.contains("--env-from expects KEY=VALUE"), "got: {error}");
+        assert!(
+            error.contains("--env-from expects KEY=VALUE"),
+            "got: {error}"
+        );
 
         let error = mcp_add_body(parse_mcp(&[
-            "ext", "mcp", "add", "remote", "--transport", "http", "--url",
-            "https://example.com/mcp", "--header-from", "NOPE",
+            "ext",
+            "mcp",
+            "add",
+            "remote",
+            "--transport",
+            "http",
+            "--url",
+            "https://example.com/mcp",
+            "--header-from",
+            "NOPE",
         ]))
         .unwrap_err()
         .to_string();
@@ -1041,23 +1082,5 @@ mod tests {
         assert_eq!(row.toggle(), "on");
         assert_eq!(row.tools, vec!["notion::create_page".to_string()]);
         assert_eq!(row.skills, vec!["daily-digest".to_string()]);
-    }
-
-    /// A cell whose cut lands inside a multibyte character used to panic —
-    /// `ext list` is the surface an operator reaches for when an extension has
-    /// already gone wrong, and both the id and the daemon-generated `reason`
-    /// can hold one.
-    #[test]
-    fn truncate_cuts_on_character_boundaries() {
-        assert_eq!(truncate("short", 21), "short");
-        // Exactly the width: untouched.
-        assert_eq!(truncate("abcde", 5), "abcde");
-        // Over the width: 3 chars of ellipsis, `max - 3` chars kept.
-        assert_eq!(truncate("abcdefgh", 5), "ab...");
-        // Multibyte, cut mid-character under the old byte slice.
-        assert_eq!(truncate("ünïcödé-server-name", 8), "ünïcö...");
-        assert_eq!(truncate("日本語のサーバー", 6), "日本語...");
-        // Every emoji is 4 bytes; the old code panicked on all of these.
-        assert_eq!(truncate("🙂🙂🙂🙂🙂🙂", 4), "🙂...");
     }
 }

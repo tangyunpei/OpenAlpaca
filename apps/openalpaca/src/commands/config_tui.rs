@@ -6,10 +6,10 @@ use dialoguer::{Confirm, Input, Password, Select, theme::ColorfulTheme};
 use openalpaca_llm::{ClaudeCodeCliProvider, CodexCliProvider};
 use openalpaca_storage::config_schema::{self, ConfigBackend};
 use openalpaca_storage::{ConfigRepository, Database};
-use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 
+use super::agent_client::{self, AgentDetailItem as TuiAgentItem, AgentDraft};
 use super::ai_config;
 use super::daemon_config_cli;
 use crate::client::DaemonClient;
@@ -976,29 +976,6 @@ fn interactive_daemon(
     }
 }
 
-// ── Agent management structs (local deserialization) ────────────────────
-//
-// These mirror the structs in agents.rs but are kept local to avoid coupling.
-
-#[derive(Debug, Deserialize)]
-struct TuiAgentItem {
-    id: String,
-    name: String,
-    status: String,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    skills: Option<Vec<String>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TuiAgentConfigResponse {
-    config: serde_json::Value,
-    config_version: u64,
-}
-
 /// Run an async future on the current tokio runtime from synchronous code.
 ///
 /// Uses `block_in_place` to safely move off the async worker thread before
@@ -1173,8 +1150,7 @@ fn interactive_agent_detail(agent: &TuiAgentItem) -> Result<()> {
 /// Show full agent config as pretty-printed JSON.
 fn view_agent_config_json(agent_id: &str) -> Result<()> {
     let client = DaemonClient::connect().context("Daemon is not running")?;
-    let config: TuiAgentConfigResponse =
-        block_on(async { client.get(&format!("/v1/agents/{}/config", agent_id)).await })?;
+    let config = block_on(agent_client::config(&client, agent_id))?;
 
     println!();
     println!(
@@ -1200,8 +1176,7 @@ fn view_agent_config_json(agent_id: &str) -> Result<()> {
 /// Interactive editor for an agent's config (key-by-key editing).
 fn interactive_edit_agent_config(agent_id: &str, agent_name: &str) -> Result<()> {
     let client = DaemonClient::connect().context("Daemon is not running")?;
-    let resp: TuiAgentConfigResponse =
-        block_on(async { client.get(&format!("/v1/agents/{}/config", agent_id)).await })?;
+    let resp = block_on(agent_client::config(&client, agent_id))?;
 
     let mut config = resp.config;
     let version = resp.config_version;
@@ -1261,15 +1236,9 @@ fn interactive_edit_agent_config(agent_id: &str, agent_name: &str) -> Result<()>
             set_nested_value(&mut config, path, json_val);
         } else if sel == fields.len() {
             // Save
-            let body = serde_json::json!({
-                "config": config,
-                "config_version": version,
-            });
-            let save_result: Result<serde_json::Value> = block_on(async {
-                client
-                    .put(&format!("/v1/agents/{}/config", agent_id), &body)
-                    .await
-            });
+            let save_result = block_on(agent_client::save_config(
+                &client, agent_id, &config, version,
+            ));
             match save_result {
                 Ok(result) => {
                     let new_version = result["config_version"].as_u64().unwrap_or(version + 1);
@@ -1400,12 +1369,7 @@ fn parse_json_value(s: &str) -> serde_json::Value {
 /// Perform a pause/resume action on an agent.
 fn agent_action_tui(agent_id: &str, action: &str) -> Result<()> {
     let client = DaemonClient::connect().context("Daemon is not running")?;
-    let body = serde_json::json!({ "action": action });
-    let result: serde_json::Value = block_on(async {
-        client
-            .post(&format!("/v1/agents/{}/action", agent_id), &body)
-            .await
-    })?;
+    let result = block_on(agent_client::action(&client, agent_id, action))?;
 
     let status = result["status"].as_str().unwrap_or("unknown");
     let status_styled = match status.to_lowercase().as_str() {
@@ -1438,8 +1402,7 @@ fn remove_agent_tui(agent_id: &str, agent_name: &str) -> Result<bool> {
     }
 
     let client = DaemonClient::connect().context("Daemon is not running")?;
-    let result: serde_json::Value =
-        block_on(async { client.delete_req(&format!("/v1/agents/{}", agent_id)).await })?;
+    let result = block_on(agent_client::remove(&client, agent_id))?;
 
     let status = result["status"].as_str().unwrap_or("archived");
     println!(
@@ -1529,25 +1492,16 @@ fn interactive_create_agent() -> Result<()> {
         .interact_text()?;
     let temperature: f64 = temp_input.parse().unwrap_or(0.5);
 
-    // Build the config JSON
-    let mut agent_config = serde_json::json!({
-        "name": name,
-        "description": description,
-        "llm": {
-            "model": model,
-        },
-        "skills": skills,
-        "persona": persona,
-        "preset": {
-            "temperature": temperature,
-        }
-    });
-
-    if max_cost > 0.0 {
-        agent_config["constraints"] = serde_json::json!({
-            "max_cost_per_task": max_cost,
-        });
+    let agent_config = AgentDraft {
+        name: &name,
+        description: &description,
+        model: &model,
+        skills: &skills,
+        max_cost,
+        persona: Some(&persona),
+        temperature: Some(temperature),
     }
+    .config();
 
     // Confirm
     println!();
@@ -1576,9 +1530,7 @@ fn interactive_create_agent() -> Result<()> {
     }
 
     let client = DaemonClient::connect().context("Daemon is not running")?;
-    let body = serde_json::json!({ "config": agent_config });
-    let result: Result<serde_json::Value> =
-        block_on(async { client.post("/v1/agents", &body).await });
+    let result = block_on(agent_client::create(&client, &agent_config));
 
     match result {
         Ok(resp) => {
@@ -1599,13 +1551,7 @@ fn interactive_create_agent() -> Result<()> {
 
 /// Try to fetch the list of available models from the daemon.
 fn fetch_model_list() -> Result<Vec<String>> {
-    let client = DaemonClient::connect()?;
-    let models: Vec<serde_json::Value> = block_on(async { client.get("/v1/models").await })?;
-    let names: Vec<String> = models
-        .iter()
-        .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
-        .collect();
-    Ok(names)
+    block_on(agent_client::models(&DaemonClient::connect()?))
 }
 
 fn interactive_agents(
@@ -1986,6 +1932,7 @@ fn configure_key(
 
 fn save_and_exit(repo: &ConfigRepository, config_map: &HashMap<String, String>) -> Result<()> {
     let mut ai_entries: Vec<(&str, &str)> = Vec::new();
+    let mut daemon_entries = Vec::new();
 
     for (k, v) in config_map {
         // Source-hint metadata entries go into the AI batch (processed there)
@@ -2001,8 +1948,7 @@ fn save_and_exit(repo: &ConfigRepository, config_map: &HashMap<String, String>) 
         match backend {
             ConfigBackend::LlmToml => ai_entries.push((k.as_str(), v.as_str())),
             ConfigBackend::DaemonToml => {
-                // Write daemon.toml entries one at a time
-                daemon_config_cli::set_daemon_value(k, v)?;
+                daemon_entries.push((k.as_str(), v.as_str()));
             }
             ConfigBackend::SystemConfig => {
                 let kind = def.map(|d| d.kind.as_db_kind()).unwrap_or("string");
@@ -2011,6 +1957,7 @@ fn save_and_exit(repo: &ConfigRepository, config_map: &HashMap<String, String>) 
         }
     }
 
+    daemon_config_cli::set_daemon_values_batch(&daemon_entries)?;
     if !ai_entries.is_empty() {
         ai_config::set_ai_values_batch(&ai_entries)?;
     }

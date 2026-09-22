@@ -81,14 +81,6 @@ pub enum LlmCommands {
     },
 }
 
-pub(super) fn truncate(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}...", &s[..max.saturating_sub(3)])
-    } else {
-        s.to_string()
-    }
-}
-
 pub async fn run(args: LlmArgs) -> Result<()> {
     match args.command {
         LlmCommands::Status { format } => llm_status::llm_status(format).await,
@@ -100,9 +92,7 @@ pub async fn run(args: LlmArgs) -> Result<()> {
             daily,
             format,
         } => llm_status::llm_usage(agent, date, key, daily, format).await,
-        LlmCommands::Models { refresh, format } => {
-            llm_status::llm_models(refresh, format).await
-        }
+        LlmCommands::Models { refresh, format } => llm_status::llm_models(refresh, format).await,
         LlmCommands::Strategy { provider, strategy } => {
             llm_status::llm_strategy(&provider, &strategy).await
         }

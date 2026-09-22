@@ -375,38 +375,53 @@ pub fn get_daemon_value(key: &str) -> Result<Option<String>> {
 
 /// Set a single daemon config value by schema key.
 pub fn set_daemon_value(key: &str, value: &str) -> Result<()> {
-    let mapping =
-        find_mapping(key).ok_or_else(|| anyhow::anyhow!("Unknown daemon config key '{}'", key))?;
+    set_daemon_values_batch(&[(key, value)])
+}
 
-    let path = daemon_config_path()?;
+/// Validate every entry, then update daemon.toml with one read and one write.
+/// Other configuration backends remain independent of this file's commit.
+pub fn set_daemon_values_batch(entries: &[(&str, &str)]) -> Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    set_daemon_values_at(&daemon_config_path()?, entries)
+}
 
-    // Load existing config or start with empty table
+fn set_daemon_values_at(path: &std::path::Path, entries: &[(&str, &str)]) -> Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let validated: Vec<_> = entries
+        .iter()
+        .map(|(key, value)| {
+            let mapping = find_mapping(key)
+                .ok_or_else(|| anyhow::anyhow!("Unknown daemon config key '{}'", key))?;
+            openalpaca_storage::config_schema::validate(key, value)
+                .map_err(|e| anyhow::anyhow!("Invalid value for '{}': {}", key, e))?;
+            let value = openalpaca_storage::config_schema::normalize(key, value);
+            Ok((mapping, string_to_toml_value(&value)))
+        })
+        .collect::<Result<_>>()?;
+
     let mut root = if path.exists() {
-        let content = std::fs::read_to_string(&path)
+        let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
         toml::from_str::<toml::Value>(&content)
             .with_context(|| format!("Failed to parse {}", path.display()))?
     } else {
         toml::Value::Table(toml::map::Map::new())
     };
-
-    // Navigate to the correct section and set the value
-    let section = navigate_to_section_mut(&mut root, mapping.section);
-    let table = section
-        .as_table_mut()
-        .ok_or_else(|| anyhow::anyhow!("TOML section is not a table"))?;
-
-    // Infer TOML type: try integer first, then float, then string
-    let toml_val = string_to_toml_value(value);
-    table.insert(mapping.field.to_string(), toml_val);
-
-    // Write back
+    for (mapping, value) in validated {
+        let table = navigate_to_section_mut(&mut root, mapping.section)
+            .as_table_mut()
+            .ok_or_else(|| anyhow::anyhow!("TOML section is not a table"))?;
+        table.insert(mapping.field.to_string(), value);
+    }
+    let output = toml::to_string_pretty(&root).context("Failed to serialize daemon config")?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).context("Failed to create config directory")?;
     }
-    let output = toml::to_string_pretty(&root).context("Failed to serialize daemon config")?;
-    std::fs::write(&path, output).with_context(|| format!("Failed to write {}", path.display()))?;
-
+    std::fs::write(path, output).with_context(|| format!("Failed to write {}", path.display()))?;
     Ok(())
 }
 

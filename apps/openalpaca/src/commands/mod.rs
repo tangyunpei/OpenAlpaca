@@ -1,3 +1,4 @@
+mod agent_client;
 pub mod agents;
 pub mod ai_config;
 mod ai_config_helpers;

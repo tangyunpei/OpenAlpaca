@@ -7,9 +7,7 @@ use colored::Colorize;
 use serde::{Deserialize, Serialize};
 
 use crate::client::DaemonClient;
-use crate::output::{OutputFormat, TableRow, format_usd, print_list, status_color};
-
-use super::llm::truncate;
+use crate::output::{OutputFormat, TableRow, format_usd, print_list, status_color, truncate};
 
 // ── Local deserialization structs ────────────────────────────────
 

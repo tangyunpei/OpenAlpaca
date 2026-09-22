@@ -93,3 +93,27 @@ pub fn print_table_header(headers: &[(&str, usize)]) {
     let total_width: usize = headers.iter().map(|(_, w)| w + 1).sum::<usize>();
     println!("{}", "-".repeat(total_width).dimmed());
 }
+
+/// Fit a cell to a number of Unicode characters, including its ellipsis.
+pub fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max.saturating_sub(3)).collect();
+    format!("{head}...")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate;
+
+    #[test]
+    fn truncate_cuts_on_character_boundaries() {
+        assert_eq!(truncate("short", 21), "short");
+        assert_eq!(truncate("abcde", 5), "abcde");
+        assert_eq!(truncate("abcdefgh", 5), "ab...");
+        assert_eq!(truncate("ünïcödé-server-name", 8), "ünïcö...");
+        assert_eq!(truncate("日本語のサーバー", 6), "日本語...");
+        assert_eq!(truncate("🙂🙂🙂🙂🙂🙂", 4), "🙂...");
+    }
+}

@@ -24,6 +24,38 @@ pub(super) struct ConfigEntry {
     pub description: Option<String>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct ResolvedConfigEntry {
+    value: String,
+    source: &'static str,
+    is_set: bool,
+}
+
+fn resolve_entry(
+    def: &config_schema::ConfigKeyDef,
+    value: Option<&str>,
+    source: &'static str,
+    all: bool,
+) -> Option<ResolvedConfigEntry> {
+    let (value, source, is_set) = match value {
+        Some(value) => (value, source, true),
+        None if all => match def.default {
+            Some(value) => (value, "default", false),
+            None => ("", "—", false),
+        },
+        None => return None,
+    };
+    Some(ResolvedConfigEntry {
+        value: if def.sensitive {
+            config_schema::mask_value(value)
+        } else {
+            value.to_string()
+        },
+        source,
+        is_set,
+    })
+}
+
 pub(super) fn cmd_set(repo: &ConfigRepository, key: &str, value: &str) -> Result<()> {
     let def = config_schema::lookup(key);
 
@@ -121,57 +153,21 @@ pub(super) fn cmd_list(
         .collect();
 
     // Resolve each key to (display_value, source, is_set)
-    let mut resolved: HashMap<String, (String, String, bool)> = HashMap::new();
+    let mut resolved: HashMap<String, ResolvedConfigEntry> = HashMap::new();
 
     for def in config_schema::CONFIG_KEYS {
-        let (raw_val, source, is_set) = match def.backend {
-            ConfigBackend::LlmToml => {
-                if let Some(val) = ai_map.get(def.key) {
-                    (val.clone(), "llm.toml", true)
-                } else if all {
-                    if let Some(d) = def.default {
-                        (d.to_string(), "default", false)
-                    } else {
-                        (String::new(), "—", false)
-                    }
-                } else {
-                    continue;
-                }
-            }
+        let (value, source) = match def.backend {
+            ConfigBackend::LlmToml => (ai_map.get(def.key).map(String::as_str), "llm.toml"),
             ConfigBackend::DaemonToml => {
-                if let Some(val) = daemon_map.get(def.key) {
-                    (val.clone(), "daemon.toml", true)
-                } else if all {
-                    if let Some(d) = def.default {
-                        (d.to_string(), "default", false)
-                    } else {
-                        (String::new(), "—", false)
-                    }
-                } else {
-                    continue;
-                }
+                (daemon_map.get(def.key).map(String::as_str), "daemon.toml")
             }
             ConfigBackend::SystemConfig => {
-                if let Some((val, _)) = db_map.get(def.key) {
-                    (val.clone(), "db", true)
-                } else if all {
-                    if let Some(d) = def.default {
-                        (d.to_string(), "default", false)
-                    } else {
-                        (String::new(), "—", false)
-                    }
-                } else {
-                    continue;
-                }
+                (db_map.get(def.key).map(|(value, _)| value.as_str()), "db")
             }
         };
-
-        let display = if def.sensitive {
-            config_schema::mask_value(&raw_val)
-        } else {
-            raw_val
-        };
-        resolved.insert(def.key.to_string(), (display, source.to_string(), is_set));
+        if let Some(entry) = resolve_entry(def, value, source, all) {
+            resolved.insert(def.key.to_string(), entry);
+        }
     }
 
     // Dynamic connector keys from DB not in the static registry
@@ -186,22 +182,29 @@ pub(super) fn cmd_list(
         } else {
             v.clone()
         };
-        resolved.insert(k.clone(), (display, "db".to_string(), true));
+        resolved.insert(
+            k.clone(),
+            ResolvedConfigEntry {
+                value: display,
+                source: "db",
+                is_set: true,
+            },
+        );
     }
 
     match format {
         OutputFormat::Json => {
             let entries: Vec<ConfigEntry> = resolved
                 .iter()
-                .map(|(k, (v, src, _))| {
+                .map(|(k, entry)| {
                     let def = config_schema::lookup(k);
                     ConfigEntry {
                         key: k.clone(),
-                        value: v.clone(),
+                        value: entry.value.clone(),
                         kind: def
                             .as_ref()
                             .map_or("string".to_string(), |d| d.kind.as_db_kind().to_string()),
-                        source: src.clone(),
+                        source: entry.source.to_string(),
                         category: def.as_ref().map(|d| d.category.to_string()),
                         description: def.as_ref().map(|d| d.description.to_string()),
                     }
@@ -222,7 +225,7 @@ pub(super) fn cmd_list(
 
 /// Print config values grouped by category and subcategory with colored output.
 fn print_grouped_table(
-    resolved: &HashMap<String, (String, String, bool)>, // key → (display_value, source, is_set)
+    resolved: &HashMap<String, ResolvedConfigEntry>, // key → (display_value, source, is_set)
     verbose: bool,
 ) {
     let category_order = ["Agents", "API-Keys", "Daemon", "Connectors", "System"];
@@ -231,7 +234,7 @@ fn print_grouped_table(
     let key_width = resolved.keys().map(|k| k.len()).max().unwrap_or(30).max(20);
     let val_width = resolved
         .values()
-        .map(|(v, _, _)| v.len())
+        .map(|entry| entry.value.len())
         .max()
         .unwrap_or(20)
         .clamp(10, 36);
@@ -322,7 +325,11 @@ fn print_grouped_table(
         );
 
         for k in &dynamic_keys {
-            let (display_val, source, is_set) = &resolved[k.as_str()];
+            let ResolvedConfigEntry {
+                value: display_val,
+                source,
+                is_set,
+            } = &resolved[k.as_str()];
             total_keys += 1;
             if *is_set {
                 set_keys += 1;
@@ -358,7 +365,7 @@ fn print_grouped_table(
 
 fn print_category_keys(
     defs: &[&config_schema::ConfigKeyDef],
-    resolved: &HashMap<String, (String, String, bool)>,
+    resolved: &HashMap<String, ResolvedConfigEntry>,
     key_width: usize,
     val_width: usize,
     verbose: bool,
@@ -366,7 +373,12 @@ fn print_category_keys(
     set: &mut usize,
 ) {
     for def in defs {
-        if let Some((display_val, source, is_set)) = resolved.get(def.key) {
+        if let Some(ResolvedConfigEntry {
+            value: display_val,
+            source,
+            is_set,
+        }) = resolved.get(def.key)
+        {
             *total += 1;
             if *is_set {
                 *set += 1;
@@ -482,4 +494,48 @@ pub(super) fn cmd_reset(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_backend_uses_the_same_explicit_default_and_absent_rules() {
+        for backend in [
+            ConfigBackend::SystemConfig,
+            ConfigBackend::LlmToml,
+            ConfigBackend::DaemonToml,
+        ] {
+            let def = config_schema::CONFIG_KEYS
+                .iter()
+                .find(|def| def.backend == backend && def.default.is_some() && !def.sensitive)
+                .unwrap();
+            let explicit = resolve_entry(def, Some(""), "test", false).unwrap();
+            assert_eq!(
+                explicit,
+                ResolvedConfigEntry {
+                    value: String::new(),
+                    source: "test",
+                    is_set: true
+                }
+            );
+            assert!(resolve_entry(def, None, "test", false).is_none());
+            let default = resolve_entry(def, None, "test", true).unwrap();
+            assert_eq!(default.value, def.default.unwrap());
+            assert_eq!(default.source, "default");
+            assert!(!default.is_set);
+        }
+    }
+
+    #[test]
+    fn sensitive_values_and_unset_without_defaults_remain_distinct() {
+        let def = config_schema::lookup("ai.anthropic.api_key").unwrap();
+        let explicit = resolve_entry(&def, Some("sk-secret-value"), "llm.toml", true).unwrap();
+        assert_eq!(explicit.value, config_schema::mask_value("sk-secret-value"));
+        assert!(explicit.is_set);
+        let absent = resolve_entry(&def, None, "llm.toml", true).unwrap();
+        assert_eq!(absent.source, "—");
+        assert!(!absent.is_set);
+    }
 }

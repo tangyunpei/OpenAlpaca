@@ -232,43 +232,17 @@ pub fn list_ai_entries() -> Result<Vec<(String, String, String)>> {
     let encryptor = encryptor()?;
     let store = secret_store();
 
-    let keys = [
-        "ai.default_model",
-        "ai.fallback_models",
-        "ai.embeddings.enabled",
-        "ai.embeddings.provider",
-        "ai.embeddings.model",
-        "ai.embeddings.dimensions",
-        "ai.anthropic.enabled",
-        "ai.anthropic.api_key",
-        "ai.openai.enabled",
-        "ai.openai.api_key",
-        "ai.ollama.enabled",
-        "ai.ollama.base_url",
-        "ai.claude_code.discovery",
-        "ai.claude_code.cli_enabled",
-        "ai.claude_code.cli_path",
-        "ai.codex.discovery",
-        "ai.codex.cli_enabled",
-        "ai.codex.cli_path",
-        "ai.web_search.api_key",
-        "ai.web_search.timeout_secs",
-    ];
-
     let mut entries = Vec::new();
-    for key in &keys {
-        if let Some(val) = read_from_config(key, &config, &encryptor, &store) {
-            let kind = if key.ends_with(".enabled")
-                || key.ends_with(".discovery")
-                || key.ends_with(".cli_enabled")
-            {
-                "bool"
-            } else if key.ends_with(".dimensions") || key.ends_with(".timeout_secs") {
-                "int"
-            } else {
-                "string"
-            };
-            entries.push((key.to_string(), val, kind.to_string()));
+    for def in openalpaca_storage::config_schema::CONFIG_KEYS
+        .iter()
+        .filter(|def| def.backend == openalpaca_storage::config_schema::ConfigBackend::LlmToml)
+    {
+        if let Some(value) = read_from_config(def.key, &config, &encryptor, &store) {
+            entries.push((
+                def.key.to_string(),
+                value,
+                def.kind.as_db_kind().to_string(),
+            ));
         }
     }
     Ok(entries)

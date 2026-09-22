@@ -11,6 +11,7 @@ use colored::Colorize;
 use serde::{Deserialize, Serialize};
 
 use crate::client::DaemonClient;
+use crate::output::truncate;
 use crate::output::{OutputFormat, TableRow, print_list, status_color};
 
 #[derive(Args)]
@@ -241,14 +242,6 @@ impl TableRow for TaskItem {
             agents,
             created,
         )
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}...", &s[..max.saturating_sub(3)])
-    } else {
-        s.to_string()
     }
 }
 
@@ -640,7 +633,9 @@ mod tests {
     fn task_list_rows_count_the_agents_a_run_spawned() {
         plain();
         assert!(
-            TaskItem::headers().iter().any(|(name, _)| *name == "AGENTS"),
+            TaskItem::headers()
+                .iter()
+                .any(|(name, _)| *name == "AGENTS"),
             "the list table names the column"
         );
 
@@ -832,7 +827,10 @@ mod tests {
             "to_seq": 12,
         });
         let line = action_line("task-1234-5678", &body);
-        assert!(line.starts_with("\u{2713} Task task-123 -> running"), "{line}");
+        assert!(
+            line.starts_with("\u{2713} Task task-123 -> running"),
+            "{line}"
+        );
         assert!(line.contains("replayed 3 rounds from session s1"), "{line}");
 
         let one =

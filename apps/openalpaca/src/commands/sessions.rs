@@ -28,7 +28,7 @@ use colored::Colorize;
 use serde::{Deserialize, Serialize};
 
 use crate::client::DaemonClient;
-use crate::output::{OutputFormat, TableRow, print_list, status_color};
+use crate::output::{OutputFormat, TableRow, print_list, status_color, truncate};
 
 #[derive(Args)]
 pub struct SessionsArgs {
@@ -142,11 +142,8 @@ impl TableRow for SessionItem {
             "{:<36} {:<9} {:<28} {:<20} {:<16}",
             self.id,
             status_color(&self.status),
-            title.chars().take(28).collect::<String>(),
-            display_workspace(self.workspace_id.as_deref())
-                .chars()
-                .take(20)
-                .collect::<String>(),
+            truncate(title, 28),
+            truncate(&display_workspace(self.workspace_id.as_deref()), 20),
             display_stamp(&self.updated_at),
         )
     }

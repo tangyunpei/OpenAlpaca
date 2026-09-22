@@ -42,10 +42,8 @@ pub enum ConfigAction {
 }
 
 pub async fn run(args: ConfigArgs) -> Result<()> {
-    // Runs the root move first: opening the database would otherwise *create* an
-    // empty one at the new path and strand the legacy install's data. Idempotent
-    // — a no-op once the daemon has booted at least once.
-    let db = store::migrate::open_store_database()?;
+    // Open the current store and ensure its private state directory exists.
+    let db = store::open_database()?;
     let repo = ConfigRepository::new(&db);
 
     match args.action {

@@ -49,14 +49,13 @@ impl EnvSandbox {
         }
         let sandbox = Self { _lock: lock, saved };
 
-        // Fail before writing anything if the sandbox is not airtight: a test
-        // must never be able to reach the real legacy application data dir.
-        let legacy = openalpaca_storage::store::migrate::legacy_app_dir()
-            .expect("the legacy app dir must resolve");
+        // Fail before writing if current store accessors escape this sandbox.
+        let home_store = openalpaca_storage::store::home_root().expect("home store");
+        let config_dir = openalpaca_storage::store::runtime_config_dir().expect("config dir");
+        assert!(home_store.starts_with(root), "home store escaped sandbox");
         assert!(
-            legacy.starts_with(root),
-            "HOME override did not sandbox the legacy root ({}); refusing to run",
-            legacy.display()
+            config_dir.starts_with(root),
+            "config directory escaped sandbox"
         );
         sandbox
     }
@@ -138,4 +137,46 @@ fn the_daemons_master_key_decrypts_what_the_cli_wrote() {
 
     assert!(KeyEncryptor::is_encrypted(&encrypted));
     assert_eq!(daemon.decrypt(&encrypted).unwrap(), "sk-secret-value");
+}
+
+#[test]
+fn the_schema_llm_keys_all_round_trip_through_the_list_adapter() {
+    use openalpaca_storage::config_schema::{CONFIG_KEYS, ConfigBackend};
+    let tmp = tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    let entries: Vec<_> = CONFIG_KEYS
+        .iter()
+        .filter(|def| def.backend == ConfigBackend::LlmToml)
+        .map(|def| {
+            (
+                def.key,
+                def.default.unwrap_or_else(|| {
+                    if def.key.ends_with(".api_key") {
+                        "sk-test-secret-value"
+                    } else if def.key.ends_with(".cli_path") {
+                        "/tmp/test-cli"
+                    } else {
+                        "model-a, model-b"
+                    }
+                }),
+            )
+        })
+        .collect();
+    crate::commands::ai_config::set_ai_values_batch(&entries).unwrap();
+    let listed = crate::commands::ai_config::list_ai_entries().unwrap();
+    assert_eq!(
+        listed.len(),
+        entries.len(),
+        "a registered LLM key is not readable"
+    );
+    for (key, value, kind) in listed {
+        assert_eq!(get_ai_value(&key).unwrap().as_deref(), Some(value.as_str()));
+        assert_eq!(
+            kind,
+            openalpaca_storage::config_schema::lookup(&key)
+                .unwrap()
+                .kind
+                .as_db_kind()
+        );
+    }
 }

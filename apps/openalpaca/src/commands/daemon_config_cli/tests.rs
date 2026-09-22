@@ -61,14 +61,76 @@ max_rounds = 5
 "#;
     let root: toml::Value = toml::from_str(toml_str).unwrap();
     let section = navigate_to_section(&root, &["execution", "agent_defaults"]).unwrap();
-    assert_eq!(
-        section.get("max_rounds").unwrap(),
-        &toml::Value::Integer(5)
-    );
+    assert_eq!(section.get("max_rounds").unwrap(), &toml::Value::Integer(5));
 }
 
 #[test]
 fn test_navigate_to_section_missing() {
     let root: toml::Value = toml::from_str("").unwrap();
     assert!(navigate_to_section(&root, &["execution", "agent_defaults"]).is_none());
+}
+
+#[test]
+fn batch_updates_multiple_sections_and_preserves_unrelated_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("daemon.toml");
+    std::fs::write(&path, "[custom]\nkeep = 'owner value'\n").unwrap();
+    set_daemon_values_at(
+        &path,
+        &[
+            ("daemon.execution.max_rounds", "7"),
+            ("daemon.orchestrator.prompt_recent_messages", "12"),
+        ],
+    )
+    .unwrap();
+    let value: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        value["execution"]["agent_defaults"]["max_rounds"].as_integer(),
+        Some(7)
+    );
+    assert_eq!(
+        value["orchestrator"]["memory"]["prompt_recent_messages"].as_integer(),
+        Some(12)
+    );
+    assert_eq!(value["custom"]["keep"].as_str(), Some("owner value"));
+}
+
+#[test]
+fn invalid_later_entry_never_partially_writes_a_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("daemon.toml");
+    let original = "# keep these bytes\n[execution.agent_defaults]\nmax_rounds = 3\n";
+    for invalid in [
+        ("unknown.key", "2"),
+        ("daemon.execution.max_rounds", "invalid"),
+    ] {
+        std::fs::write(&path, original).unwrap();
+        assert!(
+            set_daemon_values_at(&path, &[("daemon.execution.max_rounds", "7"), invalid]).is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+}
+
+#[test]
+fn malformed_file_and_section_errors_never_partially_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("daemon.toml");
+    for original in ["not valid = [", "[execution]\nagent_defaults = 42\n"] {
+        std::fs::write(&path, original).unwrap();
+        assert!(
+            set_daemon_values_at(
+                &path,
+                &[
+                    ("daemon.orchestrator.prompt_recent_messages", "12"),
+                    ("daemon.execution.max_rounds", "7"),
+                ]
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+    let missing = dir.path().join("absent").join("daemon.toml");
+    set_daemon_values_at(&missing, &[]).unwrap();
+    assert!(!missing.exists());
 }
