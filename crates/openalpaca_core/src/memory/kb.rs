@@ -107,16 +107,17 @@ fn collect_markdown_files(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    use tempfile::{TempDir, tempdir};
 
-    fn test_db() -> Database {
+    fn test_db() -> (TempDir, Database) {
         let dir = tempdir().unwrap();
-        Database::open(&dir.path().join("test.db")).unwrap()
+        let db = Database::open(&dir.path().join("test.db")).unwrap();
+        (dir, db)
     }
 
     #[test]
     fn test_ingest_directory() {
-        let db = test_db();
+        let (_db_dir, db) = test_db();
         let docs_dir = tempdir().unwrap();
 
         // Create test markdown files
@@ -139,7 +140,7 @@ mod tests {
 
     #[test]
     fn test_ingest_dedup() {
-        let db = test_db();
+        let (_db_dir, db) = test_db();
         let docs_dir = tempdir().unwrap();
 
         std::fs::write(

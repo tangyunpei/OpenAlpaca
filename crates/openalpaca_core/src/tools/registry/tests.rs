@@ -1001,6 +1001,9 @@ fn test_tool_name_validation() {
     assert!(registry.register(make_tool_with_name("bad\0name")).is_err());
     // Too long (300 chars exceeds 256 limit)
     assert!(registry.register(make_tool_with_name(&"x".repeat(300))).is_err());
+    // Rejection must remain an error even when its preview crosses a UTF-8 boundary.
+    let error = registry.register(make_tool_with_name(&"中".repeat(100))).unwrap_err();
+    assert!(error.contains("exceeds 256 char limit"));
     // Valid name
     assert!(registry.register(make_tool_with_name("good_tool")).is_ok());
 }

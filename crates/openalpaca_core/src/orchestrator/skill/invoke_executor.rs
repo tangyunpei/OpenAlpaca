@@ -1,14 +1,19 @@
 use crate::bus::EventBus;
 use crate::orchestrator::skill::catalog::SkillCatalog;
-use crate::orchestrator::skill::constraints::{compose_constraints, filter_tools_by_constraints, MAX_SKILL_STACK_DEPTH};
+use crate::orchestrator::skill::constraints::{
+    MAX_SKILL_STACK_DEPTH, compose_constraints, filter_tools_by_constraints,
+};
 use crate::runner::{LoopConfig, LoopCostAccumulator, LoopResult, run_agentic_loop_routed};
 use crate::security::capabilities::Allowlist;
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
-use crate::tools::builtins::ScriptToolBuiltIn;
-use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext, ToolRegistry};
+use crate::tools::registry::{BuiltInTool, ToolContext, ToolRegistry};
+#[cfg(test)]
+use crate::tools::registry::{RegisteredTool, ToolBackend};
 use async_trait::async_trait;
+use openalpaca_llm::ChatMessage;
 use openalpaca_llm::LlmRouter;
-use openalpaca_llm::{ChatMessage, ToolDefinition};
+#[cfg(test)]
+use openalpaca_llm::ToolDefinition;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -152,46 +157,16 @@ impl SkillInvocationToolExecutor {
         // disappeared here in total silence, with `sandbox_policy = None`
         // beneath it. The refusal on total loss is C5's.
         let ctx = self.parent_tool_context.as_ref();
-        let mut tool_defs: Vec<ToolDefinition> =
-            if !skill_doc.frontmatter.requires_capabilities.is_empty() {
-                let deny = &skill_doc.frontmatter.tools.deny;
-                let resolution = self
-                    .tool_registry
-                    .resolve_capabilities(&skill_doc.frontmatter.requires_capabilities, &[]);
-                self.tool_registry.announce_withheld(&resolution, ctx, None);
-                let mut defs = resolution.defs;
-                defs.retain(|t| !deny.contains(&t.name));
-                defs
-            } else if !skill_doc.frontmatter.tools.allow.is_empty() {
-                let names = &skill_doc.frontmatter.tools.allow;
-                let resolved: Vec<ToolDefinition> = names
-                    .iter()
-                    .filter_map(|name| {
-                        self.tool_registry.get(name).map(|t| t.definition.clone())
-                    })
-                    .collect();
-                if resolved.len() < names.len() {
-                    let resolved_names: Vec<&str> =
-                        resolved.iter().map(|d| d.name.as_str()).collect();
-                    let missing: Vec<&str> = names
-                        .iter()
-                        .filter(|n| !resolved_names.contains(&n.as_str()))
-                        .map(|n| n.as_str())
-                        .collect();
-                    let unattributed =
-                        self.tool_registry.announce_withheld_names(missing, ctx, None);
-                    if !unattributed.is_empty() {
-                        tracing::warn!(
-                            "Skill '{}' references unknown tools: {:?}",
-                            skill_id,
-                            unattributed
-                        );
-                    }
-                }
-                resolved
-            } else {
-                vec![]
-            };
+        let mut tool_defs = super::tool_setup::resolve_skill_tools(
+            &self.tool_registry,
+            &skill_doc.frontmatter,
+            skill_id,
+            ctx,
+            None,
+        );
+        if !skill_doc.frontmatter.requires_capabilities.is_empty() {
+            tool_defs.retain(|tool| !skill_doc.frontmatter.tools.deny.contains(&tool.name));
+        }
 
         // **Fail closed — the total-loss refusal** (design §6.2 #10, §10
         // case 3), the same predicate the top-level site applies, on both
@@ -211,25 +186,13 @@ impl SkillInvocationToolExecutor {
         // Add invoke_skill:* synthetic tool definitions for nested skill's own depends_on
         for dep_id in &skill_doc.frontmatter.depends_on {
             if let Some(dep_entry) = self.catalog.get(dep_id) {
-                tool_defs.push(ToolDefinition {
-                    name: format!("invoke_skill:{}", dep_id),
-                    description: format!(
+                tool_defs.push(super::tool_setup::dependency_definition(
+                    dep_id,
+                    format!(
                         "Invoke the '{}' skill: {}",
                         dep_entry.frontmatter.name, dep_entry.frontmatter.description
                     ),
-                    parameters: serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "query": {
-                                "type": "string",
-                                "description": "The input/query to pass to the skill"
-                            }
-                        },
-                        "required": ["query"]
-                    }),
-                    strict: None,
-                    input_examples: None,
-                });
+                ));
             }
         }
 
@@ -304,21 +267,12 @@ impl SkillInvocationToolExecutor {
             let cloned = (*self.tool_registry).clone();
 
             // Register script tools (file-based skills only)
-            if let Some(ref skill_dir) = entry.skill_dir {
-                for cfg in &skill_doc.frontmatter.scripts {
-                    let tool = ScriptToolBuiltIn::new(skill_dir, cfg)?;
-                    cloned.register(RegisteredTool {
-                        definition: ScriptToolBuiltIn::tool_definition(&cfg.name),
-                        backend: ToolBackend::BuiltIn(Arc::new(tool)),
-                        provides_capabilities: vec![],
-                        exempt_from_timeout: false,
-                        annotations: None,
-                        version: env!("CARGO_PKG_VERSION").to_string(),
-                        author: format!("skill:{}", skill_id),
-                        created_at: chrono::Utc::now(),
-                    })?;
-                }
-            }
+            super::tool_setup::register_scripts(
+                &cloned,
+                entry.skill_dir.as_deref(),
+                &skill_doc.frontmatter.scripts,
+                skill_id,
+            )?;
 
             // Register invoke_skill:* backends for nested dependencies
             if !skill_doc.frontmatter.depends_on.is_empty() {
@@ -339,39 +293,13 @@ impl SkillInvocationToolExecutor {
                     self.circuit_breaker.clone(),
                     self.confirmation_timeout_secs,
                 ));
-                for dep_id in &skill_doc.frontmatter.depends_on {
-                    if self.catalog.get(dep_id).is_some() {
-                        let invoke_name = format!("invoke_skill:{}", dep_id);
-                        cloned.register(RegisteredTool {
-                            definition: ToolDefinition {
-                                name: invoke_name,
-                                description: format!("Invoke the '{}' skill", dep_id),
-                                parameters: serde_json::json!({
-                                    "type": "object",
-                                    "properties": {
-                                        "query": {
-                                            "type": "string",
-                                            "description": "The input/query to pass to the skill"
-                                        }
-                                    },
-                                    "required": ["query"]
-                                }),
-                                strict: None,
-                                input_examples: None,
-                            },
-                            backend: ToolBackend::BuiltIn(Arc::new(SkillInvocationBuiltInAdapter {
-                                executor: child_executor.clone(),
-                                skill_id: dep_id.clone(),
-                            })),
-                            provides_capabilities: vec![],
-                            exempt_from_timeout: true,
-                            annotations: None,
-                            version: env!("CARGO_PKG_VERSION").to_string(),
-                            author: format!("skill:{}", skill_id),
-                            created_at: chrono::Utc::now(),
-                        })?;
-                    }
-                }
+                super::tool_setup::register_dependencies(
+                    &cloned,
+                    &self.catalog,
+                    &skill_doc.frontmatter.depends_on,
+                    child_executor,
+                    skill_id,
+                )?;
             }
 
             Arc::new(cloned)
@@ -409,20 +337,13 @@ impl SkillInvocationToolExecutor {
                 agent_id: format!("skill:{}", skill_id),
                 // Closed set: the nested skill may call exactly the tools
                 // composed for it (this arm only runs when there are some).
-                allowed_capabilities: Allowlist::only(
-                    tool_defs.iter().map(|t| t.name.as_str()),
-                ),
+                allowed_capabilities: Allowlist::only(tool_defs.iter().map(|t| t.name.as_str())),
                 denied_capabilities: child_tool_ctx
                     .effective_constraints
                     .as_ref()
                     .map(|c| c.denied.iter().cloned().collect())
                     .unwrap_or_default(),
-                require_confirmation_for: skill_doc
-                    .frontmatter
-                    .permissions
-                    .confirm
-                    .tools
-                    .clone(),
+                require_confirmation_for: skill_doc.frontmatter.permissions.confirm.tools.clone(),
                 max_tool_calls: skill_doc
                     .frontmatter
                     .tools
@@ -497,8 +418,8 @@ mod tests {
         Usage,
     };
     use std::io::Write;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
     /// Mock provider: round 1 issues a call to `echo_tool`, round 2 stops.

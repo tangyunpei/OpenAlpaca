@@ -11,7 +11,7 @@ use crate::context::SharedContext;
 use crate::daemon_config::DaemonConfig;
 use crate::events::SystemEvent;
 use crate::memory::scope_context::MemoryScopeContext;
-use crate::middleware::prompt::{format_tool_guidance, SystemPersona};
+use crate::middleware::prompt::{SystemPersona, format_tool_guidance};
 use crate::prompt_ctx::ContextManager;
 use crate::prompt_ctx::section::ContextBundle;
 use crate::prompt_ctx::{ExecutionPath, SectionPriority};
@@ -19,16 +19,16 @@ use crate::runner::plugin_agent::{PluginLoopOutcome, PluginRunScope, run_plugin_
 use crate::runner::steering::SteeringInbox;
 use crate::runner::{LoopConfig, run_agentic_loop_routed};
 use crate::security::sandbox::{SandboxManager, SandboxPolicy};
+use crate::tools::ToolRegistry;
 use crate::tools::extensions::ExtensionId;
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
-use crate::tools::ToolRegistry;
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use chrono::Utc;
 use openalpaca_llm::{ChatMessage, LlmRouter, ToolDefinition};
 use openalpaca_storage::Database;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -219,9 +219,15 @@ impl BuiltInTool for SpawnSubagentTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| "Missing required parameter: objective".to_string())?;
 
+        self.spawn_one(agent_id, objective).await
+    }
+}
+
+impl SpawnSubagentTool {
+    async fn spawn_one(&self, agent_id: &str, objective: &str) -> Result<String, String> {
         tracing::info!(
             target_agent = agent_id,
-            objective_preview = &objective[..objective.len().min(80)],
+            objective_preview = crate::utils::prefix_by_bytes(objective, 80),
             task_id = %self.task_id,
             "Lead agent spawning subagent"
         );
@@ -389,8 +395,11 @@ impl BuiltInTool for SpawnSubagentTool {
         }
 
         // 6. Resolve tools for subagent's skills
-        let tools =
-            crate::tools::resolve_agent_tools(&agent, &self.tool_registry, Some(&subagent_tool_ctx));
+        let tools = crate::tools::resolve_agent_tools(
+            &agent,
+            &self.tool_registry,
+            Some(&subagent_tool_ctx),
+        );
 
         // 7. Build LoopConfig from daemon defaults + agent constraints
         let mut loop_config =
@@ -594,7 +603,12 @@ impl BuiltInTool for SpawnSubagentTool {
                 .agent_defaults
                 .confirmation_timeout_secs,
         );
-        if self.daemon_config.load().security.auto_approve_confirmations {
+        if self
+            .daemon_config
+            .load()
+            .security
+            .auto_approve_confirmations
+        {
             sandbox_policy.auto_approve = true;
         }
 
@@ -700,8 +714,7 @@ impl BuiltInTool for SpawnSubagentTool {
                     .first()
                     .map(|m| m.content.clone())
                     .unwrap_or_default();
-                let instructions =
-                    format!("{system_prompt}\n\nObjective: {objective_full}");
+                let instructions = format!("{system_prompt}\n\nObjective: {objective_full}");
                 let plugin_ctx = serde_json::json!({
                     "objective": objective_full,
                     "task_id": task_id,
@@ -712,10 +725,7 @@ impl BuiltInTool for SpawnSubagentTool {
                 // load of one, **before** `spawn` is ever sent; the guard it
                 // returns is held for the whole run, so T3's drain waits for
                 // this loop the way it waits for a tool call.
-                let outcome = match scope
-                    .ledger
-                    .begin_run(&scope.extension, scope.generation)
-                {
+                let outcome = match scope.ledger.begin_run(&scope.extension, scope.generation) {
                     Ok(guard) => {
                         let ledger = Arc::clone(&scope.ledger);
                         let outcome = ledger
@@ -754,10 +764,8 @@ impl BuiltInTool for SpawnSubagentTool {
                 // failed one, keeping this path's vocabulary identical to the
                 // LLM path's below.
                 let cancelled = child_token.as_ref().is_some_and(|t| t.is_cancelled());
-                let span_state = crate::runner::span::plugin_span_state(
-                    outcome.success(),
-                    cancelled,
-                );
+                let span_state =
+                    crate::runner::span::plugin_span_state(outcome.success(), cancelled);
                 let span_detail = match &outcome {
                     PluginLoopOutcome::Completed { .. } => None,
                     _ if cancelled => Some("cancelled".to_string()),
@@ -1000,12 +1008,7 @@ impl BuiltInTool for SpawnSubagentsBatchTool {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| format!("subagents[{}]: missing objective", i))?;
 
-            let single_args = serde_json::json!({
-                "agent_id": agent_id,
-                "objective": objective,
-            });
-
-            match self.inner.execute(&single_args).await {
+            match self.inner.spawn_one(agent_id, objective).await {
                 Ok(msg) => {
                     success_count += 1;
                     results.push(format!("[{}] OK: {}", i + 1, msg));

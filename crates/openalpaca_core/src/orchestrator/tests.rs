@@ -1066,7 +1066,7 @@ async fn test_empty_content_with_attachments_forces_simple_query() {
 /// the registry has never heard of. One Ollama model is registered and
 /// routable, with the media support the case under test needs.
 fn local_only_router(
-    provider: Arc<crate::test_util::RecordingProvider>,
+    provider: Arc<dyn openalpaca_llm::LlmProvider>,
     model_id: &str,
     supports_image: bool,
     supports_document: bool,
@@ -1221,19 +1221,27 @@ async fn an_image_is_withheld_from_a_local_model_that_cannot_see_and_is_reported
     std::fs::write(&img_path, [0xFFu8, 0xD8, 0xFF]).unwrap();
 
     let request_id = Uuid::new_v4();
-    orch.handle_message_with_attachments(
-        attachment_request(request_id, "what colour is it?"),
-        vec![ResolvedAttachment {
-            file_id: "img-1".to_string(),
-            filename: "image.jpg".to_string(),
-            mime_type: "image/jpeg".to_string(),
-            size_bytes: 3,
-            extracted_text: None,
-            storage_path: img_path.to_string_lossy().to_string(),
-        }],
-    )
-    .await
-    .expect("the turn answers");
+    let turn = orch
+        .handle_message_with_attachments_result(
+            attachment_request(request_id, "what colour is it?"),
+            vec![ResolvedAttachment {
+                file_id: "img-1".to_string(),
+                filename: "image.jpg".to_string(),
+                mime_type: "image/jpeg".to_string(),
+                size_bytes: 3,
+                extracted_text: None,
+                storage_path: img_path.to_string_lossy().to_string(),
+            }],
+        )
+        .await
+        .expect("the turn answers");
+
+    assert!(turn.attachments_used.iter().all(|id| {
+        !turn
+            .attachments_skipped
+            .iter()
+            .any(|skipped| &skipped.id == id)
+    }));
 
     let parts = parts_the_model_saw(&provider);
     assert!(
@@ -1245,17 +1253,10 @@ async fn an_image_is_withheld_from_a_local_model_that_cannot_see_and_is_reported
     );
 
     // U3(c): the turn's result carries the withheld id and a reason.
-    let recorded = orch
-        .attachments_skipped_map
-        .remove(&request_id)
-        .map(|(_, v)| v)
-        .expect("a withheld attachment is recorded for the turn's result");
+    let recorded = turn.attachments_skipped;
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0].id, "img-1");
-    assert_eq!(
-        recorded[0].reason,
-        super::attachment_adapt::REASON_NO_IMAGE
-    );
+    assert_eq!(recorded[0].reason, super::attachment_adapt::REASON_NO_IMAGE);
 }
 
 /// **U2 — every model reads text.** A text file's extracted content reaches a
@@ -1268,20 +1269,29 @@ async fn a_documents_text_reaches_a_model_without_native_document_support() {
     let orch = make_orchestrator_with_llm_and_agents(router, vec![]);
 
     let request_id = Uuid::new_v4();
-    orch.handle_message_with_attachments(
-        attachment_request(request_id, "what is the codeword?"),
-        vec![ResolvedAttachment {
-            file_id: "doc-1".to_string(),
-            filename: "secret.txt".to_string(),
-            mime_type: "text/plain".to_string(),
-            size_bytes: 40,
-            extracted_text: Some("the codeword is PLATYPUS".to_string()),
-            storage_path: "/dev/null".to_string(),
-        }],
-    )
-    .await
-    .expect("the turn answers");
+    let turn = orch
+        .handle_message_with_attachments_result(
+            attachment_request(request_id, "what is the codeword?"),
+            vec![ResolvedAttachment {
+                file_id: "doc-1".to_string(),
+                filename: "secret.txt".to_string(),
+                mime_type: "text/plain".to_string(),
+                size_bytes: 40,
+                extracted_text: Some("the codeword is PLATYPUS".to_string()),
+                storage_path: "/dev/null".to_string(),
+            }],
+        )
+        .await
+        .expect("the turn answers");
 
+    assert!(turn.attachments_used.iter().all(|id| {
+        !turn
+            .attachments_skipped
+            .iter()
+            .any(|skipped| &skipped.id == id)
+    }));
+
+    assert_eq!(turn.attachments_used, ["doc-1"]);
     let parts = parts_the_model_saw(&provider);
     let carried = parts
         .iter()
@@ -1300,7 +1310,7 @@ async fn a_documents_text_reaches_a_model_without_native_document_support() {
         "the text is not labelled with the file it came from: {carried}"
     );
     assert!(
-        orch.attachments_skipped_map.get(&request_id).is_none(),
+        turn.attachments_skipped.is_empty(),
         "an attachment that reached the model as text is not skipped"
     );
 }
@@ -1314,19 +1324,27 @@ async fn a_document_with_no_extracted_text_keeps_the_placeholder() {
     let orch = make_orchestrator_with_llm_and_agents(router, vec![]);
 
     let request_id = Uuid::new_v4();
-    orch.handle_message_with_attachments(
-        attachment_request(request_id, "what does it say?"),
-        vec![ResolvedAttachment {
-            file_id: "doc-2".to_string(),
-            filename: "scan.pdf".to_string(),
-            mime_type: "application/pdf".to_string(),
-            size_bytes: 1024,
-            extracted_text: None,
-            storage_path: "/dev/null".to_string(),
-        }],
-    )
-    .await
-    .expect("the turn answers");
+    let turn = orch
+        .handle_message_with_attachments_result(
+            attachment_request(request_id, "what does it say?"),
+            vec![ResolvedAttachment {
+                file_id: "doc-2".to_string(),
+                filename: "scan.pdf".to_string(),
+                mime_type: "application/pdf".to_string(),
+                size_bytes: 1024,
+                extracted_text: None,
+                storage_path: "/dev/null".to_string(),
+            }],
+        )
+        .await
+        .expect("the turn answers");
+
+    assert!(turn.attachments_used.iter().all(|id| {
+        !turn
+            .attachments_skipped
+            .iter()
+            .any(|skipped| &skipped.id == id)
+    }));
 
     let parts = parts_the_model_saw(&provider);
     assert!(
@@ -1336,11 +1354,7 @@ async fn a_document_with_no_extracted_text_keeps_the_placeholder() {
         )),
         "expected the placeholder, got {parts:?}"
     );
-    let recorded = orch
-        .attachments_skipped_map
-        .remove(&request_id)
-        .map(|(_, v)| v)
-        .expect("a withheld attachment is recorded");
+    let recorded = turn.attachments_skipped;
     assert_eq!(recorded[0].id, "doc-2");
     assert_eq!(
         recorded[0].reason,
@@ -2775,7 +2789,17 @@ fn make_tool_mode_orchestrator_with_db(
 }
 
 async fn send_tool_mode(orch: &Orchestrator, request_id: Uuid, content: &str) -> String {
-    orch.handle_message(HandleRequest {
+    send_tool_mode_result(orch, request_id, content)
+        .await
+        .content
+}
+
+async fn send_tool_mode_result(
+    orch: &Orchestrator,
+    request_id: Uuid,
+    content: &str,
+) -> crate::gateway::HandleResult {
+    orch.handle_message_result(HandleRequest {
         request_id,
         source: "cli".to_string(),
         content: content.to_string(),
@@ -2868,12 +2892,13 @@ async fn test_tool_mode_task_message_starts_workflow() {
     let mut rx = orch.bus.subscribe();
     let request_id = Uuid::new_v4();
 
-    let reply = send_tool_mode(
+    let turn = send_tool_mode_result(
         &orch,
         request_id,
         "Please research the Rust borrow checker end to end",
     )
     .await;
+    let reply = turn.content.as_str();
 
     // The model's own text IS the reply — no canonical-ack swap.
     assert_eq!(
@@ -2882,14 +2907,13 @@ async fn test_tool_mode_task_message_starts_workflow() {
     );
 
     // Structured delegation populated from the result cell.
-    let delegation = orch
-        .delegation_map
-        .get(&request_id)
+    let delegation = turn
+        .delegation
+        .as_ref()
         .expect("delegation must be recorded for the started workflow");
     assert_eq!(delegation.title, "Borrow checker research");
     assert!(!delegation.task_id.is_empty());
     let task_id = delegation.task_id.clone();
-    drop(delegation);
 
     // The task registered and both TaskCreated + WorkflowStarted fired.
     assert_eq!(orch.shared_context.task_registry.count(), 1);
@@ -2959,7 +2983,9 @@ async fn test_tool_mode_at_cap_start_returns_directive_error_and_model_relays() 
     let mut rx = orch.bus.subscribe();
     let request_id = Uuid::new_v4();
 
-    let reply = send_tool_mode(&orch, request_id, "Please run another big research task").await;
+    let turn =
+        send_tool_mode_result(&orch, request_id, "Please run another big research task").await;
+    let reply = turn.content.as_str();
 
     // The model relays the alternatives in its own words.
     assert_eq!(
@@ -2968,7 +2994,7 @@ async fn test_tool_mode_at_cap_start_returns_directive_error_and_model_relays() 
     );
 
     // Nothing dispatched: no delegation, no WorkflowStarted, no new task.
-    assert!(orch.delegation_map.get(&request_id).is_none());
+    assert!(turn.delegation.as_ref().is_none());
     assert_eq!(orch.shared_context.task_registry.count(), 1);
     while let Ok(event) = rx.try_recv() {
         assert!(
@@ -3751,8 +3777,8 @@ async fn an_explicit_slash_for_a_withheld_skill_returns_the_named_error_as_ok() 
 async fn a_skill_loop_honours_the_configured_inline_threshold() {
     use crate::tools::registry::BuiltInTool;
     use openalpaca_llm::{
-        ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider,
-        ToolCall as LlmToolCall, Usage,
+        ChatRequest, ChatResponse, FinishReason, LlmError, LlmProvider, ToolCall as LlmToolCall,
+        Usage,
     };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3896,6 +3922,7 @@ Dump.
     let ctx = orch.build_context("test:cli", "dump it");
     let scope = crate::memory::scope_context::MemoryScopeContext::new(None);
     orch.handle_skill_invocation(
+        &mut crate::gateway::HandleResult::text(String::new()),
         Uuid::new_v4(),
         "cli",
         "Dumper",
@@ -3949,6 +3976,7 @@ async fn the_top_level_invocation_site_refuses_on_the_same_predicate() {
     ] {
         let err = orch
             .handle_skill_invocation(
+                &mut crate::gateway::HandleResult::text(String::new()),
                 Uuid::new_v4(),
                 "cli",
                 skill,
@@ -5415,8 +5443,8 @@ async fn a_streamed_tool_call_runs_with_its_arguments() {
     let sink = crate::chat::TurnSinkHandle::new(recorder.clone());
     let request_id = Uuid::new_v4();
 
-    let reply = orch
-        .handle_message(HandleRequest {
+    let turn = orch
+        .handle_message_result(HandleRequest {
             turn_sink: Some(sink),
             ..HandleRequest::new(
                 request_id,
@@ -5432,11 +5460,13 @@ async fn a_streamed_tool_call_runs_with_its_arguments() {
         .await
         .expect("the turn should be answered");
 
+    let reply = turn.content.as_str();
+
     assert_eq!(reply, "Started it in the background.");
 
-    let delegation = orch
-        .delegation_map
-        .get(&request_id)
+    let delegation = turn
+        .delegation
+        .as_ref()
         .expect("the streamed tool call must have started a workflow");
     assert_eq!(
         delegation.title, "Alpaca notes",
@@ -5808,6 +5838,7 @@ Look.
     let scope = crate::memory::scope_context::MemoryScopeContext::new(None);
 
     orch.handle_skill_invocation(
+        &mut crate::gateway::HandleResult::text(String::new()),
         Uuid::new_v4(),
         "cli",
         "Looker",
@@ -5840,9 +5871,7 @@ Look.
         "the skill tier sent a raw image to a model with no vision: {parts:?}"
     );
     assert!(
-        !parts
-            .iter()
-            .any(|p| matches!(p, ContentPart::Image { .. })),
+        !parts.iter().any(|p| matches!(p, ContentPart::Image { .. })),
         "no image part may survive for a model that cannot see: {parts:?}"
     );
     // U2 applies on this tier too: the document's text is carried, labelled.
@@ -5867,7 +5896,7 @@ Look.
 /// An orchestrator with one `/echo` skill and a local-only router, the shape a
 /// `/slash` turn with a file meets on an Ollama-only install.
 fn local_skill_orchestrator(
-    provider: Arc<crate::test_util::RecordingProvider>,
+    provider: Arc<dyn openalpaca_llm::LlmProvider>,
     model_id: &str,
     supports_image: bool,
     supports_document: bool,
@@ -5920,25 +5949,33 @@ async fn a_slash_turns_own_document_reaches_the_skills_model() {
     let mut rx = orch.bus.subscribe();
 
     let request_id = Uuid::new_v4();
-    orch.handle_message_with_attachments(
-        attachment_request(request_id, "/echo what is the codeword?"),
-        vec![ResolvedAttachment {
-            file_id: "doc-1".to_string(),
-            filename: "secret.txt".to_string(),
-            mime_type: "text/plain".to_string(),
-            size_bytes: 40,
-            extracted_text: Some("the codeword is PLATYPUS".to_string()),
-            storage_path: "/dev/null".to_string(),
-        }],
-    )
-    .await
-    .expect("the turn answers");
+    let turn = orch
+        .handle_message_with_attachments_result(
+            attachment_request(request_id, "/echo what is the codeword?"),
+            vec![ResolvedAttachment {
+                file_id: "doc-1".to_string(),
+                filename: "secret.txt".to_string(),
+                mime_type: "text/plain".to_string(),
+                size_bytes: 40,
+                extracted_text: Some("the codeword is PLATYPUS".to_string()),
+                storage_path: "/dev/null".to_string(),
+            }],
+        )
+        .await
+        .expect("the turn answers");
 
     assert_eq!(
         drain_stage_mode(&mut rx).as_deref(),
         Some("skill_command"),
         "this turn must be answered by the skill tier, or the test proves nothing"
     );
+
+    assert!(turn.attachments_used.iter().all(|id| {
+        !turn
+            .attachments_skipped
+            .iter()
+            .any(|skipped| &skipped.id == id)
+    }));
 
     let parts = parts_the_model_saw(&provider);
     let carried = parts
@@ -5965,7 +6002,7 @@ async fn a_slash_turns_own_document_reaches_the_skills_model() {
         "the skill's model must see the parsed query, not the slash line: {carried}"
     );
     assert!(
-        orch.attachments_skipped_map.get(&request_id).is_none(),
+        turn.attachments_skipped.is_empty(),
         "an attachment that reached the model is not skipped"
     );
 }
@@ -6078,8 +6115,8 @@ async fn a_plugin_skills_turn_reports_the_attachment_skipped() {
     );
 
     let request_id = Uuid::new_v4();
-    let answer = orch
-        .handle_message_with_attachments(
+    let turn = orch
+        .handle_message_with_attachments_result(
             attachment_request(request_id, "/jot remember this"),
             vec![ResolvedAttachment {
                 file_id: "doc-7".to_string(),
@@ -6093,6 +6130,8 @@ async fn a_plugin_skills_turn_reports_the_attachment_skipped() {
         .await
         .expect("the plugin skill answers");
 
+    let answer = turn.content.as_str();
+
     assert!(
         answer.contains("plugin saw:"),
         "the plugin skill did not run: {answer}"
@@ -6101,11 +6140,7 @@ async fn a_plugin_skills_turn_reports_the_attachment_skipped() {
         !answer.contains("PLATYPUS"),
         "the file's text must not be inlined into the plugin's query: {answer}"
     );
-    let recorded = orch
-        .attachments_skipped_map
-        .remove(&request_id)
-        .map(|(_, v)| v)
-        .expect("a plugin-skill turn records its attachments skipped");
+    let recorded = turn.attachments_skipped;
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0].id, "doc-7");
     assert!(
@@ -6125,29 +6160,26 @@ async fn a_deterministic_tier_reports_the_turns_attachments_skipped() {
     let orch = make_orchestrator_with_llm_and_agents(router, vec![]);
 
     let request_id = Uuid::new_v4();
-    orch.handle_message_with_attachments(
-        attachment_request(request_id, "/tasks"),
-        vec![ResolvedAttachment {
-            file_id: "doc-3".to_string(),
-            filename: "notes.txt".to_string(),
-            mime_type: "text/plain".to_string(),
-            size_bytes: 20,
-            extracted_text: Some("the codeword is PLATYPUS".to_string()),
-            storage_path: "/dev/null".to_string(),
-        }],
-    )
-    .await
-    .expect("the task command answers");
+    let turn = orch
+        .handle_message_with_attachments_result(
+            attachment_request(request_id, "/tasks"),
+            vec![ResolvedAttachment {
+                file_id: "doc-3".to_string(),
+                filename: "notes.txt".to_string(),
+                mime_type: "text/plain".to_string(),
+                size_bytes: 20,
+                extracted_text: Some("the codeword is PLATYPUS".to_string()),
+                storage_path: "/dev/null".to_string(),
+            }],
+        )
+        .await
+        .expect("the task command answers");
 
     assert!(
         provider.first_request_opt().is_none(),
         "a task command reaches no model at all"
     );
-    let recorded = orch
-        .attachments_skipped_map
-        .remove(&request_id)
-        .map(|(_, v)| v)
-        .expect("a task-ops turn records its attachments skipped");
+    let recorded = turn.attachments_skipped;
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0].id, "doc-3");
     assert!(
@@ -6208,8 +6240,8 @@ async fn a_direct_send_reports_the_turns_attachments_skipped() {
     orch.set_connector_send_provider(Arc::new(RecordingSender));
 
     let request_id = Uuid::new_v4();
-    let answer = orch
-        .handle_message_with_attachments(
+    let turn = orch
+        .handle_message_with_attachments_result(
             HandleRequest {
                 principal: Principal::User {
                     global_id: "alice".to_string(),
@@ -6228,6 +6260,8 @@ async fn a_direct_send_reports_the_turns_attachments_skipped() {
         .await
         .expect("the direct send answers");
 
+    let answer = turn.content.as_str();
+
     assert!(
         answer.contains("sent to telegram"),
         "the direct-send branch did not run, so this test proves nothing: {answer}"
@@ -6236,11 +6270,7 @@ async fn a_direct_send_reports_the_turns_attachments_skipped() {
         provider.first_request_opt().is_none(),
         "a direct send reaches no model at all"
     );
-    let recorded = orch
-        .attachments_skipped_map
-        .remove(&request_id)
-        .map(|(_, v)| v)
-        .expect("a direct-send turn records its attachments skipped");
+    let recorded = turn.attachments_skipped;
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0].id, "doc-5");
     assert_eq!(
@@ -6264,19 +6294,27 @@ async fn a_turns_audio_attachment_is_judged_as_audio() {
     let orch = make_orchestrator_with_llm_and_agents(router, vec![]);
 
     let request_id = Uuid::new_v4();
-    orch.handle_message_with_attachments(
-        attachment_request(request_id, "what is said?"),
-        vec![ResolvedAttachment {
-            file_id: "aud-1".to_string(),
-            filename: "memo.m4a".to_string(),
-            mime_type: "audio/mp4".to_string(),
-            size_bytes: 4096,
-            extracted_text: None,
-            storage_path: "/dev/null".to_string(),
-        }],
-    )
-    .await
-    .expect("the turn answers");
+    let turn = orch
+        .handle_message_with_attachments_result(
+            attachment_request(request_id, "what is said?"),
+            vec![ResolvedAttachment {
+                file_id: "aud-1".to_string(),
+                filename: "memo.m4a".to_string(),
+                mime_type: "audio/mp4".to_string(),
+                size_bytes: 4096,
+                extracted_text: None,
+                storage_path: "/dev/null".to_string(),
+            }],
+        )
+        .await
+        .expect("the turn answers");
+
+    assert!(turn.attachments_used.iter().all(|id| {
+        !turn
+            .attachments_skipped
+            .iter()
+            .any(|skipped| &skipped.id == id)
+    }));
 
     let parts = parts_the_model_saw(&provider);
     assert!(
@@ -6292,11 +6330,7 @@ async fn a_turns_audio_attachment_is_judged_as_audio() {
             .any(|p| matches!(p, ContentPart::Document { .. })),
         "the clip must not travel as a document part: {parts:?}"
     );
-    let recorded = orch
-        .attachments_skipped_map
-        .remove(&request_id)
-        .map(|(_, v)| v)
-        .expect("the withheld clip is recorded for the turn's result");
+    let recorded = turn.attachments_skipped;
     assert_eq!(recorded[0].id, "aud-1");
     assert_eq!(recorded[0].reason, super::attachment_adapt::REASON_NO_AUDIO);
 }
@@ -6556,12 +6590,13 @@ async fn a_fabricated_delegation_gets_one_corrective_round_and_then_the_tool() {
     );
 
     let request_id = Uuid::new_v4();
-    let reply = send_tool_mode(
+    let turn = send_tool_mode_result(
         &orch,
         request_id,
         "Start a workflow that writes a two-sentence markdown artifact about guanacos",
     )
     .await;
+    let reply = turn.content.as_str();
 
     assert_eq!(reply, "Started it — the run is under way now.");
 
@@ -6588,9 +6623,9 @@ async fn a_fabricated_delegation_gets_one_corrective_round_and_then_the_tool() {
     );
 
     // And the run the model finally started is real.
-    let delegation = orch
-        .delegation_map
-        .get(&request_id)
+    let delegation = turn
+        .delegation
+        .as_ref()
         .expect("the corrective round produced a real delegation");
     assert_eq!(delegation.title, "Guanaco fiber notes");
 }
@@ -6610,16 +6645,17 @@ async fn a_twice_fabricated_delegation_keeps_the_answer_and_adds_the_note() {
     );
 
     let request_id = Uuid::new_v4();
-    let reply = send_tool_mode(
+    let turn = send_tool_mode_result(
         &orch,
         request_id,
         "Start a workflow that writes a two-sentence markdown artifact about guanacos",
     )
     .await;
+    let reply = turn.content.as_str();
 
     assert_eq!(reply, format!("{SECOND}\n\n{}", guard_line("9f4c2b71")));
     assert!(
-        orch.delegation_map.get(&request_id).is_none(),
+        turn.delegation.as_ref().is_none(),
         "no delegation was recorded, because none happened"
     );
     assert_eq!(orch.shared_context.task_registry.count(), 0);
@@ -6646,7 +6682,8 @@ async fn a_truthful_delegation_is_shipped_untouched() {
     );
 
     let request_id = Uuid::new_v4();
-    let reply = send_tool_mode(&orch, request_id, "Research guanaco fibre for me").await;
+    let turn = send_tool_mode_result(&orch, request_id, "Research guanaco fibre for me").await;
+    let reply = turn.content.as_str();
 
     assert_eq!(
         reply,
@@ -6657,7 +6694,7 @@ async fn a_truthful_delegation_is_shipped_untouched() {
         2,
         "the tool round and the answer — no corrective round"
     );
-    assert!(orch.delegation_map.get(&request_id).is_some());
+    assert!(turn.delegation.as_ref().is_some());
 }
 
 /// Quoting a run that exists is ordinary conversation, whether the model
@@ -6848,4 +6885,251 @@ async fn an_answer_that_states_no_id_is_never_reviewed_twice() {
         "A guanaco's fibre is finer than a llama's, at about 16 microns."
     );
     assert_eq!(requests.lock().unwrap().len(), 1);
+}
+fn withheld_test_attachment(id: &str) -> ResolvedAttachment {
+    ResolvedAttachment {
+        file_id: id.to_string(),
+        filename: "scan.pdf".to_string(),
+        mime_type: "application/pdf".to_string(),
+        size_bytes: 1,
+        extracted_text: None,
+        storage_path: "/dev/null".to_string(),
+    }
+}
+
+#[tokio::test]
+async fn concurrent_turn_results_keep_metadata_with_their_own_request() {
+    struct BarrierProvider {
+        barrier: tokio::sync::Barrier,
+        recording: Arc<crate::test_util::RecordingProvider>,
+    }
+    #[async_trait]
+    impl openalpaca_llm::LlmProvider for BarrierProvider {
+        fn name(&self) -> &str {
+            "barrier"
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        async fn chat(
+            &self,
+            request: ChatRequest,
+        ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+            self.barrier.wait().await;
+            openalpaca_llm::LlmProvider::chat(self.recording.as_ref(), request).await
+        }
+    }
+    let provider = Arc::new(BarrierProvider {
+        barrier: tokio::sync::Barrier::new(2),
+        recording: crate::test_util::RecordingProvider::new("answer"),
+    });
+    let router = local_only_router(provider, "qwen3:8b", false, false);
+    let orch = make_orchestrator_with_llm_and_agents(router, vec![]);
+    // Even an accidentally reused identifier cannot overwrite another result.
+    let id = Uuid::new_v4();
+    let (first, second) = tokio::join!(
+        orch.handle_message_with_attachments_result(
+            attachment_request(id, "summarize the first file"),
+            vec![withheld_test_attachment("first")]
+        ),
+        orch.handle_message_with_attachments_result(
+            attachment_request(id, "summarize the second file"),
+            vec![withheld_test_attachment("second")]
+        ),
+    );
+    for (turn, expected) in [(first.unwrap(), "first"), (second.unwrap(), "second")] {
+        assert_eq!(turn.attachments_skipped.len(), 1);
+        assert_eq!(turn.attachments_skipped[0].id, expected);
+        assert!(turn.attachments_used.is_empty());
+        assert_eq!(turn.model.as_deref(), Some("qwen3:8b"));
+        assert_eq!(turn.tokens_in, Some(10));
+        assert_eq!(turn.tokens_out, Some(5));
+        assert!(turn.delegation.is_none());
+    }
+    let next = orch
+        .handle_message_result(attachment_request(id, "/tasks"))
+        .await
+        .unwrap();
+    assert!(next.attachments_skipped.is_empty());
+    assert!(next.model.is_none());
+}
+
+#[tokio::test]
+async fn rejected_attachment_turn_does_not_leave_metadata_for_the_next_turn() {
+    let provider = crate::test_util::RecordingProvider::new("unused");
+    let router = local_only_router(provider, "qwen3:8b", false, false);
+    let orch = make_orchestrator_with_llm_and_agents(router, vec![]);
+    let id = Uuid::new_v4();
+    // Adaptation records the withheld file before input validation fails.
+    let too_long = "x".repeat(orch.daemon_config.load().security.max_input_length + 1);
+    assert!(
+        orch.handle_message_with_attachments_result(
+            attachment_request(id, &too_long),
+            vec![withheld_test_attachment("rejected")]
+        )
+        .await
+        .is_err()
+    );
+    let next = orch
+        .handle_message_result(attachment_request(id, "/tasks"))
+        .await
+        .unwrap();
+    assert!(next.attachments_skipped.is_empty());
+    assert!(next.model.is_none());
+    assert!(next.delegation.is_none());
+}
+
+#[tokio::test]
+async fn cancelled_attachment_turn_drops_its_metadata() {
+    struct PendingProvider {
+        entered: tokio::sync::Notify,
+    }
+    #[async_trait]
+    impl openalpaca_llm::LlmProvider for PendingProvider {
+        fn name(&self) -> &str {
+            "pending"
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
+        async fn chat(
+            &self,
+            _: ChatRequest,
+        ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+            self.entered.notify_one();
+            std::future::pending().await
+        }
+    }
+    let provider = Arc::new(PendingProvider {
+        entered: tokio::sync::Notify::new(),
+    });
+    let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
+        provider.clone(),
+        openalpaca_llm::ProviderType::Anthropic,
+        crate::test_util::RECORDED_MODEL.to_string(),
+    ));
+    let orch = make_orchestrator_with_llm_and_agents(router, vec![]);
+    let id = Uuid::new_v4();
+    {
+        let turn = orch.handle_message_with_attachments_result(
+            attachment_request(id, "summarize the file"),
+            vec![ResolvedAttachment {
+                mime_type: "audio/wav".to_string(),
+                ..withheld_test_attachment("cancelled")
+            }],
+        );
+        tokio::pin!(turn);
+        tokio::select! {
+            _ = provider.entered.notified() => {},
+            result = &mut turn => panic!("provider should remain pending: {result:?}"),
+            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => panic!("provider was not reached"),
+        }
+        // Dropping the future cancels after adaptation has written metadata.
+    }
+    let next = orch
+        .handle_message_result(attachment_request(id, "/tasks"))
+        .await
+        .unwrap();
+    assert!(next.attachments_skipped.is_empty());
+    assert!(next.attachments_used.is_empty());
+    assert!(next.model.is_none());
+    assert!(next.delegation.is_none());
+}
+
+#[test]
+fn loop_usage_keeps_workflow_and_interactive_pricing_and_statuses() {
+    use crate::runner::{LoopFinishReason, LoopResult};
+    use openalpaca_storage::repository::LlmUsageRepository;
+    let tmp = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&tmp.path().join("usage.db")).unwrap();
+    let router =
+        crate::test_util::router_recording(crate::test_util::RecordingProvider::new("unused"));
+    let orch = make_orchestrator_with_llm_agents_and_config(
+        router.clone(),
+        vec![],
+        DaemonConfig::default(),
+        Some(db.clone()),
+    );
+    let mut rx = orch.bus.subscribe();
+    let repo = LlmUsageRepository::new(&db);
+    let cases = [
+        (LoopFinishReason::Complete, "success", None),
+        (LoopFinishReason::MaxRounds, "success", None),
+        (LoopFinishReason::Truncated, "success", None),
+        (LoopFinishReason::CostExceeded, "cost_exceeded", None),
+        (LoopFinishReason::Cancelled, "cancelled", None),
+        (
+            LoopFinishReason::Error("provider failed".into()),
+            "error",
+            Some("provider failed"),
+        ),
+    ];
+    for (index, (finish_reason, status, error)) in cases.into_iter().enumerate() {
+        let result = LoopResult {
+            final_content: String::new(),
+            rounds_used: 1,
+            total_input_tokens: 100,
+            total_output_tokens: 50,
+            tool_calls_made: 0,
+            finish_reason,
+            model_used: Some(crate::test_util::RECORDED_MODEL.to_string()),
+            elapsed: std::time::Duration::ZERO,
+            estimated_cost: 42.0,
+            last_tool_error: None,
+        };
+        let task = format!("task-{index}");
+        dispatcher::usage::record_llm_usage(
+            &router,
+            &result,
+            Some("unused-override"),
+            "worker",
+            &task,
+            12,
+            Some(&db),
+            &orch.bus,
+        );
+        let row = repo.get_task_usage(&task, 1).unwrap().pop().unwrap();
+        assert_eq!(row.model, crate::test_util::RECORDED_MODEL);
+        assert_eq!(row.status, status);
+        assert_eq!(row.error_message.as_deref(), error);
+        assert_eq!(row.cost_usd, 42.0);
+        let SystemEvent::LlmCallCompleted {
+            cost_usd, task_id, ..
+        } = rx.try_recv().unwrap()
+        else {
+            panic!("expected usage event");
+        };
+        assert_eq!(cost_usd, row.cost_usd);
+        assert_eq!(task_id.as_deref(), Some(task.as_str()));
+
+        let mut turn = crate::gateway::HandleResult::text(String::new());
+        let cost = orch.record_turn_usage(&router, &result, 12, &mut turn);
+        assert_eq!(
+            cost,
+            router
+                .cost_tracker
+                .calculate_cost(crate::test_util::RECORDED_MODEL, 100, 50)
+        );
+        assert_ne!(cost, result.estimated_cost);
+        assert_eq!(
+            turn.model.as_deref(),
+            Some(crate::test_util::RECORDED_MODEL)
+        );
+        assert_eq!(turn.tokens_in, Some(100));
+        let SystemEvent::LlmCallCompleted {
+            cost_usd, task_id, ..
+        } = rx.try_recv().unwrap()
+        else {
+            panic!("expected usage event");
+        };
+        assert_eq!(cost_usd, cost);
+        assert!(task_id.is_none());
+    }
+    let interactive = repo.get_agent_usage("orchestrator", 10).unwrap();
+    assert_eq!(interactive.len(), 6);
+    assert!(
+        interactive
+            .iter()
+            .all(|row| row.task_id.is_none() && row.cost_usd != 42.0)
+    );
 }

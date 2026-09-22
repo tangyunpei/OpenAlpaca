@@ -8,7 +8,80 @@ use openalpaca_llm::LlmRouter;
 use openalpaca_storage::Database;
 use uuid::Uuid;
 
-/// Record LLM usage metrics (cost, tokens, latency) to the database and emit an event.
+/// One loop's usage, resolved once for persistence, events, and the turn result.
+pub(crate) struct LoopUsage<'a> {
+    pub model: String,
+    provider: String,
+    result: &'a LoopResult,
+    pub cost: f64,
+}
+
+impl<'a> LoopUsage<'a> {
+    pub fn new(router: &LlmRouter, result: &'a LoopResult, model_override: Option<&str>) -> Self {
+        let model = result
+            .model_used
+            .clone()
+            .or_else(|| model_override.map(str::to_owned))
+            .unwrap_or_else(|| router.default_model());
+        let provider = router
+            .model_registry()
+            .resolve_provider(&model)
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        Self {
+            model,
+            provider,
+            result,
+            cost: result.estimated_cost,
+        }
+    }
+
+    pub fn record(
+        &self,
+        agent_id: &str,
+        task_id: Option<&str>,
+        latency_ms: i64,
+        db: Option<&Database>,
+        bus: &EventBus,
+    ) {
+        let (status, error) = match &self.result.finish_reason {
+            LoopFinishReason::Complete
+            | LoopFinishReason::MaxRounds
+            | LoopFinishReason::Truncated => ("success", None),
+            LoopFinishReason::CostExceeded => ("cost_exceeded", None),
+            LoopFinishReason::Cancelled => ("cancelled", None),
+            LoopFinishReason::Error(msg) => ("error", Some(msg.as_str())),
+        };
+        if let Some(db) = db {
+            let repo = openalpaca_storage::repository::LlmUsageRepository::new(db);
+            if let Err(e) = repo.record_and_log(
+                agent_id,
+                task_id,
+                &self.provider,
+                &self.model,
+                self.result.total_input_tokens as i32,
+                self.result.total_output_tokens as i32,
+                self.cost,
+                latency_ms,
+                status,
+                error,
+            ) {
+                tracing::warn!("Failed to persist LLM usage: {e}");
+            }
+        }
+        bus.publish(SystemEvent::LlmCallCompleted {
+            agent_id: agent_id.to_string(),
+            model: self.model.clone(),
+            input_tokens: self.result.total_input_tokens,
+            output_tokens: self.result.total_output_tokens,
+            cost_usd: self.cost,
+            task_id: task_id.map(str::to_owned),
+            timestamp: Utc::now(),
+        });
+    }
+}
+
+/// Workflows keep the loop's accumulated cost, including model changes.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn record_llm_usage(
     router: &LlmRouter,
@@ -20,58 +93,43 @@ pub(crate) fn record_llm_usage(
     db: Option<&Database>,
     bus: &EventBus,
 ) {
-    let default_model = router.default_model();
-    let actual_model = loop_result
-        .model_used
-        .as_deref()
-        .or(model_override)
-        .unwrap_or(&default_model);
-    let resolved_provider = router
-        .model_registry()
-        .resolve_provider(actual_model)
-        .map(|p| p.to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    let call_cost = loop_result.estimated_cost;
+    LoopUsage::new(router, loop_result, model_override).record(
+        agent_id,
+        Some(task_id),
+        latency_ms,
+        db,
+        bus,
+    );
+}
 
-    let call_status = match &loop_result.finish_reason {
-        LoopFinishReason::Complete | LoopFinishReason::MaxRounds | LoopFinishReason::Truncated => "success",
-        LoopFinishReason::CostExceeded => "cost_exceeded",
-        LoopFinishReason::Cancelled => "cancelled",
-        LoopFinishReason::Error(_) => "error",
-    };
-    let call_error = match &loop_result.finish_reason {
-        LoopFinishReason::Error(msg) => Some(msg.as_str()),
-        _ => None,
-    };
-
-    if let Some(db) = db {
-        let usage_repo = openalpaca_storage::repository::LlmUsageRepository::new(db);
-        if let Err(e) = usage_repo.record_and_log(
-            agent_id,
-            Some(task_id),
-            &resolved_provider,
-            actual_model,
-            loop_result.total_input_tokens as i32,
-            loop_result.total_output_tokens as i32,
-            call_cost,
+impl super::super::Orchestrator {
+    pub(in crate::orchestrator) fn record_turn_usage(
+        &self,
+        router: &LlmRouter,
+        result: &LoopResult,
+        latency_ms: i64,
+        turn: &mut crate::gateway::HandleResult,
+    ) -> f64 {
+        let mut usage = LoopUsage::new(router, result, self.loop_config.model.as_deref());
+        // Preserve the interactive paths' existing policy: price the aggregate
+        // tokens using the final model, rather than changing billing in a refactor.
+        usage.cost = router.cost_tracker.calculate_cost(
+            &usage.model,
+            result.total_input_tokens,
+            result.total_output_tokens,
+        );
+        usage.record(
+            crate::orchestrator::MAIN_LOOP_AGENT_ID,
+            None,
             latency_ms,
-            call_status,
-            call_error,
-        ) {
-            tracing::warn!("Failed to persist LLM usage: {e}");
-        }
+            self.db.as_ref(),
+            &self.bus,
+        );
+        turn.model = Some(usage.model);
+        turn.tokens_in = Some(result.total_input_tokens);
+        turn.tokens_out = Some(result.total_output_tokens);
+        usage.cost
     }
-
-    bus.publish(SystemEvent::LlmCallCompleted {
-        agent_id: agent_id.to_string(),
-        model: actual_model.to_string(),
-        input_tokens: loop_result.total_input_tokens,
-        output_tokens: loop_result.total_output_tokens,
-        cost_usd: call_cost,
-        // The one LLM path that runs inside a workflow (GAP-10).
-        task_id: Some(task_id.to_string()),
-        timestamp: Utc::now(),
-    });
 }
 
 /// Record per-agent task history and increment success/failure counters.

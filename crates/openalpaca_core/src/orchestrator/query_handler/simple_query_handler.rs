@@ -18,7 +18,10 @@ use crate::middleware::bootstrap::bootstrap_to_prompt_block;
 use crate::middleware::guard::{OutputGuard, detect_hallucinated_send};
 use crate::middleware::prompt::AgentPersona;
 use crate::orchestrator::{ConversationContext, MAIN_LOOP_AGENT_ID, Orchestrator};
-use crate::prompt_ctx::{SectionPriority, sources::{ContextRequest, ExecutionPath}};
+use crate::prompt_ctx::{
+    SectionPriority,
+    sources::{ContextRequest, ExecutionPath},
+};
 use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
 use crate::security::capabilities::Allowlist;
 use crate::security::sandbox::SandboxManager;
@@ -26,13 +29,13 @@ use crate::security::sandbox::SandboxPolicy;
 use crate::tools::registry::ToolContext;
 use chrono::Utc;
 use openalpaca_llm::{ChatMessage, ContentPart};
-use openalpaca_storage::repository::LlmUsageRepository;
 use uuid::Uuid;
 
 impl Orchestrator {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::orchestrator) async fn handle_simple_query(
         &self,
+        turn: &mut crate::gateway::HandleResult,
         request_id: Uuid,
         source: &str,
         query: &str,
@@ -60,7 +63,7 @@ impl Orchestrator {
             // A1 — this branch answers with no model at all: the send is
             // executed and summarised here. The turn's files went nowhere.
             self.skip_turn_attachments(
-                request_id,
+                turn,
                 attachments,
                 crate::orchestrator::handler_attachments::skipped::DIRECT_SEND,
             );
@@ -69,8 +72,7 @@ impl Orchestrator {
         // The turn's files followed by the message as typed — the shape this
         // tier has always sent (A1 keeps the question out of the carrier so
         // the skill tier can send its own parsed one instead).
-        let own_parts: Option<Vec<ContentPart>> =
-            attachments.map(|a| a.message_parts(&a.question));
+        let own_parts: Option<Vec<ContentPart>> = attachments.map(|a| a.message_parts(&a.question));
         let current_parts: Option<&[ContentPart]> = own_parts.as_deref();
 
         // ── Extract individual prompt parts ─────────────────────────────────
@@ -178,7 +180,10 @@ impl Orchestrator {
         // path keeps today's behaviour.
         let unattended = matches!(
             &loop_overrides,
-            Some(super::LoopOverrides::MainLoop { unattended: true, .. })
+            Some(super::LoopOverrides::MainLoop {
+                unattended: true,
+                ..
+            })
         );
 
         // Apply loop overrides if provided (main loop)
@@ -316,9 +321,7 @@ impl Orchestrator {
                 // lowercases the tool name and compares verbatim, which
                 // matters for mixed-case MCP/plugin names on the default
                 // surface (X-23).
-                allowed_capabilities: Allowlist::only(
-                    tool_defs.iter().map(|t| t.name.as_str()),
-                ),
+                allowed_capabilities: Allowlist::only(tool_defs.iter().map(|t| t.name.as_str())),
                 denied_capabilities: vec![],
                 require_confirmation_for: vec![],
                 max_tool_calls: None,
@@ -332,7 +335,11 @@ impl Orchestrator {
                         .agent_defaults
                         .confirmation_timeout_secs,
                 ),
-                auto_approve: self.daemon_config.load().security.auto_approve_confirmations,
+                auto_approve: self
+                    .daemon_config
+                    .load()
+                    .security
+                    .auto_approve_confirmations,
                 // M6: the turn's own tools, refused at once rather than left
                 // waiting when the client said it cannot answer.
                 unattended,
@@ -343,9 +350,8 @@ impl Orchestrator {
             // whether a stated id belongs to one of theirs (J1 — the same
             // identity `start_workflow` stamps and `task_status` reads, not
             // the lane). Every other loop leaves it `None`.
-            let answer_guard: Option<Arc<dyn crate::runner::AnswerGuard>> = main_loop_set
-                .as_ref()
-                .map(|set| {
+            let answer_guard: Option<Arc<dyn crate::runner::AnswerGuard>> =
+                main_loop_set.as_ref().map(|set| {
                     Arc::new(super::run_claim_guard::RunClaimGuard::new(
                         set.start_workflow.clone(),
                         self.db.clone(),
@@ -403,9 +409,7 @@ impl Orchestrator {
         let model_window = self
             .llm_router
             .as_ref()
-            .and_then(|r| {
-                crate::runner::routed_context_window(r, config_for_loop.model.as_deref())
-            })
+            .and_then(|r| crate::runner::routed_context_window(r, config_for_loop.model.as_deref()))
             .unwrap_or(200_000);
 
         // ── Route system-prompt + message-list assembly through the layered
@@ -463,7 +467,8 @@ impl Orchestrator {
         );
 
         // send_tool_context is set only when `send` is in the resolved tool set.
-        let send_tool_context: Option<Arc<str>> = if tools_for_loop.iter().any(|d| d.name == "send") {
+        let send_tool_context: Option<Arc<str>> = if tools_for_loop.iter().any(|d| d.name == "send")
+        {
             let send_ctx = self.build_send_context(owner_id);
             if send_ctx.is_empty() {
                 None
@@ -570,49 +575,49 @@ impl Orchestrator {
         // `answering_model` walks L3's ladder through `runner::routed_model`
         // — the same reader `model_window` above uses — and `None` (nothing
         // routable) leaves every part alone so `NoRoutableModel` can speak.
-        let (adapted_recent, current_user_turn): (Vec<ChatMessage>, Option<ChatMessage>) =
-            if self.llm_router.is_none() {
-                // Echo-stub path (no router) — pass messages through unchanged.
-                (ctx.recent_messages.clone(), Some(ChatMessage::user(query)))
-            } else {
-                // `None` here is "nothing at all is routable": every part is
-                // left exactly as it is rather than replaced by a placeholder
-                // claiming the model cannot read it.
-                let model = self.answering_model(config_for_loop.model.as_deref());
-                let recent: Vec<ChatMessage> = match &model {
-                    None => ctx.recent_messages.clone(),
-                    Some(model) => ctx
-                        .recent_messages
-                        .iter()
-                        .map(|msg| {
-                            if msg.parts.is_some() {
-                                let mut adapted = msg.clone();
-                                adapted.parts = Some(self.adapt_parts_for_model(
-                                    sanitize_parts_for_dispatch(
-                                        msg.parts.clone().unwrap_or_default(),
-                                    ),
-                                    model,
-                                ));
-                                adapted
-                            } else {
-                                msg.clone()
-                            }
-                        })
-                        .collect(),
-                };
-                let cur = match current_parts {
-                    Some(parts) => {
-                        let parts = sanitize_parts_for_dispatch(parts.to_vec());
-                        let parts = match &model {
-                            Some(model) => self.adapt_parts_for_model(parts, model),
-                            None => parts,
-                        };
-                        Some(ChatMessage::user_with_parts(parts))
-                    }
-                    None => Some(ChatMessage::user(query)),
-                };
-                (recent, cur)
+        let (adapted_recent, current_user_turn): (Vec<ChatMessage>, Option<ChatMessage>) = if self
+            .llm_router
+            .is_none()
+        {
+            // Echo-stub path (no router) — pass messages through unchanged.
+            (ctx.recent_messages.clone(), Some(ChatMessage::user(query)))
+        } else {
+            // `None` here is "nothing at all is routable": every part is
+            // left exactly as it is rather than replaced by a placeholder
+            // claiming the model cannot read it.
+            let model = self.answering_model(config_for_loop.model.as_deref());
+            let recent: Vec<ChatMessage> = match &model {
+                None => ctx.recent_messages.clone(),
+                Some(model) => ctx
+                    .recent_messages
+                    .iter()
+                    .map(|msg| {
+                        if msg.parts.is_some() {
+                            let mut adapted = msg.clone();
+                            adapted.parts = Some(self.adapt_parts_for_model(
+                                sanitize_parts_for_dispatch(msg.parts.clone().unwrap_or_default()),
+                                model,
+                            ));
+                            adapted
+                        } else {
+                            msg.clone()
+                        }
+                    })
+                    .collect(),
             };
+            let cur = match current_parts {
+                Some(parts) => {
+                    let parts = sanitize_parts_for_dispatch(parts.to_vec());
+                    let parts = match &model {
+                        Some(model) => self.adapt_parts_for_model(parts, model),
+                        None => parts,
+                    };
+                    Some(ChatMessage::user_with_parts(parts))
+                }
+                None => Some(ChatMessage::user(query)),
+            };
+            (recent, cur)
+        };
 
         // Resolve ConversationLane for Tier-2 cache activation (Component 4).
         // `lane_key` is canonical "user_id:source" form; parse back to typed
@@ -662,13 +667,15 @@ impl Orchestrator {
         // `built.total_prompt_tokens` summed all registered sections including
         // context_bundle sections).
         let ctx_config = &self.daemon_config.load().execution.context;
-        let mut budget =
-            crate::context_budget::ContextBudgetManager::new(model_window, ctx_config);
+        let mut budget = crate::context_budget::ContextBudgetManager::new(model_window, ctx_config);
         let system_prompt_tokens = (composed.token_budget.static_prompt_tokens
             + composed.token_budget.dynamic_context_tokens)
             as usize;
         budget.register_section("system_prompt", system_prompt_tokens);
-        budget.register_section("tools", crate::runner::estimate_tools_tokens(&tools_for_loop));
+        budget.register_section(
+            "tools",
+            crate::runner::estimate_tools_tokens(&tools_for_loop),
+        );
 
         let (response_content, is_structured) = if let Some(ref router) = self.llm_router {
             // The messages vec came out of the compose engine above, which
@@ -721,10 +728,8 @@ impl Orchestrator {
             // main-loop gate: only this path carries the tools the model
             // may need to re-dispatch the leftover instructions.
             if main_loop_set.is_some()
-                && let Some(block) = super::take_unprocessed_steering_block(
-                    self.db.as_ref(),
-                    lane_key,
-                )
+                && let Some(block) =
+                    super::take_unprocessed_steering_block(self.db.as_ref(), lane_key)
             {
                 let insert_at = messages.len().saturating_sub(1);
                 messages.insert(insert_at, ChatMessage::user(&block));
@@ -821,77 +826,13 @@ impl Orchestrator {
             if let Some(ref set) = main_loop_set
                 && let Some(outcome) = set.start_workflow.outcome()
             {
-                self.record_delegation(request_id, &outcome);
+                turn.delegation = Some(crate::gateway::DelegationInfo {
+                    task_id: outcome.task_id.clone(),
+                    title: outcome.title.clone(),
+                });
             }
 
-            // Persist LLM usage and emit event
-            let default_model = router.default_model();
-            let actual_model = result
-                .model_used
-                .as_deref()
-                .or(self.loop_config.model.as_deref())
-                .unwrap_or(&default_model);
-            let resolved_provider = router
-                .model_registry()
-                .resolve_provider(actual_model)
-                .map(|p| p.to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-            let call_cost = router.cost_tracker.calculate_cost(
-                actual_model,
-                result.total_input_tokens,
-                result.total_output_tokens,
-            );
-
-            let call_status = match &result.finish_reason {
-                LoopFinishReason::Complete | LoopFinishReason::MaxRounds | LoopFinishReason::Truncated => "success",
-                LoopFinishReason::CostExceeded => "cost_exceeded",
-                LoopFinishReason::Cancelled => "cancelled",
-                LoopFinishReason::Error(_) => "error",
-            };
-            let call_error = match &result.finish_reason {
-                LoopFinishReason::Error(msg) => Some(msg.as_str()),
-                _ => None,
-            };
-
-            if let Some(ref db) = self.db {
-                let usage_repo = LlmUsageRepository::new(db);
-                if let Err(e) = usage_repo.record_and_log(
-                    "orchestrator",
-                    None,
-                    &resolved_provider,
-                    actual_model,
-                    result.total_input_tokens as i32,
-                    result.total_output_tokens as i32,
-                    call_cost,
-                    latency_ms,
-                    call_status,
-                    call_error,
-                ) {
-                    tracing::warn!("Failed to persist LLM usage: {e}");
-                }
-            }
-
-            self.bus.publish(SystemEvent::LlmCallCompleted {
-                agent_id: "orchestrator".to_string(),
-                model: actual_model.to_string(),
-                input_tokens: result.total_input_tokens,
-                output_tokens: result.total_output_tokens,
-                cost_usd: call_cost,
-                // A main-loop turn belongs to no run — the same `None` the
-                // usage row beside it records (GAP-10).
-                task_id: None,
-                timestamp: Utc::now(),
-            });
-
-            // Store LLM metadata for bridge to read (keyed by request_id for concurrency safety)
-            self.llm_metadata_map.insert(
-                request_id,
-                super::super::LlmMetadata {
-                    model: actual_model.to_string(),
-                    tokens_in: result.total_input_tokens,
-                    tokens_out: result.total_output_tokens,
-                },
-            );
+            self.record_turn_usage(router, &result, latency_ms, turn);
 
             // **V3: a turn never ends with nothing.**
             //
@@ -976,8 +917,10 @@ impl Orchestrator {
     ///
     /// Minimal prompt: system persona (SOUL) only. No identity, bootstrap, skills,
     /// connectors, memory retrieval, or tools. max_rounds=1.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::orchestrator) async fn handle_social_query(
         &self,
+        turn: &mut crate::gateway::HandleResult,
         request_id: Uuid,
         query: &str,
         lane_key: &str,
@@ -985,7 +928,10 @@ impl Orchestrator {
         model_override: Option<String>,
         turn_sink: Option<&crate::chat::TurnSinkHandle>,
     ) -> Result<String, String> {
-        let router = self.llm_router.as_ref().ok_or_else(|| "No LLM router".to_string())?;
+        let router = self
+            .llm_router
+            .as_ref()
+            .ok_or_else(|| "No LLM router".to_string())?;
 
         let system_persona = match self.system_persona.read() {
             Ok(guard) => guard.clone(),
@@ -1129,72 +1075,7 @@ impl Orchestrator {
         .await;
         let latency_ms = call_start.elapsed().as_millis() as i64;
 
-        // LLM usage tracking
-        let default_model = router.default_model();
-        let actual_model = result
-            .model_used
-            .as_deref()
-            .or(self.loop_config.model.as_deref())
-            .unwrap_or(&default_model);
-        let resolved_provider = router
-            .model_registry()
-            .resolve_provider(actual_model)
-            .map(|p| p.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        let call_cost = router.cost_tracker.calculate_cost(
-            actual_model,
-            result.total_input_tokens,
-            result.total_output_tokens,
-        );
-
-        let call_status = match &result.finish_reason {
-            LoopFinishReason::Complete | LoopFinishReason::MaxRounds | LoopFinishReason::Truncated => "success",
-            LoopFinishReason::CostExceeded => "cost_exceeded",
-            LoopFinishReason::Cancelled => "cancelled",
-            LoopFinishReason::Error(_) => "error",
-        };
-        let call_error = match &result.finish_reason {
-            LoopFinishReason::Error(msg) => Some(msg.as_str()),
-            _ => None,
-        };
-
-        if let Some(ref db) = self.db {
-            let usage_repo = LlmUsageRepository::new(db);
-            if let Err(e) = usage_repo.record_and_log(
-                "orchestrator",
-                None,
-                &resolved_provider,
-                actual_model,
-                result.total_input_tokens as i32,
-                result.total_output_tokens as i32,
-                call_cost,
-                latency_ms,
-                call_status,
-                call_error,
-            ) {
-                tracing::warn!("Failed to persist LLM usage: {e}");
-            }
-        }
-
-        self.bus.publish(SystemEvent::LlmCallCompleted {
-            agent_id: "orchestrator".to_string(),
-            model: actual_model.to_string(),
-            input_tokens: result.total_input_tokens,
-            output_tokens: result.total_output_tokens,
-            cost_usd: call_cost,
-            // As above: a main-loop turn belongs to no run (GAP-10).
-            task_id: None,
-            timestamp: Utc::now(),
-        });
-
-        self.llm_metadata_map.insert(
-            request_id,
-            super::super::LlmMetadata {
-                model: actual_model.to_string(),
-                tokens_in: result.total_input_tokens,
-                tokens_out: result.total_output_tokens,
-            },
-        );
+        self.record_turn_usage(router, &result, latency_ms, turn);
 
         // V3, as on the main loop above: the social path runs a model too, and
         // a turn of it that says nothing says why.

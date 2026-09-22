@@ -2658,3 +2658,52 @@ async fn a_plugin_backed_subagent_may_call_the_tool_its_capability_resolves_to()
     assert_eq!(web_search.calls(), 1);
     assert!(violations.is_empty(), "{violations:?}");
 }
+/// Batch validation remains serial: a malformed later entry does not roll
+/// back a worker already started. The objective also crosses UTF-8 byte 80.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn batch_keeps_prior_spawn_when_a_later_entry_is_malformed() {
+    let shared = Arc::new(SharedContext::new());
+    register_worker_template(&shared, "worker", vec![], vec![]);
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn_tool = SpawnSubagentTool::new(
+        crate::test_util::router_recording(crate::test_util::RecordingProvider::new("done")),
+        Arc::new(ToolRegistry::default()),
+        shared,
+        EventBus::default(),
+        None,
+        "task-1".to_string(),
+        "user-1".to_string(),
+        "test-lead".to_string(),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        None,
+        tracker.clone(),
+        0,
+        DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+        MemoryScopeContext::global_only(),
+        None,
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        false,
+    );
+    let batch = SpawnSubagentsBatchTool::new(Arc::new(spawn_tool));
+    let error = batch
+        .execute(&serde_json::json!({"subagents": [
+            {"agent_id": "worker", "objective": "中".repeat(40)},
+            {"agent_id": "worker"}
+        ]}))
+        .await
+        .unwrap_err();
+    assert!(error.contains("objective"));
+    assert_eq!(tracker.statuses.lock().unwrap().len(), 1);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !tracker.all_done() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the first worker still completes");
+    assert_eq!(tracker.status_counts(), (0, 0, 1, 0));
+    assert!(logs_contain("Lead agent spawning subagent"));
+}

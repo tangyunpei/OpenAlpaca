@@ -257,7 +257,7 @@ impl GatewayPersistence {
     ///
     /// `tokens_in`/`tokens_out` are the **turn's** usage, summed over every
     /// round of the main loop (`LoopResult::total_input_tokens`, carried here
-    /// through `LlmMetadata`), not the last round's. They used to be dropped,
+    /// through the owned `HandleResult`), not the last round's. They used to be dropped,
     /// so every reloaded assistant row read `0/0` while `llm_call_log` held the
     /// real numbers (G4). `None` on the non-LLM paths — a slash command spent
     /// no tokens, which is a different fact from "spent none that we counted",

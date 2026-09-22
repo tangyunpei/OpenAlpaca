@@ -16,11 +16,25 @@ use uuid::Uuid;
 use super::intent::Intent;
 
 impl Orchestrator {
-    /// Public entry point for processing a user message.
+    /// Process a user message when only its text is needed.
     pub async fn handle_message(&self, request: HandleRequest) -> Result<String, String> {
-        let model_input_content = request.content.clone();
-        self.handle_message_internal(request, model_input_content, false, None)
+        self.handle_message_result(request)
             .await
+            .map(|turn| turn.content)
+    }
+
+    /// Process one turn, returning its text and metadata together.
+    /// The result belongs to this future, so cancellation and errors drop it.
+    pub async fn handle_message_result(
+        &self,
+        request: HandleRequest,
+    ) -> Result<crate::gateway::HandleResult, String> {
+        let mut turn = crate::gateway::HandleResult::text(String::new());
+        let model_input_content = request.content.clone();
+        turn.content = self
+            .handle_message_internal(&mut turn, request, model_input_content, false, None)
+            .await?;
+        Ok(turn)
     }
 
     /// Internal message handler that separates the model input from the intent source.
@@ -38,6 +52,7 @@ impl Orchestrator {
     /// keeps meaning "the model's request really carried it".
     pub(super) async fn handle_message_internal(
         &self,
+        turn: &mut crate::gateway::HandleResult,
         request: HandleRequest,
         model_input_content: String,
         force_simple_query: bool,
@@ -122,7 +137,7 @@ impl Orchestrator {
                 // A1 — a task command is answered with no model at all, so the
                 // turn's files went nowhere. Say so rather than let the bridge
                 // report them used.
-                self.skip_turn_attachments(request_id, attachments.as_ref(), skipped::TASK_OPS);
+                self.skip_turn_attachments(turn, attachments.as_ref(), skipped::TASK_OPS);
                 // Task ops skip the routing ladder entirely, but every routed
                 // message must still be observable (Routing V2 Phase 3):
                 // emit OrchestrationStage + the latency record before returning.
@@ -155,7 +170,12 @@ impl Orchestrator {
         let mode: String;
 
         let result: Result<String, String> = if !force_simple_query
-            && self.daemon_config.load().orchestrator.routing.steering_enabled
+            && self
+                .daemon_config
+                .load()
+                .orchestrator
+                .routing
+                .steering_enabled
             && let Some(steer_text) = intent_source_content.strip_prefix("/steer ")
         {
             // Deterministic steering override (Routing V2): guaranteed
@@ -165,7 +185,7 @@ impl Orchestrator {
             mode = "steered".to_string();
             // A1 — a steer is a deterministic injection, not a turn a model
             // answers; nothing carries the files into the running workflow.
-            self.skip_turn_attachments(request_id, attachments.as_ref(), skipped::STEER);
+            self.skip_turn_attachments(turn, attachments.as_ref(), skipped::STEER);
             self.handle_steer_prefix(
                 request_id,
                 steer_text,
@@ -184,6 +204,7 @@ impl Orchestrator {
             // main loop (Routing V2 Phase 0.5).
             mode = "skill_command".to_string();
             self.invoke_skill_with_telemetry(
+                turn,
                 request_id,
                 &source,
                 skill_name,
@@ -219,11 +240,12 @@ impl Orchestrator {
             // plugin that owns it instead (extension design §10 case 5(a)).
             mode = "skill_withdrawn".to_string();
             // A1 — the tombstone is a fixed sentence, written without a model.
-            self.skip_turn_attachments(request_id, attachments.as_ref(), skipped::NO_MODEL_TIER);
+            self.skip_turn_attachments(turn, attachments.as_ref(), skipped::NO_MODEL_TIER);
             Ok(reply)
         } else if self.is_bootstrapping() {
             mode = "bootstrap".to_string();
             self.handle_simple_query(
+                turn,
                 request_id,
                 &source,
                 &model_input_content,
@@ -245,6 +267,7 @@ impl Orchestrator {
         } else if force_simple_query {
             mode = "forced_simple_query".to_string();
             self.handle_simple_query(
+                turn,
                 request_id,
                 &source,
                 &model_input_content,
@@ -273,16 +296,19 @@ impl Orchestrator {
                     .ok()
                     .and_then(|g| g.as_ref().map(|p| p.sendable_channels()))
                     .unwrap_or_default();
-                super::query_handler::detect_active_send_hints(&ctx.recent_messages, &sendable_for_guard)
-                    == super::query_handler::ActiveSendHints::default()
+                super::query_handler::detect_active_send_hints(
+                    &ctx.recent_messages,
+                    &sendable_for_guard,
+                ) == super::query_handler::ActiveSendHints::default()
             }
         {
             // Social fast path: ultra-light prompt for "ok", "thanks", "好的" etc.
             mode = "social_fast_path".to_string();
             // A1 — this arm *does* reach a model, but with a prompt of its own
             // that carries no parts. The turn's files did not reach it.
-            self.skip_turn_attachments(request_id, attachments.as_ref(), skipped::SOCIAL);
+            self.skip_turn_attachments(turn, attachments.as_ref(), skipped::SOCIAL);
             self.handle_social_query(
+                turn,
                 request_id,
                 &model_input_content,
                 &lane_key,
@@ -299,6 +325,7 @@ impl Orchestrator {
             // tool set assembled inside handle_simple_query).
             mode = "main_loop".to_string();
             self.handle_simple_query(
+                turn,
                 request_id,
                 &source,
                 &model_input_content,
@@ -343,13 +370,41 @@ impl Orchestrator {
             let bg_lane = lane_key.to_string();
 
             // Extraction-only fields (clone only when needed)
-            let bg_counter = if needs_extraction { Some(self.extraction_turn_counter.clone()) } else { None };
-            let bg_embedder = if needs_extraction { self.embedder.clone() } else { None };
-            let bg_user_path = if needs_extraction { Some(self.user_path.clone()) } else { None };
-            let bg_user_doc = if needs_extraction { Some(self.user_document.clone()) } else { None };
-            let bg_persona_version = if needs_extraction { Some(self.persona_version.clone()) } else { None };
-            let bg_bus = if needs_extraction { Some(self.bus.clone()) } else { None };
-            let bg_intent = if needs_extraction { Some(intent_source_content.to_string()) } else { None };
+            let bg_counter = if needs_extraction {
+                Some(self.extraction_turn_counter.clone())
+            } else {
+                None
+            };
+            let bg_embedder = if needs_extraction {
+                self.embedder.clone()
+            } else {
+                None
+            };
+            let bg_user_path = if needs_extraction {
+                Some(self.user_path.clone())
+            } else {
+                None
+            };
+            let bg_user_doc = if needs_extraction {
+                Some(self.user_document.clone())
+            } else {
+                None
+            };
+            let bg_persona_version = if needs_extraction {
+                Some(self.persona_version.clone())
+            } else {
+                None
+            };
+            let bg_bus = if needs_extraction {
+                Some(self.bus.clone())
+            } else {
+                None
+            };
+            let bg_intent = if needs_extraction {
+                Some(intent_source_content.to_string())
+            } else {
+                None
+            };
             let bg_owner = owner_id.map(|s| s.to_string());
             let bg_response = result.as_ref().ok().cloned();
 
@@ -387,9 +442,19 @@ impl Orchestrator {
                         )
                     {
                         extract_user_traits_background(
-                            db, router, bg_config, counter, bg_embedder,
-                            user_path, user_doc, persona_ver, bus,
-                            bg_lane, intent, response_text.clone(), owner.clone(),
+                            db,
+                            router,
+                            bg_config,
+                            counter,
+                            bg_embedder,
+                            user_path,
+                            user_doc,
+                            persona_ver,
+                            bus,
+                            bg_lane,
+                            intent,
+                            response_text.clone(),
+                            owner.clone(),
                         )
                         .await;
                     }

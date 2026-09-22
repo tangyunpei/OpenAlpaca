@@ -9,5 +9,7 @@ mod invocation;
 pub(crate) mod output;
 mod preflight;
 
+mod tool_setup;
+
 pub use catalog::*;
 pub use router::*;

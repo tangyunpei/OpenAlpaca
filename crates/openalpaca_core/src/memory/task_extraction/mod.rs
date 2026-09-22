@@ -444,7 +444,7 @@ pub async fn persist_memory_item_with_embedding(
                     "Memory persist: superseded #{} -> #{}: {}",
                     old_id,
                     new_id,
-                    &content[..content.len().min(60)]
+                    crate::utils::prefix_by_bytes(content, 60)
                 );
                 PersistResult::Superseded {
                     old_id,
@@ -471,7 +471,7 @@ pub async fn persist_memory_item_with_embedding(
                 }
                 tracing::debug!(
                     "Memory persist: stored new: {}",
-                    &content[..content.len().min(60)]
+                    crate::utils::prefix_by_bytes(content, 60)
                 );
                 PersistResult::Inserted(new_id)
             }
@@ -484,32 +484,7 @@ pub async fn persist_memory_item_with_embedding(
     }
 }
 
-/// Try to parse JSON from LLM response, handling both raw and fenced formats.
-pub fn parse_json_response(content: &str) -> Option<serde_json::Value> {
-    let trimmed = content.trim();
-    if let Ok(v) = serde_json::from_str(trimmed) {
-        return Some(v);
-    }
-    // Try ```json fence
-    if let Some(start) = trimmed.find("```json") {
-        let after = &trimmed[start + 7..];
-        if let Some(end) = after.find("```")
-            && let Ok(v) = serde_json::from_str(after[..end].trim())
-        {
-            return Some(v);
-        }
-    }
-    // Try plain ``` fence
-    if let Some(start) = trimmed.find("```") {
-        let after = &trimmed[start + 3..];
-        if let Some(end) = after.find("```")
-            && let Ok(v) = serde_json::from_str(after[..end].trim())
-        {
-            return Some(v);
-        }
-    }
-    None
-}
+pub use crate::utils::json::parse_json_response;
 
 #[cfg(test)]
 mod tests;

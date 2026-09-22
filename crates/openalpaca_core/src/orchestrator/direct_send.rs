@@ -40,13 +40,16 @@ static CN_CONTENT_FIRST: LazyLock<Regex> = LazyLock::new(|| {
 
 // English: "send hello to telegram"
 static EN_SEND_TO: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\bsend\s+(?P<content>.+?)\s+(?:to|via|through)\s+(?P<ch>telegram|imessage|discord)\b")
-        .unwrap()
+    Regex::new(
+        r"(?i)\bsend\s+(?P<content>.+?)\s+(?:to|via|through)\s+(?P<ch>telegram|imessage|discord)\b",
+    )
+    .unwrap()
 });
 
 // English: "telegram send hello"
 static EN_CHANNEL_FIRST: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(?P<ch>telegram|imessage|discord)\s+(?:send|message)\s+(?P<content>.+)").unwrap()
+    Regex::new(r"(?i)\b(?P<ch>telegram|imessage|discord)\s+(?:send|message)\s+(?P<content>.+)")
+        .unwrap()
 });
 
 // ── Literal content guard ─────────────────────────────────────────────────
@@ -180,33 +183,8 @@ impl Orchestrator {
             _ => return None,
         };
         let pref_repo = PreferenceRepository::new(db);
-        let has_default = match params.channel.as_str() {
-            "telegram" => pref_repo
-                .get(owner, "telegram.last_chat_id")
-                .ok()
-                .flatten()
-                .and_then(|p| p.value.parse::<i64>().ok())
-                .is_some(),
-            "imessage" => {
-                pref_repo
-                    .get(owner, "imessage.last_reply_target")
-                    .ok()
-                    .flatten()
-                    .is_some()
-                    || pref_repo
-                        .get(owner, "imessage.last_chat_id")
-                        .ok()
-                        .flatten()
-                        .is_some()
-            }
-            "discord" => pref_repo
-                .get(owner, "discord.last_channel_id")
-                .ok()
-                .flatten()
-                .and_then(|p| p.value.parse::<u64>().ok())
-                .is_some(),
-            _ => false,
-        };
+        let has_default =
+            super::send_context::has_default_recipient(&pref_repo, owner, &params.channel);
         if !has_default {
             return None;
         }

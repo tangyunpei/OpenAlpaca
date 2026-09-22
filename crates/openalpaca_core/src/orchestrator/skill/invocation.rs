@@ -4,7 +4,7 @@
 
 use super::context::inject_skill_context;
 use super::handler::SkillInvocationResult;
-use super::invoke_executor::{SkillInvocationBuiltInAdapter, SkillInvocationToolExecutor};
+use super::invoke_executor::SkillInvocationToolExecutor;
 use super::output::{deterministic_repair, validate_skill_output};
 use super::preflight::preflight_permissions;
 use crate::compose::{
@@ -25,11 +25,9 @@ use crate::runner::{LoopConfig, LoopFinishReason, run_agentic_loop_routed};
 use crate::security::capabilities::Allowlist;
 use crate::security::sandbox::SandboxManager;
 use crate::security::sandbox::SandboxPolicy;
-use crate::tools::builtins::ScriptToolBuiltIn;
-use crate::tools::registry::{RegisteredTool, ToolBackend, ToolContext};
+use crate::tools::registry::ToolContext;
 use chrono::Utc;
 use openalpaca_llm::{ChatMessage, ToolChoice};
-use openalpaca_storage::repository::LlmUsageRepository;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -38,6 +36,7 @@ impl Orchestrator {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::orchestrator) async fn handle_skill_invocation_inner(
         &self,
+        turn: &mut crate::gateway::HandleResult,
         request_id: Uuid,
         source: &str,
         skill_name: &str,
@@ -86,7 +85,7 @@ impl Orchestrator {
             // document's text into the query would be exactly the silent
             // degradation the settled rules forbid. Say so instead.
             self.skip_turn_attachments(
-                request_id,
+                turn,
                 attachments,
                 crate::orchestrator::handler_attachments::skipped::PLUGIN_SKILL,
             );
@@ -185,53 +184,13 @@ impl Orchestrator {
         // this is the attribution that lands with the event. The dedup scope is
         // the request, which has no `ToolContext` yet at this point.
         let withheld_scope = request_id.to_string();
-        let mut tool_defs: Vec<openalpaca_llm::ToolDefinition> =
-            if !skill_doc.frontmatter.requires_capabilities.is_empty() {
-                // New path: capability-based resolution
-                let resolution = self
-                    .tool_registry
-                    .resolve_capabilities(&skill_doc.frontmatter.requires_capabilities, &[]);
-                self.tool_registry
-                    .announce_withheld(&resolution, None, Some(&withheld_scope));
-                resolution.defs
-            } else if !skill_doc.frontmatter.tools.allow.is_empty() {
-                // Legacy fallback: direct tool name matching
-                let names = &skill_doc.frontmatter.tools.allow;
-                let resolved: Vec<openalpaca_llm::ToolDefinition> = names
-                    .iter()
-                    .filter_map(|name| {
-                        self.tool_registry.get(name).map(|t| t.definition.clone())
-                    })
-                    .collect();
-                if resolved.len() < names.len() {
-                    let resolved_names: Vec<&str> =
-                        resolved.iter().map(|d| d.name.as_str()).collect();
-                    let missing: Vec<&str> = names
-                        .iter()
-                        .filter(|n| !resolved_names.contains(&n.as_str()))
-                        .map(|n| n.as_str())
-                        .collect();
-                    // Every miss the ledger attributes is announced with the
-                    // extension that took it; the rest keep today's
-                    // unattributed warning, because a typo and a withdrawal are
-                    // indistinguishable for a name nothing ever owned.
-                    let unattributed = self.tool_registry.announce_withheld_names(
-                        missing,
-                        None,
-                        Some(&withheld_scope),
-                    );
-                    if !unattributed.is_empty() {
-                        tracing::warn!(
-                            "Skill '{}' references unknown tools: {:?}",
-                            skill_name,
-                            unattributed
-                        );
-                    }
-                }
-                resolved
-            } else {
-                vec![]
-            };
+        let mut tool_defs = super::tool_setup::resolve_skill_tools(
+            &self.tool_registry,
+            &skill_doc.frontmatter,
+            skill_name,
+            None,
+            Some(&withheld_scope),
+        );
 
         // **Fail closed — the total-loss refusal** (design §6.2 #10, §10
         // case 3). One predicate across both resolution branches: refuse when
@@ -291,25 +250,13 @@ impl Orchestrator {
         // Add invoke_skill:* synthetic tools (from depends_on)
         for dep_id in &skill_doc.frontmatter.depends_on {
             if let Some(dep_entry) = self.skill_catalog.get(dep_id) {
-                tool_defs.push(openalpaca_llm::ToolDefinition {
-                    name: format!("invoke_skill:{}", dep_id),
-                    description: format!(
+                tool_defs.push(super::tool_setup::dependency_definition(
+                    dep_id,
+                    format!(
                         "Invoke the '{}' skill: {}",
                         dep_entry.frontmatter.name, dep_entry.frontmatter.description
                     ),
-                    parameters: serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "query": {
-                                "type": "string",
-                                "description": "The input/query to pass to the skill"
-                            }
-                        },
-                        "required": ["query"]
-                    }),
-                    strict: None,
-                    input_examples: None,
-                });
+                ));
             } else {
                 tracing::warn!(
                     "Skill '{}' depends on '{}' which is not in catalog",
@@ -343,13 +290,11 @@ impl Orchestrator {
         } else {
             Vec::new()
         };
-        let connector_summaries: Arc<Vec<ConnectorSummary>> =
-            Arc::new(connector_summaries_vec);
+        let connector_summaries: Arc<Vec<ConnectorSummary>> = Arc::new(connector_summaries_vec);
 
         let (tools_for_loop, policy_opt, mut config_for_loop);
         if !tool_defs.is_empty() {
-            let tool_names_log: Vec<&str> =
-                tool_defs.iter().map(|d| d.name.as_str()).collect();
+            let tool_names_log: Vec<&str> = tool_defs.iter().map(|d| d.name.as_str()).collect();
             tracing::info!(
                 "Skill invocation '{}' with {} tools: {:?}",
                 skill_name,
@@ -364,12 +309,7 @@ impl Orchestrator {
                 // it (this arm only runs when that resolution is non-empty).
                 allowed_capabilities: Allowlist::only(resolved),
                 denied_capabilities: denied_caps,
-                require_confirmation_for: skill_doc
-                    .frontmatter
-                    .permissions
-                    .confirm
-                    .tools
-                    .clone(),
+                require_confirmation_for: skill_doc.frontmatter.permissions.confirm.tools.clone(),
                 max_tool_calls: skill_doc
                     .frontmatter
                     .tools
@@ -487,9 +427,7 @@ impl Orchestrator {
         let persona_output = Arc::new(crate::compose::persona::compute(&persona_input));
 
         // send_tool_context is set only when `send` is in the resolved tool set.
-        let send_tool_context: Option<Arc<str>> = if tools_for_loop
-            .iter()
-            .any(|d| d.name == "send")
+        let send_tool_context: Option<Arc<str>> = if tools_for_loop.iter().any(|d| d.name == "send")
         {
             let send_ctx = self.build_send_context(owner_id);
             if send_ctx.is_empty() {
@@ -663,17 +601,21 @@ impl Orchestrator {
         // `built.total_prompt_tokens` summed all registered sections including
         // context_bundle sections).
         let ctx_config = &self.daemon_config.load().execution.context;
-        let mut budget =
-            crate::context_budget::ContextBudgetManager::new(model_window, ctx_config);
+        let mut budget = crate::context_budget::ContextBudgetManager::new(model_window, ctx_config);
         let system_prompt_tokens = (composed.token_budget.static_prompt_tokens
             + composed.token_budget.dynamic_context_tokens)
             as usize;
         budget.register_section("system_prompt", system_prompt_tokens);
-        budget.register_section("tools", crate::runner::estimate_tools_tokens(&tools_for_loop));
+        budget.register_section(
+            "tools",
+            crate::runner::estimate_tools_tokens(&tools_for_loop),
+        );
 
         // --- Context Budget Telemetry ---
         {
-            let model_id = self.llm_router.as_ref()
+            let model_id = self
+                .llm_router
+                .as_ref()
                 .map(|r| r.default_model())
                 .unwrap_or_else(|| "default".to_string());
 
@@ -749,21 +691,12 @@ impl Orchestrator {
                 || !skill_doc.frontmatter.depends_on.is_empty();
             let registry = if needs_clone {
                 let cloned = (*self.tool_registry).clone();
-                if let Some(ref skill_dir) = entry.skill_dir {
-                    for cfg in &skill_doc.frontmatter.scripts {
-                        let tool = ScriptToolBuiltIn::new(skill_dir, cfg)?;
-                        cloned.register(RegisteredTool {
-                            definition: ScriptToolBuiltIn::tool_definition(&cfg.name),
-                            backend: ToolBackend::BuiltIn(Arc::new(tool)),
-                            provides_capabilities: vec![],
-                            exempt_from_timeout: false,
-                            annotations: None,
-                            version: env!("CARGO_PKG_VERSION").to_string(),
-                            author: format!("skill:{}", skill_name),
-                            created_at: chrono::Utc::now(),
-                        })?;
-                    }
-                }
+                super::tool_setup::register_scripts(
+                    &cloned,
+                    entry.skill_dir.as_deref(),
+                    &skill_doc.frontmatter.scripts,
+                    skill_name,
+                )?;
                 // Register invoke_skill:* backends so the sandbox can execute them
                 if !skill_doc.frontmatter.depends_on.is_empty() {
                     let call_stack = vec![skill_name.to_string()];
@@ -775,9 +708,9 @@ impl Orchestrator {
                         call_stack,
                         3, // max nesting depth
                         None,
-                        None,                          // cost_accumulator (top-level)
-                        Some(tool_ctx.clone()),         // parent_tool_context
-                        config_for_loop.max_cost,       // parent_max_cost
+                        None,                     // cost_accumulator (top-level)
+                        Some(tool_ctx.clone()),   // parent_tool_context
+                        config_for_loop.max_cost, // parent_max_cost
                         self.daemon_config
                             .load()
                             .security
@@ -789,44 +722,13 @@ impl Orchestrator {
                             .agent_defaults
                             .confirmation_timeout_secs,
                     ));
-                    for dep_id in &skill_doc.frontmatter.depends_on {
-                        if self.skill_catalog.get(dep_id).is_some() {
-                            let tool_name = format!("invoke_skill:{}", dep_id);
-                            cloned.register(RegisteredTool {
-                                definition: openalpaca_llm::ToolDefinition {
-                                    name: tool_name,
-                                    description: format!(
-                                        "Invoke the '{}' skill",
-                                        dep_id
-                                    ),
-                                    parameters: serde_json::json!({
-                                        "type": "object",
-                                        "properties": {
-                                            "query": {
-                                                "type": "string",
-                                                "description": "The input/query to pass to the skill"
-                                            }
-                                        },
-                                        "required": ["query"]
-                                    }),
-                                    strict: None,
-                                    input_examples: None,
-                                },
-                                backend: ToolBackend::BuiltIn(Arc::new(
-                                    SkillInvocationBuiltInAdapter {
-                                        executor: executor.clone(),
-                                        skill_id: dep_id.clone(),
-                                    },
-                                )),
-                                provides_capabilities: vec![],
-                                exempt_from_timeout: true, // nested skills manage own timeouts
-                                annotations: None,
-                                version: env!("CARGO_PKG_VERSION").to_string(),
-                                author: format!("skill:{}", skill_name),
-                                created_at: chrono::Utc::now(),
-                            })?;
-                        }
-                    }
+                    super::tool_setup::register_dependencies(
+                        &cloned,
+                        &self.skill_catalog,
+                        &skill_doc.frontmatter.depends_on,
+                        executor,
+                        skill_name,
+                    )?;
                 }
                 Arc::new(cloned)
             } else {
@@ -870,76 +772,7 @@ impl Orchestrator {
             .await;
             let latency_ms = call_start.elapsed().as_millis() as i64;
 
-            // Persist LLM usage and emit event
-            let default_model = router.default_model();
-            let actual_model = result
-                .model_used
-                .as_deref()
-                .or(self.loop_config.model.as_deref())
-                .unwrap_or(&default_model);
-            let resolved_provider = router
-                .model_registry()
-                .resolve_provider(actual_model)
-                .map(|p| p.to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-            let call_cost = router.cost_tracker.calculate_cost(
-                actual_model,
-                result.total_input_tokens,
-                result.total_output_tokens,
-            );
-
-            let call_status = match &result.finish_reason {
-                LoopFinishReason::Complete
-                | LoopFinishReason::MaxRounds
-                | LoopFinishReason::Truncated => "success",
-                LoopFinishReason::CostExceeded => "cost_exceeded",
-                LoopFinishReason::Cancelled => "cancelled",
-                LoopFinishReason::Error(_) => "error",
-            };
-            let call_error = match &result.finish_reason {
-                LoopFinishReason::Error(msg) => Some(msg.as_str()),
-                _ => None,
-            };
-
-            if let Some(ref db) = self.db {
-                let usage_repo = LlmUsageRepository::new(db);
-                if let Err(e) = usage_repo.record_and_log(
-                    "orchestrator",
-                    None,
-                    &resolved_provider,
-                    actual_model,
-                    result.total_input_tokens as i32,
-                    result.total_output_tokens as i32,
-                    call_cost,
-                    latency_ms,
-                    call_status,
-                    call_error,
-                ) {
-                    tracing::warn!("Failed to persist LLM usage: {e}");
-                }
-            }
-
-            self.bus.publish(SystemEvent::LlmCallCompleted {
-                agent_id: "orchestrator".to_string(),
-                model: actual_model.to_string(),
-                input_tokens: result.total_input_tokens,
-                output_tokens: result.total_output_tokens,
-                cost_usd: call_cost,
-                // A skill invocation is not a workflow — no run to attribute
-                // it to, and none invented (GAP-10).
-                task_id: None,
-                timestamp: Utc::now(),
-            });
-
-            // Store LLM metadata for bridge to read (keyed by request_id for concurrency safety)
-            self.llm_metadata_map.insert(
-                request_id,
-                crate::orchestrator::LlmMetadata {
-                    model: actual_model.to_string(),
-                    tokens_in: result.total_input_tokens,
-                    tokens_out: result.total_output_tokens,
-                },
-            );
+            let call_cost = self.record_turn_usage(router, &result, latency_ms, turn);
 
             // Capture loop metadata for SkillInvocationResult
             inv_finish_reason = result.finish_reason.clone();
@@ -1062,9 +895,7 @@ impl Orchestrator {
                 validation_failures.push(validation_err.to_string());
                 if skill_doc.frontmatter.output.auto_repair {
                     repair_attempted = true;
-                    if let Some((repaired, ok)) =
-                        deterministic_repair(&guarded, &validation_err)
-                    {
+                    if let Some((repaired, ok)) = deterministic_repair(&guarded, &validation_err) {
                         repair_succeeded = ok;
                         tracing::info!(
                             "Skill '{}': deterministic repair {}",

@@ -123,44 +123,23 @@ pub(super) async fn update_summary_background(
     let usage_repo = LlmUsageRepository::new(&db);
 
     // Parse response (try raw JSON, then ```json fence, then plain ``` fence)
-    let parsed: serde_json::Value = match serde_json::from_str(response.content.trim()) {
-        Ok(v) => v,
-        Err(_) => {
-            let trimmed = response.content.trim();
-            let json_str = if let Some(start) = trimmed.find("```json") {
-                let after = &trimmed[start + 7..];
-                after
-                    .find("```")
-                    .map(|end| &after[..end])
-                    .unwrap_or(trimmed)
-            } else if let Some(start) = trimmed.find("```") {
-                let after = &trimmed[start + 3..];
-                after
-                    .find("```")
-                    .map(|end| &after[..end])
-                    .unwrap_or(trimmed)
-            } else {
-                trimmed
-            };
-            match serde_json::from_str(json_str.trim()) {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!("Summary update: malformed JSON from LLM: {e}");
-                    let _ = usage_repo.record_and_log(
-                        "orchestrator_summary",
-                        None,
-                        &resolved_provider,
-                        actual_model,
-                        response.usage.input_tokens as i32,
-                        response.usage.output_tokens as i32,
-                        call_cost,
-                        latency_ms,
-                        "error",
-                        Some(&format!("JSON parse: {e}")),
-                    );
-                    return;
-                }
-            }
+    let parsed = match crate::utils::json::parse_utility_json_response(&response.content) {
+        Ok(value) => value,
+        Err(e) => {
+            tracing::warn!("Summary update: malformed JSON from LLM: {e}");
+            let _ = usage_repo.record_and_log(
+                "orchestrator_summary",
+                None,
+                &resolved_provider,
+                actual_model,
+                response.usage.input_tokens as i32,
+                response.usage.output_tokens as i32,
+                call_cost,
+                latency_ms,
+                "error",
+                Some(&format!("JSON parse: {e}")),
+            );
+            return;
         }
     };
 
@@ -211,12 +190,8 @@ pub(super) async fn update_summary_background(
 
     // Save with optimistic locking to conversations table
     let repo = ConversationRepository::new(&db);
-    match repo.update_summary_optimistic(
-        &lane_key,
-        ctx.summary_version,
-        &new_summary,
-        new_last_id,
-    ) {
+    match repo.update_summary_optimistic(&lane_key, ctx.summary_version, &new_summary, new_last_id)
+    {
         Ok(true) => tracing::debug!("Summary updated successfully"),
         Ok(false) => {
             tracing::warn!("Summary update: version mismatch, retrying once");

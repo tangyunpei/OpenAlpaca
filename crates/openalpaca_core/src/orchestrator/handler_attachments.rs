@@ -106,7 +106,7 @@ impl Orchestrator {
     /// path, a plugin-contributed skill) are both this case.
     pub(super) fn skip_turn_attachments(
         &self,
-        request_id: uuid::Uuid,
+        turn: &mut crate::gateway::HandleResult,
         attachments: Option<&TurnAttachments>,
         reason: &str,
     ) {
@@ -119,9 +119,7 @@ impl Orchestrator {
         for id in &attachments.carried {
             warn_withheld(Some(id), "-", reason);
         }
-        self.attachments_skipped_map
-            .entry(request_id)
-            .or_default()
+        turn.attachments_skipped
             .extend(attachments.carried.iter().map(|id| SkippedAttachment {
                 id: id.clone(),
                 reason: reason.to_string(),
@@ -145,10 +143,21 @@ impl Orchestrator {
         request: HandleRequest,
         attachments: Vec<ResolvedAttachment>,
     ) -> Result<String, String> {
+        self.handle_message_with_attachments_result(request, attachments)
+            .await
+            .map(|turn| turn.content)
+    }
+
+    /// Process attachments and carry their fate in the same owned turn result.
+    pub async fn handle_message_with_attachments_result(
+        &self,
+        request: HandleRequest,
+        attachments: Vec<ResolvedAttachment>,
+    ) -> Result<crate::gateway::HandleResult, String> {
+        let mut turn = crate::gateway::HandleResult::text(String::new());
         // The request's own content is the intent source; the augmented string
         // built below is what the model sees.
         let content = &request.content;
-        let request_id = request.request_id;
         // U1 — the same resolution `handle_simple_query` will budget and route
         // with: this turn's pin (`LoopConfig.model` after the request's
         // override) walked down L3's ladder. `None` — no router, nothing
@@ -270,12 +279,7 @@ impl Orchestrator {
             }
         }
 
-        // U3(b,c) — the bridge subtracts these ids from `attachments_used` and
-        // carries them on the turn's result. Written only when something was
-        // actually withheld, and removed by the bridge on the way out.
-        if !skipped.is_empty() {
-            self.attachments_skipped_map.insert(request_id, skipped);
-        }
+        turn.attachments_skipped = skipped;
 
         // 2. Build text-only augmented string for intent classification
         //    (the intent parser only understands text)
@@ -307,16 +311,24 @@ impl Orchestrator {
         // 3. Pass BOTH the text augmented string AND the structured parts,
         //    with the ids riding in them (A1): an arm that answers without
         //    the parts records exactly those as skipped.
-        self.handle_message_internal(
-            request,
-            augmented,
-            force_simple_query,
-            Some(TurnAttachments {
-                files: parts,
-                question,
-                carried,
-            }),
-        )
-        .await
+        turn.content = self
+            .handle_message_internal(
+                &mut turn,
+                request,
+                augmented,
+                force_simple_query,
+                Some(TurnAttachments {
+                    files: parts,
+                    question,
+                    carried,
+                }),
+            )
+            .await?;
+        turn.attachments_used = attachments
+            .into_iter()
+            .map(|a| a.file_id)
+            .filter(|id| !turn.attachments_skipped.iter().any(|s| &s.id == id))
+            .collect();
+        Ok(turn)
     }
 }

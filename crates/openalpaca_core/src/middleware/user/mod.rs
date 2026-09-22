@@ -62,94 +62,15 @@ impl fmt::Display for UserParseError {
 impl std::error::Error for UserParseError {}
 
 // ---------------------------------------------------------------------------
-// Frontmatter helpers (shared logic with soul.rs, inlined to avoid coupling)
+// Document-specific frontmatter requirements
 // ---------------------------------------------------------------------------
 
-fn strip_outer_quotes(value: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.len() >= 2
-        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
-            || (trimmed.starts_with('\'') && trimmed.ends_with('\'')))
-    {
-        trimmed[1..trimmed.len() - 1].trim().to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-fn split_frontmatter(input: &str) -> Result<(Vec<String>, Vec<String>), UserParseError> {
-    let mut lines = input.lines();
-    let first = lines.next().unwrap_or_default();
-    if first.trim() != "---" {
-        return Err(UserParseError::MissingFrontmatter);
-    }
-
-    let mut frontmatter = Vec::new();
-    let mut body = Vec::new();
-    let mut in_frontmatter = true;
-
-    for line in lines {
-        if in_frontmatter {
-            if line.trim() == "---" {
-                in_frontmatter = false;
-                continue;
-            }
-            frontmatter.push(line.to_string());
-            continue;
-        }
-        body.push(line.to_string());
-    }
-
-    if in_frontmatter {
-        return Err(UserParseError::UnterminatedFrontmatter);
-    }
-
-    Ok((frontmatter, body))
-}
-
 fn parse_frontmatter(lines: &[String]) -> Result<UserFrontmatter, UserParseError> {
-    let mut title: Option<String> = None;
-    let mut summary: Option<String> = None;
-    let mut read_when: Vec<String> = Vec::new();
-
-    let mut idx = 0usize;
-    while idx < lines.len() {
-        let trimmed = lines[idx].trim();
-        if trimmed.is_empty() {
-            idx += 1;
-            continue;
-        }
-
-        if let Some(rest) = trimmed.strip_prefix("title:") {
-            title = Some(strip_outer_quotes(rest));
-            idx += 1;
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix("summary:") {
-            summary = Some(strip_outer_quotes(rest));
-            idx += 1;
-            continue;
-        }
-        if trimmed.starts_with("read_when:") {
-            idx += 1;
-            while idx < lines.len() {
-                let item = lines[idx].trim();
-                if item.is_empty() {
-                    idx += 1;
-                    continue;
-                }
-                if let Some(v) = item.strip_prefix("- ") {
-                    read_when.push(strip_outer_quotes(v));
-                    idx += 1;
-                    continue;
-                }
-                break;
-            }
-            continue;
-        }
-
-        idx += 1;
-    }
+    let crate::utils::markdown::PersonaFrontmatter {
+        title,
+        summary,
+        read_when,
+    } = crate::utils::markdown::scan_persona_frontmatter(lines);
 
     let title = title.ok_or(UserParseError::MissingField("title"))?;
     let summary = summary.ok_or(UserParseError::MissingField("summary"))?;
@@ -328,7 +249,15 @@ fn parse_sections(lines: &[String]) -> ParsedSections {
 /// Unlike `parse_soul_markdown`, all body sections are optional.
 /// Only the YAML frontmatter is required.
 pub fn parse_user_markdown(input: &str) -> Result<UserDocument, UserParseError> {
-    let (frontmatter_lines, body_lines) = split_frontmatter(input)?;
+    let (frontmatter_lines, body_lines) = crate::utils::markdown::split_frontmatter(input)
+        .map_err(|error| match error {
+            crate::utils::markdown::FrontmatterError::MissingFrontmatter => {
+                UserParseError::MissingFrontmatter
+            }
+            crate::utils::markdown::FrontmatterError::UnterminatedFrontmatter => {
+                UserParseError::UnterminatedFrontmatter
+            }
+        })?;
     let frontmatter = parse_frontmatter(&frontmatter_lines)?;
     let sections = parse_sections(&body_lines);
 

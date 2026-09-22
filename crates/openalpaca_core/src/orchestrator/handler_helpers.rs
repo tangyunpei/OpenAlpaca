@@ -9,22 +9,7 @@ use chrono::Utc;
 use openalpaca_llm::ContentPart;
 use uuid::Uuid;
 
-use super::dispatcher::DispatchOutcome;
-
 impl Orchestrator {
-    /// Record structured delegation metadata for the bridge to attach to the
-    /// response (mirrors `llm_metadata_map`: inserted here, drained by the
-    /// daemon's `build_result`).
-    pub(super) fn record_delegation(&self, request_id: Uuid, outcome: &DispatchOutcome) {
-        self.delegation_map.insert(
-            request_id,
-            crate::gateway::DelegationInfo {
-                task_id: outcome.task_id.clone(),
-                title: outcome.title.clone(),
-            },
-        );
-    }
-
     /// The `/slash` tier's tombstone answer (extension design §10 case 5(a)).
     ///
     /// `SkillCatalog::remove` scrubs the command and alias indices, so after a
@@ -54,6 +39,7 @@ impl Orchestrator {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn invoke_skill_with_telemetry(
         &self,
+        turn: &mut crate::gateway::HandleResult,
         request_id: Uuid,
         source: &str,
         skill_name: &str,
@@ -90,9 +76,7 @@ impl Orchestrator {
         // Auto-routed skills never reach here unsatisfiable: the router drops
         // them from candidacy on the same predicate.
         if let Some(entry) = self.skill_catalog.get(skill_name) {
-            let requirements = self
-                .tool_registry
-                .skill_requirements(&entry.frontmatter);
+            let requirements = self.tool_registry.skill_requirements(&entry.frontmatter);
             if !requirements.is_satisfiable() {
                 // The announcement the surface assembly this short-circuits
                 // would have made (§7.2, `Moment::SurfaceAssembly`), scoped to
@@ -113,7 +97,7 @@ impl Orchestrator {
                 );
                 // A1 — the refusal is written here, without a model.
                 self.skip_turn_attachments(
-                    request_id,
+                    turn,
                     attachments,
                     super::handler_attachments::skipped::SKILL_REFUSED,
                 );
@@ -131,6 +115,7 @@ impl Orchestrator {
             .map(|s| s.score);
 
         self.handle_skill_invocation(
+            turn,
             request_id,
             source,
             skill_name,

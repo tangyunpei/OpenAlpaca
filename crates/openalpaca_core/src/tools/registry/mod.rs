@@ -416,7 +416,7 @@ impl ToolRegistry {
         if name.len() > 256 {
             return Err(format!(
                 "Tool name '{}...' exceeds 256 char limit",
-                &name[..32.min(name.len())]
+                crate::utils::prefix_by_bytes(name, 32)
             ));
         }
         if name.contains('\0') {

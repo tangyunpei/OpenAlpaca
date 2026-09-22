@@ -5,8 +5,8 @@ use crate::memory::scope_context::MemoryScopeContext;
 use crate::orchestrator::{ConversationContext, Orchestrator};
 use crate::runner::LoopFinishReason;
 use chrono::Utc;
-use openalpaca_storage::repository::SkillExecutionRepository;
 use openalpaca_storage::SkillExecutionEntry;
+use openalpaca_storage::repository::SkillExecutionRepository;
 use uuid::Uuid;
 
 /// Result of a skill invocation, carrying LLM metadata alongside the output content.
@@ -31,6 +31,7 @@ impl Orchestrator {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::orchestrator) async fn handle_skill_invocation(
         &self,
+        turn: &mut crate::gateway::HandleResult,
         request_id: Uuid,
         source: &str,
         skill_name: &str,
@@ -60,6 +61,7 @@ impl Orchestrator {
 
         let result = self
             .handle_skill_invocation_inner(
+                turn,
                 request_id,
                 source,
                 skill_name,
@@ -125,8 +127,16 @@ impl Orchestrator {
                 duration_ms: duration_ms as i64,
                 rounds_used: result.as_ref().ok().map(|r| r.rounds_used as i32),
                 tool_calls_made: result.as_ref().ok().map(|r| r.tool_calls_made as i32),
-                input_tokens: result.as_ref().ok().map(|r| r.input_tokens as i32).unwrap_or(0),
-                output_tokens: result.as_ref().ok().map(|r| r.output_tokens as i32).unwrap_or(0),
+                input_tokens: result
+                    .as_ref()
+                    .ok()
+                    .map(|r| r.input_tokens as i32)
+                    .unwrap_or(0),
+                output_tokens: result
+                    .as_ref()
+                    .ok()
+                    .map(|r| r.output_tokens as i32)
+                    .unwrap_or(0),
                 cost_usd: result.as_ref().ok().map(|r| r.cost_usd).unwrap_or(0.0),
                 model_used: result.as_ref().ok().and_then(|r| r.model_used.clone()),
                 query_preview: if store_preview {
@@ -136,8 +146,16 @@ impl Orchestrator {
                 },
                 route_score,
                 was_auto_selected,
-                repair_attempted: result.as_ref().ok().map(|r| r.repair_attempted).unwrap_or(false),
-                repair_succeeded: result.as_ref().ok().map(|r| r.repair_succeeded).unwrap_or(false),
+                repair_attempted: result
+                    .as_ref()
+                    .ok()
+                    .map(|r| r.repair_attempted)
+                    .unwrap_or(false),
+                repair_succeeded: result
+                    .as_ref()
+                    .ok()
+                    .map(|r| r.repair_succeeded)
+                    .unwrap_or(false),
                 timestamp: None,
             };
             if let Err(e) = SkillExecutionRepository::new(db).record(&entry) {

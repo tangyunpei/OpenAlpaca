@@ -18,6 +18,7 @@ mod handler_helpers;
 mod handlers;
 mod memory_ops;
 mod query_handler;
+mod send_context;
 mod summary;
 mod task_launch;
 mod task_ops;
@@ -59,13 +60,11 @@ use crate::security::gate::SecurityGate;
 use crate::security::policy::Principal;
 use crate::tools::ToolRegistry;
 use arc_swap::ArcSwap;
-use dashmap::DashMap;
 use openalpaca_llm::{ChatMessage, LlmRouter};
 use openalpaca_storage::{Database, Task};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, RwLock};
-use uuid::Uuid;
 
 /// Takes a path out of the filesystem watcher's poll set (S8).
 ///
@@ -144,19 +143,6 @@ pub trait FollowupRunner: Send + Sync {
 use dispatcher::TaskDispatcher;
 use intent::IntentParser;
 
-/// Metadata from an LLM call, stored by query/skill handlers and
-/// read by the bridge to propagate into `HandleResult`.
-///
-/// This avoids threading metadata through all internal `Result<String, String>`
-/// return paths — the orchestrator keeps returning `Result<String, String>`
-/// internally, and metadata flows through this side-channel keyed by request_id
-/// to avoid races between concurrent requests.
-pub struct LlmMetadata {
-    pub model: String,
-    pub tokens_in: u32,
-    pub tokens_out: u32,
-}
-
 /// The Orchestrator: unified message handler for all user interactions.
 ///
 /// Routing (Routing V2): deterministic tiers (task ops, `/steer`, skills,
@@ -209,21 +195,9 @@ pub struct Orchestrator {
     connector_status: Arc<RwLock<Option<Arc<dyn ConnectorStatusProvider>>>>,
     /// Connector send provider for outbound messaging tool (set post-construction).
     pub connector_sender: Arc<RwLock<Option<Arc<dyn ConnectorSendProvider>>>>,
-    /// Per-request LLM metadata from query/skill handlers → bridge.
-    /// Keyed by request_id to avoid races between concurrent requests.
-    /// Populated after LLM response, removed by bridge after reading.
-    pub llm_metadata_map: DashMap<Uuid, LlmMetadata>,
-    /// Per-request delegation metadata from dispatch paths → bridge.
-    /// Mirrors `llm_metadata_map`: populated when a dispatch creates a task,
-    /// removed by bridge after reading.
-    pub delegation_map: DashMap<Uuid, crate::gateway::DelegationInfo>,
-    /// U3 — per-request record of the turn's attachments that never reached
-    /// the model. Mirrors `delegation_map`: written by the attachment
-    /// adaptation, removed by the bridge after reading. Written only when
-    /// something was actually withheld, so an ordinary turn touches nothing.
-    pub attachments_skipped_map: DashMap<Uuid, Vec<crate::gateway::SkippedAttachment>>,
     /// Optional broker for interactive tool confirmation (set post-construction via `set_confirmation_broker()`).
-    pub confirmation_broker: Arc<RwLock<Option<Arc<crate::security::confirmation::ConfirmationBroker>>>>,
+    pub confirmation_broker:
+        Arc<RwLock<Option<Arc<crate::security::confirmation::ConfirmationBroker>>>>,
     /// Context manager for resolving dynamic context (memory, user profile, etc.) via PromptBuilder.
     context_manager: Arc<ContextManager>,
     /// Monotonic counter bumped on every persona-doc (SOUL / USER / IDENTITY)
@@ -278,7 +252,6 @@ pub(crate) fn wrap_untrusted_context(
     )
 }
 
-
 impl Orchestrator {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -307,18 +280,14 @@ impl Orchestrator {
                 Box::new(crate::prompt_ctx::sources::memory::MemorySource::new(
                     Arc::new(db_ref.clone()),
                 )),
-                Box::new(
-                    crate::prompt_ctx::sources::conversation::ConversationSource::new(),
-                ),
+                Box::new(crate::prompt_ctx::sources::conversation::ConversationSource::new()),
                 Box::new(
                     crate::prompt_ctx::sources::user_profile::UserProfileSource::new(
                         user_document.clone(),
                     ),
                 ),
                 Box::new(crate::prompt_ctx::sources::skill::SkillContextSource::new()),
-                Box::new(
-                    crate::prompt_ctx::sources::workspace::WorkspaceSource::new(),
-                ),
+                Box::new(crate::prompt_ctx::sources::workspace::WorkspaceSource::new()),
             ];
             ContextManager::new(sources, daemon_config.clone())
         } else {
@@ -377,9 +346,6 @@ impl Orchestrator {
             bootstrap_completing: AtomicBool::new(false),
             connector_status,
             connector_sender,
-            llm_metadata_map: DashMap::new(),
-            delegation_map: DashMap::new(),
-            attachments_skipped_map: DashMap::new(),
             confirmation_broker: Arc::new(RwLock::new(None)),
             context_manager,
             persona_version: Arc::new(AtomicU64::new(0)),
