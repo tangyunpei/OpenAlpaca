@@ -1,18 +1,71 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
-use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tracing::{debug, error, trace, warn};
 
 use crate::error::PluginError;
 
 /// Map of in-flight request IDs to their response senders.
 type PendingMap = HashMap<u64, oneshot::Sender<Result<Value, PluginError>>>;
+
+/// Critical sections only insert/remove senders and never await. A synchronous
+/// mutex lets a dropped request future remove its entry immediately.
+#[derive(Default)]
+struct PendingRequests(Mutex<PendingMap>);
+
+impl PendingRequests {
+    fn register(
+        &self,
+        id: u64,
+        sender: oneshot::Sender<Result<Value, PluginError>>,
+    ) -> PendingRequest<'_> {
+        self.0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(id, sender);
+        PendingRequest { requests: self, id }
+    }
+
+    fn take(&self, id: u64) -> Option<oneshot::Sender<Result<Value, PluginError>>> {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).remove(&id)
+    }
+
+    fn drain(&self) {
+        let requests = std::mem::take(&mut *self.0.lock().unwrap_or_else(|p| p.into_inner()));
+        if !requests.is_empty() {
+            warn!(
+                count = requests.len(),
+                "draining pending requests after process exit"
+            );
+        }
+        for sender in requests.into_values() {
+            let _ = sender.send(Err(PluginError::ProcessCrashed));
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.0.lock().unwrap().len()
+    }
+}
+
+struct PendingRequest<'a> {
+    requests: &'a PendingRequests,
+    id: u64,
+}
+
+impl Drop for PendingRequest<'_> {
+    fn drop(&mut self) {
+        // The reader may already have completed it. Removal is idempotent.
+        self.requests.take(self.id);
+    }
+}
 
 /// Multiplexed JSON-RPC 2.0 transport over a child process's stdin/stdout.
 ///
@@ -27,7 +80,7 @@ type PendingMap = HashMap<u64, oneshot::Sender<Result<Value, PluginError>>>;
 #[derive(Clone)]
 pub struct StdioChannel {
     writer: mpsc::Sender<Vec<u8>>,
-    pending: Arc<Mutex<PendingMap>>,
+    pending: Arc<PendingRequests>,
     next_id: Arc<AtomicU64>,
     semaphore: Arc<Semaphore>,
     /// Kept alive so cloned `StdioChannel` handles retain the notification sender.
@@ -49,7 +102,7 @@ impl StdioChannel {
     ) -> (Self, mpsc::Receiver<Value>) {
         let (writer_tx, writer_rx) = mpsc::channel::<Vec<u8>>(64);
         let (notification_tx, notification_rx) = mpsc::channel::<Value>(64);
-        let pending: Arc<Mutex<PendingMap>> = Arc::new(Mutex::new(HashMap::new()));
+        let pending: Arc<PendingRequests> = Arc::new(PendingRequests::default());
 
         // Spawn writer task
         tokio::spawn(writer_task(stdin, writer_rx));
@@ -97,11 +150,8 @@ impl StdioChannel {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
 
-        // Register the pending request — lock is dropped before any await.
-        {
-            let mut map = self.pending.lock().await;
-            map.insert(id, tx);
-        }
+        // Covers normal completion, timeout, send failure and external cancellation.
+        let _pending = self.pending.register(id, tx);
 
         let request = serde_json::json!({
             "jsonrpc": "2.0",
@@ -115,23 +165,14 @@ impl StdioChannel {
 
         debug!(id, method, "sending JSON-RPC request");
 
-        if let Err(_e) = self.writer.send(frame.into_bytes()).await {
-            self.pending.lock().await.remove(&id);
-            return Err(PluginError::ChannelClosed);
-        }
-
+        self.writer
+            .send(frame.into_bytes())
+            .await
+            .map_err(|_| PluginError::ChannelClosed)?;
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(result)) => result,
-            Ok(Err(_)) => {
-                // oneshot sender was dropped — process crashed
-                self.pending.lock().await.remove(&id);
-                Err(PluginError::ProcessCrashed)
-            }
-            Err(_) => {
-                // Timed out waiting for response
-                self.pending.lock().await.remove(&id);
-                Err(PluginError::Timeout)
-            }
+            Ok(Err(_)) => Err(PluginError::ProcessCrashed),
+            Err(_) => Err(PluginError::Timeout),
         }
     }
 
@@ -159,15 +200,8 @@ impl StdioChannel {
     /// Drain all pending requests, sending `ProcessCrashed` to each.
     ///
     /// Called when the child process exits or crashes to unblock all waiters.
-    pub async fn drain_pending(&self) {
-        let mut map = self.pending.lock().await;
-        let count = map.len();
-        for (_id, sender) in map.drain() {
-            let _ = sender.send(Err(PluginError::ProcessCrashed));
-        }
-        if count > 0 {
-            warn!(count, "drained pending requests after process exit");
-        }
+    pub fn drain_pending(&self) {
+        self.pending.drain();
     }
 }
 
@@ -195,7 +229,7 @@ async fn writer_task(mut stdin: ChildStdin, mut rx: mpsc::Receiver<Vec<u8>>) {
 /// production passes the child's `ChildStdout`.
 async fn reader_task<R>(
     stdout: R,
-    pending: Arc<Mutex<PendingMap>>,
+    pending: Arc<PendingRequests>,
     notification_tx: mpsc::Sender<Value>,
 ) where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
@@ -211,7 +245,11 @@ async fn reader_task<R>(
         // Step 1: Read header line(s) until we find Content-Length.
         let content_length = match read_content_length(&mut reader).await {
             Ok(len) if len > MAX_MESSAGE_BYTES => {
-                error!(len, max = MAX_MESSAGE_BYTES, "plugin message exceeds maximum size; closing channel");
+                error!(
+                    len,
+                    max = MAX_MESSAGE_BYTES,
+                    "plugin message exceeds maximum size; closing channel"
+                );
                 break;
             }
             Ok(len) => len,
@@ -253,10 +291,7 @@ async fn reader_task<R>(
             let result = if let Some(result) = msg.get("result") {
                 Ok(result.clone())
             } else if let Some(err_obj) = msg.get("error") {
-                let code = err_obj
-                    .get("code")
-                    .and_then(|c| c.as_i64())
-                    .unwrap_or(-1);
+                let code = err_obj.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
                 let message = err_obj
                     .get("message")
                     .and_then(|m| m.as_str())
@@ -274,10 +309,7 @@ async fn reader_task<R>(
             };
 
             // Look up and notify the waiter — lock is not held across await.
-            let sender = {
-                let mut map = pending.lock().await;
-                map.remove(&id)
-            };
+            let sender = pending.take(id);
 
             if let Some(tx) = sender {
                 let _ = tx.send(result);
@@ -310,14 +342,7 @@ async fn reader_task<R>(
     }
 
     // Process exited or stdout closed — drain all pending requests.
-    let mut map = pending.lock().await;
-    let count = map.len();
-    for (_id, sender) in map.drain() {
-        let _ = sender.send(Err(PluginError::ProcessCrashed));
-    }
-    if count > 0 {
-        warn!(count, "reader task draining pending requests on exit");
-    }
+    pending.drain();
     debug!("reader task exiting");
 }
 
@@ -439,9 +464,9 @@ mod tests {
 
         // Same capacity as StdioChannel::new.
         let (notification_tx, notification_rx) = mpsc::channel::<Value>(64);
-        let pending: Arc<Mutex<PendingMap>> = Arc::new(Mutex::new(HashMap::new()));
+        let pending: Arc<PendingRequests> = Arc::new(PendingRequests::default());
         let (tx, rx) = oneshot::channel();
-        pending.lock().await.insert(1, tx);
+        let _pending_request = pending.register(1, tx);
 
         tokio::spawn(reader_task(server, Arc::clone(&pending), notification_tx));
 
@@ -468,5 +493,107 @@ mod tests {
 
         // Keep the receiver alive to the end so try_send saw Full (not Closed).
         drop(notification_rx);
+    }
+
+    fn test_channel() -> (StdioChannel, mpsc::Receiver<Vec<u8>>, mpsc::Receiver<Value>) {
+        let (writer, frames) = mpsc::channel(1);
+        let (notification_tx, notifications) = mpsc::channel(64);
+        (
+            StdioChannel {
+                writer,
+                pending: Arc::new(PendingRequests::default()),
+                next_id: Arc::new(AtomicU64::new(1)),
+                semaphore: Arc::new(Semaphore::new(1)),
+                notification_tx,
+                default_timeout: Duration::from_secs(60),
+            },
+            frames,
+            notifications,
+        )
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_call_releases_its_entry_and_permit_and_ignores_late_response() {
+        let (channel, mut frames, _notifications) = test_channel();
+        let (mut output, input) = tokio::io::duplex(4096);
+        let reader = tokio::spawn(reader_task(
+            input,
+            channel.pending.clone(),
+            channel.notification_tx.clone(),
+        ));
+        let first = tokio::spawn({
+            let channel = channel.clone();
+            async move { channel.call("first", Value::Null).await }
+        });
+        frames.recv().await.unwrap();
+        assert_eq!(channel.pending.len(), 1);
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        assert_eq!(channel.pending.len(), 0);
+        assert_eq!(channel.semaphore.available_permits(), 1);
+
+        let second = tokio::spawn({
+            let channel = channel.clone();
+            async move { channel.call("second", Value::Null).await }
+        });
+        frames.recv().await.unwrap();
+        output
+            .write_all(&frame(r#"{"id":1,"result":"late"}"#))
+            .await
+            .unwrap();
+        output
+            .write_all(&frame(r#"{"id":2,"result":"current"}"#))
+            .await
+            .unwrap();
+        assert_eq!(second.await.unwrap().unwrap(), "current");
+        assert_eq!(channel.pending.len(), 0);
+        drop(output);
+        reader.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelling_while_the_writer_is_full_also_cleans_up() {
+        let (channel, _frames, _notifications) = test_channel();
+        channel.writer.try_send(Vec::new()).unwrap();
+        let call = tokio::spawn({
+            let channel = channel.clone();
+            async move { channel.call("blocked", Value::Null).await }
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(channel.pending.len(), 1);
+        call.abort();
+        let _ = call.await;
+        assert_eq!(channel.pending.len(), 0);
+        assert_eq!(channel.semaphore.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn timeout_closed_writer_and_process_exit_release_pending_requests() {
+        let (channel, mut frames, _notifications) = test_channel();
+        assert!(matches!(
+            channel
+                .call_with_timeout("timeout", Value::Null, Duration::ZERO)
+                .await,
+            Err(PluginError::Timeout)
+        ));
+        assert_eq!(channel.pending.len(), 0);
+        frames.recv().await.unwrap();
+        let call = tokio::spawn({
+            let channel = channel.clone();
+            async move { channel.call("crash", Value::Null).await }
+        });
+        frames.recv().await.unwrap();
+        channel.drain_pending();
+        assert!(matches!(
+            call.await.unwrap(),
+            Err(PluginError::ProcessCrashed)
+        ));
+        assert_eq!(channel.pending.len(), 0);
+        drop(frames);
+        assert!(matches!(
+            channel.call("closed", Value::Null).await,
+            Err(PluginError::ChannelClosed)
+        ));
+        assert_eq!(channel.pending.len(), 0);
     }
 }

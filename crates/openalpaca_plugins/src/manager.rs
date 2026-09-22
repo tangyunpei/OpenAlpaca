@@ -28,6 +28,8 @@
 //! sequence is W → E0 → E-PRE → E1 → E2 → E3 → E4 → E5; each step is a method
 //! named after it below.
 
+use crate::config::toml_to_json;
+
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
@@ -2992,27 +2994,6 @@ fn build_agent_template_from_info(
             plugin_id: plugin_name.to_string(),
             executor: bridge,
         },
-    }
-}
-
-/// Convert a `toml::Value` to a `serde_json::Value`.
-fn toml_to_json(v: &toml::Value) -> Value {
-    match v {
-        toml::Value::String(s) => Value::String(s.clone()),
-        toml::Value::Integer(i) => Value::Number((*i).into()),
-        toml::Value::Float(f) => serde_json::Number::from_f64(*f)
-            .map(Value::Number)
-            .unwrap_or(Value::Null),
-        toml::Value::Boolean(b) => Value::Bool(*b),
-        toml::Value::Datetime(dt) => Value::String(dt.to_string()),
-        toml::Value::Array(arr) => Value::Array(arr.iter().map(toml_to_json).collect()),
-        toml::Value::Table(tbl) => {
-            let map: serde_json::Map<String, Value> = tbl
-                .iter()
-                .map(|(k, v)| (k.clone(), toml_to_json(v)))
-                .collect();
-            Value::Object(map)
-        }
     }
 }
 
