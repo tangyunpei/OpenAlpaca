@@ -152,8 +152,6 @@ crates/
   openalpaca_connectors/# Chat platform adapters (Telegram, iMessage, Discord)
   openalpaca_mcp/       # MCP client (rmcp wrapper) — connects out to MCP servers, imports tools
   openalpaca_plugins/   # Out-of-process plugin system (JSON-RPC over stdio, approval gate)
-  openalpaca_platform/  # Platform abstractions (placeholder)
-  openalpaca_platform_macos/  # macOS-specific (placeholder)
 config/
   daemon.toml           # Execution limits, server settings, memory/cost budgets
   mcp.toml              # MCP server declarations + connect/reconnect defaults

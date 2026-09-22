@@ -129,7 +129,7 @@ More detail: [docs/agent-loop.md](docs/agent-loop.md) and [docs/Daemon_Manual.md
 
 ## Project layout
 
-A Rust workspace (edition 2024) with three apps and ten library crates.
+A Rust workspace (edition 2024) with three apps and eight library crates.
 
 | Path | What it is |
 |---|---|
@@ -144,7 +144,6 @@ A Rust workspace (edition 2024) with three apps and ten library crates.
 | `crates/openalpaca_connectors` | Telegram, iMessage and Discord adapters |
 | `crates/openalpaca_mcp` | MCP client: stdio and streamable-HTTP transports |
 | `crates/openalpaca_plugins` | Out-of-process plugins: JSON-RPC over stdio, manifests, approval gate |
-| `crates/openalpaca_platform`, `crates/openalpaca_platform_macos` | Empty placeholders |
 
 ## Configuration and data
 

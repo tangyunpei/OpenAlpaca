@@ -4295,14 +4295,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "openalpaca_platform"
-version = "0.1.0"
-
-[[package]]
-name = "openalpaca_platform_macos"
-version = "0.1.0"
-
-[[package]]
 name = "openalpaca_plugins"
 version = "0.1.0"
 dependencies = [
