@@ -119,46 +119,66 @@ fn spawn_daemon() -> anyhow::Result<()> {
     tracing::info!("Daemon runtime dir: {}", app_dir.display());
     tracing::info!("Daemon config dir: {}", config_dir.display());
 
+    #[cfg(any(unix, windows))]
+    daemon_command(&path_to_use, &app_dir, &config_dir).spawn()?;
+    Ok(())
+}
+
+/// Common launch settings; platform branches only configure detachment.
+fn daemon_command(
+    binary: &std::path::Path,
+    runtime_dir: &std::path::Path,
+    config_dir: &std::path::Path,
+) -> Command {
+    let mut cmd = Command::new(binary);
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .current_dir(runtime_dir)
+        .env("OPENALPACA_CONFIG_DIR", config_dir);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-
-        // On Unix, use setsid to detach from terminal
-        let mut cmd = Command::new(&path_to_use);
-        cmd.stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .current_dir(&app_dir)
-            .env("OPENALPACA_CONFIG_DIR", &config_dir);
-
-        // Create new session (detach from parent)
+        // SAFETY: setsid is async-signal-safe and the callback allocates nothing.
         unsafe {
             cmd.pre_exec(|| {
                 libc::setsid();
                 Ok(())
             });
         }
-
-        cmd.spawn()?;
     }
-
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const DETACHED_PROCESS: u32 = 0x00000008;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-        Command::new(&path_to_use)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .current_dir(&app_dir)
-            .env("OPENALPACA_CONFIG_DIR", &config_dir)
-            .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
-            .spawn()?;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW);
     }
+    cmd
+}
 
-    Ok(())
+#[cfg(test)]
+mod tests {
+    use super::daemon_command;
+    use std::{ffi::OsStr, path::Path};
+
+    #[test]
+    fn sidecar_command_uses_the_bundle_binary_and_runtime_config() {
+        let binary = Path::new("bundle/openalpacad");
+        let runtime = Path::new("runtime");
+        let config = Path::new("runtime/config");
+        let command = daemon_command(binary, runtime, config);
+        assert_eq!(command.get_program(), binary.as_os_str());
+        assert_eq!(command.get_current_dir(), Some(runtime));
+        assert_eq!(command.get_args().count(), 0);
+        assert_eq!(
+            command.get_envs().collect::<Vec<_>>(),
+            vec![(
+                OsStr::new("OPENALPACA_CONFIG_DIR"),
+                Some(config.as_os_str())
+            )]
+        );
+    }
 }
 
 // ============================================================================
