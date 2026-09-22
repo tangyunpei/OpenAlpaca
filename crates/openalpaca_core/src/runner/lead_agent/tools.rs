@@ -198,7 +198,13 @@ impl BuiltInTool for SpawnSubagentTool {
 
         tracing::info!(
             target_agent = agent_id,
-            objective_preview = &objective[..objective.len().min(80)],
+            // 80 **bytes**, cut on a character boundary: the objective is
+            // model-authored text and `&objective[..80]` panicked on any
+            // multi-byte character straddling the cut. This log line is at
+            // INFO — the daemon's default level — and runs before the
+            // self-spawn and depth guards, so the panic was reachable in a
+            // stock install.
+            objective_preview = crate::utils::text::byte_prefix(objective, 80),
             task_id = %self.task_id,
             "Lead agent spawning subagent"
         );

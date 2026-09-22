@@ -2658,3 +2658,65 @@ async fn a_plugin_backed_subagent_may_call_the_tool_its_capability_resolves_to()
     assert_eq!(web_search.calls(), 1);
     assert!(violations.is_empty(), "{violations:?}");
 }
+
+/// The lead's `spawn_subagent` logs an 80-byte preview of the objective at
+/// INFO — the daemon's default level — *before* the self-spawn and depth
+/// guards run, so `&objective[..80]` was a live panic on any objective whose
+/// byte 80 fell inside a character. A lead agent's objective is model-authored
+/// text, and a Chinese one puts a 3-byte character across that cut.
+///
+/// `#[traced_test]` matters: `tracing::info!` does not evaluate its field
+/// expressions unless a subscriber has enabled the callsite, so without a
+/// subscriber this test would pass against the broken code.
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn spawn_subagent_survives_a_multibyte_objective_preview() {
+    let tracker = Arc::new(SubagentTracker::new());
+    let spawn_tool = SpawnSubagentTool::new(
+        Arc::new(openalpaca_llm::LlmRouter::new(
+            std::collections::HashMap::new(),
+            openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
+            std::collections::HashMap::new(),
+            Arc::new(openalpaca_llm::CostTracker::new(
+                openalpaca_llm::ModelRegistry::new(std::collections::HashMap::new()),
+            )),
+            "test-model".to_string(),
+        )),
+        Arc::new(ToolRegistry::default()),
+        Arc::new(SharedContext::new()),
+        EventBus::default(),
+        None,
+        "task-utf8".to_string(),
+        "user-1".to_string(),
+        "test-lead".to_string(),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+        None,
+        tracker,
+        0,
+        DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+        MemoryScopeContext::global_only(),
+        None,
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::prompt_ctx::section::ContextBundle::empty()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        false,
+    );
+
+    // 40 Chinese characters = 120 bytes; byte 80 lands inside the 27th.
+    let objective = "请把这些会议记录整理成一份摘要并列出待办事项谢谢你帮忙啊好的没问题再见吧朋友";
+    assert!(objective.len() > 80);
+    assert!(!objective.is_char_boundary(80));
+
+    // The agent id is the lead's own template, so execute() refuses right
+    // after the log line — the preview is what we are exercising, not a spawn.
+    let result = spawn_tool
+        .execute(&serde_json::json!({
+            "agent_id": "test-lead",
+            "objective": objective,
+        }))
+        .await;
+
+    let err = result.expect_err("self-spawn is refused");
+    assert!(err.contains("cannot spawn itself"), "{err}");
+    assert!(logs_contain("Lead agent spawning subagent"));
+}
