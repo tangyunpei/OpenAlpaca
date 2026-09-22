@@ -13,8 +13,11 @@ pub(super) fn parse_anthropic_sse(
 ) -> impl futures_util::Stream<Item = Result<StreamEvent, LlmError>> + Send {
     let text_stream = crate::providers::utf8::utf8_chunks(byte_stream);
     futures_util::stream::unfold(
-        (Box::pin(text_stream), String::new(), 0_usize),
-        |(mut stream, mut buffer, mut block_index)| async move {
+        (Box::pin(text_stream), String::new(), 0_usize, None),
+        |(mut stream, mut buffer, mut block_index, mut pending)| async move {
+            if let Some(event) = pending.take() {
+                return Some((Ok(event), (stream, buffer, block_index, pending)));
+            }
             loop {
                 // Try to extract a complete SSE frame from the buffer
                 while let Some(frame_end) = buffer.find("\n\n") {
@@ -56,14 +59,10 @@ pub(super) fn parse_anthropic_sse(
                             let block = &json["content_block"];
                             let block_type = block["type"].as_str().unwrap_or("");
                             if block_type == "tool_use" {
-                                let id =
-                                    block["id"].as_str().unwrap_or_default().to_string();
-                                let name =
-                                    block["name"].as_str().unwrap_or_default().to_string();
-                                let idx = json["index"]
-                                    .as_u64()
-                                    .unwrap_or(block_index as u64)
-                                    as usize;
+                                let id = block["id"].as_str().unwrap_or_default().to_string();
+                                let name = block["name"].as_str().unwrap_or_default().to_string();
+                                let idx =
+                                    json["index"].as_u64().unwrap_or(block_index as u64) as usize;
                                 block_index = idx + 1;
                                 return Some((
                                     Ok(StreamEvent::ToolUseStart {
@@ -71,7 +70,7 @@ pub(super) fn parse_anthropic_sse(
                                         id,
                                         name,
                                     }),
-                                    (stream, buffer, block_index),
+                                    (stream, buffer, block_index, pending),
                                 ));
                             }
                             // text and thinking blocks don't need start events
@@ -86,7 +85,7 @@ pub(super) fn parse_anthropic_sse(
                                             Ok(StreamEvent::TextDelta {
                                                 text: text.to_string(),
                                             }),
-                                            (stream, buffer, block_index),
+                                            (stream, buffer, block_index, pending),
                                         ));
                                     }
                                 }
@@ -96,20 +95,19 @@ pub(super) fn parse_anthropic_sse(
                                             Ok(StreamEvent::ThinkingDelta {
                                                 thinking: thinking.to_string(),
                                             }),
-                                            (stream, buffer, block_index),
+                                            (stream, buffer, block_index, pending),
                                         ));
                                     }
                                 }
                                 "input_json_delta" => {
                                     if let Some(pj) = delta["partial_json"].as_str() {
-                                        let idx =
-                                            json["index"].as_u64().unwrap_or(0) as usize;
+                                        let idx = json["index"].as_u64().unwrap_or(0) as usize;
                                         return Some((
                                             Ok(StreamEvent::InputJsonDelta {
                                                 index: idx,
                                                 partial_json: pj.to_string(),
                                             }),
-                                            (stream, buffer, block_index),
+                                            (stream, buffer, block_index, pending),
                                         ));
                                     }
                                 }
@@ -132,28 +130,15 @@ pub(super) fn parse_anthropic_sse(
                             } else {
                                 Usage::default()
                             };
-                            let done_frame = format!(
-                                "event: _done\ndata: {{\"finish_reason\":\"{}\"}}\n\n",
-                                stop_reason
-                            );
-                            buffer = done_frame + &buffer;
-                            return Some((
-                                Ok(StreamEvent::Usage(usage)),
-                                (stream, buffer, block_index),
-                            ));
-                        }
-                        "_done" => {
-                            let stop_reason =
-                                json["finish_reason"].as_str().unwrap_or("end_turn");
                             let finish_reason = match stop_reason {
-                                "end_turn" => FinishReason::Stop,
                                 "tool_use" => FinishReason::ToolUse,
                                 "max_tokens" => FinishReason::MaxTokens,
                                 _ => FinishReason::Stop,
                             };
+                            pending = Some(StreamEvent::Done { finish_reason });
                             return Some((
-                                Ok(StreamEvent::Done { finish_reason }),
-                                (stream, buffer, block_index),
+                                Ok(StreamEvent::Usage(usage)),
+                                (stream, buffer, block_index, pending),
                             ));
                         }
                         "message_start" => {
@@ -183,7 +168,7 @@ pub(super) fn parse_anthropic_sse(
                                             cache_creation_input_tokens: cache_creation,
                                             cache_read_input_tokens: cache_read,
                                         })),
-                                        (stream, buffer, block_index),
+                                        (stream, buffer, block_index, pending),
                                     ));
                                 }
                             }
@@ -195,7 +180,7 @@ pub(super) fn parse_anthropic_sse(
                                 .to_string();
                             return Some((
                                 Ok(StreamEvent::Error { message }),
-                                (stream, buffer, block_index),
+                                (stream, buffer, block_index, pending),
                             ));
                         }
                         // ping, content_block_stop, etc. — ignore
@@ -211,7 +196,7 @@ pub(super) fn parse_anthropic_sse(
                     Some(Err(e)) => {
                         return Some((
                             Err(LlmError::Stream(e.to_string())),
-                            (stream, buffer, block_index),
+                            (stream, buffer, block_index, pending),
                         ));
                     }
                     None => {
@@ -221,4 +206,44 @@ pub(super) fn parse_anthropic_sse(
             }
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn completion_usage_precedes_done_even_before_buffered_message_stop() {
+        for (reason, expected) in [
+            ("end_turn", FinishReason::Stop),
+            ("tool_use", FinishReason::ToolUse),
+            ("max_tokens", FinishReason::MaxTokens),
+            ("unknown\"reason", FinishReason::Stop),
+        ] {
+            let delta =
+                serde_json::json!({"delta":{"stop_reason":reason}, "usage":{"output_tokens":7}});
+            let wire = format!(
+                "event: message_delta\ndata: {delta}\n\nevent: message_stop\ndata: {{}}\n\n"
+            );
+            for bytewise in [false, true] {
+                let chunks: Vec<_> = if bytewise {
+                    wire.bytes()
+                        .map(|byte| Ok(bytes::Bytes::from(vec![byte])))
+                        .collect()
+                } else {
+                    vec![Ok(bytes::Bytes::from(wire.clone()))]
+                };
+                let events: Vec<_> = parse_anthropic_sse(futures_util::stream::iter(chunks))
+                    .collect()
+                    .await;
+                assert_eq!(events.len(), 2);
+                assert!(
+                    matches!(&events[0], Ok(StreamEvent::Usage(usage)) if usage.output_tokens == 7)
+                );
+                assert!(
+                    matches!(&events[1], Ok(StreamEvent::Done { finish_reason }) if *finish_reason == expected)
+                );
+            }
+        }
+    }
 }

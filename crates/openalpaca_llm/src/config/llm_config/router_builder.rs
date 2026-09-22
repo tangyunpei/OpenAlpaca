@@ -1,8 +1,7 @@
-use crate::LlmProvider;
+use crate::config::key_pool_builder::{KeyResolver, selection_strategy};
+use crate::config::provider_builder::{ProviderBuildError, build_provider};
 use crate::error::LlmError;
-use crate::keys::key_pool::{
-    ApiKey, KeyPool, ProviderType, SelectionStrategy,
-};
+use crate::keys::key_pool::{KeyPool, ProviderType};
 use crate::routing::cost_tracker::CostTracker;
 use crate::routing::model_registry::ModelRegistry;
 use crate::routing::router::{LlmRouter, ProviderEntry};
@@ -14,10 +13,6 @@ use tracing;
 use super::parse_provider_type;
 use super::router_config::LlmRouterConfig;
 use super::runtime::LlmRuntimeConfig;
-
-fn resolve_key_secret(env_var: &str) -> Option<String> {
-    std::env::var(env_var).ok()
-}
 
 /// Build an LlmRouter from a config file path.
 pub fn build_router(path: &std::path::Path) -> Result<LlmRouter, LlmError> {
@@ -61,206 +56,34 @@ fn build_router_from_hierarchical(
             let provider_type = parse_provider_type(provider_name)
                 .ok_or_else(|| LlmError::UnknownProvider(provider_name.clone()))?;
 
-            // Collect keys
+            let mut resolver = KeyResolver::new(secret_store, None);
             let mut api_keys = Vec::new();
-            if let Some(ref keys) = provider_config.keys {
-                for key_config in keys {
-                    // Resolution order: secret_env > secret_ref > secret_encrypted
-                    let secret = if let Some(ref env_var) = key_config.secret_env {
-                        // 1. Environment variable (highest priority, explicit)
-                        let resolved = resolve_key_secret(env_var);
-                        if resolved.is_none() {
-                            tracing::warn!(
-                                "Skipping key '{}': environment variable '{}' not set",
-                                key_config.id,
-                                env_var
-                            );
-                        }
-                        resolved
-                    } else if let Some(ref sref) = key_config.secret_ref {
-                        // 2. OS keychain via secret_ref
-                        if let Some(store) = secret_store {
-                            match store.get(sref) {
-                                Ok(Some(s)) => Some(s),
-                                Ok(None) => {
-                                    tracing::warn!(
-                                        "Skipping key '{}': secret_ref '{}' not found in keychain",
-                                        key_config.id,
-                                        sref
-                                    );
-                                    None
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Skipping key '{}': keychain error: {e}",
-                                        key_config.id
-                                    );
-                                    None
-                                }
-                            }
-                        } else {
-                            tracing::warn!(
-                                "Skipping key '{}': secret_ref set but no secret store available",
-                                key_config.id
-                            );
-                            None
-                        }
-                    } else if let Some(ref encrypted) = key_config.secret_encrypted {
-                        // 3. AES-256-GCM local encryption — the no-keychain
-                        //    fallback tier, not a compat shim (P16).
-                        if crate::keys::key_encryption::KeyEncryptor::is_encrypted(encrypted) {
-                            match crate::keys::key_encryption::KeyEncryptor::from_env() {
-                                Ok(enc) => match enc.decrypt(encrypted) {
-                                    Ok(s) => Some(s),
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "Skipping key '{}': decryption failed: {e}. \
-                                             Re-add the key via Settings to fix.",
-                                            key_config.id
-                                        );
-                                        None
-                                    }
-                                },
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Skipping key '{}': failed to load master key: {e}",
-                                        key_config.id
-                                    );
-                                    None
-                                }
-                            }
-                        } else {
-                            Some(encrypted.clone())
-                        }
-                    } else {
-                        tracing::warn!("Skipping key '{}': no secret configured", key_config.id);
-                        None
-                    };
-
-                    let secret = match secret {
-                        Some(s) => s,
-                        None => continue, // Skip this key, try next
-                    };
-
-                    let mut api_key =
-                        ApiKey::new(key_config.id.clone(), provider_type.clone(), secret.clone());
-                    crate::config::key_pool_builder::apply_key_config_metadata(
-                        &mut api_key,
-                        key_config,
-                    );
-                    api_keys.push(api_key);
+            for key_config in provider_config.keys.iter().flatten() {
+                match resolver.resolve(key_config, &provider_type) {
+                    Ok(key) => api_keys.push(key),
+                    Err(error) => {
+                        tracing::warn!(key_id = %key_config.id, %error, "Skipping invalid provider key; re-add it via Settings")
+                    }
                 }
             }
-
-            // Parse strategy from either field
-            let strategy_str = provider_config
-                .key_selection_strategy
-                .as_deref()
-                .or(provider_config.strategy.as_deref());
-            let strategy = match strategy_str {
-                Some("lru") | Some("least_recently_used") => SelectionStrategy::LeastRecentlyUsed,
-                Some("primary_fallback") => SelectionStrategy::PrimaryFallback,
-                _ => SelectionStrategy::RoundRobin,
-            };
-
-            // Use first successfully resolved key for the provider's default instance
             let first_secret = api_keys.first().map(|k| k.secret.clone());
-
-            let key_pool = KeyPool::new(api_keys, strategy);
-
-            // Build the actual provider.
-            // Skip providers that require keys but have none resolved.
-            let prov_defaults = runtime_config.provider_defaults.get(provider_name);
-            // One client per provider, carrying that provider's own timeouts —
-            // the same resolution the runtime registration path performs, so
-            // the two cannot disagree (L7). Clients pool per host, and each
-            // provider has its own, so nothing is lost by not sharing one.
-            #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
-            let request_timeout = runtime_config.request_timeout_for(provider_name);
-            #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
-            let client = crate::providers::build_http_client(request_timeout);
-            let provider: Box<dyn LlmProvider> = match &provider_type {
-                #[cfg(feature = "anthropic")]
-                ProviderType::Anthropic => {
-                    let Some(key) = first_secret else {
-                        tracing::warn!(
-                            "Skipping Anthropic provider: no valid API keys. \
-                             Re-add your key via Settings to fix."
-                        );
-                        continue;
-                    };
-                    let model = provider_config
-                        .default_model
-                        .clone()
-                        .or_else(|| prov_defaults.map(|d| d.default_model.clone()));
-                    let max_tokens = provider_config
-                        .default_max_tokens
-                        .or_else(|| prov_defaults.map(|d| d.default_max_tokens));
-                    Box::new(
-                        crate::providers::anthropic::AnthropicProvider::with_client(
-                            client, key, model, max_tokens,
-                        )
-                        .with_request_timeout(request_timeout),
-                    )
+            let key_pool = KeyPool::new(api_keys, selection_strategy(Some(provider_config)));
+            let provider = match build_provider(
+                &provider_type,
+                runtime_config
+                    .provider_defaults
+                    .get(provider_name)
+                    .and_then(|d| d.base_url.clone()),
+                &runtime_config,
+                first_secret,
+            ) {
+                Ok(provider) => provider,
+                #[cfg(any(feature = "anthropic", feature = "openai"))]
+                Err(ProviderBuildError::MissingKey) => {
+                    tracing::warn!(%provider_name, "Skipping provider: no valid API keys. Re-add your key via Settings to fix.");
+                    continue;
                 }
-                #[cfg(feature = "openai")]
-                ProviderType::OpenAI => {
-                    let Some(key) = first_secret else {
-                        tracing::warn!(
-                            "Skipping OpenAI provider: no valid API keys. \
-                             Re-add your key via Settings to fix."
-                        );
-                        continue;
-                    };
-                    let model = provider_config
-                        .default_model
-                        .clone()
-                        .or_else(|| prov_defaults.map(|d| d.default_model.clone()));
-                    let base_url = provider_config
-                        .base_url
-                        .clone()
-                        .or_else(|| prov_defaults.and_then(|d| d.base_url.clone()));
-                    let max_tokens = provider_config
-                        .default_max_tokens
-                        .or_else(|| prov_defaults.map(|d| d.default_max_tokens));
-                    Box::new(
-                        crate::providers::openai::OpenAiProvider::with_client(
-                            client, key, model, base_url, max_tokens,
-                        )
-                        .with_request_timeout(request_timeout),
-                    )
-                }
-                #[cfg(feature = "ollama")]
-                ProviderType::Ollama => {
-                    // An empty `default_model` is the seeded template's way of
-                    // saying "whatever is installed" (L4) — the catalogue
-                    // answers that, so it must never become a tag on the wire.
-                    // The router names the model on every request; this is only
-                    // the instance-level fallback for a caller that names none.
-                    let model = provider_config
-                        .default_model
-                        .clone()
-                        .or_else(|| prov_defaults.map(|d| d.default_model.clone()))
-                        .filter(|m| !m.trim().is_empty())
-                        .unwrap_or_else(|| "llama3".to_string());
-                    let base_url = provider_config
-                        .base_url
-                        .clone()
-                        .or_else(|| prov_defaults.and_then(|d| d.base_url.clone()));
-                    // Read like the other two arms: the file's output ceiling
-                    // reaches the request body instead of the 4096 default (L6).
-                    let max_tokens = provider_config
-                        .default_max_tokens
-                        .or_else(|| prov_defaults.map(|d| d.default_max_tokens));
-                    Box::new(
-                        crate::providers::ollama::OllamaProvider::with_client(
-                            client, model, base_url, max_tokens,
-                        )
-                        .with_request_timeout(request_timeout),
-                    )
-                }
-                #[allow(unreachable_patterns)]
-                _ => {
+                Err(ProviderBuildError::Unavailable) => {
                     return Err(LlmError::UnknownProvider(provider_name.clone()));
                 }
             };
@@ -268,7 +91,7 @@ fn build_router_from_hierarchical(
             providers_map.insert(
                 provider_type,
                 ProviderEntry {
-                    provider: Arc::from(provider),
+                    provider,
                     key_pool: Arc::new(ArcSwap::from_pointee(key_pool)),
                 },
             );

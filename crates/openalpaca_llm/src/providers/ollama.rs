@@ -328,25 +328,10 @@ impl LlmProvider for OllamaProvider {
                 return Err(LlmError::Api { status, message });
             }
 
-            let choice = &response_body["choices"][0];
-            let content = choice["message"]["content"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-            let model = response_body["model"]
-                .as_str()
-                .unwrap_or(&self.model)
-                .to_string();
-
-            Ok(ChatResponse {
-                content,
-                tool_calls: vec![],
-                model,
-                usage: Usage::default(),
-                finish_reason: FinishReason::Stop,
-                thinking: None,
-                parts: None,
-            })
+            // The shared OpenAI-compatible decoder, which is feature-independent
+            // for exactly this branch: hand-decoding here dropped tool calls,
+            // token usage and reasoning text on the floor.
+            crate::openai_compat::parse_response(&self.model, response_body)
         }
     }
 }

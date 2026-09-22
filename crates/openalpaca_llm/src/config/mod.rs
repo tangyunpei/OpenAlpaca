@@ -1,5 +1,6 @@
 pub mod key_pool_builder;
 pub mod llm_config;
+mod provider_builder;
 pub mod settings_service;
 pub mod settings_types;
 

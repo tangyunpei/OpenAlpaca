@@ -3,14 +3,16 @@
 //! Provides a high-level API for managing API keys with encryption,
 //! config persistence, and hot-reload via ArcSwap.
 
+use super::key_pool_builder::{KeyResolver, selection_strategy};
+use super::provider_builder::{ProviderBuildError, build_provider};
+
 use crate::config::{
     KeyConfig, LlmRouterConfig, ProviderConfig, WebSearchConfig, read_config,
     read_config_with_text, render_config_preserving,
 };
 use crate::keys::key_encryption::KeyEncryptor;
 use crate::keys::key_pool::{
-    ApiKey, KeyHealthStatus, KeyPool, KeyStatus, ProviderType,
-    SelectionStrategy, mask_secret,
+    ApiKey, KeyHealthStatus, KeyPool, KeyStatus, ProviderType, mask_secret,
 };
 use crate::keys::secret_store::SecretStore;
 use crate::routing::router::LlmRouter;
@@ -765,8 +767,13 @@ impl LlmSettingsService {
 
         // Build a new KeyPool from the updated config and hot-reload it via
         // ArcSwap — registering the provider if it is not in the router yet.
+        // Avoid resolving credentials twice when a provider is first registered.
+        if !self.router.has_provider(&provider_type) {
+            return self.register_provider_from_config(&config, provider_type);
+        }
         let new_pool = self.build_key_pool_from_config(&config, &provider_type)?;
         if !self.router.reload_keys(&provider_type, new_pool) {
+            // A concurrent removal can still race the presence check.
             tracing::info!(
                 "Provider {:?} not in router, registering now",
                 provider_type
@@ -906,8 +913,7 @@ impl LlmSettingsService {
                     .model_registry()
                     .reload_from_config(models, &disabled);
             }
-            if let Err(e) = self.register_provider_from_config(&config, provider_type.clone())
-            {
+            if let Err(e) = self.register_provider_from_config(&config, provider_type.clone()) {
                 tracing::warn!(provider = %provider, error = %e, "provider enabled in config but not loaded");
                 outcome.warning = Some(e);
             } else {
@@ -1052,115 +1058,30 @@ impl LlmSettingsService {
         config: &LlmRouterConfig,
         provider_type: ProviderType,
     ) -> Result<(), String> {
-        let api_keys = self.build_api_keys_from_config(config, &provider_type)?;
-        // Ollama is keyless — the boot builder registers it with no key at all
-        // — so the demand for one belongs to the arms that need it, not here.
-        let first_key = api_keys.first().map(|k| k.secret.clone());
-        let require_key = || {
-            first_key
-                .clone()
-                .ok_or_else(|| format!("No keys for {:?}, cannot register provider", provider_type))
-        };
-
-        let pool = self.build_key_pool_from_config(config, &provider_type)?;
-
-        let provider_name = provider_type.to_string();
-        let base_url = config
+        let provider_config = config
             .providers
             .as_ref()
-            .and_then(|p| p.get(&provider_name))
-            .and_then(|pc| pc.base_url.clone());
-
-        let rt = self.router.runtime_config();
-        // The same two facts the boot builder reads for this provider: the
-        // client's connect/idle bounds and the non-streaming deadline. A
-        // provider registered here used to get a bare `reqwest::Client` with no
-        // timeout at all, so the same provider behaved differently depending on
-        // whether it was enabled before or after startup (L7).
-        #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
-        let request_timeout = rt.request_timeout_for(&provider_name);
-        #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
-        let client = crate::providers::build_http_client(request_timeout);
-        let provider: Option<Arc<dyn crate::LlmProvider>> = match &provider_type {
-            #[cfg(feature = "anthropic")]
-            ProviderType::Anthropic => {
-                let model = rt
-                    .provider_defaults
-                    .get("anthropic")
-                    .map(|d| d.default_model.clone());
-                let max_tokens = rt
-                    .provider_defaults
-                    .get("anthropic")
-                    .map(|d| d.default_max_tokens);
-                Some(Arc::new(
-                    crate::providers::anthropic::AnthropicProvider::with_client(
-                        client,
-                        require_key()?,
-                        model,
-                        max_tokens,
-                    )
-                    .with_request_timeout(request_timeout),
-                ))
-            }
-            #[cfg(feature = "openai")]
-            ProviderType::OpenAI => {
-                let model = rt
-                    .provider_defaults
-                    .get("openai")
-                    .map(|d| d.default_model.clone());
-                let max_tokens = rt
-                    .provider_defaults
-                    .get("openai")
-                    .map(|d| d.default_max_tokens);
-                Some(Arc::new(
-                    crate::providers::openai::OpenAiProvider::with_client(
-                        client,
-                        require_key()?,
-                        model,
-                        base_url,
-                        max_tokens,
-                    )
-                    .with_request_timeout(request_timeout),
-                ))
-            }
-            #[cfg(feature = "ollama")]
-            ProviderType::Ollama => {
-                // An empty `default_model` means "whatever is installed"
-                // (L4), not a tag — same reading as the boot builder's.
-                let model = rt
-                    .provider_defaults
-                    .get("ollama")
-                    .map(|d| d.default_model.clone())
-                    .filter(|m| !m.trim().is_empty())
-                    .unwrap_or_else(|| "llama3".to_string());
-                // The same output ceiling the boot builder reads — a provider
-                // toggled on at runtime must not answer differently from one
-                // that was on at startup (L6).
-                let max_tokens = rt
-                    .provider_defaults
-                    .get("ollama")
-                    .map(|d| d.default_max_tokens);
-                Some(Arc::new(
-                    crate::providers::ollama::OllamaProvider::with_client(
-                        client, model, base_url, max_tokens,
-                    )
-                    .with_request_timeout(request_timeout),
-                ))
-            }
-            #[allow(unreachable_patterns)]
-            _ => None,
-        };
-
-        match provider {
-            Some(p) => {
-                self.router.register_provider(provider_type, p, pool);
-                tracing::info!("Registered provider in router");
-                Ok(())
-            }
-            None => Err(format!(
-                "Provider not available (feature not enabled)"
-            )),
-        }
+            .and_then(|p| p.get(&provider_type.to_string()));
+        let api_keys = self.build_api_keys_from_config(config, &provider_type)?;
+        let first_key = api_keys.first().map(|k| k.secret.clone());
+        let pool = KeyPool::new(api_keys, selection_strategy(provider_config));
+        let runtime = self.router.runtime_config();
+        let base_url = provider_config.and_then(|p| p.base_url.clone());
+        let provider =
+            build_provider(&provider_type, base_url, &runtime, first_key).map_err(|error| {
+                match error {
+                    #[cfg(any(feature = "anthropic", feature = "openai"))]
+                    ProviderBuildError::MissingKey => {
+                        format!("No keys for {:?}, cannot register provider", provider_type)
+                    }
+                    ProviderBuildError::Unavailable => {
+                        "Provider not available (feature not enabled)".to_string()
+                    }
+                }
+            })?;
+        self.router.register_provider(provider_type, provider, pool);
+        tracing::info!("Registered provider in router");
+        Ok(())
     }
 
     /// Build a KeyPool from the current config for a specific provider.
@@ -1170,25 +1091,11 @@ impl LlmSettingsService {
         provider_type: &ProviderType,
     ) -> Result<KeyPool, String> {
         let api_keys = self.build_api_keys_from_config(config, provider_type)?;
-
-        let provider_name = provider_type.to_string();
         let provider_config = config
             .providers
             .as_ref()
-            .and_then(|p| p.get(&provider_name));
-
-        let strategy_str = provider_config.and_then(|p| {
-            p.key_selection_strategy
-                .as_deref()
-                .or(p.strategy.as_deref())
-        });
-        let strategy = match strategy_str {
-            Some("lru") | Some("least_recently_used") => SelectionStrategy::LeastRecentlyUsed,
-            Some("primary_fallback") => SelectionStrategy::PrimaryFallback,
-            _ => SelectionStrategy::RoundRobin,
-        };
-
-        Ok(KeyPool::new(api_keys, strategy))
+            .and_then(|p| p.get(&provider_type.to_string()));
+        Ok(KeyPool::new(api_keys, selection_strategy(provider_config)))
     }
 
     /// Build a Vec<ApiKey> from config for a specific provider.
@@ -1197,49 +1104,12 @@ impl LlmSettingsService {
         config: &LlmRouterConfig,
         provider_type: &ProviderType,
     ) -> Result<Vec<ApiKey>, String> {
-        let provider_name = provider_type.to_string();
-
         let provider_config = config
             .providers
             .as_ref()
-            .and_then(|p| p.get(&provider_name));
-
-        let mut api_keys = Vec::new();
-        if let Some(pc) = provider_config
-            && let Some(ref keys) = pc.keys
-        {
-            for key_config in keys {
-                // Resolve secret: secret_env > secret_ref > secret_encrypted
-                let secret = if let Some(ref env_var) = key_config.secret_env {
-                    std::env::var(env_var).map_err(|_| {
-                        format!("Missing env var '{}' for key '{}'", env_var, key_config.id)
-                    })?
-                } else if let Some(ref sref) = key_config.secret_ref {
-                    self.secret_store.get(sref)?.ok_or_else(|| {
-                        format!(
-                            "Secret '{}' not found in keychain for key '{}'",
-                            sref, key_config.id
-                        )
-                    })?
-                } else if let Some(ref encrypted) = key_config.secret_encrypted {
-                    if KeyEncryptor::is_encrypted(encrypted) {
-                        self.encryptor.decrypt(encrypted).map_err(|e| {
-                            format!("Failed to decrypt key '{}': {e}", key_config.id)
-                        })?
-                    } else {
-                        encrypted.clone()
-                    }
-                } else {
-                    return Err(format!("No secret for key '{}'", key_config.id));
-                };
-
-                let mut api_key = ApiKey::new(key_config.id.clone(), provider_type.clone(), secret);
-                super::key_pool_builder::apply_key_config_metadata(&mut api_key, key_config);
-                api_keys.push(api_key);
-            }
-        }
-
-        Ok(api_keys)
+            .and_then(|p| p.get(&provider_type.to_string()));
+        KeyResolver::new(Some(self.secret_store.as_ref()), Some(&self.encryptor))
+            .resolve_all(provider_config, provider_type)
     }
 
     /// Get a reference to the secret store.
@@ -1267,7 +1137,9 @@ fn provider_hint_for_model(model: &str) -> Option<ProviderType> {
     if id.starts_with("claude") {
         return Some(ProviderType::Anthropic);
     }
-    if id.starts_with("gpt") || id.starts_with("chatgpt") || id.starts_with("o1")
+    if id.starts_with("gpt")
+        || id.starts_with("chatgpt")
+        || id.starts_with("o1")
         || id.starts_with("o3")
         || id.starts_with("o4")
     {
@@ -1281,9 +1153,9 @@ fn parse_provider_type(name: &str) -> Option<ProviderType> {
         "anthropic" => Some(ProviderType::Anthropic),
         "openai" => Some(ProviderType::OpenAI),
         "ollama" => Some(ProviderType::Ollama),
-        other if other.starts_with("plugin:") => {
-            Some(ProviderType::Plugin(other.strip_prefix("plugin:").unwrap().to_string()))
-        }
+        other if other.starts_with("plugin:") => Some(ProviderType::Plugin(
+            other.strip_prefix("plugin:").unwrap().to_string(),
+        )),
         _ => None,
     }
 }

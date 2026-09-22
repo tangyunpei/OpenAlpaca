@@ -41,79 +41,99 @@ pub fn build_key_pool_from_provider_config(
     provider_type: ProviderType,
     secret_store: Option<&dyn SecretStore>,
 ) -> Result<KeyPool, String> {
-    let api_keys =
-        build_api_keys_from_provider_config(provider_config, provider_type, secret_store)?;
+    let api_keys = KeyResolver::new(secret_store, None)
+        .resolve_all(Some(provider_config), &provider_type)?;
 
-    let strategy_str = provider_config
-        .key_selection_strategy
-        .as_deref()
-        .or(provider_config.strategy.as_deref());
-    let strategy = match strategy_str {
+    Ok(KeyPool::new(
+        api_keys,
+        selection_strategy(Some(provider_config)),
+    ))
+}
+
+pub(crate) fn selection_strategy(config: Option<&ProviderConfig>) -> SelectionStrategy {
+    match config.and_then(|p| {
+        p.key_selection_strategy
+            .as_deref()
+            .or(p.strategy.as_deref())
+    }) {
         Some("lru") | Some("least_recently_used") => SelectionStrategy::LeastRecentlyUsed,
         Some("primary_fallback") => SelectionStrategy::PrimaryFallback,
         _ => SelectionStrategy::RoundRobin,
-    };
-
-    Ok(KeyPool::new(api_keys, strategy))
+    }
 }
 
-/// Build a `Vec<ApiKey>` from a `ProviderConfig` without needing an `LlmSettingsService` instance.
-fn build_api_keys_from_provider_config(
-    provider_config: &ProviderConfig,
-    provider_type: ProviderType,
-    secret_store: Option<&dyn SecretStore>,
-) -> Result<Vec<ApiKey>, String> {
-    let mut api_keys = Vec::new();
+/// Resolves one configured key; callers choose whether a failure skips a key
+/// (startup) or rejects the entire update (settings and hot reload).
+pub(crate) struct KeyResolver<'a> {
+    secret_store: Option<&'a dyn SecretStore>,
+    encryptor: Option<&'a KeyEncryptor>,
+    loaded_encryptor: Option<KeyEncryptor>,
+}
 
-    if let Some(ref keys) = provider_config.keys {
-        // Lazily load encryptor only if needed
-        let mut encryptor: Option<KeyEncryptor> = None;
-
-        for key_config in keys {
-            let secret = if let Some(ref env_var) = key_config.secret_env {
-                std::env::var(env_var).map_err(|_| {
-                    format!("Missing env var '{}' for key '{}'", env_var, key_config.id)
-                })?
-            } else if let Some(ref sref) = key_config.secret_ref {
-                match secret_store {
-                    Some(store) => store.get(sref)?.ok_or_else(|| {
-                        format!(
-                            "Secret '{}' not found in keychain for key '{}'",
-                            sref, key_config.id
-                        )
-                    })?,
-                    None => {
-                        return Err(format!(
-                            "No secret store available to resolve '{}' for key '{}'",
-                            sref, key_config.id
-                        ));
-                    }
-                }
-            } else if let Some(ref encrypted) = key_config.secret_encrypted {
-                if KeyEncryptor::is_encrypted(encrypted) {
-                    let enc = match encryptor {
-                        Some(ref e) => e,
-                        None => {
-                            encryptor = Some(KeyEncryptor::from_env()?);
-                            encryptor.as_ref().unwrap()
-                        }
-                    };
-                    enc.decrypt(encrypted)
-                        .map_err(|e| format!("Failed to decrypt key '{}': {e}", key_config.id))?
-                } else {
-                    encrypted.clone()
-                }
-            } else {
-                return Err(format!("No secret for key '{}'", key_config.id));
-            };
-
-            let mut api_key = ApiKey::new(key_config.id.clone(), provider_type.clone(), secret);
-            apply_key_config_metadata(&mut api_key, key_config);
-            api_keys.push(api_key);
+impl<'a> KeyResolver<'a> {
+    pub(crate) fn new(
+        secret_store: Option<&'a dyn SecretStore>,
+        encryptor: Option<&'a KeyEncryptor>,
+    ) -> Self {
+        Self {
+            secret_store,
+            encryptor,
+            loaded_encryptor: None,
         }
     }
 
-    Ok(api_keys)
+    pub(crate) fn resolve(
+        &mut self,
+        key: &KeyConfig,
+        provider: &ProviderType,
+    ) -> Result<ApiKey, String> {
+        let secret = if let Some(env_var) = &key.secret_env {
+            std::env::var(env_var)
+                .map_err(|_| format!("Missing env var '{}' for key '{}'", env_var, key.id))?
+        } else if let Some(secret_ref) = &key.secret_ref {
+            let store = self.secret_store.ok_or_else(|| {
+                format!(
+                    "No secret store available to resolve '{}' for key '{}'",
+                    secret_ref, key.id
+                )
+            })?;
+            store.get(secret_ref)?.ok_or_else(|| {
+                format!(
+                    "Secret '{}' not found in keychain for key '{}'",
+                    secret_ref, key.id
+                )
+            })?
+        } else if let Some(encrypted) = &key.secret_encrypted {
+            if KeyEncryptor::is_encrypted(encrypted) {
+                let encryptor = match self.encryptor {
+                    Some(encryptor) => encryptor,
+                    None => &*self.loaded_encryptor.insert(KeyEncryptor::from_env()?),
+                };
+                encryptor
+                    .decrypt(encrypted)
+                    .map_err(|e| format!("Failed to decrypt key '{}': {e}", key.id))?
+            } else {
+                encrypted.clone()
+            }
+        } else {
+            return Err(format!("No secret for key '{}'", key.id));
+        };
+        let mut api_key = ApiKey::new(key.id.clone(), provider.clone(), secret);
+        apply_key_config_metadata(&mut api_key, key);
+        Ok(api_key)
+    }
+
+    pub(crate) fn resolve_all(
+        &mut self,
+        config: Option<&ProviderConfig>,
+        provider: &ProviderType,
+    ) -> Result<Vec<ApiKey>, String> {
+        config
+            .into_iter()
+            .flat_map(|p| p.keys.iter().flatten())
+            .map(|key| self.resolve(key, provider))
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -174,12 +194,9 @@ mod tests {
             request_timeout_secs: None,
         };
 
-        let reload_keys = build_api_keys_from_provider_config(
-            &provider_config,
-            ProviderType::Anthropic,
-            None,
-        )
-        .expect("reload path should build keys");
+        let reload_keys = KeyResolver::new(None, None)
+            .resolve_all(Some(&provider_config), &ProviderType::Anthropic)
+            .expect("reload path should build keys");
         assert_eq!(reload_keys.len(), 1);
         let reloaded = &reload_keys[0];
 
@@ -201,5 +218,87 @@ mod tests {
         assert_eq!(reloaded.notes, boot_key.notes);
 
         unsafe { std::env::remove_var(ENV_VAR) };
+    }
+
+    #[test]
+    fn secret_reference_takes_priority_and_does_not_fall_back_when_missing() {
+        let store = crate::MemorySecretStore::new();
+        store.set("fixture/key", "from-store").unwrap();
+        let mut key = full_key_config("unused");
+        key.secret_env = None;
+        key.secret_ref = Some("fixture/key".into());
+        key.secret_encrypted = Some("fallback-secret".into());
+        let mut resolver = KeyResolver::new(Some(&store), None);
+        assert_eq!(
+            resolver
+                .resolve(&key, &ProviderType::OpenAI)
+                .unwrap()
+                .secret,
+            "from-store"
+        );
+        store.delete("fixture/key").unwrap();
+        assert!(
+            resolver
+                .resolve(&key, &ProviderType::OpenAI)
+                .unwrap_err()
+                .contains("not found in keychain")
+        );
+        key.secret_ref = None;
+        assert_eq!(
+            resolver
+                .resolve(&key, &ProviderType::OpenAI)
+                .unwrap()
+                .secret,
+            "fallback-secret"
+        );
+    }
+
+    #[test]
+    fn supplied_encryptor_decrypts_without_loading_another_master_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let encryptor = KeyEncryptor::load_or_generate_at(dir.path()).unwrap();
+        let mut key = full_key_config("unused");
+        key.secret_env = None;
+        key.secret_encrypted = Some(encryptor.encrypt("encrypted-fixture").unwrap());
+        let mut resolver = KeyResolver::new(None, Some(&encryptor));
+        assert_eq!(
+            resolver
+                .resolve(&key, &ProviderType::Anthropic)
+                .unwrap()
+                .secret,
+            "encrypted-fixture"
+        );
+        assert!(resolver.loaded_encryptor.is_none());
+    }
+
+    #[cfg(feature = "openai")]
+    #[tokio::test]
+    async fn boot_skips_a_missing_key_while_runtime_rebuild_rejects_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("llm.toml");
+        let text = r#"
+            [providers.openai]
+            [[providers.openai.keys]]
+            id = "missing"
+            secret_ref = "fixture/missing"
+            [[providers.openai.keys]]
+            id = "valid"
+            secret_ref = "fixture/valid"
+            rate_limit = 42
+        "#;
+        std::fs::write(&path, text).unwrap();
+        let store = crate::MemorySecretStore::new();
+        store.set("fixture/valid", "sk-fixture").unwrap();
+        let router = crate::build_router_with_secret_store(&path, Some(&store)).unwrap();
+        let keys = router.key_statuses(&ProviderType::OpenAI).await.unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].id, "valid");
+        let config: crate::LlmRouterConfig = toml::from_str(text).unwrap();
+        let result = build_key_pool_from_provider_config(
+            &config.providers.unwrap()["openai"],
+            ProviderType::OpenAI,
+            Some(&store),
+        );
+        assert!(matches!(result, Err(error) if error.contains("fixture/missing")));
     }
 }

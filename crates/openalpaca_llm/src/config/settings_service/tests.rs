@@ -9,6 +9,7 @@
 //! *registration* is proved in `openalpacad`, which does compile them.
 
 use super::*;
+use crate::SelectionStrategy;
 
 use crate::keys::key_encryption::KeyEncryptor;
 use crate::routing::cost_tracker::CostTracker;
@@ -856,4 +857,74 @@ base_url = "{base_url}/v1"
             "and the failure is the deadline, not a routing miss"
         );
     }
+
+    #[tokio::test]
+    async fn registration_keeps_runtime_defaults_when_file_values_are_newer() {
+        let server = ollama_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let original = config_text(&server.base_url, "default_max_tokens = 4321");
+        let (router, service) = harness(dir.path(), &original);
+        let mut changed: LlmRouterConfig = toml::from_str(&original).unwrap();
+        let provider = changed.providers.as_mut().unwrap().get_mut("ollama").unwrap();
+        provider.default_max_tokens = Some(123);
+        provider.default_model = Some("not-yet-reloaded".into());
+        service.register_provider_from_config(&changed, ProviderType::Ollama).unwrap();
+        router.refresh_models_for(&ProviderType::Ollama).await;
+        router.complete(request()).await.unwrap();
+        let requests = server.requests().await;
+        let request = requests.iter().find(|r| r.path == "/v1/chat/completions").unwrap();
+        let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+        assert_eq!(body["max_tokens"], 4321, "registration uses the existing runtime snapshot");
+    }
+
+}
+
+#[cfg(feature = "openai")]
+#[tokio::test]
+async fn first_registration_resolves_each_secret_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct CountingStore(AtomicUsize);
+    impl SecretStore for CountingStore {
+        fn get(&self, _: &str) -> Result<Option<String>, String> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(Some("sk-local-fixture".into()))
+        }
+        fn set(&self, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn delete(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+    let mut h = Harness::new();
+    let store = Arc::new(CountingStore(AtomicUsize::new(0)));
+    h.service.secret_store = store.clone();
+    // The key operation follows the same persist/reload path as settings. It
+    // does not call a provider or refresh the model catalog.
+    h.service
+        .persist_and_reload(ProviderType::OpenAI, |config| {
+            config
+                .providers
+                .as_mut()
+                .unwrap()
+                .get_mut("openai")
+                .unwrap()
+                .keys = Some(vec![KeyConfig {
+                id: "first".into(),
+                secret_env: None,
+                secret_ref: Some("fixture/key".into()),
+                secret_encrypted: None,
+                tier: None,
+                priority: None,
+                source: None,
+                notes: None,
+                rate_limit: Some(9),
+            }]);
+        })
+        .await
+        .unwrap();
+    assert_eq!(store.0.load(Ordering::Relaxed), 1);
+    let keys = h.router.key_statuses(&ProviderType::OpenAI).await.unwrap();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0].id, "first");
 }

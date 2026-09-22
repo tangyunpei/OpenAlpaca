@@ -4,6 +4,7 @@ pub mod context_management;
 pub mod embedder;
 pub mod error;
 pub mod keys;
+pub mod openai_compat;
 pub mod providers;
 pub mod routing;
 pub mod streaming;
