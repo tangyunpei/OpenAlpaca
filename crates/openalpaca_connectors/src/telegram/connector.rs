@@ -2,6 +2,7 @@
 
 use super::delivery::send_with_retry;
 use super::rate_limiter::ChatRateLimiter;
+use crate::common::format_confirmation_prompt;
 use crate::{Connector, ConnectorError};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
@@ -180,29 +181,8 @@ impl TelegramConnector {
                         pending.entry(chat_id).or_default().push_back(request_id.clone());
                         let queue_len = pending.get(&chat_id).map(|q| q.len()).unwrap_or(1);
 
-                        // Format arguments for display (truncate if too long)
-                        let args_display = {
-                            let s = serde_json::to_string_pretty(&tool_arguments)
-                                .unwrap_or_else(|_| tool_arguments.to_string());
-                            if s.len() > 500 {
-                                format!("{}...", &s[..500])
-                            } else {
-                                s
-                            }
-                        };
-
-                        let queue_info = if queue_len > 1 {
-                            format!(" (1 of {} pending)", queue_len)
-                        } else {
-                            String::new()
-                        };
-
-                        let prompt = format!(
-                            "A tool requires your confirmation before executing{queue_info}:\n\n\
-                             Tool: {tool_name}\n\
-                             Arguments:\n{args_display}\n\n\
-                             Reply /yes or /no to approve or deny."
-                        );
+                        let prompt =
+                            format_confirmation_prompt(&tool_name, &tool_arguments, queue_len);
 
                         if let Err(e) =
                             send_with_retry(&bot, ChatId(chat_id), &prompt).await
