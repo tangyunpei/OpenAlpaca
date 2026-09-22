@@ -91,10 +91,8 @@ impl FileWatchHandle {
 #[async_trait]
 impl EventWatcher for FilesystemWatcher {
     async fn start(&self, tx: mpsc::Sender<WakeEvent>) -> Result<()> {
-        let tx_clone = tx.clone();
         // Simple debounce: track last event time per path
-        let last_event: Arc<Mutex<HashMap<String, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
-        let last_event_clone = last_event.clone();
+        let mut last_event: HashMap<String, Instant> = HashMap::new();
 
         // Setup notify watcher
         let mut watcher = PollWatcher::new(
@@ -117,15 +115,14 @@ impl EventWatcher for FilesystemWatcher {
 
                             // Simple debounce: skip if same path within DEBOUNCE_MS
                             {
-                                let mut last = last_event_clone.lock().unwrap();
                                 let now = Instant::now();
-                                if let Some(last_time) = last.get(&path_str)
+                                if let Some(last_time) = last_event.get(&path_str)
                                     && now.duration_since(*last_time).as_millis() < DEBOUNCE_MS
                                 {
                                     debug!("Debounced event for: {}", path_str);
                                     continue;
                                 }
-                                last.insert(path_str.clone(), now);
+                                last_event.insert(path_str.clone(), now);
                             }
 
                             let wake_event = WakeEvent::FileChanged {
@@ -134,7 +131,7 @@ impl EventWatcher for FilesystemWatcher {
                             };
 
                             // Use try_send to avoid blocking the watcher thread
-                            if let Err(e) = tx_clone.try_send(wake_event) {
+                            if let Err(e) = tx.try_send(wake_event) {
                                 // Drop if channel full (backpressure)
                                 debug!(
                                     "Filesystem wake event dropped (channel full or closed): {e}"
