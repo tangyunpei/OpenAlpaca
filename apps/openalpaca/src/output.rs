@@ -79,3 +79,49 @@ pub fn print_table_header(headers: &[(&str, usize)]) {
     let total_width: usize = headers.iter().map(|(_, w)| w + 1).sum::<usize>();
     println!("{}", "-".repeat(total_width).dimmed());
 }
+
+/// Fit a cell to `max` **characters**, ellipsis included.
+///
+/// A char budget, not a byte one, because the padding around every call site
+/// is `{:<width$}` — `std`'s fill counts characters, so a byte budget would
+/// leave the columns ragged the moment a cell held anything but ASCII.
+///
+/// Char-safe by construction: byte-slicing `&s[..max - 3]` panics whenever the
+/// cut lands inside a multibyte character, and every string that reaches here
+/// can hold one — a task title (the dispatcher caps titles at 50 *characters*,
+/// which is up to 150 bytes), an agent or model id, a plugin directory name, a
+/// daemon-generated `reason`. `ext list`, `tasks list` and `llm status` are
+/// the surfaces an operator reaches for when something is already wrong, so
+/// they must not be the thing that panics. ASCII-identical to the byte slice
+/// this replaced.
+pub fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let keep = max.saturating_sub(3);
+    let head: String = s.chars().take(keep).collect();
+    format!("{head}...")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate;
+
+    /// A cell whose cut lands inside a multibyte character used to panic —
+    /// these surfaces are what an operator reaches for when something has
+    /// already gone wrong, and an id, a title and a daemon-generated `reason`
+    /// can all hold one.
+    #[test]
+    fn truncate_cuts_on_character_boundaries() {
+        assert_eq!(truncate("short", 21), "short");
+        // Exactly the width: untouched.
+        assert_eq!(truncate("abcde", 5), "abcde");
+        // Over the width: 3 chars of ellipsis, `max - 3` chars kept.
+        assert_eq!(truncate("abcdefgh", 5), "ab...");
+        // Multibyte, cut mid-character under the old byte slice.
+        assert_eq!(truncate("ünïcödé-server-name", 8), "ünïcö...");
+        assert_eq!(truncate("日本語のサーバー", 6), "日本語...");
+        // Every emoji is 4 bytes; the old code panicked on all of these.
+        assert_eq!(truncate("🙂🙂🙂🙂🙂🙂", 4), "🙂...");
+    }
+}
