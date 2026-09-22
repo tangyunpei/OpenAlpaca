@@ -1150,3 +1150,100 @@ async fn an_ordinary_violation_keeps_its_own_event_type() {
         .expect("read the audit log");
     assert_eq!(rows.len(), 1);
 }
+
+// ── `admit_tool_surface`: the allow list admits the tools the loop was handed ──
+
+fn surface(names: &[&str]) -> Vec<openalpaca_llm::ToolDefinition> {
+    names
+        .iter()
+        .map(|name| openalpaca_llm::ToolDefinition {
+            name: name.to_string(),
+            description: String::new(),
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            input_examples: None,
+        })
+        .collect()
+}
+
+/// A capability name and the names of the tools that provide it are different
+/// words; the sandbox is asked about the tool. Admitting the resolved surface
+/// is what lets `web_access` mean `web_search`.
+#[test]
+fn a_granted_capability_admits_the_tools_it_resolved_to() {
+    let mut policy = make_policy("researcher-1");
+    policy.allowed_capabilities = Allowlist::only(["web_access", "workspace_read"]);
+
+    policy.admit_tool_surface(&surface(&["web_search", "web_fetch", "workspace_read"]));
+
+    assert_eq!(
+        policy.allowed_capabilities,
+        Allowlist::Only(vec![
+            "web_access".to_string(),
+            "workspace_read".to_string(),
+            "web_search".to_string(),
+            "web_fetch".to_string(),
+        ]),
+        "appended once each, nothing duplicated"
+    );
+    // Only the surface: a tool nobody resolved is still outside the list.
+    assert!(!policy.allowed_capabilities.admits("shell_execute"));
+}
+
+/// The `Allowlist::Only` contract is pre-lowercased entries, because the check
+/// lowercases the called name and compares verbatim.
+#[test]
+fn admitted_tool_names_are_lowercased() {
+    let mut policy = make_policy("worker-1");
+    policy.allowed_capabilities = Allowlist::only(["acme__search"]);
+
+    policy.admit_tool_surface(&surface(&["Acme__Search", "Notion::Query"]));
+
+    assert_eq!(
+        policy.allowed_capabilities,
+        Allowlist::Only(vec!["acme__search".to_string(), "notion::query".to_string()])
+    );
+}
+
+/// **Empty stays empty.** A template that granted nothing yields an agent that
+/// can call nothing; an assembled surface must never back-fill it (the lead's
+/// surface carries tools no template capability resolved).
+#[test]
+fn an_empty_allow_list_is_not_back_filled_from_the_surface() {
+    let mut policy = make_policy("worker-1");
+    policy.allowed_capabilities = Allowlist::Only(vec![]);
+
+    policy.admit_tool_surface(&surface(&["web_search", "invoke_skill"]));
+
+    assert_eq!(policy.allowed_capabilities, Allowlist::Only(vec![]));
+    assert!(!policy.allowed_capabilities.admits("web_search"));
+}
+
+#[test]
+fn an_unrestricted_allow_list_is_left_alone() {
+    let mut policy = make_policy("main-loop");
+    policy.allowed_capabilities = Allowlist::Unrestricted;
+
+    policy.admit_tool_surface(&surface(&["web_search"]));
+
+    assert_eq!(policy.allowed_capabilities, Allowlist::Unrestricted);
+}
+
+/// Admission never touches the deny list, and the sandbox reads the deny list
+/// first — so a denied name on the surface is refused all the same.
+#[tokio::test]
+async fn a_denial_wins_over_an_admitted_surface() {
+    let sandbox = make_sandbox();
+    let mut policy = make_policy("researcher-1");
+    policy.allowed_capabilities = Allowlist::only(["web_access"]);
+    policy.denied_capabilities = vec!["web_search".to_string()];
+
+    policy.admit_tool_surface(&surface(&["web_search"]));
+
+    assert_eq!(policy.denied_capabilities, vec!["web_search".to_string()]);
+    let err = sandbox
+        .execute_tool(&make_tool_call("web_search"), &policy, &make_ctx("researcher-1"))
+        .await
+        .unwrap_err();
+    assert!(err.contains("denied"), "{err}");
+}

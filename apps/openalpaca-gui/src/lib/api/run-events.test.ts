@@ -29,6 +29,15 @@ function row(
   };
 }
 
+/** A resolved-confirmation row: the outcome rides the `result` blob (T1). */
+function resolved(
+  id: number,
+  detail: Record<string, unknown> | null,
+  result: unknown,
+): EventLogRecord {
+  return { ...row(id, "tool_confirmation_resolved", detail), result };
+}
+
 function one(record: EventLogRecord) {
   return runEventsFromLog([record], "b41")[0];
 }
@@ -38,6 +47,7 @@ describe("runEventsFromLog — tags", () => {
     for (const type of [
       "tool_executed",
       "tool_confirmation_requested",
+      "tool_confirmation_resolved",
       "tool_auto_approved",
       "security_violation",
       "circuit_breaker_tripped",
@@ -122,6 +132,44 @@ describe("runEventsFromLog — sentences", () => {
         row(9, "tool_executed", { tool_name: "shell_execute", success: false }),
       )?.text,
     ).toBe("shell_execute · failed");
+  });
+
+  /**
+   * The outcome of a prompt is in the row's `result` blob, not its `detail` —
+   * that is where `events/persistence.rs` writes it (T1). Without it the row
+   * read back as the bare literal `tool_confirmation_resolved`.
+   */
+  it("says how a confirmation ended, in the reader's words", () => {
+    const cases: Array<[string, string]> = [
+      ["approved", "shell_execute · approved"],
+      ["denied", "shell_execute · denied"],
+      ["timed_out", "shell_execute · timed out"],
+      ["cancelled", "shell_execute · withdrawn"],
+    ];
+    for (const [outcome, text] of cases) {
+      expect(
+        one(resolved(1, { tool_name: "shell_execute" }, { outcome }))?.text,
+      ).toBe(text);
+    }
+  });
+
+  it("names an outcome this build does not know by the daemon's own word", () => {
+    expect(
+      one(resolved(2, { tool_name: "web_search" }, { outcome: "superseded" }))
+        ?.text,
+    ).toBe("web_search · superseded");
+  });
+
+  it("falls back to the raw type when a resolution names no tool or no outcome", () => {
+    expect(one(resolved(3, { tool_name: "shell_execute" }, {}))?.text).toBe(
+      "tool_confirmation_resolved",
+    );
+    expect(one(resolved(4, {}, { outcome: "denied" }))?.text).toBe(
+      "tool_confirmation_resolved",
+    );
+    expect(one(resolved(5, { tool_name: "shell_execute" }, null))?.text).toBe(
+      "tool_confirmation_resolved",
+    );
   });
 
   it("gives a refusal its reason and a trip its failure count", () => {

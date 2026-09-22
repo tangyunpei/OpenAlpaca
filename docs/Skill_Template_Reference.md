@@ -16,13 +16,25 @@ This two-level progressive loading means:
 - **Level 1 (startup)**: Only YAML frontmatter is parsed — lightweight catalog scan.
 - **Level 2 (on-demand)**: Full markdown body + sections loaded when the skill is actually invoked.
 
+A skill can be reached five ways:
+
+| Way | Who triggers it | Notes |
+|-----|-----------------|-------|
+| Slash command (`/review …`) | The user | Deterministic; see Section 5. |
+| Auto-routing | The `SkillRouter` | Only `invoke.mode: "auto"` skills; see Section 5. |
+| `invoke_skill` tool | The chat model or a workflow's lead agent | Runs the skill as a nested invocation; see Section 8. |
+| `depends_on` | Another skill | Nested invocation; see Section 8. |
+| `invoke.cron` | The wake scheduler | Unattended; see Section 4.2. |
+
+A slash or auto-routed skill answers the turn itself: its text streams to the client as it is written, and files attached to the turn reach the skill's model (Section 6). A plugin-backed skill is the exception on both counts (Section 10).
+
 Skills are **hot-reloadable**: the daemon's file watcher monitors the skills directory and reloads a skill's catalog entry when its `SKILL.md` changes, is renamed, or deleted (emitting a `SkillCatalogUpdated` event).
 
 ---
 
 ## 2. Directory Structure
 
-```
+```text
 config/skills/<skill-id>/
   SKILL.md           # REQUIRED — skill definition
   scripts/           # Optional — executable scripts exposed as callable tools
@@ -33,6 +45,8 @@ config/skills/<skill-id>/
 ```
 
 The **directory name is the canonical skill ID** (lowercased). Every direct child directory of the skills directory that contains a `SKILL.md` is treated as a skill.
+
+`config/` here means the daemon's config directory. That is `./config` when you run from a repo checkout, and `~/.openalpaca/config` for a daemon started by the GUI or the CLI. On first boot the daemon seeds `skills/` with the four shipped skills (`code-review`, `commit-message`, `create-skill`, `explain-code`). A `skills/` directory that already exists is left alone, even if it is empty.
 
 ### Scopes
 
@@ -86,18 +100,18 @@ Every field is documented with its type, default value, and enforcement status:
 
 - **ENFORCED** — Runtime code actively checks and acts on this field.
 - **PARSED** — Deserialized and stored, but has no runtime effect.
-- **DEPRECATED** — Parsed for backward compatibility; the catalog records a deprecation warning at scan time.
+- **DEPRECATED** — Parsed for backward compatibility; the catalog logs a deprecation warning at scan time.
 
 ### 4.1 Top-Level Fields
 
 | Field | Type | Default | Required | Status | Description |
 |-------|------|---------|----------|--------|-------------|
-| `id` | `Option<String>` | `None` | No | ENFORCED (warning) | Skill identifier. The directory name is the canonical ID; if `id` differs from the directory name, a validation warning is logged and recorded in the catalog's validation errors. |
+| `id` | `Option<String>` | `None` | No | ENFORCED (warning) | Skill identifier. The directory name is the canonical ID; if `id` differs from the directory name, a warning is written to the daemon log. |
 | `name` | `String` | `""` | **Yes** | ENFORCED | Human-readable skill name. Must be non-empty. Used in catalog display and as the `name` attribute of the `<skill_context>` prompt block. Skills can also be looked up by name (case-insensitive). |
 | `version` | `Option<String>` | `None` | No | PARSED | Semver version string (e.g., `"0.1.0"`). Informational only. |
 | `description` | `String` | `""` | **Yes** | ENFORCED | What this skill does. Must be non-empty. Shown in catalog listings and the `<skill_context>` block. |
-| `requires_capabilities` | `Vec<String>` | `[]` | No | ENFORCED | Capability identifiers used for capability-based tool resolution. **When non-empty, this replaces `tools.allow` entirely** — see Section 7. |
-| `depends_on` | `Vec<String>` | `[]` | No | ENFORCED | Skill IDs this skill can delegate to. Each dependency becomes a synthetic `invoke_skill:<id>` tool — see Section 8 (Skill Composition). |
+| `requires_capabilities` | `Vec<String>` | `[]` | No | ENFORCED | Capability identifiers used for capability-based tool resolution. **When non-empty, this replaces `tools.allow` entirely** — see Section 7. If every tool behind a listed capability belongs to a disabled MCP server or plugin, the skill is refused rather than run without it. |
+| `depends_on` | `Vec<String>` | `[]` | No | ENFORCED | Skill IDs this skill can delegate to (use the lowercase directory name). Each dependency becomes a synthetic `invoke_skill:<id>` tool — see Section 8 (Skill Composition). |
 | `scripts` | `Vec<ScriptConfig>` | `[]` | No | ENFORCED | Bundled executable scripts exposed as `skill_script:<name>` tools — see Section 4.9. |
 
 ### 4.2 `invoke` — Invocation Configuration
@@ -109,10 +123,16 @@ Controls how the skill is triggered.
 | `invoke.mode` | `String` | `"manual"` | ENFORCED | `"manual"` — only via slash command or explicit selection. `"auto"` — eligible for auto-routing. `"scheduled"` — cron-triggered via `invoke.cron` (a `"scheduled"` skill without a cron expression logs a warning and is never fired automatically). `"disabled"` — skipped at scan time, never enters the catalog. |
 | `invoke.slash` | `Option<String>` | `None` | ENFORCED | Slash command (e.g., `"/review"`). Registered in the catalog's command index. The leading `/` is stripped and the command is lowercased for matching. |
 | `invoke.aliases` | `Vec<String>` | `[]` | ENFORCED | Alternative slash commands. Maintained in a dedicated alias index; `get_by_command()` resolves aliases exactly like the primary slash command (leading `/` stripped, lowercased). |
-| `invoke.cron` | `Option<String>` | `None` | ENFORCED | Cron expression (6/7-field, seconds first — e.g. `"0 0 9 * * *"` for 09:00 daily). The daemon registers a wake-scheduler job (`skill:<id>`) at boot and re-syncs it on skill hot-reload; each fire injects the skill's slash command (or `/<skill-id>` when no slash command is declared) as a fresh turn on the local user's `scheduled` lane. Invalid expressions are logged and skipped. Any skill with a cron expression is scheduled, regardless of `invoke.mode`. Gated globally by `[orchestrator.routing] scheduled_skills_enabled` in `daemon.toml` (default `true`). |
+| `invoke.cron` | `Option<String>` | `None` | ENFORCED | Cron expression (6/7-field, seconds first — e.g. `"0 0 9 * * *"` for 09:00 daily). The daemon registers a wake-scheduler job (`skill:<id>`) at boot and re-syncs it on skill hot-reload; each fire injects the skill's slash command (or `/<skill-id>` when no slash command is declared) as a fresh turn on the local user's `scheduled` lane. Invalid expressions are logged and skipped. Any skill with a cron expression is scheduled, regardless of `invoke.mode`. Gated globally by `[orchestrator.routing] scheduled_skills_enabled` in `daemon.toml` (default `true`). See "Scheduled runs" below. |
 | `invoke.max_depth` | `usize` | `2` | PARSED | Intended maximum skill nesting depth. Currently parsed only — the nested-invocation executor hardcodes a maximum depth of 3 (see Section 8). |
 
 Slash-command conflicts between skills (two skills claiming the same command) are detected at scan time; the later-loaded skill wins and a warning is logged.
+
+**Scheduled runs.** A cron fire is a turn nobody is watching, so it behaves differently from a typed slash command in three ways:
+
+- It is **unattended**. A tool that needs approval is refused at once, with a message saying where it can be approved, instead of waiting out the confirmation timeout (Section 7).
+- It is **skipped** when the skill's required tools are unavailable because their MCP server or plugin is disabled. The skip is logged; the job stays registered and runs again once the extension is back.
+- The query is just the slash command, with no text after it, and nothing streams. The answer is stored on the `scheduled` lane, where it is readable as chat history, and the notification dispatcher can push it to your other channels.
 
 Command resolution order: primary slash command → alias → skill ID (directory name). The ID fallback means `/<skill-id>` always invokes the skill deterministically, even without an explicit `invoke.slash`; explicit commands and aliases win on conflict.
 
@@ -146,7 +166,7 @@ Defines external content to inject into the LLM prompt when the skill is invoked
 | Field | Type | Default | Status | Description |
 |-------|------|---------|--------|-------------|
 | `context.sources` | `Vec<ContextSource>` | `[]` | ENFORCED | List of context sources to inject (see source types below). |
-| `context.summarize` | `SummarizeConfig` | `{enabled: false, max_tokens: null}` | DEPRECATED | Has no runtime effect. Setting `enabled: true` triggers a scan-time deprecation warning ("is deprecated and has no effect"). Use `context.budget_tokens` for context size control. |
+| `context.summarize` | `SummarizeConfig` | `{enabled: false, max_tokens: null}` | DEPRECATED | Has no runtime effect. Setting `enabled: true` logs a deprecation warning at scan time ("is deprecated and has no effect"). Use `context.budget_tokens` for context size control. |
 | `context.budget_tokens` | `usize` | `0` | ENFORCED | Token budget for both the injected context and the skill-body prompt block (estimated as 1 token ≈ 4 characters). `0` means the default of 4,000 tokens (16,000 characters). |
 
 **Context Source Types** (discriminated by `type` field):
@@ -179,18 +199,16 @@ Controls what the skill is allowed to do.
 | Field | Type | Default | Status | Description |
 |-------|------|---------|--------|-------------|
 | `permissions.level` | `String` | `"readonly"` | ENFORCED | Permission tier. Valid values: `"readonly"`, `"readwrite"`, `"admin"`. Unknown values are rejected at preflight (invocation blocked). |
-| `permissions.confirm` | `ConfirmAction` | `{tools: []}` | ENFORCED | Tools requiring user confirmation before execution. |
+| `permissions.confirm` | `ConfirmAction` | `{tools: []}` | ENFORCED | Tools requiring user confirmation before execution. An empty list does **not** mean "no confirmations" — see below. |
 | `permissions.sandbox` | `SandboxConfig` | `{net: false}` | ENFORCED | `net` is enforced at preflight. |
 
 **`permissions.confirm` sub-fields:**
 
 | Field | Type | Default | Status | Description |
 |-------|------|---------|--------|-------------|
-| `permissions.confirm.tools` | `Vec<String>` | `[]` | ENFORCED | Tool names requiring confirmation. Passed to `SandboxPolicy.require_confirmation_for`. |
+| `permissions.confirm.tools` | `Vec<String>` | `[]` | ENFORCED | Tool names requiring confirmation. Passed to `SandboxPolicy.require_confirmation_for`. When the list is empty, every tool flagged destructive requires confirmation instead (built-ins: `file_write`, `artifact_write`, `workspace_write`, `update_persona`, `shell_execute`, `send`). A non-empty list replaces that default. |
 
-> **Interactive Confirmation**: When a tool listed in `confirm.tools` is invoked, the sandbox pauses execution and requests approval through the `ConfirmationBroker` (a `ToolConfirmationRequested` event routed to the active client; approvals come back via `POST /v1/chat/confirmations/{request_id}`). The approval timeout comes from `execution.agent_defaults.confirmation_timeout_secs` in `daemon.toml` (default 300s). Two escape hatches exist:
-> - `security.auto_approve_confirmations = true` in `daemon.toml` auto-approves all confirmations (logged as `tool_auto_approved`).
-> - If no `ConfirmationBroker` is available (headless/background execution), confirmation-required tools are **fail-closed** — blocked immediately.
+> **Interactive Confirmation**: When a tool in the confirmation set is invoked, the sandbox pauses execution and requests approval through the `ConfirmationBroker` (a `ToolConfirmationRequested` event routed to the active client; the answer comes back via `POST /v1/chat/confirmations/{request_id}`). The approval timeout comes from `execution.agent_defaults.confirmation_timeout_secs` in `daemon.toml` (default 300s). Section 7 lists every way a prompt can end.
 
 **`permissions.sandbox` sub-fields:**
 
@@ -206,7 +224,7 @@ Controls which tools the skill can use. **Ignored when `requires_capabilities` i
 |-------|------|---------|--------|-------------|
 | `tools.allow` | `Vec<String>` | `[]` | ENFORCED | Tool allowlist (legacy name-based path). Only these tools are available during the skill's agentic loop. Empty (with no `requires_capabilities`) means no tools. |
 | `tools.deny` | `Vec<String>` | `[]` | ENFORCED | Tool denylist. Removed from the resolved tool set (both resolution paths) and folded into the sandbox policy's denied capabilities. |
-| `tools.defaults` | `HashMap<String, Value>` | `{}` | DEPRECATED | No runtime effect. A non-empty map triggers a scan-time deprecation warning. |
+| `tools.defaults` | `HashMap<String, Value>` | `{}` | DEPRECATED | No runtime effect. A non-empty map logs a deprecation warning at scan time. |
 | `tools.rate_limit` | `RateLimitConfig` | `{max_calls: null}` | ENFORCED | `max_calls` is enforced as a total cap for the invocation. |
 
 **`tools.rate_limit` sub-fields:**
@@ -272,7 +290,7 @@ A missing required field (`file`, `name`, or `description`) is a YAML parse erro
 
 **Execution flow:**
 
-```
+```text
 LLM calls skill_script:<name>({"key": "value", ...})
   → SandboxManager: capability check, confirmation gating, circuit breaker
     → per-invocation cloned ToolRegistry → ScriptToolBuiltIn
@@ -311,7 +329,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 - **Sandbox integration**: Script tool names are added to `SandboxPolicy.allowed_capabilities` and pass through the full sandbox pipeline.
 - **No shell injection**: Arguments are passed directly to the process (no shell), so shell metacharacters in argument values are inert.
 
-> **Note**: Listing script tool names in `permissions.confirm.tools` prompts the user for approval each time the script tool is invoked. In non-interactive contexts (no broker available), the tool is blocked (fail-closed). See Section 7.
+> **Note**: Listing script tool names in `permissions.confirm.tools` prompts the user for approval when the script tool is invoked. Within one invocation an approval is remembered, so a repeat call with the same arguments is not prompted again. In unattended or non-interactive contexts the tool is blocked (fail-closed). See Section 7.
 
 **Example:**
 
@@ -345,7 +363,7 @@ scripts:
 
 The LLM sees tools `skill_script:lint_code` and `skill_script:analyze_deps`. When it calls `skill_script:lint_code` with `{"path": "src/", "fix": true}`, the system executes:
 
-```
+```text
 <skill-dir>/scripts/lint.sh --path=src/ --fix=true
 ```
 
@@ -371,11 +389,13 @@ One field remains harmless to leave in older frontmatter: `read_when` (`Vec<Stri
 
 Slash commands short-circuit routing: a message starting with `/<command>` that matches a skill's `invoke.slash` or `invoke.aliases` invokes that skill directly, regardless of mode or score. The text after the command becomes the query (or the whole message if nothing follows).
 
-For non-slash messages, the `SkillRouter` scores every non-disabled skill against the query using a weighted formula.
+A slash command that matches no skill is not an error: the message goes to the chat model as ordinary text. The one exception is a command that names a skill a disabled plugin used to provide — that is answered with a sentence naming the plugin and its state.
+
+For non-slash messages, the `SkillRouter` scores every non-disabled skill against the query using a weighted formula. A skill whose required tools are currently unavailable — every provider of one of its `requires_capabilities` belongs to a disabled MCP server or plugin — is left out of scoring entirely, so it can neither be auto-selected nor suggested. The same skills are left out of the skill list shown to the chat model.
 
 ### Formula
 
-```
+```text
 score = base
       + (intent_match ? intent_weight : 0)
       + (keyword_ratio * keyword_weight)
@@ -443,7 +463,7 @@ When a skill is invoked, two pieces of skill content enter the system prompt.
 
 The skill's markdown body (instructions) is rendered as an XML-tagged block:
 
-```
+```text
 <skill_context name="<skill-name>" description="<description>">
 <body text>
 </skill_context>
@@ -455,7 +475,7 @@ The body is truncated to `context.budget_tokens * 4` characters — **16,000 cha
 
 `context.sources` are resolved and assembled into a separate system block named `skill_context` in the compose engine, containing one section per source:
 
-```
+```text
 --- context: <relative-path> ---
 <file contents>
 --- context: <relative-path> ---
@@ -485,6 +505,20 @@ The total injected context is capped at `budget_tokens * 4` characters (16,000 c
 - Each source is read up to its `max_bytes` / `max_bytes_each` limit, further capped by the remaining budget.
 - Sources are processed in order; once the budget is exhausted, remaining sources are skipped.
 
+### What Else the Skill's Model Sees
+
+A slash or auto-routed skill runs as the turn's answer, so beyond the two blocks above its prompt carries the usual chat context: the persona documents, relevant memories, the lane's conversation summary and recent messages, and the query as the user message.
+
+**Attachments.** Files attached to the turn travel in the skill's user message, exactly as they do on a normal chat turn:
+
+- Each file is adapted for the model that will actually answer. An image goes to a vision model as an image. A document goes as a native document part where the model has one, otherwise as a labelled block of its extracted text. An audio clip the model cannot hear travels as its transcript when one was extracted.
+- A file the model cannot take in any form is **skipped**, never dropped silently: the turn's result lists it under `attachments_skipped` with a one-sentence reason, and `attachments_used` lists only what really reached the model.
+- A **plugin-backed** skill (Section 10) receives a plain query string over the plugin protocol and cannot carry files. Every attachment on such a turn is reported skipped, with a reason saying so. Nothing is inlined into the query.
+
+**Streaming.** A file-based skill's answer streams to the client delta by delta, the same as any chat turn, and the model's reasoning is shown live where the client displays it. A plugin-backed skill cannot stream — its answer comes back finished — so it arrives as one block. Nested invocations (Section 8) and scheduled runs do not stream either.
+
+**The model that answers.** The skill loop uses the daemon's default chat model, or whatever model the router falls back to when that one is not routable (a local-only install, for example). The turn's `model` override does not apply to a skill. The context budget is sized against the model that answers.
+
 ---
 
 ## 7. Tool Resolution & Permissions
@@ -510,16 +544,29 @@ Before a skill runs, `preflight_permissions()` validates:
 
 The invocation handler builds the tool set as follows:
 
-1. **Capability path** — if `requires_capabilities` is non-empty: resolve tools via the registry's capability index (`tools_for_capabilities`) — every registered tool whose `provides_capabilities` includes one of the listed capabilities. **`tools.allow` is ignored on this path.**
+1. **Capability path** — if `requires_capabilities` is non-empty: resolve tools via the registry's capability index (`resolve_capabilities`) — every registered tool whose `provides_capabilities` includes one of the listed capabilities. **`tools.allow` is ignored on this path.**
 2. **Legacy path** — otherwise, if `tools.allow` is non-empty: resolve each name against the tool registry. Unknown names trigger a warning (`Skill '<x>' references unknown tools: [...]`) but don't block invocation.
 3. Otherwise: no tools (pure LLM prompt).
-4. **Bootstrap exception**: during persona bootstrap mode, `update_persona` is force-added to the tool set even if not allowed.
-5. **Deny list**: remove tools in `tools.deny`. Applies to both resolution paths. There is no global per-tool deny list — a whole MCP server or plugin is switched off with `openalpaca ext disable <kind> <id>`, and its tools then resolve to nothing here (the skill is refused if that leaves a required capability wholly withheld).
-6. Append `skill_script:*` tools from `scripts` (Section 4.9) and `invoke_skill:*` tools from `depends_on` (Section 8).
+4. **Availability check** (see below): refuse the skill if a requirement is wholly unavailable.
+5. **Bootstrap exception**: during persona bootstrap mode, `update_persona` is force-added to the tool set even if not allowed.
+6. **Deny list**: remove tools in `tools.deny`. Applies to both resolution paths.
+7. Append `skill_script:*` tools from `scripts` (Section 4.9) and `invoke_skill:*` tools from `depends_on` (Section 8).
+
+The resolved names become the invocation's allow list: the sandbox refuses any tool call outside it, and `tools.deny` is enforced there a second time.
 
 Intent-suggested tools from the orchestrator are intentionally **not** merged, preserving skill-level tool isolation.
 
-Capability names provided by built-in tools: `file_read`, `file_write`, `shell_execute`, `web_access` (both `web_search` and `web_fetch`), `memory_read` (memory_search), `workspace_read`, `workspace_write`, `messaging` (send).
+Capability names provided by built-in tools: `file_read`, `file_write`, `artifact_write`, `shell_execute`, `web_access` (both `web_search` and `web_fetch`), `memory_read` (memory_search), `read_result`, `workspace_read`, `workspace_write`, `persona_write` (update_persona), `messaging` (send). An MCP tool provides a capability equal to its own name (`<server>__<tool>`). A plugin's tools provide the capabilities its manifest declares.
+
+### When a Required Tool Is Unavailable
+
+There is no per-tool on/off switch. A whole MCP server or plugin is switched off with `openalpaca ext disable <kind> <id>` (or in the GUI under Settings → Extensions), and its tools then leave every tool list. For a skill that depends on them:
+
+| Situation | What happens |
+|-----------|--------------|
+| **Total loss** — every provider of one `requires_capabilities` entry belongs to an extension that is not enabled, or (legacy path) every `tools.allow` name does | The skill is **refused**. The reply names the skill, the missing capability or tool, and the extension that owns it. The router stops selecting the skill, the chat model stops seeing it, and a cron fire is skipped. |
+| **Partial loss** — another provider still serves the capability | The skill runs. Its answer starts with a note saying which declared tools it ran without. A warning is logged. |
+| **Never provided** — a capability or tool name nothing ever registered (a typo) | The skill runs without it. Only a log line says so. |
 
 ### Loop Limits
 
@@ -536,11 +583,19 @@ The skill agentic loop runs with limits from `daemon.toml` `[execution.skill_def
 
 ### Confirmation Tools
 
-Tools listed in `permissions.confirm.tools` are passed to `SandboxPolicy.require_confirmation_for`. When such a tool is invoked:
+The confirmation set is `permissions.confirm.tools` when that list is non-empty. Otherwise it is every tool flagged destructive — among the built-ins: `file_write`, `artifact_write`, `workspace_write`, `update_persona`, `shell_execute` and `send`. So a skill that uses `shell_execute` asks for approval even if it lists nothing.
 
-- With a `ConfirmationBroker` available: execution pauses, a `ToolConfirmationRequested` event is emitted to the active client, and the user approves or denies (`POST /v1/chat/confirmations/{request_id}`). Timeout: 300 seconds (fixed for skill invocations). Denied or timed-out calls return an error.
-- With `security.auto_approve_confirmations = true` in `daemon.toml`: automatically approved.
-- With no broker (headless/background execution): **fail-closed** — the tool is blocked immediately.
+When a tool in the set is invoked, the first matching rule applies:
+
+| # | Condition | Result |
+|---|-----------|--------|
+| 1 | The same call was already approved earlier in this invocation | Runs without a prompt. |
+| 2 | `security.auto_approve_confirmations = true` in `daemon.toml` | Runs. The bypass is written to the audit log as `tool_auto_approved`. |
+| 3 | The turn is **unattended** — a scheduled run, or an `openalpaca chat` whose stdin or stdout is not a terminal | Refused at once. The error tells the model (and the user) that nothing ran and that the GUI or an interactive `openalpaca chat` can approve it. |
+| 4 | A client can answer | Execution pauses and a `ToolConfirmationRequested` event reaches the client. The user answers in the GUI, at the CLI's inline prompt, or with `openalpaca tasks confirmations approve\|deny` (`POST /v1/chat/confirmations/{request_id}`). |
+| 5 | No confirmation broker at all — a nested invocation (Section 8) | **Fail-closed**: blocked immediately. |
+
+A prompt ends in one of four outcomes, each announced to clients with a `ToolConfirmationResolved` event: `approved` (the tool runs), `denied`, `timed_out` (nobody answered within `execution.agent_defaults.confirmation_timeout_secs`, default 300 s) or `cancelled`. In the last three the tool does not run and the model receives an error.
 
 ---
 
@@ -556,17 +611,37 @@ depends_on:
 
 Each dependency becomes a synthetic tool `invoke_skill:<id>` ("Invoke the '<name>' skill: <description>") taking a single required `query` string. When the LLM calls it, the dependency skill runs as a nested invocation via `SkillInvocationToolExecutor`, carrying:
 
-- a **call stack** (`skill_stack`) of the invoking chain,
+- a **call stack** (`skill_stack`) of the invoking chain — a skill already on the stack is refused as a cycle,
 - a **hardcoded maximum nesting depth of 3** (`invoke.max_depth` is parsed but not consulted),
 - the parent invocation's cost budget.
 
-Dependency declarations are validated by `SkillCatalog::validate_dependencies()`: it reports references to non-existent skills and detects dependency cycles (`Cycle detected: 'a' -> 'b' -> 'a'`), recording errors in the catalog's validation list. This runs automatically after `scan_multi_scope()`; the daemon's startup path (`scan_directory`) does not run it, so in production a missing dependency surfaces as a warning at invocation time (`Skill '<x>' depends on '<y>' which is not in catalog`) and the `invoke_skill` tool is simply not registered.
+Dependency declarations are validated by `SkillCatalog::validate_dependencies()`: it reports references to non-existent skills and detects dependency cycles (`Cycle detected: 'a' -> 'b' -> 'a'`), logging each as a warning and returning the list to its caller. This runs automatically after `scan_multi_scope()`; the daemon's startup path (`scan_directory`) does not run it, so in production a missing dependency surfaces as a warning at invocation time (`Skill '<x>' depends on '<y>' which is not in catalog`) and the `invoke_skill` tool is simply not registered.
+
+### The General `invoke_skill` Tool
+
+The chat model and a workflow's lead agent carry a general `invoke_skill` tool (`skill`, `query`). It accepts a skill ID, a slash command or an alias, and runs the skill through the same nested executor, with the same depth and cycle guards. A skill does not need `depends_on` to be reachable this way — being in the catalog, and having its required tools available, is enough.
+
+### How a Nested Invocation Differs
+
+A nested invocation — through `depends_on` or through `invoke_skill` — is a smaller thing than a slash invocation:
+
+| | Slash / auto-routed | Nested |
+|---|---|---|
+| System prompt | Persona, memory, history, skill body, `context.sources` | Only `You are executing the '<name>' skill.` plus the skill body |
+| Rounds | `[execution.skill_defaults] max_rounds` (default 6) | 10 |
+| Tools | The skill's own set | The skill's own set, narrowed by any tool constraints inherited from the invoking skill chain |
+| Output validation (Section 9) | Yes | No |
+| Streaming, attachments | Yes | No |
+| Confirmation prompts | Asked of the user | Fail-closed — a tool that needs approval is blocked |
+| Telemetry | One `skill_execution_log` row | One row for an `invoke_skill` call; none for a `depends_on` call |
 
 ---
 
 ## 9. Output Validation & Repair
 
-After the agentic loop completes, the skill's output is validated against the `output` config.
+After the agentic loop completes, the skill's output is validated against the `output` config. Validation runs for slash and auto-routed invocations of file-based skills. It does not run for nested invocations (Section 8) or for plugin-backed skills.
+
+**When the loop produces no text.** A skill turn never ends with an empty answer. If the loop runs out of rounds, hits its cost cap, is cut off by the model's output limit, or the model simply writes nothing, the runtime answers with one sentence that says why, plus the last tool error if there was one. That sentence is the turn's content and skips validation and `max_length`. If the LLM call itself failed, the same sentence is returned as the turn's error.
 
 ### Format-Specific Validation
 
@@ -615,24 +690,42 @@ Skill activity is published on the system event bus:
 | `SkillContextInjected` | `context.sources` produced injected context (byte count). |
 | `ContextBudgetComputed` | Token budget breakdown for the invocation's prompt. |
 | `SkillCatalogUpdated` | A skill was hot-reloaded by the file watcher. |
+| `SkillDiscovered` | A `SKILL.md` was loaded into the catalog (startup scan or reload). |
 
 ### Execution Telemetry
 
-Every invocation is persisted to the `skill_execution_log` SQLite table: status, finish reason, error message, validation failures, duration, rounds used, tool calls, input/output tokens, cost, model used, route score, `was_auto_selected`, `repair_attempted`, `repair_succeeded`, and (when `telemetry.store_query_preview` is enabled in `daemon.toml`) a 200-character query preview.
+Every slash, auto-routed and `invoke_skill` invocation is persisted to the `skill_execution_log` SQLite table: status, finish reason, error message, validation failures, duration, rounds used, tool calls, input/output tokens, cost, model used, route score, `was_auto_selected`, `repair_attempted`, `repair_succeeded`, and (when `telemetry.store_query_preview` is enabled in `daemon.toml`) a 200-character query preview.
 
-`GET /v1/skills/health` on the daemon returns per-skill health metrics aggregated from this table.
+Rows older than 90 days are deleted by a daily cleanup.
 
-### Catalog Validation Errors
+`GET /v1/skills` on the daemon lists the catalog; `GET /v1/skills/health` returns per-skill health metrics aggregated from this table.
 
-Scan-time warnings (deprecated fields in use, `id`/directory mismatches, slash-command conflicts, dependency errors) are collected in the catalog's validation-error list (capped at 100 entries), available via `SkillCatalog::validation_errors()`. They are also logged as warnings in the daemon log.
+### Catalog Warnings
+
+Scan-time problems — deprecated fields in use, `id`/directory mismatches, slash-command conflicts, dependency errors — are written to the daemon log as warnings (`SkillCatalog: …`). The catalog keeps no list of them, so the log is the only place to look.
 
 ### Hot Reload
 
-The daemon's file watcher monitors the skills directory. When a file under `config/skills/<id>/` changes, the catalog entry for that skill is reloaded (`reload_skill`): renamed or deleted skills are removed, changed skills are re-parsed, and a `SkillCatalogUpdated` event is emitted. Parse failures leave the previous entry removed and log a warning.
+The daemon's file watcher monitors the skills directory. When a file under `config/skills/<id>/` changes, the catalog entry for that skill is reloaded (`reload_skill`): renamed or deleted skills are removed, changed skills are re-parsed, and a `SkillCatalogUpdated` event is emitted. If the edited `SKILL.md` no longer parses, a warning is logged (`Skill reload failed for …`) and the previous catalog entry stays in place. A changed `invoke.cron` is re-synced with the scheduler on the same reload.
 
 ### Plugin-Backed Skills
 
-The catalog also supports skills registered by plugins (`SkillSource::Plugin`, via `register_plugin_skill()`): they have no `SKILL.md` on disk. Invocation works like any other skill (slash command or router selection), but instead of running the LLM agentic loop the orchestrator delegates to the plugin's `PluginSkillExecutor` out-of-process; tool callbacks the plugin requests are proxied through the sandboxed execute path (capability checks, confirmation gating, timeouts). The plugin host system is early-stage; file-based skills are the only kind in practical use today.
+The catalog also supports skills registered by plugins (`SkillSource::Plugin`, via `register_plugin_skill()`): they have no `SKILL.md` on disk. The plugin describes its skill in its `skill/info` response, and only these fields are read from it: `name`, `description`, `invoke.mode`, `invoke.slash`, `invoke.aliases`, `routing.intent` and `routing.keywords`. Everything else takes its default, and `invoke.cron` is never read, so a plugin skill cannot be scheduled. Invocation works like any other skill (slash command or router selection), but instead of running the LLM agentic loop the orchestrator delegates to the plugin's `PluginSkillExecutor` out-of-process; tool callbacks the plugin requests are proxied through the sandboxed execute path (capability checks, confirmation gating, timeouts).
+
+What differs from a file-based skill:
+
+| | File-based | Plugin-backed |
+|---|---|---|
+| Where the reasoning runs | The daemon's agentic loop | Inside the plugin process |
+| Streaming | Delta by delta | One block when the plugin returns |
+| Attachments | Reach the model | Reported as skipped (Section 6) |
+| `context.sources`, `scripts`, `depends_on` | Used | Not used — there is no skill directory |
+| Output validation | Yes | No |
+| Tool callbacks | The resolved tool set | Same sandbox, same resolution rules — but `skill/info` carries no tool fields, so today the allow list is empty and every tool callback a plugin skill makes is refused |
+| Tokens, cost, model in telemetry | Recorded | Zero / empty — no LLM router is involved |
+| When the plugin is disabled | — | The skill leaves the catalog; its slash command answers that the plugin is disabled; re-enabling brings it back |
+
+No plugin ships with OpenAlpaca. The four shipped skills are all file-based.
 
 ---
 
@@ -660,7 +753,7 @@ invoke:
 
 # ── Routing / Auto-selection ──────────────────────────────────
 routing:
-  intent:                        # Substring-scored AND regex-compiled as triggers
+  intent:                        # Case-insensitive substring match against the query
     - "security audit"
     - "check for vulnerabilities"
     - "OWASP check"
@@ -699,7 +792,7 @@ context:
 permissions:
   level: readwrite               # readonly | readwrite | admin
   confirm:
-    tools:                       # These tools require user confirmation
+    tools:                       # These tools require user confirmation (replaces the default set)
       - shell_execute
       - file_write
   sandbox:
@@ -811,7 +904,7 @@ This skill:
 
 ### Practical Minimum
 
-A realistic minimal skill with invocation and permissions (modeled on the shipped `code-review` skill):
+A realistic minimal skill with invocation and permissions (modeled on the shipped `explain-code` skill):
 
 ```yaml
 ---
@@ -859,11 +952,11 @@ Use plain language. Avoid jargon. Use analogies where helpful.
 
 4. **Set `required_sections` for structured output**, and consider `auto_repair: true` so missing sections are patched deterministically instead of silently passing through.
 
-5. **Keep intent phrases natural — and regex-safe.** Phrases are substring-scored *and* compiled as case-insensitive regexes for trigger matching, so regex metacharacters (`?`, `(`, `+`, ...) change trigger behavior or drop the pattern entirely.
+5. **Keep intent phrases natural and short.** A phrase matches only when it appears in the query as a contiguous, case-insensitive substring, so "review code" does not match "review my code". Phrases are plain text, not regular expressions.
 
 6. **Set `budget_tokens` for context-heavy skills.** Without it, both the skill body and injected context each default to ~4,000 tokens (16,000 characters), which may be too much or too little.
 
-7. **Use `permissions.confirm.tools` for destructive operations.** In non-interactive contexts these tools are blocked (fail-closed) — plan for that in background/scheduled use.
+7. **Know what will ask for approval.** Destructive tools (`shell_execute`, `file_write`, …) prompt by default; `permissions.confirm.tools` replaces that set with your own list. In unattended contexts — scheduled runs, piped CLI calls, nested invocations — a tool that needs approval is blocked (fail-closed), so a scheduled skill should stick to tools that do not.
 
 8. **Enable `sandbox.net: true` when using `web_fetch`** with `readwrite`/`admin` — preflight rejects the invocation otherwise.
 
@@ -894,22 +987,27 @@ These are the tool names usable in `tools.allow` / `tools.deny`. Names must matc
 |-----------|-----------|-------------|--------------|
 | `file_read` | `file_read` | Read file contents from the workspace | Always registered |
 | `file_write` | `file_write` | Write/create files in the workspace | Always registered |
+| `artifact_write` | `artifact_write` | Save a versioned deliverable to the artifact store (shown in the GUI Library) | Always registered; requires a database at execution time |
 | `shell_execute` | `shell_execute` | Execute shell commands | Always registered |
 | `web_search` | `web_access` | Search the web | Always registered; needs the `[web_search]` section (API key) in `config/llm.toml` |
 | `web_fetch` | `web_access` | Fetch and read content from a URL | Always registered |
 | `memory_search` | `memory_read` | Search stored memories (hybrid FTS + vector when an embedder is configured) | Registered only when a database is available |
+| `read_result` | `read_result` | Page back a tool result that was too large to show inline | Always registered, but only useful where results spill to a session log (chat turns and workflows). A skill loop has no session log, so its oversized results are cut inline instead and this tool has nothing to read |
 | `workspace_read` | `workspace_read` | Read entries from the shared task workspace | Always registered; requires database + task context at execution time |
 | `workspace_write` | `workspace_write` | Write entries to the shared task workspace (32 KB per entry, optimistic-locking retries) | Always registered; requires database + task context at execution time |
 | `update_persona` | `persona_write` | Update persona documents (SOUL.md, USER.md, or IDENTITY.md via `target` param) | Registered by the daemon with persona context |
-| `send` | `messaging` | Send an outbound message through a connector channel (e.g. Telegram) | Registered only when a connector send provider is configured |
+| `send` | `messaging` | Send an outbound message through a connector channel (e.g. Telegram) | Registered by the daemon; fails at call time when no connector can send |
 
 **`send` in skill loops** gets special handling: when `send` is in the resolved tool set, the loop's initial tool choice is forced to `send`, a send-context block (available channels) is injected into the prompt, and a post-hoc guard detects "hallucinated send" responses (confirmation text without an actual tool call) and replaces them with a warning asking the user to retry.
 
+The chat-only tools (`start_workflow`, `task_status`, `memory_store`, `memory_forget`, `steer_workflow`, `queue_followup`, the general `invoke_skill`) and the lead agent's coordination tools are created per request and are **not** in the shared registry, so a skill cannot list them.
+
 **Beyond built-ins**, the registry can also contain:
 - **MCP tools** from `config/mcp.toml`, named `<server>__<tool>`;
-- **Custom declarative tools** from `config/tools/*.toml` (HTTP-backed).
+- **Plugin tools**, named `<plugin>::<tool>`;
+- **Custom declarative tools** from `config/tools/*.toml` (HTTP- or command-backed).
 
-Both are addressable in `tools.allow` by their registered names.
+All three are addressable in `tools.allow` by their registered names. With `requires_capabilities`, list an MCP tool's own name, a plugin manifest's capability, or a custom tool's `provides_capabilities` entry.
 
 ### Script Tools (`skill_script:*`)
 
@@ -953,13 +1051,25 @@ Created from `depends_on` (Section 8); like script tools, they are invocation-sc
 **"Skill '<x>' references unknown tools: [...]" (warning in logs)**
 - Use exact registered names (Section 14). This is the legacy `tools.allow` path; unknown names are skipped, not fatal.
 - If `requires_capabilities` is set, `tools.allow` is ignored entirely — a common source of confusion when the tool set doesn't match expectations.
-- `memory_search` requires a database; `send` requires a connector send provider.
+- `memory_search` is registered only when the daemon has a database. `send` is always registered by the daemon, but a call fails when no connector can deliver to the requested channel.
 
 **`routing.score` vs `routing.weights`**
-- Both keys are accepted (serde alias). `weights` is canonical; `score` is kept for backward compatibility (and is what the shipped skills use).
+- Both keys are accepted (serde alias). `weights` is canonical; `score` is kept for backward compatibility (the shipped `code-review` skill uses it).
 
-**Intent phrase behaves oddly / never triggers**
-- Phrases are compiled as case-insensitive regexes for trigger matching. Regex metacharacters are interpreted; an invalid pattern is dropped with a warning (`invalid trigger pattern ...`). Substring scoring by the router is unaffected.
+**Intent phrase never matches**
+- A phrase must appear in the query as one contiguous substring (case-insensitive). Extra words in the middle break the match. Phrases are plain text; regex syntax is matched literally.
+
+**"Skill '<x>' cannot run — required capabilities are unavailable."** (or "required tools" for a `tools.allow` skill)
+- Every tool behind one of the skill's requirements belongs to an MCP server or plugin that is not enabled. The message names it. Check `openalpaca ext list`, then `openalpaca ext enable <kind> <id>`. See Section 7.
+
+**The answer starts with "Note: this skill ran without some of the capabilities it declared."**
+- One provider of a capability is switched off while another still serves it. The skill ran with what was left.
+
+**A tool is refused with "needs your approval, and this run cannot ask for it"**
+- The turn was unattended (a scheduled run, or a CLI call with a redirected stdin or stdout). Run it from the GUI or an interactive `openalpaca chat`, or remove the tool from the confirmation set. See Section 7.
+
+**A file attached to a `/slash` turn did not reach the skill**
+- Look at the turn's `attachments_skipped` list (the CLI prints one line per skipped file; the GUI shows a "Not sent to the model" note). The reason says whether the model could not take that file type or the skill is plugin-backed. See Section 6.
 
 **Context injection skips files silently**
 - Check for `..` in paths (blocked) and that files resolve inside the skill directory (canonical path check).
@@ -969,7 +1079,7 @@ Created from `depends_on` (Section 8); like script tools, they are invocation-sc
 - Expected with `auto_repair: false`: validation failures log a warning and pass the output through. Set `auto_repair: true` to have missing markdown sections appended deterministically.
 
 **Deprecation warnings at startup**
-- `context.summarize.enabled: true` and non-empty `tools.defaults` produce "is deprecated and has no effect" warnings in the catalog's validation errors. Remove the fields.
+- `context.summarize.enabled: true` and non-empty `tools.defaults` produce "is deprecated and has no effect" warnings in the daemon log. Remove the fields.
 
 ### Script-Related Errors
 

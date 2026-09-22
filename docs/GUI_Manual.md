@@ -163,18 +163,21 @@ Chat's two side columns do, and below a breakpoint they give way on their own
 rather than pushing the layout off the edge of the window: on a portrait
 monitor or a half-screen split (about 1080pt wide) the conversation list
 collapses and the aside stays; narrower still, the aside goes too. The header's
-`Conversations` and `N running` buttons are the way back, and **re-opening a
-column by hand sticks** — nothing re-collapses it until you resize the window
-again, and nothing re-opens one for you either. The composer keeps pace: when
-the row cannot hold both the message box and `Attach` / the model button /
-`Send`, the three controls move to a line of their own below the box, and a
-long model id (a local `hf.co/…:Q8_0` tag) is shown elided with the full id on
-its tooltip.
+`Conversations` button and its `N running` pill (shown while at least one run
+is active) are the way back, and **re-opening a column by hand sticks** —
+nothing re-collapses it until you resize the window again, and nothing re-opens
+one for you either.
+
+The composer keeps pace. When the row cannot hold both the message box and
+`Attach` / the model button / `Send`, the three controls move to a line of
+their own below the box. A long model id (a local `hf.co/…:Q8_0` tag) is shown
+elided, with the full id on its tooltip.
 
 **Resizable panes.** Four columns are draggable and their widths persist
 per-machine in `localStorage` (`oa-pane-widths`): the chat aside (300–600,
 default 396), the Work run list (260–480, default 340), the Library list
 (260–480, default 326) and the chat conversation list (200–360, default 236).
+Double-click a divider to put its column back to the default.
 
 **Density.** The compact toggle in the chat header (also ⌘⇧D) narrows the
 message gap, widens the transcript column from 720 to 780, and tightens the run
@@ -208,9 +211,10 @@ something is open in it — an aside (`src/views/chat/`).
 **Conversations.** A lane holds many conversations (sessions) with exactly one
 active at a time; the sidebar is the surface that makes that visible. The live
 one sits on top, archived ones below it by `updated_at`, each labelled with the
-project it is bound to, with `New chat`, rename, archive, delete and a
-`Load more`. Clicking a row resumes it. A row whose runs were cut short by a
-daemon restart carries an `N interrupted` badge.
+project it is bound to, with `New chat`, rename, archive, delete (a two-step
+confirm — there is no undo) and a `Show more` when the list has further pages.
+Clicking a row resumes it. A row whose runs were cut short by a daemon restart
+carries an `N interrupted` badge.
 
 Two rules the sidebar displays rather than enforces:
 
@@ -223,70 +227,119 @@ Two rules the sidebar displays rather than enforces:
   row says which one wins.
 
 **Transcript.** Mono speaker labels over plain paragraphs — no avatars, no
-bubbles. A body is rendered from a fixed markdown vocabulary, the one a model
-actually writes in: paragraphs, bullet and numbered lists, `**bold**`,
-`*italic*` (either of which may wrap a code span), inline code, `#`–`####`
-headings, `---` thematic breaks, one level of `>` blockquote, fenced
-code blocks (with the language named above them and their own horizontal
-scroll) and simple pipe tables (also scrollable when wide). An ordered list
-resumed after a code block counts on from its own marker instead of restarting
-at 1, and a half-received fence or table renders as what it is while the answer
-streams rather than flashing raw backticks first. Nothing here renders HTML:
-links, images and raw markup are shown as the text they are, and the Library's
-own renderers are where a full document belongs. Times are the reader's own:
-the daemon stores UTC, and every clock in the window converts it. Besides
-messages it carries the run-report card for a background
-workflow that finished in this session, session-local rows for a steer or a
-queued follow-up (neither is a chat turn, so neither is persisted), the tool
-confirmation banner, and chips for the files a turn carried in and the files its
-run produced. A file **you** attached is shown the same way, as a card under
-your own message, live and after a reload — the daemon also writes a text
-rendering of them into the message (`[Attachments: notes.txt]`) for clients
-that can only print a string, and this window draws the cards instead. The run
-pill and the artifact chips are read off stored history, so they survive a
-reload; the recap *card* is built from the live
-`workflow_started` / `task_status` frames and does not.
+bubbles. Times are the reader's own: the daemon stores UTC, and every clock in
+the window converts it.
+
+A message body is rendered from a fixed markdown vocabulary — the one a model
+actually writes in:
+
+- paragraphs, bullet lists and numbered lists;
+- `**bold**` and `*italic*` (either may wrap a code span), and inline code;
+- `#`–`####` headings and `---` thematic breaks;
+- one level of `>` blockquote;
+- fenced code blocks, with the language named above them and their own
+  horizontal scroll;
+- simple pipe tables, also scrollable when wide.
+
+Three details of that rendering:
+
+- An ordered list resumed after a code block counts on from its own marker
+  instead of restarting at 1.
+- A half-received fence or table renders as what it is while the answer
+  streams, rather than flashing raw backticks first.
+- `_underscores_` are not emphasis, so an identifier like `task_id` is never
+  italicised.
+
+Nothing here renders HTML: links, images and raw markup are shown as the text
+they are. The Library's own renderers are where a full document belongs.
+
+Besides messages, the transcript carries:
+
+- the run-report card for a background workflow that finished in this session;
+- a row for each steer or queued follow-up you sent (neither is a chat turn,
+  so the daemon stores neither);
+- the tool confirmation banner, and the row that replaces it once it settles;
+- a card for each file a run wrote, and chips for the files a finished run
+  produced;
+- a card under your own message for each file **you** attached, live and after
+  a reload. The daemon also writes a text rendering into the message
+  (`[Attachments: notes.txt]`) for clients that can only print a string; this
+  window draws the cards instead.
+
+The run pill and the file chips are read off stored history, so they survive a
+reload. The run-report card is built from the live `workflow_started` /
+`task_status` frames and does not.
 
 **Composer.** Two mutually exclusive states. Normally: a growing textarea, the
 `Attach` button, the model picker, and today's spend. While a tool confirmation
 is pending the textarea is **not rendered at all** — `Approve`, `Deny` and
 `Always allow` replace it, which is why ↵ can never mean both "send" and
-"approve". `Always allow` sends `approval_scope: "entire_tool"`, which the
-daemon honours for the rest of the session.
+"approve". `Always allow` sends `approval_scope: "entire_tool"`: the daemon
+stops asking about that tool for the rest of the current turn or run — the
+chat turn, the workflow's lead, or the one subagent that raised the prompt.
+It is not remembered beyond that, and one agent's approval does not cover
+another's.
 
-**Attaching files.** `Attach`, left of the model button, opens a file picker;
-pasting an image into the textarea and dropping files on the composer do the
-same thing. Each file uploads immediately and appears as a chip above the
-textarea with its name, its size and one of three states: `uploading…`, `✓`, or
-the daemon's own refusal — `MIME type 'application/zip' is not allowed`,
-`Declared MIME … doesn't match detected …`, the size limit. A refused chip
-never travels; `✗` removes any chip. **Send is off while an upload is in
-flight**, so a turn can never go out missing a file you attached, and the chips
-clear only once the daemon has accepted the turn — if it refuses one, your
-files are still there and are not re-uploaded.
+**Attaching files.** Three ways in, all the same path: the `Attach` button
+left of the model button opens a file picker, you can paste an image into the
+textarea, and you can drop files on the composer (there is no drop zone — the
+chips are the feedback).
 
-Ten files per turn (the daemon's `[upload] max_files_per_message`); an eleventh
-pick is refused in the window with the same sentence the daemon would have
-answered with. Files ride an ordinary chat turn only: `Steer` and
-`Queue follow-up` carry no attachments, so chips wait for the next chat message
-rather than being dropped. A file the browser cannot type is offered as
-`application/octet-stream` and the daemon refuses it by name — nothing here
-guesses a type on your behalf.
+Each file uploads immediately and appears as a chip above the textarea with its
+name, its size and one of three states:
+
+| Chip state | Meaning |
+|---|---|
+| `uploading…` | the upload is in flight |
+| `✓` | the daemon holds the file; it will travel with the next message |
+| the daemon's own refusal | for example `MIME type 'application/zip' is not allowed`, `Declared MIME … doesn't match detected …`, or the size limit. A refused chip never travels |
+
+`✗` removes any chip. The rules around sending:
+
+- **Send is off while an upload is in flight**, so a turn can never go out
+  missing a file you attached.
+- The chips clear once the daemon has accepted the turn. If it refuses the
+  turn, your files are still there and are not re-uploaded.
+- The chips also clear when you switch to another conversation or start a new
+  chat: files belong to the conversation you attached them in. Re-attach them
+  if you meant them for the new one. The text you had typed is *not* cleared —
+  it stays with the window.
+- Ten files per turn (the daemon's `[upload] max_files_per_message` default).
+  An eleventh pick is refused in the window with the same sentence the daemon
+  would have answered with.
+- Files ride an ordinary chat turn only. `Steer` and `Queue follow-up` carry no
+  attachments, so chips wait for the next chat message rather than being
+  dropped.
+- A file the browser cannot type is offered as `application/octet-stream` and
+  the daemon refuses it by name — nothing here guesses a type on your behalf.
 
 **"Not sent to the model."** An attachment can reach the daemon and still not
-reach the model that answers: a local model with no vision cannot take an
-image, one with no audio support cannot take a clip, and a model with no native
-document part gets a document's extracted text instead (or a placeholder, when
-there is no text to extract). Some turns reach no model at all, or reach one
-with a prompt of their own: a task command (`/tasks`, `/status`), a `/steer`,
-a message that is just a quoted send to a connector, and a skill a **plugin**
-provides — whose protocol carries a plain question and nothing else — all answer
-without your files, and say so rather than pretend otherwise. A `/slash` for an
-ordinary, file-based skill does carry them, exactly like an ordinary message. When a file does not reach the model the turn shows a
-muted note under the answer naming each one and the daemon's reason, and the
-file is **not** listed among the ones the turn used. The note is live only — the
-daemon stores no record of a skip on the message — so a reloaded transcript
-shows the answer without it.
+reach the model that answers. It depends on the model:
+
+- a model with no vision cannot take an image;
+- a model with no audio support cannot take a clip (its transcript travels
+  instead, when one was extracted);
+- a model with no native document part gets the document's extracted text
+  instead, or a placeholder when there is no text to extract.
+
+It also depends on the turn. Some turns reach no model at all, or reach one
+with a prompt of their own, and answer without your files:
+
+- a task command (`/tasks`, `/status`) or a `/steer`;
+- a short social message (`thanks`, `ok`), which is answered from a small
+  prompt of its own;
+- a message that is just a quoted send to a connector;
+- a skill a **plugin** provides, whose protocol carries a plain question and
+  nothing else.
+
+A `/slash` for an ordinary, file-based skill does carry your files, exactly
+like an ordinary message.
+
+When a file does not reach the model, the turn shows a muted note under the
+answer naming each file and the daemon's reason, and the file is **not** listed
+among the ones the turn used. The note is live only — the daemon stores no
+record of a skip on the message — so a reloaded transcript shows the answer
+without it.
 
 **A thinking model shows its thinking.** A local reasoning model can spend ten
 seconds or more before its first token. While the turn is thinking, the
@@ -295,8 +348,9 @@ reasoning runs live underneath it: muted mono type in a box with its own scroll
 and a fixed height, so it cannot push the composer down the screen. The box
 follows the newest text as it arrives; scroll up inside it to read something
 earlier and it stays where you left it until you scroll back to the bottom.
-Click the label to collapse or reopen it. It is live only — the daemon keeps reasoning
-out of the message it stores, so a reloaded transcript shows the answer alone.
+Click the label — `thinking… (hide)` / `thinking… (show)` — to collapse or
+reopen it. It is live only: the daemon keeps reasoning out of the message it
+stores, so a reloaded transcript shows the answer alone.
 
 **A confirmation outlives the turn that started it.** A workflow asks for
 approval minutes after the chat turn that launched it has finished, so the
@@ -307,18 +361,27 @@ lane never blocks this composer, and the card names who is asking — the agent
 template for a workflow's prompt, and `Alpaca` for one the assistant raised in
 the chat itself.
 
-**A prompt nobody answers settles anyway.** The daemon waits a fixed five
-minutes per prompt and then refuses the call: the tool does **not** run. The
-window learns that three ways, and never trusts one of them alone — the daemon
-announces the resolution (`tool_confirmation_resolved`, whatever the outcome),
-the prompt drops out of `GET /v1/chat/confirmations`, which is re-read every
-ten seconds while a card is up, and a prompt the assistant raised in the chat
-is settled by its own turn's last frame. However it settles, the composer
-unpauses at once, and a card that ran out its clock leaves a row saying so —
-`Timed out · update_persona timed out — not run. Nobody answered in time, so
-the agent continued without it.` An answer given somewhere else (another
-window, `openalpaca tasks confirmations approve`) clears the card here without
-claiming you gave it.
+**A prompt nobody answers settles anyway.** The daemon waits five minutes per
+prompt by default (`[execution.agent_defaults] confirmation_timeout_secs` in
+`daemon.toml`) and then refuses the call: the tool does **not** run. The window
+learns that three ways, and never trusts one of them alone:
+
+1. The daemon announces the resolution (`tool_confirmation_resolved`, whatever
+   the outcome).
+2. The prompt drops out of `GET /v1/chat/confirmations`, which is re-read every
+   ten seconds while a card is up (every thirty otherwise).
+3. A prompt the assistant raised in the chat is settled by its own turn's last
+   frame.
+
+However it settles, the composer unpauses at once. What is left behind depends
+on how it ended:
+
+| How the prompt ended | What the transcript shows |
+|---|---|
+| You approved it here | `Approved · <tool> approved · waiting for the tool to run…`, upgraded to `returned in 1.4s` or `failed after …` when the tool reports back |
+| You denied it here | `Denied · <tool> denied · the agent was told to skip it.` |
+| Nobody answered in time | `Timed out · <tool> timed out — not run. Nobody answered in time, so the agent continued without it.` |
+| It was answered somewhere else (another window, `openalpaca tasks confirmations approve`), or the run went away | the card clears, with no row — the window does not claim an answer you did not give |
 
 `Approved`, `Denied` and `Timed out` rows stay in the transcript for as long
 as the window is open, in the order they happened — switching to Work, the
@@ -331,15 +394,15 @@ finished run is its completion message, its run pill and its file chips, all
 of which come from stored history.
 
 **A prompt raised before the window opened is picked up too.** The frames are
-live-only with no replay, so a reload — or a second window, or restarting the
-app while a background run is blocked — used to show no card at all while the
-daemon waited out the timeout. The window now reads
-`GET /v1/chat/confirmations`, the daemon's list of what is *still waiting*, on
-load and again whenever the socket reconnects, and draws a card for each prompt
-that belongs to this lane. A card this window has already retired is not
-brought back by it. When that read *fails*, the transcript says so — "Could not
-check for pending approvals: …" — rather than looking like a daemon with
-nothing waiting; live prompts keep arriving regardless.
+live-only with no replay, so a reloaded window, a second window, or an app
+restarted while a background run is blocked would otherwise never see the
+prompt. The window reads `GET /v1/chat/confirmations`, the daemon's list of
+what is *still waiting*, on load and again whenever the socket reconnects, and
+draws a card for each prompt that belongs to this lane. A card this window has
+already retired is not brought back by it. When that read *fails*, the
+transcript says so — "Could not check for pending approvals: …" — rather than
+looking like a daemon with nothing waiting; live prompts keep arriving
+regardless.
 
 The composer can also be *aimed*: `Steer` on a run card points it at that run
 (`POST /v1/tasks/{id}/steer`, which answers `accepted` and the inbox depth),
@@ -401,7 +464,14 @@ action group or, for a finished run, a terminal banner, then three cards:
   blob shows them without pretending they open.
 - **Event log** — this run's own persisted log,
   `GET /v1/events/history?task_id=`, including the tool calls the live socket
-  could never attribute to a run.
+  could never attribute to a run. Each row wears one of five tags (`tool`,
+  `steer`, `artifact`, `spawn`, `run`) and a sentence built from the stored
+  row. A tool prompt reads `<tool> · awaiting approval`, and how it ended is
+  its own row: `<tool> · approved`, `denied`, `timed out`, or `withdrawn` (the
+  run went away before anyone answered). A row the window cannot fill a
+  sentence for shows the daemon's raw `event_type` instead of a guess. The card
+  refetches whenever a live frame names this run, so a denial or a timeout
+  appears without waiting for the next unrelated event.
 
 Every card distinguishes "nothing happened" from "the read failed" and says
 which.
@@ -477,12 +547,18 @@ rather than shown as `0`, because a zero is a claim.
 The liveness dot and instance id (`GET /v1/health`), the endpoint, and
 `Reconnect` (re-bootstrap, then reopen the socket).
 
-Today's spend, runs and tokens come from `GET /v1/usage/summary`, including the
-day itself — the daemon's UTC date rather than the browser's local one, so the
-figure and the run filter mean the same day. There is **no daily budget and
-none is coming**, so today's total has no denominator and no progress bar; the
-panel instead names the two caps the daemon does enforce, per workflow and per
-agent turn, with the daemon's own numbers.
+Today's spend and tokens come from `GET /v1/usage/summary`, and so does the day
+itself — the daemon's UTC date rather than the browser's local one. Today's run
+count is the run list filtered to that same date, so all three figures mean the
+same day.
+
+There is **no overall daily budget and none is coming**, so today's total has
+no denominator and no progress bar. The panel instead names the two caps that
+bound a chat turn or a workflow — per workflow and per agent turn — with the
+daemon's own numbers. Three background jobs (memory extraction, conversation
+summaries and task-output extraction) do have small daily ceilings of their
+own, the `*_max_daily_cost_usd` keys under `[orchestrator.costs]` in
+`daemon.toml`; the panel does not show them.
 
 `GET /v1/status` supplies uptime, the open database's `schema_version`, the
 store's two size totals kept deliberately apart (uploaded bytes, which the
@@ -518,13 +594,31 @@ The provider list and its keys (`GET /v1/settings/llm`), the model catalogue
 `GET /v1/usage/summary`'s `by_provider`; a provider with no calls today says so
 rather than borrowing a lifetime number.
 
+**Keys are read-only here for now.** Each row counts the provider's keys, but
+the key editor is not built: `Add provider` answers with a toast saying so, and
+nothing in this section adds, removes or reorders a key. A local provider needs
+no key at all; see below.
+
+A cloud provider therefore takes two steps, in this order:
+
+1. Turn the provider's switch on here (or run
+   `openalpaca config set ai.<provider>.enabled true`). Every provider starts
+   off, and adding a key does not turn one on.
+2. Add the key from the CLI: `openalpaca llm keys add --provider <name>`, which
+   asks for the key with hidden input (see the [CLI Manual](CLI_Manual.md)).
+
+Between the two steps the row reads `On, but not loaded`, as described next.
+
 The per-provider switch writes the bit to `llm.toml` and moves the router
 live (`PUT /v1/settings/llm/providers/{provider}/enabled`): a disable unloads
 the provider and takes its models out of the registry, an enable puts them
 back. Disabling the provider that serves the default model is refused with a
 `409` naming it. A `200` is not always a load — enabling a provider with no
 usable key writes the bit and leaves the router with nothing — so the row
-carries the daemon's warning beneath the switch.
+carries the daemon's warning beneath the switch (`On, but not loaded — …`), and
+a provider that is on with no model in `GET /v1/models` is tagged `on` rather
+than `active`. The warning only arrives on the toggle's own answer, so after a
+reload the row says `On, but no models loaded` instead.
 
 **A provider that needs no key.** A local provider (Ollama) is designed to hold
 no key at all, so its row reads `no key needed · <strategy>` where a cloud
@@ -655,7 +749,9 @@ A template with no completed run in the window says so in words, because
 `0 runs` reads like a metric that failed to load.
 
 The per-template on/off switch is the second remaining gap: a template has no
-`enabled` field and nothing would enforce one where subagents are spawned.
+`enabled` field and nothing would enforce one where subagents are spawned. The
+switch is drawn on and disabled, with that reason attached, and a note under
+the list says the same.
 
 ### Conversations
 
@@ -671,10 +767,10 @@ affordance than one beside the transcript it removes.
 
 ### Event log
 
-The daemon-wide tail, `GET /v1/events/history`, newest first. The five coloured
-tags are a client-side categorisation of the daemon's `event_type` string, which
-is left untouched in the message column, so nothing is invented and nothing is
-hidden. The panel states that this persisted log is narrower than the live
+The daemon-wide tail — the newest 50 rows of `GET /v1/events/history`, newest
+first. The five coloured tags are a client-side categorisation of the daemon's
+`event_type` string, which is left untouched in the message column, so nothing
+is invented and nothing is hidden. The panel states that this persisted log is narrower than the live
 socket, which carries more variants than the daemon stores and cannot be
 replayed. A single run reads its own slice through `?task_id=` on the same
 route, in the Work detail.
@@ -691,9 +787,14 @@ Two, and both say so in the UI rather than rendering a dead control
 
 Some other absences are **decisions**, not gaps, and are stated as such where
 they appear: HTML and SVG previews are shown as source until the webview
-rendering review happens; there is no daily spend bar because there is no daily
-budget; there is no per-tool switch because ENABLE is per extension; the
-replay-resume button is hidden unless the daemon enables it.
+rendering review happens; there is no daily spend bar because there is no
+overall daily budget; there is no per-tool switch because ENABLE is per
+extension; the replay-resume button is hidden unless the daemon enables it.
+
+One absence is the GUI's own rather than the daemon's: the API-key editor in
+Settings → Models & keys is not built yet, although the daemon serves the key
+routes. `Add provider` says so in a toast, and `openalpaca llm keys` is the way
+to manage keys until it exists.
 
 ## Troubleshooting
 
@@ -718,8 +819,9 @@ refetch path.
 shows the daemon's own reason under the switch — a `200` that wrote the bit
 without loading the provider says so, and an enable that loaded but found
 nothing to serve says that instead. `config/llm.toml` is seeded on first daemon
-start and holds no keys until you add them; a **local** provider needs none —
-turn `ollama` on, and `Refresh models` after a later `ollama pull`. See
+start with every provider off and no keys. A cloud provider needs both: its
+switch on, then a key (`openalpaca llm keys add`). A **local** provider needs
+no key — turn `ollama` on, and `Refresh models` after a later `ollama pull`. See
 [Installation Manual → Local Models (Ollama)](Installation_Manual.md#local-models-ollama).
 
 **Library previews do not render.** Owner note, verbatim: "the Library's inline

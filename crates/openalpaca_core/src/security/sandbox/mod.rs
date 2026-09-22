@@ -83,6 +83,52 @@ impl SandboxPolicy {
             unattended: false,
         }
     }
+
+    /// Admit the tools this loop was handed.
+    ///
+    /// A template grants **capabilities**; the sandbox is asked about **tool
+    /// names** (`execute_tool` checks `tool_call.name`). The two coincide for
+    /// `file_read` or an MCP tool, and differ wherever one capability is
+    /// served by tools with names of their own — `web_access` is `web_search`
+    /// and `web_fetch`, `memory_read` is `memory_search`, `messaging` is
+    /// `send`. So every loop whose policy starts from template constraints
+    /// (the lead, a subagent) calls this with the surface it resolved, and the
+    /// rule is the one the main loop and the skill tier already follow by
+    /// building their list from the exposed definitions: *the allow list
+    /// admits the tools this loop was handed*.
+    ///
+    /// It adds the names on the surface and nothing else, so it stays
+    /// fail-closed:
+    ///
+    /// * a tool that is registered but was not resolved onto this surface
+    ///   gains nothing from this call. (The list still carries the template's
+    ///   capability strings and the check is a name match, so a tool whose
+    ///   *name* equals one of those strings is admitted with or without this
+    ///   method — unchanged by it.)
+    /// * the deny list is untouched and is checked first, so a denial by tool
+    ///   name wins over anything admitted here. A subagent's surface comes
+    ///   from `resolve_capabilities`, which has also kept a tool that provides
+    ///   a denied capability off it; the lead's surface is assembled by hand,
+    ///   so there only the name check applies.
+    /// * an allow list that resolved to **nothing stays empty** — a template
+    ///   that granted no capability is not back-filled from an assembled
+    ///   surface;
+    /// * [`Allowlist::Unrestricted`] is left alone.
+    ///
+    /// Names are lowercased (the [`Allowlist::Only`] contract) and never
+    /// duplicated.
+    pub fn admit_tool_surface(&mut self, defs: &[openalpaca_llm::ToolDefinition]) {
+        if let Allowlist::Only(ref mut allowed) = self.allowed_capabilities
+            && !allowed.is_empty()
+        {
+            for def in defs {
+                let name = def.name.to_lowercase();
+                if !allowed.contains(&name) {
+                    allowed.push(name);
+                }
+            }
+        }
+    }
 }
 
 /// Manages sandboxed tool execution with security checks.

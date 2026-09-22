@@ -80,6 +80,22 @@ describe("DaemonEventsClient", () => {
     return socket;
   }
 
+  /**
+   * A `bootstrap` that hangs until `release()`, handing every caller the same
+   * promise — `connection.ts`'s own `bootstrapInFlight` does exactly that, and
+   * it is why two overlapping `connect()` continuations run back to back.
+   */
+  function sharedBootstrap(): {
+    bootstrap: () => Promise<ConnectionInfo>;
+    release: (info: ConnectionInfo) => void;
+  } {
+    let release!: (info: ConnectionInfo) => void;
+    const pending = new Promise<ConnectionInfo>((resolve) => {
+      release = resolve;
+    });
+    return { bootstrap: () => pending, release };
+  }
+
   beforeEach(() => {
     sockets = [];
     vi.useFakeTimers();
@@ -393,6 +409,101 @@ describe("DaemonEventsClient", () => {
     expect(socket.onclose).toBeNull();
     await vi.advanceTimersByTimeAsync(60_000);
     expect(refresh).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A superseded `connect()` never opens a socket (PR #31 review, finding 4).
+   *
+   * `connect()`'s continuation was the one `openSocket` call site with no
+   * teardown in front of it, so two of them landing back to back left the
+   * first socket open, fully wired and unreachable by `teardownSocket()` for
+   * ever — every frame delivered twice until the survivor closed. The flag
+   * cannot catch it: the second `connect()` sets `reconnectEnabled` back to
+   * true before the first continuation runs. Only a generation stamp answers
+   * "is this still the current attempt?".
+   */
+  it("opens one socket when a connect is superseded mid-bootstrap", async () => {
+    // `bootstrapConnection` shares one in-flight promise, so overlapping
+    // `connect()` calls resolve off the same one and their continuations run
+    // back to back, in call order. That is the shape that orphans.
+    const { bootstrap, release } = sharedBootstrap();
+    const client = makeClient({ bootstrap });
+
+    // StrictMode's mount → cleanup → mount, all while bootstrap is pending.
+    void client.connect();
+    client.disconnect();
+    void client.connect();
+    release(INFO);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sockets).toHaveLength(1);
+    expect(sockets.filter((socket) => !socket.closed)).toHaveLength(1);
+
+    client.disconnect();
+  });
+
+  it("opens one socket when two connects overlap with no disconnect", async () => {
+    const { bootstrap, release } = sharedBootstrap();
+    const client = makeClient({ bootstrap });
+
+    // Two Reconnect clicks during one multi-second sidecar spawn.
+    void client.connect();
+    void client.connect();
+    release(INFO);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sockets).toHaveLength(1);
+    expect(sockets.filter((socket) => !socket.closed)).toHaveLength(1);
+
+    client.disconnect();
+  });
+
+  it("opens no socket at all when the connect was cancelled", async () => {
+    const { bootstrap, release } = sharedBootstrap();
+    const client = makeClient({ bootstrap });
+
+    void client.connect();
+    client.disconnect();
+    release(INFO);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sockets).toHaveLength(0);
+    expect(client.getStatus()).toBe("disconnected");
+  });
+
+  /**
+   * The backoff ladder's own continuation is stamped too: a `connect()` that
+   * started while `refresh()` was in flight re-enables the flag the ladder
+   * checks, so the flag alone would let the timer open a second socket over
+   * the one `connect()` is about to open.
+   */
+  it("lets a concurrent connect supersede an in-flight reconnect", async () => {
+    let releaseRefresh!: (info: ConnectionInfo) => void;
+    const client = makeClient({
+      refresh: () =>
+        new Promise<ConnectionInfo>((resolve) => {
+          releaseRefresh = resolve;
+        }),
+      random: () => 0,
+    });
+
+    await client.connect();
+    latest().onopen?.({});
+    latest().onclose?.({});
+    await vi.advanceTimersByTimeAsync(800);
+    expect(sockets).toHaveLength(1);
+
+    // The user hits Reconnect while the ladder's `refresh()` is pending.
+    await client.connect();
+    expect(sockets).toHaveLength(2);
+
+    releaseRefresh(INFO);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sockets).toHaveLength(2);
+    expect(sockets.filter((socket) => !socket.closed)).toHaveLength(1);
+
+    client.disconnect();
   });
 
   it("keeps retrying when the reconnect handshake itself fails", async () => {

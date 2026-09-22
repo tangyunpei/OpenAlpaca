@@ -1015,9 +1015,17 @@ def parse_schema_state(migrations: list[MigrationItem]) -> tuple[dict[str, Table
                 )
                 continue
 
-            m = re.match(r"DROP\s+TABLE\s+IF\s+EXISTS\s+([A-Za-z_][A-Za-z0-9_]*)$", s, re.I)
+            # `IF EXISTS` is optional: a table-rebuild migration drops the old
+            # table bare (021, 024, 039). SQLite drops the table's indexes with
+            # it, so they go too — a rebuild that wants them recreates them
+            # after the rename. (Triggers are not cascaded: `TriggerDef` does not
+            # record its table, and no migration leaves one on a dropped table.)
+            m = re.match(r"DROP\s+TABLE\s+(IF\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)$", s, re.I)
             if m:
-                tables.pop(m.group(1), None)
+                dropped_table = m.group(2)
+                tables.pop(dropped_table, None)
+                for idx_name in [n for n, idx in indexes.items() if idx.table == dropped_table]:
+                    indexes.pop(idx_name, None)
                 continue
 
             m = re.match(
@@ -1046,6 +1054,25 @@ def parse_schema_state(migrations: list[MigrationItem]) -> tuple[dict[str, Table
                 if table_name in tables:
                     tables[table_name].columns.append(col_def)
                     tables[table_name].source_file = mig.file_name
+                continue
+
+            # `COLUMN` is optional in SQLite. A column definition is matched by
+            # its leading identifier — the rest of the definition is whatever
+            # the CREATE said, which the drop does not repeat.
+            m = re.match(
+                r"ALTER\s+TABLE\s+([A-Za-z_][A-Za-z0-9_]*)\s+DROP\s+(COLUMN\s+)?([A-Za-z_][A-Za-z0-9_]*)$",
+                s,
+                re.I,
+            )
+            if m:
+                table_name = m.group(1)
+                col_name = m.group(3).lower()
+                if table_name in tables:
+                    table = tables[table_name]
+                    table.columns = [
+                        c for c in table.columns if c.split()[0].strip('"`[]').lower() != col_name
+                    ]
+                    table.source_file = mig.file_name
                 continue
 
             m = re.match(

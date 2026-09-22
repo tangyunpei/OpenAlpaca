@@ -81,6 +81,24 @@ export function executedResolutionNote(
     : `${toolName} approved · failed after ${duration}, the agent continued without it.`;
 }
 
+/**
+ * Who a tool call belongs to — the only correlation the two frames share.
+ *
+ * `tool_confirmation_requested` and `tool_executed` are emitted from the same
+ * frame in the sandbox with the same `agent_id` and the same `ctx.task_id`;
+ * neither carries the confirmation's `request_id`, by deliberate decision. A
+ * main-loop prompt is agent `orchestrator` with no run; a subagent's is its
+ * template id with the run's id.
+ *
+ * `agentId: null` means *unknown* — a card whose WS twin has not landed. It
+ * matches nothing: a frame always names its agent, so an unknown owner keeps
+ * the honest "waiting" instead of borrowing a stranger's outcome.
+ */
+export interface ToolOwner {
+  agentId: string | null;
+  taskId: string | null;
+}
+
 /** One `tool_executed` frame, remembered long enough to settle a card. */
 export interface ToolRun {
   toolName: string;
@@ -89,6 +107,9 @@ export interface ToolRun {
   duration: string;
   /** When this client saw the frame, in epoch ms. */
   atMs: number;
+  /** Straight off the frame — who ran it, and in which run. */
+  agentId: string;
+  taskId: string | null;
 }
 
 /**
@@ -102,21 +123,36 @@ export interface ToolRun {
  *
  * `sinceMs` is when this client sent the answer: only a run of that tool that
  * started after it can be the one it approved, so an earlier call of the same
- * tool cannot be borrowed. The match is by name because that is all the two
- * frames share — a confirmation carries a `request_id`, a `tool_executed`
- * carries none.
+ * tool cannot be borrowed. `owner` is the other half (F5): the socket is the
+ * daemon-wide firehose, so a background workflow's subagent running the same
+ * tool 400 ms later used to settle this row with its own outcome — wrongly,
+ * and permanently, since the real frame then found no row still waiting.
+ * Name, time **and** owner, or the row keeps waiting.
  */
 export function settlingRun(
   runs: readonly ToolRun[],
   toolName: string,
   sinceMs: number,
+  owner: ToolOwner,
 ): ToolRun | null {
   for (let index = runs.length - 1; index >= 0; index -= 1) {
     const run = runs[index];
     if (run === undefined) continue;
-    if (run.toolName === toolName && run.atMs >= sinceMs) return run;
+    if (run.toolName !== toolName || run.atMs < sinceMs) continue;
+    if (!sameToolOwner(run, owner)) continue;
+    return run;
   }
   return null;
+}
+
+/**
+ * Whether the executed call (`run`) and the card that is waiting (`card`)
+ * name the same agent in the same run. A card with no agent on it knows of no
+ * call it could be: it matches nothing.
+ */
+export function sameToolOwner(run: ToolOwner, card: ToolOwner): boolean {
+  if (card.agentId === null) return false;
+  return run.agentId === card.agentId && run.taskId === card.taskId;
 }
 
 /**

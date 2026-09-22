@@ -3,6 +3,8 @@
 `openalpaca` is the command-line interface for controlling a local `openalpacad` instance.
 
 Related docs:
+- [Quick Start](QuickStart_Manual.md)
+- [Installation Manual](Installation_Manual.md)
 - [Daemon Manual](Daemon_Manual.md)
 - [GUI Manual](GUI_Manual.md)
 - [API Docs](api/README.md)
@@ -21,6 +23,8 @@ Build release binary:
 cargo build -p openalpaca --release
 ./target/release/openalpaca --help
 ```
+
+Every command and subcommand takes `--help`. `openalpaca` has no `--version` flag; `openalpaca daemon status` prints the running daemon's version.
 
 ### macOS Package Install (No Cargo on target machine)
 
@@ -50,12 +54,13 @@ Linux and Windows packaging/install scripts also exist under `scripts/release/` 
 
 ## Connection and Auth Model
 
-- The daemon writes discovery metadata to `~/.openalpaca/state/discovery.json`.
+- The daemon writes discovery metadata to `~/.openalpaca/state/discovery.json` when it starts (under `OPENALPACA_HOME_STORE` instead, when that is set).
 - CLI reads base URL and token from discovery.
 - Protected endpoints use `Authorization: Bearer <token>`.
 - Streaming endpoints may use query-token auth (handled by CLI internals).
+- The token is valid for 24 hours from daemon start. After that the CLI refuses it with `Discovery token has expired`; `openalpaca daemon restart` writes a fresh one.
 
-If discovery is missing or expired, daemon-backed commands fail until daemon is started/restarted.
+If discovery is missing or expired, daemon-backed commands fail until daemon is started/restarted. `config` is the exception — it works on local files and needs no daemon.
 
 ## Quick Start
 
@@ -77,7 +82,31 @@ openalpaca sessions
 openalpaca chat --resume
 ```
 
+No API key? A local [Ollama](Installation_Manual.md#local-models-ollama) needs none. Start the daemon once first, so its config files exist:
+
+```bash
+ollama pull <model>                          # any chat model
+openalpaca config set ai.ollama.enabled true # the whole setup; no restart needed
+openalpaca llm models --refresh              # the pulled model is listed
+openalpaca llm status                        # shows which model will answer
+```
+
 ## Top-Level Commands
+
+| Command | What it manages |
+|---|---|
+| [`daemon`](#daemon) | The daemon process: status, live events, start, stop, restart |
+| [`config`](#config) | Settings in the database, `llm.toml` and `daemon.toml` |
+| [`gui`](#gui) | The desktop app process |
+| [`connector`](#connector) | Chat-platform connectors |
+| [`tasks`](#tasks) | Runs (workflows) and their approval prompts |
+| [`agents`](#agents) | Agents and their configuration |
+| [`llm`](#llm) | Keys, models, usage |
+| [`ext`](#ext) | MCP servers and plugins |
+| [`plugin`](#plugin) | Plugin-only shortcut over `ext` |
+| [`sessions`](#sessions) | Stored conversations |
+| [`store`](#store) | Project history: re-base or purge |
+| [`chat`](#chat) | Talk to the orchestrator |
 
 ### `daemon`
 
@@ -95,9 +124,11 @@ Notes:
 - `start` launches daemon and then GUI unless `--daemon-only` is set.
 - `stop` stops both daemon and GUI.
 - `restart` restarts daemon only.
+- `status` reads the discovery file and calls the daemon's health endpoint. It prints status, version, PID, instance id and URL.
 - `tail` streams live daemon events (not historical query output); `--count` limits the number of events shown, default `0` = unlimited (Ctrl+C to stop).
-- Optional daemon binary override: `OPENALPACA_DAEMON_BIN=/abs/path/openalpacad`.
-- Daemon startup sets `OPENALPACA_CONFIG_DIR` to `~/.openalpaca/config`.
+- `start` finds `openalpacad` in this order: `OPENALPACA_DAEMON_BIN=/abs/path/openalpacad`, next to the `openalpaca` binary (symlinks followed), `../libexec/`, then `PATH`. From a repository checkout it falls back to `cargo run -p openalpacad`.
+- Daemon startup sets `OPENALPACA_CONFIG_DIR` to `~/.openalpaca/config` and runs the daemon with `~/.openalpaca` as its working directory.
+- The daemon's output is appended to `~/.openalpaca/state/logs/daemon.log`; `start` prints the path. A log past 16 MB is rotated at start (`daemon.log.1` … `.3`).
 
 ### `config`
 
@@ -115,14 +146,29 @@ Notes:
 - Bare `openalpaca config` (no subcommand) opens an interactive configuration TUI.
 - `config` operates directly on the local database and TOML files — no running daemon required (the TUI's agent-management screen is the exception; it talks to the daemon).
 - `--all` includes unset keys with their defaults; `-v/--verbose` adds a source column (db / llm.toml / daemon.toml).
-- `set` validates keys against the config schema; unknown keys get "did you mean" suggestions.
+- `set` validates keys against the config schema; unknown keys get "did you mean" suggestions. A sensitive value (a token, an API key) is masked wherever it is printed.
+- `get` prints the stored value, or the schema default followed by `(default)` when nothing is stored.
 
-Backends:
-- DB-backed settings (`system_config` table)
-- `config/llm.toml`
-- `config/daemon.toml`
+Each key belongs to one backend, chosen by its prefix:
 
-`reset` without `--factory` resets configuration only (agents preserved); `--factory` performs a full storage reset (wipes agents, memories, everything) after confirmation.
+| Key prefix | Backend | Examples |
+|---|---|---|
+| `telegram.*`, `imessage.*`, `discord.*` | database (`system_config` table) | `telegram.token`, `discord.enabled` |
+| `ai.*` | `llm.toml` | `ai.default_model`, `ai.fallback_models`, `ai.ollama.enabled`, `ai.anthropic.api_key` |
+| `daemon.*` | `daemon.toml` | `daemon.execution.max_rounds`, `daemon.orchestrator.routing.steering_enabled` |
+
+`openalpaca config list --all` prints every key with its default and description.
+
+```bash
+openalpaca config set ai.ollama.enabled true
+openalpaca config set ai.default_model qwen3:8b
+openalpaca config get ai.default_model
+openalpaca config list --all -v
+```
+
+Which file is edited: the one in `OPENALPACA_CONFIG_DIR` when that names a directory; otherwise `~/.openalpaca/config/<file>` when it exists; otherwise `./config/<file>` under the current directory (a repository checkout). A daemon running on the same config directory watches `llm.toml` and `daemon.toml` and picks an edit up without a restart.
+
+`reset <key>` deletes that one key. `reset` with no key resets all configuration after a confirmation (agents and data are preserved). `reset --factory` performs a full storage reset (wipes agents, memories, everything), also after a confirmation.
 
 ### `gui`
 
@@ -133,8 +179,7 @@ openalpaca gui start
 openalpaca gui stop
 ```
 
-Optional GUI app override:
-- `OPENALPACA_GUI_APP=/abs/path/openalpaca-gui.app`
+`start` looks for the app bundle in this order: `OPENALPACA_GUI_APP=/abs/path/openalpaca-gui.app`, `~/Applications/openalpaca-gui.app`, `/Applications/openalpaca-gui.app`. From a repository checkout it falls back to the Tauri dev build.
 
 ### `connector`
 
@@ -145,6 +190,15 @@ openalpaca connector list
 openalpaca connector enable <name>
 openalpaca connector disable <name>
 openalpaca connector delete <name>
+```
+
+Notes:
+- Connector names are `telegram`, `imessage` (macOS only) and `discord`.
+- These commands talk to the running daemon. A connector's credentials and options are config keys, set with `config`:
+
+```bash
+openalpaca config set telegram.token <bot-token>
+openalpaca connector enable telegram
 ```
 
 ### `tasks`
@@ -170,51 +224,42 @@ Notes:
   `interrupted`, `active`. `interrupted` is what the daemon writes at boot for a run it
   was driving when it went away — terminal, but not a failure, and re-runnable.
 - `--limit` defaults to 50 (for both `list` and `log`).
-- `create` prompts for a title if the description argument is omitted; `--priority` defaults to 0.
-  The parked row belongs to **your own lane** — the one this CLI and the GUI share, read from `GET /v1/me` the same way a `chat` turn reads it — so the run's completion report lands in that conversation when it is started. It used to send a lane nobody owned (`cli_user:cli`), which `POST /v1/tasks` answers `404 LANE_NOT_FOUND` to; a create against a daemon that cannot be reached for that read fails before anything is parked.
-  A create with no terminal on stdin or stdout (a script, a cron line) sends `unattended: true`, which the daemon **stores on the parked row**: whoever starts it later inherits that declaration unless it declares for itself, so a scripted run's confirm-listed tools are refused at once instead of waiting out the timeout. Nothing is pre-approved by it. See `chat`'s note below for the rule.
-- `resume` is one word over two verbs. On a **paused** run it is the plain
-  transition back to running, as it has always been. On an **interrupted** one it
-  is *replay resume* — **experimental, and off by default**: the daemon rebuilds
-  the run's loop history from its session log (its rounds and their tool results)
-  and continues it under the same id, telling the model not to repeat
-  side-effecting calls it already made. Nothing recorded is re-executed. Turn it
-  on with `resume_enabled = true` under `[orchestrator.routing]` in `daemon.toml`.
-  Until then an interrupted run answers `RESUME_DISABLED`, and the way to redo
-  the work is a re-run — the GUI's `Re-run` button, or
-  `POST /v1/tasks/{id}/rerun` directly; the CLI has no `rerun` verb yet. A resume
-  that finds no usable transcript (the sweep took the log) answers
-  `RESUME_LOG_MISSING` and leaves the row exactly as it was. When it succeeds the
-  command names how much came back: `replayed 3 rounds from session <id>`.
-- **`confirmations`** answers the approval prompts a run stops on. A tool on the
-  confirm list suspends its run and asks; in the GUI the card is there, and from
-  a terminal these are the way:
-  - `watch` sits on the daemon's event socket and prompts for each one as it is
-    raised — `y` allows this call, `a` allows every later call of that tool for
-    the rest of the session, anything else (Enter included) denies. This is what
-    answers a **background workflow's** prompt: that run raises it long after the
-    `openalpaca chat` turn that started it has finished, so nothing else is
-    listening. Ctrl+C leaves every unanswered prompt exactly as it was.
-  - `approve` / `deny` answer one by id. An id the daemon is not holding — it was
-    answered already, it timed out, or the daemon restarted — is said plainly and
-    changes nothing.
-  - `list` shows the prompts a run is **waiting on right now**, oldest first,
-    read from `GET /v1/chat/confirmations`. It used to read the event log,
-    which holds what was once *raised* — answered and timed-out prompts listed
-    as though they were live. It is a snapshot, not a subscription: one
-    answered or timed out since the read is refused by id, plainly, and
-    nothing is changed. It is also **unscoped**: it lists what the whole
-    daemon is waiting on, not only your own runs, and each row carries the
-    tool's arguments (`--format json` hands them on; the table's columns do
-    not print them). On a single-owner machine that is the same list either
-    way; whether it should be scoped or redacted for a multi-owner daemon is
-    an owner decision, recorded as T22 in `tasks/api-fix-plan.md` §0 and not
-    adopted.
+- `list` prints `ID` (first 8 characters), `TITLE`, `STATUS`, `AGENTS` (how many subagents the run spawned, `-` for none) and `CREATED`.
+- `status` prints the task and, under `Lanes:`, one line per subagent it spawned. With `--format json` the subagents are the `lanes` array; `lanes_error` is present when the timeline could not be read, so an empty array is never mistaken for "spawned nothing".
+- Every command that takes a `<task_id>` needs the **full** id; the daemon does not match a prefix. The `list` table shortens it, so copy it from `openalpaca tasks list --format json`.
 
-  A prompt is never auto-approved, and `--entire-tool` is the only thing that
-  widens one. See also `chat`'s note below: a one-shot or piped turn declares
-  that it *cannot* answer, and its confirm-listed tools are refused immediately
-  rather than waiting for an answer that cannot come.
+#### Creating a task
+
+- `create` prompts for a title if the description argument is omitted; `--priority` defaults to 0.
+- `create` **parks** a queued run. It does not start it, and the CLI has no `start` verb: start it from the GUI (`Start now` on the queued run), or with `POST /v1/tasks/{id}/action` and the body `{"action":"start"}`. To start work straight away from a terminal, ask for it in `openalpaca chat` instead.
+- The parked row belongs to **your own lane** — the one this CLI and the GUI share, read from `GET /v1/me` the same way a `chat` turn reads it. The run's completion report lands in that conversation once it is started. If the daemon cannot be reached for that read, the create fails before anything is parked.
+- A create with no terminal on stdin or stdout (a script, a cron line) sends `unattended: true`, and the daemon **stores it on the parked row**. Whoever starts the run later inherits that declaration unless it declares for itself, so a scripted run's confirm-listed tools are refused at once instead of waiting out the timeout. Nothing is pre-approved by it. See [Approval prompts](#approval-prompts) under `chat` for the rule.
+
+#### Resuming a task
+
+`resume` is one word over two verbs:
+
+- On a **paused** run it is the plain transition back to running.
+- On an **interrupted** run it is *replay resume* — **experimental, and off by default**. The daemon rebuilds the run's loop history from its session log (its rounds and their tool results) and continues it under the same id, telling the model not to repeat side-effecting calls it already made. Nothing recorded is re-executed.
+- Turn replay resume on with `resume_enabled = true` under `[orchestrator.routing]` in `daemon.toml`. Until then an interrupted run answers `RESUME_DISABLED`.
+- The other way to redo an interrupted run is a re-run: the GUI's `Re-run` button, or `POST /v1/tasks/{id}/rerun` directly. The CLI has no `rerun` verb yet.
+- A resume that finds no usable transcript (the sweep took the log) answers `RESUME_LOG_MISSING` and leaves the row exactly as it was.
+- When it succeeds the command names how much came back: `replayed 3 rounds from session <id>`.
+
+#### Answering approval prompts (`confirmations`)
+
+A tool on the confirm list suspends its run and asks. In the GUI the card is there; from a terminal these are the way:
+
+- `watch` sits on the daemon's event socket and prompts for each one as it is raised: `Allow? [y]es / [a]lways this tool / [N]o`. `y` allows this call, `a` allows every later call of that tool for the rest of the session, anything else (Enter included) denies.
+  - This is what answers a **background workflow's** prompt from a terminal: that run raises it long after the interactive `openalpaca chat` turn that started it has finished, so the chat itself is no longer listening.
+  - Prompts that were already waiting when `watch` started are not replayed; `list` shows those.
+  - Ctrl+C leaves every unanswered prompt exactly as it was.
+- `approve` / `deny` answer one by id. `approve --entire-tool` allows every later call of that tool for the rest of the session. An id the daemon is not holding — it was answered already, it timed out, or the daemon restarted — is said plainly and changes nothing.
+- `list` shows the prompts a run is **waiting on right now**, oldest first, read from `GET /v1/chat/confirmations`. The table is `REQUEST_ID`, `TOOL`, `RUN` (`-` for a prompt raised by a chat turn rather than a run) and `RAISED`.
+  - It is a snapshot, not a subscription: a prompt answered or timed out since the read is refused by id, plainly, and nothing is changed.
+  - It is **unscoped**: it lists what the whole daemon is waiting on, not only your own runs. Each row carries the tool's arguments — `--format json` hands them on; the table does not print them. On a single-owner machine that is the same list either way.
+
+A prompt is never auto-approved, and `--entire-tool` (or `a` in `watch`) is the only thing that widens one. An unanswered prompt times out on the daemon as a refusal (`confirmation_timeout_secs` under `[execution.agent_defaults]` in `daemon.toml`, default 300 s). A one-shot or piped `chat` turn declares that it *cannot* answer, and its confirm-listed tools are refused immediately rather than waiting — see [Approval prompts](#approval-prompts).
 
 ### `agents`
 
@@ -232,7 +277,10 @@ openalpaca agents remove <agent_id>
 ```
 
 Notes:
-- `openalpaca agents` with no subcommand enters interactive creation mode.
+- `openalpaca agents` with no subcommand enters interactive creation mode. So does `agents create` with no flags.
+- `--from-file <path>` creates the agent from a TOML file.
+- `set` takes a dotted config path, for example `openalpaca agents set <agent_id> llm.model <model-id>`. Every section on the way to the last key must already exist in the agent's config (`agents config <agent_id>` shows it). The value is read as a number, then `true`/`false`, then a string.
+- `remove` archives the agent.
 
 ### `llm`
 
@@ -243,7 +291,7 @@ openalpaca llm status [--format table|json]
 openalpaca llm keys list [--format table|json]
 openalpaca llm keys add [--provider <name>] [--secret <key>] [--priority primary|fallback] [--source <src>] [--notes <text>]
 openalpaca llm keys remove <provider> <key_id>
-openalpaca llm keys validate --provider <name> --secret <key>
+openalpaca llm keys validate --provider <name> [--secret <key>]
 openalpaca llm keys set-primary <provider> <key_id>
 openalpaca llm keys reorder <key_id>...
 openalpaca llm usage [--agent <id>] [--key <key_id>] [--daily [--date YYYY-MM-DD]] [--format table|json]
@@ -254,43 +302,42 @@ openalpaca llm backends [--format table|json]
 openalpaca llm provider-usage [--format table|json]
 ```
 
-Notes:
-- `llm models --refresh` asks every loaded provider what it can serve before
-  listing (`POST /v1/models/refresh`). Providers that need no key are asked
-  exactly like the ones that do, so a model you just installed with `ollama
-  pull` appears without restarting the daemon or editing `llm.toml`. Without
-  the flag the catalogue is read as it stands. The table carries a `TOOLS`
-  column (a `-` means the daemon did not say, not "no"), and an empty
-  catalogue names the fix instead of printing `No items found.`
-- `llm status` reads the daemon's own verdict on the default model. Its
-  `Model:` line can read `X — not available, using Y` when the configured
-  model is not routable and the fallback ladder answers with another, or name
-  the fix when nothing is routable at all. A daemon too old to serve that fact
-  is not second-guessed — the configured id is printed alone.
-- A provider that **needs no API key** (Ollama) reads `· <provider> — no key
-  needed` under `Key Health`, and gets a row saying the same in `llm keys
-  list`. A keyed provider with an empty pool still reads `✗ … — no key
-  configured`.
-- The provider ENABLE bit is **`openalpaca config set ai.<provider>.enabled
-  true`** — under `config`, not `llm`, because it writes `llm.toml` through
-  the config schema like every other `ai.*` key (`ai.ollama.enabled`,
-  `ai.anthropic.enabled`, `ai.openai.enabled`). Ollama is exempt from the
-  key-format check, so enabling it asks for no key. The same row is in the
-  interactive `openalpaca config` TUI under API-Keys → `<provider>`, and the
-  GUI's switch (Settings → Models & keys) and a hand edit write the same
-  field. Whichever writes it, the daemon's watcher registers any provider the
-  file enables that the router is not already holding, discovery included, so
-  no restart is needed. See
-  [Installation Manual → Local Models (Ollama)](Installation_Manual.md#local-models-ollama).
-- `--format json` echoes the daemon's own field names. For `llm models` those
-  are `id`, `input_price_per_million`, `output_price_per_million` and
-  `supports_tools` (the older `model_id` / `*_per_1m` spellings were never on
-  the wire and always came out null); for `llm keys list` the row carries the
-  daemon's `priority` string and a `keyless` flag instead of the old
-  always-false `is_primary`.
-- `llm keys validate --provider <keyless provider>` answers `no key needed`
-  and posts nothing: a provider that needs no key has no key to validate, and
-  sending one to be graded produced a meaningless `✗ Key is invalid`.
+#### Turning a provider on
+
+There is no `llm enable` verb. The provider ENABLE bit is a config key:
+
+```bash
+openalpaca config set ai.ollama.enabled true      # also ai.anthropic.enabled, ai.openai.enabled
+```
+
+- It lives under `config`, not `llm`, because it writes `llm.toml` through the config schema like every other `ai.*` key.
+- Ollama needs no API key, so enabling it asks for none.
+- The same switch is in the interactive `openalpaca config` TUI under API-Keys → `<provider>`, in the GUI (Settings → Models & keys), and in `llm.toml` itself (`[providers.<name>] enabled`). All of them write the same field.
+- Whichever writes it, the daemon's file watcher registers any provider the file enables that the router is not already holding, model discovery included. No restart is needed.
+- See [Installation Manual → Local Models (Ollama)](Installation_Manual.md#local-models-ollama).
+
+#### Models and status
+
+- `llm models --refresh` asks every loaded provider what it can serve before listing (`POST /v1/models/refresh`). Providers that need no key are asked exactly like the ones that do, so a model you just installed with `ollama pull` appears without restarting the daemon or editing `llm.toml`. Without the flag the catalogue is read as it stands.
+- The models table carries a `TOOLS` column. A `-` there means the daemon did not say, not "no".
+- An empty catalogue names the fix instead of printing `No items found.`
+- `llm status` reads the daemon's own verdict on the default model. Its `Model:` line reads:
+  - the configured model alone, when it is routable;
+  - `X — not available, using Y` when the configured model is not routable and the fallback ladder answers with another;
+  - the fix (`openalpaca config set ai.ollama.enabled true`, …) when nothing is routable at all.
+
+#### Keys
+
+- `llm keys add` asks interactively for whatever was not passed: provider, secret, source and notes. Pass all of `--provider`, `--secret`, `--source` and `--notes` to run it without a prompt. The key is checked first and the verdict printed (`valid` / `invalid`), but it is added either way.
+- `llm keys remove` asks for confirmation before it deletes.
+- A provider that **needs no API key** (Ollama) reads `· <provider> — no key needed` under `Key Health` in `llm status`, and gets a row saying the same in `llm keys list`. A keyed provider with an empty pool reads `✗ <provider> — no key configured`.
+- `llm keys validate --provider <keyless provider>` answers that no key is needed and posts nothing. For a keyed provider, `--secret` is required.
+
+#### Other notes
+
+- `--format json` echoes the daemon's own field names. For `llm models` those are `id`, `input_price_per_million`, `output_price_per_million` and `supports_tools`. For `llm keys list` the row carries the daemon's `priority` string and a `keyless` flag.
+- `llm usage --date` only applies together with `--daily`.
+- **`llm strategy` has no effect at present.** The command prints a success line, but the daemon route it calls (`PUT /v1/orchestrator/config`) reads only `model` and `fallback_models` and ignores the strategy. Key selection is read from `llm.toml`: `strategy = "round_robin"` (the default), `"lru"` or `"primary_fallback"` under `[providers.<name>]`.
 
 ### `ext`
 
@@ -311,7 +358,7 @@ openalpaca ext remove <plugin-id>
 openalpaca ext install <path> [--dry-run]
 openalpaca ext update <plugin-id> <path>
 openalpaca ext uninstall <kind> <id> [--purge-data]
-openalpaca ext mcp add <name> [--transport stdio|http] ...
+openalpaca ext mcp add <name> [options]    # options: see "Declaring an MCP server"
 openalpaca ext mcp remove <name>
 ```
 
@@ -325,9 +372,10 @@ Notes:
 - `reload` re-applies an edited declaration or a rotated credential.
 - `remove` drops the permissions entry of an *orphaned* plugin — one whose
   directory is gone. `list --include-orphaned` is how you see those.
-- Rows report `kind`, `id`, `enabled`, `state` (`enabled`, `disabled`,
-  `unapproved`, `failed`, `orphaned`, and the in-flight `enabling`/`disabling`)
-  and what the extension contributes.
+- `list` rows report `kind`, `id`, `enabled`, `state` (`enabled`, `disabled`,
+  `unapproved`, `failed`, `orphaned`, and the in-flight `enabling`/`disabling`),
+  the reason for that state, and how many tools the extension contributes.
+  `info` shows one extension in full.
 
 #### Installing and removing extensions
 
@@ -350,6 +398,9 @@ openalpaca ext install ~/src/openalpaca-notion
 openalpaca ext approve openalpaca-notion                   # now it runs
 ```
 
+Installing from a URL is **not** supported: `source: "url"` is declined until it
+has had its own security review. Only a local directory can be installed.
+
 `update <id> <path>` replaces an installed plugin's tree: the plugin is torn
 down first (its child runs with its directory as the working directory, so an
 in-place replace is never allowed), the incumbent tree is moved to
@@ -366,11 +417,31 @@ the trash as well. For `kind = mcp` this removes the `[servers.<name>]` block
 from `config/mcp.toml`; the server must be turned off first (`ext disable mcp
 <name>`), otherwise the command refuses with `not_disabled`.
 
+#### Declaring an MCP server
+
 `ext mcp add` writes a `[servers.<name>]` block into `config/mcp.toml` through
 the daemon's atomic, comment-preserving writer — your comments, defaults and
 other servers come back unchanged — and then connects it. Writing a server into
 your own config *is* the consent, so there is no approve step; `--disabled`
-declares it turned off instead.
+declares it turned off instead. `<name>` becomes the server's extension id, and
+its tools register as `<name>__<tool>`.
+
+| Option | Transport | Meaning |
+|---|---|---|
+| `--transport <TRANSPORT>` | both | `stdio` (default) or `http` |
+| `--command <COMMAND>` | stdio | The program to run |
+| `--arg <ARG>` | stdio | One argument; repeatable; a leading dash is fine |
+| `--env KEY=VALUE` | stdio | One environment entry; repeatable; never a secret |
+| `--env-from KEY=HOST_VAR` | stdio | Read the value from the daemon's own `HOST_VAR`; repeatable |
+| `--cwd <DIR>` | stdio | Working directory for the child |
+| `--url <URL>` | http | The endpoint to connect to |
+| `--bearer-env <VAR>` | http | Environment variable holding the bearer token |
+| `--api-key-header <HEADER>` | http | The header an API key is sent in |
+| `--api-key-env <VAR>` | http | Environment variable holding that API key |
+| `--header-from HEADER=HOST_VAR` | http | Read a header's value from `HOST_VAR`; repeatable |
+| `--connect-timeout-secs <N>` | both | Seconds to wait for the connection |
+| `--request-timeout-secs <N>` | both | Seconds to wait for one request |
+| `--disabled` | both | Declare it turned off, so nothing is spawned |
 
 **The daemon does not write secrets.** `--env KEY=VALUE` carries literal values
 for ordinary settings, but a key that names a credential (anything containing
@@ -423,9 +494,6 @@ openalpaca ext mcp add tracked --transport http \
 openalpaca ext disable mcp github && openalpaca ext mcp remove github
 ```
 
-Installing from a URL is **not** supported: `source: "url"` is declined until it
-has had its own security review. Only a local directory can be installed.
-
 ### `plugin`
 
 The plugin-shaped shortcut over the same routes (`/v1/extensions`), kept for
@@ -443,8 +511,9 @@ openalpaca plugin config <name> get [<key>]
 ```
 
 Notes:
-- The verbs keep their names but carry the `ext` meanings above: `enable` no
-  longer records consent, and `deny` performs a full unload.
+- The verbs carry the `ext` meanings above: `enable` writes the toggle and does
+  not record consent, `approve` records consent and does not turn the plugin
+  on, and `deny` performs a full unload.
 - `info` shows the same row `ext info` shows, for one plugin.
 - `config set` writes a key through the daemon (values are parsed as
   number/bool/string).
@@ -547,28 +616,106 @@ openalpaca chat --resume
 openalpaca chat --session 0f2c9a41-3b7d-4e58-9a10-6c1f2d3e4b55
 ```
 
-Notes:
-- `--file <PATH>` is repeatable and uploads the files as message attachments; it requires `--message` (attachments are not supported in interactive or pipe mode).
+#### Three ways to run it
+
+| Invocation | What happens |
+|---|---|
+| `openalpaca chat` on a terminal | An interactive REPL opens. |
+| `openalpaca chat --message "<text>"` | One-shot: the turn is sent, the reply printed, the process exits. |
+| stdin piped, no `--message` | All of stdin is read and sent as one message; the reply is the output. |
+
+- The REPL has streaming replies, tab completion and line history (kept in `~/.openalpaca/state/repl_history`). Exit with `exit`, `quit`, or Ctrl-D. If the daemon was restarted in the meantime, the REPL reconnects once and retries.
+- The REPL handles these slash commands itself: `/help`, `/model`, `/models`, `/agents`, `/keys`, `/usage`, `/clear`, `/verbose`. Every other slash line goes to the daemon — see [Slash commands](#slash-commands).
+- Piped stdin that is empty (or only whitespace) sends nothing and exits **1** with `No input on stdin` — a pipe that produced nothing is a mistake upstream, not a request to send an empty turn.
+
+#### Attachments
+
+- `--file <PATH>` is repeatable and requires `--message`. Attachments are not supported in the REPL or in pipe mode.
+- Each file is uploaded before the turn is sent. The CLI prints `Uploaded: <name> (<file id>)` on stderr for each one.
+- The daemon's default limits are 10 files per message and 50 MB per file (`max_files_per_message` and `max_file_size_bytes` under `[upload]` in `daemon.toml`). A message with too many files is refused with `TOO_MANY_ATTACHMENTS`.
+- What reaches the model depends on the model that answers. An image needs a model with image input. A document still travels as its extracted text to a model with no native document input; it is skipped only when no text could be extracted. An audio clip needs a model with audio input: nothing transcribes it, so any other model skips it.
+- **A file that does not reach the model is never dropped silently.** After the answer, the CLI prints one line per skipped file on stderr, with the daemon's reason:
+
+```text
+Attachment <file id> did not reach the model: the answering model does not support image input
+```
+
+- Some turns cannot carry files at all, and report every attachment as skipped the same way: a task command such as `/status`, a `/steer`, or a skill that comes from a plugin (it receives the question as plain text).
+
+#### Project and conversation
+
 - Every turn carries the CLI's working directory as its project (`x-workspace-path`), the same way the GUI sends the project chosen in its window. The daemon resolves it up to the nearest `.openalpaca`/`.git` marker; that root is what a run records as its `workspace_id` and where the files it writes land. A directory the CLI cannot canonicalize sends no project at all rather than a path the daemon would resolve against its own directory.
-- `--resume` continues a stored conversation instead of the lane's current one. Its scope is **this project**: the conversations bound to the working directory's own root, newest first — the lane is shared with the GUI and with every other checkout, so a lane-wide resume continued another project's conversation and then let that conversation's project override the directory you were in. With a terminal it opens a picker over them; with stdin piped it takes the most recent — the row the picker would have opened on — because a prompt written into a pipe is a hang, not a question. A project with no conversations yet says so and names itself, rather than reaching for another project's; from a directory under no project marker the list stays lane-wide, which is the same scope such a turn itself has. `--session <id>` names one directly; `openalpaca sessions` lists the ids. The two are mutually exclusive.
+- `--resume` continues a stored conversation instead of the lane's current one. `--session <id>` names one directly; `openalpaca sessions` lists the ids. The two are mutually exclusive.
+- `--resume` is scoped to **this project**: the conversations bound to the working directory's own root, newest first. The lane is shared with the GUI and with every other checkout, so a lane-wide list would offer another project's conversations.
+  - With a terminal it opens a picker over them.
+  - With stdin piped it takes the most recent — the row the picker would have opened on — because a prompt written into a pipe is a hang, not a question.
+  - A project with no conversations yet says so and names itself, rather than reaching for another project's.
+  - From a directory under no project marker the list stays lane-wide, which is the same scope such a turn itself has.
 - `--session <id>` only continues a conversation on the lane the CLI talks on. One on another lane (a connector's) is refused here, before anything is sent, naming both lanes: activating it would archive that lane's own live conversation and the turn would still be refused (`409 SESSION_LANE_MISMATCH`). `openalpaca sessions --all` is what lists those.
-- Resuming **re-opens** the conversation (`POST /v1/sessions/{id}/activate`) before anything is sent. A lane holds exactly one live conversation, so resuming an archived one archives whatever was live; the CLI prints the conversation it resumed, and its project, so that is visible rather than discovered later. The last few turns are printed before the prompt opens.
+- Resuming **re-opens** the conversation (`POST /v1/sessions/{id}/activate`) before anything is sent. A lane holds exactly one live conversation, so resuming an archived one archives whatever was live. The CLI prints the conversation it resumed, and its project, so that is visible rather than discovered later. The last 8 messages are printed before the prompt opens.
 - A resumed conversation's own project governs the turn, overriding the working directory: one conversation belongs to one project. A conversation that has no project yet takes the working directory's and is bound by it.
-- With no `--message` and a TTY on stdin, an interactive REPL opens: streaming replies, tab completion, and client-side slash commands (`/help`, `/model`, `/models`, `/agents`, `/keys`, `/usage`, `/clear`, `/verbose`). Exit with `exit`, `quit`, or Ctrl-D.
-- If stdin is piped, the CLI reads all of stdin, sends it as one message, and streams the reply. Stdin that is empty (or only whitespace) sends nothing and exits **1** with `No input on stdin` — a pipe that produced nothing is a mistake upstream, not a request to send an empty turn.
-- **The reply streams as the model writes it, and ends on the authoritative answer.** The daemon forwards the provider's own tokens now (it used to re-chunk a finished answer three words at a time), so a terminal prints them as they arrive. Their sum is **not** necessarily the final answer: a turn that calls a tool streams the text written before the call, and a stream that breaks mid-way is answered by the non-streaming fallback. The CLI reconciles on the terminal `done` — it appends what is missing, and on a divergence prints the authoritative answer on a fresh line — so a terminal always ends with the answer, exactly once. **A pipe prints nothing before `done`**: its bytes are somebody else's input, so it gets the final answer once and nothing else, and a failed turn writes no partial answer into it at all.
-- **A thinking model's reasoning is shown, dim, on a terminal only.** A local reasoning model can spend ten seconds or more thinking before its first token; the daemon forwards that on the stream (SSE `reasoning`) and the CLI prints it dimmed as it arrives, then starts the answer on its own line. It is never written into a pipe or a redirect, and it is never part of the answer — nothing stores it, and `openalpaca chat --resume` will not replay it.
-- **A one-shot exits when the turn is over.** The process returns on the stream's last frame (`done`, or an `error`) rather than waiting for the daemon to close the connection — the daemon holds a finished stream open for a few seconds so a late reader can still fetch it, which used to be five seconds of idling after the answer had already been printed. Nothing is approved by leaving: a confirmation is raised *before* the turn ends, and one left unanswered still times out on the daemon as a refusal.
-- **One label rule for both one-shot paths.** The `Alpaca: ` label is printed only when stdout is a terminal, for `--message` exactly as for a pipe, so `openalpaca chat --message q > answer.txt`, `openalpaca chat < question.txt > answer.txt` and `... | jq` all get the answer and nothing else.
-- **A turn that reaches no answer says why.** A turn that runs out of tool rounds, hits its cost cap or is truncated with nothing written used to print the meta line and no text at all. It now answers with one line naming the reason and, where there is one, the last tool error — "I stopped after 8 tool rounds without reaching an answer. The last tool error was: …". It is the turn's answer like any other: stored in the conversation, printed on a terminal, written to a pipe.
-- **A failed turn fails the command.** When the daemon reports an error (no routable model, a provider that cannot be reached, a broken stream), the message goes to **stderr** and the process exits non-zero — in the `--message` path and the piped path alike. It used to print `Error: …` on stdout and exit 0, which no script could tell from an answer. The interactive REPL prints the failure on stderr and keeps the prompt open.
-- **A turn with no terminal declares that it cannot answer an approval prompt.** The rule is the shape of the process's streams: a turn can answer when **stdin and stdout are both a terminal**, and declares `unattended: true` on `POST /v1/chat` otherwise — `openalpaca chat --message q > answer.txt`, `... | jq`, `openalpaca chat < question.txt`, a cron line, a CI step. There the prompt reaches nobody and the run used to sit on it for the whole `confirmation_timeout_secs` (default 300 s) *per tool call*; the daemon now **refuses** the confirm-listed tool at once and tells the model where it can be approved. A `--message` typed at a prompt is **not** unattended — the confirmation arrives on the stream it is still reading and it asks inline `[y/N]`, which is the behaviour it had before this declaration existed. It is a declaration, not an approval: nothing is auto-allowed. To run work that needs an approval from a script, watch for its prompts in another terminal with `openalpaca tasks confirmations watch` (or answer one by id with `approve`/`deny <request_id>`; `list` shows what is waiting).
-- Routing is decided by the daemon: the model answers directly or starts a background workflow via a tool call. When a reply delegates work to a workflow, the daemon returns structured delegation metadata (task id + title) and the CLI polls that task by id, printing the result when it completes (Ctrl-C stops waiting; the task keeps running — check it later with `openalpaca tasks status <task_id>`).
-- The daemon also recognizes chat-level commands with no LLM call: `/status [task_id]`, `/tasks`, `/cancel`/`/pause`/`/resume` (bare forms target the lane's active workflows, or pass an explicit task id), `/steer <text>` (inject a correction into the running workflow), and `/<skill>` invocations. In the interactive REPL, only the client-side commands listed above are handled locally; every other slash line — the daemon commands here and anything unrecognized (which may be a skill command) — is forwarded to the daemon as a chat message, so `/steer focus on the tests` works directly at the prompt. One-shot mode works too: `openalpaca chat --message "/steer focus on the tests"`.
+
+#### What is printed
+
+On a **terminal**:
+
+- The reply is labelled `Alpaca: ` and streams as the model writes it — the daemon forwards the provider's own tokens.
+- **A thinking model's reasoning is shown dimmed**, as it arrives, and the answer then starts on its own line. A local reasoning model can spend ten seconds or more thinking before its first token; this is what fills that silence. Reasoning is never part of the answer: nothing stores it, and `openalpaca chat --resume` will not replay it.
+- **The turn ends on the authoritative answer.** The streamed pieces do not always add up to the final answer: a turn that calls a tool streams the text written before the call, and a stream that breaks mid-way is answered by a non-streaming fallback. When the turn is done the CLI reconciles — it appends what is missing, or, when the stream diverged, prints the final answer on a fresh line — so the terminal always ends with the answer, exactly once.
+- A usage line follows the answer: `[<model> | <tokens> in | <tokens> out | <ms>ms]`. The model named is the one that answered, which can differ from the configured one when the fallback ladder stepped in.
+
+On a **pipe or a redirect** (`openalpaca chat --message q > answer.txt`, `openalpaca chat < question.txt > answer.txt`, `... | jq`):
+
+- No `Alpaca: ` label, no reasoning, no partial text. Nothing is written before the turn is done; then the final answer is written once.
+- The usage line is still written to stdout after the answer. When the turn delegated to a workflow, so is the workflow's outcome (`[Task completed in 42s]`, then `Result: …`). A script that wants the answer alone must drop those lines.
+- `Uploaded: …`, the skipped-attachment lines and `Waiting for task to complete...` go to stderr, so they never mix with the answer.
+- A failed turn writes no partial answer.
+
+Both:
+
+- **A one-shot exits when the turn is over.** The process returns on the stream's last frame (`done`, or an `error`) rather than waiting for the daemon to close the connection, which the daemon keeps open a few seconds longer for late readers.
+- **A turn that reaches no answer says why.** A turn that runs out of tool rounds, hits its cost cap or is truncated with nothing written answers with one line naming the reason and, where there is one, the last tool error — "I stopped after 8 tool rounds without reaching an answer. The last tool error was: …". It is the turn's answer like any other: stored in the conversation, printed on a terminal, written to a pipe.
+- **A reply never claims a run it did not start.** If an answer states a task id that matches none of your runs, and no workflow was started in that turn, the daemon appends one line beneath it: `Note from OpenAlpaca: no workflow was started in this turn, and no task with id <id> exists. Ask again to start one.`
+
+#### Failures and exit codes
+
+- **A failed turn fails the command.** When the daemon reports an error (no routable model, a provider that cannot be reached, a broken stream), the message goes to **stderr** and the process exits non-zero — in the `--message` path and the piped path alike.
+- The interactive REPL prints the failure on stderr and keeps the prompt open.
+- If the failure is "no routable model", `openalpaca llm status` names the fix.
+
+#### Approval prompts
+
+A tool on the confirm list suspends the turn and asks before it runs.
+
+- **With a terminal on both stdin and stdout** — the REPL, or a `--message` typed at a prompt — the confirmation arrives on the stream the CLI is reading and it asks inline: `Allow execution? [y/N]`. `y` or `yes` approves; anything else denies.
+- **Otherwise the turn declares `unattended: true`** on `POST /v1/chat`: `openalpaca chat --message q > answer.txt`, `... | jq`, `openalpaca chat < question.txt`, a cron line, a CI step. Nobody could answer there, so the daemon **refuses** the confirm-listed tool at once and tells the model where it can be approved, instead of waiting out `confirmation_timeout_secs` (default 300 s) *per tool call*.
+- It is a declaration, not an approval: nothing is auto-allowed.
+- Nothing is approved by leaving, either: a prompt left unanswered times out on the daemon as a refusal.
+- The declaration travels with the work: a workflow started by an unattended turn is unattended too, so no prompt is ever raised for it and `tasks confirmations watch` has nothing to answer. Work that needs an approval has to start from somewhere that can give one — the GUI, or an interactive `openalpaca chat`.
+- A **background workflow** started from an interactive chat raises its prompts after the turn that started it has ended, so the inline `[y/N]` never sees them. Answer those from the GUI, or keep `openalpaca tasks confirmations watch` open in another terminal — see [`tasks`](#answering-approval-prompts-confirmations).
+
+#### Workflows
+
+- Routing is decided by the daemon: the model answers directly or starts a background workflow via a tool call.
+- When a reply delegates work to a workflow, the daemon returns structured delegation metadata (task id + title) and the CLI polls that task by id every 2 seconds, printing the result when it completes.
+- Ctrl-C stops waiting; the task keeps running. The CLI also stops waiting by itself after 5 minutes. Either way, check the run later with `openalpaca tasks status <task_id>`.
+- A run the daemon was driving when it restarted reads `interrupted`. The CLI says so and stops waiting. See [Resuming a task](#resuming-a-task) for the ways to redo it.
+
+#### Slash commands
+
+- The daemon answers these chat-level commands itself, without asking a model: `/status [task_id]`, `/tasks`, `/cancel`/`/pause`/`/resume` (bare forms target the lane's active workflows, or pass an explicit task id), and `/steer <text>` (inject a correction into the running workflow).
+- `/<skill>` runs that skill directly, without the main loop choosing it.
+- In the REPL, only the client-side commands (`/help`, `/model`, `/models`, `/agents`, `/keys`, `/usage`, `/clear`, `/verbose`) are handled locally. Every other slash line — the daemon commands here and anything unrecognized (which may be a skill command) — is forwarded to the daemon as a chat message, so `/steer focus on the tests` works directly at the prompt.
+- One-shot mode works too: `openalpaca chat --message "/steer focus on the tests"`.
+- A skill's answer streams like any other turn. A skill contributed by a plugin cannot stream: its answer arrives in one piece.
 
 ## Troubleshooting
 
-- Discovery missing/expired: start or restart daemon.
-- Auth errors: ensure CLI and daemon use the same current discovery file.
-- `daemon status` unhealthy: inspect daemon logs and `RUST_LOG` settings.
+- Discovery missing/expired: start or restart daemon. `Discovery token has expired` means the daemon has been up for more than 24 hours — `openalpaca daemon restart`.
+- Auth errors: ensure CLI and daemon use the same current discovery file (the same `OPENALPACA_HOME_STORE`, if you set one).
+- `daemon status` unhealthy: inspect the daemon log (`~/.openalpaca/state/logs/daemon.log` for a daemon started with `openalpaca daemon start`) and `RUST_LOG` settings.
 - Chat/stream failures: verify daemon is reachable on `127.0.0.1` and token is valid.
+- A chat turn fails with no routable model: run `openalpaca llm status` — its `Model:` line names the fix. With a local Ollama that is `openalpaca config set ai.ollama.enabled true`, then `openalpaca llm models --refresh`.
+- A scripted or piped turn reports that a tool needs an approval it cannot ask for: the turn was unattended, so the tool was refused without a prompt. Run that work from the GUI or from an interactive `openalpaca chat`, and approve it there.
+- A workflow sits in `running` and nothing happens: it may be waiting on an approval. `openalpaca tasks confirmations list` shows what is waiting; `approve`/`deny <request_id>` answers it.
+- A command says a task was not found although `tasks list` shows it: the table shortens ids. Use the full id from `openalpaca tasks list --format json`.

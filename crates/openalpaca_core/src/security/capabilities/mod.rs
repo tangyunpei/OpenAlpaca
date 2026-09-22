@@ -117,6 +117,13 @@ impl Allowlist {
     /// Template-declared capabilities are a closed set: whatever the template
     /// granted is all the agent gets, and a template that granted nothing
     /// yields an agent that can call nothing.
+    ///
+    /// The entries are **capability** names, as the template spells them, and
+    /// the sandbox is asked about **tool** names. Where the two differ
+    /// (`web_access` is provided by `web_search` and `web_fetch`), the loop
+    /// that resolved those capabilities to a surface adds that surface's tool
+    /// names with `SandboxPolicy::admit_tool_surface` — still nothing the
+    /// template did not grant, only spelled the way the check reads it.
     pub fn from_agent_constraints(constraints: &AgentConstraints) -> Self {
         Self::only(&constraints.allowed_capabilities)
     }

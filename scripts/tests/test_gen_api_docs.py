@@ -16,6 +16,7 @@ from __future__ import annotations
 import importlib.util
 import pathlib
 import sys
+import tempfile
 
 
 SCRIPTS = pathlib.Path(__file__).resolve().parents[1]
@@ -275,6 +276,73 @@ export async function getRunEventLog(taskId: string): Promise<RunEventPage> {
 def test_sql_column_split_still_respects_quoted_defaults() -> None:
     columns = gen.split_top_level("id TEXT PRIMARY KEY, state TEXT DEFAULT 'a, b', n INTEGER")
     assert columns == ["id TEXT PRIMARY KEY", "state TEXT DEFAULT 'a, b'", "n INTEGER"]
+
+
+# ── the schema state replays what a migration undid ─────────────────────
+#
+# `parse_schema_state` is a replay of every migration in order, and a statement
+# it does not recognize is a silent no-op: the doc then shows a column or a
+# table the real database dropped, with no sign anything was missed.
+
+
+def _parse_migrations(files: list[tuple[str, str]]):
+    """Run `parse_schema_state` over temp .sql files instead of the real ones."""
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = pathlib.Path(tmp)
+        migrations = []
+        for index, (file_name, sql) in enumerate(files, start=1):
+            (directory / file_name).write_text(sql, encoding="utf-8")
+            migrations.append(
+                gen.MigrationItem(version=index, name=file_name, file_name=file_name, summary="")
+            )
+        original = gen.MIGRATIONS_DIR
+        gen.MIGRATIONS_DIR = directory
+        try:
+            return gen.parse_schema_state(migrations)
+        finally:
+            gen.MIGRATIONS_DIR = original
+
+
+def test_parse_schema_state_applies_drop_column() -> None:
+    tables, _indexes, _triggers = _parse_migrations(
+        [
+            (
+                "001_create.sql",
+                "CREATE TABLE latency (\n"
+                "    id INTEGER PRIMARY KEY,\n"
+                "    planner_ms INTEGER DEFAULT 0,\n"
+                "    total_ms INTEGER DEFAULT 0\n"
+                ");\n",
+            ),
+            ("002_drop_column.sql", "ALTER TABLE latency DROP COLUMN planner_ms;\n"),
+        ]
+    )
+
+    columns = tables["latency"].columns
+    assert not any(c.split()[0] == "planner_ms" for c in columns), columns
+    assert [c.split()[0] for c in columns] == ["id", "total_ms"], columns
+    # The doc attributes a table to the last migration that changed it.
+    assert tables["latency"].source_file == "002_drop_column.sql"
+
+
+def test_parse_schema_state_applies_a_drop_table_without_if_exists() -> None:
+    tables, indexes, _triggers = _parse_migrations(
+        [
+            (
+                "001_create.sql",
+                "CREATE TABLE gone (id TEXT PRIMARY KEY, note TEXT);\n"
+                "CREATE INDEX idx_gone_note ON gone(note);\n"
+                "CREATE TABLE kept (id TEXT PRIMARY KEY);\n"
+                "CREATE INDEX idx_kept ON kept(id);\n",
+            ),
+            # SQLite drops a table's indexes with the table, `IF EXISTS` or not.
+            ("002_drop_table.sql", "DROP TABLE gone;\n"),
+        ]
+    )
+
+    assert "gone" not in tables, sorted(tables)
+    assert "idx_gone_note" not in indexes, sorted(indexes)
+    assert "kept" in tables and "idx_kept" in indexes
 
 
 def main() -> int:

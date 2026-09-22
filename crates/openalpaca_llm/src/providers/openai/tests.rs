@@ -680,6 +680,70 @@ async fn test_ollama_sse_reasoning_delta() {
     assert_eq!(text_parts.join(""), "Hi");
 }
 
+/// F7: a gateway that always emits `reasoning_content`, empty when it has
+/// nothing of its own, while passing the vendor's `reasoning` through beside
+/// it. The empty first name must not hide the second: emptiness is decided per
+/// key, not once on whichever key happened to match first.
+#[test]
+fn test_empty_reasoning_content_falls_through_to_reasoning() {
+    let provider = OpenAiProvider::new_without_auth(
+        "some-model".to_string(),
+        "http://127.0.0.1:1/v1".to_string(),
+        None,
+    );
+    let response_json = serde_json::json!({
+        "id": "chatcmpl-gateway",
+        "model": "some-model",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "A haiku about the ocean.",
+                "reasoning_content": "",
+                "reasoning": "The user wants a haiku about the ocean."
+            },
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20}
+    });
+
+    let response = provider.parse_response(response_json).unwrap();
+    assert_eq!(
+        response.thinking.as_deref(),
+        Some("The user wants a haiku about the ocean."),
+        "an empty reasoning_content must fall through to a populated reasoning"
+    );
+}
+
+/// F7, the streamed half: the same both-keys-present shape on a delta, where
+/// the short-circuit dropped a `ThinkingDelta` on every affected frame.
+#[tokio::test]
+async fn test_sse_empty_reasoning_content_falls_through_to_reasoning() {
+    let raw = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"\",\"reasoning\":\"The\"},\"finish_reason\":null}]}\n",
+        "\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"\",\"reasoning\":\" user\"},\"finish_reason\":null}]}\n",
+        "\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n",
+        "\n",
+        "data: [DONE]\n",
+        "\n",
+    );
+
+    let thinking: String = events_of(raw)
+        .await
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::ThinkingDelta { thinking } => Some(thinking.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        thinking, "The user",
+        "an empty reasoning_content must not swallow the frame's reasoning"
+    );
+}
+
 // ── V1: one frame, every event it carries ────────────────────────────
 
 /// Collect a raw SSE body into the events the parser yields, in order.

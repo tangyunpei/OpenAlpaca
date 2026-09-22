@@ -56,3 +56,23 @@ jobs:
       # imports, Tailwind token typos) that `tsc --noEmit` cannot see.
       - name: Build
         run: bun run build
+
+  # The only Windows job, and deliberately the smallest one: no Rust, no bun,
+  # just the Pester suite for install-windows.ps1 / uninstall-windows.ps1. They
+  # are the one piece of shipped code the ubuntu jobs cannot exercise at all,
+  # which is why their store root drifted away from the daemon's unnoticed.
+  windows-release-scripts:
+    name: Test (Windows release scripts)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pester
+        shell: pwsh
+        run: |
+          if (-not (Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -ge [version]'5.0.0' })) {
+            Install-Module Pester -MinimumVersion 5.5.0 -Force -Scope CurrentUser -SkipPublisherCheck
+          }
+          Import-Module Pester -MinimumVersion 5.0.0
+          $result = Invoke-Pester -Path scripts/release/tests -PassThru
+          if ($result.FailedCount -gt 0 -or $result.PassedCount -eq 0) { exit 1 }

@@ -358,6 +358,30 @@ async function settleSnapshot(): Promise<void> {
   });
 }
 
+/* ── the composer's attachments, shared by the U5 and I5 blocks ─────────── */
+
+function fileInput(): HTMLInputElement {
+  const node = document.querySelector<HTMLInputElement>('input[type="file"]');
+  if (node === null) throw new Error("no file input in the composer");
+  return node;
+}
+
+function textFile(name: string, body = "codeword: alpaca"): File {
+  return new File([body], name, { type: "text/plain" });
+}
+
+/** Pick files through the hidden input, the way the Attach button does. */
+async function pick(...files: File[]): Promise<void> {
+  await act(async () => {
+    fireEvent.change(fileInput(), { target: { files } });
+  });
+}
+
+/** The bodies of every `POST /v1/files/upload` this test made. */
+function uploads(): RecordedRequest[] {
+  return requests.filter((request) => request.url.includes("/v1/files/upload"));
+}
+
 /**
  * `GET /v1/status`'s body — the store roots, this request's project, and the
  * `llm` block the composer seeds its model from (G9).
@@ -1525,6 +1549,31 @@ describe("ChatView — a settle signal never retires a live prompt (R1, R2)", ()
  * the upgrade pass runs over a list that does not contain it yet.
  */
 describe("ChatView — a confirmation whose tool reported first (G6)", () => {
+  /**
+   * The SSE frame draws the card; its WS twin says who it was raised for.
+   * Both are emitted from the same frame in the sandbox, and it is the twin's
+   * `agent_id`/`task_id` that lets the execution be matched to this row (F5).
+   */
+  async function raiseMainLoopCard(source: FakeEventSource) {
+    await act(async () => {
+      source.emit("confirmation_requested", {
+        request_id: "req-1",
+        tool_name: "artifact_write",
+        tool_arguments: { name: "notes.md" },
+      });
+      emitServerEvent({
+        type: "tool_confirmation_requested",
+        request_id: "req-1",
+        agent_id: "orchestrator",
+        tool_name: "artifact_write",
+        tool_arguments: { name: "notes.md" },
+        stream_id: null,
+        lane_key: "user:gui",
+        task_id: null,
+      });
+    });
+  }
+
   it("settles the card with the outcome it already saw", async () => {
     // Hold the answer open, exactly as a slow round trip would.
     let release = (): void => {};
@@ -1535,13 +1584,7 @@ describe("ChatView — a confirmation whose tool reported first (G6)", () => {
 
     renderChat();
     const source = await sendMessage("write the notes");
-    await act(async () => {
-      source.emit("confirmation_requested", {
-        request_id: "req-1",
-        tool_name: "artifact_write",
-        tool_arguments: { name: "notes.md" },
-      });
-    });
+    await raiseMainLoopCard(source);
 
     fireEvent.click(screen.getByRole("button", { name: /Approve/ }));
 
@@ -1549,7 +1592,7 @@ describe("ChatView — a confirmation whose tool reported first (G6)", () => {
     await act(async () => {
       emitServerEvent({
         type: "tool_executed",
-        agent_id: "lead_agent",
+        agent_id: "orchestrator",
         tool_name: "artifact_write",
         success: true,
         duration_ms: 1400,
@@ -1572,13 +1615,7 @@ describe("ChatView — a confirmation whose tool reported first (G6)", () => {
   it("upgrades a card that was drawn before the tool reported", async () => {
     renderChat();
     const source = await sendMessage("write the notes");
-    await act(async () => {
-      source.emit("confirmation_requested", {
-        request_id: "req-1",
-        tool_name: "artifact_write",
-        tool_arguments: { name: "notes.md" },
-      });
-    });
+    await raiseMainLoopCard(source);
 
     fireEvent.click(screen.getByRole("button", { name: /Approve/ }));
     expect(
@@ -1588,7 +1625,7 @@ describe("ChatView — a confirmation whose tool reported first (G6)", () => {
     await act(async () => {
       emitServerEvent({
         type: "tool_executed",
-        agent_id: "lead_agent",
+        agent_id: "orchestrator",
         tool_name: "artifact_write",
         success: false,
         duration_ms: 9000,
@@ -1601,6 +1638,88 @@ describe("ChatView — a confirmation whose tool reported first (G6)", () => {
         "artifact_write approved · failed after 9.0s, the agent continued without it.",
       ),
     ).toBeInTheDocument();
+  });
+
+  /**
+   * F5 — chat runs alongside workflows, so a background subagent's own call of
+   * the same tool arrives on the same socket. It is not this row's outcome,
+   * and taking it was permanent: the real frame, 40 s later, found no row
+   * still waiting to correct.
+   */
+  it("ignores another agent's execution of the same tool, in both orders", async () => {
+    renderChat();
+    const source = await sendMessage("write the notes");
+    await raiseMainLoopCard(source);
+
+    fireEvent.click(screen.getByRole("button", { name: /Approve/ }));
+    expect(
+      await screen.findByText(/artifact_write approved · waiting/),
+    ).toBeInTheDocument();
+
+    // A subagent of a background workflow finishes its own call.
+    await act(async () => {
+      emitServerEvent({
+        type: "tool_executed",
+        agent_id: "researcher",
+        tool_name: "artifact_write",
+        success: false,
+        duration_ms: 200,
+        task_id: "a1b2",
+      });
+    });
+    expect(
+      screen.getByText(/artifact_write approved · waiting/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/failed after 0\.2s/)).toBeNull();
+
+    // The row is still waiting, so its own call can still settle it.
+    await act(async () => {
+      emitServerEvent({
+        type: "tool_executed",
+        agent_id: "orchestrator",
+        tool_name: "artifact_write",
+        success: true,
+        duration_ms: 40000,
+        task_id: null,
+      });
+    });
+    expect(
+      await screen.findByText(
+        "artifact_write approved · returned in 40.0s, the agent resumed.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("ignores a foreign run that reported before the answer landed", async () => {
+    let release = (): void => {};
+    confirmationReply = () =>
+      new Promise<Response>((resolve) => {
+        release = () => resolve(new Response("", { status: 200 }));
+      });
+
+    renderChat();
+    const source = await sendMessage("write the notes");
+    await raiseMainLoopCard(source);
+
+    fireEvent.click(screen.getByRole("button", { name: /Approve/ }));
+    await act(async () => {
+      emitServerEvent({
+        type: "tool_executed",
+        agent_id: "researcher",
+        tool_name: "artifact_write",
+        success: false,
+        duration_ms: 200,
+        task_id: "a1b2",
+      });
+    });
+    await act(async () => {
+      release();
+    });
+
+    expect(
+      await screen.findByText(/artifact_write approved · waiting/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/failed after 0\.2s/)).toBeNull();
   });
 });
 
@@ -2856,6 +2975,116 @@ describe("ChatView — switching conversations (I5)", () => {
     expect(screen.getByText("first message on this lane")).toBeInTheDocument();
     expect(screen.getByText("Answered.")).toBeInTheDocument();
   });
+
+  /**
+   * F6 — a file attached in one conversation rode the next conversation's
+   * first message. The chips live in `useChatSession`, which spans every
+   * conversation, and the session-change reset cleared nine session-local
+   * things without them.
+   */
+  it("drops the composer's chips, so the next conversation sends none", async () => {
+    historyReply = () =>
+      json({
+        messages: [],
+        total: 0,
+        lane_key: "user:gui",
+        session_id: "sess-a",
+      });
+    renderChat();
+    await screen.findByLabelText("Message");
+
+    await pick(textFile("salary-review.pdf"));
+    await waitFor(() => expect(uploads()).toHaveLength(1));
+    await screen.findByLabelText("ready");
+
+    historyReply = () =>
+      json({
+        messages: [],
+        total: 0,
+        lane_key: "user:gui",
+        session_id: "sess-b",
+      });
+    fireEvent.click(screen.getByRole("button", { name: "New chat" }));
+
+    await waitFor(() =>
+      expect(screen.queryByRole("list", { name: "Attachments" })).toBeNull(),
+    );
+
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "what's the release order?" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    });
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+
+    expect(chatBody().attachments).toEqual([]);
+    // Nothing was re-uploaded either: the file is the other conversation's.
+    expect(uploads()).toHaveLength(1);
+  });
+
+  /** An upload still in flight lands as a no-op — it never draws a chip. */
+  it("never resurrects a chip whose upload finished after the switch", async () => {
+    let release: (() => void) | null = null;
+    uploadReply = async (form) => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const file = form.get("file");
+      const name = file instanceof File ? file.name : "unnamed";
+      return json({
+        id: `file-${name}`,
+        filename: name,
+        mime_type: "text/plain",
+        size_bytes: 3,
+        status: "uploaded",
+      });
+    };
+    historyReply = () =>
+      json({
+        messages: [],
+        total: 0,
+        lane_key: "user:gui",
+        session_id: "sess-a",
+      });
+    renderChat();
+    await screen.findByLabelText("Message");
+
+    await pick(textFile("slow.pdf"));
+    expect(await screen.findByText("uploading…")).toBeInTheDocument();
+
+    historyReply = () =>
+      json({
+        messages: [],
+        total: 0,
+        lane_key: "user:gui",
+        session_id: "sess-b",
+      });
+    fireEvent.click(screen.getByRole("button", { name: "New chat" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("list", { name: "Attachments" })).toBeNull(),
+    );
+
+    await act(async () => {
+      release?.();
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByRole("list", { name: "Attachments" })).toBeNull();
+    expect(screen.queryByText("slow.pdf")).toBeNull();
+    expect(screen.queryByLabelText("ready")).toBeNull();
+
+    // And the turn the new conversation does send carries nothing.
+    fireEvent.change(screen.getByLabelText("Message"), {
+      target: { value: "what's the release order?" },
+    });
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    });
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    expect(chatBody().attachments).toEqual([]);
+  });
 });
 
 /**
@@ -3117,30 +3346,6 @@ describe("ChatView — a run the daemon never finished (§5.6b)", () => {
  * the wire rather than on a spy.
  */
 describe("ChatView — composer attachments (U5, U3)", () => {
-  function fileInput(): HTMLInputElement {
-    const node = document.querySelector<HTMLInputElement>('input[type="file"]');
-    if (node === null) throw new Error("no file input in the composer");
-    return node;
-  }
-
-  function textFile(name: string, body = "codeword: alpaca"): File {
-    return new File([body], name, { type: "text/plain" });
-  }
-
-  /** Pick files through the hidden input, the way the Attach button does. */
-  async function pick(...files: File[]): Promise<void> {
-    await act(async () => {
-      fireEvent.change(fileInput(), { target: { files } });
-    });
-  }
-
-  /** The bodies of every `POST /v1/files/upload` this test made. */
-  function uploads(): RecordedRequest[] {
-    return requests.filter((request) =>
-      request.url.includes("/v1/files/upload"),
-    );
-  }
-
   it("uploads a picked file and sends the id the daemon gave it", async () => {
     renderChat();
     await screen.findByLabelText("Message");

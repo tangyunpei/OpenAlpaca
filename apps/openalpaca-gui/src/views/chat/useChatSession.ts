@@ -59,6 +59,7 @@ import {
   timedOutResolutionNote,
   type DraftAttachment,
   type Resolution,
+  type ToolOwner,
   type ToolRun,
 } from "@/components/chat";
 import { toUiStatus, type UiStatus } from "@/components/ui";
@@ -445,6 +446,8 @@ export function useChatSession(): ChatSession {
   // The picker's project governs where an upload's bytes land (D2), the same
   // way it governs the turn that will carry them.
   const attachments = useComposerAttachments(projectPath);
+  /** Stable (`useCallback(…, [])`), so the session reset can depend on it. */
+  const clearAttachments = attachments.clear;
 
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState<PendingTurn | null>(null);
@@ -764,6 +767,11 @@ export function useChatSession(): ChatSession {
       resolution: "timed_out",
       note: timedOutResolutionNote(shown.tool_name),
       at: event.ts,
+      // Straight off the frame that ended it — the same pair the card was
+      // raised with. Nothing upgrades a timed-out row (the tool did not run),
+      // but the row says who it belonged to all the same.
+      agentId: event.agent_id,
+      taskId: event.task_id,
     });
   });
 
@@ -818,10 +826,17 @@ export function useChatSession(): ChatSession {
         success: event.success,
         duration: formatDurationMs(event.duration_ms),
         atMs: Date.now(),
+        // Who ran it, and in which run — the pair a card can be matched on
+        // (F5). This subscriber is unfiltered on purpose: the frame may be
+        // for a card that does not exist yet, and the match happens where the
+        // card is, not here.
+        agentId: event.agent_id,
+        taskId: event.task_id,
       },
     ];
     noteToolRun(
       event.tool_name,
+      { agentId: event.agent_id, taskId: event.task_id },
       executedResolutionNote(
         event.tool_name,
         event.success,
@@ -913,6 +928,20 @@ export function useChatSession(): ChatSession {
    * A change while a turn is in flight is that turn's own doing — R48 archives
    * and reopens mid-turn — so the id is adopted and nothing is cleared;
    * clearing would close the `EventSource` the user is watching.
+   *
+   * The composer's attachment chips go with them (F6). A file picked in one
+   * conversation was still on screen in the next and rode its first message:
+   * the daemon scopes a file asset by owner alone, so it accepted it without
+   * comment and the turn was persisted carrying it. An upload still in flight
+   * at that moment lands as a no-op — `clear()` empties the list its `.then`
+   * maps over — so nothing resurfaces afterwards. The `names` map is left
+   * alone on purpose: the skipped-attachments note is read from it *after* a
+   * send, and it is right for it to outlive the chips.
+   *
+   * The draft *text* is deliberately not cleared here. It is window-level in
+   * this build — nothing else clears it on a switch either — and making the
+   * composer conversation-scoped is a decision about per-conversation drafts,
+   * not a fix (PR #31 review, finding 6).
    */
   const shownSession = useRef<string | null | undefined>(undefined);
   useEffect(() => {
@@ -936,11 +965,18 @@ export function useChatSession(): ChatSession {
     setArtifacts([]);
     clearResolutions();
     setSteers([]);
+    clearAttachments();
     setConfirmationMeta({});
     firstSeenAtMs.current.clear();
     started.current.clear();
     stream.reset();
-  }, [history.data, stream.active, stream.reset, clearResolutions]);
+  }, [
+    history.data,
+    stream.active,
+    stream.reset,
+    clearResolutions,
+    clearAttachments,
+  ]);
 
   const items = useMemo(
     () =>
@@ -1185,6 +1221,14 @@ export function useChatSession(): ChatSession {
       // When the answer went out — the earliest a `tool_executed` for it can
       // be this one's (G6).
       const answeredAtMs = Date.now();
+      // Who it was raised for (F5). `confirmationMeta` is filled by the WS
+      // twin of the frame that drew the card; a card whose twin has not
+      // landed leaves the row unowned, and an unowned row is never upgraded.
+      const meta = confirmationMetaRef.current[target.requestId];
+      const owner: ToolOwner = {
+        agentId: meta?.agentId ?? null,
+        taskId: meta?.taskId ?? null,
+      };
 
       respondRef.current.mutate(
         {
@@ -1203,9 +1247,15 @@ export function useChatSession(): ChatSession {
               note: resolutionNote(
                 resolution,
                 target.toolName,
-                settlingRun(toolRuns.current, target.toolName, answeredAtMs),
+                settlingRun(
+                  toolRuns.current,
+                  target.toolName,
+                  answeredAtMs,
+                  owner,
+                ),
               ),
               at: new Date().toISOString(),
+              ...owner,
             });
           },
           onError: (error: Error) => {

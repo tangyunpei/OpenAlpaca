@@ -8,26 +8,148 @@ fn test_database_creation() {
 
     let db = Database::open(&db_path).unwrap();
     assert!(db_path.exists());
-    assert_eq!(db.schema_version().unwrap(), 42);
+    assert_eq!(db.schema_version().unwrap(), migrations::BASELINE_VERSION);
 }
 
 #[test]
-fn test_migrations_idempotent() {
+fn reopening_a_current_database_preserves_its_data_and_version() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("test.db");
 
-    // Open twice - migrations should only run once
-    let _db1 = Database::open(&db_path).unwrap();
-    let db2 = Database::open(&db_path).unwrap();
+    {
+        let db = Database::open(&db_path).unwrap();
+        db.with_connection(|conn| {
+            conn.execute_batch(
+                "INSERT INTO session (id, lane_key, source, title)
+                 VALUES ('session-1', 'user:gui', 'gui', 'Keep this conversation');
+                 INSERT INTO conversation_messages (lane_key, role, content, session_id)
+                 VALUES ('user:gui', 'user', 'Keep this message', 'session-1');",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
 
-    assert_eq!(db2.schema_version().unwrap(), 42);
+    let db = Database::open(&db_path).unwrap();
+    assert_eq!(db.schema_version().unwrap(), migrations::BASELINE_VERSION);
+    db.with_connection(|conn| {
+        let (title, content): (String, String) = conn.query_row(
+            "SELECT s.title, m.content FROM session s
+             JOIN conversation_messages m ON m.session_id = s.id
+             WHERE s.id = 'session-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(title, "Keep this conversation");
+        assert_eq!(content, "Keep this message");
+
+        let versions = conn
+            .prepare("SELECT version FROM schema_version ORDER BY version")?
+            .query_map([], |row| row.get::<_, i32>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(versions, vec![migrations::BASELINE_VERSION]);
+        Ok(())
+    })
+    .unwrap();
 }
 
 #[test]
-fn test_migration_035_drops_planner_telemetry() {
+fn an_unsupported_old_database_is_refused_without_changing_its_schema_or_data() {
+    let dir = tempdir().unwrap();
+    for version in [1, migrations::BASELINE_VERSION - 1] {
+        let db_path = dir.path().join(format!("legacy-{version}.db"));
+        let original_schema = {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+                 CREATE TABLE legacy_data (id INTEGER PRIMARY KEY, content TEXT NOT NULL);
+                 INSERT INTO legacy_data (id, content) VALUES (7, 'Do not discard');",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO schema_version (version) VALUES (?1)",
+                [version],
+            )
+            .unwrap();
+            conn.prepare("SELECT name, sql FROM sqlite_master ORDER BY name")
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+
+        let error = Database::open(&db_path)
+            .err()
+            .unwrap_or_else(|| panic!("legacy version {version} must be refused"));
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(&format!("Unsupported legacy schema version {version}")),
+            "opening an old database must deliberately refuse it: {message}"
+        );
+        // The remedy is deleting the file, so the refusal has to say which file.
+        // The store root is overridable, and a developer reading this line in a
+        // log has no other way to find out.
+        let named = std::path::absolute(&db_path).unwrap();
+        assert!(
+            message.contains(&named.display().to_string()),
+            "the refusal must name the database file by its full path ({}): {message}",
+            named.display()
+        );
+        assert!(
+            message.contains(&format!("schema version {}", migrations::BASELINE_VERSION)),
+            "the refusal must name the version this build starts at: {message}"
+        );
+        assert!(
+            message.contains("Delete "),
+            "the refusal must prescribe deleting that file: {message}"
+        );
+
+        let conn = Connection::open(&db_path).unwrap();
+        let schema = conn
+            .prepare("SELECT name, sql FROM sqlite_master ORDER BY name")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            schema, original_schema,
+            "refusal must leave the schema intact"
+        );
+        let rows = conn
+            .prepare("SELECT id, content FROM legacy_data ORDER BY id")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(rows, vec![(7, "Do not discard".to_string())]);
+        let versions = conn
+            .prepare("SELECT version FROM schema_version ORDER BY version")
+            .unwrap()
+            .query_map([], |row| row.get::<_, i32>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            versions,
+            vec![version],
+            "refusal must not advance the version"
+        );
+    }
+}
+
+#[test]
+fn test_schema_omits_obsolete_planner_telemetry() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 42);
 
     db.with_connection(|conn| {
         let columns = |table: &str| -> rusqlite::Result<Vec<String>> {
@@ -95,13 +217,13 @@ fn test_sqlite_vec_available() {
             "vec_version() should return a version string"
         );
 
-        // 2. Verify migration created the table
+        // 2. Verify the schema includes the vector table
         let exists: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_vec')",
             [],
             |row| row.get(0),
         )?;
-        assert!(exists, "memory_vec table should exist after migration");
+        assert!(exists, "memory_vec table should exist");
 
         // 3. Insert a zero vector (768 floats x 4 bytes = 3072 bytes of zeroblob)
         conn.execute(
@@ -180,10 +302,9 @@ fn insert_asset(
 }
 
 #[test]
-fn test_migration_036_adds_artifact_columns() {
+fn test_artifact_schema_columns_defaults_and_indexes() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 42);
 
     db.with_connection(|conn| {
         let columns = |table: &str| -> rusqlite::Result<Vec<String>> {
@@ -284,7 +405,7 @@ fn test_migration_036_adds_artifact_columns() {
 }
 
 #[test]
-fn test_migration_036_address_is_unique_but_null_rel_path_is_free() {
+fn test_artifact_address_is_unique_but_null_rel_path_is_free() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
 
@@ -324,7 +445,7 @@ fn test_migration_036_address_is_unique_but_null_rel_path_is_free() {
 }
 
 #[test]
-fn test_migration_036_artifact_versions_cascade() {
+fn test_artifact_versions_are_unique_and_cascade() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
 
@@ -362,10 +483,9 @@ fn test_migration_036_artifact_versions_cascade() {
 }
 
 #[test]
-fn test_migration_037_run_observability_schema() {
+fn test_run_observability_schema_and_constraints() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 42);
 
     db.with_connection(|conn| {
         let columns = |table: &str| -> rusqlite::Result<Vec<String>> {
@@ -447,10 +567,9 @@ fn test_migration_037_run_observability_schema() {
 }
 
 #[test]
-fn test_migration_038_message_run_links() {
+fn test_message_run_links_are_nullable_without_foreign_keys() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 42);
 
     db.with_connection(|conn| {
         let columns: Vec<String> = conn
@@ -486,7 +605,7 @@ fn test_migration_038_message_run_links() {
         )?;
         assert_eq!(stored.as_deref(), Some("no-such-run"));
 
-        // Every pre-038 row reads back NULL, never an empty string.
+        // A message without a run link reads back NULL, never an empty string.
         conn.execute(
             "INSERT INTO conversation_messages (lane_key, role, content)
              VALUES ('user:gui', 'user', 'chat only')",
@@ -505,19 +624,21 @@ fn test_migration_038_message_run_links() {
 }
 
 #[test]
-fn test_migration_039_rebuilds_conversations_as_session() {
+fn test_session_schema_and_links() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
 
     db.with_connection(|conn| {
-        // The old table is gone — rebuilt, not shadowed by a second
-        // transcript container.
+        // Session is the only transcript container.
         let leftover: i64 = conn.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'conversations'",
             [],
             |row| row.get(0),
         )?;
-        assert_eq!(leftover, 0, "`conversations` should have been dropped");
+        assert_eq!(
+            leftover, 0,
+            "`conversations` must not coexist with `session`"
+        );
 
         let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(session)")?
@@ -565,7 +686,13 @@ fn test_migration_039_rebuilds_conversations_as_session() {
                 "{table}.session_id should exist"
             );
         }
-        for column in ["task_id", "log_seq", "args_preview", "result_preview", "result_ref"] {
+        for column in [
+            "task_id",
+            "log_seq",
+            "args_preview",
+            "result_preview",
+            "result_ref",
+        ] {
             assert!(
                 has_column("tool_execution_log", column)?,
                 "tool_execution_log.{column} should exist"
@@ -578,7 +705,7 @@ fn test_migration_039_rebuilds_conversations_as_session() {
 }
 
 #[test]
-fn test_migration_039_partial_index_allows_one_active_session_per_lane() {
+fn test_partial_index_allows_one_active_session_per_lane() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
 
@@ -596,8 +723,7 @@ fn test_migration_039_partial_index_allows_one_active_session_per_lane() {
         );
         assert!(clash.is_err(), "a second active session must be rejected");
 
-        // Archived siblings are unlimited — that is the whole point of
-        // dropping 011's column-level UNIQUE(lane_key).
+        // Archived siblings are unlimited; only active lanes are unique.
         conn.execute(
             "INSERT INTO session (id, lane_key, source, status) VALUES ('s2', 'u:gui', 'gui', 'archived')",
             [],
@@ -628,194 +754,12 @@ fn test_migration_039_partial_index_allows_one_active_session_per_lane() {
     .unwrap();
 }
 
-/// Apply every migration up to and including `through` to a raw connection.
-///
-/// `Database::open` always runs *all* of them, so a test that wants the
-/// database as version 38 left it — with rows in `conversations`, which 039
-/// then copies and drops — cannot use it. The pragmas mirror `open`'s so the
-/// migrations run under the same foreign-key posture they do in production.
-fn open_at_version(path: &std::path::Path, through: i32) -> Connection {
-    ensure_vec_extension();
-    let conn = Connection::open(path).expect("open the database");
-    conn.execute_batch(
-        "PRAGMA journal_mode = WAL;
-         PRAGMA foreign_keys = ON;
-         PRAGMA temp_store = MEMORY;",
-    )
-    .expect("apply pragmas");
-    for migration in migrations::MIGRATIONS
-        .iter()
-        .filter(|m| m.version <= through)
-    {
-        conn.execute_batch(migration.sql).unwrap_or_else(|e| {
-            panic!(
-                "migration {} ({}) failed: {e}",
-                migration.version, migration.name
-            )
-        });
-    }
-    conn
-}
-
-fn apply_migration(conn: &Connection, version: i32) {
-    let migration = migrations::MIGRATIONS
-        .iter()
-        .find(|m| m.version == version)
-        .unwrap_or_else(|| panic!("migration {version} is not registered"));
-    conn.execute_batch(migration.sql)
-        .unwrap_or_else(|e| panic!("migration {version} failed: {e}"));
-}
-
-/// The riskiest statement in 039 is its data copy: `INSERT INTO session …
-/// SELECT … FROM conversations`, followed by `DROP TABLE conversations` — after
-/// which nothing can be recovered — and the `UPDATE conversation_messages SET
-/// session_id = (SELECT …)` that re-keys the transcript onto it.
-///
-/// Opening a fresh database exercises neither: 039 runs against an empty
-/// `conversations`. So build the database the way an upgrading user's is built
-/// — apply 001..038 directly, seed the old tables, then apply 039 alone — and
-/// read every carried column back off `session`.
-#[test]
-fn test_migration_039_copies_conversations_into_session_and_rekeys_messages() {
-    let dir = tempdir().unwrap();
-    let conn = open_at_version(&dir.path().join("test.db"), 38);
-
-    let version: i32 = conn
-        .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    assert_eq!(version, 38, "the seed must happen on a pre-039 schema");
-
-    // Two lanes as 011..038 left them: one conversation row each, distinct
-    // values in every column 039 carries, and messages on both.
-    conn.execute(
-        "INSERT INTO conversations (id, lane_key, source, title, message_count, last_message_at,
-                                    summary, summary_version, last_summarized_message_id,
-                                    summary_updated_at, created_at, updated_at)
-         VALUES ('conv-a', 'alice:gui', 'gui', 'Old chat', 3, '2026-01-02 03:04:05',
-                 'a summary', 7, 42, '2026-01-02 03:04:06',
-                 '2025-12-01 00:00:00', '2026-01-02 03:04:07')",
-        [],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO conversations (id, lane_key, source, title, message_count, created_at, updated_at)
-         VALUES ('conv-b', 'bob:telegram', 'telegram', '', 1,
-                 '2025-11-01 00:00:00', '2025-11-02 00:00:00')",
-        [],
-    )
-    .unwrap();
-    for (lane, content) in [
-        ("alice:gui", "hello"),
-        ("alice:gui", "hi back"),
-        ("bob:telegram", "ping"),
-        // A lane with messages but no `conversations` master row: 039's
-        // scalar subquery finds nothing, so it stays unattached.
-        ("carol:cli", "orphan"),
-    ] {
-        conn.execute(
-            "INSERT INTO conversation_messages (lane_key, role, content) VALUES (?1, 'user', ?2)",
-            rusqlite::params![lane, content],
-        )
-        .unwrap();
-    }
-
-    apply_migration(&conn, 39);
-
-    // Every column the SELECT lists arrived, positionally intact — a swapped
-    // pair in a 14-column positional copy is exactly the defect this catches.
-    let column = |name: &str| -> Option<String> {
-        conn.query_row(
-            &format!("SELECT CAST({name} AS TEXT) FROM session WHERE id = 'conv-a'"),
-            [],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .unwrap_or_else(|e| panic!("read session.{name}: {e}"))
-    };
-    for (name, expected) in [
-        ("lane_key", "alice:gui"),
-        ("source", "gui"),
-        ("title", "Old chat"),
-        ("message_count", "3"),
-        ("last_message_at", "2026-01-02 03:04:05"),
-        ("summary", "a summary"),
-        ("summary_version", "7"),
-        ("last_summarized_message_id", "42"),
-        ("summary_updated_at", "2026-01-02 03:04:06"),
-        ("created_at", "2025-12-01 00:00:00"),
-        ("updated_at", "2026-01-02 03:04:07"),
-    ] {
-        assert_eq!(
-            column(name).as_deref(),
-            Some(expected),
-            "session.{name} did not survive the copy"
-        );
-    }
-
-    // Both rows made it, and the lifecycle columns the copy *sets* rather than
-    // carries hold the values §5.2 gives a carried-over conversation.
-    let carried: Vec<(String, String, Option<String>, Option<String>)> = conn
-        .prepare("SELECT id, status, workspace_id, ended_at FROM session ORDER BY id")
-        .unwrap()
-        .query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-        })
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
-    assert_eq!(carried.len(), 2, "every conversation became a session");
-    for (id, status, workspace, ended_at) in &carried {
-        assert_eq!(status, "active", "{id} keeps today's semantics");
-        assert!(workspace.is_none(), "{id}: no workspace is known pre-039");
-        assert!(ended_at.is_none(), "{id} has not ended");
-    }
-    assert_eq!(carried[0].0, "conv-a");
-    assert_eq!(carried[1].0, "conv-b");
-
-    // The transcript re-keyed onto the session its lane became.
-    let rekeyed: Vec<(String, Option<String>)> = conn
-        .prepare("SELECT content, session_id FROM conversation_messages ORDER BY id")
-        .unwrap()
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
-    assert_eq!(
-        rekeyed,
-        vec![
-            ("hello".to_string(), Some("conv-a".to_string())),
-            ("hi back".to_string(), Some("conv-a".to_string())),
-            ("ping".to_string(), Some("conv-b".to_string())),
-            ("orphan".to_string(), None),
-        ]
-    );
-
-    // And the table the copy read from is gone, at version 39.
-    let leftover: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'conversations'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(leftover, 0);
-    let version: i32 = conn
-        .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    assert_eq!(version, 39);
-}
-
-/// `factory_reset` must run against the schema every migration produces —
-/// migration 039 dropped `conversations`, which the reset used to name — and
-/// it must empty every table holding user content, including the ones no
-/// foreign key reaches. `lane_followups` (033) is free-standing: a queued
+/// `factory_reset` must empty every table holding user content, including
+/// those no foreign key reaches. `lane_followups` is free-standing: a queued
 /// follow-up that survives the wipe is fired by `GatewayFollowupRunner` as a
 /// turn against the emptied database.
 #[test]
-fn factory_reset_runs_on_a_fully_migrated_database() {
+fn factory_reset_empties_current_schema_tables() {
     let dir = tempfile::tempdir().unwrap();
     let db = Database::open(&dir.path().join("reset.db")).unwrap();
     db.with_connection(|conn| {
@@ -833,7 +777,8 @@ fn factory_reset_runs_on_a_fully_migrated_database() {
         Ok(())
     })
     .unwrap();
-    db.factory_reset().expect("factory_reset must succeed on the current schema");
+    db.factory_reset()
+        .expect("factory_reset must succeed on the current schema");
     let (sessions, followups, versions): (i64, i64, i64) = db
         .with_connection(|conn| {
             Ok((
@@ -848,7 +793,7 @@ fn factory_reset_runs_on_a_fully_migrated_database() {
         followups, 0,
         "a queued follow-up must not outlive a factory reset"
     );
-    assert_eq!(versions, 0, "036's version history goes with the rows");
+    assert_eq!(versions, 0, "version history goes with the rows");
 }
 
 /// One produced artifact row and one `artifact_versions` row for it.
@@ -893,15 +838,12 @@ fn factory_reset_empties_artifact_versions_without_the_cascade() {
     assert_eq!(versions, 0, "the DELETE is named, not inherited");
 }
 
-/// R63: `llm_call_log` had no index leading on `timestamp`, so
-/// `provider_usage_since` (backing `GET /v1/usage/summary`) full-scanned an
-/// append-only log on every `llm_call_completed` refetch. Migration 040 adds
-/// `idx_llm_call_log_timestamp` and bumps `schema_version` to 40.
+/// The usage summary needs a timestamp-leading index to avoid a full scan
+/// of the append-only call log on every completion refetch.
 #[test]
-fn test_migration_040_adds_llm_call_log_timestamp_index() {
+fn test_llm_call_log_has_a_timestamp_index() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 42);
 
     db.with_connection(|conn| {
         let exists: bool = conn.query_row(
@@ -913,23 +855,19 @@ fn test_migration_040_adds_llm_call_log_timestamp_index() {
         )?;
         assert!(
             exists,
-            "idx_llm_call_log_timestamp should exist on llm_call_log after migration 040"
+            "idx_llm_call_log_timestamp should exist on llm_call_log"
         );
         Ok(())
     })
     .unwrap();
 }
 
-/// R80: `GET /v1/tools`' and `GET /v1/skills`' "today" counts are
-/// `WHERE timestamp >= ?1 GROUP BY <name>` over append-only logs, and 030's
-/// indexes lead on the grouping column — the only plan was a full covering scan
-/// of a log that never stops growing. Migration 041 adds the timestamp-leading
-/// pair; the plan is what the fix is, so the plan is what the test reads.
+/// The tools and skills "today" counts must search the timestamp-leading
+/// indexes instead of scanning append-only logs in grouping-column order.
 #[test]
-fn test_migration_041_indexes_the_execution_logs_by_timestamp() {
+fn test_execution_log_counts_use_timestamp_indexes() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
-    assert_eq!(db.schema_version().unwrap(), 42);
 
     db.with_connection(|conn| {
         let plan = |sql: &str| -> rusqlite::Result<String> {
@@ -979,7 +917,7 @@ fn test_migration_041_indexes_the_execution_logs_by_timestamp() {
     .unwrap();
 
     // The hinted statements are the repository's own: they must prepare against
-    // the index the migration created, and answer the same counts.
+    // the schema's indexes, and answer the same counts.
     let repo = crate::repository::SkillExecutionRepository::new(&db);
     let since = "2026-09-11 00:00:00";
     assert_eq!(
@@ -987,7 +925,9 @@ fn test_migration_041_indexes_the_execution_logs_by_timestamp() {
         Some(&1)
     );
     assert_eq!(
-        repo.skill_invocations_since(since).unwrap().get("summarise"),
+        repo.skill_invocations_since(since)
+            .unwrap()
+            .get("summarise"),
         Some(&1)
     );
 }
