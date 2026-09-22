@@ -483,10 +483,7 @@ impl McpClient {
         if let Some(mut old) = self.inner.service.lock().await.take() {
             let _ = old.close_with_timeout(ABANDONED_CLOSE_TIMEOUT).await;
         }
-        *self.inner.state.write().await = ConnectionState::Reconnecting {
-            attempt,
-            next_at: std::time::Instant::now() + delay,
-        };
+        *self.inner.state.write().await = ConnectionState::Reconnecting { attempt };
 
         tokio::time::sleep(delay).await;
 
@@ -582,49 +579,6 @@ impl McpClient {
                 Err(e) => return Err(e),
             }
         }
-    }
-
-    /// List resources exposed by the server. **P5 feature** — returns an error in P1.
-    pub async fn list_resources(
-        &self,
-        _cancel_token: Option<&tokio_util::sync::CancellationToken>,
-    ) -> Result<Vec<rmcp::model::Resource>, McpError> {
-        Err(McpError::ServerInternal(
-            "list_resources not implemented until P5 of the MCP roadmap".into(),
-        ))
-    }
-
-    /// Read a resource by URI. **P5 feature** — returns an error in P1.
-    pub async fn read_resource(
-        &self,
-        _uri: &str,
-        _cancel_token: Option<&tokio_util::sync::CancellationToken>,
-    ) -> Result<rmcp::model::ResourceContents, McpError> {
-        Err(McpError::ServerInternal(
-            "read_resource not implemented until P5 of the MCP roadmap".into(),
-        ))
-    }
-
-    /// List prompts exposed by the server. **P5 feature** — returns an error in P1.
-    pub async fn list_prompts(
-        &self,
-        _cancel_token: Option<&tokio_util::sync::CancellationToken>,
-    ) -> Result<Vec<rmcp::model::Prompt>, McpError> {
-        Err(McpError::ServerInternal(
-            "list_prompts not implemented until P5 of the MCP roadmap".into(),
-        ))
-    }
-
-    /// Materialise a prompt. **P5 feature** — returns an error in P1.
-    pub async fn get_prompt(
-        &self,
-        _name: &str,
-        _arguments: serde_json::Value,
-        _cancel_token: Option<&tokio_util::sync::CancellationToken>,
-    ) -> Result<Vec<rmcp::model::PromptMessage>, McpError> {
-        Err(McpError::ServerInternal(
-            "get_prompt not implemented until P5 of the MCP roadmap".into(),
-        ))
     }
 }
 
@@ -1177,10 +1131,7 @@ mod tests {
             ConnectionSnapshot::Connected
         );
 
-        *client.inner.state.write().await = ConnectionState::Reconnecting {
-            attempt: 2,
-            next_at: std::time::Instant::now(),
-        };
+        *client.inner.state.write().await = ConnectionState::Reconnecting { attempt: 2 };
         assert_eq!(
             client.connection_state().await,
             ConnectionSnapshot::Reconnecting { attempt: 2 }
@@ -1377,27 +1328,6 @@ mod tests {
             matches!(err, McpError::Cancelled | McpError::TransportClosed),
             "unexpected error: {err:?}"
         );
-    }
-
-    #[tokio::test]
-    async fn stub_methods_return_server_internal() {
-        let cfg = McpClientConfig::default();
-        let inner = Arc::new(ClientInner::new(cfg, ConnectionState::Connected));
-        let client = McpClient { inner };
-
-        for result in [
-            client.list_resources(None).await.map(|_| ()),
-            client.read_resource("mem://x", None).await.map(|_| ()),
-            client.list_prompts(None).await.map(|_| ()),
-            client.get_prompt("x", serde_json::json!({}), None).await.map(|_| ()),
-        ] {
-            let err = result.expect_err("expected error");
-            assert!(
-                matches!(err, McpError::ServerInternal(_)),
-                "expected ServerInternal, got {err:?}"
-            );
-            assert!(err.to_string().contains("P5"), "msg should mention P5: {err}");
-        }
     }
 
     #[tokio::test]
