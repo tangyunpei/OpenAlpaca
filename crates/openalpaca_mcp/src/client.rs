@@ -23,8 +23,8 @@ use crate::transport::{Transport, TransportConnection, TransportInner, Transport
 /// answered a raw JSON-RPC error on every call (extension design §3.7, X-35).
 ///
 /// Only [`Self::ToolList`] has a consumer: MCP resources and prompts are
-/// stubbed. The other two variants exist so that un-stubbing them is a
-/// supervisor change, never a second refresh route (§2.3, X-36).
+/// unsupported. Their notifications remain available for future supervisor
+/// integration (§2.3, X-36).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerChange {
     ToolList,
@@ -389,7 +389,11 @@ impl McpClient {
         // rmcp 0.16 does not expose a typed `ping()` helper on `Peer<RoleClient>`;
         // construct a PingRequest manually and discard the (empty) server response.
         let req: ClientRequest = PingRequest::default().into();
-        running.peer().send_request(req).await.map_err(McpError::from)?;
+        running
+            .peer()
+            .send_request(req)
+            .await
+            .map_err(McpError::from)?;
         Ok(())
     }
 
@@ -436,8 +440,8 @@ impl McpClient {
     /// cheap half of the seal; [`Self::install_service`] closes the window this
     /// one cannot see (a handshake already past this point).
     pub(crate) async fn reconnect(&self) -> Result<(), McpError> {
+        use crate::lifecycle::{ConnectionState, MAX_BACKOFF, apply_jitter, backoff_for_attempt};
         use std::sync::atomic::Ordering;
-        use crate::lifecycle::{apply_jitter, backoff_for_attempt, ConnectionState, MAX_BACKOFF};
 
         // The flag and the state enum must agree: either alone means "do not
         // resurrect this client".
@@ -458,7 +462,9 @@ impl McpClient {
         let max = self.inner.config.max_reconnect_attempts;
         if attempt > max {
             let reason = McpError::ReconnectExhausted(max);
-            *self.inner.state.write().await = ConnectionState::Failed { reason: McpError::ReconnectExhausted(max) };
+            *self.inner.state.write().await = ConnectionState::Failed {
+                reason: McpError::ReconnectExhausted(max),
+            };
             tracing::error!(
                 server_name = %self.inner.config.server_name,
                 attempts = max,
@@ -469,7 +475,8 @@ impl McpClient {
 
         // 10% deterministic jitter — uses attempt as a poor-person's jitter seed.
         let rand_factor = ((attempt as f64 * 0.37).fract() * 2.0) - 1.0;
-        let base = backoff_for_attempt(attempt, self.inner.config.reconnect_backoff_ms, MAX_BACKOFF);
+        let base =
+            backoff_for_attempt(attempt, self.inner.config.reconnect_backoff_ms, MAX_BACKOFF);
         let delay = apply_jitter(base, rand_factor);
 
         tracing::warn!(
@@ -500,43 +507,21 @@ impl McpClient {
         &self,
         cancel_token: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<Vec<rmcp::model::Tool>, McpError> {
-        use std::sync::atomic::Ordering;
-        loop {
-            let op = async {
-                let guard = self.inner.service.lock().await;
-                let running = guard.as_ref().ok_or(McpError::TransportClosed)?;
-                let result = running.list_all_tools().await.map_err(McpError::from)?;
-                Ok::<_, McpError>(result)
-            };
-            match with_cancel_and_timeout(op, cancel_token, self.inner.config.request_timeout).await {
-                Ok(tools) => {
-                    self.inner.attempt_counter.store(0, Ordering::Relaxed);
-                    return Ok(tools);
-                }
-                Err(e) if e.is_cancelled() => return Err(e),
-                Err(e) if e.is_retriable() => {
-                    tracing::warn!(
-                        server_name = %self.inner.config.server_name,
-                        operation = "list_tools",
-                        error = %e,
-                        "operation failed; triggering reconnect"
-                    );
-                    self.reconnect().await?;
-                    continue;
-                }
-                Err(e) => return Err(e),
-            }
-        }
+        self.with_retry("list_tools", None, cancel_token, || async {
+            let guard = self.inner.service.lock().await;
+            let running = guard.as_ref().ok_or(McpError::TransportClosed)?;
+            running.list_all_tools().await.map_err(McpError::from)
+        })
+        .await
     }
 
-    /// Invoke a tool.
+    /// Invoke a tool with the existing transport retry policy.
     pub async fn call_tool(
         &self,
         name: &str,
         arguments: serde_json::Value,
         cancel_token: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<rmcp::model::CallToolResult, McpError> {
-        use std::sync::atomic::Ordering;
         let params = rmcp::model::CallToolRequestParams {
             meta: None,
             name: name.to_string().into(),
@@ -551,18 +536,38 @@ impl McpClient {
             },
             task: None,
         };
+        self.with_retry("call_tool", Some(name), cancel_token, || {
+            let params = params.clone();
+            async move {
+                let guard = self.inner.service.lock().await;
+                let running = guard.as_ref().ok_or(McpError::TransportClosed)?;
+                running.call_tool(params).await.map_err(McpError::from)
+            }
+        })
+        .await
+    }
 
+    /// Share policy, not a running future: each attempt creates its own RPC.
+    async fn with_retry<F, Fut, T>(
+        &self,
+        operation: &str,
+        tool: Option<&str>,
+        cancel_token: Option<&tokio_util::sync::CancellationToken>,
+        mut request: F,
+    ) -> Result<T, McpError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T, McpError>>,
+    {
+        use std::sync::atomic::Ordering;
         loop {
-            let op = {
-                let params = params.clone();
-                async move {
-                    let guard = self.inner.service.lock().await;
-                    let running = guard.as_ref().ok_or(McpError::TransportClosed)?;
-                    let result = running.call_tool(params).await.map_err(McpError::from)?;
-                    Ok::<_, McpError>(result)
-                }
-            };
-            match with_cancel_and_timeout(op, cancel_token, self.inner.config.request_timeout).await {
+            match with_cancel_and_timeout(
+                request(),
+                cancel_token,
+                self.inner.config.request_timeout,
+            )
+            .await
+            {
                 Ok(result) => {
                     self.inner.attempt_counter.store(0, Ordering::Relaxed);
                     return Ok(result);
@@ -571,60 +576,16 @@ impl McpClient {
                 Err(e) if e.is_retriable() => {
                     tracing::warn!(
                         server_name = %self.inner.config.server_name,
-                        operation = "call_tool",
-                        tool = %name,
+                        operation,
+                        tool,
                         error = %e,
                         "operation failed; triggering reconnect"
                     );
                     self.reconnect().await?;
-                    continue;
                 }
                 Err(e) => return Err(e),
             }
         }
-    }
-
-    /// List resources exposed by the server. **P5 feature** — returns an error in P1.
-    pub async fn list_resources(
-        &self,
-        _cancel_token: Option<&tokio_util::sync::CancellationToken>,
-    ) -> Result<Vec<rmcp::model::Resource>, McpError> {
-        Err(McpError::ServerInternal(
-            "list_resources not implemented until P5 of the MCP roadmap".into(),
-        ))
-    }
-
-    /// Read a resource by URI. **P5 feature** — returns an error in P1.
-    pub async fn read_resource(
-        &self,
-        _uri: &str,
-        _cancel_token: Option<&tokio_util::sync::CancellationToken>,
-    ) -> Result<rmcp::model::ResourceContents, McpError> {
-        Err(McpError::ServerInternal(
-            "read_resource not implemented until P5 of the MCP roadmap".into(),
-        ))
-    }
-
-    /// List prompts exposed by the server. **P5 feature** — returns an error in P1.
-    pub async fn list_prompts(
-        &self,
-        _cancel_token: Option<&tokio_util::sync::CancellationToken>,
-    ) -> Result<Vec<rmcp::model::Prompt>, McpError> {
-        Err(McpError::ServerInternal(
-            "list_prompts not implemented until P5 of the MCP roadmap".into(),
-        ))
-    }
-
-    /// Materialise a prompt. **P5 feature** — returns an error in P1.
-    pub async fn get_prompt(
-        &self,
-        _name: &str,
-        _arguments: serde_json::Value,
-        _cancel_token: Option<&tokio_util::sync::CancellationToken>,
-    ) -> Result<Vec<rmcp::model::PromptMessage>, McpError> {
-        Err(McpError::ServerInternal(
-            "get_prompt not implemented until P5 of the MCP roadmap".into(),
-        ))
     }
 }
 
@@ -1354,7 +1315,10 @@ mod tests {
         // Accept either: pre-Task-11 returns TransportClosed; post-Task-11 returns
         // ReconnectExhausted(0) because max_attempts=0 means "don't retry at all".
         assert!(
-            matches!(err, McpError::TransportClosed | McpError::ReconnectExhausted(0)),
+            matches!(
+                err,
+                McpError::TransportClosed | McpError::ReconnectExhausted(0)
+            ),
             "unexpected error: {err:?}"
         );
     }
@@ -1377,27 +1341,6 @@ mod tests {
             matches!(err, McpError::Cancelled | McpError::TransportClosed),
             "unexpected error: {err:?}"
         );
-    }
-
-    #[tokio::test]
-    async fn stub_methods_return_server_internal() {
-        let cfg = McpClientConfig::default();
-        let inner = Arc::new(ClientInner::new(cfg, ConnectionState::Connected));
-        let client = McpClient { inner };
-
-        for result in [
-            client.list_resources(None).await.map(|_| ()),
-            client.read_resource("mem://x", None).await.map(|_| ()),
-            client.list_prompts(None).await.map(|_| ()),
-            client.get_prompt("x", serde_json::json!({}), None).await.map(|_| ()),
-        ] {
-            let err = result.expect_err("expected error");
-            assert!(
-                matches!(err, McpError::ServerInternal(_)),
-                "expected ServerInternal, got {err:?}"
-            );
-            assert!(err.to_string().contains("P5"), "msg should mention P5: {err}");
-        }
     }
 
     #[tokio::test]
@@ -1438,6 +1381,149 @@ mod tests {
         );
         // State should be Failed.
         let state = client.inner.state.read().await;
-        assert!(matches!(&*state, ConnectionState::Failed { .. }), "expected Failed state");
+        assert!(
+            matches!(&*state, ConnectionState::Failed { .. }),
+            "expected Failed state"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_and_call_keep_terminal_errors_cancellation_and_success_reset() {
+        use std::sync::atomic::Ordering;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        for operation in ["list_tools", "call_tool"] {
+            let client = test_client(operation, ConnectionState::Connected);
+            let (client_end, server_end) = tokio::io::duplex(8192);
+            let server = tokio::spawn(async move {
+                let (read, mut write) = tokio::io::split(server_end);
+                let mut lines = BufReader::new(read).lines();
+                let mut requests = 0;
+                while let Some(line) = lines.next_line().await.unwrap() {
+                    let message: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    let Some(id) = message.get("id") else {
+                        continue;
+                    };
+                    let method = message["method"].as_str().unwrap();
+                    let reply = if method == "initialize" {
+                        serde_json::json!({"jsonrpc":"2.0", "id":id, "result":{
+                            "protocolVersion":ProtocolVersion::default(),
+                            "capabilities":{"tools":{}},
+                            "serverInfo":{"name":"stub", "version":"1"}
+                        }})
+                    } else {
+                        requests += 1;
+                        if requests == 1 {
+                            serde_json::json!({"jsonrpc":"2.0", "id":id,
+                                "error":{"code":-32602, "message":"terminal"}})
+                        } else {
+                            let result = if method == "tools/list" {
+                                serde_json::json!({"tools":[]})
+                            } else {
+                                serde_json::json!({"content":[{"type":"text","text":"ok"}]})
+                            };
+                            serde_json::json!({"jsonrpc":"2.0", "id":id, "result":result})
+                        }
+                    };
+                    write
+                        .write_all(format!("{reply}\n").as_bytes())
+                        .await
+                        .unwrap();
+                }
+                requests
+            });
+            let handler = NotifyingHandler {
+                server_name: "stub".into(),
+                tx: None,
+            };
+            client
+                .install_service(handler.serve(client_end).await.unwrap())
+                .await
+                .unwrap();
+            for (cancel, expect_error) in [(false, true), (true, true), (false, false)] {
+                client.inner.attempt_counter.store(2, Ordering::Relaxed);
+                let token = tokio_util::sync::CancellationToken::new();
+                if cancel {
+                    token.cancel();
+                }
+                let result = if operation == "list_tools" {
+                    client.list_tools(Some(&token)).await.map(|_| ())
+                } else {
+                    client
+                        .call_tool("example", serde_json::json!({}), Some(&token))
+                        .await
+                        .map(|_| ())
+                };
+                match (cancel, expect_error) {
+                    (true, _) => assert!(matches!(result, Err(McpError::Cancelled))),
+                    (false, true) => assert!(matches!(
+                        result,
+                        Err(McpError::JsonRpc { code: -32602, .. })
+                    )),
+                    _ => assert!(result.is_ok(), "{operation}: {result:?}"),
+                }
+                assert_eq!(
+                    client.inner.attempt_counter.load(Ordering::Relaxed),
+                    if expect_error { 2 } else { 0 }
+                );
+            }
+            client.disconnect().await.unwrap();
+            assert_eq!(
+                server.await.unwrap(),
+                2,
+                "cancel must send no request; terminal errors must not replay"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn both_rpc_entries_retry_a_lost_transport_then_return_the_new_response() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::Ordering;
+        for operation in ["list_tools", "call_tool"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let script = tmp.path().join("rpc-server.sh");
+            let log = tmp.path().join("spawns.log");
+            let program = r#"#!/bin/sh
+echo spawned >> '__LOG__'
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  [ -n "$id" ] || continue
+  case "$line" in
+    *'"method":"initialize"'*) result='{"protocolVersion":"__PROTOCOL__","capabilities":{"tools":{}},"serverInfo":{"name":"stub","version":"1"}}' ;;
+    *'"method":"tools/list"'*) result='{"tools":[]}' ;;
+    *'"method":"tools/call"'*) result='{"content":[{"type":"text","text":"ok"}]}' ;;
+    *) continue ;;
+  esac
+  printf '{"jsonrpc":"2.0","id":%s,"result":%s}\n' "$id" "$result"
+done
+"#.replace("__LOG__", log.to_str().unwrap())
+                .replace("__PROTOCOL__", &ProtocolVersion::default().to_string());
+            std::fs::write(&script, program).unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            // Connected state with a lost service forces the first real operation
+            // through TransportClosed -> reconnect -> a freshly generated RPC.
+            let client = stdio_client(&script, ConnectionState::Connected);
+            let result = tokio::time::timeout(Duration::from_secs(10), async {
+                if operation == "list_tools" {
+                    assert!(client.list_tools(None).await.unwrap().is_empty());
+                } else {
+                    assert!(
+                        client
+                            .call_tool("example", serde_json::json!({}), None)
+                            .await
+                            .unwrap()
+                            .content
+                            .len()
+                            == 1
+                    );
+                }
+            })
+            .await;
+            assert!(result.is_ok(), "{operation}: mock server did not answer");
+            assert_eq!(spawn_count(&log), 1);
+            assert_eq!(client.inner.attempt_counter.load(Ordering::Relaxed), 0);
+            client.disconnect().await.unwrap();
+        }
     }
 }
