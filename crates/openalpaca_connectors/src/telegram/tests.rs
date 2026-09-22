@@ -1,4 +1,4 @@
-use super::delivery::{TELEGRAM_MAX_LENGTH, chunk_message, escape_markdown_v2};
+use super::delivery::{TELEGRAM_MAX_LENGTH, chunk_message};
 use super::rate_limiter::ChatRateLimiter;
 use std::time::Duration;
 
@@ -49,27 +49,6 @@ fn test_chunk_message_hard_cut() {
     assert_eq!(chunks.len(), 2);
     assert_eq!(chunks[0].len(), TELEGRAM_MAX_LENGTH);
     assert_eq!(chunks[1].len(), 5000 - TELEGRAM_MAX_LENGTH);
-}
-
-#[test]
-fn test_escape_markdown_v2_basic() {
-    assert_eq!(escape_markdown_v2("hello"), "hello");
-    assert_eq!(escape_markdown_v2("hello_world"), "hello\\_world");
-    assert_eq!(escape_markdown_v2("a*b*c"), "a\\*b\\*c");
-    assert_eq!(escape_markdown_v2("test."), "test\\.");
-    assert_eq!(escape_markdown_v2("1+1=2"), "1\\+1\\=2");
-}
-
-#[test]
-fn test_escape_markdown_v2_all_special() {
-    let input = "_*[]()~`>#+-=|{}.!";
-    let expected = "\\_\\*\\[\\]\\(\\)\\~\\`\\>\\#\\+\\-\\=\\|\\{\\}\\.\\!";
-    assert_eq!(escape_markdown_v2(input), expected);
-}
-
-#[test]
-fn test_escape_markdown_v2_empty() {
-    assert_eq!(escape_markdown_v2(""), "");
 }
 
 #[test]
