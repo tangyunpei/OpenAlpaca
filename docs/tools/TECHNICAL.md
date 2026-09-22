@@ -4,7 +4,7 @@
 > `crates/openalpaca_core/src/security`, `crates/openalpaca_core/src/runner`,
 > `crates/openalpaca_core/src/orchestrator/skill`, `apps/openalpacad/src/services`,
 > `apps/openalpacad/src/managers` and the shipped `config/`. Workspace version 0.1.0,
-> schema version 42 (the `001_baseline.sql` baseline).
+> schema version 1 (the `001_baseline.sql` baseline; numbering updated 2026-09-21).
 >
 > Code-level reference for the OpenAlpaca tool system.  For architecture
 > and design rationale see the companion [DESIGN.md](./DESIGN.md).  Struct
@@ -1051,9 +1051,9 @@ depends on the registry dropping the last reference.
 - **Non-text content is dropped**: image/audio/resource blocks in tool
   results are replaced with a bracketed placeholder — they are not
   surfaced to the model.
-- **MCP resources and prompts are not implemented**: the client's
-  `list_resources`, `read_resource`, `list_prompts`, and `get_prompt`
-  return "not implemented" errors.  Only tools work.
+- **MCP is tools-only**: the client speaks tool listing and tool calls
+  (`list_tools`, `call_tool`) and nothing else — it has no resource or
+  prompt methods, and serving MCP is a non-goal.
 - Retriable transport errors trigger the client's internal
   reconnect/retry loop (`max_reconnect_attempts`, exponential backoff).  A
   client sealed by a disable does not reconnect.
@@ -1565,7 +1565,7 @@ pub(super) fn format_tool_error_with_hint(tool_name: &str, msg: &str) -> String
 
 ### Database Tables
 
-Defined in `crates/openalpaca_storage/src/migrations/001_baseline.sql` (schema version 42).
+Defined in `crates/openalpaca_storage/src/migrations/001_baseline.sql` (schema version 1; applied by the runner-owned `schema_migrations` ledger).
 The generated [schema reference](../api/database/schema.md) is
 authoritative.
 

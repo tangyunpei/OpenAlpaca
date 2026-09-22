@@ -272,7 +272,7 @@ openalpaca agents config <agent_id> [--format table|json]
 openalpaca agents pause <agent_id>
 openalpaca agents resume <agent_id>
 openalpaca agents set <agent_id> <dotted.path> <value>
-openalpaca agents create [--from-file <path>] [--interactive]
+openalpaca agents create [--from-file <path>]
 openalpaca agents remove <agent_id>
 ```
 

@@ -146,3 +146,6 @@ config/llm.toml.lock
 !tasks/research/
 !tasks/research/*.md
 !tasks/bug-main-loop-cost-lockout.md
+
+# Crate simplification record
+!tasks/simplification-implementation.md

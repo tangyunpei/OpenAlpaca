@@ -95,10 +95,9 @@ root is the human's:
 ## Startup and Lifecycle
 
 1. Parse the command line (none expected; `--help`/`--version` print and exit here), then initialize tracing/logging.
-2. Seed the `~/.openalpaca` home store, then move a legacy app directory into it
-   — once, before the lock is taken, because the lock file itself moves
-   (`store::ensure_store` + `store::migrate::move_app_root`; see
-   [Installation Manual](Installation_Manual.md#migrating-from-the-old-data-directory)).
+2. Seed the current `~/.openalpaca` home store (`store::ensure_store`).
+   Older development directory layouts are not imported automatically; see
+   [Development data compatibility](Installation_Manual.md#development-data-compatibility).
 3. Acquire single-instance lock (`openalpacad.lock`).
 4. Resolve config directory, seed missing default configs, and ensure master key.
 5. Install signal handlers.
@@ -143,7 +142,7 @@ Important runtime files:
   - inside a directory being filled, an existing file is never overwritten;
   - one `INFO` line per directory names the count and the path, and a per-file failure is a `WARN` that does not stop the rest.
 - A workflow is led by an agent template: one with the `orchestration` capability when there is one, otherwise any template that can be spawned. When no agent templates are loaded at all, the workflow request fails with "No agent templates are installed…" and names the `config/agents` directory. That is a different message from "All agents are busy", which clears by itself.
-- The AES-256-GCM master key lives at `~/.openalpaca/state/.master_key` (`store::master_key_dir()`); a key left in a legacy app directory is moved there by the boot-time mover. The daemon exports it as `OPENALPACA_MASTER_KEY` for its own process; startup fails hard if the key cannot be ensured.
+- The AES-256-GCM master key lives at `~/.openalpaca/state/.master_key` (`store::master_key_dir()`). The daemon exports it as `OPENALPACA_MASTER_KEY` for its own process; startup fails hard if the key cannot be ensured.
 - Persona documents (`SOUL.md`, `USER.md`, `IDENTITY.md`, and conditionally `BOOTSTRAP.md`) are written into `<config>/orchestrator/` from templates if absent.
 
 ## Hot Reload
@@ -850,8 +849,8 @@ The daemon runs periodic workers, all cancelled together on shutdown (intervals 
 ## Storage Model
 
 - SQLite location is resolved by `openalpaca_storage::store::database_path()` — `~/.openalpaca/state/openalpaca.db`. Every path in the layout comes from that module; no crate joins a literal directory name onto a store root.
-- Migrations are embedded and applied from `openalpaca_storage::migrations::MIGRATIONS`. The unreleased chain is consolidated into `crates/openalpaca_storage/src/migrations/001_baseline.sql`, which initializes schema version 42 directly. Existing version-42 databases remain usable; older development schemas are rejected rather than upgraded. The next migration version is 43. `GET /v1/status` reports the version the open database is actually at.
-- **If your database is refused.** Startup fails with `Unsupported legacy schema version <n>: this build starts at schema version 42 and cannot upgrade a database created by an older one`, followed by the absolute path of the file. No migration runs — the old schema and its rows are left exactly as they were. There are two ways out, and both are yours to choose: delete `~/.openalpaca/state/openalpaca.db` together with its `-wal` and `-shm` siblings, after which the next start builds a fresh database at version 42 and every row you had (conversations, memories, tasks, and the rows indexing artifacts and uploads) is gone, the artifact and upload *files* staying on disk unreferenced; or open the database with a build from before the squash and export what you want to keep first. No CLI verb will do it for you: `openalpaca config reset --factory` opens the database before it dispatches the action (`apps/openalpaca/src/commands/config.rs`), so it fails with the same error — and a factory reset empties tables rather than replacing a schema, which would not have helped anyway.
+- Migrations are embedded and applied from `openalpaca_storage::migrations::MIGRATIONS`. `001_baseline.sql` creates the application schema at clean version **1**. The runner owns `schema_migrations(version INTEGER PRIMARY KEY CHECK(version > 0))` and records each applied version atomically with its schema changes. A database with ledger `[1]` reopens without replay; future migrations start at **2** (`002_<name>.sql`), and migration SQL does not insert version rows. `GET /v1/status.schema_version` remains the current version read from the open database.
+- **If your database is refused.** The applied ledger must be an exact prefix of the migration registry. A nonempty database without `schema_migrations`, an empty or invalid ledger, or a database newer than the registry is refused before schema/data changes. Old development databases using `schema_version`, including versions 1 and 42, are unsupported and are never automatically relabeled. Preserve one for export with its matching old build, or start with a separate empty home-store directory. If you deliberately discard it, stop every daemon first and remove the database file together with its `-wal`/`-shm` sidecars; the next start creates schema 1. Its application rows are lost, while artifact/upload files elsewhere remain unreferenced. `openalpaca config reset --factory` cannot perform this conversion: it opens the database before dispatching the reset, and a table-content reset does not replace migration history.
 - Session logs live at `~/.openalpaca/sessions/<id>/` and are bounded by **size only**:
   - `[orchestrator.sessions] log_max_session_bytes` (default 256 MiB) per session. On exceed the writer drops whole oldest segments, never the live one, and records the `seq` range that went.
   - `log_max_total_bytes` (default 2 GiB) across all of them, swept once at boot, oldest-touched archived session first, never an active one.

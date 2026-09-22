@@ -10,6 +10,7 @@
 ## Modules
 
 - `bridge` (crates/openalpaca_plugins/src/bridge/mod.rs)
+- `config` (crates/openalpaca_plugins/src/config.rs)
 - `error` (crates/openalpaca_plugins/src/error.rs)
 - `install` (crates/openalpaca_plugins/src/install.rs)
 - `manager` (crates/openalpaca_plugins/src/manager.rs)

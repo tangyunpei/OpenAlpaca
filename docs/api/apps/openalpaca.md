@@ -51,6 +51,12 @@
 
 ## Command Source Map
 
+### `agent_client`
+
+- Source: `apps/openalpaca/src/commands/agent_client.rs`
+- No `Subcommand` enum found in module.
+- Parsed flags: none
+
 ### `agents`
 
 - Source: `apps/openalpaca/src/commands/agents.rs`
@@ -61,9 +67,9 @@
   - `pause` (fields: `agent_id`)
   - `resume` (fields: `agent_id`)
   - `set` (fields: `agent_id`, `key_path`, `value`)
-  - `create` (fields: `from_file`, `interactive`)
+  - `create` (fields: `from_file`)
   - `remove` (fields: `agent_id`)
-- Parsed flags: `--format`, `--from-file`, `--interactive`, `--status`
+- Parsed flags: `--format`, `--from-file`, `--status`
 
 ### `ai_config`
 

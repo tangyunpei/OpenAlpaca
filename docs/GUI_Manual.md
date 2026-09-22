@@ -93,10 +93,10 @@ root and `OPENALPACA_CONFIG_DIR` to `<root>/config`
 (`src-tauri/src/lib.rs`, `spawn_daemon`). A project you point the GUI at keeps
 its own store at `<project>/.openalpaca/`.
 
-First boot of a rebuilt daemon moves the contents of the legacy directory
-(`~/Library/Application Support/OpenAlpaca` on macOS) into this root once. The
-move is idempotent and resumable but **not reversible** — back the old
-directory up first, and quit any old daemon, which otherwise blocks the move.
+The daemon does not import an older application-data directory. It reads the
+root above and nothing else, so a store an earlier development build left
+behind (`~/Library/Application Support/OpenAlpaca` on macOS) stays where it is,
+untouched.
 
 ## Connection lifecycle
 

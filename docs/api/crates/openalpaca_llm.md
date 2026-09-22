@@ -15,6 +15,7 @@
 - `embedder` (crates/openalpaca_llm/src/embedder.rs)
 - `error` (crates/openalpaca_llm/src/error.rs)
 - `keys` (crates/openalpaca_llm/src/keys/mod.rs)
+- `openai_compat` (crates/openalpaca_llm/src/openai_compat.rs)
 - `providers` (crates/openalpaca_llm/src/providers/mod.rs)
 - `routing` (crates/openalpaca_llm/src/routing/mod.rs)
 - `streaming` (crates/openalpaca_llm/src/streaming.rs)

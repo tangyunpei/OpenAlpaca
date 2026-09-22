@@ -6,9 +6,11 @@
 
 - Total registered migrations: 1
 - Migration SQL directory: `crates/openalpaca_storage/src/migrations`
+- The database runner records each applied version in `schema_migrations` in the same transaction as its SQL.
+- Append the next numbered migration to the registry; SQL files do not insert version rows.
 
 ## Files
 
 | Version | Name | SQL File | Summary |
 |---|---|---|---|
-| 42 | `baseline` | `001_baseline.sql` | Baseline schema: the final state of the unreleased 001-042 migration history. |
+| 1 | `baseline` | `001_baseline.sql` | Initial application schema, version 1. |

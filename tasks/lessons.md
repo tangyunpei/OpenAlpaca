@@ -3,6 +3,10 @@
 Rules written after corrections, so the same mistake is not made twice. Newest first.
 Each entry: what went wrong → the rule that prevents it.
 
+## 2026-09-21 — A pre-release baseline reset includes clean numbering
+**What happened:** The migration files were squashed but retained schema version 42 for development-database compatibility, although the owner wanted a clean start for an app never distributed.
+**Rule:** When an unreleased app is explicitly reset to a clean baseline, reset the version sequence too. Give the new migration history an unambiguous identity, reject incompatible stores without changing them, and update tests and both repository/vault docs. Remove existing databases only when explicitly authorized; verify the path first.
+
 ## 2026-09-02 — In a lifecycle spec, fix handle ownership as a table, not one rule at a time
 **What happened:** Three consecutive review rounds on the extension-enable design each found one real S2 hole in the same family, and each fix was one rule: rev 10 added E-FAIL (a bring-up that fails *after* connect must tear down the handle it just built); rev 11 then added E-PRE (a verb that builds a handle must first tear down whatever handle the map still holds, because a Retry can win the mutex before the crash reaper). Both are the same question — *who owns the handle in each state, and which verb drops it* — answered one cell at a time.
 **Rule:** When a design has a handle with a lifecycle (process, connection, task, lock), write the ownership matrix explicitly before declaring any invariant: rows = states (`Enabling`, `Enabled`, `Failed{Crashed}` pre-reaper, `Failed` post-reaper, `Disabled`…), columns = every verb and every failure exit that can create or drop the handle (`enable`, `reload`, `disable`, `deny`, reaper, watcher, E-FAIL…). Every cell must say "holds one", "holds none", or "tears down then builds". An invariant like "Failed owns no handle" that is not derived from that table will be false in the first race a critic constructs. Do this in the *first* pass; each missed cell costs a full review round.

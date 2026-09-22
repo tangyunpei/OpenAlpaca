@@ -146,38 +146,31 @@ config the installed daemon actually reads (not any repo checkout).
 The whole runtime root can be moved with `OPENALPACA_HOME_STORE`; see
 [Runtime Overrides](#runtime-overrides).
 
-## Migrating From the Old Data Directory
+## Development Data Compatibility
 
-Older installs kept everything under `~/Library/Application Support/OpenAlpaca`
-(macOS), `~/.local/share/openalpaca` (Linux) or `%APPDATA%\OpenAlpaca\data`
-(Windows). The **daemon** moves that directory's contents into the
-`~/.openalpaca` layout on its first boot, before it takes the singleton lock.
-On the CLI side exactly one command runs the same move itself —
-`openalpaca config` (in every form: `set`, `get`, `list`, `reset`, and the bare
-interactive editor), because it is the only one that opens the database
-directly instead of asking the daemon. Every other `openalpaca` subcommand
-talks to the running daemon over HTTP, so for those the move is whatever the
-daemon already did. It is one move either way:
+The app has never been distributed. This build supports the current
+`~/.openalpaca` layout (or an absolute `OPENALPACA_HOME_STORE` override), with
+the database at `state/openalpaca.db` and content in the home/project stores.
+It no longer imports the old application-data directory, rewrites legacy asset
+paths, or relocates content-addressed development uploads.
 
-- The move is **idempotent and resumable** (a process killed mid-move
-  finishes on the next boot) but **not reversible** — back up the old
-  directory before upgrading if you want to keep a fallback.
-- A **still-running old daemon blocks the move**: stop it first (`openalpaca
-  daemon stop` against the old install, or kill the process holding
-  `openalpacad.lock` in the old directory).
-- If **both** the old directory and `~/.openalpaca/state` end up holding an
-  `openalpaca.db`, the mover refuses to choose between them and aborts before
-  it renames anything: the daemon exits instead of starting, and `openalpaca
-  config` exits instead of reading the database. The error names both paths;
-  move one aside and start again. Every other CLI command is unaffected in
-  itself — it opens no database — but it needs a daemon that will not start
-  until the two are one.
-- The move is a rename, so it **cannot cross volumes**. If
-  `OPENALPACA_HOME_STORE` puts the new root on another disk, the daemon stops
-  with an error naming both paths; move the directory by hand and start again.
-- Anything the mover doesn't recognize left behind in the old directory
-  produces a boot warning (check the daemon log) rather than being deleted
-  silently.
+A fresh, empty database receives `001_baseline.sql` as schema version 1.
+The runner creates the `schema_migrations` ledger and records each migration
+in the same transaction as its schema changes. A current database whose ledger
+is `[1]` reopens without replaying the baseline. Future migrations start at 2
+(`002_<name>.sql`), are appended to the registry, and contain no manual version
+inserts.
+
+Applied versions must be an exact prefix of the registered migrations. A
+nonempty database without the new ledger, an empty or invalid ledger, and a
+database newer than the registry are refused before schema/data changes. Old
+development databases using `schema_version` — including versions 1 and 42 —
+are not imported or relabeled. Preserve an old store for export with its
+matching build, or use a separate empty home-store directory for a fresh
+start. The current CLI factory-reset command cannot repair an incompatible
+migration history.
+
+Current project-store moves (`openalpaca store rebase`) remain supported.
 
 ## Run and Verify
 
@@ -422,9 +415,8 @@ Re-run installer with a newer artifact:
 
 Upgrade keeps:
 
-- `~/.openalpaca` data and config (see [Migrating From the Old Data
-  Directory](#migrating-from-the-old-data-directory) if you're upgrading from
-  an install that kept its data elsewhere)
+- Current-layout `~/.openalpaca` data and config (see
+  [Development data compatibility](#development-data-compatibility)).
 
 Upgrade replaces:
 
@@ -476,9 +468,8 @@ the platform's data-directory convention.
   `openalpaca daemon start`, after the daemon itself has started. Use
   `openalpaca daemon start --daemon-only`, and open the app from the desktop
   entry or by running the AppImage.
-- **Older installs:** legacy data lived at `~/.local/share/openalpaca` and is
-  moved on first boot; see [Migrating From the Old Data
-  Directory](#migrating-from-the-old-data-directory).
+- **Development data:** old application-data directories are no longer imported;
+  see [Development data compatibility](#development-data-compatibility).
 
 ### Windows
 
@@ -536,8 +527,6 @@ The uninstaller removes the GUI MSI, the prefix, the Start Menu folder and the
 - `No model is available: no enabled provider offers one`
   - A fresh install has every provider switched off. Turn one on; see
     [Connect a model](#connect-a-model).
-- `two databases: ... has not moved yet and ... already exists` at startup
-  - Both the old and new data directories hold an `openalpaca.db`. Keep the
-    one you want (the legacy file is the older install's data), move or
-    remove the other, and restart. See [Migrating From the Old Data
-    Directory](#migrating-from-the-old-data-directory).
+- Unsupported pre-release database schema at startup
+  - Preserve it for export with an older build, or start with a separate empty
+    home store; see [Development data compatibility](#development-data-compatibility).

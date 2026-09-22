@@ -144,7 +144,6 @@ A Rust workspace (edition 2024) with three apps and ten library crates.
 | `crates/openalpaca_connectors` | Telegram, iMessage and Discord adapters |
 | `crates/openalpaca_mcp` | MCP client: stdio and streamable-HTTP transports |
 | `crates/openalpaca_plugins` | Out-of-process plugins: JSON-RPC over stdio, manifests, approval gate |
-| `crates/openalpaca_platform`, `crates/openalpaca_platform_macos` | Empty placeholders |
 
 ## Configuration and data
 
@@ -209,7 +208,7 @@ bun run check && bun run test && bun run format:check && bun run build
 
 ## Status and limitations
 
-- **Moving target.** Config keys, API routes and the database schema change between commits. `001_baseline.sql` initializes schema version 42; existing version-42 databases remain usable, but earlier development schemas are no longer upgraded.
+- **Moving target.** Config keys, API routes and the database schema change between commits. `001_baseline.sql` now starts a clean schema version 1, tracked by the runner-owned `schema_migrations` ledger; future migrations start at 2. Old development databases using `schema_version`, including the former version 42, are not imported or relabeled. See [Development data compatibility](docs/Installation_Manual.md#development-data-compatibility).
 - **Platforms.** Developed on macOS. CI builds and tests on Linux. Windows has packaging scripts, but CI does not build the Rust workspace there.
 - **Plugins** can add tools, skills and agent templates. Plugin connectors and plugin LLM providers are declared in the manifest format but not wired. They do not work.
 - **MCP** is client-side and tools only. MCP resources and prompts are stubs. Serving MCP is not a goal.

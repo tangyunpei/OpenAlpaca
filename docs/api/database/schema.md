@@ -4,11 +4,16 @@
 
 ## Files
 
-- DB path resolver: `openalpaca_storage::paths::database_path()`
+- DB path resolver: `openalpaca_storage::store::database_path()`
 - Migrations entrypoint: `openalpaca_storage::migrations::MIGRATIONS`
 - Registered migrations: 1
 
-## Tables
+## Migration ledger
+
+`schema_migrations` is created by `crates/openalpaca_storage/src/database/mod.rs`, outside the application SQL below.
+It stores `version INTEGER PRIMARY KEY CHECK(version > 0)`. The runner validates the applied history and records each new version atomically with its migration.
+
+## Application tables
 
 ### `agent` (table)
 
@@ -364,14 +369,6 @@ version INTEGER NOT NULL DEFAULT 1
 created_at TEXT DEFAULT (datetime('now'))
 updated_at TEXT DEFAULT (datetime('now'))
 UNIQUE(user_id, key)
-```
-
-### `schema_version` (table)
-
-Source migration: `001_baseline.sql`
-
-```sql
-version INTEGER PRIMARY KEY
 ```
 
 ### `session` (table)
