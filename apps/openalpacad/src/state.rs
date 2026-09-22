@@ -5,10 +5,7 @@ use tokio::sync::mpsc;
 
 use crate::events::EventBroadcaster;
 use openalpaca_core::{
-    agent::AgentConfigService,
-    chat::{ChatService, ChatStreamManager},
-    gateway::Gateway,
-    orchestrator::Orchestrator,
+    agent::AgentConfigService, chat::ChatService, gateway::Gateway, orchestrator::Orchestrator,
     security::confirmation::ConfirmationBroker,
 };
 use openalpaca_storage::Database;
@@ -41,9 +38,8 @@ pub struct AppState {
     /// no turn, no lane history and no model behind it.
     pub orchestrator: Arc<Orchestrator>,
     pub llm_settings_service: Option<Arc<openalpaca_llm::LlmSettingsService>>,
-    pub agent_config_service: Option<Arc<AgentConfigService>>,
-    pub chat_service: Option<Arc<ChatService>>,
-    pub chat_stream_manager: Option<Arc<ChatStreamManager>>,
+    pub agent_config_service: Arc<AgentConfigService>,
+    pub chat_service: Arc<ChatService>,
     pub token_manager: Option<Arc<openalpaca_llm::TokenManager>>,
     pub provider_usage_tracker: Option<Arc<openalpaca_llm::ProviderUsageTracker>>,
     pub embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
@@ -53,7 +49,7 @@ pub struct AppState {
     pub daemon_config: Arc<ArcSwap<openalpaca_core::daemon_config::DaemonConfig>>,
     pub daemon_config_path: PathBuf,
     pub web_search_config: Arc<ArcSwap<openalpaca_llm::WebSearchConfig>>,
-    pub confirmation_broker: Option<Arc<ConfirmationBroker>>,
+    pub confirmation_broker: Arc<ConfirmationBroker>,
     /// GAP-18's read path: `GET /v1/tools` renders the live registry. Cloned
     /// **before** the registry moves into `Orchestrator::new` (`main.rs`), the
     /// way the plugin manager's clone already is.

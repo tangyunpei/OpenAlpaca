@@ -1,17 +1,14 @@
-use super::*;
 use super::persona::{ensure_soul_file, ensure_soul_template_file};
+use super::*;
 use openalpaca_core::middleware::prompt::SystemPersona;
-use std::path::PathBuf;
-
-fn make_temp_dir(prefix: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("{}-{}", prefix, uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).expect("temp dir should be creatable");
-    dir
-}
 
 #[test]
 fn test_bootstrap_system_persona_creates_template_and_soul() {
-    let dir = make_temp_dir("openalpaca-soul-bootstrap");
+    let temp_dir = tempfile::Builder::new()
+        .prefix("openalpaca-soul-bootstrap")
+        .tempdir()
+        .expect("temp dir");
+    let dir = temp_dir.path().to_path_buf();
     let (persona, soul_path) = bootstrap_system_persona(&dir);
 
     assert_eq!(persona.name, "OpenAlpaca");
@@ -22,13 +19,15 @@ fn test_bootstrap_system_persona_creates_template_and_soul() {
             .join("SOUL_temp.md")
             .exists()
     );
-
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn test_bootstrap_system_persona_falls_back_on_invalid_soul() {
-    let dir = make_temp_dir("openalpaca-soul-invalid");
+    let temp_dir = tempfile::Builder::new()
+        .prefix("openalpaca-soul-invalid")
+        .tempdir()
+        .expect("temp dir");
+    let dir = temp_dir.path().to_path_buf();
     let template_path = ensure_soul_template_file(&dir).expect("template should bootstrap");
     let soul_path = ensure_soul_file(&dir, &template_path).expect("soul file should bootstrap");
 
@@ -38,20 +37,20 @@ fn test_bootstrap_system_persona_falls_back_on_invalid_soul() {
     assert_eq!(loaded_path, soul_path);
     assert_eq!(persona.name, SystemPersona::default().name);
     assert_eq!(persona.core_values, SystemPersona::default().core_values);
-
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn test_is_same_file_path_matches_identical_files() {
-    let dir = make_temp_dir("openalpaca-soul-path");
+    let temp_dir = tempfile::Builder::new()
+        .prefix("openalpaca-soul-path")
+        .tempdir()
+        .expect("temp dir");
+    let dir = temp_dir.path().to_path_buf();
     let file = dir.join("SOUL.md");
     std::fs::write(&file, "x").expect("test file should be writable");
 
     let canonical = std::fs::canonicalize(&file).expect("file should canonicalize");
     assert!(is_same_file_path(&file, &canonical));
-
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// GAP-09 — a daemon killed mid-run leaves a task `running` and its lanes
@@ -63,7 +62,11 @@ fn test_is_same_file_path_matches_identical_files() {
 fn the_boot_sweeps_report_abandoned_lanes_as_interrupted() {
     use openalpaca_storage::{Database, NewSubagentSpan, SubagentSpanRepository};
 
-    let dir = make_temp_dir("openalpaca-span-sweep");
+    let temp_dir = tempfile::Builder::new()
+        .prefix("openalpaca-span-sweep")
+        .tempdir()
+        .expect("temp dir");
+    let dir = temp_dir.path().to_path_buf();
     let db = Database::open(&dir.join("test.db")).expect("open db");
     db.with_connection(|conn| {
         conn.execute(
@@ -124,7 +127,6 @@ fn the_boot_sweeps_report_abandoned_lanes_as_interrupted() {
     assert_eq!(spans[0].ended_at, ended_at);
 
     drop(db);
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 // ── §5.6b: recovery, ordering, idempotence ──────────────────────────
@@ -197,7 +199,11 @@ fn queued_contents(db: &Database, lane: &str) -> Vec<String> {
 /// model already saw it.
 #[test]
 fn the_boot_sweep_marks_the_run_interrupted_and_recovers_its_undrained_steering() {
-    let dir = make_temp_dir("openalpaca-interrupted");
+    let temp_dir = tempfile::Builder::new()
+        .prefix("openalpaca-interrupted")
+        .tempdir()
+        .expect("temp dir");
+    let dir = temp_dir.path().to_path_buf();
     let db = Database::open(&dir.join("test.db")).unwrap();
     let sessions = dir.join("sessions");
     seed_run(&db, "t1", "s1", "user:cli");
@@ -228,7 +234,6 @@ fn the_boot_sweep_marks_the_run_interrupted_and_recovers_its_undrained_steering(
     assert_eq!(row.session_id.as_deref(), Some("s1"));
 
     drop(db);
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// Twice, and only once. The second boot's `list_non_terminal` is empty
@@ -237,7 +242,11 @@ fn the_boot_sweep_marks_the_run_interrupted_and_recovers_its_undrained_steering(
 /// nothing, because the row's own presence is the marker.
 #[test]
 fn a_second_boot_recovers_the_same_interjection_no_second_time() {
-    let dir = make_temp_dir("openalpaca-interrupted-twice");
+    let temp_dir = tempfile::Builder::new()
+        .prefix("openalpaca-interrupted-twice")
+        .tempdir()
+        .expect("temp dir");
+    let dir = temp_dir.path().to_path_buf();
     let db = Database::open(&dir.join("test.db")).unwrap();
     let sessions = dir.join("sessions");
     seed_run(&db, "t1", "s1", "user:cli");
@@ -265,7 +274,6 @@ fn a_second_boot_recovers_the_same_interjection_no_second_time() {
     assert_eq!(queued_contents(&db, "user:cli"), vec!["never seen"]);
 
     drop(db);
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// The order the brief fixes: **recovery before the byte-cap eviction**. The
@@ -281,7 +289,11 @@ fn the_recovery_runs_before_the_byte_cap_eviction_or_the_interjection_is_gone() 
     let empty = std::collections::HashSet::new();
 
     // (a) The boot order as it ships: recover, then evict.
-    let dir = make_temp_dir("openalpaca-order-right");
+    let temp_dir = tempfile::Builder::new()
+        .prefix("openalpaca-order-right")
+        .tempdir()
+        .expect("temp dir");
+    let dir = temp_dir.path().to_path_buf();
     let db = Database::open(&dir.join("test.db")).unwrap();
     let sessions = dir.join("sessions");
     seed_run(&db, "t1", "s1", "user:cli");
@@ -295,11 +307,14 @@ fn the_recovery_runs_before_the_byte_cap_eviction_or_the_interjection_is_gone() 
     assert_eq!(queued_contents(&db, "user:cli"), vec!["never seen"]);
 
     drop(db);
-    let _ = std::fs::remove_dir_all(dir);
 
     // (b) The same fixture with the two passes swapped: the eviction takes the
     // only copy of the interjection, and the recovery finds nothing.
-    let dir = make_temp_dir("openalpaca-order-wrong");
+    let temp_dir = tempfile::Builder::new()
+        .prefix("openalpaca-order-wrong")
+        .tempdir()
+        .expect("temp dir");
+    let dir = temp_dir.path().to_path_buf();
     let db = Database::open(&dir.join("test.db")).unwrap();
     let sessions = dir.join("sessions");
     seed_run(&db, "t1", "s1", "user:cli");
@@ -320,14 +335,17 @@ fn the_recovery_runs_before_the_byte_cap_eviction_or_the_interjection_is_gone() 
     );
 
     drop(db);
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// A run with no session (a lane that never had one, or a pre-039 row) is
 /// still marked, has nothing to recover, and is not announced.
 #[test]
 fn a_run_with_no_session_is_marked_but_announces_nothing() {
-    let dir = make_temp_dir("openalpaca-interrupted-nosession");
+    let temp_dir = tempfile::Builder::new()
+        .prefix("openalpaca-interrupted-nosession")
+        .tempdir()
+        .expect("temp dir");
+    let dir = temp_dir.path().to_path_buf();
     let db = Database::open(&dir.join("test.db")).unwrap();
     db.with_connection(|conn| {
         conn.execute(
@@ -349,7 +367,6 @@ fn a_run_with_no_session_is_marked_but_announces_nothing() {
     assert!(rx.try_recv().is_err(), "no session, nothing to announce in");
 
     drop(db);
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// The frame §5.7 gained: `SessionChanged` with `status = "interrupted"` and
@@ -357,7 +374,11 @@ fn a_run_with_no_session_is_marked_but_announces_nothing() {
 /// was watching will never finish.
 #[test]
 fn an_interrupted_run_is_announced_on_its_session() {
-    let dir = make_temp_dir("openalpaca-interrupted-announce");
+    let temp_dir = tempfile::Builder::new()
+        .prefix("openalpaca-interrupted-announce")
+        .tempdir()
+        .expect("temp dir");
+    let dir = temp_dir.path().to_path_buf();
     let db = Database::open(&dir.join("test.db")).unwrap();
     seed_run(&db, "t1", "s1", "user:cli");
     let runs = sweep_interrupted_runs(&db, None, "boot-1");
@@ -383,7 +404,6 @@ fn an_interrupted_run_is_announced_on_its_session() {
     }
 
     drop(db);
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 // ── L9: first-boot content ──────────────────────────────────────────────
@@ -393,7 +413,11 @@ fn an_interrupted_run_is_announced_on_its_session() {
 /// no template could act as Lead Agent, and no skill could be invoked.
 #[test]
 fn a_first_boot_seeds_the_agents_skills_and_tools_it_carries() {
-    let dir = make_temp_dir("openalpaca-seed-content");
+    let temp_dir = tempfile::Builder::new()
+        .prefix("openalpaca-seed-content")
+        .tempdir()
+        .expect("temp dir");
+    let dir = temp_dir.path().to_path_buf();
 
     seed_default_configs(&dir);
 
@@ -410,7 +434,12 @@ fn a_first_boot_seeds_the_agents_skills_and_tools_it_carries() {
         "all nine shipped templates land"
     );
 
-    assert!(dir.join("skills").join("code-review").join("SKILL.md").exists());
+    assert!(
+        dir.join("skills")
+            .join("code-review")
+            .join("SKILL.md")
+            .exists()
+    );
     let script = dir
         .join("skills")
         .join("create-skill")
@@ -425,15 +454,17 @@ fn a_first_boot_seeds_the_agents_skills_and_tools_it_carries() {
     }
 
     assert!(dir.join("tools").join("example.toml").exists());
-
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// The daemon fills a gap; it does not restore a default. A directory the
 /// owner has curated is theirs — including one they emptied.
 #[test]
 fn seeding_never_touches_content_the_owner_already_has() {
-    let dir = make_temp_dir("openalpaca-seed-content-existing");
+    let temp_dir = tempfile::Builder::new()
+        .prefix("openalpaca-seed-content-existing")
+        .tempdir()
+        .expect("temp dir");
+    let dir = temp_dir.path().to_path_buf();
     std::fs::create_dir_all(dir.join("agents")).unwrap();
     std::fs::write(dir.join("agents").join("lead_agent.md"), "mine").unwrap();
     // Curated down to nothing: still the owner's directory.
@@ -458,14 +489,16 @@ fn seeding_never_touches_content_the_owner_already_has() {
     );
     // …while the directory that really is absent is still filled.
     assert!(dir.join("tools").join("example.toml").exists());
-
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// Seeding is idempotent: a second boot writes nothing and changes nothing.
 #[test]
 fn a_second_boot_seeds_nothing_again() {
-    let dir = make_temp_dir("openalpaca-seed-content-twice");
+    let temp_dir = tempfile::Builder::new()
+        .prefix("openalpaca-seed-content-twice")
+        .tempdir()
+        .expect("temp dir");
+    let dir = temp_dir.path().to_path_buf();
     seed_default_configs(&dir);
     std::fs::write(dir.join("agents").join("lead_agent.md"), "edited by hand").unwrap();
 
@@ -475,6 +508,4 @@ fn a_second_boot_seeds_nothing_again() {
         std::fs::read_to_string(dir.join("agents").join("lead_agent.md")).unwrap(),
         "edited by hand"
     );
-
-    let _ = std::fs::remove_dir_all(dir);
 }

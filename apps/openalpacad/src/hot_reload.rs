@@ -17,7 +17,7 @@ pub type RecentHashes = Arc<Mutex<VecDeque<String>>>;
 
 /// Create a new bounded hash ring for dedup.
 pub fn new_recent_hashes() -> RecentHashes {
-    Arc::new(Mutex::new(VecDeque::with_capacity(8)))
+    Arc::new(Mutex::new(VecDeque::with_capacity(OWN_WRITE_RING)))
 }
 
 /// How many of the daemon's own writes a dedup ring remembers.
@@ -38,9 +38,26 @@ pub fn new_config_hashes() -> ConfigHashes {
     )))
 }
 
-fn content_hash(contents: &str) -> String {
+fn content_hash(contents: impl AsRef<[u8]>) -> String {
     use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(contents.as_bytes()))
+    format!("{:x}", Sha256::digest(contents.as_ref()))
+}
+
+fn record_hash(ring: &mut VecDeque<String>, hash: String) {
+    ring.push_back(hash);
+    while ring.len() > OWN_WRITE_RING {
+        ring.pop_front();
+    }
+}
+
+fn consume_hash(ring: &mut VecDeque<String>, hash: &str) -> bool {
+    match ring.iter().position(|h| h == hash) {
+        Some(pos) => {
+            ring.remove(pos);
+            true
+        }
+        None => false,
+    }
 }
 
 fn lock_ring(ring: &ConfigHashes) -> std::sync::MutexGuard<'_, VecDeque<String>> {
@@ -55,10 +72,7 @@ fn lock_ring(ring: &ConfigHashes) -> std::sync::MutexGuard<'_, VecDeque<String>>
 /// ring.
 pub fn record_own_config_write(ring: &ConfigHashes, contents: &str) {
     let mut ring = lock_ring(ring);
-    ring.push_back(content_hash(contents));
-    while ring.len() > OWN_WRITE_RING {
-        ring.pop_front();
-    }
+    record_hash(&mut ring, content_hash(contents));
 }
 
 /// Did the daemon write these bytes? Consumes the match, so one recorded write
@@ -66,13 +80,7 @@ pub fn record_own_config_write(ring: &ConfigHashes, contents: &str) {
 fn swallow_own_config_write(ring: &ConfigHashes, contents: &str) -> bool {
     let hash = content_hash(contents);
     let mut ring = lock_ring(ring);
-    match ring.iter().position(|h| *h == hash) {
-        Some(pos) => {
-            ring.remove(pos);
-            true
-        }
-        None => false,
-    }
+    consume_hash(&mut ring, &hash)
 }
 
 /// All context needed by the file watcher task.
@@ -238,115 +246,114 @@ fn scheduled_skills_enabled(ctx: &FileWatcherContext) -> bool {
         .scheduled_skills_enabled
 }
 
-async fn handle_soul_change(ctx: &FileWatcherContext) {
-    let should_skip = if let Ok(content) = std::fs::read(&ctx.soul_path) {
-        use sha2::{Digest, Sha256};
-        let file_hash = format!("{:x}", Sha256::digest(&content));
-        let mut ring = ctx.soul_hashes.lock().await;
-        if let Some(pos) = ring.iter().position(|h| *h == file_hash) {
-            ring.remove(pos);
-            info!(
-                "Watcher dedup: skipping reload for hash {} (already applied via EventBus)",
-                &file_hash[..16]
-            );
-            true
-        } else {
-            false
-        }
-    } else {
-        false
-    };
+#[derive(Clone, Copy, Debug)]
+enum DocumentKind {
+    Soul,
+    User,
+    Identity,
+}
 
-    if !should_skip {
-        match bootstrap::load_system_persona_from_soul_file(&ctx.soul_path) {
-            Ok(persona) => {
-                ctx.orchestrator.update_system_persona(persona);
-                info!("Soul reloaded (watcher): {}", ctx.soul_path.display());
-            }
-            Err(e) => {
-                warn!(
-                    "SOUL parse/validation failed for {}: {e}; keeping last active soul",
-                    ctx.soul_path.display()
-                );
-            }
+impl DocumentKind {
+    fn apply(self, orchestrator: &Orchestrator, path: &Path) -> anyhow::Result<()> {
+        match self {
+            Self::Soul => orchestrator
+                .update_system_persona(bootstrap::load_system_persona_from_soul_file(path)?),
+            Self::User => orchestrator
+                .update_user_document(Some(bootstrap::load_user_document_from_file(path)?)),
+            Self::Identity => orchestrator
+                .update_identity_document(Some(bootstrap::load_identity_document_from_file(path)?)),
+        }
+        Ok(())
+    }
+
+    fn update(
+        self,
+        event: &openalpaca_core::events::SystemEvent,
+    ) -> Option<(&str, &str)> {
+        use openalpaca_core::events::SystemEvent;
+        match (self, event) {
+            (
+                Self::Soul,
+                SystemEvent::SoulUpdated {
+                    actor,
+                    content_sha256,
+                    ..
+                },
+            )
+            | (
+                Self::User,
+                SystemEvent::UserProfileUpdated {
+                    actor,
+                    content_sha256,
+                    ..
+                },
+            )
+            | (
+                Self::Identity,
+                SystemEvent::IdentityUpdated {
+                    actor,
+                    content_sha256,
+                    ..
+                },
+            ) => Some((actor, content_sha256)),
+            _ => None,
         }
     }
+}
+
+async fn consume_document_write(hashes: &RecentHashes, path: &Path) -> bool {
+    let Ok(contents) = std::fs::read(path) else {
+        return false;
+    };
+    consume_hash(&mut *hashes.lock().await, &content_hash(contents))
+}
+
+async fn handle_document_change(
+    orchestrator: &Orchestrator,
+    kind: DocumentKind,
+    path: &Path,
+    hashes: &RecentHashes,
+) {
+    if consume_document_write(hashes, path).await {
+        info!(?kind, "Watcher dedup: already applied via EventBus");
+        return;
+    }
+    match kind.apply(orchestrator, path) {
+        Ok(()) => info!(?kind, path = %path.display(), "Document reloaded (watcher)"),
+        Err(e) => {
+            warn!(?kind, path = %path.display(), "Document reload failed: {e}; keeping last active document")
+        }
+    }
+}
+
+async fn handle_soul_change(ctx: &FileWatcherContext) {
+    handle_document_change(
+        &ctx.orchestrator,
+        DocumentKind::Soul,
+        &ctx.soul_path,
+        &ctx.soul_hashes,
+    )
+    .await;
 }
 
 async fn handle_user_change(ctx: &FileWatcherContext) {
-    let should_skip = if let Ok(content) = std::fs::read(&ctx.user_path) {
-        use sha2::{Digest, Sha256};
-        let file_hash = format!("{:x}", Sha256::digest(&content));
-        let mut ring = ctx.user_hashes.lock().await;
-        if let Some(pos) = ring.iter().position(|h| *h == file_hash) {
-            ring.remove(pos);
-            info!(
-                "Watcher dedup: skipping USER reload for hash {} (already applied via EventBus)",
-                &file_hash[..16]
-            );
-            true
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-
-    if !should_skip {
-        match bootstrap::load_user_document_from_file(&ctx.user_path) {
-            Ok(doc) => {
-                ctx.orchestrator.update_user_document(Some(doc));
-                info!(
-                    "User profile reloaded (watcher): {}",
-                    ctx.user_path.display()
-                );
-            }
-            Err(e) => {
-                warn!(
-                    "USER parse/validation failed for {}: {e}; keeping last active profile",
-                    ctx.user_path.display()
-                );
-            }
-        }
-    }
+    handle_document_change(
+        &ctx.orchestrator,
+        DocumentKind::User,
+        &ctx.user_path,
+        &ctx.user_hashes,
+    )
+    .await;
 }
 
 async fn handle_identity_change(ctx: &FileWatcherContext) {
-    let should_skip = if let Ok(content) = std::fs::read(&ctx.identity_path) {
-        use sha2::{Digest, Sha256};
-        let file_hash = format!("{:x}", Sha256::digest(&content));
-        let mut ring = ctx.identity_hashes.lock().await;
-        if let Some(pos) = ring.iter().position(|h| *h == file_hash) {
-            ring.remove(pos);
-            info!(
-                "Watcher dedup: skipping IDENTITY reload for hash {} (already applied via EventBus)",
-                &file_hash[..16]
-            );
-            true
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-
-    if !should_skip {
-        match bootstrap::load_identity_document_from_file(&ctx.identity_path) {
-            Ok(doc) => {
-                ctx.orchestrator.update_identity_document(Some(doc));
-                info!(
-                    "Identity reloaded (watcher): {}",
-                    ctx.identity_path.display()
-                );
-            }
-            Err(e) => {
-                warn!(
-                    "IDENTITY parse/validation failed for {}: {e}; keeping last active identity",
-                    ctx.identity_path.display()
-                );
-            }
-        }
-    }
+    handle_document_change(
+        &ctx.orchestrator,
+        DocumentKind::Identity,
+        &ctx.identity_path,
+        &ctx.identity_hashes,
+    )
+    .await;
 }
 
 async fn handle_bootstrap_change(ctx: &FileWatcherContext, bp: &Path) {
@@ -418,8 +425,7 @@ pub(crate) async fn llm_config_watcher_reload(
     web_search_config: &ArcSwap<openalpaca_llm::WebSearchConfig>,
     path: &Path,
 ) -> bool {
-    let reloaded =
-        llm_config_watcher_tick(hashes, router, secret_store, web_search_config, path);
+    let reloaded = llm_config_watcher_tick(hashes, router, secret_store, web_search_config, path);
     if !reloaded {
         return false;
     }
@@ -476,7 +482,9 @@ pub(crate) fn llm_config_watcher_tick(
     //    file says are off, which contribute no models anywhere (R58b).
     let disabled = openalpaca_llm::config::disabled_providers(&new_config);
     if let Some(ref models) = new_config.models {
-        router.model_registry().reload_from_config(models, &disabled);
+        router
+            .model_registry()
+            .reload_from_config(models, &disabled);
     }
 
     // 3. Reload default model
@@ -623,9 +631,7 @@ async fn handle_agents_change(ctx: &FileWatcherContext, changed_path: &Path) {
                                 ctx.agent_registry
                                     .update_config(&template_id, fresh, version)
                             {
-                                warn!(
-                                    "Agent instance update skipped (concurrent claim): {e}"
-                                );
+                                warn!("Agent instance update skipped (concurrent claim): {e}");
                             }
                         }
                     } else {
@@ -658,177 +664,93 @@ async fn handle_agents_change(ctx: &FileWatcherContext, changed_path: &Path) {
 #[cfg(test)]
 mod llm_dedup_tests;
 
-/// Spawn soul hot-reload subscriber via EventBus (agent-initiated updates).
-///
-/// When the update_persona tool writes a new SOUL file, it publishes SoulUpdated.
-/// This subscriber reloads the persona immediately without waiting for the
-/// file watcher, providing a more reliable activation path.
+/// The three document subscribers share delivery and dedup semantics. The
+/// callback parses and applies a document before its event hash is recorded.
+async fn document_reload_events(
+    mut rx: broadcast::Receiver<openalpaca_core::events::SystemEvent>,
+    kind: DocumentKind,
+    hashes: RecentHashes,
+    cancel: CancellationToken,
+    mut reload: impl FnMut() -> anyhow::Result<()>,
+) {
+    loop {
+        let event = tokio::select! {
+            result = rx.recv() => match result {
+                Ok(event) => event,
+                Err(broadcast::error::RecvError::Closed) => break,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            },
+            _ = cancel.cancelled() => break,
+        };
+        let Some((actor, hash)) = kind.update(&event) else {
+            continue;
+        };
+        match reload() {
+            Ok(()) => {
+                record_hash(&mut *hashes.lock().await, hash.to_owned());
+                info!(?kind, actor, "Document hot-reloaded via EventBus");
+            }
+            Err(e) => warn!(
+                ?kind,
+                actor, "Document EventBus reload failed: {e}; keeping last active document"
+            ),
+        }
+    }
+}
+
+fn spawn_document_reload_subscriber(
+    bus: &EventBus,
+    orchestrator: Arc<Orchestrator>,
+    kind: DocumentKind,
+    path: PathBuf,
+    hashes: RecentHashes,
+    cancel: CancellationToken,
+) {
+    let rx = bus.subscribe();
+    tokio::spawn(async move {
+        document_reload_events(rx, kind, hashes, cancel, || {
+            kind.apply(&orchestrator, &path)
+        })
+        .await;
+    });
+}
+
 pub fn spawn_soul_reload_subscriber(
     bus: &EventBus,
     orchestrator: Arc<Orchestrator>,
-    soul_path: PathBuf,
+    path: PathBuf,
     hashes: RecentHashes,
     cancel: CancellationToken,
 ) {
-    let mut rx = bus.subscribe();
-    tokio::spawn(async move {
-        loop {
-            let event = tokio::select! {
-                result = rx.recv() => match result {
-                    Ok(ev) => ev,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                },
-                _ = cancel.cancelled() => break,
-            };
-            if let openalpaca_core::events::SystemEvent::SoulUpdated {
-                actor,
-                content_sha256,
-                ..
-            } = event
-            {
-                info!(
-                    "SoulUpdated via EventBus (actor={}, sha256={}), reloading persona",
-                    actor,
-                    &content_sha256[..16.min(content_sha256.len())]
-                );
-                match bootstrap::load_system_persona_from_soul_file(&soul_path) {
-                    Ok(persona) => {
-                        orchestrator.update_system_persona(persona);
-
-                        // Record this hash so the file watcher won't double-reload
-                        let mut ring = hashes.lock().await;
-                        ring.push_back(content_sha256.clone());
-                        while ring.len() > 8 {
-                            ring.pop_front();
-                        }
-
-                        info!("Soul hot-reloaded via EventBus: {}", soul_path.display());
-                    }
-                    Err(e) => {
-                        warn!(
-                            "Soul EventBus reload failed for {}: {e}; keeping last active soul",
-                            soul_path.display()
-                        );
-                    }
-                }
-            }
-        }
-    });
+    spawn_document_reload_subscriber(bus, orchestrator, DocumentKind::Soul, path, hashes, cancel);
 }
 
-/// Spawn user profile hot-reload subscriber via EventBus (agent-initiated updates).
 pub fn spawn_user_reload_subscriber(
     bus: &EventBus,
     orchestrator: Arc<Orchestrator>,
-    user_path: PathBuf,
+    path: PathBuf,
     hashes: RecentHashes,
     cancel: CancellationToken,
 ) {
-    let mut rx = bus.subscribe();
-    tokio::spawn(async move {
-        loop {
-            let event = tokio::select! {
-                result = rx.recv() => match result {
-                    Ok(ev) => ev,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                },
-                _ = cancel.cancelled() => break,
-            };
-            if let openalpaca_core::events::SystemEvent::UserProfileUpdated {
-                actor,
-                content_sha256,
-                ..
-            } = event
-            {
-                info!(
-                    "UserProfileUpdated via EventBus (actor={}, sha256={}), reloading profile",
-                    actor,
-                    &content_sha256[..16.min(content_sha256.len())]
-                );
-                match bootstrap::load_user_document_from_file(&user_path) {
-                    Ok(doc) => {
-                        orchestrator.update_user_document(Some(doc));
-
-                        // Record this hash so the file watcher won't double-reload
-                        let mut ring = hashes.lock().await;
-                        ring.push_back(content_sha256.clone());
-                        while ring.len() > 8 {
-                            ring.pop_front();
-                        }
-
-                        info!(
-                            "User profile hot-reloaded via EventBus: {}",
-                            user_path.display()
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            "User EventBus reload failed for {}: {e}; keeping last active profile",
-                            user_path.display()
-                        );
-                    }
-                }
-            }
-        }
-    });
+    spawn_document_reload_subscriber(bus, orchestrator, DocumentKind::User, path, hashes, cancel);
 }
 
-/// Spawn identity hot-reload subscriber via EventBus (agent-initiated updates).
 pub fn spawn_identity_reload_subscriber(
     bus: &EventBus,
     orchestrator: Arc<Orchestrator>,
-    identity_path: PathBuf,
+    path: PathBuf,
     hashes: RecentHashes,
     cancel: CancellationToken,
 ) {
-    let mut rx = bus.subscribe();
-    tokio::spawn(async move {
-        loop {
-            let event = tokio::select! {
-                result = rx.recv() => match result {
-                    Ok(ev) => ev,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                },
-                _ = cancel.cancelled() => break,
-            };
-            if let openalpaca_core::events::SystemEvent::IdentityUpdated {
-                actor,
-                content_sha256,
-                ..
-            } = event
-            {
-                info!(
-                    "IdentityUpdated via EventBus (actor={}, sha256={}), reloading identity",
-                    actor,
-                    &content_sha256[..16.min(content_sha256.len())]
-                );
-                match bootstrap::load_identity_document_from_file(&identity_path) {
-                    Ok(doc) => {
-                        orchestrator.update_identity_document(Some(doc));
-
-                        // Record this hash so the file watcher won't double-reload
-                        let mut ring = hashes.lock().await;
-                        ring.push_back(content_sha256.clone());
-                        while ring.len() > 8 {
-                            ring.pop_front();
-                        }
-
-                        info!(
-                            "Identity hot-reloaded via EventBus: {}",
-                            identity_path.display()
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            "Identity EventBus reload failed for {}: {e}; keeping last active identity",
-                            identity_path.display()
-                        );
-                    }
-                }
-            }
-        }
-    });
+    spawn_document_reload_subscriber(
+        bus,
+        orchestrator,
+        DocumentKind::Identity,
+        path,
+        hashes,
+        cancel,
+    );
 }
+
+#[cfg(test)]
+mod document_reload_tests;

@@ -31,6 +31,7 @@
 //! client hung up, a timeout layer fired) must not abandon a transition halfway
 //! and strand a record in `Enabling`.
 
+use openalpaca_plugins::config::toml_to_json;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -800,25 +801,6 @@ fn config_json(config: &HashMap<String, toml::Value>) -> serde_json::Value {
     serde_json::Value::Object(map)
 }
 
-pub(crate) fn toml_to_json(v: &toml::Value) -> serde_json::Value {
-    match v {
-        toml::Value::String(s) => serde_json::Value::String(s.clone()),
-        toml::Value::Integer(i) => serde_json::Value::Number((*i).into()),
-        toml::Value::Float(f) => serde_json::Number::from_f64(*f)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null),
-        toml::Value::Boolean(b) => serde_json::Value::Bool(*b),
-        toml::Value::Datetime(d) => serde_json::Value::String(d.to_string()),
-        toml::Value::Array(arr) => serde_json::Value::Array(arr.iter().map(toml_to_json).collect()),
-        toml::Value::Table(table) => serde_json::Value::Object(
-            table
-                .iter()
-                .map(|(k, v)| (k.clone(), toml_to_json(v)))
-                .collect(),
-        ),
-    }
-}
-
 pub(crate) fn json_to_toml(v: &serde_json::Value) -> toml::Value {
     match v {
         serde_json::Value::String(s) => toml::Value::String(s.clone()),
@@ -832,9 +814,7 @@ pub(crate) fn json_to_toml(v: &serde_json::Value) -> toml::Value {
             }
         }
         serde_json::Value::Bool(b) => toml::Value::Boolean(*b),
-        serde_json::Value::Array(arr) => {
-            toml::Value::Array(arr.iter().map(json_to_toml).collect())
-        }
+        serde_json::Value::Array(arr) => toml::Value::Array(arr.iter().map(json_to_toml).collect()),
         serde_json::Value::Object(obj) => {
             let mut map = toml::map::Map::new();
             for (k, v) in obj {

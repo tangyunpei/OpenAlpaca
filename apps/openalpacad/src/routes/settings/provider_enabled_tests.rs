@@ -104,7 +104,9 @@ impl Harness {
     async fn put(&self, provider: &str, enabled: bool) -> (StatusCode, serde_json::Value) {
         let response = provider_enabled_response(&self.service, provider, enabled).await;
         let status = response.status();
-        let bytes = to_bytes(response.into_body(), 64 * 1024).await.expect("body");
+        let bytes = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
         let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
         (status, json)
     }
@@ -224,7 +226,9 @@ base_url = "{}"
 
     let response = crate::routes::settings::refresh_models_response(&h.service).await;
     assert_eq!(response.status(), StatusCode::OK);
-    let bytes = to_bytes(response.into_body(), 64 * 1024).await.expect("body");
+    let bytes = to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("body");
     let models: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
 
     let ids: Vec<&str> = models
@@ -249,10 +253,9 @@ async fn the_write_rotates_a_backup_because_it_uses_the_one_atomic_writer() {
     let kept = h.backups();
     assert_eq!(kept.len(), 1, "the replaced version is kept: {kept:?}");
     assert!(kept[0].starts_with("llm.toml.bak."), "{kept:?}");
-    let replaced = std::fs::read_to_string(
-        h.home.path().join("state").join("backups").join(&kept[0]),
-    )
-    .expect("read the backup");
+    let replaced =
+        std::fs::read_to_string(h.home.path().join("state").join("backups").join(&kept[0]))
+            .expect("read the backup");
     assert_eq!(replaced, CONFIG, "the backup is the version it replaced");
 }
 
@@ -283,7 +286,10 @@ async fn a_disable_strips_the_models_and_a_second_enable_puts_them_back() {
             .contains(&ProviderType::Ollama)
     );
     assert_eq!(
-        h.service.router().model_registry().resolve_provider("llama3.1"),
+        h.service
+            .router()
+            .model_registry()
+            .resolve_provider("llama3.1"),
         None,
         "a disabled provider's models leave the registry with it"
     );
@@ -293,7 +299,10 @@ async fn a_disable_strips_the_models_and_a_second_enable_puts_them_back() {
     let (status, _) = h.put("ollama", true).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        h.service.router().model_registry().resolve_provider("llama3.1"),
+        h.service
+            .router()
+            .model_registry()
+            .resolve_provider("llama3.1"),
         Some(ProviderType::Ollama),
         "the config's own [models] rows are re-applied on enable"
     );
@@ -313,7 +322,10 @@ async fn an_unknown_provider_is_a_404() {
             .unwrap_or_default()
             .contains("groq")
     );
-    assert!(body["error"].get("status").is_none(), "§7: no duplicated status");
+    assert!(
+        body["error"].get("status").is_none(),
+        "§7: no duplicated status"
+    );
     assert_eq!(h.text(), h.seed, "nothing was written");
 }
 
@@ -359,10 +371,20 @@ async fn an_enable_the_router_cannot_load_says_so_on_the_wire() {
 
     let (status, body) = h.put("anthropic", true).await;
 
-    assert_eq!(status, StatusCode::OK, "the write happened; this is not a failure");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the write happened; this is not a failure"
+    );
     assert_eq!(body["id"], "anthropic");
-    assert_eq!(body["enabled"], true, "the file says what the owner asked for");
-    assert_eq!(body["loaded"], false, "and the body says it did not load: {body}");
+    assert_eq!(
+        body["enabled"], true,
+        "the file says what the owner asked for"
+    );
+    assert_eq!(
+        body["loaded"], false,
+        "and the body says it did not load: {body}"
+    );
     let warning = body["warning"].as_str().unwrap_or_default();
     assert!(
         warning.contains("No keys"),
@@ -430,4 +452,11 @@ async fn the_two_409_arms_answer_different_code_words() {
         placed_body["error"]["code"], unplaced_body["error"]["code"],
         "same status, different fact — the client renders per code"
     );
+}
+
+#[test]
+fn shared_service_guard_returns_the_existing_service() {
+    let harness = Harness::new();
+    let found = super::required_llm_settings(Some(harness.service.as_ref())).unwrap();
+    assert!(std::ptr::eq(found, harness.service.as_ref()));
 }

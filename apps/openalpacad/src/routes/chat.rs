@@ -66,24 +66,30 @@ fn target_session(
     let session = match repo.get_session(session_id) {
         Ok(Some(session)) => session,
         Ok(None) => {
-            return Err(
-                error_response(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", "Session not found")
-                    .into_response(),
-            );
+            return Err(error_response(
+                StatusCode::NOT_FOUND,
+                "SESSION_NOT_FOUND",
+                "Session not found",
+            )
+            .into_response());
         }
         Err(e) => {
-            return Err(
-                error_response(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", &e.to_string())
-                    .into_response(),
-            );
+            return Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "DB_ERROR",
+                &e.to_string(),
+            )
+            .into_response());
         }
     };
 
     if !is_lane_owned_by(&session.lane_key, owner) {
-        return Err(
-            error_response(StatusCode::NOT_FOUND, "SESSION_NOT_FOUND", "Session not found")
-                .into_response(),
-        );
+        return Err(error_response(
+            StatusCode::NOT_FOUND,
+            "SESSION_NOT_FOUND",
+            "Session not found",
+        )
+        .into_response());
     }
     let chat_lane = format!("{owner}:gui");
     if session.lane_key != chat_lane {
@@ -127,10 +133,12 @@ fn target_session(
             "Session not found",
         )
         .into_response()),
-        Err(e) => Err(
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", &e.to_string())
-                .into_response(),
-        ),
+        Err(e) => Err(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "DB_ERROR",
+            &e.to_string(),
+        )
+        .into_response()),
     }
 }
 
@@ -181,9 +189,7 @@ fn lane_refusal(lane_key: &str, owner_id: &str) -> Option<Response> {
     if is_lane_owned_by(lane_key, owner_id) {
         return None;
     }
-    Some(
-        error_response(StatusCode::NOT_FOUND, "LANE_NOT_FOUND", "No such lane").into_response(),
-    )
+    Some(error_response(StatusCode::NOT_FOUND, "LANE_NOT_FOUND", "No such lane").into_response())
 }
 
 /// Which session the two history routes act on: the one the query names, else
@@ -387,17 +393,7 @@ pub async fn send_chat_handler(
     headers: HeaderMap,
     Json(body): Json<ChatSendRequest>,
 ) -> impl IntoResponse {
-    let chat_service = match &state.chat_service {
-        Some(svc) => svc,
-        None => {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "CHAT_NOT_CONFIGURED",
-                "Chat service is not configured",
-            )
-            .into_response();
-        }
-    };
+    let chat_service = &state.chat_service;
 
     let principal = &state.local_user_id;
 
@@ -472,17 +468,7 @@ pub async fn chat_stream_handler(
         return (StatusCode::UNAUTHORIZED, "Invalid token").into_response();
     }
 
-    let chat_service = match &state.chat_service {
-        Some(svc) => svc,
-        None => {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "CHAT_NOT_CONFIGURED",
-                "Chat service is not configured",
-            )
-            .into_response();
-        }
-    };
+    let chat_service = &state.chat_service;
 
     let rx = match chat_service.stream_manager().get_receiver(&stream_id) {
         Some(rx) => rx,
@@ -531,10 +517,7 @@ fn sse_frame(event: &openalpaca_core::chat::ChatStreamEvent) -> (&'static str, S
         E::Thinking => ("thinking", "{}".to_string()),
         // S2: the model's reasoning, live. Nothing persists it — it is not in
         // `done.content` and the history route never replays it.
-        E::Reasoning { text } => (
-            "reasoning",
-            serde_json::json!({ "text": text }).to_string(),
-        ),
+        E::Reasoning { text } => ("reasoning", serde_json::json!({ "text": text }).to_string()),
         E::Delta { content } => (
             "delta",
             serde_json::json!({ "content": content }).to_string(),
@@ -590,17 +573,7 @@ pub async fn get_chat_history_handler(
     State(state): State<Arc<AppState>>,
     Query(query): Query<HistoryQuery>,
 ) -> impl IntoResponse {
-    let chat_service = match &state.chat_service {
-        Some(svc) => svc,
-        None => {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "CHAT_NOT_CONFIGURED",
-                "Chat service is not configured",
-            )
-            .into_response();
-        }
-    };
+    let chat_service = &state.chat_service;
 
     let limit = query.limit.unwrap_or(50);
     let offset = query.offset.unwrap_or(0);
@@ -612,7 +585,8 @@ pub async fn get_chat_history_handler(
         return refusal;
     }
 
-    let session_id = match resolve_history_session(&state.db, lane_key, query.session_id.as_deref()) {
+    let session_id = match resolve_history_session(&state.db, lane_key, query.session_id.as_deref())
+    {
         Ok(id) => id,
         Err(response) => return response,
     };
@@ -653,17 +627,7 @@ pub async fn delete_chat_history_handler(
     State(state): State<Arc<AppState>>,
     Query(query): Query<DeleteHistoryQuery>,
 ) -> impl IntoResponse {
-    let chat_service = match &state.chat_service {
-        Some(svc) => svc,
-        None => {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "CHAT_NOT_CONFIGURED",
-                "Chat service is not configured",
-            )
-            .into_response();
-        }
-    };
+    let chat_service = &state.chat_service;
 
     let lane_key = query.lane_key.as_deref().unwrap_or(&state.default_lane_key);
 
@@ -673,7 +637,8 @@ pub async fn delete_chat_history_handler(
         return refusal;
     }
 
-    let session_id = match resolve_history_session(&state.db, lane_key, query.session_id.as_deref()) {
+    let session_id = match resolve_history_session(&state.db, lane_key, query.session_id.as_deref())
+    {
         Ok(id) => id,
         Err(response) => return response,
     };
@@ -795,9 +760,9 @@ pub async fn delete_feedback_handler(
 /// waiting is not acting on it. Answering stays owner-scoped at
 /// `POST /v1/chat/confirmations/{request_id}`, which is unchanged.
 pub async fn list_confirmations(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    Json(pending_confirmations(
-        state.confirmation_broker.as_deref(),
-    ))
+    Json(pending_confirmations(Some(
+        state.confirmation_broker.as_ref(),
+    )))
 }
 
 /// The body of [`list_confirmations`] — split out so the shape is provable
@@ -840,17 +805,7 @@ pub async fn confirm_tool(
     Path(request_id): Path<String>,
     Json(body): Json<ConfirmationBody>,
 ) -> impl IntoResponse {
-    let broker = match &state.confirmation_broker {
-        Some(b) => b,
-        None => {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "CONFIRMATION_NOT_CONFIGURED",
-                "Confirmation broker is not configured",
-            )
-            .into_response();
-        }
-    };
+    let broker = &state.confirmation_broker;
 
     match broker.respond(
         &request_id,
@@ -873,8 +828,7 @@ mod tests {
     /// that sets it is taken at its word.
     #[test]
     fn unattended_defaults_to_false_and_is_read_when_sent() {
-        let quiet: ChatSendRequest =
-            serde_json::from_str(r#"{"content": "hi"}"#).expect("parse");
+        let quiet: ChatSendRequest = serde_json::from_str(r#"{"content": "hi"}"#).expect("parse");
         assert!(!quiet.unattended, "a client that says nothing is attended");
 
         let declared: ChatSendRequest =
@@ -1263,7 +1217,10 @@ mod tests {
     #[tokio::test]
     async fn a_turn_names_no_model_when_nothing_is_routable() {
         let router = router_with(&[]);
-        assert_eq!(resolve_turn_model(Some(&router), None).expect("accepted"), None);
+        assert_eq!(
+            resolve_turn_model(Some(&router), None).expect("accepted"),
+            None
+        );
     }
 
     /// A registered id is accepted and echoed back as the turn's model.
@@ -1509,9 +1466,7 @@ mod tests {
         let announced = std::iter::from_fn(|| rx.try_recv().ok())
             .filter_map(|e| match e {
                 openalpaca_core::events::SystemEvent::SessionChanged {
-                    session_id,
-                    status,
-                    ..
+                    session_id, status, ..
                 } => Some((session_id, status)),
                 _ => None,
             })
@@ -1664,7 +1619,11 @@ mod tests {
         let broker = openalpaca_core::security::confirmation::ConfirmationBroker::new();
         let base = chrono::Utc::now();
         let older = raised("req-older", "artifact_write", base);
-        let newer = raised("req-newer", "workspace_write", base + chrono::Duration::seconds(5));
+        let newer = raised(
+            "req-newer",
+            "workspace_write",
+            base + chrono::Duration::seconds(5),
+        );
         // Registered newest first, to prove the ordering is the route's.
         let _newer_rx = broker.request(&newer);
         let _older_rx = broker.request(&older);
@@ -1703,7 +1662,9 @@ mod tests {
             )
             .expect("the answer lands");
         assert!(
-            pending_confirmations(Some(&broker)).confirmations.is_empty(),
+            pending_confirmations(Some(&broker))
+                .confirmations
+                .is_empty(),
             "an answered prompt is not pending"
         );
     }

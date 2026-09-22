@@ -69,9 +69,9 @@ pub struct FileOpenResponse {
 /// the stored name is the store's own, so opening it in place would hand the
 /// user `03-quarterly-report.pdf` instead of the name they uploaded — and a row
 /// written before D2 is still a content-addressed blob under `state/assets/`
-/// with no extension at all until the boot `rehome` pass moves it, which the
-/// system opener cannot pick an application for. The staged copy restores the
-/// original filename in both cases.
+/// with no extension at all, which the system opener cannot pick an
+/// application for — nothing relocates such a row. The staged copy restores
+/// the original filename in both cases.
 ///
 /// A **produced** artifact already lives at a real path under its own name
 /// (§4.2's grammar), so it opens in place — no copy, and "Open" reveals the file

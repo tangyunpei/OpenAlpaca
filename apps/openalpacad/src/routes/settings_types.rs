@@ -1,9 +1,13 @@
 //! Request/response types and helpers for settings endpoints.
 
-use axum::{Json, http::StatusCode, response::IntoResponse};
+use axum::{Json, http::StatusCode};
 use serde::{Deserialize, Serialize};
 
-pub(super) fn settings_error(status: StatusCode, code: &str, message: &str) -> impl IntoResponse {
+pub(super) fn settings_error(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
     (
         status,
         Json(serde_json::json!({

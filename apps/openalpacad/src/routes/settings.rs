@@ -17,18 +17,24 @@ use std::sync::Arc;
 use super::api_error;
 use super::settings_types::*;
 
+/// Shared guard for the legacy settings routes; preserves their error envelope.
+fn required_llm_settings(
+    service: Option<&openalpaca_llm::LlmSettingsService>,
+) -> Result<&openalpaca_llm::LlmSettingsService, (StatusCode, Json<serde_json::Value>)> {
+    service.ok_or_else(|| {
+        settings_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "LLM_NOT_CONFIGURED",
+            "LLM router is not configured",
+        )
+    })
+}
+
 /// GET /v1/settings/llm — returns masked config
 pub async fn get_llm_settings(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let service = match &state.llm_settings_service {
-        Some(s) => s,
-        None => {
-            return settings_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "LLM_NOT_CONFIGURED",
-                "LLM router is not configured",
-            )
-            .into_response();
-        }
+    let service = match required_llm_settings(state.llm_settings_service.as_deref()) {
+        Ok(service) => service,
+        Err(response) => return response.into_response(),
     };
 
     match service.get_config().await {
@@ -43,16 +49,9 @@ pub async fn upsert_key(
     State(state): State<Arc<AppState>>,
     Json(body): Json<AddKeyRequest>,
 ) -> impl IntoResponse {
-    let service = match &state.llm_settings_service {
-        Some(s) => s,
-        None => {
-            return settings_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "LLM_NOT_CONFIGURED",
-                "LLM router is not configured",
-            )
-            .into_response();
-        }
+    let service = match required_llm_settings(state.llm_settings_service.as_deref()) {
+        Ok(service) => service,
+        Err(response) => return response.into_response(),
     };
 
     // Validate key format
@@ -92,16 +91,9 @@ pub async fn delete_key(
     State(state): State<Arc<AppState>>,
     Path((provider, key_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let service = match &state.llm_settings_service {
-        Some(s) => s,
-        None => {
-            return settings_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "LLM_NOT_CONFIGURED",
-                "LLM router is not configured",
-            )
-            .into_response();
-        }
+    let service = match required_llm_settings(state.llm_settings_service.as_deref()) {
+        Ok(service) => service,
+        Err(response) => return response.into_response(),
     };
 
     match service.remove_key(&provider, &key_id).await {
@@ -127,16 +119,9 @@ pub async fn reorder_keys(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ReorderKeysRequest>,
 ) -> impl IntoResponse {
-    let service = match &state.llm_settings_service {
-        Some(s) => s,
-        None => {
-            return settings_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "LLM_NOT_CONFIGURED",
-                "LLM router is not configured",
-            )
-            .into_response();
-        }
+    let service = match required_llm_settings(state.llm_settings_service.as_deref()) {
+        Ok(service) => service,
+        Err(response) => return response.into_response(),
     };
 
     let event_provider = body.provider.clone();
@@ -160,16 +145,9 @@ pub async fn set_key_priority(
     State(state): State<Arc<AppState>>,
     Json(body): Json<SetKeyPriorityRequest>,
 ) -> impl IntoResponse {
-    let service = match &state.llm_settings_service {
-        Some(s) => s,
-        None => {
-            return settings_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "LLM_NOT_CONFIGURED",
-                "LLM router is not configured",
-            )
-            .into_response();
-        }
+    let service = match required_llm_settings(state.llm_settings_service.as_deref()) {
+        Ok(service) => service,
+        Err(response) => return response.into_response(),
     };
 
     if body.priority != "primary" && body.priority != "fallback" {
@@ -207,16 +185,9 @@ pub async fn validate_key(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ValidateKeyRequest>,
 ) -> impl IntoResponse {
-    let service = match &state.llm_settings_service {
-        Some(s) => s,
-        None => {
-            return settings_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "LLM_NOT_CONFIGURED",
-                "LLM router is not configured",
-            )
-            .into_response();
-        }
+    let service = match required_llm_settings(state.llm_settings_service.as_deref()) {
+        Ok(service) => service,
+        Err(response) => return response.into_response(),
     };
 
     if body.secret.is_empty() {
@@ -237,16 +208,9 @@ pub async fn validate_key(
 
 /// GET /v1/settings/llm/status — live health
 pub async fn get_key_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let service = match &state.llm_settings_service {
-        Some(s) => s,
-        None => {
-            return settings_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "LLM_NOT_CONFIGURED",
-                "LLM router is not configured",
-            )
-            .into_response();
-        }
+    let service = match required_llm_settings(state.llm_settings_service.as_deref()) {
+        Ok(service) => service,
+        Err(response) => return response.into_response(),
     };
 
     let health = service.key_health().await;
@@ -255,16 +219,9 @@ pub async fn get_key_status(State(state): State<Arc<AppState>>) -> impl IntoResp
 
 /// GET /v1/models — list all available models
 pub async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let service = match &state.llm_settings_service {
-        Some(s) => s,
-        None => {
-            return settings_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "LLM_NOT_CONFIGURED",
-                "LLM router is not configured",
-            )
-            .into_response();
-        }
+    let service = match required_llm_settings(state.llm_settings_service.as_deref()) {
+        Ok(service) => service,
+        Err(response) => return response.into_response(),
     };
 
     let models = service.available_models();
@@ -278,16 +235,9 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoRespons
 /// pool, so this is the route that makes a local Ollama's installed models
 /// appear without anything being written to `llm.toml`.
 pub async fn refresh_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let service = match &state.llm_settings_service {
-        Some(s) => s,
-        None => {
-            return settings_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "LLM_NOT_CONFIGURED",
-                "LLM router is not configured",
-            )
-            .into_response();
-        }
+    let service = match required_llm_settings(state.llm_settings_service.as_deref()) {
+        Ok(service) => service,
+        Err(response) => return response.into_response(),
     };
 
     refresh_models_response(service).await
@@ -322,16 +272,9 @@ fn cost_for_utc_date(db: &openalpaca_storage::Database, date: &str) -> f64 {
 
 /// GET /v1/orchestrator/config
 pub async fn get_orchestrator_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let service = match &state.llm_settings_service {
-        Some(s) => s,
-        None => {
-            return settings_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "LLM_NOT_CONFIGURED",
-                "LLM router is not configured",
-            )
-            .into_response();
-        }
+    let service = match required_llm_settings(state.llm_settings_service.as_deref()) {
+        Ok(service) => service,
+        Err(response) => return response.into_response(),
     };
 
     match service.get_orchestrator_config() {
@@ -370,16 +313,9 @@ pub async fn update_orchestrator_config(
     State(state): State<Arc<AppState>>,
     Json(body): Json<UpdateOrchestratorRequest>,
 ) -> impl IntoResponse {
-    let service = match &state.llm_settings_service {
-        Some(s) => s,
-        None => {
-            return settings_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "LLM_NOT_CONFIGURED",
-                "LLM router is not configured",
-            )
-            .into_response();
-        }
+    let service = match required_llm_settings(state.llm_settings_service.as_deref()) {
+        Ok(service) => service,
+        Err(response) => return response.into_response(),
     };
 
     let model_name = body.model.clone();
@@ -438,8 +374,7 @@ pub async fn get_llm_usage_daily(
     let repo = openalpaca_storage::repository::LlmUsageRepository::new(&state.db);
     let limit = query.limit.unwrap_or(30).min(365);
 
-    let result =
-        repo.query_daily_usage(query.agent_id.as_deref(), query.date.as_deref(), limit);
+    let result = repo.query_daily_usage(query.agent_id.as_deref(), query.date.as_deref(), limit);
 
     match result {
         Ok(usage) => (StatusCode::OK, Json(serde_json::to_value(usage).unwrap())).into_response(),
@@ -581,16 +516,9 @@ pub async fn rescan_credentials(State(state): State<Arc<AppState>>) -> impl Into
         }
     };
 
-    let service = match &state.llm_settings_service {
-        Some(s) => s,
-        None => {
-            return settings_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "LLM_NOT_CONFIGURED",
-                "LLM router is not configured",
-            )
-            .into_response();
-        }
+    let service = match required_llm_settings(state.llm_settings_service.as_deref()) {
+        Ok(service) => service,
+        Err(response) => return response.into_response(),
     };
 
     let router = service.router();
@@ -612,16 +540,9 @@ pub async fn get_cli_backends(State(state): State<Arc<AppState>>) -> impl IntoRe
 
 /// GET /v1/settings/llm/providers/usage — provider-level usage summaries
 pub async fn get_provider_usage(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let service = match &state.llm_settings_service {
-        Some(s) => s,
-        None => {
-            return settings_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "LLM_NOT_CONFIGURED",
-                "LLM router is not configured",
-            )
-            .into_response();
-        }
+    let service = match required_llm_settings(state.llm_settings_service.as_deref()) {
+        Ok(service) => service,
+        Err(response) => return response.into_response(),
     };
 
     let router = service.router();
@@ -859,12 +780,28 @@ mod tests {
     use chrono::TimeZone;
     use openalpaca_storage::{Database, LlmUsageDaily, LlmUsageRepository, ProviderCallUsage};
     use std::fs;
-    use std::path::PathBuf;
 
-    fn temp_dir(prefix: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&dir).expect("temp dir should be creatable");
-        dir
+    #[tokio::test]
+    async fn missing_llm_service_preserves_the_legacy_settings_envelope() {
+        use axum::response::IntoResponse;
+
+        let response = super::required_llm_settings(None)
+            .err()
+            .expect("missing service")
+            .into_response();
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({
+                "error": {"code":"LLM_NOT_CONFIGURED", "status":503, "message":"LLM router is not configured"}
+            })
+        );
     }
 
     fn test_db() -> (tempfile::TempDir, Database) {
@@ -912,10 +849,7 @@ mod tests {
         .unwrap();
 
         let total = cost_for_utc_date(&db, &today);
-        assert!(
-            (total - 0.35).abs() < 1e-9,
-            "expected 0.35, got {total}"
-        );
+        assert!((total - 0.35).abs() < 1e-9, "expected 0.35, got {total}");
     }
 
     #[test]
@@ -1053,13 +987,19 @@ mod tests {
             !rendered.contains("daily"),
             "N4: no daily budget may appear anywhere on this route — {rendered}"
         );
-        assert!(!rendered.contains("budget"), "N4: no budget key — {rendered}");
+        assert!(
+            !rendered.contains("budget"),
+            "N4: no budget key — {rendered}"
+        );
     }
 
     #[test]
     fn cli_backends_config_uses_explicit_llm_config_path() {
-        let dir = temp_dir("openalpacad-cli-backends");
-        let llm_path = dir.join("llm.toml");
+        let dir = tempfile::Builder::new()
+            .prefix("openalpacad-cli-backends")
+            .tempdir()
+            .expect("temp dir");
+        let llm_path = dir.path().join("llm.toml");
         fs::write(
             &llm_path,
             r#"
@@ -1072,19 +1012,18 @@ enabled = false
         let cfg = load_cli_backends_config(&llm_path);
         let claude = cfg.claude_code.expect("claude config should be present");
         assert_eq!(claude.enabled, Some(false));
-
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn cli_backends_config_returns_default_when_missing() {
-        let dir = temp_dir("openalpacad-cli-backends-missing");
-        let missing = dir.join("missing.toml");
+        let dir = tempfile::Builder::new()
+            .prefix("openalpacad-cli-backends-missing")
+            .tempdir()
+            .expect("temp dir");
+        let missing = dir.path().join("missing.toml");
 
         let cfg = load_cli_backends_config(&missing);
         assert!(cfg.claude_code.is_none());
         assert!(cfg.codex.is_none());
-
-        let _ = fs::remove_dir_all(dir);
     }
 }

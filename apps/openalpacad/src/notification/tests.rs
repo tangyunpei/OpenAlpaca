@@ -175,9 +175,10 @@ fn failure_empty_error_string() {
 
 // ── resolve_artifact_file + deliver_artifacts ─────────────────────
 
-fn test_db() -> Database {
+fn test_db() -> (tempfile::TempDir, Database) {
     let dir = tempfile::tempdir().unwrap();
-    Database::open(&dir.path().join("test.db")).unwrap()
+    let db = Database::open(&dir.path().join("test.db")).unwrap();
+    (dir, db)
 }
 
 fn make_file_asset(id: &str, path: &str, size: i64) -> openalpaca_storage::FileAsset {
@@ -200,7 +201,7 @@ fn make_file_asset(id: &str, path: &str, size: i64) -> openalpaca_storage::FileA
 
 #[test]
 fn test_resolve_artifact_file_uses_file_asset_id() {
-    let db = test_db();
+    let (_db_dir, db) = test_db();
     let repo = FileAssetRepository::new(&db);
     let asset = make_file_asset("asset_1", "/tmp/test.pdf", 1024);
     repo.insert(&asset).unwrap();
@@ -212,7 +213,7 @@ fn test_resolve_artifact_file_uses_file_asset_id() {
 
 #[test]
 fn test_resolve_artifact_file_falls_back_to_key() {
-    let db = test_db();
+    let (_db_dir, db) = test_db();
     let repo = FileAssetRepository::new(&db);
     let asset = make_file_asset("key_as_id", "/tmp/test.pdf", 1024);
     repo.insert(&asset).unwrap();
@@ -225,7 +226,7 @@ fn test_resolve_artifact_file_falls_back_to_key() {
 
 #[test]
 fn test_resolve_artifact_file_returns_none_for_workspace_key() {
-    let db = test_db();
+    let (_db_dir, db) = test_db();
     let repo = FileAssetRepository::new(&db);
 
     // No file_asset_id, key doesn't match any file_asset ID
@@ -235,7 +236,7 @@ fn test_resolve_artifact_file_returns_none_for_workspace_key() {
 
 #[test]
 fn test_resolve_artifact_file_rejects_wrong_owner() {
-    let db = test_db();
+    let (_db_dir, db) = test_db();
     let repo = FileAssetRepository::new(&db);
     let asset = make_file_asset("asset_1", "/tmp/test.pdf", 1024);
     repo.insert(&asset).unwrap(); // owner_id = "user1"
@@ -265,7 +266,7 @@ impl ConnectorSendProvider for MockSendProvider {
 
 #[tokio::test]
 async fn test_deliver_artifacts_skips_non_file_capable_channel() {
-    let db = test_db();
+    let (_db_dir, db) = test_db();
     let send = MockSendProvider {
         file_capable: vec!["telegram".to_string()],
     };
@@ -279,7 +280,7 @@ async fn test_deliver_artifacts_skips_non_file_capable_channel() {
 
 #[tokio::test]
 async fn test_deliver_artifacts_skips_oversized_files() {
-    let db = test_db();
+    let (_db_dir, db) = test_db();
     let repo = FileAssetRepository::new(&db);
     // Create a real (small) temp file so the existence check passes,
     // but set size_bytes > 50MB in the DB record so the size check fires.
@@ -332,7 +333,7 @@ fn test_format_completion_handles_very_long_summary() {
 
 #[tokio::test]
 async fn test_deliver_artifacts_handles_malformed_outcome_json() {
-    let db = test_db();
+    let (_db_dir, db) = test_db();
     let send = MockSendProvider {
         file_capable: vec!["telegram".to_string()],
     };
