@@ -4159,7 +4159,6 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
- "uuid",
 ]
 
 [[package]]
@@ -4261,7 +4260,6 @@ dependencies = [
  "file-lock",
  "futures-util",
  "keyring",
- "pin-project-lite",
  "rand 0.10.2",
  "reqwest 0.13.4",
  "serde",
@@ -4295,21 +4293,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "openalpaca_platform"
-version = "0.1.0"
-
-[[package]]
-name = "openalpaca_platform_macos"
-version = "0.1.0"
-
-[[package]]
 name = "openalpaca_plugins"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
  "async-trait",
  "chrono",
- "notify",
  "openalpaca_api",
  "openalpaca_connectors",
  "openalpaca_core",
@@ -4323,7 +4312,6 @@ dependencies = [
  "toml 0.9.12+spec-1.1.0",
  "toml_edit 0.25.13+spec-1.1.0",
  "tracing",
- "uuid",
 ]
 
 [[package]]
