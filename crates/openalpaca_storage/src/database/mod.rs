@@ -105,13 +105,22 @@ impl Database {
 
     /// Run all pending migrations
     ///
+    /// Four cases, decided by the stored `schema_version` before any SQL runs:
+    /// a fresh database (version 0) gets every migration; one older than the
+    /// baseline is refused, naming the verb that rescues it; one **newer than
+    /// the newest registered migration** is refused too, naming no remedy at
+    /// all — only the build that wrote it can read it, and a user sent to the
+    /// factory reset from here would delete a store that nothing is wrong with;
+    /// anything in between runs the migrations it is missing.
+    ///
     /// `path` is the database file this connection was opened from; it is used
-    /// only to name the file in the legacy-refusal message, which is otherwise
+    /// only to name the file in the two refusal messages, which are otherwise
     /// unactionable — the store root is overridable with `OPENALPACA_HOME_STORE`,
     /// so "this database" identifies nothing.
     fn run_migrations(&self, path: &Path) -> Result<()> {
         let current_version = self.schema_version()?;
         debug!("Current schema version: {}", current_version);
+        let named_file = || std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
 
         // The baseline creates the final schema directly; it cannot upgrade a
         // partially migrated development database. Refuse before executing SQL
@@ -124,7 +133,7 @@ impl Database {
         // The path is still spelled out because the store root is overridable
         // with `OPENALPACA_HOME_STORE`, so "your database" identifies nothing.
         if current_version > 0 && current_version < migrations::BASELINE_VERSION {
-            let file = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+            let file = named_file();
             anyhow::bail!(
                 "Unsupported legacy schema version {current_version}: this build starts at schema \
                  version {baseline} and cannot upgrade a database created by an older one. \
@@ -134,6 +143,27 @@ impl Database {
                  disk with nothing pointing at them. To keep any of it, open {file} with a build \
                  from before the migrations were squashed into the baseline and export it first.",
                 baseline = migrations::BASELINE_VERSION,
+                file = file.display(),
+            );
+        }
+
+        // A version past the newest registered migration was written by a newer
+        // build. Nothing is pending, so without this check the open would
+        // succeed and fail later on a table this build has never heard of — or
+        // worse, write rows the newer schema does not expect. There is no remedy
+        // to name: the store is fine, this build is the wrong one, and start-up
+        // refusals never name each other's remedies (a user who ran the legacy
+        // refusal's reset against this file would delete it).
+        let newest = migrations::MIGRATIONS
+            .last()
+            .map(|m| m.version)
+            .unwrap_or(migrations::BASELINE_VERSION);
+        if current_version > newest {
+            let file = named_file();
+            anyhow::bail!(
+                "Database {file} is at schema version {current_version}, which is newer than \
+                 this build knows ({newest}). Use the OpenAlpaca build that created it. \
+                 Nothing was changed.",
                 file = file.display(),
             );
         }

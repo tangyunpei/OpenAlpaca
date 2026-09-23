@@ -153,6 +153,104 @@ fn an_unsupported_old_database_is_refused_without_changing_its_schema_or_data() 
 }
 
 #[test]
+fn a_database_newer_than_this_build_is_refused_without_changing_its_schema_or_data() {
+    let dir = tempdir().unwrap();
+    let newest = migrations::MIGRATIONS.last().unwrap().version;
+    let version = 99;
+    assert!(
+        version > newest,
+        "the fixture must be newer than every registered migration"
+    );
+    let db_path = dir.path().join("future.db");
+    let original_schema = {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+             CREATE TABLE future_data (id INTEGER PRIMARY KEY, content TEXT NOT NULL);
+             INSERT INTO future_data (id, content) VALUES (7, 'Do not discard');",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO schema_version (version) VALUES (?1)",
+            [version],
+        )
+        .unwrap();
+        conn.prepare("SELECT name, sql FROM sqlite_master ORDER BY name")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+
+    let error = Database::open(&db_path)
+        .err()
+        .unwrap_or_else(|| panic!("schema version {version} must be refused"));
+    let message = format!("{error:#}");
+    // The whole sentence is pinned: it names the file by its full path (the
+    // store root is overridable, so nothing else identifies it), the version
+    // the file is at, and the newest version this build knows — and nothing
+    // else. A newer store is one a newer build wrote; the only remedy is that
+    // build, and start-up refusals never name each other's remedies.
+    let named = std::path::absolute(&db_path).unwrap();
+    assert_eq!(
+        message,
+        format!(
+            "Database {} is at schema version {version}, which is newer than this build \
+             knows ({newest}). Use the OpenAlpaca build that created it. Nothing was changed.",
+            named.display()
+        ),
+        "opening a newer database must refuse it with exactly this text"
+    );
+    // Pinned on its own as well, so the rule survives a rewording of the
+    // sentence: a user who followed the legacy refusal's advice against this
+    // file would delete a store that nothing is wrong with.
+    assert!(
+        !message.contains("reset --factory"),
+        "the refusal must not send the user to the factory reset: {message}"
+    );
+
+    let conn = Connection::open(&db_path).unwrap();
+    let schema = conn
+        .prepare("SELECT name, sql FROM sqlite_master ORDER BY name")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        schema, original_schema,
+        "refusal must leave the schema intact"
+    );
+    let rows = conn
+        .prepare("SELECT id, content FROM future_data ORDER BY id")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(rows, vec![(7, "Do not discard".to_string())]);
+    let versions = conn
+        .prepare("SELECT version FROM schema_version ORDER BY version")
+        .unwrap()
+        .query_map([], |row| row.get::<_, i32>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        versions,
+        vec![version],
+        "refusal must not touch the version"
+    );
+}
+
+#[test]
 fn test_schema_omits_obsolete_planner_telemetry() {
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
