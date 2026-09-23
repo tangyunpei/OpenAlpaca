@@ -1,16 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import type {
-  DaemonLlmStatus,
-  ProviderEnabledResponse,
-  ProviderInfo,
-} from "@/lib/api/types";
+import type { ProviderEnabledResponse, ProviderInfo } from "@/lib/api/types";
 
-import {
-  effectiveModelNote,
-  providerKeyLine,
-  providerToggleToast,
-} from "./models-copy";
+import { providerKeyLine, providerToggleToast } from "./models-copy";
 
 const providerInfo = (over: Partial<ProviderInfo> = {}): ProviderInfo => ({
   enabled: true,
@@ -70,66 +62,6 @@ describe("the key line under a provider", () => {
         providerInfo({ requires_key: false, keys: [key("k1"), key("k2")] }),
       ),
     ).toBe("2 keys · round_robin");
-  });
-});
-
-/**
- * L3: `[orchestrator] model` may name a model this install cannot serve —
- * every shipped agent template pins a Claude id. A picker that shows only that
- * id disagrees with every reply the daemon gives.
- */
-describe("the note about the model that would really answer", () => {
-  const llm = (over: Partial<DaemonLlmStatus> = {}): DaemonLlmStatus => ({
-    default_model: "claude-haiku-4-5",
-    default_model_routable: false,
-    effective_default_model: "qwen3:8b",
-    ...over,
-  });
-
-  it("names the substitution", () => {
-    expect(effectiveModelNote(llm())).toBe(
-      "configured: claude-haiku-4-5 — not available, using qwen3:8b",
-    );
-  });
-
-  it("says nothing when the configured model is the one that answers", () => {
-    expect(
-      effectiveModelNote(
-        llm({
-          default_model_routable: true,
-          effective_default_model: "claude-haiku-4-5",
-        }),
-      ),
-    ).toBeNull();
-  });
-
-  it("says nothing routable exists, and where to fix it", () => {
-    const note = effectiveModelNote(llm({ effective_default_model: null }));
-    expect(note).toContain("no model is");
-    expect(note).toContain("needs no key");
-  });
-
-  /**
-   * M8: an install that never set a default sends `default_model: null`, not
-   * `""`. "configured: null — not available" would be a sentence about a
-   * setting that does not exist.
-   */
-  it("does not report an unconfigured default as an unavailable one", () => {
-    expect(effectiveModelNote(llm({ default_model: null }))).toBe(
-      "No chat model is configured — using qwen3:8b",
-    );
-    const nothing = effectiveModelNote(
-      llm({ default_model: null, effective_default_model: null }),
-    );
-    expect(nothing).toContain("No chat model is configured");
-    expect(nothing).toContain("needs no key");
-    expect(nothing).not.toContain("null");
-  });
-
-  /** A daemon with no router, or one too old for the block, is not guessed at. */
-  it("is silent about a daemon that does not say", () => {
-    expect(effectiveModelNote(null)).toBeNull();
-    expect(effectiveModelNote(undefined)).toBeNull();
   });
 });
 

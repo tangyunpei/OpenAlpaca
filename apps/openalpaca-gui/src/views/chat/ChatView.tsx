@@ -21,7 +21,7 @@
  * transcript's max width and the message gap. The third lives in the run card.
  */
 
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 
 import {
   Composer,
@@ -52,6 +52,8 @@ import {
 
 import { decideChatModel, modelReplacedToast } from "./chat-model";
 import { FilePanelSlot } from "./FilePanelSlot";
+import { firstRunState } from "./first-run";
+import { FirstRunCard } from "./FirstRunCard";
 import { Transcript } from "./Transcript";
 import { useChatSession } from "./useChatSession";
 import { useSessionSidebar } from "./useSessionSidebar";
@@ -126,8 +128,12 @@ export default function ChatView({
   // window's own polling query (the Models banner reads the same block), so
   // this costs a cache read, and the `llm` key moves on a provider toggle and
   // on a models refresh — which is what keeps the held id true afterwards.
-  const effectiveModel =
-    useDaemonStatus(projectPath).data?.llm?.effective_default_model;
+  //
+  // The whole block is kept as well, for the first-run card (D-G): it is
+  // `DaemonLlmStatus | null | undefined`, and `undefined` — the status has not
+  // answered — must stay distinct from the daemon's own `null`.
+  const daemonLlm = useDaemonStatus(projectPath).data?.llm;
+  const effectiveModel = daemonLlm?.effective_default_model;
   const modelRows = models.data;
   useEffect(() => {
     const decision = decideChatModel({
@@ -187,6 +193,14 @@ export default function ChatView({
   }, [itemCount, liveLength]);
 
   const activeCount = session.activeRuns.length;
+
+  // One way to Settings → Models & keys, shared by the model picker's footer
+  // and the first-run card. Closing the picker from the card is a no-op.
+  const openModelSettings = useCallback(() => {
+    closeModelPicker();
+    setSettingsSection("models");
+    setView("settings");
+  }, [closeModelPicker, setSettingsSection, setView]);
 
   return (
     <>
@@ -250,6 +264,18 @@ export default function ChatView({
             className="mx-auto px-[26px]"
             style={{ maxWidth: transcriptMaxWidth }}
           >
+            {/* D-G: drawn only on the daemon's explicit `null`, never on a
+                status that has not answered yet, and only while the
+                transcript is empty — a conversation whose model went away
+                mid-way hears it from the daemon's own answer instead. Above
+                the error lines because it is the problem to fix first. */}
+            {session.items.length === 0 &&
+              firstRunState(effectiveModel) === "no-model" && (
+                <FirstRunCard
+                  llm={daemonLlm}
+                  onOpenSettings={openModelSettings}
+                />
+              )}
             {session.historyError !== null && (
               <p className="mb-[20px] font-mono text-2xs-plus text-faint">
                 Could not load this lane: {session.historyError.message}
@@ -329,11 +355,7 @@ export default function ChatView({
             showToast(`Chat model → ${modelId} (${provider})`);
           }}
           modelNote={MODEL_SCOPE_NOTE}
-          onManageProviders={() => {
-            closeModelPicker();
-            setSettingsSection("models");
-            setView("settings");
-          }}
+          onManageProviders={openModelSettings}
           spend={
             orchestrator.data === undefined
               ? null

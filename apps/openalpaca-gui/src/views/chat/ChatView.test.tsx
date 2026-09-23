@@ -22,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useGlobalKeys } from "@/components/shell";
 import { resetConnection } from "@/lib/connection";
 import { daemonEvents, type ServerEvent } from "@/lib/events";
+import { qk } from "@/lib/query-keys";
 import { QueryProvider } from "@/lib/query-provider";
 import { useConfirmationStore } from "@/stores/confirmation";
 import { useProjectStore } from "@/stores/project";
@@ -29,6 +30,7 @@ import { useSessionSelection } from "@/stores/session";
 import { useUiStore } from "@/stores/ui";
 
 import ChatView from "./ChatView";
+import { FIRST_RUN_ACTION, FIRST_RUN_TITLE } from "./first-run";
 import { useResolutions } from "./resolution-store";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -115,7 +117,7 @@ let sessionListReply: (url: string) => Response;
  * project root it resolves is the header it was sent. A test that cares about
  * R50 swaps in a root the picker's path only *contains*.
  */
-let statusReply: (headers: Headers) => Response;
+let statusReply: (headers: Headers) => Response | Promise<Response>;
 /** What the five `/v1/sessions` write verbs answer; swapped per test to refuse. */
 let sessionWriteReply: () => Response;
 /**
@@ -210,7 +212,7 @@ function installFetch() {
       return await uploadReply(form ?? new FormData());
     }
     if (url.includes("/v1/status")) {
-      return statusReply(new Headers(init?.headers));
+      return await statusReply(new Headers(init?.headers));
     }
     if (url.includes("/v1/sessions")) {
       if (method === "GET") return sessionListReply(url);
@@ -3843,5 +3845,117 @@ describe("ChatView — resolution rows stay for the life of the window (P2)", ()
     fireEvent.click(screen.getByRole("button", { name: "New chat" }));
 
     await waitFor(() => expect(screen.queryByText("Timed out")).toBeNull());
+  });
+});
+
+/**
+ * D-G — the empty transcript says when nothing can answer, and only then.
+ *
+ * "Setup completed" is derived from `GET /v1/status`'s
+ * `llm.effective_default_model`: the daemon's explicit `null` draws the card,
+ * a model id does not, and a status that has not answered **draws nothing** —
+ * `useDaemonStatus` has no `initialData`, and a first boot answers slowly, so
+ * a falsy test would put "no model" on screen at every cold start of a
+ * correctly configured install.
+ */
+describe("ChatView — the first-run card (D-G)", () => {
+  const nothingRoutable = {
+    default_model: null,
+    default_model_routable: false,
+    effective_default_model: null,
+  };
+
+  /** Wait until this window's `GET /v1/status` has really answered. */
+  async function statusAnswered(client: QueryClient): Promise<void> {
+    await waitFor(() =>
+      expect(
+        client
+          .getQueryCache()
+          .findAll({ queryKey: qk.statusAll() })
+          .some((query) => query.state.status === "success"),
+      ).toBe(true),
+    );
+    await settleSnapshot();
+  }
+
+  it("draws nothing for a daemon that serves no llm block (undefined is not null)", async () => {
+    llmStatus = null;
+    modelRows = [];
+    const client = renderChat();
+
+    await statusAnswered(client);
+
+    expect(screen.queryByText(FIRST_RUN_TITLE)).toBeNull();
+  });
+
+  it("draws nothing while the status has not answered, even on an install with no model", async () => {
+    llmStatus = nothingRoutable;
+    modelRows = [];
+    let answer: (response: Response) => void = () => undefined;
+    statusReply = () =>
+      new Promise<Response>((resolve) => {
+        answer = resolve;
+      });
+    renderChat();
+
+    await waitFor(() =>
+      expect(requests.some((r) => r.url.includes("/v1/status"))).toBe(true),
+    );
+    await settleSnapshot();
+    // The cold start: the question is in flight, and nothing is claimed.
+    expect(screen.queryByText(FIRST_RUN_TITLE)).toBeNull();
+
+    // The daemon then says it can route nothing, and the card arrives.
+    await act(async () => {
+      answer(json(daemonStatus(null)));
+    });
+    expect(await screen.findByText(FIRST_RUN_TITLE)).toBeInTheDocument();
+  });
+
+  it("draws the card on the daemon's null, and its button opens Models & keys", async () => {
+    llmStatus = nothingRoutable;
+    modelRows = [];
+    renderChat();
+
+    expect(await screen.findByText(FIRST_RUN_TITLE)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: FIRST_RUN_ACTION }));
+
+    expect(useUiStore.getState().view).toBe("settings");
+    expect(useUiStore.getState().settingsSectionId).toBe("models");
+  });
+
+  it("stays out of a transcript that already holds a conversation", async () => {
+    llmStatus = nothingRoutable;
+    modelRows = [];
+    historyReply = () =>
+      json({
+        messages: [
+          {
+            id: 1,
+            lane_key: "user:gui",
+            role: "user",
+            content: "hello there",
+            created_at: "2026-09-05T13:35:00Z",
+            artifacts: [],
+            task_id: null,
+          },
+        ],
+        total: 1,
+        lane_key: "user:gui",
+      });
+    const client = renderChat();
+
+    expect(await screen.findByText("hello there")).toBeInTheDocument();
+    await statusAnswered(client);
+
+    expect(screen.queryByText(FIRST_RUN_TITLE)).toBeNull();
+  });
+
+  it("draws nothing when a model would answer", async () => {
+    const client = renderChat();
+
+    await statusAnswered(client);
+
+    expect(screen.queryByText(FIRST_RUN_TITLE)).toBeNull();
   });
 });

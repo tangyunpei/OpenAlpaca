@@ -273,6 +273,16 @@ The run pill and the file chips are read off stored history, so they survive a
 reload. The run-report card is built from the live `workflow_started` /
 `task_status` frames and does not.
 
+**When nothing can answer.** An empty transcript on an install where the
+daemon can route no model carries a first-run card: the daemon's own reading
+of its `llm` block (`GET /v1/status`), a reminder that a local model needs no
+API key, and one button to Settings → Models & keys. It is derived, never
+stored — there is no "setup completed" flag anywhere — so it disappears the
+moment a model becomes routable and comes back if one stops. While the status
+request is still in flight the card is **not** drawn: an unanswered daemon is
+not a daemon with no model. The card never blocks the composer; a message
+sent into it is answered by the daemon's own sentence naming this screen.
+
 **Composer.** Two mutually exclusive states. Normally: a growing textarea, the
 `Attach` button, the model picker, and today's spend. While a tool confirmation
 is pending the textarea is **not rendered at all** — `Approve`, `Deny` and

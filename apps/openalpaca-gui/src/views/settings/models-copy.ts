@@ -1,16 +1,15 @@
 /**
- * The sentences Settings → Models says about a provider and the default model.
+ * The sentences Settings → Models says about a provider.
+ *
+ * The note about the default model moved to `@/lib/model-availability`, so the
+ * chat first-run card reads the same four branches this screen's banner does.
  *
  * Pure, and out here rather than inline, for the reason `provider-toggle.ts`
  * is: what this screen *claims* is the part that can be wrong, and a claim is
  * only worth making if a test can read it back.
  */
 
-import type {
-  DaemonLlmStatus,
-  ProviderEnabledResponse,
-  ProviderInfo,
-} from "@/lib/api/types";
+import type { ProviderEnabledResponse, ProviderInfo } from "@/lib/api/types";
 
 /**
  * The description under a provider's name.
@@ -26,37 +25,6 @@ export function providerKeyLine(info: ProviderInfo): string {
       ? "no key needed"
       : `${info.keys.length} ${info.keys.length === 1 ? "key" : "keys"}`;
   return `${keys} · ${info.key_selection_strategy}`;
-}
-
-/**
- * What to say when the configured chat model is not the one that would answer
- * (L3) — `null` when there is nothing to say.
- *
- * `[orchestrator] model` is allowed to name a model this install cannot serve:
- * every shipped agent template pins a Claude id, and on a machine with only a
- * local provider the ladder answers with something else. A picker that shows
- * the configured id alone is then a picker that disagrees with every reply.
- *
- * It is also allowed to name **nothing**: an install that has never set one
- * sends `default_model: null` (M8), which is not the same sentence — there is
- * no configured id to report as unavailable, only whatever the ladder found.
- */
-export function effectiveModelNote(
-  llm: DaemonLlmStatus | null | undefined,
-): string | null {
-  // A daemon that does not say — no router, or one built before the block —
-  // is not second-guessed.
-  if (llm === null || llm === undefined) return null;
-  if (llm.default_model_routable) return null;
-  if (llm.default_model === null || llm.default_model === "") {
-    return llm.effective_default_model === null
-      ? "No chat model is configured, and none is available. Turn a provider on below; a local one needs no key."
-      : `No chat model is configured — using ${llm.effective_default_model}`;
-  }
-  if (llm.effective_default_model !== null) {
-    return `configured: ${llm.default_model} — not available, using ${llm.effective_default_model}`;
-  }
-  return `configured: ${llm.default_model} — not available, and no model is. Turn a provider on below; a local one needs no key.`;
 }
 
 /**

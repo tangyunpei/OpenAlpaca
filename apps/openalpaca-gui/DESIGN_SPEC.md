@@ -1541,7 +1541,7 @@ Left: the transcript column. Right (optional): the aside, in one of two modes.
 
 **Empty/edge states not drawn in the design but implied and required:**
 
-- Empty transcript (new lane) — no design exists; use the composer placeholder as the only affordance.
+- Empty transcript (new lane) — no design exists; the composer placeholder is the only affordance **unless `GET /v1/status`'s `llm.effective_default_model` is `null`**, in which case a first-run card is drawn above it (D-G; `views/chat/FirstRunCard.tsx`). `undefined` (status in flight, or a daemon with no `llm` block) draws nothing: the three states are distinguished with `=== null`, never with a falsy test, or every cold start flashes the card.
 - Aside fully collapsed — the chat header grows a `RunningNowPill`; that is the design's own re-entry path.
 - Zero running runs — the rail's "Running now" section and the Work nav badge have no zero-state in the design; hide the badge when `activeCount === 0` and keep the section header with an empty list.
 

@@ -59,16 +59,13 @@ import {
   useSetProviderEnabled,
 } from "@/hooks/useSettings";
 import { formatSpend, useUsageSummary } from "@/hooks/useUsage";
+import { effectiveModelNote } from "@/lib/model-availability";
 import { useProjectStore } from "@/stores/project";
 import { useUiStore } from "@/stores/ui";
 
 import { GapNote, ListCard, ListRow, ListState, Toggle } from "./primitives";
 import { compactCount } from "./format";
-import {
-  effectiveModelNote,
-  providerKeyLine,
-  providerToggleToast,
-} from "./models-copy";
+import { providerKeyLine, providerToggleToast } from "./models-copy";
 import { providerToggleErrorCopy } from "./provider-toggle";
 
 export function ModelsSection() {
