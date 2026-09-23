@@ -869,6 +869,7 @@ fn open_creates_nothing_and_the_first_write_lays_out_privately() {
             p.notes_dir().to_path_buf(),
             p.history_dir().to_path_buf(),
             p.history_dir().join(created.id.to_string()),
+            sb.home.join("state"),
             sb.home.join("state/memory-control"),
         ] {
             assert_eq!(fsx::mode_of(&dir), Some(0o700), "{}", dir.display());
@@ -3024,6 +3025,49 @@ fn adopt_refuses_a_key_that_is_not_an_owner_key() {
     assert!(is_owner_key(&owner_key(ALICE)));
     assert!(!is_owner_key(&upper));
     assert!(!is_owner_key("../../state"));
+}
+
+/// When the memory library is the first thing to touch a store — a loader, a
+/// first `repair` or `adopt` on a copied-in partition — `state/` is created
+/// private (0700) like every directory it makes, never with the umask default.
+#[cfg(unix)]
+#[test]
+fn repair_and_adopt_create_state_privately_when_nothing_else_has() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let created = p
+        .create(
+            new_note("Home note", "# H\n", NoteKind::Fact),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    drop(p);
+    let state = sb.home.join("state");
+    // A partition copied in from elsewhere: notes, no control, no `state/`.
+    std::fs::remove_dir_all(&state).unwrap();
+    let p = sb.open_home(ALICE);
+    assert!(matches!(p.health(), PartitionHealth::Quarantined(_)));
+    assert!(!state.exists(), "opening creates nothing");
+    let report = p.repair(&owner_key(ALICE)).unwrap();
+    assert!(report.rebuilt);
+    assert_eq!(fsx::mode_of(&state), Some(0o700));
+    assert_eq!(fsx::mode_of(&state.join("memory-control")), Some(0o700));
+    assert_eq!(fsx::mode_of(p.snapshot_path()), Some(0o600));
+    assert!(p.read(&created.id).unwrap().derived.recorded);
+    drop(p);
+    // The same for `adopt` of a partition that has no snapshot at all.
+    std::fs::remove_dir_all(&state).unwrap();
+    let adopted = adopt(&owner_key(ALICE), BOB, ts(2026, 9, 24, 0, 0, 0)).unwrap();
+    assert_eq!(adopted, [format!("home-{}", owner_key(BOB))]);
+    assert_eq!(fsx::mode_of(&state), Some(0o700));
+    assert_eq!(fsx::mode_of(&state.join("memory-control")), Some(0o700));
+    let p = sb.open_home(BOB);
+    assert_eq!(p.health(), PartitionHealth::Ready);
+    assert_eq!(fsx::mode_of(p.snapshot_path()), Some(0o600));
+    assert!(
+        !p.read(&created.id).unwrap().derived.recorded,
+        "external now"
+    );
 }
 
 /// `snapshot_path_for` is public and takes text: only the two partition-key

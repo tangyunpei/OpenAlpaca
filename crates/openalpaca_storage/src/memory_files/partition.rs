@@ -27,7 +27,7 @@ use super::{
     OWNERS_DIR, PROJECT_GITIGNORE_TEXT, home_partition_key, is_owner_key, is_partition_key,
     is_revision, owner_key, project_partition_key,
 };
-use crate::store::{ContentKind, StoreScope, content_dir, home_root, store_root};
+use crate::store::{ContentKind, StoreScope, content_dir, home_root, state_dir, store_root};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use std::collections::BTreeMap;
@@ -570,6 +570,9 @@ impl Partition {
             &self.root_canonical,
             self.now(),
         );
+        // `state/` itself is the store's and is created 0700 by the store,
+        // never by the snapshot's `create_dir_all` with the umask default.
+        state_dir()?;
         snapshot.save(&self.snapshot_path, self.now())?;
         state.snapshot = Some(snapshot);
         self.write_navigation(&[]);
@@ -1446,6 +1449,7 @@ impl Partition {
             );
         }
         create_private_dir(&self.history_dir)?;
+        state_dir()?; // `state/` private before the snapshot's parent is made
         snapshot.save(&self.snapshot_path, now)?;
         state.snapshot = Some(snapshot);
         state.quarantine = None;
@@ -1669,6 +1673,7 @@ pub fn adopt(
         }
     }
 
+    state_dir()?; // `state/` private before the first snapshot is written
     let mut adopted = Vec::new();
     for c in candidates {
         let old_dir = c.owners_dir.join(old_owner_key);
