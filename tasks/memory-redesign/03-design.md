@@ -1,6 +1,6 @@
 # Proposed native Markdown memory design
 
-**Status: rev 4 (2026-09-23): the owner has answered MD-1…MD-9 (§0) and the three decisions the rev-3 audit raised (G2, G30, G38); not implemented; awaiting the owner's approval of this written design.** Rev 4 applies the [audit of rev 3](07-audit-gaps.md) — 49 verified gaps, G1–G49 — and adds **§7a, the frozen contracts** that slice 1 could not freeze from rev 3. Rev 3 applied the owner's answers and the instruction that the old engine be removed completely. Rev 2 applied the [review](05-review.md). Every change traces to evidence in [06a–06d](05-review.md#method) or to a gap in 07, and the revision log at the end lists which gaps each change closes. See also [the audit](01-code-audit.md), [framework research](02-framework-research.md), [filesystem research](02-filesystem-research.md) and the [implementation plan](04-implementation-plan.md).
+**Status: rev 4.1 (2026-09-23): the owner has answered MD-1…MD-9 (§0) and the three decisions the rev-3 audit raised (G2, G30, G38); not implemented; awaiting the owner's approval of this written design.** Rev 4 applies the [audit of rev 3](07-audit-gaps.md) — 49 verified gaps, G1–G49 — and adds **§7a, the frozen contracts** that slice 1 could not freeze from rev 3. Rev 3 applied the owner's answers and the instruction that the old engine be removed completely. Rev 2 applied the [review](05-review.md). Every change traces to evidence in [06a–06d](05-review.md#method) or to a gap in 07, and the revision log at the end lists which gaps each change closes. See also [the audit](01-code-audit.md), [framework research](02-framework-research.md), [filesystem research](02-filesystem-research.md) and the [implementation plan](04-implementation-plan.md).
 
 ## 0. Owner decisions
 
@@ -586,6 +586,28 @@ openalpaca persona edit   user                                    GET → $EDITO
 
 `--supersedes <id>` fetches the target's current revision first and sends it as `expected_revision`, so a race is a visible 409, never a silent overwrite.
 
+## 7b. Rulings pinned by the slice-1 fixtures
+
+The invariant fixtures (`crates/openalpaca_storage/tests/fixtures/memory/`, slice 1) had to take one reading wherever rev 4 was silent. Each reading below is adopted as a design ruling on 2026-09-23 by the session lead, because none reverses an owner decision or widens a component's job; the owner may send any of them back as a design revision, in which case the fixture changes with it. Slices 2 and 3 implement them as written.
+
+| # | Reading | Fixture |
+|---|---|---|
+| P1 | An explicit `scope: project` from a request that resolves no project root is refused `invalid_input`, not written to global | 02 |
+| P2 | `as_of` alone never includes superseded or archived notes; `historical: true` is the only switch; a bound is half-open at the instant | 11 |
+| P3 | A search result's `conflict: true` marks the note that **carries** an un-honored `supersedes` link, and the same-`fact_key` **loser**; the winner and the link's target read `conflict: false` | 10, 18, 24 |
+| P4 | `memory_search` returns a same-`fact_key` loser flagged `conflict: true`; automatic recall excludes it (§3 rule 3 and §5 step 5 read together) | 18, 24 |
+| P5 | The substring pass for 1–2 character queries has no `MatchReason`; those steps check ids only | 12, 23 |
+| P6 | `source_forgotten` has no §7a wire field; the fixtures read it from a search result's `sources_status` | 16 |
+| P7 | A `ModelTool` write from a context whose `capabilities.write` is false is refused `fixture:capability_denied`, naming `memory_write` | 20 |
+| P8 | Exact dedup (same owner, same partition, same bytes) answers with the existing note's id rather than creating a second file; the `dedup` expectation reads it | 09 |
+| P9 | The `authority_conflict` and `confirm_refused` messages name the Memory view and the `openalpaca memory` verb | 10, 18 |
+| P10 | An extraction on a daemon with no configured model reports `unavailable` with one WARN and the turn is unaffected | 19 |
+| P11 | `doctor` names a stale or abandoned move snapshot by the directory it is bound to | 17 |
+| P12 | A `forget` whose target id no longer exists answers `not_found`, not `revision_conflict`, whatever revision was sent | 16 |
+| P13 | A `memory_changed` published by a reconciliation scan (`change: external`) carries no `surface`: §7a's enum is `user \| model_tool \| extraction` and a scan is none of them; the fixture omits the field until the design adds a value or makes it optional | 13 |
+
+Two consequences for §7a: `sources_status` is a field of a search result (P6), and `memory_changed.surface` is optional, absent for a change a reconciliation scan discovered (P13).
+
 ## 8. Module boundaries and cost controls
 
 | Location | Responsibility |
@@ -637,6 +659,7 @@ These exclusions keep the replacement reviewable. Expand only after the evaluati
   - **§7a (new):** the frozen contracts — the snapshot schema with an example, `MemoryAccessContext` with its per-surface table, the six tool schemas, the route table with the cursor rule and error codes, the persona routes, `memory_changed`, `memory_used`, and the CLI syntax [G1, G6, G7, G9, G10, G17, G18, G19, G20, G39, G45].
   - **§8:** modules list the ring, the bridge arms, the persona routes and the `serde_yaml` edge [G22, G30]. **§9:** import/export are listed as excluded [G16].
   - **Where rev 4 departs from 07.** G11, as above. G7: the instruction's single `supersedes: {id, expected_revision}` object is used rather than 07's list; the file field stays a list. G2's refusal message names the Memory *view* rather than "Settings → Memory", because G30 placed the view in the side nav. G6 and G2 add a third `surface` value, `Extraction`, for the background extractor: MD-2 already gives it its own origins, so a two-valued surface could not say which of `extracted_user`/`extracted_other` an extraction write records; no owner-decided rule changes.
+- **rev 4.1 (2026-09-23):** §7b adopts the thirteen readings the slice-1 fixtures pinned (P1–P13) as rulings; §7a gains `sources_status` and an optional `memory_changed.surface`.
 - **rev 3 (2026-09-23):** the owner answered MD-1…MD-9.
   - **MD-6 (refuse and reset)** removes the `imported_legacy` origin, the `legacy:` block, `migrate --dry-run` and the `legacy_memory` module.
   - **MD-9 (everything at once)** puts the GUI and the Persona editor in the cutover.
