@@ -807,7 +807,7 @@ fn f4_operators_are_literal_text_and_never_a_syntax_error() {
     let index = ready_index();
     index
         .upsert_many(&[
-            record("tabs", "Tabs and spaces", "Use tabs for indentation and spaces for alignment; never one or the other alone.\n"),
+            record("tabs", "Tabs and spaces", "Use tabs for indentation and spaces for alignment; never one or the other alone. Quote a\"b and 简\"洁 exactly.\n"),
             record("garden", "Garden", "The tomatoes ripen in August.\n"),
         ])
         .unwrap();
@@ -827,6 +827,10 @@ fn f4_operators_are_literal_text_and_never_a_syntax_error() {
         "or",
         "AND OR NOT",
         "{tabs} [spaces] ; DROP TABLE notes; --",
+        // A quote inside a term reaches FTS5 doubled, never as a delimiter.
+        "a\"b",
+        "简\"洁",
+        "tabs a\"b",
     ] {
         let r = index
             .search(&q(query))
