@@ -434,6 +434,166 @@ fn structured_insert_carries_the_run_too() {
     assert_eq!(listed[0].display_text.as_deref(), Some("Starting that now."));
 }
 
+/// A message carrying every column the two writers bind, with structured
+/// fields of its own that neither writer may read.
+fn full_message(lane_key: &str, session_id: Option<&str>) -> ConversationMessage {
+    ConversationMessage {
+        lane_key: lane_key.to_string(),
+        role: "assistant".to_string(),
+        content: "the answer".to_string(),
+        source: Some("gui".to_string()),
+        model: Some("m-1".to_string()),
+        tokens_in: Some(11),
+        tokens_out: Some(22),
+        duration_ms: Some(33),
+        content_json: Some(r#"{"from":"the struct"}"#.to_string()),
+        display_text: Some("from the struct".to_string()),
+        task_id: Some("task-7".to_string()),
+        session_id: session_id.map(str::to_string),
+        ..Default::default()
+    }
+}
+
+fn read_back(repo: &ConversationRepository<'_>, id: i64) -> ConversationMessage {
+    let lane = repo
+        .db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT lane_key FROM conversation_messages WHERE id = ?1",
+                [id],
+                |row| row.get::<_, String>(0),
+            )?)
+        })
+        .unwrap();
+    repo.list_by_lane(&lane, 50, 0)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.id == id)
+        .unwrap()
+}
+
+/// The plain writer stores NULL in both structured columns, whatever the
+/// message struct carries in its own `content_json` / `display_text`.
+#[test]
+fn plain_insert_never_reads_the_structs_structured_fields() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+
+    let id = repo.insert(&full_message("user:gui", None)).unwrap();
+    let row = read_back(&repo, id);
+    assert_eq!(row.content_json, None);
+    assert_eq!(row.display_text, None);
+    assert_eq!(
+        (
+            row.role.as_str(),
+            row.content.as_str(),
+            row.source.as_deref(),
+            row.model.as_deref(),
+            row.tokens_in,
+            row.tokens_out,
+            row.duration_ms,
+            row.task_id.as_deref(),
+        ),
+        (
+            "assistant",
+            "the answer",
+            Some("gui"),
+            Some("m-1"),
+            Some(11),
+            Some(22),
+            Some(33),
+            Some("task-7"),
+        )
+    );
+}
+
+/// The structured writer stores its two arguments, not the struct's fields,
+/// and every common column exactly as the plain writer does.
+#[test]
+fn structured_insert_stores_its_arguments_and_every_common_column() {
+    let db = test_db();
+    let repo = ConversationRepository::new(&db);
+
+    let id = repo
+        .insert_with_structured(&full_message("user:gui", None), r#"{"v":1}"#, "shown")
+        .unwrap();
+    let row = read_back(&repo, id);
+    assert_eq!(row.content_json.as_deref(), Some(r#"{"v":1}"#));
+    assert_eq!(row.display_text.as_deref(), Some("shown"));
+    assert_eq!(
+        (
+            row.role.as_str(),
+            row.content.as_str(),
+            row.source.as_deref(),
+            row.model.as_deref(),
+            row.tokens_in,
+            row.tokens_out,
+            row.duration_ms,
+            row.task_id.as_deref(),
+        ),
+        (
+            "assistant",
+            "the answer",
+            Some("gui"),
+            Some("m-1"),
+            Some(11),
+            Some(22),
+            Some(33),
+            Some("task-7"),
+        )
+    );
+}
+
+/// Both writers resolve the session the same way: the one the message
+/// names (even archived, even unknown), else the lane's active one, else NULL.
+#[test]
+fn both_inserts_resolve_the_session_in_the_same_order() {
+    type Writer = fn(&ConversationRepository<'_>, &ConversationMessage) -> i64;
+    let writers: [(&str, Writer); 2] = [
+        ("plain", |repo, msg| repo.insert(msg).unwrap()),
+        ("structured", |repo, msg| {
+            repo.insert_with_structured(msg, "{}", "d").unwrap()
+        }),
+    ];
+
+    for (name, write) in writers {
+        let db = test_db();
+        let repo = ConversationRepository::new(&db);
+
+        // No session on the lane at all: NULL.
+        let id = write(&repo, &full_message("bare:gui", None));
+        assert_eq!(read_back(&repo, id).session_id, None, "{name}: no session");
+
+        // The lane's active session when none is named.
+        let archived = repo
+            .get_or_create_active_session("user:gui", "gui", None)
+            .unwrap();
+        let active = repo.create_session("user:gui", "gui", None, None).unwrap();
+        let id = write(&repo, &full_message("user:gui", None));
+        assert_eq!(
+            read_back(&repo, id).session_id.as_deref(),
+            Some(active.id.as_str()),
+            "{name}: active session"
+        );
+
+        // A named session wins over the active one, archived or not.
+        let id = write(&repo, &full_message("user:gui", Some(&archived.id)));
+        assert_eq!(
+            read_back(&repo, id).session_id.as_deref(),
+            Some(archived.id.as_str()),
+            "{name}: explicit archived session"
+        );
+
+        // A named session is stored as named, without a lookup.
+        let id = write(&repo, &full_message("user:gui", Some("no-such-session")));
+        assert_eq!(
+            read_back(&repo, id).session_id.as_deref(),
+            Some("no-such-session"),
+            "{name}: explicit unknown session"
+        );
+    }
+}
+
 // ── §5.1: the session lifecycle ──────────────────────────────────────
 
 #[test]

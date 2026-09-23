@@ -94,26 +94,7 @@ impl<'a> ConversationRepository<'a> {
     /// has been persisted through the gateway yet) stores `NULL`, exactly as
     /// every pre-039 row that predates the column.
     pub fn insert(&self, msg: &ConversationMessage) -> Result<i64> {
-        self.db.with_connection(|conn| {
-            let session_id = Self::resolve_session_id(conn, msg)?;
-            conn.execute(
-                "INSERT INTO conversation_messages (lane_key, role, content, source, model, tokens_in, tokens_out, duration_ms, task_id, session_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                (
-                    &msg.lane_key,
-                    &msg.role,
-                    &msg.content,
-                    &msg.source,
-                    &msg.model,
-                    msg.tokens_in,
-                    msg.tokens_out,
-                    msg.duration_ms,
-                    &msg.task_id,
-                    &session_id,
-                ),
-            )?;
-            Ok(conn.last_insert_rowid())
-        })
+        self.insert_row(msg, None)
     }
 
     /// Insert a conversation message with structured content (multimodal).
@@ -123,6 +104,19 @@ impl<'a> ConversationRepository<'a> {
         content_json: &str,
         display_text: &str,
     ) -> Result<i64> {
+        self.insert_row(msg, Some((content_json, display_text)))
+    }
+
+    /// The one writer behind both entries. `structured` is `(content_json,
+    /// display_text)`; `None` stores NULL in both — the message struct's own
+    /// fields of those names are never read. The session is resolved inside
+    /// the same connection lock as the INSERT.
+    fn insert_row(
+        &self,
+        msg: &ConversationMessage,
+        structured: Option<(&str, &str)>,
+    ) -> Result<i64> {
+        let (content_json, display_text) = structured.unzip();
         self.db.with_connection(|conn| {
             let session_id = Self::resolve_session_id(conn, msg)?;
             conn.execute(
