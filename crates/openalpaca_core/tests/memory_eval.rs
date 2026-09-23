@@ -1081,11 +1081,19 @@ async fn memory_eval() {
             )
         }),
     );
+    // The daemon discovers each enabled provider's models at boot
+    // (`refresh_models`, apps/openalpacad/src/services/llm.rs); a router built
+    // from the file alone knows no Ollama model and answers every turn with
+    // "No model is available".
+    router.refresh_models().await;
     eprintln!(
-        "memory_eval: system {} — router loaded from {} (default model: {})",
+        "memory_eval: system {} — router loaded from {} (default model: {}; effective: {})",
         settings.system.as_str(),
         settings.llm_toml.display(),
-        router.default_model()
+        router.default_model(),
+        router
+            .effective_default_model()
+            .unwrap_or_else(|| "none".to_string())
     );
 
     // ── Embedder (B only) ───────────────────────────────────────────────
