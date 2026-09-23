@@ -16,7 +16,14 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 pub(crate) struct HomeStoreGuard {
     _lock: MutexGuard<'static, ()>,
     prev: Option<OsString>,
+    /// The user-home variables [`HomeStoreGuard::set_with_home`] replaced, to
+    /// restore on drop. Empty for [`HomeStoreGuard::set`].
+    prev_home: Vec<(&'static str, Option<OsString>)>,
 }
+
+/// What `directories::ProjectDirs` reads to place the legacy app dir: `HOME`
+/// everywhere on unix, and `XDG_DATA_HOME` first on Linux when it is set.
+const USER_HOME_VARS: [&str; 2] = ["HOME", "XDG_DATA_HOME"];
 
 impl HomeStoreGuard {
     pub(crate) fn set(path: &Path) -> Self {
@@ -25,13 +32,52 @@ impl HomeStoreGuard {
         // SAFETY: serialized by ENV_LOCK; every test that reads the variable
         // holds the same guard.
         unsafe { std::env::set_var(HOME_STORE_ENV, path) };
-        Self { _lock: lock, prev }
+        Self {
+            _lock: lock,
+            prev,
+            prev_home: Vec::new(),
+        }
+    }
+
+    /// [`HomeStoreGuard::set`], and also points the user's home directory at
+    /// `home` — for any test that can reach [`legacy_root::legacy_app_dir`].
+    ///
+    /// `OPENALPACA_HOME_STORE` does not move the legacy root: it resolves
+    /// through `directories::ProjectDirs`, which reads `HOME`, so under
+    /// [`HomeStoreGuard::set`] alone such a test would resolve the real
+    /// `~/Library/Application Support/OpenAlpaca`. Same lock, no second one.
+    /// Panics — restoring everything on the way out — if the legacy root still
+    /// resolves outside `home`: a test must never be able to reach it.
+    pub(crate) fn set_with_home(path: &Path, home: &Path) -> Self {
+        let mut guard = Self::set(path);
+        guard.prev_home = USER_HOME_VARS
+            .iter()
+            .map(|var| (*var, std::env::var_os(var)))
+            .collect();
+        // SAFETY: still holding ENV_LOCK, taken by `set` above.
+        unsafe {
+            std::env::set_var("HOME", home);
+            std::env::remove_var("XDG_DATA_HOME");
+        }
+        let legacy = legacy_root::legacy_app_dir().expect("the legacy app dir must resolve");
+        assert!(
+            legacy.starts_with(home),
+            "HOME override did not sandbox the legacy root ({}); refusing to run",
+            legacy.display()
+        );
+        guard
     }
 }
 
 impl Drop for HomeStoreGuard {
     fn drop(&mut self) {
         // SAFETY: as above — still holding ENV_LOCK.
+        for (var, prev) in self.prev_home.drain(..) {
+            match prev {
+                Some(v) => unsafe { std::env::set_var(var, v) },
+                None => unsafe { std::env::remove_var(var) },
+            }
+        }
         match self.prev.take() {
             Some(v) => unsafe { std::env::set_var(HOME_STORE_ENV, v) },
             None => unsafe { std::env::remove_var(HOME_STORE_ENV) },
@@ -178,6 +224,36 @@ fn path_queries_do_not_create_the_store() {
         );
     }
     assert!(!root.exists(), "a path query created {}", root.display());
+}
+
+/// The one guarantee `open_home_database` exists for: a process that opens the
+/// database before any daemon has run still gets a private `state/`, rather
+/// than one SQLite made at the process umask beside `.master_key`.
+#[cfg(unix)]
+#[test]
+fn open_home_database_creates_the_state_directory_at_0700() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("home");
+    // `open_home_database` checks for a legacy root first, so `HOME` is
+    // sandboxed too (and holds no legacy root).
+    let _guard = HomeStoreGuard::set_with_home(&root, &tmp.path().join("user"));
+    assert!(!root.join("state").exists());
+
+    let db = open_home_database().unwrap();
+    drop(db);
+
+    let mode = fs::metadata(root.join("state"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o700, "state/ is {:o}", mode & 0o777);
+    assert!(root.join("state").join("openalpaca.db").exists());
+    assert_eq!(
+        database_path().unwrap(),
+        root.join("state").join("openalpaca.db")
+    );
 }
 
 /// Where a pre-D2 upload's bytes sat: `state/assets/ab/cd/<sha256>`.

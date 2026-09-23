@@ -24,6 +24,7 @@
 //! root.
 
 mod artifact;
+pub mod legacy_root;
 pub mod migrate;
 pub mod project_move;
 
@@ -45,6 +46,10 @@ pub const STORE_DIR_NAME: &str = ".openalpaca";
 
 /// Layout version written to line 1 of `.layout`.
 pub const LAYOUT_VERSION: u32 = 1;
+
+/// The database file name under `state/`, so [`database_path`] and
+/// [`open_home_database`] cannot drift.
+const DB_FILE: &str = "openalpaca.db";
 
 const LAYOUT_FILE: &str = ".layout";
 const README_FILE: &str = "README.md";
@@ -108,7 +113,27 @@ fn state_dir_path() -> Result<PathBuf> {
 
 /// `state/openalpaca.db`
 pub fn database_path() -> Result<PathBuf> {
-    Ok(state_dir_path()?.join("openalpaca.db"))
+    Ok(state_dir_path()?.join(DB_FILE))
+}
+
+/// Opens this install's database, creating `state/` (0700 on unix) if it is not
+/// there — the ordering every process outside the daemon's boot preamble needs.
+///
+/// The daemon makes `state/` itself, long before it opens anything
+/// (`discovery::acquire_single_instance_lock` calls [`state_dir`]). Every other
+/// process — `openalpaca config`, the connector examples — has no such step, so
+/// this is where the private directory is guaranteed. Going through
+/// [`database_path`] instead would let SQLite create `state/` at the process
+/// umask, leaving `.master_key` and `discovery.json` world-readable.
+///
+/// It also runs [`legacy_root::check_legacy_root_result`] first: opening the
+/// database **creates** it, so a process that opens before checking is exactly
+/// the process that strands an older install's data.
+pub fn open_home_database() -> Result<crate::database::Database> {
+    legacy_root::check_legacy_root_result()?;
+    let path = state_dir()?.join(DB_FILE);
+    crate::database::Database::open(&path)
+        .with_context(|| format!("Failed to open {}", path.display()))
 }
 
 /// `state/discovery.json`

@@ -632,7 +632,9 @@ fn rebase_is_anchored_at_the_prefix() {
 #[test]
 fn rebase_through_the_boot_entry_point_is_a_no_op_without_a_legacy_root() {
     let tmp = tempdir().unwrap();
-    let _guard = HomeStoreGuard::set(tmp.path());
+    // The boot wrapper resolves the legacy root through `HOME`: sandbox it, so
+    // this never computes the real one (and there really is no legacy root).
+    let _guard = HomeStoreGuard::set_with_home(tmp.path(), &tmp.path().join("user"));
     let db = Database::open(&tmp.path().join("t.db")).unwrap();
     insert_asset(&db, "a", "/somewhere/else/blob");
 
