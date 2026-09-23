@@ -53,13 +53,14 @@ The daemon writes `~/.openalpaca/state/discovery.json`
 }
 ```
 
-The webview never reads this file. Two Tauri commands do
+The webview never reads this file. Tauri commands do
 (`apps/openalpaca-gui/src-tauri/src/lib.rs`, registered in `tauri::generate_handler!`):
 
-| Tauri command           | Behavior                                                                                                                                                                                                                                                                                                                                             | Returns          |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
-| `get_connection_info`   | `discovery::read_discovery()` → `discovery::ensure_not_expired()` → `ConnectionInfo::from(&d)`. Errors if missing/expired.                                                                                                                                                                                                                           | `ConnectionInfo` |
-| `ensure_daemon_running` | Reads discovery; probes liveness by TCP-connecting to `listen.host:listen.port` with a 300 ms timeout (`daemon_is_alive`); if dead, spawns the `openalpacad` sidecar detached (`setsid` on unix, `DETACHED_PROCESS` on windows) with `OPENALPACA_CONFIG_DIR=<app_dir>/config`, then polls `read_discovery()+daemon_is_alive` 25 × 200 ms (≈5 s cap). | `ConnectionInfo` |
+| Tauri command           | Behavior                                                                                                                                                                                                                                                                                                                                                                                                                                           | Returns            |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
+| `get_connection_info`   | `discovery::read_discovery()` → `discovery::ensure_not_expired()` → `ConnectionInfo::from(&d)`. Errors if missing/expired.                                                                                                                                                                                                                                                                                                                         | `ConnectionInfo`   |
+| `ensure_daemon_running` | Reads discovery; probes liveness by TCP-connecting to `listen.host:listen.port` with a 300 ms timeout (`daemon_is_alive`); if dead, spawns the `openalpacad` sidecar detached (`setsid` on unix, `DETACHED_PROCESS` on windows) with `OPENALPACA_CONFIG_DIR=<app_dir>/config`, then polls `read_discovery()+daemon_is_alive` 25 × 200 ms (≈5 s cap).                                                                                               | `ConnectionInfo`   |
+| `await_daemon_stopped`  | Waits until the daemon is really gone — first its process, then the singleton lock — through `openalpaca_storage::daemon_lifecycle::wait_for_daemon_exit(STOP_TIMEOUT)` (15 s), the same primitive the CLI's `daemon stop`/`restart` wait on. Signals nothing. Runs on the blocking pool so it cannot stall other `invoke`s. Called after `POST /v1/command {"command":"shutdown"}`, whose `200 shutting_down` is an acceptance, not a completion. | `DaemonStopReport` |
 
 `ConnectionInfo` (Rust, serialized to the webview in **camelCase**):
 
@@ -70,6 +71,13 @@ interface ConnectionInfo {
   instanceId: string;
 }
 // baseUrl = `http://{listen.host}:{listen.port}`
+
+interface DaemonStopReport {
+  // Only "not_running" and "stopped" mean a daemon may be started now.
+  outcome: "not_running" | "stopped" | "lock_still_held" | "still_alive";
+  pid: number | null; // set only for "still_alive"
+  waitedMs: number;
+}
 ```
 
 Auth on the wire:
@@ -107,6 +115,9 @@ Liveness / identity guards the React client must reproduce:
    `Daemon connected` / `Reconnect` state.
 6. Keep the design's "connected · 7f3a" chip fed by `instanceId.slice(0, 4)` +
    WS `connectionState`.
+7. A stop is two steps and never one: `POST /v1/command {"command":"shutdown"}`,
+   then `invoke("await_daemon_stopped")`. Report the stop only on its
+   `stopped`/`not_running` outcome — the 200 alone says the daemon was asked.
 
 ---
 

@@ -3,9 +3,12 @@
 //! Provides Tauri commands for:
 //! - Connecting to the daemon via discovery.json
 //! - Ensuring the daemon is running (spawning if needed)
+//! - Waiting until a daemon the webview asked to stop is really gone
 
+use openalpaca_storage::daemon_lifecycle::{self, StopOutcome};
 use openalpaca_storage::discovery::{self, ConnectionInfo};
 use openalpaca_storage::store;
+use serde::Serialize;
 use std::process::Command;
 use std::time::Duration;
 
@@ -56,6 +59,75 @@ async fn ensure_daemon_running() -> Result<ConnectionInfo, String> {
     }
 
     Err("Daemon did not become ready within timeout".into())
+}
+
+/// What [`await_daemon_stopped`] concluded, serialized to the webview in
+/// camelCase: `{ outcome, pid, waitedMs }`.
+///
+/// `outcome` is one of `not_running`, `stopped`, `lock_still_held` or
+/// `still_alive` — [`StopOutcome`]'s four answers, spelled as data. Only
+/// `not_running` and `stopped` mean a daemon can be started now; `pid` is set
+/// only for `still_alive`, so the webview can name the process it could not
+/// wait out.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DaemonStopReport {
+    outcome: &'static str,
+    pid: Option<u32>,
+    waited_ms: u64,
+}
+
+impl From<StopOutcome> for DaemonStopReport {
+    fn from(outcome: StopOutcome) -> Self {
+        let millis = |waited: Duration| u64::try_from(waited.as_millis()).unwrap_or(u64::MAX);
+        match outcome {
+            StopOutcome::NotRunning => DaemonStopReport {
+                outcome: "not_running",
+                pid: None,
+                waited_ms: 0,
+            },
+            StopOutcome::Stopped { waited } => DaemonStopReport {
+                outcome: "stopped",
+                pid: None,
+                waited_ms: millis(waited),
+            },
+            StopOutcome::LockStillHeld { waited } => DaemonStopReport {
+                outcome: "lock_still_held",
+                pid: None,
+                waited_ms: millis(waited),
+            },
+            StopOutcome::StillAlive { pid, waited } => DaemonStopReport {
+                outcome: "still_alive",
+                pid: Some(pid),
+                waited_ms: millis(waited),
+            },
+        }
+    }
+}
+
+/// Wait until the daemon is really gone: first its process, then the
+/// singleton lock, for at most `daemon_lifecycle::STOP_TIMEOUT` (15 s).
+///
+/// The webview stops a daemon over HTTP (`POST /v1/command {"command":
+/// "shutdown"}`), and that route's `200 shutting_down` is an acceptance, not a
+/// completion: the daemon still has up to 10 s of shutdown tail to run, and a
+/// replacement started inside it loses the non-blocking lock race and exits.
+/// So the GUI never reports "stopped" on the strength of the 200 — it asks
+/// this command, which is a thin wrapper over the same
+/// `daemon_lifecycle::wait_for_daemon_exit` the CLI's `daemon stop|restart`
+/// wait through. It signals nothing: this shell never kills a process.
+///
+/// The wait polls with a blocking sleep, so it runs on the blocking pool —
+/// on the async runtime's own threads it would stall every other `invoke`
+/// for up to 15 s.
+#[tauri::command]
+async fn await_daemon_stopped() -> Result<DaemonStopReport, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        daemon_lifecycle::wait_for_daemon_exit(daemon_lifecycle::STOP_TIMEOUT)
+    })
+    .await
+    .map(DaemonStopReport::from)
+    .map_err(|e| format!("Could not wait for the daemon to stop: {e}"))
 }
 
 /// Liveness probe: can we open a TCP connection to the daemon's listen address?
@@ -171,7 +243,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_connection_info,
-            ensure_daemon_running
+            ensure_daemon_running,
+            await_daemon_stopped
         ])
         .run(tauri::generate_context!())
         .expect("Error while running Tauri application");
