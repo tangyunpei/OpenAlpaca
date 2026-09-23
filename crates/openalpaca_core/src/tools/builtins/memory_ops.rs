@@ -79,7 +79,8 @@ pub fn memory_store_tool_definition() -> ToolDefinition {
         description: "Store a fact or preference in the user's long-term memory so it \
                        persists across conversations. Use when the user asks you to \
                        remember something, or states a durable preference worth keeping. \
-                       Semantically similar existing memories are superseded automatically."
+                       An exact duplicate is not stored twice; a changed preference is a \
+                       new memory, and the old one stays unless memory_forget removes it."
             .to_string(),
         parameters: serde_json::json!({
             "type": "object",

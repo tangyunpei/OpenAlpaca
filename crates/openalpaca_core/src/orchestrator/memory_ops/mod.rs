@@ -9,15 +9,19 @@ use std::sync::Arc;
 
 /// Store a "remember X" item in Memory v2 as a Preference (shared core).
 ///
-/// Checks for semantically similar existing memories and supersedes if found.
-/// Supports a `--workspace` flag in `content` to scope the memory to the
-/// current project workspace; default (no flag) stores as Global scope.
+/// An exact duplicate is reported, never rewritten; no existing memory is
+/// retired for looking alike. Supports a `--workspace` flag in `content` to
+/// scope the memory to the current project workspace; default (no flag)
+/// stores as Global scope.
 ///
 /// Used by the `memory_store` builtin tool (Routing V2).
+///
+/// `_daemon_config` is unread: it carried the two supersession thresholds,
+/// and stays on the signature until the memory config fields themselves go.
 pub(crate) async fn store_memory(
     db: Option<&Database>,
     embedder: &Option<Arc<dyn openalpaca_llm::Embedder>>,
-    daemon_config: &Arc<ArcSwap<DaemonConfig>>,
+    _daemon_config: &Arc<ArcSwap<DaemonConfig>>,
     content: &str,
     owner_id: Option<&str>,
     scope_ctx: &MemoryScopeContext,
@@ -26,9 +30,6 @@ pub(crate) async fn store_memory(
 
     if let Some(db) = db {
         let repo = MemoryRepository::new(db);
-        let dcfg = daemon_config.load();
-        let supersession_threshold = dcfg.orchestrator.memory.supersession_distance_threshold;
-        let jaccard_threshold = dcfg.orchestrator.memory.fts_jaccard_threshold;
 
         // Parse --workspace flag from content
         let (text, scope, scope_id) = parse_remember_scope(content, scope_ctx);
@@ -45,8 +46,6 @@ pub(crate) async fn store_memory(
             0.9,
             1.0,
             None,
-            supersession_threshold,
-            jaccard_threshold,
         )
         .await;
 
@@ -57,12 +56,6 @@ pub(crate) async fn store_memory(
         };
 
         match result {
-            PersistResult::Superseded { old_content, .. } => Ok(format!(
-                "Got it, I've updated my memory{} (was: \"{}\"): {}",
-                scope_label,
-                old_content.chars().take(50).collect::<String>(),
-                text
-            )),
             PersistResult::Inserted(_) => Ok(format!(
                 "Got it, I'll remember that{}: {}",
                 scope_label, text

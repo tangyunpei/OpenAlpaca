@@ -322,12 +322,9 @@ pub(super) async fn extract_user_traits_background(
         }
     }
 
-    // Write memory-level items to Memory v2 (with supersession)
+    // Write memory-level items to Memory v2
     if !memory_items.is_empty() {
         let repo = MemoryRepository::new(&db);
-        let dcfg = daemon_config.load();
-        let supersession_threshold = dcfg.orchestrator.memory.supersession_distance_threshold;
-        let jaccard_threshold = dcfg.orchestrator.memory.fts_jaccard_threshold;
 
         for item in &memory_items {
             // User trait memories use Global scope intentionally:
@@ -345,8 +342,6 @@ pub(super) async fn extract_user_traits_background(
                 0.6,
                 0.7,
                 None,
-                supersession_threshold,
-                jaccard_threshold,
             )
             .await;
             if let PersistResult::Error(e) = &result {

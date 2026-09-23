@@ -1,8 +1,13 @@
 //! Task output memory extraction: extracts learnable knowledge from
-//! completed task outputs and persists to MemoryV2 with supersession.
+//! completed task outputs and persists it to MemoryV2.
 //!
 //! Called as fire-and-forget from the dispatcher after lead agent, DAG,
 //! or pipeline execution completes successfully.
+//!
+//! Persisting never retires an existing memory: the similarity-based
+//! supersession step (vector distance, or word overlap without an embedder)
+//! is gone, because it let any caller — a task extraction included — replace
+//! an explicit save that merely looked alike (fix 0.3).
 
 use arc_swap::ArcSwap;
 use openalpaca_llm::{ChatMessage, Embedder, LlmRouter, RequestContext, RouterRequest};
@@ -17,12 +22,6 @@ use crate::daemon_config::DaemonConfig;
 pub enum PersistResult {
     /// New memory inserted. Contains the new row id.
     Inserted(i64),
-    /// Existing memory superseded. Contains old content, old id, and new id.
-    Superseded {
-        old_id: i64,
-        old_content: String,
-        new_id: i64,
-    },
     /// Content already exists (hash collision / duplicate).
     Duplicate,
     /// Operation failed.
@@ -220,8 +219,6 @@ pub async fn extract_task_memories(
     }
 
     let repo = MemoryRepository::new(&db);
-    let supersession_threshold = dcfg.orchestrator.memory.supersession_distance_threshold;
-    let jaccard_threshold = dcfg.orchestrator.memory.fts_jaccard_threshold;
 
     let metadata = serde_json::json!({
         "task_id": params.task_id,
@@ -308,14 +305,11 @@ pub async fn extract_task_memories(
             ext.importance,
             ext.confidence,
             Some(&metadata),
-            supersession_threshold,
-            jaccard_threshold,
             pre_emb,
         )
         .await;
-        match result {
-            PersistResult::Inserted(_) | PersistResult::Superseded { .. } => stored += 1,
-            _ => {}
+        if let PersistResult::Inserted(_) = result {
+            stored += 1;
         }
     }
 
@@ -326,12 +320,14 @@ pub async fn extract_task_memories(
     );
 }
 
-/// Persist a single memory item with embed + supersession logic.
+/// Persist a single memory item: embed the content, insert the row, store
+/// the embedding.
 ///
-/// Handles the full flow: embed content → check for similar existing memories
-/// (vector or FTS fallback) → supersede or insert → store embedding.
+/// An exact duplicate (same owner, same content hash) is reported as
+/// [`PersistResult::Duplicate`] and nothing is written. No existing memory
+/// is ever retired here, however alike it looks.
 ///
-/// Used by task extraction, auto-extraction, and the /remember handler.
+/// Used by task extraction, auto-extraction, and the `memory_store` tool.
 #[allow(clippy::too_many_arguments)]
 pub async fn persist_memory_item(
     repo: &MemoryRepository<'_>,
@@ -345,24 +341,10 @@ pub async fn persist_memory_item(
     importance: f64,
     confidence: f64,
     metadata: Option<&serde_json::Value>,
-    supersession_threshold: f64,
-    fts_jaccard_threshold: f64,
 ) -> PersistResult {
     persist_memory_item_with_embedding(
-        repo,
-        embedder,
-        owner_id,
-        content,
-        kind,
-        scope,
-        scope_id,
-        source,
-        importance,
-        confidence,
-        metadata,
-        supersession_threshold,
-        fts_jaccard_threshold,
-        None,
+        repo, embedder, owner_id, content, kind, scope, scope_id, source, importance, confidence,
+        metadata, None,
     )
     .await
 }
@@ -382,8 +364,6 @@ pub async fn persist_memory_item_with_embedding(
     importance: f64,
     confidence: f64,
     metadata: Option<&serde_json::Value>,
-    supersession_threshold: f64,
-    fts_jaccard_threshold: f64,
     pre_embedding: Option<Vec<f32>>,
 ) -> PersistResult {
     // Step 1: Use pre-computed embedding or embed on demand
@@ -398,88 +378,26 @@ pub async fn persist_memory_item_with_embedding(
         None
     };
 
-    // Step 2: Check for similar existing memories (scoped to prevent cross-scope supersession)
-    let similar = if let Some(ref emb) = new_embedding {
-        repo.find_similar_for_supersession(
-            owner_id,
-            emb,
-            supersession_threshold,
-            1,
-            Some(scope),
-            Some(scope_id),
-        )
-        .unwrap_or_default()
-    } else {
-        repo.find_similar_fts_fallback(owner_id, content, 3, Some(scope), Some(scope_id))
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|(_, jaccard)| *jaccard >= fts_jaccard_threshold)
-            .collect()
-    };
-
-    if let Some((existing, _distance)) = similar.first() {
-        let old_content = existing.content.clone();
-        let old_id = existing.id;
-        // Step 3: Supersede
-        match repo.supersede(
-            existing.id,
-            content,
-            kind,
-            scope,
-            scope_id,
-            source,
-            importance,
-            confidence,
-            metadata,
-        ) {
-            Ok(new_id) if new_id > 0 => {
-                if let Some(ref emb) = new_embedding
-                    && let Err(e) = repo.insert_embedding(new_id, emb)
-                {
-                    tracing::warn!(
-                        "Failed to insert embedding for superseded memory #{new_id}: {e}"
-                    );
-                }
-                tracing::debug!(
-                    "Memory persist: superseded #{} -> #{}: {}",
-                    old_id,
-                    new_id,
-                    crate::utils::text::byte_prefix(content, 60)
-                );
-                PersistResult::Superseded {
-                    old_id,
-                    old_content,
-                    new_id,
-                }
+    // Step 2: Insert new
+    match repo.add(
+        owner_id, kind, scope, scope_id, source, content, metadata, importance, confidence,
+    ) {
+        Ok(new_id) if new_id > 0 => {
+            if let Some(ref emb) = new_embedding
+                && let Err(e) = repo.insert_embedding(new_id, emb)
+            {
+                tracing::warn!("Failed to insert embedding for memory #{new_id}: {e}");
             }
-            Ok(_) => PersistResult::Duplicate, // hash collision
-            Err(e) => {
-                tracing::warn!("Memory persist: supersession failed: {e}");
-                PersistResult::Error(e.to_string())
-            }
+            tracing::debug!(
+                "Memory persist: stored new: {}",
+                crate::utils::text::byte_prefix(content, 60)
+            );
+            PersistResult::Inserted(new_id)
         }
-    } else {
-        // Step 4: Insert new
-        match repo.add(
-            owner_id, kind, scope, scope_id, source, content, metadata, importance, confidence,
-        ) {
-            Ok(new_id) if new_id > 0 => {
-                if let Some(ref emb) = new_embedding
-                    && let Err(e) = repo.insert_embedding(new_id, emb)
-                {
-                    tracing::warn!("Failed to insert embedding for memory #{new_id}: {e}");
-                }
-                tracing::debug!(
-                    "Memory persist: stored new: {}",
-                    crate::utils::text::byte_prefix(content, 60)
-                );
-                PersistResult::Inserted(new_id)
-            }
-            Ok(_) => PersistResult::Duplicate, // duplicate
-            Err(e) => {
-                tracing::warn!("Memory persist: failed to store: {e}");
-                PersistResult::Error(e.to_string())
-            }
+        Ok(_) => PersistResult::Duplicate, // duplicate
+        Err(e) => {
+            tracing::warn!("Memory persist: failed to store: {e}");
+            PersistResult::Error(e.to_string())
         }
     }
 }

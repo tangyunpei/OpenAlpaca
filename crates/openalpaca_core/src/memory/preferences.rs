@@ -97,8 +97,9 @@ impl PreferenceStore {
             new_val.version = 1;
         }
 
-        // Note: Change history is tracked at the extraction level via
-        // persist_memory_item() supersession, not here at the preference store.
+        // Note: this store keeps no change history — `set` replaces the
+        // previous value. (persist_memory_item() no longer supersedes either,
+        // so nothing records what a preference used to be.)
 
         self.backend
             .set(user_id, new_val)
