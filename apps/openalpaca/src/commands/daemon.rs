@@ -28,7 +28,7 @@ pub enum DaemonAction {
         #[arg(long)]
         daemon_only: bool,
     },
-    /// Stop Daemon (and GUI)
+    /// Stop the daemon (an open app window stays open and shows it stopped)
     Stop,
     /// Restart Daemon
     Restart,
@@ -48,8 +48,11 @@ pub async fn run(args: DaemonArgs) -> Result<()> {
             Ok(())
         }
         DaemonAction::Stop => {
+            // The daemon only: an open app window stays open, keeps its
+            // unsent draft and shows `stopped elsewhere` with a Start button
+            // (owner, 2026-09-22). `openalpaca gui stop` is the verb that
+            // quits the app.
             let gone = stop_and_wait(false)?;
-            manager::stop_gui()?;
             if !gone {
                 std::process::exit(2);
             }
