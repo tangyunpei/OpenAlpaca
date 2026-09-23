@@ -4,16 +4,16 @@
 //! refuses, deleting the files is the remedy, and asking the database's
 //! permission first is exactly what made the verb unreachable.
 //!
-//! What it does, in order: refuse if a daemon is running; print the warning
-//! (which names the absolute store root) and require the typed word
-//! [`CONFIRM_WORD`]; delete `state/openalpaca.db` and its `-wal`/`-shm`
-//! siblings; clear `llm.toml` and reset `daemon.toml`. Paths are resolved with
-//! the non-creating store accessors only, so running it against a store that
-//! does not exist creates nothing.
+//! What it does, in order: take the daemon's singleton lock, refusing if a
+//! daemon holds it; print the warning (which names the absolute store root)
+//! and require the typed word [`CONFIRM_WORD`]; delete `state/openalpaca.db`
+//! and its `-wal`/`-shm` siblings; clear `llm.toml` and reset `daemon.toml`;
+//! release the lock. Paths are resolved with the non-creating store accessors
+//! only, so running it against a store that does not exist creates nothing.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result};
 use dialoguer::{Input, theme::ColorfulTheme};
-use openalpaca_storage::store;
+use openalpaca_storage::{discovery, store};
 use std::path::Path;
 
 use super::ai_config;
@@ -25,8 +25,7 @@ use super::daemon_config_cli;
 pub(super) const CONFIRM_WORD: &str = "factory-reset";
 
 /// Why the reset will not run under a live daemon. Names no pid on purpose:
-/// the predicate is a `bool`, and widening it would make this a second reader
-/// of `discovery.json` for a cosmetic gain.
+/// the evidence is the daemon's lock, which says only that it is held.
 const DAEMON_RUNNING_REFUSAL: &str = "\
 A daemon is running against this store, and a factory reset will not delete a database \
 it has open. On Unix the file would vanish from the directory while the daemon kept \
@@ -43,17 +42,32 @@ pub(super) fn run(env: &dyn ConfigEnv) -> Result<()> {
     // that is not there leaves nothing behind.
     let root = std::path::absolute(store::home_root()?)?;
     let db_path = store::database_path()?;
+    let state_dir = db_path
+        .parent()
+        .context("the database path has no parent directory")?;
 
     // Before the question, not after it: a refusal that arrives only once the
-    // user has typed the word is a question we had no business asking.
-    if env.daemon_is_running() {
-        bail!("{DAEMON_RUNNING_REFUSAL}");
-    }
+    // user has typed the word is a question we had no business asking. And
+    // held from here until the files are gone, not merely checked: the prompt
+    // waits as long as the user takes, and a daemon started meanwhile (the
+    // app opened, `daemon start` in another terminal) would otherwise have
+    // the database open when it is unlinked. Holding the lock, a daemon that
+    // starts now exits on it instead.
+    let claim = claim_store(state_dir)?;
 
     if !env.confirm_factory_reset(&root)? {
         println!("Cancelled. Nothing was deleted.");
         return Ok(());
     }
+
+    // With no `state/` there was nothing to lock — and no database — when we
+    // asked. A daemon started during the prompt creates both, so take the
+    // lock now or refuse; with `state/` still absent there is still nothing
+    // to delete and nothing is created.
+    let _claim = match claim {
+        Some(held) => Some(held),
+        None => claim_store(state_dir)?,
+    };
 
     // Files first: if this fails (a permission, a locked file), the user's
     // configuration is still intact and re-running is safe.
@@ -70,6 +84,23 @@ pub(super) fn run(env: &dyn ConfigEnv) -> Result<()> {
          with nothing pointing at them."
     );
     Ok(())
+}
+
+/// Takes the daemon's singleton lock for the length of the reset — the same
+/// non-blocking acquisition the daemon makes at boot, so exactly one of the
+/// two can hold the store: a daemon that is running or still booting makes
+/// this refuse, and a daemon started while it is held exits on the lock
+/// without opening the database. Dropping the returned guard releases it.
+///
+/// `Ok(None)` when `state/` does not exist: there is no database to protect,
+/// and taking the lock would create the directory this verb promises not to.
+fn claim_store(state_dir: &Path) -> Result<Option<impl Sized>> {
+    if !state_dir.is_dir() {
+        return Ok(None);
+    }
+    discovery::acquire_single_instance_lock(false)
+        .map(Some)
+        .map_err(|e| e.context(DAEMON_RUNNING_REFUSAL))
 }
 
 /// The warning printed above the prompt. `root` is absolute —

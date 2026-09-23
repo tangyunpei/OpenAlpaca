@@ -47,14 +47,12 @@ pub enum ConfigAction {
 /// The factory reset's whole point is that it opens **no** database — it is the
 /// one form of this verb that survives a schema the build refuses. A claim like
 /// that is only worth as much as the test behind it, so the opener is injected
-/// and the test uses one that panics. The daemon check and the terminal prompt
-/// ride along for the same reason: neither is available in a test binary.
+/// and the test uses one that panics. The terminal prompt rides along for the
+/// same reason: it is not available in a test binary. (The daemon check is not
+/// here: it is the daemon's own lock, which a test can hold for real.)
 pub(super) trait ConfigEnv {
     /// The store database. Opened at most once, and only by the arms that need it.
     fn database(&mut self) -> Result<Database>;
-
-    /// Whether an `openalpacad` is running against this store.
-    fn daemon_is_running(&self) -> bool;
 
     /// Shows the factory-reset warning and reads the typed confirmation word.
     /// `Ok(false)` means the user declined; an error means we could not ask.
@@ -78,10 +76,6 @@ impl ConfigEnv for RealConfigEnv {
         // `Database` is an `Arc<Mutex<Connection>>` behind a `Clone`, so handing
         // out an owned clone costs nothing and spares every caller a lifetime.
         Ok(self.opened.clone().expect("just opened"))
-    }
-
-    fn daemon_is_running(&self) -> bool {
-        crate::manager::is_daemon_running()
     }
 
     fn confirm_factory_reset(&self, root: &Path) -> Result<bool> {

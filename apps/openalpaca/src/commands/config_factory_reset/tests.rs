@@ -5,9 +5,11 @@
 use super::*;
 use crate::commands::config::tests::{FakeEnv, assert_sandboxed};
 use crate::commands::config::{ConfigAction, ConfigArgs, run_with};
-use crate::test_util::EnvSandbox;
+use crate::test_util::{EnvSandbox, LockHolder};
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 use tempfile::tempdir;
 
 const TRIO: [&str; 3] = [
@@ -73,20 +75,24 @@ fn a_factory_reset_never_opens_the_store_database() {
     );
 }
 
+/// A daemon — running, or still booting before it has written
+/// `discovery.json` — holds the singleton lock. Here another process holds
+/// it for real, which is the only way to hold an `fcntl` lock against this
+/// one.
 #[test]
-fn a_running_daemon_refuses_the_factory_reset() {
+fn a_held_daemon_lock_refuses_the_factory_reset() {
     let tmp = tempdir().unwrap();
     let _env = EnvSandbox::enter(tmp.path());
     assert_sandboxed(tmp.path());
     let root = home(tmp.path());
     seed_trio(&root);
+    let _daemon = LockHolder::spawn(&root);
 
     let mut env = FakeEnv {
-        daemon_running: true,
         answer: true,
         ..FakeEnv::default()
     };
-    let error = factory_reset(&mut env).expect_err("a live daemon must refuse the reset");
+    let error = factory_reset(&mut env).expect_err("a held daemon lock must refuse the reset");
 
     let message = format!("{error:#}");
     assert!(
@@ -101,6 +107,85 @@ fn a_running_daemon_refuses_the_factory_reset() {
     for rel in TRIO {
         assert!(root.join(rel).exists(), "{rel} must survive a refusal");
     }
+}
+
+/// The race the lock closes: nothing was running when the question was
+/// asked, and a daemon came up while the user was still reading it. The
+/// store had no `state/` yet, so there was nothing to lock up front; the
+/// reset must take the lock after the answer, fail, and delete nothing.
+#[test]
+fn a_daemon_that_starts_during_the_prompt_refuses_the_factory_reset() {
+    let tmp = tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    assert_sandboxed(tmp.path());
+    let root = home(tmp.path());
+    assert!(!root.join("state").exists());
+
+    let daemon: Rc<RefCell<Option<LockHolder>>> = Rc::default();
+    let started = Rc::clone(&daemon);
+    let booted_root = root.clone();
+    let mut env = FakeEnv {
+        answer: true,
+        during_prompt: RefCell::new(Some(Box::new(move || {
+            // A daemon's boot: it takes the lock (creating `state/`), then
+            // opens the database.
+            *started.borrow_mut() = Some(LockHolder::spawn(&booted_root));
+            seed_trio(&booted_root);
+        }))),
+        ..FakeEnv::default()
+    };
+    let error = factory_reset(&mut env)
+        .expect_err("a daemon started during the prompt must refuse the reset");
+
+    assert!(daemon.borrow().is_some(), "the daemon must have started");
+    assert!(
+        format!("{error:#}").contains("openalpaca daemon stop"),
+        "{error:#}"
+    );
+    for rel in TRIO {
+        assert!(
+            root.join(rel).exists(),
+            "{rel} belongs to a live daemon and must survive"
+        );
+    }
+}
+
+/// And the lock is held from before the question to after the delete: a
+/// daemon started during the prompt of a store that *did* exist cannot take
+/// it — which is what makes it exit instead of opening the database.
+#[test]
+fn the_reset_holds_the_daemon_lock_while_the_prompt_is_open() {
+    let tmp = tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    assert_sandboxed(tmp.path());
+    let root = home(tmp.path());
+    seed_trio(&root);
+
+    let lock_free_during_prompt: Rc<Cell<Option<bool>>> = Rc::default();
+    let seen = Rc::clone(&lock_free_during_prompt);
+    let prompt_root = root.clone();
+    let mut env = FakeEnv {
+        answer: true,
+        during_prompt: RefCell::new(Some(Box::new(move || {
+            // A daemon starting now: can it take the lock?
+            seen.set(Some(LockHolder::try_spawn(&prompt_root).is_some()));
+        }))),
+        ..FakeEnv::default()
+    };
+    factory_reset(&mut env).unwrap();
+
+    assert_eq!(
+        lock_free_during_prompt.get(),
+        Some(false),
+        "a daemon starting while the prompt is open must find the lock held"
+    );
+    for rel in TRIO {
+        assert!(!root.join(rel).exists(), "{rel} must be deleted");
+    }
+    assert!(
+        LockHolder::try_spawn(&root).is_some(),
+        "the lock must be released once the reset is done"
+    );
 }
 
 #[test]

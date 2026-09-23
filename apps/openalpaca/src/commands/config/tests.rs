@@ -11,11 +11,13 @@ use tempfile::tempdir;
 /// test that completes with it has proved the arm it drove opened nothing.
 #[derive(Default)]
 pub(in crate::commands) struct FakeEnv {
-    pub daemon_running: bool,
     /// What `confirm_factory_reset` answers.
     pub answer: bool,
     pub confirm_calls: Cell<usize>,
     pub confirmed_root: RefCell<Option<PathBuf>>,
+    /// Runs while the prompt is "open" — what the world does while a user
+    /// is still reading the warning.
+    pub during_prompt: RefCell<Option<Box<dyn FnOnce()>>>,
 }
 
 impl ConfigEnv for FakeEnv {
@@ -23,13 +25,12 @@ impl ConfigEnv for FakeEnv {
         panic!("this form of `openalpaca config` must not open the store database");
     }
 
-    fn daemon_is_running(&self) -> bool {
-        self.daemon_running
-    }
-
     fn confirm_factory_reset(&self, root: &Path) -> Result<bool> {
         self.confirm_calls.set(self.confirm_calls.get() + 1);
         *self.confirmed_root.borrow_mut() = Some(root.to_path_buf());
+        if let Some(meanwhile) = self.during_prompt.borrow_mut().take() {
+            meanwhile();
+        }
         Ok(self.answer)
     }
 }
