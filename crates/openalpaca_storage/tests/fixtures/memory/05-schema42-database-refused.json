@@ -1,0 +1,52 @@
+{
+  "row": {
+    "id": 5,
+    "scenario": "Any opener meets a schema-42 database",
+    "required_outcome": "Refused with the §4 text, before any statement touches memory tables; bytes unchanged; works with sqlite-vec absent"
+  },
+  "design": ["plan §4 Data transition (MD-6): refusal text for version 42", "plan slice 1: the schema-42 fixture and the hash-copy test", "plan 3.5"],
+  "loads_in": ["slice-3"],
+  "notes_for_implementer": "Not a memory-library fixture: it is run by `crates/openalpaca_storage/src/database/tests.rs` against the sibling fixture `crates/openalpaca_storage/tests/fixtures/schema42.db` (slice 1, task A), which is copied to a temporary directory first. The refusal must come from `run_migrations`'s version guard with `vec0` not registered on the connection, the copy's SHA-256 must be identical before and after, and the `-wal`/`-shm` files the open creates beside the copy are outside the hash. The message substrings below are the pinned phrases of plan §4 (the 42 arm) plus the phrases `database/tests.rs:59-110` already pins for the 1–41 arm. Until 3.5 lands, the current build opens a schema-42 database normally; a test running this fixture before 3.5 must be marked as such, not made to pass.",
+  "owners": [],
+  "partitions": [],
+  "operations": [
+    {
+      "step": 1,
+      "op": "open_database",
+      "input": { "fixture": "schema42.db", "vec_extension": "absent" },
+      "expect": {
+        "refused": "fixture:legacy_schema",
+        "message_contains": [
+          "Unsupported legacy schema version 42",
+          "schema version 43",
+          "cannot read a database from before the memory redesign",
+          "its memory storage was replaced",
+          "openalpaca config reset --factory",
+          "-wal and -shm",
+          "llm.toml",
+          "artifact, upload and session files stay on disk",
+          ".master_key",
+          "with an OpenAlpaca build from before the memory redesign"
+        ],
+        "message_not_contains": ["newer than this build knows"],
+        "file_unchanged": ["dir:copy/schema42.db"],
+        "vec0_registered": false,
+        "statements_before_refusal": ["PRAGMA journal_mode", "SELECT version FROM schema_version"]
+      }
+    },
+    {
+      "step": 2,
+      "op": "open_database",
+      "input": { "fixture": "schema42.db", "vec_extension": "absent" },
+      "expect": {
+        "refused": "fixture:legacy_schema",
+        "file_unchanged": ["dir:copy/schema42.db"]
+      }
+    }
+  ],
+  "final_state": {
+    "files_exist": ["dir:copy/schema42.db"],
+    "file_unchanged": ["dir:copy/schema42.db"]
+  },
+  "directories": ["copy"]
+}

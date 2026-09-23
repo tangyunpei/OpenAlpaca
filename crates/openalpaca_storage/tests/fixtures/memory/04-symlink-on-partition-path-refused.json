@@ -1,0 +1,125 @@
+{
+  "row": {
+    "id": 4,
+    "scenario": "A git-committed symlink at `.openalpaca`, `memory`, `owners/<key>` or `notes` in a cloned repository",
+    "required_outcome": "The project partition is refused, the turn falls back to global with one WARN, nothing is written through the link"
+  },
+  "design": ["§3 rule 1: every component from `<project>` to `notes` is checked with `symlink_metadata`; a link, junction or non-directory refuses the project partition and falls back to global with one WARN naming the component", "§6 write protocol: confined no-follow handles"],
+  "loads_in": ["slice-2", "slice-3"],
+  "notes_for_implementer": "Four cloned repositories, each with a symlink at one level of the partition path pointing into `dir:outside` (a directory the owner never chose). A fifth repository has a regular file where `memory` should be a directory. In every case a `fact` store — whose default scope is project — must land in the home partition, log exactly one WARN naming the offending component, and leave `dir:outside` empty. Slice 2 runs the same five cases through the partition open of `memory_files` and expects the refusal directly; slice 3 expects the fallback.",
+  "owners": [
+    { "id": "u_example_alice", "owner_key": "32acea7eb739b08afd959db91e46d450" }
+  ],
+  "database": { "global_users": ["u_example_alice"], "local_user_id": "u_example_alice" },
+  "directories": ["outside"],
+  "workspaces": [
+    { "name": "repo_link_openalpaca", "marker": ".git", "symlinks": [{ "path": ".openalpaca", "target": "@dir:outside" }] },
+    { "name": "repo_link_memory", "marker": ".git", "subdirs": [".openalpaca"], "symlinks": [{ "path": ".openalpaca/memory", "target": "@dir:outside" }] },
+    { "name": "repo_link_owner", "marker": ".git", "subdirs": [".openalpaca/memory/owners"], "symlinks": [{ "path": ".openalpaca/memory/owners/32acea7eb739b08afd959db91e46d450", "target": "@dir:outside" }] },
+    { "name": "repo_link_notes", "marker": ".git", "subdirs": [".openalpaca/memory/owners/32acea7eb739b08afd959db91e46d450"], "symlinks": [{ "path": ".openalpaca/memory/owners/32acea7eb739b08afd959db91e46d450/notes", "target": "@dir:outside" }] },
+    { "name": "repo_file_memory", "marker": ".git", "subdirs": [".openalpaca"], "files": [{ "path": ".openalpaca/memory", "content": "not a directory\n" }] }
+  ],
+  "daemon": { "cwd": "home", "llm": "configured" },
+  "partitions": [
+    { "name": "alice_home", "owner": "u_example_alice", "scope": "home", "notes": [] },
+    { "name": "p_link_openalpaca", "owner": "u_example_alice", "scope": "project", "workspace": "repo_link_openalpaca", "lazy": true },
+    { "name": "p_link_memory", "owner": "u_example_alice", "scope": "project", "workspace": "repo_link_memory", "lazy": true },
+    { "name": "p_link_owner", "owner": "u_example_alice", "scope": "project", "workspace": "repo_link_owner", "lazy": true },
+    { "name": "p_link_notes", "owner": "u_example_alice", "scope": "project", "workspace": "repo_link_notes", "lazy": true },
+    { "name": "p_file_memory", "owner": "u_example_alice", "scope": "project", "workspace": "repo_file_memory", "lazy": true }
+  ],
+  "contexts": {
+    "in_link_openalpaca": { "owner_id": "u_example_alice", "workspace": "ws:repo_link_openalpaca", "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "cli" } },
+    "in_link_memory": { "owner_id": "u_example_alice", "workspace": "ws:repo_link_memory", "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "cli" } },
+    "in_link_owner": { "owner_id": "u_example_alice", "workspace": "ws:repo_link_owner", "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "cli" } },
+    "in_link_notes": { "owner_id": "u_example_alice", "workspace": "ws:repo_link_notes", "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "cli" } },
+    "in_file_memory": { "owner_id": "u_example_alice", "workspace": "ws:repo_file_memory", "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "cli" } }
+  },
+  "operations": [
+    {
+      "step": 1,
+      "op": "store",
+      "context": "in_link_openalpaca",
+      "as": "n1",
+      "input": { "title": "Link at openalpaca", "body": "# Link at openalpaca\n\nA fact.\n", "kind": "fact" },
+      "expect": {
+        "created": true,
+        "scope": "global",
+        "path_within": { "n1": "part:alice_home/notes" },
+        "warnings": { "count": 1, "contains": [".openalpaca"] },
+        "files_absent": ["dir:outside/memory", "dir:outside/owners", "dir:outside/notes", "dir:outside/.gitignore"]
+      }
+    },
+    {
+      "step": 2,
+      "op": "store",
+      "context": "in_link_memory",
+      "as": "n2",
+      "input": { "title": "Link at memory", "body": "# Link at memory\n\nA fact.\n", "kind": "fact" },
+      "expect": {
+        "created": true,
+        "scope": "global",
+        "path_within": { "n2": "part:alice_home/notes" },
+        "warnings": { "count": 1, "contains": ["memory"] },
+        "files_absent": ["dir:outside/owners", "dir:outside/.gitignore", "ws:repo_link_memory/.openalpaca/memory/.gitignore"]
+      }
+    },
+    {
+      "step": 3,
+      "op": "store",
+      "context": "in_link_owner",
+      "as": "n3",
+      "input": { "title": "Link at owner", "body": "# Link at owner\n\nA fact.\n", "kind": "fact" },
+      "expect": {
+        "created": true,
+        "scope": "global",
+        "path_within": { "n3": "part:alice_home/notes" },
+        "warnings": { "count": 1, "contains": ["owners/32acea7eb739b08afd959db91e46d450"] },
+        "files_absent": ["dir:outside/notes", "dir:outside/.history"]
+      }
+    },
+    {
+      "step": 4,
+      "op": "store",
+      "context": "in_link_notes",
+      "as": "n4",
+      "input": { "title": "Link at notes", "body": "# Link at notes\n\nA fact.\n", "kind": "fact" },
+      "expect": {
+        "created": true,
+        "scope": "global",
+        "path_within": { "n4": "part:alice_home/notes" },
+        "warnings": { "count": 1, "contains": ["notes"] },
+        "files_absent": ["ws:repo_link_notes/.openalpaca/memory/owners/32acea7eb739b08afd959db91e46d450/.history"]
+      }
+    },
+    {
+      "step": 5,
+      "op": "store",
+      "context": "in_file_memory",
+      "as": "n5",
+      "input": { "title": "File at memory", "body": "# File at memory\n\nA fact.\n", "kind": "fact" },
+      "expect": {
+        "created": true,
+        "scope": "global",
+        "path_within": { "n5": "part:alice_home/notes" },
+        "warnings": { "count": 1, "contains": ["memory"] },
+        "file_content": { "ws:repo_file_memory/.openalpaca/memory": "not a directory\n" }
+      }
+    },
+    {
+      "step": 6,
+      "op": "search",
+      "context": "in_link_notes",
+      "input": { "query": "fact" },
+      "expect": {
+        "ids_unordered": ["@id:n1", "@id:n2", "@id:n3", "@id:n4", "@id:n5"],
+        "results": { "@id:n4": { "scope": "global" } },
+        "warnings": { "count": 1, "contains": ["notes"] }
+      }
+    }
+  ],
+  "final_state": {
+    "files_absent": ["dir:outside/notes", "dir:outside/owners", "dir:outside/memory", "dir:outside/.history", "dir:outside/MEMORY.md", "dir:outside/.gitignore"],
+    "snapshot_missing": ["p_link_openalpaca", "p_link_memory", "p_link_owner", "p_link_notes", "p_file_memory"]
+  }
+}

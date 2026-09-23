@@ -1,0 +1,155 @@
+{
+  "row": {
+    "id": 9,
+    "scenario": "The same phrase in two owners or projects",
+    "required_outcome": "No cross-partition dedup, override or disclosure"
+  },
+  "design": ["§3 rules 1–3", "§6 Promotion and correction: deduplication is exact, within one owner and partition", "§6 Derived supersession: same partition — a link across partitions is ignored"],
+  "loads_in": ["slice-2", "slice-3"],
+  "notes_for_implementer": "The sentence `Prefers tabs over spaces for indentation` exists three times: Alice's home partition (A1), Alice's project partition (A2) and Bob's home partition (B1). B1's frontmatter names A1 in `supersedes` — a cross-owner, cross-partition link that must be ignored, so A1 stays active for Alice. No note carries a `fact_key`, so §3 rule 3 does not apply and both of Alice's copies are returned together. Storing the same sentence again in Alice's project partition (step 4) is not an exact duplicate of anything in that partition and creates a new note; storing it in Bob's partition where B1 already holds it exactly (step 6) is the one dedup the design allows — exact, same owner, same partition — and the result must name B1, not a new id. Slice 2 runs the searches and the two stores against the index and `memory_files` with the partitions pre-resolved.",
+  "owners": [
+    { "id": "u_example_alice", "owner_key": "32acea7eb739b08afd959db91e46d450" },
+    { "id": "u_example_bob", "owner_key": "5c357145f3a583c080c9f1d8ee520e71" }
+  ],
+  "database": { "global_users": ["u_example_alice", "u_example_bob"], "local_user_id": "u_example_alice" },
+  "workspaces": [
+    { "name": "project_a", "marker": ".openalpaca" }
+  ],
+  "daemon": { "cwd": "home", "llm": "configured" },
+  "partitions": [
+    {
+      "name": "alice_home",
+      "owner": "u_example_alice",
+      "scope": "home",
+      "notes": [
+        {
+          "id": "00000009-0000-4000-8000-000000000001",
+          "title": "Indentation preference",
+          "kind": "preference",
+          "status": "active",
+          "created_at": "2026-09-23T10:00:00Z",
+          "updated_at": "2026-09-23T10:00:00Z",
+          "body": "# Indentation preference\n\nPrefers tabs over spaces for indentation.\n",
+          "origin": "user"
+        }
+      ]
+    },
+    {
+      "name": "alice_project_a",
+      "owner": "u_example_alice",
+      "scope": "project",
+      "workspace": "project_a",
+      "notes": [
+        {
+          "id": "00000009-0000-4000-8000-000000000002",
+          "title": "Indentation in project A",
+          "kind": "decision",
+          "status": "active",
+          "created_at": "2026-09-23T10:02:00Z",
+          "updated_at": "2026-09-23T10:02:00Z",
+          "body": "# Indentation in project A\n\nPrefers tabs over spaces for indentation.\n",
+          "origin": "extracted_user"
+        }
+      ]
+    },
+    {
+      "name": "bob_home",
+      "owner": "u_example_bob",
+      "scope": "home",
+      "notes": [
+        {
+          "id": "00000009-0000-4000-8000-000000000003",
+          "title": "Indentation preference",
+          "kind": "preference",
+          "status": "active",
+          "created_at": "2026-09-23T10:01:00Z",
+          "updated_at": "2026-09-23T10:01:00Z",
+          "supersedes": ["00000009-0000-4000-8000-000000000001"],
+          "body": "# Indentation preference\n\nPrefers tabs over spaces for indentation.\n",
+          "origin": "user"
+        }
+      ]
+    }
+  ],
+  "contexts": {
+    "alice_in_project_a": { "owner_id": "u_example_alice", "workspace": "ws:project_a", "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "gui" } },
+    "alice_global": { "owner_id": "u_example_alice", "workspace": null, "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "gui" } },
+    "bob_global": { "owner_id": "u_example_bob", "workspace": null, "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_bob:gui", "task_id": null, "request_id": null, "source": "gui" } },
+    "bob_in_project_a": { "owner_id": "u_example_bob", "workspace": "ws:project_a", "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_bob:gui", "task_id": null, "request_id": null, "source": "gui" } }
+  },
+  "operations": [
+    {
+      "step": 1,
+      "op": "search",
+      "context": "alice_in_project_a",
+      "input": { "query": "tabs or spaces for indentation" },
+      "expect": {
+        "ids_unordered": ["00000009-0000-4000-8000-000000000001", "00000009-0000-4000-8000-000000000002"],
+        "ids_absent": ["00000009-0000-4000-8000-000000000003"],
+        "results": {
+          "00000009-0000-4000-8000-000000000001": { "status": "active", "scope": "global", "conflict": false },
+          "00000009-0000-4000-8000-000000000002": { "status": "active", "scope": "project", "conflict": false }
+        }
+      }
+    },
+    {
+      "step": 2,
+      "op": "search",
+      "context": "alice_global",
+      "input": { "query": "tabs or spaces for indentation" },
+      "expect": { "ids_unordered": ["00000009-0000-4000-8000-000000000001"] }
+    },
+    {
+      "step": 3,
+      "op": "search",
+      "context": "bob_in_project_a",
+      "input": { "query": "tabs or spaces for indentation" },
+      "expect": {
+        "ids_unordered": ["00000009-0000-4000-8000-000000000003"],
+        "ids_absent": ["00000009-0000-4000-8000-000000000001", "00000009-0000-4000-8000-000000000002"]
+      }
+    },
+    {
+      "step": 4,
+      "op": "store",
+      "context": "alice_in_project_a",
+      "as": "alice_project_again",
+      "input": { "title": "Indentation preference", "body": "# Indentation preference\n\nPrefers tabs over spaces for indentation.\n", "kind": "decision" },
+      "expect": { "created": true, "dedup": "created", "scope": "project", "path_within": { "alice_project_again": "part:alice_project_a/notes" } }
+    },
+    {
+      "step": 5,
+      "op": "read",
+      "context": "alice_global",
+      "input": { "id": "00000009-0000-4000-8000-000000000001" },
+      "expect": { "status": "active", "results": { "00000009-0000-4000-8000-000000000001": { "superseded_by": [] } } }
+    },
+    {
+      "step": 6,
+      "op": "store",
+      "context": "bob_global",
+      "as": "bob_again",
+      "input": { "title": "Indentation preference", "body": "# Indentation preference\n\nPrefers tabs over spaces for indentation.\n", "kind": "preference" },
+      "expect": { "dedup": "existing", "ids": ["00000009-0000-4000-8000-000000000003"] }
+    },
+    {
+      "step": 7,
+      "op": "read",
+      "context": "bob_global",
+      "input": { "id": "00000009-0000-4000-8000-000000000002" },
+      "expect": { "refused": "not_found", "message_not_contains": ["project A", "Indentation in project A"] }
+    },
+    {
+      "step": 8,
+      "op": "doctor",
+      "input": {},
+      "expect": { "doctor": { "conflicts": [] } }
+    }
+  ],
+  "final_state": {
+    "snapshot": {
+      "alice_home": { "notes": { "00000009-0000-4000-8000-000000000001": { "revision": "@current", "origin": "user" } } },
+      "bob_home": { "notes": { "00000009-0000-4000-8000-000000000003": { "revision": "@current", "origin": "user" } } }
+    }
+  }
+}

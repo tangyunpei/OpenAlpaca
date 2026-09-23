@@ -1,0 +1,71 @@
+{
+  "row": {
+    "id": "q2",
+    "scenario": "slice-2 query fixture: F4's literal-`AND` case (a note containing the word \"and\")",
+    "required_outcome": "Query syntax is built from escaped literal terms; the words AND, OR, NOT, NEAR, a column filter, a `*` prefix and an unbalanced quote are all literal text, never a caller-supplied MATCH expression, and never a syntax error. Supports matrix row 12."
+  },
+  "design": ["§5 step 3: build query syntax from escaped literal terms (an AST), never from caller-supplied MATCH expressions — the F4 class of defect", "§5 step 4: phrases and exact identifiers matched as literals on the trigram table"],
+  "loads_in": ["slice-2"],
+  "notes_for_implementer": "The note contains `and` twice and `or` once. Every query below must run without an FTS5 syntax error and return the note whenever at least one of its literal terms of three or more characters occurs in the note — union semantics. `and`, `not` and `near` are three-letter literals that occur (or do not) in the text like any other word: `and` matches, `NOT` does not occur and is simply a non-matching term. `tabs*` is the literal token `tabs*`, so it still matches `tabs` through the trigram table but must not become a prefix query on the unicode61 table (the match reason is trigram, not term). `title:tabs` is not a column filter: the term `title:tabs` reaches the trigram table as a literal. Two-character queries (`or`) go to the substring pass. The decoy never appears.",
+  "owners": [
+    { "id": "u_example_alice", "owner_key": "32acea7eb739b08afd959db91e46d450" }
+  ],
+  "database": { "global_users": ["u_example_alice"], "local_user_id": "u_example_alice" },
+  "daemon": { "cwd": "home", "llm": "configured" },
+  "partitions": [
+    {
+      "name": "alice_home",
+      "owner": "u_example_alice",
+      "scope": "home",
+      "notes": [
+        {
+          "id": "00000022-0000-4000-8000-000000000001",
+          "title": "Tabs and spaces",
+          "kind": "decision",
+          "status": "active",
+          "created_at": "2026-09-23T10:00:00Z",
+          "updated_at": "2026-09-23T10:00:00Z",
+          "body": "# Tabs and spaces\n\nUse tabs for indentation and spaces for alignment; never one or the other alone.\n",
+          "origin": "user"
+        },
+        {
+          "id": "00000022-0000-4000-8000-000000000002",
+          "title": "Garden",
+          "kind": "fact",
+          "status": "active",
+          "created_at": "2026-09-23T10:01:00Z",
+          "updated_at": "2026-09-23T10:01:00Z",
+          "body": "# Garden\n\nThe tomatoes ripen in August.\n",
+          "origin": "user"
+        }
+      ]
+    }
+  ],
+  "contexts": {
+    "alice_tool": { "owner_id": "u_example_alice", "workspace": null, "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "gui" } }
+  },
+  "operations": [
+    { "step": 1, "op": "search", "context": "alice_tool", "input": { "query": "tabs and spaces" }, "expect": { "ids": ["00000022-0000-4000-8000-000000000001"], "results": { "00000022-0000-4000-8000-000000000001": { "match_includes": ["title"] } } } },
+    { "step": 2, "op": "search", "context": "alice_tool", "input": { "query": "and" }, "expect": { "ids": ["00000022-0000-4000-8000-000000000001"], "ids_absent": ["00000022-0000-4000-8000-000000000002"] } },
+    { "step": 3, "op": "search", "context": "alice_tool", "input": { "query": "tabs AND spaces" }, "expect": { "ids": ["00000022-0000-4000-8000-000000000001"] } },
+    { "step": 4, "op": "search", "context": "alice_tool", "input": { "query": "alignment AND nothingelse" }, "expect": { "ids": ["00000022-0000-4000-8000-000000000001"] } },
+    { "step": 5, "op": "search", "context": "alice_tool", "input": { "query": "NOT tabs" }, "expect": { "ids": ["00000022-0000-4000-8000-000000000001"] } },
+    { "step": 6, "op": "search", "context": "alice_tool", "input": { "query": "tabs NEAR spaces" }, "expect": { "ids": ["00000022-0000-4000-8000-000000000001"] } },
+    { "step": 7, "op": "search", "context": "alice_tool", "input": { "query": "tabs OR tomatoes" }, "expect": { "ids_unordered": ["00000022-0000-4000-8000-000000000001", "00000022-0000-4000-8000-000000000002"] } },
+    { "step": 8, "op": "search", "context": "alice_tool", "input": { "query": "\"tabs for indentation" }, "expect": { "ids": ["00000022-0000-4000-8000-000000000001"] } },
+    { "step": 9, "op": "search", "context": "alice_tool", "input": { "query": "tabs*" }, "expect": { "ids": ["00000022-0000-4000-8000-000000000001"] } },
+    { "step": 10, "op": "search", "context": "alice_tool", "input": { "query": "title:tabs" }, "expect": { "ids": ["00000022-0000-4000-8000-000000000001"] } },
+    { "step": 11, "op": "search", "context": "alice_tool", "input": { "query": "(tabs" }, "expect": { "ids": ["00000022-0000-4000-8000-000000000001"] } },
+    { "step": 12, "op": "search", "context": "alice_tool", "input": { "query": "tabs) OR (" }, "expect": { "ids": ["00000022-0000-4000-8000-000000000001"] } },
+    { "step": 13, "op": "search", "context": "alice_tool", "input": { "query": "-tabs" }, "expect": { "ids": ["00000022-0000-4000-8000-000000000001"] } },
+    { "step": 14, "op": "search", "context": "alice_tool", "input": { "query": "^tabs" }, "expect": { "ids": ["00000022-0000-4000-8000-000000000001"] } },
+    { "step": 15, "op": "search", "context": "alice_tool", "input": { "query": "or" }, "expect": { "ids": ["00000022-0000-4000-8000-000000000001"], "ids_absent": ["00000022-0000-4000-8000-000000000002"] } },
+    { "step": 16, "op": "search", "context": "alice_tool", "input": { "query": "AND OR NOT" }, "expect": { "ids": ["00000022-0000-4000-8000-000000000001"] } },
+    { "step": 17, "op": "search", "context": "alice_tool", "input": { "query": "{tabs} [spaces] ; DROP TABLE notes; --" }, "expect": { "ids": ["00000022-0000-4000-8000-000000000001"], "index_state": "ready" } },
+    { "step": 18, "op": "search", "context": "alice_tool", "input": { "query": "nothingelse whatsoever" }, "expect": { "ids_unordered": [], "count": 0 } }
+  ],
+  "final_state": {
+    "files_exist": ["home/state/cache/memory-index-v1.sqlite"],
+    "notes_on_disk": [{ "partition": "alice_home", "id": "00000022-0000-4000-8000-000000000001" }, { "partition": "alice_home", "id": "00000022-0000-4000-8000-000000000002" }]
+  }
+}

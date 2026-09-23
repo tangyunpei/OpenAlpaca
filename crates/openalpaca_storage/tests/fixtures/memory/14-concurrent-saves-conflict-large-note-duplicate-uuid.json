@@ -1,0 +1,188 @@
+{
+  "row": {
+    "id": 14,
+    "scenario": "Two agent saves; an edit conflict; a large note; a duplicate UUID",
+    "required_outcome": "No lost service update; a clear conflict or diagnostic; bounded resources"
+  },
+  "design": ["§6 Write protocol: one daemon-owned writer queue per partition", "§4 Revisions: expected_revision mandatory; duplicate IDs and oversized records rejected with a visible diagnostic; malformed external files stay on disk, excluded, never rewritten", "§4 Initial limits: note size 32 KiB; explicit tool read response 32 KiB", "§6 Management operations: doctor --repair refuses on a duplicate id and names both files", "§7a memory_store body ≤ 32 KiB; memory_update revision_conflict with current_revision"],
+  "loads_in": ["slice-2", "slice-3"],
+  "notes_for_implementer": "Step 1 runs two stores at once against one partition and expects both notes recorded — the per-partition writer queue serializes them. Steps 2–5 are the optimistic-concurrency contract: a stale `expected_revision` is `revision_conflict` carrying the current revision, the file is untouched, and the second of two racing edits loses visibly. Steps 6–8 are the size bounds: 32 KiB + 1 byte is refused before anything is written, exactly 32 KiB is accepted, and `memory_read` of it is not truncated. Steps 9–11 are the duplicate id: two hand-dropped files sharing one UUID are both listed by `doctor` as a duplicate, neither is served, neither is rewritten or deleted, and `doctor --repair` refuses naming both files. The generator body sizes are byte counts of the body alone; the frontmatter is on top, and the 32 KiB limit is the note's — the loader must size the body so the whole file is ≤ 32768 bytes in step 7 and > 32768 in step 6 (the `bytes` values leave 600 bytes for the frontmatter).",
+  "owners": [
+    { "id": "u_example_alice", "owner_key": "32acea7eb739b08afd959db91e46d450" }
+  ],
+  "database": { "global_users": ["u_example_alice"], "local_user_id": "u_example_alice" },
+  "daemon": { "cwd": "home", "llm": "configured" },
+  "partitions": [
+    {
+      "name": "alice_home",
+      "owner": "u_example_alice",
+      "scope": "home",
+      "notes": [
+        {
+          "id": "00000014-0000-4000-8000-000000000001",
+          "title": "Standup time",
+          "kind": "fact",
+          "status": "active",
+          "created_at": "2026-09-23T10:00:00Z",
+          "updated_at": "2026-09-23T10:00:00Z",
+          "body": "# Standup time\n\nStandup is at 09:30.\n",
+          "origin": "extracted_user"
+        }
+      ]
+    }
+  ],
+  "contexts": {
+    "agent_one": { "owner_id": "u_example_alice", "workspace": null, "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "gui" } },
+    "agent_two": { "owner_id": "u_example_alice", "workspace": null, "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice:telegram", "task_id": null, "request_id": null, "source": "telegram" } },
+    "alice_api": { "owner_id": "u_example_alice", "workspace": null, "surface": "user_surface", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": null, "task_id": null, "request_id": null, "source": "api" } }
+  },
+  "operations": [
+    {
+      "step": 1,
+      "op": "concurrent",
+      "input": {
+        "ops": [
+          { "op": "store", "context": "agent_one", "as": "save_one", "input": { "title": "Save one", "body": "# Save one\n\nFirst concurrent save.\n", "kind": "fact" }, "expect": { "created": true } },
+          { "op": "store", "context": "agent_two", "as": "save_two", "input": { "title": "Save two", "body": "# Save two\n\nSecond concurrent save.\n", "kind": "fact" }, "expect": { "created": true } }
+        ]
+      },
+      "expect": {
+        "notes_on_disk": [{ "partition": "alice_home", "id": "@id:save_one" }, { "partition": "alice_home", "id": "@id:save_two" }],
+        "snapshot": { "alice_home": { "notes": { "@id:save_one": { "revision": "@current", "origin": "extracted_user" }, "@id:save_two": { "revision": "@current", "origin": "extracted_user" } }, "pending": null } }
+      }
+    },
+    {
+      "step": 2,
+      "op": "update",
+      "context": "agent_one",
+      "input": { "id": "00000014-0000-4000-8000-000000000001", "expected_revision": "@stale", "action": "edit", "patch": { "body": "# Standup time\n\nStandup is at 10:00.\n" } },
+      "expect": { "refused": "revision_conflict", "current_revision": "00000014-0000-4000-8000-000000000001", "revision_changed": false, "snapshot": { "alice_home": { "pending": null } } }
+    },
+    {
+      "step": 3,
+      "op": "update",
+      "context": "agent_one",
+      "as": "edit_one",
+      "input": { "id": "00000014-0000-4000-8000-000000000001", "expected_revision": "@rev:00000014-0000-4000-8000-000000000001", "action": "edit", "patch": { "body": "# Standup time\n\nStandup is at 10:00.\n" } },
+      "expect": { "revision_changed": true, "status": "active", "history_has": [{ "partition": "alice_home", "id": "00000014-0000-4000-8000-000000000001", "revision": "@current" }] }
+    },
+    {
+      "step": 4,
+      "op": "update",
+      "context": "agent_two",
+      "input": { "id": "00000014-0000-4000-8000-000000000001", "expected_revision": "@from_rev:edit_one", "action": "edit", "patch": { "body": "# Standup time\n\nStandup is at 09:45.\n" } },
+      "expect": { "refused": "revision_conflict", "current_revision": "00000014-0000-4000-8000-000000000001", "revision_changed": false }
+    },
+    {
+      "step": 5,
+      "op": "read",
+      "context": "agent_two",
+      "input": { "id": "00000014-0000-4000-8000-000000000001" },
+      "expect": { "results": { "00000014-0000-4000-8000-000000000001": { "excerpt_contains": "10:00" } } }
+    },
+    {
+      "step": 6,
+      "op": "store",
+      "context": "agent_one",
+      "input": { "title": "Too large", "body": { "@repeat": { "text": "lorem ipsum dolor sit amet ", "bytes": 32200 } }, "kind": "reference" },
+      "expect": { "refused": "invalid_input", "message_contains": ["32"], "snapshot": { "alice_home": { "pending": null } } }
+    },
+    {
+      "step": 7,
+      "op": "store",
+      "context": "agent_one",
+      "as": "at_limit",
+      "input": { "title": "At the limit", "body": { "@repeat": { "text": "lorem ipsum dolor sit amet ", "bytes": 32100 } }, "kind": "reference" },
+      "expect": { "created": true }
+    },
+    {
+      "step": 8,
+      "op": "read",
+      "context": "agent_one",
+      "input": { "id": "@id:at_limit" },
+      "expect": { "truncated": false, "body_bytes_lte": 32768 }
+    },
+    {
+      "step": 9,
+      "op": "external_create",
+      "input": {
+        "partition": "alice_home",
+        "note": {
+          "id": "00000014-0000-4000-8000-0000000000dd",
+          "raw": "---\nschema: 1\nid: 00000014-0000-4000-8000-0000000000dd\ntitle: Duplicate one\nkind: fact\nstatus: active\ncreated_at: 2026-09-23T11:00:00Z\nupdated_at: 2026-09-23T11:00:00Z\n---\n# Duplicate one\n\nThe first file with this id.\n",
+          "origin": "external",
+          "recorded": false,
+          "filename": "00000014-0000-4000-8000-0000000000dd--duplicate-one.md"
+        }
+      },
+      "expect": {}
+    },
+    {
+      "step": 10,
+      "op": "external_create",
+      "input": {
+        "partition": "alice_home",
+        "note": {
+          "id": "00000014-0000-4000-8000-0000000000dd",
+          "raw": "---\nschema: 1\nid: 00000014-0000-4000-8000-0000000000dd\ntitle: Duplicate two\nkind: fact\nstatus: active\ncreated_at: 2026-09-23T11:01:00Z\nupdated_at: 2026-09-23T11:01:00Z\n---\n# Duplicate two\n\nThe second file with this id.\n",
+          "origin": "external",
+          "recorded": false,
+          "filename": "00000014-0000-4000-8000-0000000000dd--duplicate-two.md"
+        }
+      },
+      "expect": {}
+    },
+    {
+      "step": 11,
+      "op": "scan",
+      "input": {},
+      "expect": {
+        "files_exist": [
+          "part:alice_home/notes/00000014-0000-4000-8000-0000000000dd--duplicate-one.md",
+          "part:alice_home/notes/00000014-0000-4000-8000-0000000000dd--duplicate-two.md"
+        ],
+        "file_unchanged": [
+          "part:alice_home/notes/00000014-0000-4000-8000-0000000000dd--duplicate-one.md",
+          "part:alice_home/notes/00000014-0000-4000-8000-0000000000dd--duplicate-two.md"
+        ]
+      }
+    },
+    {
+      "step": 12,
+      "op": "search",
+      "context": "agent_one",
+      "input": { "query": "file with this id" },
+      "expect": { "ids_absent": ["00000014-0000-4000-8000-0000000000dd"] }
+    },
+    {
+      "step": 13,
+      "op": "doctor",
+      "input": {},
+      "expect": {
+        "doctor": {
+          "duplicate_ids": [["00000014-0000-4000-8000-0000000000dd"]],
+          "malformed": [
+            { "partition": "alice_home", "file_contains": "duplicate-one" },
+            { "partition": "alice_home", "file_contains": "duplicate-two" }
+          ]
+        }
+      }
+    },
+    {
+      "step": 14,
+      "op": "doctor_repair",
+      "input": {},
+      "expect": {
+        "refused": "fixture:duplicate_id",
+        "message_contains": ["00000014-0000-4000-8000-0000000000dd", "duplicate-one", "duplicate-two"],
+        "file_unchanged": [
+          "part:alice_home/notes/00000014-0000-4000-8000-0000000000dd--duplicate-one.md",
+          "part:alice_home/notes/00000014-0000-4000-8000-0000000000dd--duplicate-two.md"
+        ]
+      }
+    }
+  ],
+  "final_state": {
+    "snapshot": { "alice_home": { "pending": null, "notes": { "00000014-0000-4000-8000-0000000000dd": null } } }
+  }
+}

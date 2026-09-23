@@ -1,0 +1,144 @@
+{
+  "row": {
+    "id": 8,
+    "scenario": "A `/v1/command process` turn, its workflow and its subagents",
+    "required_outcome": "No partition: `system` is not a `global_user` row; nothing recalled, nothing extracted"
+  },
+  "design": ["§3: the owner is a `global_user` row; `system` and a `provider:id` string yield no owner — nothing recalled, nothing extracted, the tools refuse", "§7a per-surface table: lead agent `created_by`, no partition for `system`; connector `Principal::External` → no owner"],
+  "loads_in": ["slice-3"],
+  "notes_for_implementer": "Three principals that are not `global_user` rows: the `system` sentinel a `/v1/command process` turn carries into every workflow it starts, a subagent of that workflow, and an unlinked external identity on a connector lane. Alice's home note exists so a leak would be visible. Every read returns nothing, every write and every extraction is refused with `fixture:no_owner`, and no directory `owners/<sha256(system)[..32]>` (`bbc5e661e106c6dcd8dc6dd186454c2f`) or `owners/<sha256(\"provider:telegram:12345\")[..32]>` (`c00f1f5b28abd3f37a411afa16975510`) is ever created. Step 7 is the control: the linked owner on the same connector lane recalls normally.",
+  "owners": [
+    { "id": "u_example_alice", "owner_key": "32acea7eb739b08afd959db91e46d450" },
+    { "id": "system", "owner_key": "bbc5e661e106c6dcd8dc6dd186454c2f" },
+    { "id": "provider:telegram:12345", "owner_key": "c00f1f5b28abd3f37a411afa16975510" }
+  ],
+  "database": { "global_users": ["u_example_alice"], "local_user_id": "u_example_alice", "messages": ["4901"], "tasks": ["00000008-0000-4000-8000-0000000000aa"] },
+  "workspaces": [
+    { "name": "project_a", "marker": ".openalpaca" }
+  ],
+  "daemon": { "cwd": "home", "llm": "configured" },
+  "partitions": [
+    {
+      "name": "alice_home",
+      "owner": "u_example_alice",
+      "scope": "home",
+      "notes": [
+        {
+          "id": "00000008-0000-4000-8000-000000000001",
+          "title": "Deploy window",
+          "kind": "fact",
+          "status": "active",
+          "created_at": "2026-09-23T10:00:00Z",
+          "updated_at": "2026-09-23T10:00:00Z",
+          "body": "# Deploy window\n\nDeploys happen on Tuesday mornings.\n",
+          "origin": "user"
+        }
+      ]
+    }
+  ],
+  "contexts": {
+    "system_command_turn": {
+      "owner_id": "system",
+      "workspace": "ws:project_a",
+      "surface": "model_tool",
+      "capabilities": { "read": true, "write": true, "forget": true },
+      "attribution": { "lane_key": null, "task_id": null, "request_id": null, "source": "command" }
+    },
+    "system_lead": {
+      "owner_id": "system",
+      "workspace": "ws:project_a",
+      "surface": "model_tool",
+      "capabilities": { "read": true, "write": false, "forget": false },
+      "attribution": { "lane_key": null, "task_id": "00000008-0000-4000-8000-0000000000aa", "request_id": null, "source": "lead_agent" }
+    },
+    "system_subagent": {
+      "owner_id": "system",
+      "workspace": "ws:project_a",
+      "surface": "model_tool",
+      "capabilities": { "read": true, "write": false, "forget": false },
+      "attribution": { "lane_key": null, "task_id": "00000008-0000-4000-8000-0000000000aa", "request_id": null, "source": "subagent" }
+    },
+    "system_task_extraction": {
+      "owner_id": "system",
+      "workspace": "ws:project_a",
+      "surface": "extraction",
+      "capabilities": { "read": false, "write": true, "forget": false },
+      "attribution": { "lane_key": null, "task_id": "00000008-0000-4000-8000-0000000000aa", "request_id": null, "source": "task_extraction" }
+    },
+    "unlinked_external": {
+      "owner_id": "provider:telegram:12345",
+      "workspace": null,
+      "surface": "model_tool",
+      "capabilities": { "read": true, "write": true, "forget": true },
+      "attribution": { "lane_key": "u_example_alice:telegram", "task_id": null, "request_id": null, "source": "telegram" }
+    },
+    "linked_owner_on_lane": {
+      "owner_id": "u_example_alice",
+      "workspace": null,
+      "surface": "model_tool",
+      "capabilities": { "read": true, "write": true, "forget": true },
+      "attribution": { "lane_key": "u_example_alice:telegram", "task_id": null, "request_id": null, "source": "telegram" }
+    }
+  },
+  "operations": [
+    {
+      "step": 1,
+      "op": "recall",
+      "context": "system_command_turn",
+      "input": { "message": "when do deploys happen?" },
+      "expect": { "ids_unordered": [], "memory_used": [], "files_absent": ["home/memory/owners/bbc5e661e106c6dcd8dc6dd186454c2f", "ws:project_a/.openalpaca/memory/owners/bbc5e661e106c6dcd8dc6dd186454c2f"] }
+    },
+    {
+      "step": 2,
+      "op": "store",
+      "context": "system_command_turn",
+      "input": { "title": "Leaked", "body": "leaked\n", "kind": "fact" },
+      "expect": { "refused": "fixture:no_owner", "files_absent": ["home/memory/owners/bbc5e661e106c6dcd8dc6dd186454c2f", "ws:project_a/.openalpaca/memory"] }
+    },
+    {
+      "step": 3,
+      "op": "search",
+      "context": "system_lead",
+      "input": { "query": "deploy" },
+      "expect": { "ids_unordered": [], "ids_absent": ["00000008-0000-4000-8000-000000000001"] }
+    },
+    {
+      "step": 4,
+      "op": "search",
+      "context": "system_subagent",
+      "input": { "query": "deploy" },
+      "expect": { "ids_unordered": [], "ids_absent": ["00000008-0000-4000-8000-000000000001"] }
+    },
+    {
+      "step": 5,
+      "op": "extraction",
+      "context": "system_task_extraction",
+      "input": { "typed": "", "tool_output": "Deploys happen on Tuesday mornings and the on-call is the release engineer.", "source": { "type": "task", "id": "00000008-0000-4000-8000-0000000000aa" }, "task_outcome": "completed" },
+      "expect": { "extraction": { "count": 0 }, "model_calls": 0, "files_absent": ["home/memory/owners/bbc5e661e106c6dcd8dc6dd186454c2f"] }
+    },
+    {
+      "step": 6,
+      "op": "store",
+      "context": "unlinked_external",
+      "input": { "title": "From a stranger", "body": "stranger\n", "kind": "preference" },
+      "expect": { "refused": "fixture:no_owner", "files_absent": ["home/memory/owners/c00f1f5b28abd3f37a411afa16975510"] }
+    },
+    {
+      "step": 7,
+      "op": "recall",
+      "context": "linked_owner_on_lane",
+      "input": { "message": "when do deploys happen?" },
+      "expect": { "ids_unordered": ["00000008-0000-4000-8000-000000000001"], "memory_used": [{ "id": "00000008-0000-4000-8000-000000000001", "reason": "recall" }] }
+    }
+  ],
+  "final_state": {
+    "files_absent": [
+      "home/memory/owners/bbc5e661e106c6dcd8dc6dd186454c2f",
+      "home/memory/owners/c00f1f5b28abd3f37a411afa16975510",
+      "home/state/memory-control/home-bbc5e661e106c6dcd8dc6dd186454c2f.json",
+      "home/state/memory-control/home-c00f1f5b28abd3f37a411afa16975510.json",
+      "ws:project_a/.openalpaca/memory"
+    ],
+    "snapshot": { "alice_home": { "notes": { "00000008-0000-4000-8000-000000000001": { "revision": "@current", "origin": "user" } } } }
+  }
+}

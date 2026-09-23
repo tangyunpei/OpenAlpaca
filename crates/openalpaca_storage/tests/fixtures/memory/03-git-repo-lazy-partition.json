@@ -1,0 +1,128 @@
+{
+  "row": {
+    "id": 3,
+    "scenario": "CLI turn inside a git repository with no `.openalpaca/` yet",
+    "required_outcome": "The repository's project partition; the store is created lazily, the same before and after the first artifact"
+  },
+  "design": ["§2 layout (project partition, `.gitignore` `*`)", "§3 rule 1 (MD-5): the marker walk finds `.git`; the store is created lazily on the first project write", "§3 rule 2 (default write scope by kind)", "§7a control snapshot"],
+  "loads_in": ["slice-2", "slice-3"],
+  "notes_for_implementer": "A read never creates the project store (step 1). The first project write creates `<repo>/.openalpaca/memory/` with its own `.gitignore` (exactly `*\\n`), the owner directory and a control snapshot under home state (step 2). `ensure_project_store` in step 3 stands for the artifact path's `ensure_store` — the first artifact write, which lays out the rest of `<repo>/.openalpaca/`; the partition key derived before and after it must be the same, so step 4's note lands in the same partition and snapshot as step 2's. A `preference` defaults to global even from inside the repo (step 5). Slice 2 runs steps 2 and 4 through `memory_files` with the partition given explicitly and checks the same files and modes.",
+  "owners": [
+    { "id": "u_example_alice", "owner_key": "32acea7eb739b08afd959db91e46d450" }
+  ],
+  "database": { "global_users": ["u_example_alice"], "local_user_id": "u_example_alice" },
+  "workspaces": [
+    { "name": "repo", "marker": ".git", "subdirs": ["src/lib"] }
+  ],
+  "daemon": { "cwd": "home", "llm": "configured" },
+  "partitions": [
+    { "name": "alice_home", "owner": "u_example_alice", "scope": "home", "notes": [] },
+    { "name": "repo_project", "owner": "u_example_alice", "scope": "project", "workspace": "repo", "lazy": true }
+  ],
+  "contexts": {
+    "cli_in_repo_subdir": {
+      "owner_id": "u_example_alice",
+      "workspace": "ws:repo/src/lib",
+      "surface": "model_tool",
+      "capabilities": { "read": true, "write": true, "forget": true },
+      "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "cli" }
+    }
+  },
+  "operations": [
+    {
+      "step": 1,
+      "op": "search",
+      "context": "cli_in_repo_subdir",
+      "input": { "query": "anything" },
+      "expect": {
+        "ids_unordered": [],
+        "files_absent": ["ws:repo/.openalpaca"]
+      }
+    },
+    {
+      "step": 2,
+      "op": "store",
+      "context": "cli_in_repo_subdir",
+      "as": "first_project_note",
+      "input": { "title": "Test command", "body": "# Test command\n\nRun `cargo test -p openalpaca_storage` before pushing.\n", "kind": "procedure", "fact_key": "build.validation" },
+      "expect": {
+        "created": true,
+        "scope": "project",
+        "origin": "extracted_user",
+        "files_exist": [
+          "ws:repo/.openalpaca/memory/.gitignore",
+          "ws:repo/.openalpaca/memory/owners/32acea7eb739b08afd959db91e46d450/notes",
+          "ws:repo/.openalpaca/memory/owners/32acea7eb739b08afd959db91e46d450/.history"
+        ],
+        "file_content": { "ws:repo/.openalpaca/memory/.gitignore": "*\n" },
+        "path_within": { "first_project_note": "ws:repo/.openalpaca/memory/owners/32acea7eb739b08afd959db91e46d450/notes" },
+        "filename_matches": { "first_project_note": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}--test-command\\.md$" },
+        "snapshot": {
+          "repo_project": {
+            "partition_key": "@derived",
+            "owner_key": "32acea7eb739b08afd959db91e46d450",
+            "owner_id": "u_example_alice",
+            "root_is": "ws:repo/.openalpaca/memory/owners/32acea7eb739b08afd959db91e46d450",
+            "notes": { "@id:first_project_note": { "revision": "@current", "origin": "extracted_user" } },
+            "pending": null
+          }
+        }
+      }
+    },
+    {
+      "step": 3,
+      "op": "ensure_project_store",
+      "input": { "workspace": "ws:repo" },
+      "expect": {
+        "files_exist": ["ws:repo/.openalpaca/artifacts", "ws:repo/.openalpaca/memory/.gitignore"],
+        "file_content": { "ws:repo/.openalpaca/memory/.gitignore": "*\n" }
+      }
+    },
+    {
+      "step": 4,
+      "op": "store",
+      "context": "cli_in_repo_subdir",
+      "as": "second_project_note",
+      "input": { "title": "Lint command", "body": "# Lint command\n\nRun `cargo clippy -p openalpaca_storage --all-targets`.\n", "kind": "procedure", "fact_key": "build.lint" },
+      "expect": {
+        "created": true,
+        "scope": "project",
+        "path_within": { "second_project_note": "ws:repo/.openalpaca/memory/owners/32acea7eb739b08afd959db91e46d450/notes" },
+        "snapshot": {
+          "repo_project": {
+            "notes": {
+              "@id:first_project_note": { "revision": "@current", "origin": "extracted_user" },
+              "@id:second_project_note": { "revision": "@current", "origin": "extracted_user" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "step": 5,
+      "op": "store",
+      "context": "cli_in_repo_subdir",
+      "as": "pref_from_repo",
+      "input": { "title": "Diff style", "body": "# Diff style\n\nThe user prefers unified diffs.\n", "kind": "preference" },
+      "expect": { "created": true, "scope": "global", "path_within": { "pref_from_repo": "part:alice_home/notes" } }
+    },
+    {
+      "step": 6,
+      "op": "list",
+      "context": "cli_in_repo_subdir",
+      "input": {},
+      "expect": { "ids_unordered": ["@id:first_project_note", "@id:second_project_note", "@id:pref_from_repo"] }
+    },
+    {
+      "step": 7,
+      "op": "list",
+      "context": "cli_in_repo_subdir",
+      "input": { "scope": "project" },
+      "expect": { "ids_unordered": ["@id:first_project_note", "@id:second_project_note"] }
+    }
+  ],
+  "final_state": {
+    "files_exist": ["ws:repo/.git", "ws:repo/.openalpaca/memory/.gitignore"],
+    "file_content": { "ws:repo/.openalpaca/memory/.gitignore": "*\n" }
+  }
+}

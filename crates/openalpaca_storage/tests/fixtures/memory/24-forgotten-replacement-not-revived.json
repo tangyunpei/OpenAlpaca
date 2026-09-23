@@ -1,0 +1,224 @@
+{
+  "row": {
+    "id": "q4",
+    "scenario": "slice-2 query fixture: a forgotten or archived replacement does not revive its predecessor; a lower-authority link is reported, not honored; a cross-partition link is ignored; a candidate supersedes nothing",
+    "required_outcome": "Derived supersession is evaluated from active and archived notes and from tombstones, under the three conditions of design §6, and survives an index rebuild. Supports matrix rows 10 and 16 at the library level."
+  },
+  "design": ["§6 Derived supersession: same partition; the superseder's origin at or above the target's (`imported > external`); not a candidate; archiving or forgetting a replacement does not revive what it replaced", "§7a control snapshot tombstones", "§3 rule 3: same-`fact_key` losers"],
+  "loads_in": ["slice-2"],
+  "notes_for_implementer": "Everything here runs through `memory_files` + `memory_index` with the partitions given; no service, no context beyond the partition. The snapshot of Alice's home partition is explicit because the case is the tombstone: R1 (replacement of O1) is already forgotten, its tombstone keeps `supersedes: [O1]` and origin `extracted_user`. R2 supersedes O2 and is archived. K is a candidate that names C0. X is `external` and names I, an `imported` note (reserved origin, no producer — seeded directly to test the rank). P, in the project partition, names G in the home partition. Pairs W1/W2 share a fact_key with no link. Expected: O1 and O2 stay superseded; C0, I and G stay active; W2 (`user`) wins over W1 (`extracted_user`): `memory_search` still returns W1 flagged `conflict: true` (§3 rule 3, \"reported as conflict by memory_search\"), while the automatic recall path (step 1b — for slice 2, the index query with the automatic-path filter set) excludes it (§5 step 5); `doctor` lists the un-honored link and the same-key pair. Steps 6–8 rebuild the index from scratch and repeat step 1.",
+  "owners": [
+    { "id": "u_example_alice", "owner_key": "32acea7eb739b08afd959db91e46d450" }
+  ],
+  "database": { "global_users": ["u_example_alice"], "local_user_id": "u_example_alice" },
+  "workspaces": [
+    { "name": "project_a", "marker": ".openalpaca" }
+  ],
+  "daemon": { "cwd": "home", "llm": "configured" },
+  "partitions": [
+    {
+      "name": "alice_home",
+      "owner": "u_example_alice",
+      "scope": "home",
+      "notes": [
+        { "id": "00000024-0000-4000-8000-000000000001", "title": "Old office", "kind": "fact", "status": "active", "fact_key": "office.location", "created_at": "2026-08-01T10:00:00Z", "updated_at": "2026-08-01T10:00:00Z", "body": "# Old office\n\nThe office is on Elm Street.\n", "origin": "extracted_user" },
+        { "id": "00000024-0000-4000-8000-000000000003", "title": "Old parking rule", "kind": "fact", "status": "active", "created_at": "2026-08-01T10:00:00Z", "updated_at": "2026-08-01T10:00:00Z", "body": "# Old parking rule\n\nParking is free after 18:00.\n", "origin": "extracted_user" },
+        { "id": "00000024-0000-4000-8000-000000000004", "title": "New parking rule", "kind": "fact", "status": "archived", "created_at": "2026-09-01T10:00:00Z", "updated_at": "2026-09-10T10:00:00Z", "supersedes": ["00000024-0000-4000-8000-000000000003"], "body": "# New parking rule\n\nParking is free after 19:00.\n", "origin": "extracted_user" },
+        { "id": "00000024-0000-4000-8000-000000000005", "title": "Lunch break", "kind": "fact", "status": "active", "created_at": "2026-08-01T10:00:00Z", "updated_at": "2026-08-01T10:00:00Z", "body": "# Lunch break\n\nLunch break is at noon.\n", "origin": "extracted_user" },
+        { "id": "00000024-0000-4000-8000-000000000006", "title": "Lunch break candidate", "kind": "fact", "status": "candidate", "created_at": "2026-09-05T10:00:00Z", "updated_at": "2026-09-05T10:00:00Z", "supersedes": ["00000024-0000-4000-8000-000000000005"], "body": "# Lunch break candidate\n\nLunch break moved to 12:30, said a tool.\n", "origin": "extracted_other" },
+        { "id": "00000024-0000-4000-8000-000000000007", "title": "Imported style guide", "kind": "reference", "status": "active", "created_at": "2026-07-01T10:00:00Z", "updated_at": "2026-07-01T10:00:00Z", "body": "# Imported style guide\n\nHeadings are sentence case.\n", "origin": "imported" },
+        { "id": "00000024-0000-4000-8000-000000000008", "title": "Dropped-in style guide", "kind": "reference", "status": "active", "created_at": "2026-09-15T10:00:00Z", "updated_at": "2026-09-15T10:00:00Z", "supersedes": ["00000024-0000-4000-8000-000000000007"], "body": "# Dropped-in style guide\n\nHeadings are title case.\n", "origin": "external" },
+        { "id": "00000024-0000-4000-8000-000000000009", "title": "Global greeting", "kind": "preference", "status": "active", "created_at": "2026-08-01T10:00:00Z", "updated_at": "2026-08-01T10:00:00Z", "body": "# Global greeting\n\nGreet the user by first name.\n", "origin": "user" },
+        { "id": "00000024-0000-4000-8000-00000000000a", "title": "Meeting day", "kind": "fact", "status": "active", "fact_key": "team.meeting_day", "created_at": "2026-09-01T10:00:00Z", "updated_at": "2026-09-12T10:00:00Z", "body": "# Meeting day\n\nThe team meets on Wednesdays.\n", "origin": "extracted_user" },
+        { "id": "00000024-0000-4000-8000-00000000000b", "title": "Meeting day", "kind": "fact", "status": "active", "fact_key": "team.meeting_day", "created_at": "2026-09-02T10:00:00Z", "updated_at": "2026-09-02T10:00:00Z", "body": "# Meeting day\n\nThe team meets on Thursdays.\n", "origin": "user" }
+      ],
+      "snapshot": {
+        "notes": {
+          "00000024-0000-4000-8000-000000000001": { "revision": "@current", "origin": "extracted_user", "written_at": "2026-08-01T10:00:00Z" },
+          "00000024-0000-4000-8000-000000000003": { "revision": "@current", "origin": "extracted_user", "written_at": "2026-08-01T10:00:00Z" },
+          "00000024-0000-4000-8000-000000000004": { "revision": "@current", "origin": "extracted_user", "written_at": "2026-09-10T10:00:00Z" },
+          "00000024-0000-4000-8000-000000000005": { "revision": "@current", "origin": "extracted_user", "written_at": "2026-08-01T10:00:00Z" },
+          "00000024-0000-4000-8000-000000000006": { "revision": "@current", "origin": "extracted_other", "written_at": "2026-09-05T10:00:00Z" },
+          "00000024-0000-4000-8000-000000000007": { "revision": "@current", "origin": "imported", "written_at": "2026-07-01T10:00:00Z" },
+          "00000024-0000-4000-8000-000000000008": { "revision": "@current", "origin": "external", "written_at": "2026-09-15T10:00:00Z" },
+          "00000024-0000-4000-8000-000000000009": { "revision": "@current", "origin": "user", "written_at": "2026-08-01T10:00:00Z" },
+          "00000024-0000-4000-8000-00000000000a": { "revision": "@current", "origin": "extracted_user", "written_at": "2026-09-12T10:00:00Z" },
+          "00000024-0000-4000-8000-00000000000b": { "revision": "@current", "origin": "user", "written_at": "2026-09-02T10:00:00Z" }
+        },
+        "tombstones": [
+          {
+            "id": "00000024-0000-4000-8000-000000000002",
+            "origin": "extracted_user",
+            "supersedes": ["00000024-0000-4000-8000-000000000001"],
+            "suppressed_sources": ["message:2401"],
+            "forgotten_at": "2026-09-20T10:00:00Z"
+          }
+        ],
+        "pending": null
+      }
+    },
+    {
+      "name": "alice_project_a",
+      "owner": "u_example_alice",
+      "scope": "project",
+      "workspace": "project_a",
+      "notes": [
+        { "id": "00000024-0000-4000-8000-00000000000c", "title": "Project greeting override", "kind": "preference", "status": "active", "created_at": "2026-09-10T10:00:00Z", "updated_at": "2026-09-10T10:00:00Z", "supersedes": ["00000024-0000-4000-8000-000000000009"], "body": "# Project greeting override\n\nGreet the user by surname in this project.\n", "origin": "user" }
+      ]
+    }
+  ],
+  "contexts": {
+    "alice_in_project_a": { "owner_id": "u_example_alice", "workspace": "ws:project_a", "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "gui" } }
+  },
+  "foreign_ids": ["00000024-0000-4000-8000-000000000002"],
+  "operations": [
+    {
+      "step": 1,
+      "op": "search",
+      "context": "alice_in_project_a",
+      "input": { "query": "office parking lunch headings greet meets", "limit": 20 },
+      "expect": {
+        "ids_unordered": [
+          "00000024-0000-4000-8000-000000000005",
+          "00000024-0000-4000-8000-000000000007",
+          "00000024-0000-4000-8000-000000000008",
+          "00000024-0000-4000-8000-000000000009",
+          "00000024-0000-4000-8000-00000000000a",
+          "00000024-0000-4000-8000-00000000000b",
+          "00000024-0000-4000-8000-00000000000c"
+        ],
+        "ids_absent": [
+          "00000024-0000-4000-8000-000000000001",
+          "00000024-0000-4000-8000-000000000003",
+          "00000024-0000-4000-8000-000000000004",
+          "00000024-0000-4000-8000-000000000006"
+        ],
+        "results": {
+          "00000024-0000-4000-8000-000000000008": { "conflict": true, "origin": "external" },
+          "00000024-0000-4000-8000-000000000007": { "status": "active", "origin": "imported", "superseded_by": [] },
+          "00000024-0000-4000-8000-000000000009": { "status": "active", "superseded_by": [] },
+          "00000024-0000-4000-8000-00000000000a": { "conflict": true, "origin": "extracted_user", "status": "active" },
+          "00000024-0000-4000-8000-00000000000b": { "conflict": false, "origin": "user" }
+        }
+      }
+    },
+    {
+      "step": "1b",
+      "op": "recall",
+      "context": "alice_in_project_a",
+      "input": { "message": "which day does the team meet, and how are headings written?" },
+      "expect": {
+        "ids_unordered": ["00000024-0000-4000-8000-00000000000b", "00000024-0000-4000-8000-000000000007", "00000024-0000-4000-8000-000000000008"],
+        "ids_absent": ["00000024-0000-4000-8000-00000000000a", "00000024-0000-4000-8000-000000000006"]
+      }
+    },
+    {
+      "step": 2,
+      "op": "search",
+      "context": "alice_in_project_a",
+      "input": { "query": "office parking lunch meets", "historical": true, "limit": 20 },
+      "expect": {
+        "ids_unordered": [
+          "00000024-0000-4000-8000-000000000001",
+          "00000024-0000-4000-8000-000000000003",
+          "00000024-0000-4000-8000-000000000004",
+          "00000024-0000-4000-8000-000000000005",
+          "00000024-0000-4000-8000-00000000000a",
+          "00000024-0000-4000-8000-00000000000b"
+        ],
+        "ids_absent": ["00000024-0000-4000-8000-000000000002", "00000024-0000-4000-8000-000000000006"],
+        "results": {
+          "00000024-0000-4000-8000-000000000001": { "superseded_by": ["00000024-0000-4000-8000-000000000002"] },
+          "00000024-0000-4000-8000-000000000003": { "superseded_by": ["00000024-0000-4000-8000-000000000004"] },
+          "00000024-0000-4000-8000-000000000004": { "status": "archived" },
+          "00000024-0000-4000-8000-00000000000a": { "conflict": true, "status": "active" }
+        }
+      }
+    },
+    {
+      "step": 3,
+      "op": "search",
+      "context": "alice_in_project_a",
+      "input": { "query": "lunch", "historical": true, "include_candidates": true, "limit": 20 },
+      "expect": { "refused": "invalid_input", "message_contains": ["include_candidates"] }
+    },
+    {
+      "step": 4,
+      "op": "list",
+      "context": "alice_in_project_a",
+      "input": { "include_candidates": true, "include_history": true, "limit": 100 },
+      "expect": {
+        "ids_unordered": [
+          "00000024-0000-4000-8000-000000000001",
+          "00000024-0000-4000-8000-000000000003",
+          "00000024-0000-4000-8000-000000000004",
+          "00000024-0000-4000-8000-000000000005",
+          "00000024-0000-4000-8000-000000000006",
+          "00000024-0000-4000-8000-000000000007",
+          "00000024-0000-4000-8000-000000000008",
+          "00000024-0000-4000-8000-000000000009",
+          "00000024-0000-4000-8000-00000000000a",
+          "00000024-0000-4000-8000-00000000000b",
+          "00000024-0000-4000-8000-00000000000c"
+        ],
+        "ids_absent": ["00000024-0000-4000-8000-000000000002"]
+      }
+    },
+    {
+      "step": 5,
+      "op": "doctor",
+      "input": {},
+      "expect": {
+        "doctor": {
+          "conflicts": [
+            { "type": "supersedes_authority", "note": "00000024-0000-4000-8000-000000000008", "target": "00000024-0000-4000-8000-000000000007" },
+            { "type": "same_fact_key", "note": "00000024-0000-4000-8000-00000000000a", "target": "00000024-0000-4000-8000-00000000000b" }
+          ],
+          "quarantined": []
+        }
+      }
+    },
+    {
+      "step": 6,
+      "op": "erase_cache",
+      "input": {},
+      "expect": {}
+    },
+    {
+      "step": 7,
+      "op": "restart",
+      "input": {},
+      "expect": { "index_state": "ready", "snapshot": { "alice_home": { "tombstones_count": 1 } } }
+    },
+    {
+      "step": 8,
+      "op": "search",
+      "context": "alice_in_project_a",
+      "input": { "query": "office parking lunch headings greet meets", "limit": 20 },
+      "expect": {
+        "ids_unordered": [
+          "00000024-0000-4000-8000-000000000005",
+          "00000024-0000-4000-8000-000000000007",
+          "00000024-0000-4000-8000-000000000008",
+          "00000024-0000-4000-8000-000000000009",
+          "00000024-0000-4000-8000-00000000000a",
+          "00000024-0000-4000-8000-00000000000b",
+          "00000024-0000-4000-8000-00000000000c"
+        ],
+        "ids_absent": ["00000024-0000-4000-8000-000000000001", "00000024-0000-4000-8000-000000000003", "00000024-0000-4000-8000-000000000006"],
+        "results": { "00000024-0000-4000-8000-00000000000a": { "conflict": true } }
+      }
+    },
+    {
+      "step": 9,
+      "op": "search",
+      "context": "alice_in_project_a",
+      "input": { "query": "office", "limit": 5 },
+      "expect": { "ids_unordered": [], "count": 0, "partial": false }
+    }
+  ],
+  "final_state": {
+    "snapshot": { "alice_home": { "tombstones_count": 1, "notes": { "00000024-0000-4000-8000-000000000002": null } } },
+    "notes_not_on_disk": [{ "partition": "alice_home", "id": "00000024-0000-4000-8000-000000000002" }]
+  }
+}

@@ -1,0 +1,290 @@
+{
+  "row": {
+    "id": 17,
+    "scenario": "Workspace move while writing; purge; factory reset; config reset",
+    "required_outcome": "Move refused, then rebound; purge keeps memory; factory reset orphans but never reassigns and leaves the snapshots; config reset keeps the owner"
+  },
+  "design": ["§3 Workspace move: the five ordered steps; §6 recovery table, row workspace move (stale / abandoned / orphaned)", "§2: a factory reset does not touch memory — `state/memory-control/` and the index survive", "§3 Resets: a plain config reset must not delete `identity.*` (slice 0.1, landed); a factory reset mints a new owner; orphans are listed by doctor; `adopt` re-binds", "§6 Management operations: adopt pre- and post-conditions"],
+  "loads_in": ["slice-3"],
+  "notes_for_implementer": "Steps 1–3: a move is refused while a write of that project is pending, then succeeds once the write completes; afterwards the old-key snapshot is gone, the new-key snapshot binds the new directory with `moved_from` null, and the notes are found from the new location. Steps 4–7 inject a crash after move step 2 (the new-key snapshot exists, the directory has not moved): `doctor` names that snapshot `abandoned`, `--repair` deletes it and nothing else. Steps 8–11 inject a crash after step 4 (renamed, old snapshot still present): the old one is `stale`, `--repair` deletes it. Step 12: a purge deletes the workspace's runs and keeps every memory file and snapshot. Steps 13–16: a factory reset deletes the database and both config files and leaves `state/memory-control/` and the index byte for byte; the next boot mints `u_example_alice_reborn`, whose recall is empty; `doctor` lists the old owner key as orphaned; nothing is reassigned. Steps 17–19: `adopt` refuses on a collision (the new owner already has a home partition in step 17), then succeeds once that collision is removed, renaming every partition of the old key. Step 20: a plain config reset leaves `identity.local_user_id` alone. The move's crash injection needs a hook in `PATCH /v1/workspaces`'s five-step sequence; the fixture names the step, the harness owns the hook.",
+  "owners": [
+    { "id": "u_example_alice", "owner_key": "32acea7eb739b08afd959db91e46d450" },
+    { "id": "u_example_alice_reborn", "owner_key": "9bfb77d3249642b6ba22fe7dcade07a0" }
+  ],
+  "database": { "global_users": ["u_example_alice"], "local_user_id": "u_example_alice" },
+  "workspaces": [
+    { "name": "project_a", "marker": ".openalpaca" },
+    { "name": "project_c", "marker": ".openalpaca" }
+  ],
+  "directories": ["moved", "moved_two", "moved_three"],
+  "daemon": { "cwd": "home", "llm": "configured" },
+  "partitions": [
+    {
+      "name": "alice_home",
+      "owner": "u_example_alice",
+      "scope": "home",
+      "notes": [
+        {
+          "id": "00000017-0000-4000-8000-000000000001",
+          "title": "Global note",
+          "kind": "preference",
+          "status": "active",
+          "created_at": "2026-09-23T10:00:00Z",
+          "updated_at": "2026-09-23T10:00:00Z",
+          "body": "# Global note\n\nThe user prefers short answers.\n",
+          "origin": "user"
+        }
+      ]
+    },
+    {
+      "name": "alice_project_a",
+      "owner": "u_example_alice",
+      "scope": "project",
+      "workspace": "project_a",
+      "notes": [
+        {
+          "id": "00000017-0000-4000-8000-000000000002",
+          "title": "Project A release step",
+          "kind": "procedure",
+          "status": "active",
+          "created_at": "2026-09-23T10:00:00Z",
+          "updated_at": "2026-09-23T10:00:00Z",
+          "body": "# Project A release step\n\nTag, then run the release script.\n",
+          "origin": "user"
+        }
+      ]
+    },
+    {
+      "name": "alice_project_c",
+      "owner": "u_example_alice",
+      "scope": "project",
+      "workspace": "project_c",
+      "notes": [
+        {
+          "id": "00000017-0000-4000-8000-000000000003",
+          "title": "Project C note",
+          "kind": "fact",
+          "status": "active",
+          "created_at": "2026-09-23T10:00:00Z",
+          "updated_at": "2026-09-23T10:00:00Z",
+          "body": "# Project C note\n\nProject C ships monthly.\n",
+          "origin": "user"
+        }
+      ]
+    },
+    { "name": "alice_project_moved", "owner": "u_example_alice", "scope": "project", "workspace": "moved", "lazy": true },
+    { "name": "reborn_home", "owner": "u_example_alice_reborn", "scope": "home", "lazy": true },
+    { "name": "reborn_project_moved", "owner": "u_example_alice_reborn", "scope": "project", "workspace": "moved", "lazy": true },
+    { "name": "reborn_project_c", "owner": "u_example_alice_reborn", "scope": "project", "workspace": "project_c", "lazy": true }
+  ],
+  "contexts": {
+    "alice_in_a": { "owner_id": "u_example_alice", "workspace": "ws:project_a", "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "gui" } },
+    "alice_in_moved": { "owner_id": "u_example_alice", "workspace": "dir:moved", "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "gui" } },
+    "alice_in_c": { "owner_id": "u_example_alice", "workspace": "ws:project_c", "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "gui" } },
+    "reborn_in_moved": { "owner_id": "u_example_alice_reborn", "workspace": "dir:moved", "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice_reborn:gui", "task_id": null, "request_id": null, "source": "gui" } },
+    "reborn_global": { "owner_id": "u_example_alice_reborn", "workspace": null, "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice_reborn:gui", "task_id": null, "request_id": null, "source": "gui" } }
+  },
+  "operations": [
+    {
+      "step": 1,
+      "op": "begin_pending_write",
+      "input": { "partition": "alice_project_a" },
+      "expect": {}
+    },
+    {
+      "step": 2,
+      "op": "move_workspace",
+      "input": { "from": "ws:project_a", "to": "dir:moved" },
+      "expect": { "refused": "fixture:write_pending", "files_exist": ["ws:project_a/.openalpaca/memory"], "files_absent": ["dir:moved/.openalpaca"], "snapshot": { "alice_project_a": { "moved_from": null } } }
+    },
+    {
+      "step": 3,
+      "op": "end_pending_write",
+      "input": { "partition": "alice_project_a" },
+      "expect": {}
+    },
+    {
+      "step": 4,
+      "op": "move_workspace",
+      "input": { "from": "ws:project_a", "to": "dir:moved" },
+      "expect": {
+        "files_absent": ["ws:project_a/.openalpaca"],
+        "files_exist": ["dir:moved/.openalpaca/memory/.gitignore", "dir:moved/.openalpaca/memory/owners/32acea7eb739b08afd959db91e46d450/notes"],
+        "snapshot_missing": ["alice_project_a"],
+        "snapshot": { "alice_project_moved": { "moved_from": null, "root_is": "dir:moved/.openalpaca/memory/owners/32acea7eb739b08afd959db91e46d450", "notes": { "00000017-0000-4000-8000-000000000002": { "revision": "@current", "origin": "user" } } } }
+      }
+    },
+    {
+      "step": 5,
+      "op": "search",
+      "context": "alice_in_moved",
+      "input": { "query": "release script" },
+      "expect": { "ids": ["00000017-0000-4000-8000-000000000002"], "results": { "00000017-0000-4000-8000-000000000002": { "scope": "project", "freshness": "verified" } } }
+    },
+    {
+      "step": 6,
+      "op": "move_workspace",
+      "input": { "from": "dir:moved", "to": "dir:moved_two", "crash_after_step": 2 },
+      "expect": {
+        "files_exist": ["dir:moved/.openalpaca/memory"],
+        "files_absent": ["dir:moved_two/.openalpaca"],
+        "snapshot": { "alice_project_moved": { "moved_from": null } }
+      }
+    },
+    {
+      "step": 7,
+      "op": "doctor",
+      "input": {},
+      "expect": { "doctor": { "abandoned": ["dir:moved_two"], "stale": [], "orphans": [] } }
+    },
+    {
+      "step": 8,
+      "op": "doctor_repair",
+      "input": {},
+      "expect": { "doctor": { "abandoned": [], "stale": [] }, "snapshot": { "alice_project_moved": { "moved_from": null, "notes": { "00000017-0000-4000-8000-000000000002": { "revision": "@current", "origin": "user" } } } }, "files_exist": ["dir:moved/.openalpaca/memory"] }
+    },
+    {
+      "step": 9,
+      "op": "move_workspace",
+      "input": { "from": "dir:moved", "to": "dir:moved_three", "crash_after_step": 4 },
+      "expect": {
+        "files_absent": ["dir:moved/.openalpaca"],
+        "files_exist": ["dir:moved_three/.openalpaca/memory/owners/32acea7eb739b08afd959db91e46d450/notes"]
+      }
+    },
+    {
+      "step": 10,
+      "op": "doctor",
+      "input": {},
+      "expect": { "doctor": { "stale": ["dir:moved"], "abandoned": [] } }
+    },
+    {
+      "step": 11,
+      "op": "doctor_repair",
+      "input": {},
+      "expect": { "doctor": { "stale": [], "abandoned": [] }, "snapshot_missing": ["alice_project_moved"] }
+    },
+    {
+      "step": 12,
+      "op": "move_workspace",
+      "input": { "from": "dir:moved_three", "to": "dir:moved" },
+      "expect": { "files_exist": ["dir:moved/.openalpaca/memory/owners/32acea7eb739b08afd959db91e46d450/notes"], "snapshot": { "alice_project_moved": { "moved_from": null } } }
+    },
+    {
+      "step": 13,
+      "op": "purge",
+      "input": { "workspace": "dir:moved" },
+      "expect": {
+        "notes_on_disk": [{ "partition": "alice_project_moved", "id": "00000017-0000-4000-8000-000000000002" }],
+        "files_exist": ["dir:moved/.openalpaca/memory/.gitignore"],
+        "snapshot": { "alice_project_moved": { "notes": { "00000017-0000-4000-8000-000000000002": { "revision": "@current", "origin": "user" } } } }
+      }
+    },
+    {
+      "step": 14,
+      "op": "factory_reset",
+      "input": {},
+      "expect": {
+        "files_absent": ["home/state/openalpaca.db", "home/config/llm.toml"],
+        "files_exist": ["home/state/memory-control", "home/state/cache/memory-index-v1.sqlite", "home/memory/owners/32acea7eb739b08afd959db91e46d450/notes"],
+        "file_unchanged": ["home/state/memory-control/home-32acea7eb739b08afd959db91e46d450.json", "home/state/cache/memory-index-v1.sqlite"],
+        "snapshot": {
+          "alice_home": { "owner_key": "32acea7eb739b08afd959db91e46d450", "owner_id": "u_example_alice", "notes": { "00000017-0000-4000-8000-000000000001": { "revision": "@current", "origin": "user" } } },
+          "alice_project_moved": { "owner_key": "32acea7eb739b08afd959db91e46d450", "owner_id": "u_example_alice" },
+          "alice_project_c": { "owner_key": "32acea7eb739b08afd959db91e46d450", "owner_id": "u_example_alice" }
+        },
+        "preview_contains": ["state/memory-control/", "state/cache/memory-index-v1.sqlite", "memory/"]
+      }
+    },
+    {
+      "step": 15,
+      "op": "boot",
+      "input": { "local_user_id": "u_example_alice_reborn" },
+      "expect": { "owner_id_after": "u_example_alice_reborn", "files_absent": ["home/memory/owners/9bfb77d3249642b6ba22fe7dcade07a0/notes/00000017-0000-4000-8000-000000000001"] }
+    },
+    {
+      "step": 16,
+      "op": "recall",
+      "context": "reborn_in_moved",
+      "input": { "message": "what is the release step and what answers do I like?" },
+      "expect": { "ids_unordered": [], "ids_absent": ["00000017-0000-4000-8000-000000000001", "00000017-0000-4000-8000-000000000002"] }
+    },
+    {
+      "step": 17,
+      "op": "doctor",
+      "input": {},
+      "expect": { "doctor": { "orphans": ["32acea7eb739b08afd959db91e46d450"], "quarantined": [] } }
+    },
+    {
+      "step": 18,
+      "op": "store",
+      "context": "reborn_global",
+      "as": "reborn_note",
+      "input": { "title": "Reborn note", "body": "# Reborn note\n\nWritten by the new owner.\n", "kind": "fact" },
+      "expect": { "created": true, "path_within": { "reborn_note": "part:reborn_home/notes" } }
+    },
+    {
+      "step": 19,
+      "op": "adopt",
+      "input": { "owner_key": "32acea7eb739b08afd959db91e46d450" },
+      "expect": {
+        "refused": "fixture:adopt_collision",
+        "message_contains": ["9bfb77d3249642b6ba22fe7dcade07a0"],
+        "files_exist": ["home/memory/owners/32acea7eb739b08afd959db91e46d450/notes", "home/memory/owners/9bfb77d3249642b6ba22fe7dcade07a0/notes", "dir:moved/.openalpaca/memory/owners/32acea7eb739b08afd959db91e46d450/notes"],
+        "snapshot": { "alice_home": { "owner_id": "u_example_alice" }, "alice_project_moved": { "owner_id": "u_example_alice" } }
+      }
+    },
+    {
+      "step": 20,
+      "op": "forget",
+      "context": "reborn_global",
+      "input": { "targets": [{ "id": "@id:reborn_note", "expected_revision": "@rev:reborn_note" }], "confirmation": "approved" },
+      "expect": { "status": { "@id:reborn_note": "forgotten" } }
+    },
+    {
+      "step": 21,
+      "op": "remove_partition",
+      "input": { "partition": "reborn_home" },
+      "expect": { "files_absent": ["home/memory/owners/9bfb77d3249642b6ba22fe7dcade07a0"], "snapshot_missing": ["reborn_home"] }
+    },
+    {
+      "step": 22,
+      "op": "adopt",
+      "input": { "owner_key": "32acea7eb739b08afd959db91e46d450" },
+      "expect": {
+        "files_absent": ["home/memory/owners/32acea7eb739b08afd959db91e46d450", "dir:moved/.openalpaca/memory/owners/32acea7eb739b08afd959db91e46d450", "ws:project_c/.openalpaca/memory/owners/32acea7eb739b08afd959db91e46d450", "home/state/memory-control/home-32acea7eb739b08afd959db91e46d450.json"],
+        "files_exist": ["home/memory/owners/9bfb77d3249642b6ba22fe7dcade07a0/notes", "dir:moved/.openalpaca/memory/owners/9bfb77d3249642b6ba22fe7dcade07a0/notes", "ws:project_c/.openalpaca/memory/owners/9bfb77d3249642b6ba22fe7dcade07a0/notes", "home/state/memory-control/home-9bfb77d3249642b6ba22fe7dcade07a0.json"],
+        "snapshot": {
+          "reborn_home": { "owner_key": "9bfb77d3249642b6ba22fe7dcade07a0", "owner_id": "u_example_alice_reborn", "notes": { "00000017-0000-4000-8000-000000000001": { "revision": "@current", "origin": "user" } } },
+          "reborn_project_moved": { "owner_key": "9bfb77d3249642b6ba22fe7dcade07a0", "owner_id": "u_example_alice_reborn", "notes": { "00000017-0000-4000-8000-000000000002": { "revision": "@current", "origin": "user" } } },
+          "reborn_project_c": { "owner_key": "9bfb77d3249642b6ba22fe7dcade07a0", "owner_id": "u_example_alice_reborn", "notes": { "00000017-0000-4000-8000-000000000003": { "revision": "@current", "origin": "user" } } }
+        },
+        "adopted_partitions_count": 3
+      }
+    },
+    {
+      "step": 23,
+      "op": "recall",
+      "context": "reborn_in_moved",
+      "input": { "message": "what is the release step and what answers do I like?" },
+      "expect": { "ids_unordered": ["00000017-0000-4000-8000-000000000001", "00000017-0000-4000-8000-000000000002"] }
+    },
+    {
+      "step": 24,
+      "op": "config_reset",
+      "input": {},
+      "expect": { "owner_id_after": "u_example_alice_reborn" }
+    },
+    {
+      "step": 25,
+      "op": "recall",
+      "context": "reborn_global",
+      "input": { "message": "what answers do I like?" },
+      "expect": { "ids": ["00000017-0000-4000-8000-000000000001"] }
+    }
+  ],
+  "final_state": {
+    "files_absent": ["home/memory/owners/32acea7eb739b08afd959db91e46d450"],
+    "snapshot": { "reborn_home": { "owner_id": "u_example_alice_reborn" } }
+  }
+}

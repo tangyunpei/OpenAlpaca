@@ -1,0 +1,32 @@
+{
+  "row": {
+    "id": 6,
+    "scenario": "Any slice-0-or-later build meets a newer database",
+    "required_outcome": "Refused with the 0.5 text; bytes unchanged; the message names no remedy verb"
+  },
+  "design": ["plan slice 0.5 (landed on this branch): refuse any schema_version above the newest registered migration, before any statement runs", "plan §4 Rollback"],
+  "loads_in": ["slice-0", "slice-3"],
+  "notes_for_implementer": "Not a memory-library fixture: it is the database opener's test, already landed by slice 0.5, and restated here so the matrix is complete. A fresh database is created through `Database::open`, closed, its `schema_version` stamped to 99 with a plain `rusqlite` connection, then hashed and opened again. The message is verbatim from plan slice 0.5 with `<path>` the absolute path, `<n>` 99 and `<max>` the newest registered migration (42 today, 43 after 3.5); the literal `reset --factory` must not appear. The test must keep passing unchanged across 3.5, so it reads `<max>` from `migrations::MIGRATIONS.last().version` rather than a literal.",
+  "owners": [],
+  "partitions": [],
+  "directories": ["db"],
+  "operations": [
+    {
+      "step": 1,
+      "op": "open_database",
+      "input": { "stamped_version": 99, "path": "dir:db/openalpaca.db" },
+      "expect": {
+        "refused": "fixture:newer_schema",
+        "message_contains": [
+          "is at schema version 99, which is newer than this build knows",
+          "Use the OpenAlpaca build that created it. Nothing was changed."
+        ],
+        "message_not_contains": ["reset --factory", "Unsupported legacy schema version"],
+        "file_unchanged": ["dir:db/openalpaca.db"]
+      }
+    }
+  ],
+  "final_state": {
+    "file_unchanged": ["dir:db/openalpaca.db"]
+  }
+}

@@ -1,0 +1,98 @@
+{
+  "row": {
+    "id": 12,
+    "scenario": "A short Chinese term, a mixed code identifier, negation, punctuation",
+    "required_outcome": "Valid query handling and measured recall; no whole-message AND failure"
+  },
+  "design": ["§5 step 3: normalize, keep exact identifiers and paths beside normalized terms, union of terms, literal AST never a caller MATCH expression", "§5 step 4: every ≥3-character term against both tables; phrases and exact identifiers literal on the trigram table; 1–2 character queries by a bounded scoped substring pass with `partial`", "§7a MatchReason"],
+  "loads_in": ["slice-2"],
+  "notes_for_implementer": "Four notes and a decoy. The queries mix a short Chinese term, a `SCREAMING_SNAKE` environment variable, a `crate::module` path, a negated sentence and shell punctuation; each must be handled as a valid literal query (no FTS5 syntax error, no empty result because one word of the message is missing) and find its note by the union rule. Negation is not interpreted: the query `not tabs` returns the note that says `Do not use tabs`, and the loader checks the excerpt keeps the `not`. `match_includes` names the reason the design determines (an alias hit is `alias`, an exact identifier is `phrase` or `term`); for the 1- and 2-character CJK substring pass the design names no MatchReason, so those steps check the id only. The decoy (apples) must never appear.",
+  "owners": [
+    { "id": "u_example_alice", "owner_key": "32acea7eb739b08afd959db91e46d450" }
+  ],
+  "database": { "global_users": ["u_example_alice"], "local_user_id": "u_example_alice" },
+  "daemon": { "cwd": "home", "llm": "configured" },
+  "partitions": [
+    {
+      "name": "alice_home",
+      "owner": "u_example_alice",
+      "scope": "home",
+      "notes": [
+        {
+          "id": "00000012-0000-4000-8000-000000000001",
+          "title": "回答风格",
+          "kind": "preference",
+          "status": "active",
+          "aliases": ["简洁", "answer style"],
+          "created_at": "2026-09-23T10:00:00Z",
+          "updated_at": "2026-09-23T10:00:00Z",
+          "body": "# 回答风格\n\n用户喜欢简洁的回答。\n",
+          "origin": "user"
+        },
+        {
+          "id": "00000012-0000-4000-8000-000000000002",
+          "title": "Scratch store location",
+          "kind": "procedure",
+          "status": "active",
+          "tags": ["development"],
+          "created_at": "2026-09-23T10:01:00Z",
+          "updated_at": "2026-09-23T10:01:00Z",
+          "body": "# Scratch store location\n\nSet `OPENALPACA_HOME_STORE` to an absolute scratch path before running the daemon; the memory library lives in `openalpaca_storage::memory_files`.\n",
+          "origin": "user"
+        },
+        {
+          "id": "00000012-0000-4000-8000-000000000003",
+          "title": "Indentation rule",
+          "kind": "decision",
+          "status": "active",
+          "created_at": "2026-09-23T10:02:00Z",
+          "updated_at": "2026-09-23T10:02:00Z",
+          "body": "# Indentation rule\n\nDo not use tabs; this project indents with four spaces.\n",
+          "origin": "user"
+        },
+        {
+          "id": "00000012-0000-4000-8000-000000000004",
+          "title": "Bench command",
+          "kind": "procedure",
+          "status": "active",
+          "created_at": "2026-09-23T10:03:00Z",
+          "updated_at": "2026-09-23T10:03:00Z",
+          "body": "# Bench command\n\nRun `cargo test --release -p openalpaca_storage -- --ignored bench_` and read p50/p95 (ms).\n",
+          "origin": "user"
+        },
+        {
+          "id": "00000012-0000-4000-8000-000000000005",
+          "title": "Fruit",
+          "kind": "fact",
+          "status": "active",
+          "created_at": "2026-09-23T10:04:00Z",
+          "updated_at": "2026-09-23T10:04:00Z",
+          "body": "# Fruit\n\nApples are in season in October.\n",
+          "origin": "user"
+        }
+      ]
+    }
+  ],
+  "contexts": {
+    "alice_tool": { "owner_id": "u_example_alice", "workspace": null, "surface": "model_tool", "capabilities": { "read": true, "write": true, "forget": true }, "attribution": { "lane_key": "u_example_alice:gui", "task_id": null, "request_id": null, "source": "gui" } }
+  },
+  "operations": [
+    { "step": 1, "op": "search", "context": "alice_tool", "input": { "query": "简洁" }, "expect": { "ids": ["00000012-0000-4000-8000-000000000001"], "results": { "00000012-0000-4000-8000-000000000001": { "match_includes": ["alias"] } }, "ids_absent": ["00000012-0000-4000-8000-000000000005"] } },
+    { "step": 2, "op": "search", "context": "alice_tool", "input": { "query": "答" }, "expect": { "ids": ["00000012-0000-4000-8000-000000000001"], "partial": false } },
+    { "step": 3, "op": "search", "context": "alice_tool", "input": { "query": "喜欢" }, "expect": { "ids": ["00000012-0000-4000-8000-000000000001"], "partial": false } },
+    { "step": 4, "op": "search", "context": "alice_tool", "input": { "query": "简洁的回答" }, "expect": { "ids": ["00000012-0000-4000-8000-000000000001"], "results": { "00000012-0000-4000-8000-000000000001": { "match_includes": ["trigram"] } } } },
+    { "step": 5, "op": "search", "context": "alice_tool", "input": { "query": "OPENALPACA_HOME_STORE" }, "expect": { "ids": ["00000012-0000-4000-8000-000000000002"], "results": { "00000012-0000-4000-8000-000000000002": { "excerpt_contains": "OPENALPACA_HOME_STORE" } } } },
+    { "step": 6, "op": "search", "context": "alice_tool", "input": { "query": "openalpaca_storage::memory_files" }, "expect": { "ids": ["00000012-0000-4000-8000-000000000002"] } },
+    { "step": 7, "op": "search", "context": "alice_tool", "input": { "query": "memory_files" }, "expect": { "ids": ["00000012-0000-4000-8000-000000000002"] } },
+    { "step": 8, "op": "search", "context": "alice_tool", "input": { "query": "not tabs" }, "expect": { "ids": ["00000012-0000-4000-8000-000000000003"], "results": { "00000012-0000-4000-8000-000000000003": { "excerpt_contains": "Do not use tabs" } } } },
+    { "step": 9, "op": "search", "context": "alice_tool", "input": { "query": "should I indent with tabs or spaces?" }, "expect": { "ids": ["00000012-0000-4000-8000-000000000003"], "ids_absent": ["00000012-0000-4000-8000-000000000005"] } },
+    { "step": 10, "op": "search", "context": "alice_tool", "input": { "query": "cargo test --ignored bench_" }, "expect": { "ids": ["00000012-0000-4000-8000-000000000004"] } },
+    { "step": 11, "op": "search", "context": "alice_tool", "input": { "query": "p50/p95 (ms)" }, "expect": { "ids": ["00000012-0000-4000-8000-000000000004"] } },
+    { "step": 12, "op": "search", "context": "alice_tool", "input": { "query": "???" }, "expect": { "ids_unordered": [], "count": 0 } },
+    { "step": 13, "op": "search", "context": "alice_tool", "input": { "query": "\"" }, "expect": { "ids_unordered": [], "count": 0 } },
+    { "step": 14, "op": "search", "context": "alice_tool", "input": { "query": "please remind me which answer style the user 喜欢 and whether the daemon needs OPENALPACA_HOME_STORE" }, "expect": { "ids_unordered": ["00000012-0000-4000-8000-000000000001", "00000012-0000-4000-8000-000000000002"], "ids_absent": ["00000012-0000-4000-8000-000000000005"] } },
+    { "step": 15, "op": "search", "context": "alice_tool", "input": { "query": "简洁 answers" }, "expect": { "ids": ["00000012-0000-4000-8000-000000000001"] } },
+    { "step": 16, "op": "search", "context": "alice_tool", "input": { "query": "苹果" }, "expect": { "ids_unordered": [], "count": 0 } },
+    { "step": 17, "op": "search", "context": "alice_tool", "input": { "query": "" }, "expect": { "refused": "invalid_input" } }
+  ]
+}
