@@ -32,8 +32,9 @@ use chrono::Utc;
 use futures_util::stream::Stream;
 use openalpaca_core::events::SystemEvent;
 use std::{collections::HashMap, convert::Infallible, sync::Arc};
+use tokio::sync::broadcast::{Receiver, error::RecvError};
 use tokio_stream::StreamExt;
-use tokio_stream::wrappers::BroadcastStream;
+use tokio_util::sync::CancellationToken;
 
 use super::chat_types::*;
 use crate::AppState;
@@ -496,7 +497,7 @@ pub async fn chat_stream_handler(
         }
     };
 
-    let stream = make_sse_stream(rx);
+    let stream = make_sse_stream(rx, state.cancel_token.clone());
 
     let sse_keep_alive_secs = state.daemon_config.load().server.sse_keep_alive_secs;
     Sse::new(stream)
@@ -504,20 +505,96 @@ pub async fn chat_stream_handler(
         .into_response()
 }
 
-fn make_sse_stream(
-    rx: tokio::sync::broadcast::Receiver<openalpaca_core::chat::ChatStreamEvent>,
-) -> impl Stream<Item = Result<Event, Infallible>> {
-    let stream = BroadcastStream::new(rx);
+/// The one sentence a stream gets when the daemon goes away under it.
+///
+/// Sent as an `error` frame, because that is what it is: this stream will
+/// not carry the turn's `done`, and the GUI's reader and the CLI's reader
+/// both treat `error` as terminal. It says what happens next, because the
+/// boot sweep makes that knowable: a run left non-terminal comes back
+/// `interrupted` (`TaskRepository::interrupt_all_non_terminal`), and
+/// `rerun` restarts it.
+pub(crate) const SHUTDOWN_SSE_MESSAGE: &str =
+    "The daemon is shutting down, so this stream ended before the turn finished. \
+     If the turn had started a workflow, that run comes back as `interrupted` when \
+     the daemon starts again — rerun it to pick the work back up.";
 
-    // A lagged subscriber (`Err`) is skipped, not closed: it resumes at the
-    // oldest event still buffered, and the `done` that ends every turn is the
-    // last one in, so the authoritative content still arrives.
-    stream.filter_map(|result| match result {
-        Ok(event) => {
-            let (name, data) = sse_frame(&event);
-            Some(Ok(Event::default().event(name).data(data)))
+pub(crate) fn make_sse_stream(
+    rx: Receiver<openalpaca_core::chat::ChatStreamEvent>,
+    cancel: CancellationToken,
+) -> impl Stream<Item = Result<Event, Infallible>> {
+    sse_frames(rx, cancel).map(|(name, data)| Ok(Event::default().event(name).data(data)))
+}
+
+/// Where the frames of one chat stream are.
+struct SseState {
+    rx: Receiver<openalpaca_core::chat::ChatStreamEvent>,
+    cancel: CancellationToken,
+    /// A `done` or `error` has gone out — the turn's own, or the shutdown
+    /// farewell. After that a shutdown ends the stream silently: telling a
+    /// client whose turn finished that it was cut off would be a lie.
+    terminal_sent: bool,
+    /// The shutdown farewell has gone out; the stream ends on the next poll,
+    /// whatever the turn is still producing.
+    farewell_sent: bool,
+}
+
+/// The `(event name, data)` pairs of one chat stream, ending when the turn's
+/// sender drops **or when the daemon begins shutting down**.
+///
+/// The second exit is the point. The sender lives in `ChatStreamManager`,
+/// whose only garbage collector (`spawn_chat_cleanup`) stops on the same
+/// token, so at shutdown nothing else would ever end this body — and an
+/// unfinished response body is exactly what `with_graceful_shutdown` waits
+/// on, until the 10 s watchdog force-exits and skips the whole shutdown tail.
+///
+/// Split from [`make_sse_stream`] so it can be asserted without a server:
+/// axum's `Event` does not expose what it holds.
+fn sse_frames(
+    rx: Receiver<openalpaca_core::chat::ChatStreamEvent>,
+    cancel: CancellationToken,
+) -> impl Stream<Item = (&'static str, String)> {
+    let state = SseState {
+        rx,
+        cancel,
+        terminal_sent: false,
+        farewell_sent: false,
+    };
+    futures_util::stream::unfold(state, |mut st| async move {
+        if st.farewell_sent {
+            return None;
         }
-        Err(_) => None,
+        loop {
+            tokio::select! {
+                // Biased so an event already in the buffer — above all a
+                // `done` — wins a cancel that arrives in the same tick: the
+                // turn really finished, and it must be told so.
+                biased;
+                received = st.rx.recv() => match received {
+                    Ok(event) => {
+                        let frame = sse_frame(&event);
+                        if matches!(frame.0, "done" | "error") {
+                            st.terminal_sent = true;
+                        }
+                        return Some((frame, st));
+                    }
+                    // A lagged subscriber is skipped, not closed: it resumes
+                    // at the oldest event still buffered, and the `done` that
+                    // ends every turn is the last one in, so the authoritative
+                    // content still arrives.
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => return None,
+                },
+                _ = st.cancel.cancelled() => {
+                    if st.terminal_sent {
+                        return None;
+                    }
+                    st.terminal_sent = true;
+                    st.farewell_sent = true;
+                    let data = serde_json::json!({ "message": SHUTDOWN_SSE_MESSAGE }).to_string();
+                    return Some((("error", data), st));
+                }
+            }
+        }
     })
 }
 
@@ -1060,6 +1137,132 @@ mod tests {
             "the answering model does not support image input"
         );
         assert!(data.get("attachments_used").is_none());
+    }
+
+    // ── The SSE body ends at shutdown (plan row 2) ──────────────────────
+
+    type Frames = std::pin::Pin<Box<dyn futures_util::Stream<Item = (&'static str, String)> + Send>>;
+
+    fn frames(
+        rx: tokio::sync::broadcast::Receiver<openalpaca_core::chat::ChatStreamEvent>,
+        cancel: &CancellationToken,
+    ) -> Frames {
+        Box::pin(sse_frames(rx, cancel.clone()))
+    }
+
+    /// The next frame, or `None` once the stream has ended. Bounded, so a
+    /// stream that fails to end fails the test instead of hanging it.
+    async fn next_frame(stream: &mut Frames) -> Option<(&'static str, String)> {
+        tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("the SSE stream neither yielded nor ended within 2 s")
+    }
+
+    fn delta(text: &str) -> openalpaca_core::chat::ChatStreamEvent {
+        openalpaca_core::chat::ChatStreamEvent::Delta {
+            content: text.to_string(),
+        }
+    }
+
+    fn farewell_message(data: &str) -> String {
+        let parsed: serde_json::Value = serde_json::from_str(data).expect("error data is JSON");
+        parsed["message"].as_str().expect("an error frame carries a message").to_string()
+    }
+
+    #[tokio::test]
+    async fn sse_stream_relays_in_order_and_ends_when_the_turn_sender_drops() {
+        let (tx, rx) = tokio::sync::broadcast::channel(16);
+        let cancel = CancellationToken::new();
+        let mut stream = frames(rx, &cancel);
+
+        tx.send(openalpaca_core::chat::ChatStreamEvent::Thinking).unwrap();
+        tx.send(delta("Par")).unwrap();
+        tx.send(make_done(None)).unwrap();
+        drop(tx);
+
+        assert_eq!(next_frame(&mut stream).await.unwrap().0, "thinking");
+        let (name, data) = next_frame(&mut stream).await.unwrap();
+        assert_eq!(name, "delta");
+        assert!(data.contains("Par"));
+        assert_eq!(next_frame(&mut stream).await.unwrap().0, "done");
+        assert!(next_frame(&mut stream).await.is_none(), "a dropped sender ends the stream");
+    }
+
+    /// Unchanged from the `BroadcastStream` it replaced: a lag is skipped, not
+    /// fatal, and the `done` still arrives.
+    #[tokio::test]
+    async fn sse_stream_skips_a_lag_and_still_delivers_done() {
+        let (tx, rx) = tokio::sync::broadcast::channel(2);
+        let cancel = CancellationToken::new();
+        let mut stream = frames(rx, &cancel);
+
+        for text in ["a", "b", "c"] {
+            tx.send(delta(text)).unwrap();
+        }
+        tx.send(make_done(None)).unwrap();
+        drop(tx);
+
+        let (name, data) = next_frame(&mut stream).await.unwrap();
+        assert_eq!(name, "delta");
+        assert!(data.contains(r#""c""#), "resumes at the oldest event still buffered: {data}");
+        assert_eq!(next_frame(&mut stream).await.unwrap().0, "done");
+        assert!(next_frame(&mut stream).await.is_none());
+    }
+
+    /// The defect: with the turn's sender still alive (the GC that would drop
+    /// it stops on the same token), only the cancel can end the body.
+    #[tokio::test]
+    async fn a_shutdown_ends_the_stream_with_one_error_frame() {
+        let (tx, rx) = tokio::sync::broadcast::channel(16);
+        let cancel = CancellationToken::new();
+        let mut stream = frames(rx, &cancel);
+
+        cancel.cancel();
+        let (name, data) = next_frame(&mut stream).await.unwrap();
+        assert_eq!(name, "error");
+        assert_eq!(farewell_message(&data), SHUTDOWN_SSE_MESSAGE);
+
+        // Whatever the turn still produces is not relayed after the farewell.
+        tx.send(delta("late")).unwrap();
+        assert!(next_frame(&mut stream).await.is_none(), "the farewell is the last frame");
+        drop(tx);
+    }
+
+    /// `biased`: a `done` already buffered wins a same-tick cancel, and since
+    /// the turn has had its terminal frame, the shutdown adds nothing.
+    #[tokio::test]
+    async fn a_buffered_done_wins_a_same_tick_shutdown() {
+        let (tx, rx) = tokio::sync::broadcast::channel(16);
+        let cancel = CancellationToken::new();
+        let mut stream = frames(rx, &cancel);
+
+        tx.send(make_done(None)).unwrap();
+        cancel.cancel();
+
+        assert_eq!(next_frame(&mut stream).await.unwrap().0, "done");
+        assert!(
+            next_frame(&mut stream).await.is_none(),
+            "a finished turn must not be told it was cut off"
+        );
+        drop(tx);
+    }
+
+    /// A turn caught mid-answer gets what was buffered, then the farewell.
+    #[tokio::test]
+    async fn a_shutdown_mid_answer_delivers_the_buffer_then_says_goodbye() {
+        let (tx, rx) = tokio::sync::broadcast::channel(16);
+        let cancel = CancellationToken::new();
+        let mut stream = frames(rx, &cancel);
+
+        tx.send(delta("half an ans")).unwrap();
+        cancel.cancel();
+
+        assert_eq!(next_frame(&mut stream).await.unwrap().0, "delta");
+        let (name, data) = next_frame(&mut stream).await.unwrap();
+        assert_eq!(name, "error");
+        assert_eq!(farewell_message(&data), SHUTDOWN_SSE_MESSAGE);
+        assert!(next_frame(&mut stream).await.is_none());
+        drop(tx);
     }
 
     /// **S2.** The reasoning event has its own name on the wire and carries

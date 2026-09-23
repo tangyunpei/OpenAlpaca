@@ -66,8 +66,10 @@ pub struct AppState {
     /// from `POST /v1/command {"command":"shutdown"}` or from SIGINT/SIGTERM,
     /// which converge on the same future — before it stops accepting
     /// connections. A handler whose connection outlives its request selects
-    /// on it: the `/v1/events` socket does, so its client is told the daemon
-    /// is going away instead of being left on a socket that dies with the
-    /// process.
+    /// on it: the `/v1/events` socket, so its client is told the daemon is
+    /// going away instead of being left on a socket that dies with the
+    /// process; and the `/v1/chat/stream/{id}` SSE body, which
+    /// `with_graceful_shutdown` waits on and which nothing else ends at
+    /// shutdown, so without it the 10 s watchdog force-exits the daemon.
     pub cancel_token: tokio_util::sync::CancellationToken,
 }

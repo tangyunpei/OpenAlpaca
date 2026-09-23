@@ -639,7 +639,7 @@ comments are sent every `[server] sse_keep_alive_secs` (default 15).
 | `confirmation_requested` | `{"request_id", "tool_name", "tool_arguments"}` | A tool is waiting for approval. Does not end the stream. |
 | `confirmation_resolved` | `{"request_id", "outcome"}` | That prompt is no longer pending. Does not end the stream. |
 | `done` | see below | The turn finished. Terminal. |
-| `error` | `{"message": "..."}` | The turn failed. Terminal. |
+| `error` | `{"message": "..."}` | The turn failed, or the daemon is shutting down. Terminal. |
 
 The `done` payload:
 
@@ -698,6 +698,21 @@ assistant message, sent as the one fallback `delta`, carried on `done.content`.
 the same line is the message, but the error channel is kept: the stream's
 terminal frame is `error` rather than `done`, and no assistant message is
 stored.
+
+**A shutdown ends the stream.** When the daemon begins shutting down — `POST
+/v1/command {"command":"shutdown"}`, SIGINT or SIGTERM — an open stream that
+has not yet sent its `done` or `error` gets one last `error` frame and ends:
+
+> The daemon is shutting down, so this stream ended before the turn finished.
+> If the turn had started a workflow, that run comes back as `interrupted` when
+> the daemon starts again — rerun it to pick the work back up.
+
+Anything already buffered is delivered first, so a turn whose `done` was in the
+buffer is told it finished, not that it was cut off; a stream that has already
+sent its terminal frame just ends. Nothing the turn produces after the farewell
+is relayed. Until this existed, an open stream held the shutdown open until the
+10-second watchdog force-exited the daemon (see
+[Startup and Lifecycle](#startup-and-lifecycle)).
 
 **A turn never claims a run it did not start.** Before a main-loop answer is
 returned, the daemon checks any task id the answer states. If no
