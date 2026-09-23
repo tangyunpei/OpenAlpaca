@@ -221,10 +221,7 @@ impl ControlSnapshot {
         root: &str,
     ) -> Result<(), String> {
         if self.root != root {
-            return Err(format!(
-                "bound to `{}`, read for `{root}`",
-                self.root
-            ));
+            return Err(format!("bound to `{}`, read for `{root}`", self.root));
         }
         if self.partition_key != partition_key {
             return Err(format!(

@@ -47,7 +47,10 @@ fn partition_keys_have_the_design_shape() {
     assert_eq!(&key["proj-".len() + OWNER_KEY_HEX + 1..], dir_key(dir));
     assert_eq!(dir_key(dir), &sha256_hex(dir.as_bytes())[..DIR_KEY_HEX]);
     // Two different directories, two different keys; the same one, the same.
-    assert_ne!(dir_key(dir), dir_key("/tmp/y/.openalpaca/memory/owners/abc"));
+    assert_ne!(
+        dir_key(dir),
+        dir_key("/tmp/y/.openalpaca/memory/owners/abc")
+    );
     assert_eq!(project_partition_key(&owner, dir), key);
 }
 
@@ -128,14 +131,15 @@ fn design_example_round_trips_byte_identically() {
     assert_eq!(note.sources.len(), 1);
     assert_eq!(note.sources[0].kind, SourceType::Task);
     assert_eq!(note.sources[0].id, "7c1e0b2a-4d61-4f0e-9a3c-2b7f1d5e8c90");
-    assert_eq!(
-        note.sources[0].observed_at,
-        Some(ts(2026, 9, 23, 9, 55, 0))
-    );
+    assert_eq!(note.sources[0].observed_at, Some(ts(2026, 9, 23, 9, 55, 0)));
     assert!(note.supersedes.is_empty());
     assert!(note.unknown.is_empty());
     assert!(note.body.starts_with("# Build and test commands"));
-    assert_eq!(note.serialize(), EXAMPLE, "parse then write is byte-identical");
+    assert_eq!(
+        note.serialize(),
+        EXAMPLE,
+        "parse then write is byte-identical"
+    );
     assert_eq!(note.revision(), revision_of(EXAMPLE.as_bytes()));
     assert_eq!(
         note.file_name(),
@@ -270,8 +274,7 @@ fn scalars_that_yaml_would_misread_are_quoted_and_read_back() {
         note.title = title.to_string();
         note.aliases = vec![title.to_string()];
         let canon = note.serialize();
-        let again = Note::parse(canon.as_bytes())
-            .unwrap_or_else(|e| panic!("{title:?}: {e}"));
+        let again = Note::parse(canon.as_bytes()).unwrap_or_else(|e| panic!("{title:?}: {e}"));
         assert_eq!(again.title, title, "title {title:?}");
         assert_eq!(again.aliases, [title], "alias {title:?}");
         assert_eq!(again.serialize(), canon);
@@ -304,12 +307,19 @@ pinned: True
     assert_eq!(note.title, "it's quoted");
     assert_eq!(note.aliases, ["a", "b, c", "d"]);
     assert_eq!(note.tags, ["no-indent", "item"]);
-    assert_eq!(note.created_at, ts(2026, 9, 23, 8, 0, 0), "offset normalized to UTC");
+    assert_eq!(
+        note.created_at,
+        ts(2026, 9, 23, 8, 0, 0),
+        "offset normalized to UTC"
+    );
     assert!(note.pinned);
     assert_eq!(note.body, "");
     let canon = note.serialize();
     assert!(canon.contains("created_at: 2026-09-23T08:00:00Z\n"));
-    assert!(canon.contains("updated_at: 2026-09-23T10:00:00Z\n"), "sub-seconds dropped");
+    assert!(
+        canon.contains("updated_at: 2026-09-23T10:00:00Z\n"),
+        "sub-seconds dropped"
+    );
 }
 
 #[test]
@@ -348,23 +358,43 @@ fn malformed_files_are_refused_with_a_reason() {
             "duplicate key",
             base(&|s| *s = s.replace("kind: procedure\n", "kind: procedure\nkind: fact\n")),
         ),
-        ("bad kind", base(&|s| *s = s.replace("kind: procedure", "kind: memo"))),
-        ("bad status", base(&|s| *s = s.replace("status: active", "status: superseded"))),
+        (
+            "bad kind",
+            base(&|s| *s = s.replace("kind: procedure", "kind: memo")),
+        ),
+        (
+            "bad status",
+            base(&|s| *s = s.replace("status: active", "status: superseded")),
+        ),
         (
             "bad timestamp",
             base(&|s| *s = s.replace("created_at: 2026-09-23T10:00:00Z", "created_at: yesterday")),
         ),
-        ("bad schema", base(&|s| *s = s.replace("schema: 1", "schema: 2"))),
+        (
+            "bad schema",
+            base(&|s| *s = s.replace("schema: 1", "schema: 2")),
+        ),
         (
             "bad supersedes",
             base(&|s| *s = s.replace("supersedes: []", "supersedes:\n  - not-a-uuid")),
         ),
-        ("empty title", base(&|s| *s = s.replace("title: Build and test commands for this workspace", "title: \"\""))),
+        (
+            "empty title",
+            base(&|s| {
+                *s = s.replace(
+                    "title: Build and test commands for this workspace",
+                    "title: \"\"",
+                )
+            }),
+        ),
         (
             "unknown source field",
             base(&|s| *s = s.replace("    id: 7c1e0b2a", "    who: me\n    id: 7c1e0b2a")),
         ),
-        ("not utf8", String::from_utf8_lossy(&[0xff, 0xfe]).into_owned()),
+        (
+            "not utf8",
+            String::from_utf8_lossy(&[0xff, 0xfe]).into_owned(),
+        ),
     ];
     for (name, text) in cases {
         let bytes = if name == "not utf8" {
@@ -402,7 +432,10 @@ fn oversized_files_are_refused_at_parse_and_at_write() {
 fn invalid_fact_key_in_a_file_is_absent_and_refused_on_write() {
     let text = EXAMPLE.replace("fact_key: build.validation", "fact_key: Build Validation!");
     let note = Note::parse(text.as_bytes()).unwrap();
-    assert_eq!(note.fact_key, None, "treated as absent when found in a file");
+    assert_eq!(
+        note.fact_key, None,
+        "treated as absent when found in a file"
+    );
     let mut note = Note::parse(EXAMPLE.as_bytes()).unwrap();
     note.fact_key = Some("Build".into());
     assert!(note.validate_for_write().unwrap_err().contains("fact_key"));
@@ -578,11 +611,16 @@ fn snapshot_example_parses_and_reserializes_with_the_design_keys_in_order() {
 
 #[test]
 fn snapshot_unknown_fields_and_schemas_are_invalid() {
-    let with_extra = SNAPSHOT_EXAMPLE.replace("\"schema\": 1,", "\"schema\": 1,\n  \"extra\": true,");
+    let with_extra =
+        SNAPSHOT_EXAMPLE.replace("\"schema\": 1,", "\"schema\": 1,\n  \"extra\": true,");
     assert!(serde_json::from_str::<ControlSnapshot>(&with_extra).is_err());
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.json");
-    std::fs::write(&path, SNAPSHOT_EXAMPLE.replace("\"schema\": 1", "\"schema\": 7")).unwrap();
+    std::fs::write(
+        &path,
+        SNAPSHOT_EXAMPLE.replace("\"schema\": 1", "\"schema\": 7"),
+    )
+    .unwrap();
     assert!(matches!(
         ControlSnapshot::load(&path),
         Err(SnapshotError::Invalid(_))
@@ -633,11 +671,7 @@ fn snapshot_binding_is_checked() {
     let snapshot: ControlSnapshot = serde_json::from_str(SNAPSHOT_EXAMPLE).unwrap();
     assert!(
         snapshot
-            .check_binding(
-                &snapshot.partition_key,
-                &snapshot.owner_key,
-                &snapshot.root
-            )
+            .check_binding(&snapshot.partition_key, &snapshot.owner_key, &snapshot.root)
             .is_ok()
     );
     assert!(
@@ -662,9 +696,2257 @@ fn origin_ranks_are_strictly_ordered() {
         Origin::ExtractedOther,
     ];
     for pair in order.windows(2) {
-        assert!(pair[0].rank() > pair[1].rank(), "{:?} > {:?}", pair[0], pair[1]);
+        assert!(
+            pair[0].rank() > pair[1].rank(),
+            "{:?} > {:?}",
+            pair[0],
+            pair[1]
+        );
     }
     for o in Origin::ALL {
         assert_eq!(Origin::parse(o.as_str()), Some(*o));
     }
+}
+
+// ============================================================================
+// Partition fixtures
+// ============================================================================
+
+use crate::store::StoreScope;
+use crate::store::tests::HomeStoreGuard;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
+use tempfile::{TempDir, tempdir};
+
+/// A temp home root (through `OPENALPACA_HOME_STORE`), a temp project and a
+/// temp "outside" directory symlinks can point at.
+struct Sandbox {
+    _home: TempDir,
+    _env: HomeStoreGuard,
+    home: PathBuf,
+    project: TempDir,
+    outside: TempDir,
+    /// One clock per sandbox, shared by every open, so a "restart" continues
+    /// the same time line instead of starting it over.
+    clock: Arc<dyn Fn() -> chrono::DateTime<Utc> + Send + Sync>,
+}
+
+const ALICE: &str = "u_example_alice";
+const BOB: &str = "u_example_bob";
+
+impl Sandbox {
+    fn new() -> Self {
+        let home = tempdir().unwrap();
+        let canonical = home.path().canonicalize().unwrap();
+        let env = HomeStoreGuard::set(&canonical);
+        Self {
+            _home: home,
+            _env: env,
+            home: canonical,
+            project: tempdir().unwrap(),
+            outside: tempdir().unwrap(),
+            clock: Arc::new(ticking_clock()),
+        }
+    }
+
+    fn clock(&self) -> impl Fn() -> chrono::DateTime<Utc> + Send + Sync + 'static {
+        let clock = Arc::clone(&self.clock);
+        move || clock()
+    }
+
+    fn project_root(&self) -> PathBuf {
+        self.project.path().canonicalize().unwrap()
+    }
+
+    fn project_scope(&self) -> StoreScope {
+        StoreScope::Project(self.project_root())
+    }
+
+    fn open_home(&self, owner: &str) -> Partition {
+        Partition::open(&StoreScope::Home, owner)
+            .unwrap()
+            .with_clock(self.clock())
+    }
+
+    fn open_project(&self, owner: &str) -> Result<Partition, MemoryFilesError> {
+        Partition::open(&self.project_scope(), owner).map(|p| p.with_clock(self.clock()))
+    }
+
+    fn outside_is_empty(&self) -> bool {
+        std::fs::read_dir(self.outside.path())
+            .unwrap()
+            .next()
+            .is_none()
+    }
+}
+
+/// A clock that advances one second per call from a fixed instant, so every
+/// `written_at` and `updated_at` is distinct and ordered.
+fn ticking_clock() -> impl Fn() -> chrono::DateTime<Utc> + Send + Sync + 'static {
+    let counter = Arc::new(AtomicI64::new(0));
+    move || {
+        let n = counter.fetch_add(1, Ordering::SeqCst);
+        ts(2026, 9, 23, 10, 0, 0) + chrono::Duration::seconds(n)
+    }
+}
+
+fn new_note(title: &str, body: &str, kind: NoteKind) -> NewNote {
+    NewNote {
+        title: title.to_string(),
+        body: body.to_string(),
+        kind: Some(kind),
+        ..Default::default()
+    }
+}
+
+fn note_files(p: &Partition) -> Vec<String> {
+    p.scan().unwrap().into_iter().map(|e| e.file_name).collect()
+}
+
+fn read_file(path: &Path) -> Vec<u8> {
+    std::fs::read(path).unwrap()
+}
+
+#[cfg(unix)]
+fn symlink(target: &Path, link: &Path) {
+    std::os::unix::fs::symlink(target, link).unwrap();
+}
+
+// ============================================================================
+// Layout, modes, .gitignore (design §2)
+// ============================================================================
+
+#[test]
+fn open_creates_nothing_and_the_first_write_lays_out_privately() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    assert_eq!(p.health(), PartitionHealth::Absent);
+    assert!(!sb.home.join("memory").exists(), "a read never creates");
+    assert!(!p.snapshot_path().exists());
+    assert!(p.load().unwrap().views.is_empty());
+
+    let created = p
+        .create(
+            new_note(
+                "Coffee order",
+                "# Coffee\n\nFlat white.\n",
+                NoteKind::Preference,
+            ),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    assert_eq!(created.dedup, Dedup::Created);
+    assert_eq!(created.origin, Origin::User);
+    assert_eq!(p.health(), PartitionHealth::Ready);
+    let expected_root = sb.home.join("memory").join("owners").join(owner_key(ALICE));
+    assert_eq!(p.root(), expected_root);
+    assert!(p.notes_dir().is_dir() && p.history_dir().is_dir());
+    let files = note_files(&p);
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0], format!("{}--coffee-order.md", created.id));
+    let snapshot = p.snapshot().unwrap();
+    assert_eq!(snapshot.partition_key, format!("home-{}", owner_key(ALICE)));
+    assert_eq!(snapshot.owner_id, ALICE);
+    assert_eq!(snapshot.root, expected_root.to_string_lossy());
+    assert_eq!(snapshot.notes[&created.id].revision, created.revision);
+    assert_eq!(snapshot.notes[&created.id].origin, Origin::User);
+    assert!(snapshot.pending.is_none());
+    assert_eq!(
+        p.snapshot_path(),
+        sb.home
+            .join("state")
+            .join("memory-control")
+            .join(format!("{}.json", snapshot.partition_key))
+    );
+    assert!(p.root().join("MEMORY.md").is_file());
+    #[cfg(unix)]
+    {
+        for dir in [
+            sb.home.join("memory"),
+            sb.home.join("memory/owners"),
+            p.root().to_path_buf(),
+            p.notes_dir().to_path_buf(),
+            p.history_dir().to_path_buf(),
+            p.history_dir().join(created.id.to_string()),
+            sb.home.join("state/memory-control"),
+        ] {
+            assert_eq!(fsx::mode_of(&dir), Some(0o700), "{}", dir.display());
+        }
+        for file in [
+            p.notes_dir().join(&files[0]),
+            p.history_dir()
+                .join(created.id.to_string())
+                .join(format!("{}.md", created.revision)),
+            p.snapshot_path().to_path_buf(),
+            p.root().join("MEMORY.md"),
+        ] {
+            assert_eq!(fsx::mode_of(&file), Some(0o600), "{}", file.display());
+        }
+    }
+    // The revision is the file's exact bytes.
+    let bytes = read_file(&p.notes_dir().join(&files[0]));
+    assert_eq!(revision_of(&bytes), created.revision);
+    // Reopening reads it back, same key, no recovery churn.
+    let again = sb.open_home(ALICE);
+    assert_eq!(again.partition_key(), p.partition_key());
+    let view = again.read(&created.id).unwrap();
+    assert_eq!(view.revision, created.revision);
+    assert_eq!(view.derived.origin, Origin::User);
+    assert!(view.derived.recorded);
+}
+
+#[test]
+fn project_partition_is_created_lazily_with_gitignore_and_modes() {
+    let sb = Sandbox::new();
+    let p = sb.open_project(ALICE).unwrap();
+    assert_eq!(p.health(), PartitionHealth::Absent);
+    assert!(
+        !sb.project_root().join(".openalpaca").exists(),
+        "a read never creates the store"
+    );
+    let key_before = p.partition_key().to_string();
+
+    let created = p
+        .create(
+            new_note(
+                "Test command",
+                "# Test\n\nRun cargo test.\n",
+                NoteKind::Procedure,
+            ),
+            Actor::ModelTool,
+        )
+        .unwrap();
+    assert_eq!(created.origin, Origin::ExtractedUser);
+    let store = sb.project_root().join(".openalpaca");
+    let memory = store.join("memory");
+    assert_eq!(
+        read_file(&memory.join(".gitignore")),
+        PROJECT_GITIGNORE_TEXT.as_bytes()
+    );
+    assert!(
+        store.join("README.md").is_file(),
+        "content_dir seeded the project store"
+    );
+    assert!(
+        memory
+            .join("owners")
+            .join(owner_key(ALICE))
+            .join("notes")
+            .is_dir()
+    );
+    assert!(
+        memory
+            .join("owners")
+            .join(owner_key(ALICE))
+            .join(".history")
+            .is_dir()
+    );
+    assert!(key_before.starts_with(&format!("proj-{}-", owner_key(ALICE))));
+    #[cfg(unix)]
+    {
+        assert_eq!(fsx::mode_of(&memory), Some(0o700));
+        assert_eq!(fsx::mode_of(p.root()), Some(0o700));
+        assert_eq!(fsx::mode_of(p.notes_dir()), Some(0o700));
+        assert_eq!(fsx::mode_of(&memory.join(".gitignore")), Some(0o600));
+        let file = p.notes_dir().join(&note_files(&p)[0]);
+        assert_eq!(fsx::mode_of(&file), Some(0o600));
+    }
+    // The key is stable before and after the store exists, and after the
+    // artifact path lays out the rest of `.openalpaca/`.
+    crate::store::content_dir(&sb.project_scope(), crate::store::ContentKind::Artifacts).unwrap();
+    let again = sb.open_project(ALICE).unwrap();
+    assert_eq!(again.partition_key(), key_before);
+    assert_eq!(again.snapshot().unwrap().notes.len(), 1);
+    assert_eq!(read_file(&memory.join(".gitignore")), b"*\n");
+}
+
+#[test]
+fn a_pre_existing_project_gitignore_with_other_content_is_replaced() {
+    let sb = Sandbox::new();
+    let memory = sb.project_root().join(".openalpaca").join("memory");
+    std::fs::create_dir_all(&memory).unwrap();
+    std::fs::write(memory.join(".gitignore"), "!*\n").unwrap();
+    let _p = sb.open_project(ALICE).unwrap();
+    assert_eq!(
+        read_file(&memory.join(".gitignore")),
+        b"*\n",
+        "re-asserted on open"
+    );
+    // Absent: written on open too, since `memory/` exists.
+    std::fs::remove_file(memory.join(".gitignore")).unwrap();
+    let _p = sb.open_project(ALICE).unwrap();
+    assert_eq!(read_file(&memory.join(".gitignore")), b"*\n");
+    // A symlink where the file belongs is replaced by the real file, and the
+    // link's target is not written through.
+    #[cfg(unix)]
+    {
+        std::fs::remove_file(memory.join(".gitignore")).unwrap();
+        let target = sb.outside.path().join("elsewhere");
+        std::fs::write(&target, "!*\n").unwrap();
+        symlink(&target, &memory.join(".gitignore"));
+        let _p = sb.open_project(ALICE).unwrap();
+        assert!(
+            !std::fs::symlink_metadata(memory.join(".gitignore"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(read_file(&memory.join(".gitignore")), b"*\n");
+        assert_eq!(read_file(&target), b"!*\n", "the link target is untouched");
+    }
+}
+
+// ============================================================================
+// Confinement (design §3 rule 1, §6)
+// ============================================================================
+
+#[cfg(unix)]
+#[test]
+fn a_link_or_file_at_any_component_refuses_the_project_partition() {
+    let key = owner_key(ALICE);
+    let components = [
+        ".openalpaca",
+        ".openalpaca/memory",
+        ".openalpaca/memory/owners",
+        &format!(".openalpaca/memory/owners/{key}"),
+        &format!(".openalpaca/memory/owners/{key}/notes"),
+        &format!(".openalpaca/memory/owners/{key}/.history"),
+    ];
+    for component in components {
+        let sb = Sandbox::new();
+        let link = sb.project_root().join(component);
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        symlink(sb.outside.path(), &link);
+        let err = sb
+            .open_project(ALICE)
+            .err()
+            .unwrap_or_else(|| panic!("{component} must refuse"));
+        match &err {
+            MemoryFilesError::PathRefused {
+                component: named,
+                reason,
+            } => {
+                assert_eq!(named, &link, "names the component");
+                assert!(reason.contains("symbolic link"), "{reason}");
+            }
+            other => panic!("{component}: expected PathRefused, got {other:?}"),
+        }
+        assert!(
+            err.to_string()
+                .contains(component.rsplit('/').next().unwrap())
+        );
+        assert!(
+            sb.outside_is_empty(),
+            "{component}: nothing written through the link"
+        );
+        assert!(!sb.home.join("memory").exists());
+    }
+    // A regular file where `memory` should be a directory.
+    let sb = Sandbox::new();
+    let store = sb.project_root().join(".openalpaca");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join("memory"), "not a directory\n").unwrap();
+    let err = sb.open_project(ALICE).expect_err("a file refuses");
+    assert!(
+        matches!(&err, MemoryFilesError::PathRefused { reason, .. } if reason == "not a directory")
+    );
+    assert_eq!(read_file(&store.join("memory")), b"not a directory\n");
+    assert_eq!(err.class(), "fixture:path_refused");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_below_the_home_root_refuses_the_home_partition_too() {
+    let sb = Sandbox::new();
+    symlink(sb.outside.path(), &sb.home.join("memory"));
+    let err = Partition::open(&StoreScope::Home, ALICE).expect_err("refused");
+    assert!(matches!(err, MemoryFilesError::PathRefused { .. }));
+    assert!(sb.outside_is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_note_file_is_not_read_written_or_listed() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let c = p
+        .create(
+            new_note("Real", "# Real\n\nbody\n", NoteKind::Fact),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    // A link in notes/ pointing at a real note elsewhere.
+    let target = sb.outside.path().join("planted.md");
+    let planted = Note::parse(EXAMPLE.as_bytes()).unwrap();
+    std::fs::write(&target, planted.serialize()).unwrap();
+    symlink(&target, &p.notes_dir().join(planted.file_name()));
+    let scanned = p.scan().unwrap();
+    assert_eq!(scanned.len(), 1, "the link is not listed");
+    assert_eq!(scanned[0].id, Some(c.id));
+    assert!(matches!(
+        p.read(&planted.id),
+        Err(MemoryFilesError::NotFound(_))
+    ));
+    // A hard link alias of a real note is refused as malformed, not served.
+    let real = p.notes_dir().join(&note_files(&p)[0]);
+    let alias = p.notes_dir().join(format!("{}--alias.md", c.id));
+    std::fs::hard_link(&real, &alias).unwrap();
+    let loaded = p.load().unwrap();
+    assert!(
+        loaded.views.is_empty(),
+        "both names of the inode are refused"
+    );
+    assert_eq!(loaded.malformed.len(), 2);
+    assert!(
+        loaded
+            .malformed
+            .iter()
+            .all(|m| m.reason.contains("hard links"))
+    );
+}
+
+#[test]
+fn the_scanner_lists_only_regular_md_notes() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let c = p
+        .create(
+            new_note("One", "# One\n", NoteKind::Fact),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    std::fs::write(p.notes_dir().join(".hidden.md"), "x").unwrap();
+    std::fs::write(p.notes_dir().join(".x.md.123-4.tmp"), "x").unwrap();
+    std::fs::write(p.notes_dir().join("notes.txt"), "x").unwrap();
+    std::fs::create_dir(p.notes_dir().join("sub.md")).unwrap();
+    std::fs::write(p.notes_dir().join("by-hand.md"), "not frontmatter").unwrap();
+    let scanned = p.scan().unwrap();
+    let mut names: Vec<&str> = scanned.iter().map(|e| e.file_name.as_str()).collect();
+    names.sort();
+    let mut want = [format!("{}--one.md", c.id), "by-hand.md".to_string()];
+    want.sort();
+    assert_eq!(names, want.iter().map(String::as_str).collect::<Vec<_>>());
+    let one = scanned
+        .iter()
+        .find(|e| e.id == Some(c.id))
+        .expect("the note is listed with its id");
+    assert!(
+        scanned
+            .iter()
+            .any(|e| e.file_name == "by-hand.md" && e.id.is_none())
+    );
+    assert!(one.size > 0);
+    assert!(one.mtime.is_some());
+    #[cfg(unix)]
+    assert!(one.inode > 0);
+    let loaded = p.load().unwrap();
+    assert_eq!(loaded.views.len(), 1);
+    assert_eq!(loaded.malformed.len(), 1);
+    assert!(loaded.malformed[0].path.ends_with("by-hand.md"));
+}
+
+// ============================================================================
+// Mutations (design §6, §7a)
+// ============================================================================
+
+#[test]
+fn history_keeps_the_last_five_service_written_revisions_current_included() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let c = p
+        .create(
+            new_note("Counter", "# Counter\n\n0\n", NoteKind::Fact),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let mut revisions = vec![c.revision.clone()];
+    let mut current = c.revision.clone();
+    for i in 1..=7 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let u = p
+            .update(
+                &c.id,
+                &current,
+                UpdateAction::Edit(NotePatch {
+                    body: Some(format!("# Counter\n\n{i}\n")),
+                    ..Default::default()
+                }),
+                Actor::UserSurface,
+            )
+            .unwrap();
+        assert!(u.written);
+        assert_ne!(u.revision, current);
+        current = u.revision.clone();
+        revisions.push(u.revision);
+    }
+    let kept: Vec<String> = p
+        .history(&c.id)
+        .unwrap()
+        .into_iter()
+        .map(|(r, _)| r)
+        .collect();
+    assert_eq!(kept.len(), HISTORY_KEEP);
+    assert_eq!(kept[0], current, "newest first, the current one included");
+    for old in &revisions[..revisions.len() - HISTORY_KEEP] {
+        assert!(!kept.contains(old), "{old} was pruned");
+    }
+    for recent in &revisions[revisions.len() - HISTORY_KEEP..] {
+        assert!(kept.contains(recent), "{recent} is kept");
+    }
+    assert_eq!(
+        p.history_bytes(&c.id, &current).unwrap().unwrap(),
+        read_file(&p.notes_dir().join(&note_files(&p)[0]))
+    );
+    assert!(p.history_bytes(&c.id, "not-a-revision").unwrap().is_none());
+    assert_eq!(
+        note_files(&p).len(),
+        1,
+        "one file per note, never one per revision"
+    );
+}
+
+#[test]
+fn revision_checks_no_op_patches_and_retitles() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let c = p
+        .create(
+            new_note("Standup time", "# Standup\n\n09:30\n", NoteKind::Fact),
+            Actor::ModelTool,
+        )
+        .unwrap();
+    let stale = "f".repeat(64);
+    let err = p
+        .update(&c.id, &stale, UpdateAction::Archive, Actor::ModelTool)
+        .unwrap_err();
+    match err {
+        MemoryFilesError::RevisionConflict {
+            id,
+            current_revision,
+        } => {
+            assert_eq!(id, c.id);
+            assert_eq!(current_revision, c.revision);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        p.snapshot().unwrap().pending.is_none(),
+        "refused before step 1"
+    );
+    // A no-op patch: no write, same revision.
+    let u = p
+        .update(
+            &c.id,
+            &c.revision,
+            UpdateAction::Edit(NotePatch::default()),
+            Actor::ModelTool,
+        )
+        .unwrap();
+    assert!(!u.written);
+    assert_eq!(u.revision, c.revision);
+    let u = p
+        .update(
+            &c.id,
+            &c.revision,
+            UpdateAction::Edit(NotePatch {
+                body: Some("# Standup\n\n09:30\n".into()),
+                ..Default::default()
+            }),
+            Actor::ModelTool,
+        )
+        .unwrap();
+    assert!(!u.written, "the same body is a no-op");
+    assert_eq!(p.history(&c.id).unwrap().len(), 1);
+    // A retitle renames the file; the id is the identity.
+    let u = p
+        .update(
+            &c.id,
+            &c.revision,
+            UpdateAction::Edit(NotePatch {
+                title: Some("Daily standup".into()),
+                ..Default::default()
+            }),
+            Actor::ModelTool,
+        )
+        .unwrap();
+    assert!(u.written);
+    assert_eq!(note_files(&p), [format!("{}--daily-standup.md", c.id)]);
+    let view = p.read(&c.id).unwrap();
+    assert_eq!(view.revision, u.revision);
+    assert_eq!(view.note.title, "Daily standup");
+    assert_eq!(
+        view.note.body, "# Standup\n\n09:30\n",
+        "untouched body byte-for-byte"
+    );
+    // The second of two racing edits loses visibly.
+    let err = p
+        .update(&c.id, &c.revision, UpdateAction::Archive, Actor::ModelTool)
+        .unwrap_err();
+    assert!(matches!(err, MemoryFilesError::RevisionConflict { .. }));
+    assert!(matches!(
+        p.update(
+            &NoteId::new(),
+            &c.revision,
+            UpdateAction::Archive,
+            Actor::UserSurface
+        ),
+        Err(MemoryFilesError::NotFound(_))
+    ));
+}
+
+#[test]
+fn oversized_and_invalid_inputs_are_refused_before_any_write() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let err = p
+        .create(
+            new_note(
+                "Too large",
+                &"x".repeat(MAX_NOTE_BYTES + 1),
+                NoteKind::Reference,
+            ),
+            Actor::ModelTool,
+        )
+        .unwrap_err();
+    assert_eq!(err.class(), "invalid_input");
+    assert!(err.to_string().contains("32"));
+    assert_eq!(p.health(), PartitionHealth::Absent, "nothing was laid out");
+    assert!(matches!(
+        p.create(
+            NewNote {
+                title: "x".into(),
+                body: "b".into(),
+                kind: None,
+                ..Default::default()
+            },
+            Actor::ModelTool
+        ),
+        Err(MemoryFilesError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        p.create(
+            NewNote {
+                fact_key: Some("Bad Key".into()),
+                ..new_note("t", "b", NoteKind::Fact)
+            },
+            Actor::ModelTool
+        ),
+        Err(MemoryFilesError::InvalidInput(_))
+    ));
+    // Exactly at the limit is accepted and read back untruncated.
+    let probe = new_note("At the limit", "", NoteKind::Reference);
+    let header = {
+        let mut n = Note::parse(EXAMPLE.as_bytes()).unwrap();
+        n.title = probe.title.clone();
+        n.kind = NoteKind::Reference;
+        n.fact_key = None;
+        n.aliases.clear();
+        n.tags.clear();
+        n.observed_at = None;
+        n.sources.clear();
+        n.body = String::new();
+        n.serialize().len()
+    };
+    let at_limit = new_note(
+        "At the limit",
+        &"y".repeat(MAX_NOTE_BYTES - header),
+        NoteKind::Reference,
+    );
+    let c = p.create(at_limit, Actor::ModelTool).unwrap();
+    let bytes = read_file(&p.notes_dir().join(&note_files(&p)[0]));
+    assert_eq!(bytes.len(), MAX_NOTE_BYTES);
+    assert_eq!(
+        p.read(&c.id).unwrap().note.body.len(),
+        MAX_NOTE_BYTES - header
+    );
+}
+
+#[test]
+fn exact_dedup_is_within_one_partition_only() {
+    let sb = Sandbox::new();
+    let home = sb.open_home(ALICE);
+    let first = home
+        .create(
+            new_note(
+                "Indentation",
+                "# Indentation\n\nTabs.\n",
+                NoteKind::Preference,
+            ),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let again = home
+        .create(
+            new_note(
+                "Indentation",
+                "# Indentation\n\nTabs.\n",
+                NoteKind::Preference,
+            ),
+            Actor::ModelTool,
+        )
+        .unwrap();
+    assert_eq!(again.dedup, Dedup::Existing);
+    assert_eq!(again.id, first.id);
+    assert_eq!(again.revision, first.revision);
+    assert_eq!(home.load().unwrap().views.len(), 1);
+    // A different kind is not a duplicate; neither is the same text in
+    // another partition.
+    let other = home
+        .create(
+            new_note(
+                "Indentation",
+                "# Indentation\n\nTabs.\n",
+                NoteKind::Decision,
+            ),
+            Actor::ModelTool,
+        )
+        .unwrap();
+    assert_eq!(other.dedup, Dedup::Created);
+    let project = sb.open_project(ALICE).unwrap();
+    let elsewhere = project
+        .create(
+            new_note(
+                "Indentation",
+                "# Indentation\n\nTabs.\n",
+                NoteKind::Preference,
+            ),
+            Actor::ModelTool,
+        )
+        .unwrap();
+    assert_eq!(elsewhere.dedup, Dedup::Created);
+    assert_ne!(elsewhere.id, first.id);
+    let bob = sb.open_home(BOB);
+    assert!(matches!(
+        bob.read(&first.id),
+        Err(MemoryFilesError::NotFound(_))
+    ));
+}
+
+#[test]
+fn authority_rules_of_g2_are_enforced_by_the_file_layer() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let user_note = p
+        .create(
+            new_note("Editor", "# Editor\n\nvim\n", NoteKind::Preference),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let candidate = p
+        .create(
+            NewNote {
+                status: Some(NoteStatus::Candidate),
+                ..new_note(
+                    "Staging URL",
+                    "# Staging\n\nchanged, says a tool\n",
+                    NoteKind::Fact,
+                )
+            },
+            Actor::Extraction {
+                origin: Origin::ExtractedOther,
+            },
+        )
+        .unwrap();
+    assert_eq!(candidate.origin, Origin::ExtractedOther);
+
+    // A tool call may not edit, archive or supersede a user note.
+    for action in [
+        UpdateAction::Edit(NotePatch {
+            body: Some("# Editor\n\nhelix\n".into()),
+            ..Default::default()
+        }),
+        UpdateAction::Archive,
+    ] {
+        let err = p
+            .update(&user_note.id, &user_note.revision, action, Actor::ModelTool)
+            .unwrap_err();
+        assert_eq!(err.class(), "authority_conflict");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&user_note.id.to_string())
+                && msg.contains("Memory view")
+                && msg.contains("openalpaca memory"),
+            "{msg}"
+        );
+    }
+    let err = p
+        .create(
+            NewNote {
+                supersedes: Some((user_note.id, user_note.revision.clone())),
+                ..new_note("Editor", "# Editor\n\nhelix\n", NoteKind::Preference)
+            },
+            Actor::ModelTool,
+        )
+        .unwrap_err();
+    assert_eq!(err.class(), "authority_conflict");
+    assert_eq!(
+        p.read(&user_note.id).unwrap().revision,
+        user_note.revision,
+        "nothing written"
+    );
+    assert_eq!(p.load().unwrap().views.len(), 2);
+
+    // Confirm is refused from a tool call and works from a user surface.
+    let err = p
+        .update(
+            &candidate.id,
+            &candidate.revision,
+            UpdateAction::Confirm,
+            Actor::ModelTool,
+        )
+        .unwrap_err();
+    assert_eq!(err.class(), "confirm_refused");
+    assert!(
+        err.to_string()
+            .contains(&format!("openalpaca memory confirm {}", candidate.id))
+    );
+    assert_eq!(
+        p.read(&candidate.id).unwrap().note.status,
+        NoteStatus::Candidate
+    );
+    let confirmed = p
+        .update(
+            &candidate.id,
+            &candidate.revision,
+            UpdateAction::Confirm,
+            Actor::UserSurface,
+        )
+        .unwrap();
+    assert_eq!(confirmed.status, NoteStatus::Active);
+    let view = p.read(&candidate.id).unwrap();
+    assert_eq!(view.derived.origin, Origin::User);
+    assert_eq!(view.derived.effective_status, EffectiveStatus::Active);
+    // Confirming an active note is an input error, not a silent success.
+    assert!(matches!(
+        p.update(
+            &candidate.id,
+            &confirmed.revision,
+            UpdateAction::Confirm,
+            Actor::UserSurface
+        ),
+        Err(MemoryFilesError::InvalidInput(_))
+    ));
+
+    // A user-surface edit of a model note re-records it as user.
+    let model_note = p
+        .create(
+            new_note("Lunch", "# Lunch\n\nnoodles\n", NoteKind::Preference),
+            Actor::ModelTool,
+        )
+        .unwrap();
+    assert_eq!(model_note.origin, Origin::ExtractedUser);
+    let u = p
+        .update(
+            &model_note.id,
+            &model_note.revision,
+            UpdateAction::Edit(NotePatch {
+                aliases: Some(vec!["noodle bar".into()]),
+                ..Default::default()
+            }),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    assert_eq!(
+        p.snapshot().unwrap().notes[&model_note.id].origin,
+        Origin::User
+    );
+    assert_eq!(
+        p.snapshot().unwrap().notes[&model_note.id].revision,
+        u.revision
+    );
+    // And a supersede through a user surface creates B with A named.
+    let b = p
+        .create(
+            NewNote {
+                supersedes: Some((user_note.id, user_note.revision.clone())),
+                ..new_note("Editor", "# Editor\n\nhelix\n", NoteKind::Preference)
+            },
+            Actor::UserSurface,
+        )
+        .unwrap();
+    assert_eq!(b.superseded, [user_note.id]);
+    let a = p.read(&user_note.id).unwrap();
+    assert_eq!(a.revision, user_note.revision, "A's file is not touched");
+    assert_eq!(a.derived.effective_status, EffectiveStatus::Superseded);
+    assert_eq!(a.derived.superseded_by, [b.id]);
+    // A moved target is a conflict and nothing is created.
+    let err = p
+        .create(
+            NewNote {
+                supersedes: Some((b.id, "f".repeat(64))),
+                ..new_note("Editor", "# Editor\n\nnano\n", NoteKind::Preference)
+            },
+            Actor::UserSurface,
+        )
+        .unwrap_err();
+    assert_eq!(err.class(), "revision_conflict");
+    assert!(matches!(
+        p.create(
+            NewNote {
+                supersedes: Some((NoteId::new(), "f".repeat(64))),
+                ..new_note("x", "b", NoteKind::Fact)
+            },
+            Actor::UserSurface
+        ),
+        Err(MemoryFilesError::NotFound(_))
+    ));
+}
+
+#[test]
+fn concurrent_creates_on_one_partition_are_both_recorded() {
+    let sb = Sandbox::new();
+    let p = Arc::new(sb.open_home(ALICE));
+    let handles: Vec<_> = (0..4)
+        .map(|i| {
+            let p = Arc::clone(&p);
+            std::thread::spawn(move || {
+                p.create(
+                    new_note(
+                        &format!("Save {i}"),
+                        &format!("# Save {i}\n\nbody\n"),
+                        NoteKind::Fact,
+                    ),
+                    Actor::ModelTool,
+                )
+                .unwrap()
+            })
+        })
+        .collect();
+    let created: Vec<Created> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let snapshot = p.snapshot().unwrap();
+    assert!(snapshot.pending.is_none());
+    for c in &created {
+        assert_eq!(snapshot.notes[&c.id].revision, c.revision);
+    }
+    assert_eq!(note_files(&p).len(), 4);
+    assert_eq!(p.load().unwrap().views.len(), 4);
+}
+
+// ============================================================================
+// The recovery table (design §6) with a crash at every step
+// ============================================================================
+
+/// Seeds a home partition with the fixture-15 shape and returns it.
+fn seeded_for_recovery(sb: &Sandbox) -> (Partition, Created, Created, Created, Created) {
+    let p = sb.open_home(ALICE);
+    let update_target = p
+        .create(
+            new_note(
+                "Update target",
+                "# Update target\n\nVersion one of the body.\n",
+                NoteKind::Fact,
+            ),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let archive_target = p
+        .create(
+            new_note(
+                "Archive target",
+                "# Archive target\n\nTo be archived.\n",
+                NoteKind::Fact,
+            ),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let confirm_target = p
+        .create(
+            NewNote {
+                status: Some(NoteStatus::Candidate),
+                ..new_note(
+                    "Confirm target",
+                    "# Confirm target\n\nA candidate.\n",
+                    NoteKind::Fact,
+                )
+            },
+            Actor::Extraction {
+                origin: Origin::ExtractedOther,
+            },
+        )
+        .unwrap();
+    let forget_target = p
+        .create(
+            NewNote {
+                sources: vec![NoteSource {
+                    kind: SourceType::Message,
+                    id: "6001".into(),
+                    observed_at: None,
+                }],
+                ..new_note(
+                    "Forget target",
+                    "# Forget target\n\nTo be forgotten.\n",
+                    NoteKind::Fact,
+                )
+            },
+            Actor::ModelTool,
+        )
+        .unwrap();
+    (
+        p,
+        update_target,
+        archive_target,
+        confirm_target,
+        forget_target,
+    )
+}
+
+fn edit_body(body: &str) -> UpdateAction {
+    UpdateAction::Edit(NotePatch {
+        body: Some(body.to_string()),
+        ..Default::default()
+    })
+}
+
+fn file_for(p: &Partition, id: &NoteId) -> Option<PathBuf> {
+    p.scan()
+        .unwrap()
+        .into_iter()
+        .find(|e| e.id == Some(*id))
+        .map(|e| e.path)
+}
+
+#[test]
+fn create_crash_after_each_step_recovers_per_the_table() {
+    for point in [
+        CrashPoint::WriteAfter1,
+        CrashPoint::WriteAfter2a,
+        CrashPoint::WriteAfter2,
+        CrashPoint::WriteAfter3,
+    ] {
+        let sb = Sandbox::new();
+        let (p, ..) = seeded_for_recovery(&sb);
+        let before = p.snapshot().unwrap();
+        p.set_crash_point(Some(point));
+        let err = p
+            .create(
+                new_note(
+                    "Created then crashed",
+                    "# Created\n\nBody.\n",
+                    NoteKind::Fact,
+                ),
+                Actor::UserSurface,
+            )
+            .unwrap_err();
+        assert!(matches!(err, MemoryFilesError::Crashed(pt) if pt == point));
+        let on_disk = ControlSnapshot::load(p.snapshot_path()).unwrap().unwrap();
+        let (id, to_rev) = match point {
+            CrashPoint::WriteAfter3 => {
+                assert!(on_disk.pending.is_none());
+                let (id, rec) = on_disk
+                    .notes
+                    .iter()
+                    .find(|(id, _)| !before.notes.contains_key(id))
+                    .unwrap();
+                (*id, rec.revision.clone())
+            }
+            _ => {
+                let pending = on_disk.pending.clone().expect("pending set at step 1");
+                assert_eq!(pending.from_rev, None);
+                assert_eq!(pending.origin, Origin::User);
+                assert!(
+                    !on_disk.notes.contains_key(&pending.id),
+                    "not recorded before step 3"
+                );
+                (pending.id, pending.to_rev)
+            }
+        };
+        let history = p
+            .history_dir()
+            .join(id.to_string())
+            .join(format!("{to_rev}.md"));
+        match point {
+            CrashPoint::WriteAfter1 => {
+                assert!(file_for(&p, &id).is_none());
+                assert!(!history.exists());
+            }
+            CrashPoint::WriteAfter2a => {
+                assert!(
+                    file_for(&p, &id).is_none(),
+                    "history copy before the rename"
+                );
+                assert!(history.is_file());
+            }
+            CrashPoint::WriteAfter2 | CrashPoint::WriteAfter3 => {
+                let file = file_for(&p, &id).expect("written");
+                assert_eq!(revision_of(&read_file(&file)), to_rev);
+                assert!(history.is_file());
+            }
+            _ => unreachable!(),
+        }
+        drop(p);
+        // Restart: recovery at service start.
+        let p = sb.open_home(ALICE);
+        let after = p.snapshot().unwrap();
+        assert!(after.pending.is_none(), "{point:?}: pending cleared");
+        match point {
+            CrashPoint::WriteAfter1 | CrashPoint::WriteAfter2a => {
+                assert!(!after.notes.contains_key(&id), "{point:?}: never recorded");
+                assert!(file_for(&p, &id).is_none());
+                assert!(p.load().unwrap().views.iter().all(|v| v.note.id != id));
+                if point == CrashPoint::WriteAfter2a {
+                    assert!(history.is_file(), "the bounded history copy is left");
+                }
+            }
+            CrashPoint::WriteAfter2 | CrashPoint::WriteAfter3 => {
+                let rec = &after.notes[&id];
+                assert_eq!(rec.revision, to_rev, "{point:?}: step 3 finished");
+                assert_eq!(rec.origin, Origin::User);
+                let views: Vec<_> = p
+                    .load()
+                    .unwrap()
+                    .views
+                    .into_iter()
+                    .filter(|v| v.note.id == id)
+                    .collect();
+                assert_eq!(views.len(), 1, "listed once, no duplicate");
+                assert!(views[0].derived.recorded);
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            after.notes.len() + usize::from(!after.notes.contains_key(&id)),
+            before.notes.len() + 1
+        );
+        assert_eq!(after.tombstones.len(), 0);
+    }
+}
+
+#[test]
+fn update_archive_confirm_crash_after_each_step_recovers_per_the_table() {
+    #[derive(Clone, Copy)]
+    enum Which {
+        Update,
+        Archive,
+        Confirm,
+    }
+    let cases = [
+        (Which::Update, CrashPoint::WriteAfter1),
+        (Which::Update, CrashPoint::WriteAfter2a),
+        (Which::Update, CrashPoint::WriteAfter2),
+        (Which::Update, CrashPoint::WriteAfter3),
+        (Which::Archive, CrashPoint::WriteAfter1),
+        (Which::Archive, CrashPoint::WriteAfter2a),
+        (Which::Archive, CrashPoint::WriteAfter2),
+        (Which::Archive, CrashPoint::WriteAfter3),
+        (Which::Confirm, CrashPoint::WriteAfter1),
+        (Which::Confirm, CrashPoint::WriteAfter2a),
+        (Which::Confirm, CrashPoint::WriteAfter2),
+        (Which::Confirm, CrashPoint::WriteAfter3),
+    ];
+    for (which, point) in cases {
+        let sb = Sandbox::new();
+        let (p, update_target, archive_target, confirm_target, _) = seeded_for_recovery(&sb);
+        let (target, action, old_origin, new_origin) = match which {
+            Which::Update => (
+                &update_target,
+                edit_body("# Update target\n\nVersion two of the body.\n"),
+                Origin::User,
+                Origin::User,
+            ),
+            Which::Archive => (
+                &archive_target,
+                UpdateAction::Archive,
+                Origin::User,
+                Origin::User,
+            ),
+            Which::Confirm => (
+                &confirm_target,
+                UpdateAction::Confirm,
+                Origin::ExtractedOther,
+                Origin::User,
+            ),
+        };
+        let from_rev = target.revision.clone();
+        let path_before = file_for(&p, &target.id).unwrap();
+        p.set_crash_point(Some(point));
+        let err = p
+            .update(&target.id, &from_rev, action, Actor::UserSurface)
+            .unwrap_err();
+        assert!(matches!(err, MemoryFilesError::Crashed(pt) if pt == point));
+        let on_disk = ControlSnapshot::load(p.snapshot_path()).unwrap().unwrap();
+        let to_rev = match point {
+            CrashPoint::WriteAfter3 => {
+                assert!(on_disk.pending.is_none());
+                on_disk.notes[&target.id].revision.clone()
+            }
+            _ => {
+                let pending = on_disk.pending.clone().expect("pending");
+                assert_eq!(pending.id, target.id);
+                assert_eq!(pending.from_rev.as_deref(), Some(from_rev.as_str()));
+                assert_eq!(pending.origin, new_origin);
+                assert_eq!(
+                    on_disk.notes[&target.id].revision, from_rev,
+                    "record untouched until step 3"
+                );
+                assert_eq!(on_disk.notes[&target.id].origin, old_origin);
+                pending.to_rev
+            }
+        };
+        assert_ne!(to_rev, from_rev);
+        let history = p
+            .history_dir()
+            .join(target.id.to_string())
+            .join(format!("{to_rev}.md"));
+        let file_now = revision_of(&read_file(&path_before));
+        match point {
+            CrashPoint::WriteAfter1 => {
+                assert_eq!(file_now, from_rev);
+                assert!(!history.exists());
+            }
+            CrashPoint::WriteAfter2a => {
+                assert_eq!(file_now, from_rev, "history copied before the rename");
+                assert!(history.is_file());
+            }
+            CrashPoint::WriteAfter2 | CrashPoint::WriteAfter3 => {
+                assert_eq!(file_now, to_rev);
+                assert!(history.is_file());
+            }
+            _ => unreachable!(),
+        }
+        drop(p);
+        let p = sb.open_home(ALICE);
+        let after = p.snapshot().unwrap();
+        assert!(after.pending.is_none());
+        let rec = &after.notes[&target.id];
+        let view = p.read(&target.id).unwrap();
+        match point {
+            CrashPoint::WriteAfter1 | CrashPoint::WriteAfter2a => {
+                assert_eq!(rec.revision, from_rev, "{point:?}: the old revision stands");
+                assert_eq!(rec.origin, old_origin);
+                assert_eq!(view.revision, from_rev);
+                assert_eq!(history.exists(), point == CrashPoint::WriteAfter2a);
+                match which {
+                    Which::Update => assert!(view.note.body.contains("Version one")),
+                    Which::Archive => assert_eq!(view.note.status, NoteStatus::Active),
+                    Which::Confirm => assert_eq!(view.note.status, NoteStatus::Candidate),
+                }
+            }
+            CrashPoint::WriteAfter2 | CrashPoint::WriteAfter3 => {
+                assert_eq!(rec.revision, to_rev, "{point:?}: step 3 finished");
+                assert_eq!(rec.origin, new_origin);
+                assert_eq!(view.revision, to_rev);
+                assert!(view.derived.recorded);
+                match which {
+                    Which::Update => assert!(view.note.body.contains("Version two")),
+                    Which::Archive => assert_eq!(view.note.status, NoteStatus::Archived),
+                    Which::Confirm => {
+                        assert_eq!(view.note.status, NoteStatus::Active);
+                        assert_eq!(view.derived.origin, Origin::User);
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            p.load()
+                .unwrap()
+                .views
+                .iter()
+                .filter(|v| v.note.id == target.id)
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn an_external_edit_that_races_a_crashed_write_downgrades_to_external() {
+    let sb = Sandbox::new();
+    let (p, target, ..) = seeded_for_recovery(&sb);
+    p.set_crash_point(Some(CrashPoint::WriteAfter2));
+    let _ = p.update(
+        &target.id,
+        &target.revision,
+        edit_body("# Update target\n\nThe service's new body.\n"),
+        Actor::UserSurface,
+    );
+    let pending = ControlSnapshot::load(p.snapshot_path())
+        .unwrap()
+        .unwrap()
+        .pending
+        .unwrap();
+    let path = file_for(&p, &target.id).unwrap();
+    let mut bytes = read_file(&path);
+    bytes.extend_from_slice(b"\nAn editor wrote this after the crash.\n");
+    std::fs::write(&path, &bytes).unwrap();
+    drop(p);
+    let p = sb.open_home(ALICE);
+    let snapshot = p.snapshot().unwrap();
+    assert!(snapshot.pending.is_none());
+    let rec = &snapshot.notes[&target.id];
+    assert_eq!(rec.origin, Origin::External);
+    assert_eq!(rec.revision, revision_of(&bytes));
+    assert!(
+        p.history_bytes(&target.id, &pending.to_rev)
+            .unwrap()
+            .is_some(),
+        "the service's own bytes are in .history"
+    );
+    let view = p.read(&target.id).unwrap();
+    assert_eq!(view.derived.origin, Origin::External);
+    assert!(
+        view.note
+            .body
+            .contains("An editor wrote this after the crash")
+    );
+}
+
+#[test]
+fn forget_crash_after_each_step_recovers_and_tombstones_survive_restarts() {
+    for point in [CrashPoint::ForgetAfter1, CrashPoint::ForgetAfter2] {
+        let sb = Sandbox::new();
+        let (p, _, _, _, target) = seeded_for_recovery(&sb);
+        assert!(p.history_dir().join(target.id.to_string()).is_dir());
+        p.set_crash_point(Some(point));
+        let err = p
+            .forget(&[(target.id, target.revision.clone())])
+            .unwrap_err();
+        assert!(matches!(err, MemoryFilesError::Crashed(pt) if pt == point));
+        let on_disk = ControlSnapshot::load(p.snapshot_path()).unwrap().unwrap();
+        assert_eq!(on_disk.tombstones.len(), 1, "tombstone first");
+        let t = &on_disk.tombstones[0];
+        assert_eq!(t.id, target.id);
+        assert_eq!(t.origin, Origin::ExtractedUser);
+        assert!(t.supersedes.is_empty());
+        assert_eq!(t.suppressed_sources, ["message:6001"]);
+        assert!(!on_disk.notes.contains_key(&target.id));
+        match point {
+            CrashPoint::ForgetAfter1 => {
+                assert!(
+                    file_for(&p, &target.id).is_some(),
+                    "the file is still there"
+                );
+                assert!(p.history_dir().join(target.id.to_string()).is_dir());
+            }
+            _ => {
+                assert!(file_for(&p, &target.id).is_none());
+                assert!(!p.history_dir().join(target.id.to_string()).exists());
+            }
+        }
+        drop(p);
+        for _ in 0..2 {
+            let p = sb.open_home(ALICE);
+            assert!(
+                file_for(&p, &target.id).is_none(),
+                "{point:?}: a tombstoned file is deleted at start"
+            );
+            assert!(!p.history_dir().join(target.id.to_string()).exists());
+            let snapshot = p.snapshot().unwrap();
+            assert_eq!(snapshot.tombstones.len(), 1, "tombstones survive restarts");
+            assert!(!snapshot.notes.contains_key(&target.id));
+            assert!(matches!(
+                p.read(&target.id),
+                Err(MemoryFilesError::NotFound(_))
+            ));
+            // A forget of a gone id is not_found whatever revision is sent.
+            let outcomes = p.forget(&[(target.id, "f".repeat(64))]).unwrap();
+            assert_eq!(outcomes[0].status, ForgetStatus::NotFound);
+        }
+    }
+}
+
+#[test]
+fn forget_is_per_target_and_names_the_current_revision_on_conflict() {
+    let sb = Sandbox::new();
+    let (p, a, b, ..) = seeded_for_recovery(&sb);
+    let outcomes = p
+        .forget(&[
+            (a.id, "f".repeat(64)),
+            (b.id, b.revision.clone()),
+            (NoteId::new(), "f".repeat(64)),
+        ])
+        .unwrap();
+    assert_eq!(
+        outcomes[0].status,
+        ForgetStatus::RevisionConflict {
+            current_revision: a.revision.clone()
+        }
+    );
+    assert_eq!(outcomes[1].status, ForgetStatus::Forgotten);
+    assert_eq!(outcomes[2].status, ForgetStatus::NotFound);
+    assert!(file_for(&p, &a.id).is_some());
+    assert!(file_for(&p, &b.id).is_none());
+    assert_eq!(p.snapshot().unwrap().tombstones.len(), 1);
+}
+
+// ============================================================================
+// Quarantine and repair (design §2, §6 Management operations)
+// ============================================================================
+
+#[test]
+fn a_lost_or_invalid_snapshot_quarantines_the_partition_until_repair() {
+    let sb = Sandbox::new();
+    let (p, a, _, _, forgotten) = seeded_for_recovery(&sb);
+    p.forget(&[(forgotten.id, forgotten.revision.clone())])
+        .unwrap();
+    let snapshot_path = p.snapshot_path().to_path_buf();
+    drop(p);
+
+    for corrupt in [false, true] {
+        if corrupt {
+            std::fs::write(&snapshot_path, "{ not json").unwrap();
+        } else {
+            std::fs::remove_file(&snapshot_path).unwrap();
+        }
+        let p = sb.open_home(ALICE);
+        let PartitionHealth::Quarantined(reason) = p.health() else {
+            panic!("quarantined");
+        };
+        assert!(!reason.is_empty());
+        assert!(p.snapshot().is_none());
+        // Empty controls are never initialized over existing notes.
+        assert_eq!(std::fs::exists(&snapshot_path).unwrap(), corrupt);
+        // Mutations and reconciliation are refused; explicit reads work, unverified.
+        let err = p
+            .create(new_note("x", "b", NoteKind::Fact), Actor::UserSurface)
+            .unwrap_err();
+        assert_eq!(err.class(), "quarantined");
+        assert!(err.to_string().contains("doctor --repair"));
+        assert!(matches!(
+            p.reconcile(),
+            Err(MemoryFilesError::Quarantined { .. })
+        ));
+        assert!(matches!(
+            p.update(
+                &a.id,
+                &a.revision,
+                UpdateAction::Archive,
+                Actor::UserSurface
+            ),
+            Err(MemoryFilesError::Quarantined { .. })
+        ));
+        let view = p.read(&a.id).unwrap();
+        assert!(view.unverified);
+        assert_eq!(view.derived.origin, Origin::External);
+        assert!(!view.derived.recorded);
+        assert_eq!(p.load().unwrap().health, p.health());
+        // Repair: only with the current owner's key.
+        let err = p.repair(&owner_key(BOB)).unwrap_err();
+        assert!(err.to_string().contains("adopt"));
+        let report = p.repair(&owner_key(ALICE)).unwrap();
+        assert!(report.rebuilt);
+        assert_eq!(report.notes_recorded, 3);
+        assert!(report.malformed.is_empty());
+        assert_eq!(p.health(), PartitionHealth::Ready);
+        let snapshot = p.snapshot().unwrap();
+        assert_eq!(snapshot.notes.len(), 3);
+        assert!(
+            snapshot
+                .notes
+                .values()
+                .all(|r| r.origin == Origin::External)
+        );
+        assert!(
+            snapshot.tombstones.is_empty(),
+            "a rebuilt snapshot starts with no tombstones"
+        );
+        assert!(snapshot.repaired_at.is_some());
+        assert!(snapshot.pending.is_none());
+        assert_eq!(snapshot.root, p.root_canonical());
+        assert_eq!(
+            p.read(&a.id).unwrap().revision,
+            a.revision,
+            "no note file was rewritten"
+        );
+        let again = p.repair(&owner_key(ALICE)).unwrap();
+        assert!(!again.rebuilt, "a healthy partition has nothing to rebuild");
+        assert_eq!(
+            p.snapshot().unwrap(),
+            snapshot,
+            "and is left exactly as it was"
+        );
+        // Back to Ready across a restart.
+        drop(p);
+        assert_eq!(sb.open_home(ALICE).health(), PartitionHealth::Ready);
+    }
+    // A snapshot bound to another directory is invalid too.
+    let mut s = ControlSnapshot::load(&snapshot_path).unwrap().unwrap();
+    s.root = "/elsewhere".into();
+    std::fs::write(&snapshot_path, s.to_json()).unwrap();
+    assert!(
+        matches!(sb.open_home(ALICE).health(), PartitionHealth::Quarantined(r) if r.contains("binding"))
+    );
+}
+
+#[test]
+fn repair_refuses_a_duplicate_id_naming_both_files_and_touches_nothing() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    p.initialize().unwrap();
+    let id = NoteId::parse("00000014-0000-4000-8000-0000000000dd").unwrap();
+    let one = "---\nschema: 1\nid: 00000014-0000-4000-8000-0000000000dd\ntitle: Duplicate one\nkind: fact\nstatus: active\ncreated_at: 2026-09-23T11:00:00Z\nupdated_at: 2026-09-23T11:00:00Z\n---\n# Duplicate one\n";
+    let two = one.replace("Duplicate one", "Duplicate two");
+    let p1 = p.notes_dir().join(format!("{id}--duplicate-one.md"));
+    let p2 = p.notes_dir().join(format!("{id}--duplicate-two.md"));
+    std::fs::write(&p1, one).unwrap();
+    std::fs::write(&p2, &two).unwrap();
+    let loaded = p.load().unwrap();
+    assert!(loaded.views.is_empty(), "neither is served");
+    assert_eq!(loaded.duplicates, [(id, vec![p1.clone(), p2.clone()])]);
+    assert!(matches!(p.read(&id), Err(MemoryFilesError::NotFound(_))));
+    assert!(
+        p.reconcile().unwrap().is_empty(),
+        "a duplicate id is never recorded"
+    );
+    assert!(!p.snapshot().unwrap().notes.contains_key(&id));
+    std::fs::remove_file(p.snapshot_path()).unwrap();
+    drop(p);
+    let p = sb.open_home(ALICE);
+    assert!(matches!(p.health(), PartitionHealth::Quarantined(_)));
+    let err = p.repair(&owner_key(ALICE)).unwrap_err();
+    assert_eq!(err.class(), "fixture:duplicate_id");
+    let msg = err.to_string();
+    assert!(
+        msg.contains(&id.to_string())
+            && msg.contains("duplicate-one")
+            && msg.contains("duplicate-two"),
+        "{msg}"
+    );
+    assert_eq!(read_file(&p1), one.as_bytes());
+    assert_eq!(read_file(&p2), two.as_bytes());
+    assert!(matches!(p.health(), PartitionHealth::Quarantined(_)));
+}
+
+#[test]
+fn malformed_files_are_kept_excluded_and_never_rewritten() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    p.initialize().unwrap();
+    let traversal = "---\nschema: 1\nid: ../../state/memory-control/home.json\ntitle: Traversal\nkind: fact\nstatus: active\ncreated_at: 2026-09-23T10:03:00Z\nupdated_at: 2026-09-23T10:03:00Z\n---\n# Traversal\n";
+    let path = p
+        .notes_dir()
+        .join("00000018-0000-4000-8000-0000000000a2--traversal.md");
+    std::fs::write(&path, traversal).unwrap();
+    let dropped = Note::parse(EXAMPLE.as_bytes()).unwrap();
+    let dropped_path = p.notes_dir().join(dropped.file_name());
+    std::fs::write(&dropped_path, dropped.serialize()).unwrap();
+    let loaded = p.load().unwrap();
+    assert_eq!(loaded.malformed.len(), 1);
+    assert_eq!(loaded.malformed[0].path, path);
+    assert!(loaded.malformed[0].reason.contains("id"));
+    assert_eq!(loaded.views.len(), 1);
+    assert_eq!(loaded.views[0].derived.origin, Origin::External);
+    assert!(!loaded.views[0].derived.recorded);
+    let changes = p.reconcile().unwrap();
+    assert_eq!(
+        changes,
+        [ReconcileChange {
+            id: dropped.id,
+            kind: ReconcileChangeKind::Added,
+            revision: Some(dropped.revision())
+        }]
+    );
+    assert_eq!(
+        p.snapshot().unwrap().notes[&dropped.id].origin,
+        Origin::External
+    );
+    assert_eq!(
+        read_file(&path),
+        traversal.as_bytes(),
+        "malformed file untouched"
+    );
+    assert_eq!(
+        read_file(&dropped_path),
+        dropped.serialize().as_bytes(),
+        "external file untouched"
+    );
+    assert!(
+        p.reconcile().unwrap().is_empty(),
+        "a second scan finds nothing"
+    );
+}
+
+// ============================================================================
+// Reconciliation of external changes (design §5 Freshness)
+// ============================================================================
+
+#[test]
+fn reconcile_reports_edits_deletions_and_new_files_once() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let coffee = p
+        .create(
+            new_note(
+                "Coffee order",
+                "# Coffee\n\nflat white\n",
+                NoteKind::Preference,
+            ),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let parking = p
+        .create(
+            new_note("Parking spot", "# Parking\n\nbay 12\n", NoteKind::Fact),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    assert!(p.reconcile().unwrap().is_empty());
+    // Edit behind the service's back: verification sees it before any scan.
+    let coffee_path = file_for(&p, &coffee.id).unwrap();
+    let mut bytes = read_file(&coffee_path);
+    bytes.extend_from_slice(b"\nSince September: oat-milk latte.\n");
+    std::fs::write(&coffee_path, &bytes).unwrap();
+    let view = p.read(&coffee.id).unwrap();
+    assert_eq!(
+        view.derived.origin,
+        Origin::External,
+        "a dirty note is never served as the service's"
+    );
+    assert!(!view.derived.recorded);
+    assert!(
+        view.note.body.contains("oat-milk latte"),
+        "served from the re-read file"
+    );
+    // Delete behind its back.
+    std::fs::remove_file(file_for(&p, &parking.id).unwrap()).unwrap();
+    assert!(matches!(
+        p.read(&parking.id),
+        Err(MemoryFilesError::NotFound(_))
+    ));
+    // A hand-written new file.
+    let gym = Note {
+        id: NoteId::new(),
+        title: "Gym days".into(),
+        body: "# Gym\n\nMon, Thu\n".into(),
+        ..Note::parse(EXAMPLE.as_bytes()).unwrap()
+    };
+    std::fs::write(p.notes_dir().join(gym.file_name()), gym.serialize()).unwrap();
+
+    let mut changes = p.reconcile().unwrap();
+    changes.sort_by_key(|c| c.id);
+    let mut expected = vec![
+        ReconcileChange {
+            id: coffee.id,
+            kind: ReconcileChangeKind::Modified,
+            revision: Some(revision_of(&bytes)),
+        },
+        ReconcileChange {
+            id: parking.id,
+            kind: ReconcileChangeKind::Removed,
+            revision: None,
+        },
+        ReconcileChange {
+            id: gym.id,
+            kind: ReconcileChangeKind::Added,
+            revision: Some(gym.revision()),
+        },
+    ];
+    expected.sort_by_key(|c| c.id);
+    assert_eq!(changes, expected);
+    let snapshot = p.snapshot().unwrap();
+    assert_eq!(snapshot.notes[&coffee.id].origin, Origin::External);
+    assert_eq!(snapshot.notes[&coffee.id].revision, revision_of(&bytes));
+    assert!(!snapshot.notes.contains_key(&parking.id));
+    assert_eq!(snapshot.notes[&gym.id].origin, Origin::External);
+    assert!(p.read(&gym.id).unwrap().derived.recorded);
+    // A rewrite with identical bytes changes nothing; a second scan is silent.
+    std::fs::write(&coffee_path, &bytes).unwrap();
+    assert!(p.reconcile().unwrap().is_empty());
+    // An absent partition has nothing to reconcile and creates nothing.
+    let bob = sb.open_home(BOB);
+    assert!(bob.reconcile().unwrap().is_empty());
+    assert_eq!(bob.health(), PartitionHealth::Absent);
+}
+
+// ============================================================================
+// Derived supersession, authority, same fact_key (design §6, §7b)
+// ============================================================================
+
+fn mk(id: u8, status: NoteStatus, fact_key: Option<&str>, supersedes: &[u8], updated: u32) -> Note {
+    let mut n = Note::parse(EXAMPLE.as_bytes()).unwrap();
+    n.id = NoteId::parse(&format!("00000024-0000-4000-8000-0000000000{id:02x}")).unwrap();
+    n.status = status;
+    n.fact_key = fact_key.map(str::to_string);
+    n.supersedes = supersedes
+        .iter()
+        .map(|s| NoteId::parse(&format!("00000024-0000-4000-8000-0000000000{s:02x}")).unwrap())
+        .collect();
+    n.updated_at = ts(2026, 9, 1, 10, 0, 0) + chrono::Duration::days(i64::from(updated));
+    n.sources.clear();
+    n
+}
+
+fn id_of(n: u8) -> NoteId {
+    NoteId::parse(&format!("00000024-0000-4000-8000-0000000000{n:02x}")).unwrap()
+}
+
+#[test]
+fn derived_supersession_follows_the_three_conditions_and_tombstones() {
+    // Fixture 24's shape, in memory.
+    let notes = vec![
+        mk(0x01, NoteStatus::Active, Some("office.location"), &[], 0), // O1: forgotten R1 supersedes it
+        mk(0x03, NoteStatus::Active, None, &[], 0),                    // O2
+        mk(0x04, NoteStatus::Archived, None, &[0x03], 9), // R2: archived, supersedes O2
+        mk(0x05, NoteStatus::Active, None, &[], 0),       // C0
+        mk(0x06, NoteStatus::Candidate, None, &[0x05], 4), // K: candidate names C0
+        mk(0x07, NoteStatus::Active, None, &[], 0),       // I: imported
+        mk(0x08, NoteStatus::Active, None, &[0x07], 14),  // X: external names I
+        mk(0x09, NoteStatus::Active, None, &[], 0),       // G: user; P (other partition) names it
+        mk(0x0a, NoteStatus::Active, Some("team.meeting_day"), &[], 11), // W1: extracted_user, newer
+        mk(0x0b, NoteStatus::Active, Some("team.meeting_day"), &[], 1),  // W2: user, older
+    ];
+    let mut snapshot = ControlSnapshot::new(
+        "home-x",
+        SnapshotScope::Home,
+        "x",
+        "u",
+        "/r",
+        ts(2026, 9, 1, 0, 0, 0),
+    );
+    let origins = [
+        (0x01, Origin::ExtractedUser),
+        (0x03, Origin::ExtractedUser),
+        (0x04, Origin::ExtractedUser),
+        (0x05, Origin::ExtractedUser),
+        (0x06, Origin::ExtractedOther),
+        (0x07, Origin::Imported),
+        (0x08, Origin::External),
+        (0x09, Origin::User),
+        (0x0a, Origin::ExtractedUser),
+        (0x0b, Origin::User),
+    ];
+    for (n, origin) in origins {
+        let note = notes.iter().find(|x| x.id == id_of(n)).unwrap();
+        snapshot.notes.insert(
+            note.id,
+            NoteRecord {
+                revision: note.revision(),
+                origin,
+                written_at: note.updated_at,
+            },
+        );
+    }
+    snapshot.tombstones.push(Tombstone {
+        id: id_of(0x02),
+        origin: Origin::ExtractedUser,
+        supersedes: vec![id_of(0x01)],
+        suppressed_sources: vec!["message:2401".into()],
+        forgotten_at: ts(2026, 9, 20, 10, 0, 0),
+    });
+    let revisions: Vec<String> = notes.iter().map(Note::revision).collect();
+    let inputs: Vec<NoteInput<'_>> = notes
+        .iter()
+        .zip(&revisions)
+        .map(|(note, revision)| NoteInput { note, revision })
+        .collect();
+    let d = derive(&inputs, &snapshot);
+    let get = |n: u8| &d.notes[&id_of(n)];
+
+    // A forgotten replacement does not revive its predecessor.
+    assert_eq!(get(0x01).effective_status, EffectiveStatus::Superseded);
+    assert_eq!(get(0x01).superseded_by, [id_of(0x02)]);
+    // Nor does an archived one.
+    assert_eq!(get(0x03).effective_status, EffectiveStatus::Superseded);
+    assert_eq!(get(0x03).superseded_by, [id_of(0x04)]);
+    assert_eq!(get(0x04).effective_status, EffectiveStatus::Archived);
+    // A candidate supersedes nothing.
+    assert_eq!(get(0x05).effective_status, EffectiveStatus::Active);
+    assert_eq!(get(0x06).effective_status, EffectiveStatus::Candidate);
+    assert!(!get(0x06).conflict);
+    // external < imported: reported, not honored.
+    assert_eq!(get(0x07).effective_status, EffectiveStatus::Active);
+    assert!(get(0x07).superseded_by.is_empty());
+    assert!(!get(0x07).conflict);
+    assert_eq!(get(0x08).effective_status, EffectiveStatus::Active);
+    assert!(get(0x08).conflict);
+    assert_eq!(get(0x08).unhonored_links, [id_of(0x07)]);
+    assert!(
+        get(0x08).recallable(),
+        "an un-honored link alone keeps a note recallable"
+    );
+    // A cross-partition link (P is not among these notes) is ignored.
+    assert_eq!(get(0x09).effective_status, EffectiveStatus::Active);
+    assert!(!get(0x09).conflict);
+    // Same fact_key: user beats the newer extracted_user; loser flagged.
+    assert_eq!(get(0x0b).same_key_loser_to, None);
+    assert!(!get(0x0b).conflict);
+    assert_eq!(get(0x0a).same_key_loser_to, Some(id_of(0x0b)));
+    assert!(get(0x0a).conflict);
+    assert!(!get(0x0a).recallable());
+    assert_eq!(
+        get(0x0a).effective_status,
+        EffectiveStatus::Active,
+        "the loser stays on disk and active"
+    );
+    // O1 is not in the office.location group once superseded.
+    assert_eq!(get(0x01).same_key_loser_to, None);
+    // doctor: one row per pair.
+    assert_eq!(
+        d.conflicts,
+        [
+            Conflict {
+                kind: ConflictKind::SupersedesAuthority,
+                note: id_of(0x08),
+                target: id_of(0x07)
+            },
+            Conflict {
+                kind: ConflictKind::SameFactKey,
+                note: id_of(0x0a),
+                target: id_of(0x0b)
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_same_key_loser_with_an_unhonored_link_is_reported_once() {
+    // Fixture 18: M1 (external) names U (user) and shares its fact_key.
+    let u = mk(0x01, NoteStatus::Active, Some("deploy.approval"), &[], 0);
+    let m1 = mk(
+        0xa1,
+        NoteStatus::Active,
+        Some("deploy.approval"),
+        &[0x01],
+        2,
+    );
+    let mut snapshot = ControlSnapshot::new(
+        "home-x",
+        SnapshotScope::Home,
+        "x",
+        "u",
+        "/r",
+        ts(2026, 9, 1, 0, 0, 0),
+    );
+    snapshot.notes.insert(
+        u.id,
+        NoteRecord {
+            revision: u.revision(),
+            origin: Origin::User,
+            written_at: u.updated_at,
+        },
+    );
+    let (ru, rm) = (u.revision(), m1.revision());
+    let d = derive(
+        &[
+            NoteInput {
+                note: &u,
+                revision: &ru,
+            },
+            NoteInput {
+                note: &m1,
+                revision: &rm,
+            },
+        ],
+        &snapshot,
+    );
+    assert_eq!(
+        d.notes[&m1.id].origin,
+        Origin::External,
+        "unrecorded = external"
+    );
+    assert!(d.notes[&m1.id].conflict);
+    assert_eq!(d.notes[&m1.id].same_key_loser_to, Some(u.id));
+    assert!(!d.notes[&m1.id].recallable());
+    assert!(!d.notes[&u.id].conflict);
+    assert_eq!(d.notes[&u.id].effective_status, EffectiveStatus::Active);
+    assert_eq!(
+        d.conflicts,
+        [Conflict {
+            kind: ConflictKind::SupersedesAuthority,
+            note: m1.id,
+            target: u.id
+        }]
+    );
+    // Equal authority: ties go to the newest updated_at, and the link is honored.
+    snapshot.notes.insert(
+        m1.id,
+        NoteRecord {
+            revision: m1.revision(),
+            origin: Origin::User,
+            written_at: m1.updated_at,
+        },
+    );
+    let d = derive(
+        &[
+            NoteInput {
+                note: &u,
+                revision: &ru,
+            },
+            NoteInput {
+                note: &m1,
+                revision: &rm,
+            },
+        ],
+        &snapshot,
+    );
+    assert_eq!(d.notes[&u.id].effective_status, EffectiveStatus::Superseded);
+    assert!(d.conflicts.is_empty());
+}
+
+#[test]
+fn source_forgotten_is_derived_and_an_edit_lifts_it() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let src = |id: &str| NoteSource {
+        kind: SourceType::Message,
+        id: id.into(),
+        observed_at: None,
+    };
+    let colour = p
+        .create(
+            NewNote {
+                sources: vec![src("4812")],
+                ..new_note(
+                    "Favourite colour",
+                    "# Colour\n\ngreen\n",
+                    NoteKind::Preference,
+                )
+            },
+            Actor::ModelTool,
+        )
+        .unwrap();
+    let birthday = p
+        .create(
+            NewNote {
+                sources: vec![src("4812")],
+                ..new_note("Birthday", "# Birthday\n\n14 October\n", NoteKind::Fact)
+            },
+            Actor::ModelTool,
+        )
+        .unwrap();
+    let other = p
+        .create(
+            NewNote {
+                sources: vec![src("4813")],
+                ..new_note("Other", "# Other\n\nx\n", NoteKind::Fact)
+            },
+            Actor::ModelTool,
+        )
+        .unwrap();
+    // The clock ticks per call, so the forget is later than both records.
+    let outcomes = p.forget(&[(colour.id, colour.revision.clone())]).unwrap();
+    assert_eq!(outcomes[0].status, ForgetStatus::Forgotten);
+    assert!(p.snapshot().unwrap().is_source_suppressed("message:4812"));
+    let view = p.read(&birthday.id).unwrap();
+    assert!(view.derived.source_forgotten);
+    assert!(!view.derived.recallable(), "out of automatic recall");
+    assert_eq!(
+        view.derived.effective_status,
+        EffectiveStatus::Active,
+        "still readable"
+    );
+    assert!(!p.read(&other.id).unwrap().derived.source_forgotten);
+    // Survives a restart; an edit through a user surface lifts it.
+    drop(p);
+    let p = sb.open_home(ALICE);
+    assert!(p.read(&birthday.id).unwrap().derived.source_forgotten);
+    let u = p
+        .update(
+            &birthday.id,
+            &birthday.revision,
+            edit_body("# Birthday\n\n14 October (confirmed)\n"),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    assert!(u.written);
+    let view = p.read(&birthday.id).unwrap();
+    assert!(!view.derived.source_forgotten);
+    assert_eq!(view.derived.origin, Origin::User);
+    assert!(
+        view.note.sources.iter().any(|s| s.id == "4812"),
+        "the citation stays"
+    );
+}
+
+#[test]
+fn forgetting_a_replacement_keeps_its_predecessor_superseded_on_disk() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let old = p
+        .create(
+            NewNote {
+                fact_key: Some("user.timezone".into()),
+                ..new_note("Timezone", "# TZ\n\nBerlin\n", NoteKind::Fact)
+            },
+            Actor::ModelTool,
+        )
+        .unwrap();
+    let new = p
+        .create(
+            NewNote {
+                fact_key: Some("user.timezone".into()),
+                supersedes: Some((old.id, old.revision.clone())),
+                sources: vec![NoteSource {
+                    kind: SourceType::Message,
+                    id: "4813".into(),
+                    observed_at: None,
+                }],
+                ..new_note("Timezone", "# TZ\n\nTokyo\n", NoteKind::Fact)
+            },
+            Actor::ModelTool,
+        )
+        .unwrap();
+    assert_eq!(p.read(&old.id).unwrap().derived.superseded_by, [new.id]);
+    p.forget(&[(new.id, new.revision.clone())]).unwrap();
+    let snapshot = p.snapshot().unwrap();
+    let t = snapshot.tombstone(&new.id).unwrap();
+    assert_eq!(t.supersedes, [old.id]);
+    assert_eq!(t.origin, Origin::ExtractedUser);
+    assert_eq!(t.suppressed_sources, ["message:4813"]);
+    let view = p.read(&old.id).unwrap();
+    assert_eq!(
+        view.derived.effective_status,
+        EffectiveStatus::Superseded,
+        "not revived"
+    );
+    assert_eq!(view.derived.superseded_by, [new.id]);
+    // Archiving a replacement does not revive either.
+    let older = p
+        .create(
+            new_note("Parking", "# Parking\n\n18:00\n", NoteKind::Fact),
+            Actor::ModelTool,
+        )
+        .unwrap();
+    let newer = p
+        .create(
+            NewNote {
+                supersedes: Some((older.id, older.revision.clone())),
+                ..new_note("Parking", "# Parking\n\n19:00\n", NoteKind::Fact)
+            },
+            Actor::ModelTool,
+        )
+        .unwrap();
+    p.update(
+        &newer.id,
+        &newer.revision,
+        UpdateAction::Archive,
+        Actor::ModelTool,
+    )
+    .unwrap();
+    assert_eq!(
+        p.read(&older.id).unwrap().derived.effective_status,
+        EffectiveStatus::Superseded
+    );
+    assert_eq!(
+        p.read(&newer.id).unwrap().derived.effective_status,
+        EffectiveStatus::Archived
+    );
+    // Restoring is an explicit edit that removes the link — here, forgetting
+    // the archived replacement still keeps the link through its tombstone.
+    p.forget(&[(newer.id, p.read(&newer.id).unwrap().revision)])
+        .unwrap();
+    assert_eq!(
+        p.read(&older.id).unwrap().derived.effective_status,
+        EffectiveStatus::Superseded
+    );
+}
+
+#[test]
+fn a_cross_partition_link_is_ignored() {
+    let sb = Sandbox::new();
+    let alice = sb.open_home(ALICE);
+    let a1 = alice
+        .create(
+            new_note("Indentation", "# I\n\ntabs\n", NoteKind::Preference),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let bob = sb.open_home(BOB);
+    bob.initialize().unwrap();
+    // Bob's file names Alice's note by hand.
+    let mut b1 = Note::parse(EXAMPLE.as_bytes()).unwrap();
+    b1.id = NoteId::new();
+    b1.supersedes = vec![a1.id];
+    std::fs::write(bob.notes_dir().join(b1.file_name()), b1.serialize()).unwrap();
+    bob.reconcile().unwrap();
+    assert_eq!(
+        alice.read(&a1.id).unwrap().derived.effective_status,
+        EffectiveStatus::Active
+    );
+    assert!(alice.load().unwrap().conflicts.is_empty());
+    assert!(bob.load().unwrap().conflicts.is_empty());
+    assert!(!bob.read(&b1.id).unwrap().derived.conflict);
+    // And a project partition's link to a home note is ignored the same way.
+    let project = sb.open_project(ALICE).unwrap();
+    let mut p1 = Note::parse(EXAMPLE.as_bytes()).unwrap();
+    p1.id = NoteId::new();
+    p1.supersedes = vec![a1.id];
+    project.initialize().unwrap();
+    std::fs::write(project.notes_dir().join(p1.file_name()), p1.serialize()).unwrap();
+    project.reconcile().unwrap();
+    assert_eq!(
+        alice.read(&a1.id).unwrap().derived.effective_status,
+        EffectiveStatus::Active
+    );
+}
+
+// ============================================================================
+// Home-store-wide operations: adopt, listings, move snapshots (design §6)
+// ============================================================================
+
+#[test]
+fn adopt_renames_the_home_and_every_project_snapshot_together() {
+    let sb = Sandbox::new();
+    let old_owner = "u_example_alice";
+    let home = sb.open_home(old_owner);
+    let h = home
+        .create(
+            new_note("Home note", "# H\n", NoteKind::Preference),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let project = sb.open_project(old_owner).unwrap();
+    let pn = project
+        .create(
+            new_note("Project note", "# P\n", NoteKind::Fact),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let old_key = owner_key(old_owner);
+    let old_project_key = project.partition_key().to_string();
+    drop(home);
+    drop(project);
+    // Orphaned: a new owner id after a factory reset.
+    let reborn = "u_example_alice_reborn";
+    assert_eq!(
+        list_owner_keys(&StoreScope::Home).unwrap(),
+        std::slice::from_ref(&old_key)
+    );
+    let adopted = adopt(&old_key, reborn, ts(2026, 9, 24, 0, 0, 0)).unwrap();
+    assert_eq!(adopted.len(), 2);
+    let new_key = owner_key(reborn);
+    assert!(adopted.contains(&format!("home-{new_key}")));
+    assert!(
+        adopted
+            .iter()
+            .any(|k| k.starts_with(&format!("proj-{new_key}-")))
+    );
+    assert_eq!(
+        list_owner_keys(&StoreScope::Home).unwrap(),
+        std::slice::from_ref(&new_key)
+    );
+    assert_eq!(
+        list_owner_keys(&sb.project_scope()).unwrap(),
+        std::slice::from_ref(&new_key)
+    );
+    let snapshots = list_snapshots().unwrap();
+    assert_eq!(snapshots.len(), 2);
+    assert!(snapshots.iter().all(|(_, s)| {
+        let s = s.as_ref().unwrap();
+        s.owner_key == new_key && s.owner_id == reborn && s.root.contains(&new_key)
+    }));
+    assert!(
+        !snapshots
+            .iter()
+            .any(|(p, _)| p.to_string_lossy().contains(&old_project_key))
+    );
+    // The renamed partitions open Ready and serve their notes with their records.
+    let home = sb.open_home(reborn);
+    assert_eq!(home.health(), PartitionHealth::Ready);
+    assert!(home.read(&h.id).unwrap().derived.recorded);
+    let project = sb.open_project(reborn).unwrap();
+    assert_eq!(project.health(), PartitionHealth::Ready);
+    assert!(project.read(&pn.id).unwrap().derived.recorded);
+    assert_eq!(home.snapshot().unwrap().notes[&h.id].origin, Origin::User);
+    // Nothing of the old key remains, and adopting it again is an error.
+    assert!(matches!(
+        adopt(&old_key, reborn, ts(2026, 9, 24, 0, 0, 0)),
+        Err(MemoryFilesError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        adopt(&new_key, reborn, ts(2026, 9, 24, 0, 0, 0)),
+        Err(MemoryFilesError::InvalidInput(_))
+    ));
+}
+
+#[test]
+fn adopt_refuses_the_whole_command_on_one_collision() {
+    let sb = Sandbox::new();
+    let old = sb.open_home(ALICE);
+    old.create(new_note("Old", "# O\n", NoteKind::Fact), Actor::UserSurface)
+        .unwrap();
+    let old_project = sb.open_project(ALICE).unwrap();
+    old_project
+        .create(
+            new_note("Old project", "# OP\n", NoteKind::Fact),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    // The current owner already has a project partition there.
+    let reborn = "u_example_alice_reborn";
+    let current_project = sb.open_project(reborn).unwrap();
+    current_project
+        .create(
+            new_note("Mine", "# M\n", NoteKind::Fact),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    drop((old, old_project, current_project));
+    let before = list_snapshots().unwrap();
+    let err = adopt(&owner_key(ALICE), reborn, ts(2026, 9, 24, 0, 0, 0)).unwrap_err();
+    assert_eq!(err.class(), "fixture:adopt_collision");
+    assert!(err.to_string().contains(&owner_key(reborn)));
+    // Nothing partially adopted: the home partition of the old key is untouched.
+    assert!(
+        sb.home
+            .join("memory/owners")
+            .join(owner_key(ALICE))
+            .is_dir()
+    );
+    assert!(
+        !sb.home
+            .join("memory/owners")
+            .join(owner_key(reborn))
+            .exists()
+    );
+    let after = list_snapshots().unwrap();
+    assert_eq!(
+        before.iter().map(|(p, _)| p).collect::<Vec<_>>(),
+        after.iter().map(|(p, _)| p).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn move_snapshots_are_classified_stale_abandoned_or_orphaned() {
+    let dir = tempdir().unwrap();
+    let exists = dir.path().join("exists");
+    std::fs::create_dir(&exists).unwrap();
+    let gone = dir.path().join("gone");
+    let at = ts(2026, 9, 23, 0, 0, 0);
+    let mut new_after_move = ControlSnapshot::new(
+        "proj-a-new",
+        SnapshotScope::Project,
+        "a",
+        "u",
+        exists.to_string_lossy(),
+        at,
+    );
+    new_after_move.moved_from = Some("proj-a-old".into());
+    let old_after_move = ControlSnapshot::new(
+        "proj-a-old",
+        SnapshotScope::Project,
+        "a",
+        "u",
+        gone.to_string_lossy(),
+        at,
+    );
+    let mut never_moved = ControlSnapshot::new(
+        "proj-a-planned",
+        SnapshotScope::Project,
+        "a",
+        "u",
+        dir.path().join("planned").to_string_lossy(),
+        at,
+    );
+    never_moved.moved_from = Some("proj-a-new".into());
+    let orphan = ControlSnapshot::new(
+        "proj-a-lost",
+        SnapshotScope::Project,
+        "a",
+        "u",
+        dir.path().join("lost").to_string_lossy(),
+        at,
+    );
+    let all = vec![new_after_move, old_after_move, never_moved, orphan];
+    let mut classified = classify_move_snapshots(&all);
+    classified.sort();
+    assert_eq!(
+        classified,
+        [
+            ("proj-a-lost".to_string(), MoveSnapshotState::Orphaned),
+            ("proj-a-old".to_string(), MoveSnapshotState::Stale),
+            ("proj-a-planned".to_string(), MoveSnapshotState::Abandoned),
+        ]
+    );
 }

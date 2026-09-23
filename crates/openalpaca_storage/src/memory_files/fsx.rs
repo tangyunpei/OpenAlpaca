@@ -59,8 +59,8 @@ pub(super) fn real_directory_state(path: &Path) -> Result<ComponentState, (PathB
 /// Reads a regular file without following a symlink at the leaf and refuses a
 /// hardlink alias (more than one link) where the platform can say.
 pub(super) fn read_regular_nofollow(path: &Path) -> Result<Vec<u8>> {
-    let meta = fs::symlink_metadata(path)
-        .with_context(|| format!("Failed to stat {}", path.display()))?;
+    let meta =
+        fs::symlink_metadata(path).with_context(|| format!("Failed to stat {}", path.display()))?;
     if meta.file_type().is_symlink() {
         bail!("{} is a symbolic link", path.display());
     }

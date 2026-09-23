@@ -17,8 +17,8 @@
 //! keys are preserved as the exact lines they occupied.
 
 use super::{
-    EMPTY_TITLE_SLUG, MAX_LIST_ENTRIES, MAX_NOTE_BYTES, MAX_SOURCES, MAX_TITLE_CHARS,
-    NOTE_SCHEMA, SLUG_MAX_BYTES, sha256_hex,
+    EMPTY_TITLE_SLUG, MAX_LIST_ENTRIES, MAX_NOTE_BYTES, MAX_SOURCES, MAX_TITLE_CHARS, NOTE_SCHEMA,
+    SLUG_MAX_BYTES, sha256_hex,
 };
 use crate::store::slugify;
 use chrono::{DateTime, Utc};
@@ -386,7 +386,9 @@ impl Note {
         out.push_str(&format!("status: {}\n", self.status));
         out.push_str(&format!(
             "fact_key: {}\n",
-            self.fact_key.as_deref().map_or("null".to_string(), emit_scalar)
+            self.fact_key
+                .as_deref()
+                .map_or("null".to_string(), emit_scalar)
         ));
         emit_list(&mut out, "aliases", &self.aliases);
         emit_list(&mut out, "tags", &self.tags);
@@ -485,16 +487,16 @@ impl Note {
         }
 
         let schema = match fields.schema {
-            Some(Scalar::Plain(s)) => s
-                .parse::<u32>()
-                .map_err(|_| NoteParseError {
-                    reason: format!("schema `{s}` is not an integer"),
-                })?,
+            Some(Scalar::Plain(s)) => s.parse::<u32>().map_err(|_| NoteParseError {
+                reason: format!("schema `{s}` is not an integer"),
+            })?,
             Some(_) => return err("schema must be a plain integer"),
             None => return err("missing required key `schema`"),
         };
         if schema != NOTE_SCHEMA {
-            return err(format!("unknown schema {schema}; this build reads {NOTE_SCHEMA}"));
+            return err(format!(
+                "unknown schema {schema}; this build reads {NOTE_SCHEMA}"
+            ));
         }
         let id = match fields.id.and_then(Scalar::text) {
             Some(s) => NoteId::parse(&s).map_err(|e| NoteParseError {
@@ -582,11 +584,9 @@ fn required_ts(key: &str, value: Option<Scalar>) -> Result<DateTime<Utc>, NotePa
 
 fn optional_ts(key: &str, value: Option<Scalar>) -> Result<Option<DateTime<Utc>>, NoteParseError> {
     match value.and_then(Scalar::text) {
-        Some(s) => parse_ts(&s)
-            .map(Some)
-            .map_err(|e| NoteParseError {
-                reason: format!("{key}: {e}"),
-            }),
+        Some(s) => parse_ts(&s).map(Some).map_err(|e| NoteParseError {
+            reason: format!("{key}: {e}"),
+        }),
         None => Ok(None),
     }
 }
@@ -701,10 +701,7 @@ fn parse_entries(frontmatter: &str) -> Result<Vec<Entry>, NoteParseError> {
             ));
         }
         let Some(colon) = line.find(':') else {
-            return err(format!(
-                "frontmatter line {} has no `:`: `{line}`",
-                i + 1
-            ));
+            return err(format!("frontmatter line {} has no `:`: `{line}`", i + 1));
         };
         let key = &line[..colon];
         let rest = &line[colon + 1..];
@@ -993,7 +990,9 @@ fn parse_scalar(text: &str) -> Result<Scalar, String> {
         return Ok(Scalar::Quoted(inner.replace("''", "'")));
     }
     if text.starts_with('[') || text.starts_with('{') {
-        return Err(format!("`{text}` is a flow collection where a scalar was expected"));
+        return Err(format!(
+            "`{text}` is a flow collection where a scalar was expected"
+        ));
     }
     Ok(Scalar::Plain(text.to_string()))
 }
@@ -1047,8 +1046,24 @@ fn needs_quotes(s: &str) -> bool {
         || s.ends_with(char::is_whitespace)
         || matches!(
             first,
-            '-' | '?' | ':' | ',' | '[' | ']' | '{' | '}' | '#' | '&' | '*' | '!' | '|' | '>'
-                | '\'' | '"' | '%' | '@' | '`'
+            '-' | '?'
+                | ':'
+                | ','
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '#'
+                | '&'
+                | '*'
+                | '!'
+                | '|'
+                | '>'
+                | '\''
+                | '"'
+                | '%'
+                | '@'
+                | '`'
         )
     {
         return true;

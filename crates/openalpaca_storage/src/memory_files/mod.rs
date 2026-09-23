@@ -28,16 +28,27 @@
 //! starts from [`crate::store::home_root`] (which honours
 //! `OPENALPACA_HOME_STORE`) or from an explicit project root.
 
+mod authority;
 mod fsx;
 mod note;
+mod partition;
 mod snapshot;
 
 #[cfg(test)]
 mod tests;
 
+pub use authority::{
+    Conflict, ConflictKind, Derivation, DerivedNote, EffectiveStatus, NoteInput, derive,
+};
 pub use note::{
-    NewNote, Note, NoteId, NoteKind, NoteParseError, NotePatch, NoteScope, NoteSource,
-    NoteStatus, SourceType, UnknownField, is_valid_fact_key, revision_of,
+    NewNote, Note, NoteId, NoteKind, NoteParseError, NotePatch, NoteScope, NoteSource, NoteStatus,
+    SourceType, UnknownField, is_valid_fact_key, revision_of,
+};
+pub use partition::{
+    Actor, CrashPoint, Created, Dedup, ForgetOutcome, ForgetStatus, LoadedPartition, MalformedFile,
+    MoveSnapshotState, NoteView, Partition, PartitionHealth, ReconcileChange, ReconcileChangeKind,
+    RepairReport, ScanEntry, UpdateAction, Updated, adopt, classify_move_snapshots,
+    list_owner_keys, list_snapshots, snapshot_path_for,
 };
 pub use snapshot::{
     ControlSnapshot, NoteRecord, Origin, Pending, SNAPSHOT_SCHEMA, SnapshotError, SnapshotScope,
@@ -174,6 +185,10 @@ pub enum MemoryFilesError {
     /// `adopt` met an existing partition of the current owner in a scope it
     /// would rename into (design §6).
     AdoptCollision(String),
+    /// A test-injected crash: the mutation stopped after the named step with
+    /// the on-disk state exactly as it was at that point.
+    #[cfg(test)]
+    Crashed(CrashPoint),
     /// Anything the file system refused.
     Io(anyhow::Error),
 }
@@ -213,6 +228,8 @@ impl fmt::Display for MemoryFilesError {
                 )
             }
             Self::AdoptCollision(m) => write!(f, "adopt refused: {m}"),
+            #[cfg(test)]
+            Self::Crashed(point) => write!(f, "crashed after {point:?}"),
             Self::Io(e) => write!(f, "{e:#}"),
         }
     }
@@ -246,6 +263,8 @@ impl MemoryFilesError {
             Self::PathRefused { .. } => "fixture:path_refused",
             Self::DuplicateId { .. } => "fixture:duplicate_id",
             Self::AdoptCollision(_) => "fixture:adopt_collision",
+            #[cfg(test)]
+            Self::Crashed(_) => "crashed",
             Self::Io(_) => "io",
         }
     }
