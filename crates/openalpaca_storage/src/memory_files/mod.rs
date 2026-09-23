@@ -35,6 +35,8 @@ mod partition;
 mod snapshot;
 
 #[cfg(test)]
+mod fixtures;
+#[cfg(test)]
 mod tests;
 
 pub use authority::{
