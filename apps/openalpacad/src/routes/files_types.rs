@@ -69,7 +69,7 @@ pub struct FileOpenResponse {
 /// the stored name is the store's own, so opening it in place would hand the
 /// user `03-quarterly-report.pdf` instead of the name they uploaded — and a row
 /// written before D2 is still a content-addressed blob under `state/assets/`
-/// with no extension at all until the boot `rehome` pass moves it, which the
+/// with no extension at all — nothing moves it any more — which the
 /// system opener cannot pick an application for. The staged copy restores the
 /// original filename in both cases.
 ///

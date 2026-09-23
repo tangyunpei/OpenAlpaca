@@ -212,18 +212,6 @@ pub fn backups_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// `state/assets` — where uploads lived before D2, content-addressed as
-/// `ab/cd/<sha256>`.
-///
-/// Nothing writes here any more: [`crate::uploads::UploadStore`] is the one
-/// upload writer and it places bytes under `uploads/`. The directory exists only
-/// on an installation that predates D2, and only until the boot-time re-home
-/// ([`crate::uploads::rehome_pre_d2_uploads`]) has emptied and removed it — the
-/// one caller left. Nothing new is to be designed against it.
-pub fn interim_assets_dir() -> Result<PathBuf> {
-    Ok(state_dir_path()?.join("assets"))
-}
-
 /// `home_root()/plugins` — user-dropped plugin directories. Created if missing.
 pub fn plugins_dir() -> Result<PathBuf> {
     let dir = home_root()?.join("plugins");

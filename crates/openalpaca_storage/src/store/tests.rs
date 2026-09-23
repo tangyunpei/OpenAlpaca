@@ -166,7 +166,6 @@ fn test_paths_are_consistent() {
     let discovery = discovery_path().unwrap();
     let lock = lock_path().unwrap();
     let db = database_path().unwrap();
-    let assets = interim_assets_dir().unwrap();
     let logs = logs_dir().unwrap();
     let backups = backups_dir().unwrap();
     // L11: the embedding model's ~1 GB of weights is regenerable machine
@@ -176,13 +175,12 @@ fn test_paths_are_consistent() {
 
     assert_eq!(state, tmp.path().join("state"));
     assert!(state.is_dir(), "state_dir() creates the directory");
-    for p in [&discovery, &lock, &db, &assets, &logs, &backups, &embeddings] {
+    for p in [&discovery, &lock, &db, &logs, &backups, &embeddings] {
         assert!(p.starts_with(&state), "{} is not under state/", p.display());
     }
     assert!(discovery.ends_with("discovery.json"));
     assert!(lock.ends_with("openalpacad.lock"));
     assert!(db.ends_with("openalpaca.db"));
-    assert!(assets.ends_with("assets"));
     assert!(logs.is_dir() && logs.ends_with("logs"));
     assert!(backups.is_dir() && backups.ends_with("backups"));
     assert_eq!(embeddings, state.join("cache").join("fastembed"));
@@ -214,7 +212,6 @@ fn path_queries_do_not_create_the_store() {
         database_path().unwrap(),
         discovery_path().unwrap(),
         lock_path().unwrap(),
-        interim_assets_dir().unwrap(),
         runtime_config_dir().unwrap(),
     ] {
         assert!(
@@ -256,15 +253,16 @@ fn open_home_database_creates_the_state_directory_at_0700() {
     );
 }
 
-/// Where a pre-D2 upload's bytes sat: `state/assets/ab/cd/<sha256>`.
+/// Where a pre-D2 upload's bytes sit: `state/assets/ab/cd/<sha256>`.
 ///
-/// A fixture, not a path the system computes any more — the one upload writer
-/// places bytes under `uploads/`, and the boot-time re-home takes what is left
-/// here from the rows' own `storage_path`. It lives here so the two test modules
-/// that reconstruct the old layout spell it the same way.
+/// A fixture, not a path the system computes any more — nothing writes there
+/// and nothing moves what is there. It lives here, beside the private
+/// `state_dir_path` it is spelled from, so a test that reconstructs the old
+/// layout does not re-derive it.
 pub(crate) fn interim_blob_path(sha256: &str) -> PathBuf {
-    interim_assets_dir()
+    state_dir_path()
         .unwrap()
+        .join("assets")
         .join(&sha256[0..2])
         .join(&sha256[2..4])
         .join(sha256)
