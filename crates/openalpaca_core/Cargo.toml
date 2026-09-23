@@ -12,6 +12,10 @@ license.workspace = true
 # can serve a production llm.toml. Never enabled by default — the eval is
 # additionally #[ignore]d and gated on OPENALPACA_LIVE_EVAL=1.
 live-eval = ["openalpaca_llm/anthropic", "openalpaca_llm/openai", "openalpaca_llm/ollama"]
+# Baseline B of the memory eval (tests/memory_eval.rs, OPENALPACA_MEMORY_EVAL_SYSTEM=B)
+# needs the local E5 embedder on top of live-eval. It pulls fastembed/ort into
+# the test binary, so it is its own opt-in; A and `none` build with live-eval.
+live-eval-e5 = ["live-eval", "openalpaca_llm/local-embeddings"]
 
 [dependencies]
 arc-swap.workspace = true
