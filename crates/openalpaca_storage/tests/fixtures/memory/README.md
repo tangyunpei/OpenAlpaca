@@ -318,7 +318,7 @@ ordered; `*_unordered` lists are sets.
 | `items_include` | a `recently_used` listing contains these items (partial match per item) |
 | `preview_contains` | substrings of the factory-reset preview text |
 | `adopted_partitions_count` | the number of partitions `adopt` reports renaming |
-| `vec0_registered`, `statements_before_refusal` | database opener only: whether `vec0` is registered on the connection; the only statements the trace shows before the refusal |
+| `vec0_registered`, `no_statement_names` | database opener only: whether `vec0` is registered on the connection; no statement issued before the refusal names any of these tables (the opener's five PRAGMAs and `schema_version()`'s two reads are the whole trace, `database/mod.rs`) |
 | `retained` | the `forget` result's `retained` object: `{ "transcript": bool, "session_logs": bool, "note_contains": text }` |
 | `snapshot` | `{ "<partition>": { "notes": { "<id>": { "revision": "@current" \| "@from_rev" \| "@to_rev" \| hex, "origin" } \| null }, "tombstones": [..], "tombstones_count": N, "pending": null \| {..}, "moved_from", "owner_key", "owner_id", "root_is": <fixture path> } }` — a partial match of the control snapshot on disk; a note mapped to `null` must be absent from `notes` |
 | `snapshot_missing` | `["<partition name>"]` — no snapshot file exists for that partition's (derived) key |

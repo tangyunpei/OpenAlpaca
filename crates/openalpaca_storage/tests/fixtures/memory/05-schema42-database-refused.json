@@ -31,7 +31,7 @@
         "message_not_contains": ["newer than this build knows"],
         "file_unchanged": ["dir:copy/schema42.db"],
         "vec0_registered": false,
-        "statements_before_refusal": ["PRAGMA journal_mode", "SELECT version FROM schema_version"]
+        "no_statement_names": ["memory", "memory_fts", "memory_vec"]
       }
     },
     {
