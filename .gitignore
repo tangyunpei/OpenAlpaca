@@ -112,6 +112,7 @@ apps/openalpaca-gui/src-tauri/gen/
 !docs/api/crates/*.md
 !docs/api/database/*.md
 !docs/plans/Unified_Memory_System.md
+!tasks/memory-redesign/*.md
 !config/agents/*.md
 !config/orchestrator/templates/
 !config/orchestrator/templates/*.md
