@@ -17,7 +17,11 @@
  *    calls; nothing here flips the bit as a side effect of opening, typing or
  *    saving. `Save key` is guarded twice — disabled in the DOM, and re-planned
  *    in the handler — because the invariant is "no `PUT` for a disabled
- *    provider", not "the button looked off".
+ *    provider", not "the button looked off". And **"enabled" means the
+ *    daemon's word, not the optimistic cache's**: while a switch is in
+ *    flight the cache already shows it on, so saving waits for the switch to
+ *    settle — a failed enable must not leave a key behind on a provider that
+ *    stayed off.
  *  * **Checking never gates saving.** `Check key` is its own button
  *    (`POST /v1/settings/llm/validate`, which answers `504` for every failure
  *    and goes to the network on success); its answer is advisory, cleared the
@@ -60,7 +64,10 @@ export interface AddKeyFormProps {
   onCancel: () => void;
   /** The section's own `toggleProvider(provider, true)` — one code path. */
   onEnableProvider: (provider: string) => void;
-  /** Whether that toggle is in flight. */
+  /**
+   * Whether that toggle is in flight. It also holds the save: the settings
+   * cache is flipped optimistically before the daemon answers.
+   */
   enableBusy: boolean;
 }
 
@@ -119,6 +126,7 @@ export function AddKeyForm({
           enabled: info.enabled,
           requiresKey: info.requires_key,
           secret,
+          switchPending: enableBusy,
         });
 
   const onCheck = () => {
@@ -148,6 +156,7 @@ export function AddKeyForm({
       enabled: info.enabled,
       requiresKey: info.requires_key,
       secret,
+      switchPending: enableBusy,
     });
     if (now.action !== "save") return;
     const trimmedNotes = notes.trim();
@@ -220,6 +229,11 @@ export function AddKeyForm({
         </div>
       ) : (
         <>
+          {plan.action === "wait-switch" && (
+            <span className="text-base leading-[1.5] text-tertiary">
+              {plan.reason}
+            </span>
+          )}
           {plan.action === "refuse-disabled" && (
             <div className="flex flex-col gap-[6px] rounded-md border border-amber-line bg-amber-surface px-[10px] py-[8px]">
               <span className="text-base leading-[1.5] text-amber-ink">

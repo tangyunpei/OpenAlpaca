@@ -29,10 +29,19 @@ export type KeySavePlan =
   | { action: "keyless"; reason: string }
   /** The provider is switched off. Saving would be a no-op (D-F). */
   | { action: "refuse-disabled"; reason: string }
+  /**
+   * A provider switch is still in flight. The settings cache already shows
+   * the optimistic bit, so "enabled" is not yet the daemon's word — and if
+   * the switch then fails, a key saved now went to a provider that is off.
+   */
+  | { action: "wait-switch"; reason: string }
   /** Nothing typed yet. */
   | { action: "incomplete"; reason: string };
 
 export const INCOMPLETE_NOTE = "Paste the key to save it.";
+
+export const SWITCH_PENDING_NOTE =
+  "A provider switch is still being applied. Save the key once the daemon has answered it.";
 
 /**
  * The refusal: the *consequence* first ("would do nothing"), then the
@@ -67,6 +76,8 @@ export function keySavePlan(input: {
   enabled: boolean;
   requiresKey: boolean;
   secret: string;
+  /** Whether a provider switch is still in flight (`enableBusy`). */
+  switchPending: boolean;
 }): KeySavePlan {
   if (!input.requiresKey) {
     return { action: "keyless", reason: keylessNote(input.provider) };
@@ -76,6 +87,9 @@ export function keySavePlan(input: {
       action: "refuse-disabled",
       reason: disabledRefusal(input.provider),
     };
+  }
+  if (input.switchPending) {
+    return { action: "wait-switch", reason: SWITCH_PENDING_NOTE };
   }
   if (input.secret.trim().length === 0) {
     return { action: "incomplete", reason: INCOMPLETE_NOTE };

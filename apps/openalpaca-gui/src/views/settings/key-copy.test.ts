@@ -9,6 +9,7 @@ import { ApiError } from "@/lib/http";
 
 import {
   INCOMPLETE_NOTE,
+  SWITCH_PENDING_NOTE,
   disabledRefusal,
   keySavePlan,
   keylessNote,
@@ -23,7 +24,14 @@ describe("whether the form may save", () => {
     enabled: boolean;
     requiresKey: boolean;
     secret?: string;
-  }) => keySavePlan({ provider: "anthropic", secret: "", ...over }).action;
+    switchPending?: boolean;
+  }) =>
+    keySavePlan({
+      provider: "anthropic",
+      secret: "",
+      switchPending: false,
+      ...over,
+    }).action;
 
   it("has nothing to refuse for a provider that needs no key", () => {
     expect(plan({ enabled: false, requiresKey: false })).toBe("keyless");
@@ -48,8 +56,38 @@ describe("whether the form may save", () => {
       enabled: true,
       requiresKey: true,
       secret: "   ",
+      switchPending: false,
     });
     expect(result).toEqual({ action: "incomplete", reason: INCOMPLETE_NOTE });
+  });
+
+  /**
+   * The cache flips `enabled` before the daemon answers the switch, so a
+   * save waits for the switch to settle — a failed enable must not leave a
+   * key behind on a provider that stayed off.
+   */
+  it("holds the save while a provider switch is in flight", () => {
+    expect(
+      keySavePlan({
+        provider: "anthropic",
+        enabled: true,
+        requiresKey: true,
+        secret: "sk-ant-x",
+        switchPending: true,
+      }),
+    ).toEqual({ action: "wait-switch", reason: SWITCH_PENDING_NOTE });
+    // Off still names the switch, and keyless still has nothing to refuse.
+    expect(
+      plan({
+        enabled: false,
+        requiresKey: true,
+        secret: "x",
+        switchPending: true,
+      }),
+    ).toBe("refuse-disabled");
+    expect(
+      plan({ enabled: true, requiresKey: false, switchPending: true }),
+    ).toBe("keyless");
   });
 
   it("saves once an enabled provider has a key typed", () => {
@@ -65,6 +103,7 @@ describe("whether the form may save", () => {
         enabled: false,
         requiresKey: true,
         secret: "",
+        switchPending: false,
       }),
     ).toEqual({ action: "refuse-disabled", reason: disabledRefusal("openai") });
     expect(
@@ -73,6 +112,7 @@ describe("whether the form may save", () => {
         enabled: false,
         requiresKey: false,
         secret: "",
+        switchPending: false,
       }),
     ).toEqual({ action: "keyless", reason: keylessNote("ollama") });
   });

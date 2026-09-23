@@ -13,7 +13,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/http";
 
 import { AddKeyForm } from "./AddKeyForm";
-import { disabledRefusal, keylessNote } from "./key-copy";
+import { SWITCH_PENDING_NOTE, disabledRefusal, keylessNote } from "./key-copy";
 
 const SECRET = "sk-ant-test-0000-not-a-real-key";
 
@@ -215,6 +215,60 @@ describe("a switched-off provider (D-F)", () => {
     expect(screen.queryByText(disabledRefusal("openai"))).toBeNull();
     typeSecret();
     expect(screen.getByRole("button", { name: "Save key" })).toBeEnabled();
+  });
+
+  /**
+   * `useSetProviderEnabled` flips `enabled` in the settings cache before the
+   * PUT answers. Until the switch settles, "enabled" is only the cache's
+   * word: a save made then would outlive a failed enable on a provider that
+   * stayed off.
+   */
+  it("holds the save while the enable is in flight, and after it fails", () => {
+    const props = {
+      onChangeProvider: vi.fn(),
+      onDone: vi.fn(),
+      onCancel: vi.fn(),
+      onEnableProvider: vi.fn(),
+    };
+    // The optimistic write has landed; the PUT has not answered.
+    state.providers = { ...state.providers, openai: provider(true) };
+    const { rerender } = render(
+      <AddKeyForm provider="openai" enableBusy {...props} />,
+    );
+    typeSecret();
+    const save = screen.getByRole("button", { name: "Save key" });
+    expect(save).toBeDisabled();
+    expect(screen.getByText(SWITCH_PENDING_NOTE)).toBeInTheDocument();
+    fireEvent.click(save);
+    expect(state.upserts).toEqual([]);
+
+    // The enable failed: `onError` put the old cache back.
+    state.providers = { ...state.providers, openai: provider(false) };
+    rerender(<AddKeyForm provider="openai" enableBusy={false} {...props} />);
+    expect(screen.getByText(disabledRefusal("openai"))).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Save key" }));
+    expect(state.upserts).toEqual([]);
+  });
+
+  it("saves once the enable has settled on", async () => {
+    const props = {
+      onChangeProvider: vi.fn(),
+      onDone: vi.fn(),
+      onCancel: vi.fn(),
+      onEnableProvider: vi.fn(),
+    };
+    state.providers = { ...state.providers, openai: provider(true) };
+    const { rerender } = render(
+      <AddKeyForm provider="openai" enableBusy {...props} />,
+    );
+    typeSecret();
+    expect(screen.getByRole("button", { name: "Save key" })).toBeDisabled();
+
+    rerender(<AddKeyForm provider="openai" enableBusy={false} {...props} />);
+    expect(screen.queryByText(SWITCH_PENDING_NOTE)).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Save key" }));
+    expect(state.upserts).toHaveLength(1);
+    expect(state.upserts[0]?.provider).toBe("openai");
   });
 
   it("never turns the provider on by itself", async () => {

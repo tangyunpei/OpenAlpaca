@@ -691,7 +691,10 @@ provider would be accepted by the daemon and achieve nothing — the router
 drops a disabled provider's models from its catalogue and only the enable puts
 them back — so the form refuses before saving, says why, and puts a
 `Turn <provider> on` button in the refusal. It does not flip the switch for
-you, and it does not save first and offer afterwards. Between the two steps
+you, and it does not save first and offer afterwards. While a switch is still
+being applied the form waits for the daemon's answer before it will save, so a
+switch that fails cannot leave a key behind on a provider that stayed off.
+Between the two steps
 the row reads `On, but not loaded`, as described next.
 
 **Keys already stored.** Each provider row lists its keys: the masked secret
