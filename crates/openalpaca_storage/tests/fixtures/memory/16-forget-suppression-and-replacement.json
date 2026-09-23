@@ -107,7 +107,7 @@
             "tombstones": [{ "id": "00000016-0000-4000-8000-00000000000f", "origin": "extracted_user", "supersedes": [], "suppressed_sources": ["message:4812"] }]
           }
         },
-        "events": [{ "type": "memory_changed", "change": "forgotten", "note_id": "00000016-0000-4000-8000-00000000000f" }]
+        "events": [{ "type": "memory_changed", "change": "forgotten", "note_id": "00000016-0000-4000-8000-00000000000f", "surface": "model_tool" }]
       }
     },
     {

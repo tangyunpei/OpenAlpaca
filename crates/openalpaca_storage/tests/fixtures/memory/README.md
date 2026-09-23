@@ -386,6 +386,7 @@ signs these with the frozen set or sends them back as design revisions.
 | P10 | An extraction on a daemon with no configured model reports `unavailable` with one WARN and the turn is unaffected | 19 |
 | P11 | `doctor` names a stale or abandoned move snapshot by the directory it is bound to | 17 |
 | P12 | A `forget` whose target id no longer exists answers `not_found`, not `revision_conflict`, whatever revision was sent | 16 |
+| P13 | A `memory_changed` published by a reconciliation scan (`change: external`) carries no `surface`: §7a's enum is `user \| model_tool \| extraction` and a scan is none of them; the fixture omits the field until the design adds a value or makes it optional | 13 |
 
 ## Invariants every file satisfies (checked before commit)
 
