@@ -422,30 +422,13 @@ pub async fn run_lead_agent(
         } else {
             None
         };
-        let scope_ctx = workspace.has_workspace().then(|| workspace.clone());
-        let memories = if let Some(ref ctx) = scope_ctx {
-            let cascade_scopes = ctx.cascade_scopes();
-            repo.search_hybrid_cascade(
-                created_by,
-                task_description,
-                query_embedding.as_deref(),
-                5,
-                None,
-                &cascade_scopes,
-            )
-            .unwrap_or_default()
-        } else {
-            repo.search_hybrid(
-                created_by,
-                task_description,
-                query_embedding.as_deref(),
-                5,
-                None,
-                None,
-                None,
-            )
-            .unwrap_or_default()
-        };
+        let memories = retrieve_lead_memories(
+            &repo,
+            created_by,
+            task_description,
+            query_embedding.as_deref(),
+            &workspace,
+        );
         if !memories.is_empty() {
             // Track access for importance decay + boost
             let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
@@ -717,6 +700,37 @@ pub async fn run_lead_agent(
         loop_result: result,
         subagents_spawned,
     }
+}
+
+/// The memories the lead's opening prompt is primed with: up to five of
+/// `created_by`'s own, matched against the task description.
+///
+/// The run's `workspace` decides *which scopes* are read, through the same
+/// cascade every other retrieval site uses: `[Global]` for a run with no
+/// workspace — a connector lane, a scheduled skill, the GUI with no project
+/// open — and `[Global, Workspace(id)]` inside a project. The cascade's own
+/// unscoped fallback is unreachable from here because `cascade_scopes()` is
+/// never empty; a run with no workspace used to call the unscoped
+/// `search_hybrid` instead and was primed with every project's workspace
+/// memories (audit finding F1). Extracted so the scope rule can be tested
+/// against a real database without running a lead.
+fn retrieve_lead_memories(
+    repo: &openalpaca_storage::repository::MemoryRepository<'_>,
+    created_by: &str,
+    task_description: &str,
+    query_embedding: Option<&[f32]>,
+    workspace: &MemoryScopeContext,
+) -> Vec<openalpaca_storage::MemoryV2> {
+    let cascade_scopes = workspace.cascade_scopes();
+    repo.search_hybrid_cascade(
+        created_by,
+        task_description,
+        query_embedding,
+        5,
+        None,
+        &cascade_scopes,
+    )
+    .unwrap_or_default()
 }
 
 // ── Tests ────────────────────────────────────────────────────────────

@@ -2720,3 +2720,125 @@ async fn spawn_subagent_survives_a_multibyte_objective_preview() {
     assert!(err.contains("cannot spawn itself"), "{err}");
     assert!(logs_contain("Lead agent spawning subagent"));
 }
+
+// ── Memory injection scope (audit finding F1) ────────────────────────
+
+/// One owner, one global memory and one memory scoped to a project
+/// workspace, both matching the query these tests search with.
+fn memory_fixture(repo: &openalpaca_storage::repository::MemoryRepository<'_>) -> (i64, i64) {
+    use openalpaca_storage::{MemoryKind, MemoryScope, MemorySource};
+
+    let global_id = repo
+        .add(
+            "owner-1",
+            MemoryKind::Preference,
+            MemoryScope::Global,
+            "",
+            MemorySource::Conversation,
+            "the owner prefers terse status reports",
+            None,
+            0.5,
+            0.9,
+        )
+        .unwrap();
+    let workspace_id = repo
+        .add(
+            "owner-1",
+            MemoryKind::Fact,
+            MemoryScope::Workspace,
+            "/tmp/projA",
+            MemorySource::Conversation,
+            "projA status reports are posted to the release channel",
+            None,
+            0.5,
+            0.9,
+        )
+        .unwrap();
+    assert!(global_id > 0 && workspace_id > 0, "both rows must insert");
+    (global_id, workspace_id)
+}
+
+/// A workflow started with no workspace — a connector lane, a scheduled
+/// skill, the GUI with no project open — primes the lead with the owner's
+/// **global** memories only. The no-workspace branch used to run an
+/// unscoped search, so another project's workspace memories leaked into
+/// every such run.
+#[test]
+fn lead_memory_injection_without_workspace_reads_global_scope_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let repo = openalpaca_storage::repository::MemoryRepository::new(&db);
+    let (global_id, _workspace_id) = memory_fixture(&repo);
+
+    let memories = retrieve_lead_memories(
+        &repo,
+        "owner-1",
+        "status reports",
+        None,
+        &MemoryScopeContext::global_only(),
+    );
+
+    let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
+    assert_eq!(
+        ids,
+        vec![global_id],
+        "a run with no workspace must not read another project's workspace memories"
+    );
+}
+
+/// The workspace branch: a run inside `/tmp/projA` reads that workspace's
+/// memories and the global ones — most specific first — and nothing from a
+/// different workspace.
+#[test]
+fn lead_memory_injection_with_workspace_reads_its_workspace_and_global() {
+    use openalpaca_storage::{MemoryKind, MemoryScope, MemorySource};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let repo = openalpaca_storage::repository::MemoryRepository::new(&db);
+    let (global_id, workspace_id) = memory_fixture(&repo);
+    let other_id = repo
+        .add(
+            "owner-1",
+            MemoryKind::Fact,
+            MemoryScope::Workspace,
+            "/tmp/projB",
+            MemorySource::Conversation,
+            "projB status reports are weekly",
+            None,
+            0.5,
+            0.9,
+        )
+        .unwrap();
+    assert!(other_id > 0);
+
+    let memories = retrieve_lead_memories(
+        &repo,
+        "owner-1",
+        "status reports",
+        None,
+        &MemoryScopeContext::new(Some("/tmp/projA".to_string())),
+    );
+
+    let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
+    assert_eq!(ids, vec![workspace_id, global_id]);
+}
+
+/// Negative control, pinning why the lead must not call it: the storage
+/// crate's unscoped `search_hybrid` answers with every scope the owner has.
+/// That is the call the no-workspace branch used to make.
+#[test]
+fn unscoped_search_hybrid_returns_every_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let repo = openalpaca_storage::repository::MemoryRepository::new(&db);
+    let (global_id, workspace_id) = memory_fixture(&repo);
+
+    let memories = repo
+        .search_hybrid("owner-1", "status reports", None, 5, None, None, None)
+        .unwrap();
+
+    let mut ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, vec![global_id, workspace_id]);
+}
