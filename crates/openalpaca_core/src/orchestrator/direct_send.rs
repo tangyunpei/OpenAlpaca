@@ -165,9 +165,11 @@ pub(super) fn has_default_recipient(db: &Database, owner: &str, channel: &str) -
         "imessage" => {
             get("imessage.last_reply_target").is_some() || get("imessage.last_chat_id").is_some()
         }
+        // Zero is no snowflake: the daemon's send refuses it (twilight's
+        // `Id::new(0)` panics), so the prompt must not offer it either.
         "discord" => get("discord.last_channel_id")
             .and_then(|p| p.value.parse::<u64>().ok())
-            .is_some(),
+            .is_some_and(|id| id != 0),
         _ => false,
     }
 }

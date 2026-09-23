@@ -6293,14 +6293,14 @@ async fn the_direct_send_and_send_context_read_the_same_default_recipient() {
         ("imessage", "imessage.last_chat_id", Some("chat123"), true),
         ("imessage", "imessage.last_reply_target", Some(""), true),
         ("imessage", "imessage.last_reply_target", None, false),
-        // Discord: a u64 channel id; zero is not rejected.
+        // Discord: a non-zero u64 channel id (zero is no snowflake).
         (
             "discord",
             "discord.last_channel_id",
             Some("123456789012345678"),
             true,
         ),
-        ("discord", "discord.last_channel_id", Some("0"), true),
+        ("discord", "discord.last_channel_id", Some("0"), false),
         ("discord", "discord.last_channel_id", Some("-5"), false),
         ("discord", "discord.last_channel_id", Some("general"), false),
         ("discord", "discord.last_channel_id", None, false),
