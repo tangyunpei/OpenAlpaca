@@ -1,6 +1,6 @@
 # Proposed native Markdown memory design
 
-**Status: rev 4.1 (2026-09-23): the owner has answered MD-1…MD-9 (§0) and the three decisions the rev-3 audit raised (G2, G30, G38); not implemented; awaiting the owner's approval of this written design.** Rev 4 applies the [audit of rev 3](07-audit-gaps.md) — 49 verified gaps, G1–G49 — and adds **§7a, the frozen contracts** that slice 1 could not freeze from rev 3. Rev 3 applied the owner's answers and the instruction that the old engine be removed completely. Rev 2 applied the [review](05-review.md). Every change traces to evidence in [06a–06d](05-review.md#method) or to a gap in 07, and the revision log at the end lists which gaps each change closes. See also [the audit](01-code-audit.md), [framework research](02-framework-research.md), [filesystem research](02-filesystem-research.md) and the [implementation plan](04-implementation-plan.md).
+**Status: rev 4.2 (2026-09-23): the owner has answered MD-1…MD-9 (§0) and the three decisions the rev-3 audit raised (G2, G30, G38); not implemented; awaiting the owner's approval of this written design.** Rev 4 applies the [audit of rev 3](07-audit-gaps.md) — 49 verified gaps, G1–G49 — and adds **§7a, the frozen contracts** that slice 1 could not freeze from rev 3. Rev 3 applied the owner's answers and the instruction that the old engine be removed completely. Rev 2 applied the [review](05-review.md). Every change traces to evidence in [06a–06d](05-review.md#method) or to a gap in 07, and the revision log at the end lists which gaps each change closes. See also [the audit](01-code-audit.md), [framework research](02-framework-research.md), [filesystem research](02-filesystem-research.md) and the [implementation plan](04-implementation-plan.md).
 
 ## 0. Owner decisions
 
@@ -608,6 +608,25 @@ The invariant fixtures (`crates/openalpaca_storage/tests/fixtures/memory/`, slic
 
 Two consequences for §7a: `sources_status` is a field of a search result (P6), and `memory_changed.surface` is optional, absent for a change a reconciliation scan discovered (P13).
 
+## 7c. Rulings pinned by the slice-2 library
+
+Slice 2 (`crates/openalpaca_storage/src/memory_files/` and `memory_index/`, landed 2026-09-23) took these readings where §4–§7b were silent or, in one case, too narrow. Adopted as rulings by the session lead on the same basis as §7b; slice 3 builds on them as written.
+
+| # | Ruling | Where |
+|---|---|---|
+| Q1 | `pending` carries `origin` beside `{id, from_rev, to_rev}`: recovery's "finish step 3" must record the post-write origin (fixture 15). §7a's `pending` row is widened accordingly. | `memory_files/snapshot.rs` |
+| Q2 | The flat §4 frontmatter is parsed and serialized by a hand-written canon (strings, lists, timestamps, null, booleans, the small `sources` objects); unknown keys are preserved verbatim; no YAML crate. | `memory_files/note.rs` |
+| Q3 | The library has its own hardened filesystem primitives (`fsx.rs`): the store's `write_atomic`/`create_private_dir` are private to `store/mod.rs`. `state/` is created private (0700) by `store::state_dir()` before the first snapshot. | `memory_files/fsx.rs` |
+| Q4 | Every path component below the store root is checked, `owners` and `.history` included; a refused path returns `PathRefused` naming the component and the library logs nothing — the service logs the one WARN. | `memory_files/partition.rs` |
+| Q5 | A retitle writes onto the current path and then renames, so there is never a duplicate-id window; recovery repairs a stale slug. | `memory_files/partition.rs` |
+| Q6 | `repair` on a healthy partition checks its preconditions (a duplicate id is refused naming both files) and rebuilds nothing. `adopt` refuses an owner key that is not 32 lowercase hex, and `snapshot_path_for` refuses anything but `home-<32hex>` / `proj-<32hex>-<16hex>`. `adopt` re-binds a project snapshot whose root is gone; the CLI runs `classify_move_snapshots` first. | `memory_files/partition.rs`, `mod.rs` |
+| Q7 | `source_forgotten` = a suppressed source whose tombstone `forgotten_at` is **at or after** the note's `written_at`; an edit lifts it. `doctor` reports one conflict per pair. | `memory_files/authority.rs` |
+| Q8 | Exact dedup (P8) keys on kind + title + body + `fact_key` + aliases + tags among effectively active notes, since two fresh UUIDs never share bytes. | `memory_files/partition.rs` |
+| Q9 | Query routing: a term of three or more characters is searched in both FTS tables; a one- or two-character term is substring-searched when it is CJK or when the query has no longer term; English stop words are dropped from routing only when another term remains; an identifier's parts are a fallback used only when the literal matches nothing. | `memory_index/query.rs` |
+| Q10 | Candidates are never returned by search. `partial` is also set when the 256-chunk FTS candidate cap is hit — slice 3 must not read `partial` as "search again". `same_key_loser` is a separate result field from `conflict`. `MAX_TERMS` is 32. | `memory_index/search.rs` |
+| Q11 | Verification (§5 step 7: re-read and re-hash the selected files) is the service's job, not the index's; `reconcile` reports differences and the caller applies them. | `memory_index/reconcile.rs` |
+| Q12 | The cache runs with a 64 MiB page cache and mmap, and `rebuild` runs FTS `optimize` plus a WAL checkpoint; measured at 10K notes on an Apple M5 Max: search + verification p50 8–14 ms, p95 17–27 ms, cache ≈ 8× the corpus (the trigram index), rebuild ≈ 8 s in release — off the request path. | `memory_index/` |
+
 ## 8. Module boundaries and cost controls
 
 | Location | Responsibility |
@@ -659,6 +678,7 @@ These exclusions keep the replacement reviewable. Expand only after the evaluati
   - **§7a (new):** the frozen contracts — the snapshot schema with an example, `MemoryAccessContext` with its per-surface table, the six tool schemas, the route table with the cursor rule and error codes, the persona routes, `memory_changed`, `memory_used`, and the CLI syntax [G1, G6, G7, G9, G10, G17, G18, G19, G20, G39, G45].
   - **§8:** modules list the ring, the bridge arms, the persona routes and the `serde_yaml` edge [G22, G30]. **§9:** import/export are listed as excluded [G16].
   - **Where rev 4 departs from 07.** G11, as above. G7: the instruction's single `supersedes: {id, expected_revision}` object is used rather than 07's list; the file field stays a list. G2's refusal message names the Memory *view* rather than "Settings → Memory", because G30 placed the view in the side nav. G6 and G2 add a third `surface` value, `Extraction`, for the background extractor: MD-2 already gives it its own origins, so a two-valued surface could not say which of `extracted_user`/`extracted_other` an extraction write records; no owner-decided rule changes.
+- **rev 4.2 (2026-09-23):** §7c records the twelve rulings the slice-2 library pinned (Q1–Q12); §7a's `pending` gains `origin` (Q1).
 - **rev 4.1 (2026-09-23):** §7b adopts the thirteen readings the slice-1 fixtures pinned (P1–P13) as rulings; §7a gains `sources_status` and an optional `memory_changed.surface`.
 - **rev 3 (2026-09-23):** the owner answered MD-1…MD-9.
   - **MD-6 (refuse and reset)** removes the `imported_legacy` origin, the `legacy:` block, `migrate --dry-run` and the `legacy_memory` module.
