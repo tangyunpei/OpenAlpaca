@@ -252,9 +252,12 @@ pub struct MemoryDecayConfig {
     pub poll_interval_secs: u64,
     /// Half-life in days: after this many days without access, importance drops by 50%.
     pub half_life_days: f64,
-    /// Minimum importance floor. Memories below this are eligible for pruning.
+    /// Minimum importance floor: decay never takes a memory below it. Nothing
+    /// prunes at it — the decay task decays and deletes nothing.
     pub min_importance: f64,
-    /// Soft cap on total non-KbChunk memories per owner. Excess is pruned by lowest importance.
+    /// Soft cap on total non-KbChunk memories per owner. Parsed and clamped,
+    /// then read by nothing: the decay task no longer prunes, so setting it
+    /// changes nothing.
     pub soft_cap: usize,
     /// Small importance boost applied each time a memory is accessed.
     /// Reinforces frequently-used memories. Capped at 1.0 to prevent unbounded growth.

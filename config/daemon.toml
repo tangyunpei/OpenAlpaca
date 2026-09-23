@@ -59,6 +59,7 @@ supersession_distance_threshold = 1
 half_life_days = 30
 min_importance = 0.05
 poll_interval_secs = 3600
+# Read by nothing: the decay task decays and never prunes, so this changes nothing.
 soft_cap = 500
 
 [orchestrator.prompt_budgets]
