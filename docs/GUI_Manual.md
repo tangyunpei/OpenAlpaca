@@ -101,7 +101,8 @@ the daemon says so. It refuses to start only when that directory holds a
 database, a `.master_key` or a `config/` **and** this root has no database yet —
 rather than come up on an empty database beside it; the app then shows the
 daemon's own message in Settings → Connection, read from `daemon.log`. Otherwise
-it starts and logs one warning per boot. See [If You Have Data From an Older
+it starts, and logs one warning per boot while that directory still holds a
+database, `.master_key`, `config/`, `plugins/` or `assets/`. See [If You Have Data From an Older
 Build](Installation_Manual.md#if-you-have-data-from-an-older-build).
 
 ## Connection lifecycle

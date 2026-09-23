@@ -180,7 +180,8 @@ pub(crate) fn residue_message(legacy: &Path, home_root: &Path, holds_database: b
     let home_db = home_root.join("state").join(DB_FILE);
     let mut message = format!(
         "An older OpenAlpaca data directory is still on this machine: {}.\n\
-         This build neither reads nor moves it. This install runs from {}, and\n\
+         This build does not move it, and reads nothing in it except uploaded files\n\
+         that a database carried out of it still points at. This install runs from {}, and\n\
          its own database is {}.",
         legacy.display(),
         home_root.display(),

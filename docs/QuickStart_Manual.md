@@ -137,7 +137,9 @@ openalpaca daemon tail         # follow daemon events; -c N stops after N
   `~/Library/Application Support/OpenAlpaca`? Nothing is moved for you. If that
   directory holds a database, a `.master_key` or a `config/` and `~/.openalpaca`
   has no database yet, the daemon refuses to start rather than come up on an
-  empty database beside it; otherwise it starts and warns once per boot. Read [If You Have Data From an Older
+  empty database beside it; otherwise it starts, and warns once per boot while that
+  directory still holds a database, `.master_key`, `config/`, `plugins/` or `assets/`.
+  Read [If You Have Data From an Older
   Build](Installation_Manual.md#if-you-have-data-from-an-older-build) first.
 
 ## Next
