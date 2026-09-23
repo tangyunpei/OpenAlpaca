@@ -597,6 +597,48 @@ describe("DaemonEventsClient", () => {
 
     client.disconnect();
   });
+
+  /**
+   * A daemon that wrote `discovery.json` and then died on its database leaves
+   * a stale endpoint: the ladder dials it and the socket fails. That failure
+   * is not a reason, and it must not replace the one the bootstrap brought
+   * back — only a socket that opens retires it.
+   */
+  it("keeps the bootstrap's reason through a later socket failure, until a socket opens", async () => {
+    const reason =
+      "The daemon did not start within 5 seconds. Its log ends with:\n\nFATAL: legacy schema v39";
+    const client = makeClient({
+      bootstrap: () => Promise.reject(new Error(reason)),
+      random: () => 0,
+    });
+    const seen: Array<string | null> = [];
+    client.onStatus(() => seen.push(client.getLastError()));
+
+    await client.connect();
+    expect(client.getLastError()).toBe(reason);
+
+    // The ladder's first rung reads the stale discovery and dials the port.
+    await vi.advanceTimersByTimeAsync(800);
+    expect(sockets).toHaveLength(1);
+    latest().onerror?.({});
+    latest().onclose?.({});
+
+    expect(client.getStatus()).toBe("disconnected");
+    expect(client.getLastError()).toBe(reason);
+    expect(seen).not.toContain("WebSocket connection error");
+
+    // A daemon that does answer retires it.
+    await vi.advanceTimersByTimeAsync(1600);
+    latest().onopen?.({});
+    expect(client.getStatus()).toBe("connected");
+    expect(client.getLastError()).toBeNull();
+
+    // And a transport failure after that is reported as what it is.
+    latest().onerror?.({});
+    expect(client.getLastError()).toBe("WebSocket connection error");
+
+    client.disconnect();
+  });
 });
 
 describe("ServerEvent union", () => {

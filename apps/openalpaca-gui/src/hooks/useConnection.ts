@@ -138,7 +138,10 @@ export interface ConnectionStatus {
    * For a daemon that would not start this is `ensure_daemon_running`'s
    * rejection, which ends with the daemon's own log lines — a legacy-schema
    * database, an older install's data, another daemon holding the lock. It
-   * used to reach nobody: the sidecar's output went to `/dev/null`.
+   * used to reach nobody: the sidecar's output went to `/dev/null`. A later
+   * socket failure does not replace it (a daemon that died after writing
+   * discovery leaves a stale endpoint the ladder dials); only a socket that
+   * opens clears it.
    */
   lastError: string | null;
   /** Why this window has no daemon, or `null` while it should have one. */

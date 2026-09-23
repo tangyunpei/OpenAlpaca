@@ -206,7 +206,20 @@ export class DaemonEventsClient {
   private disconnectedAt: number | null = null;
 
   private status: EventsStatus = "idle";
+  /** The socket's own last failure — overwritten by every transport error. */
   private lastError: string | null = null;
+  /**
+   * Why the last bootstrap failed, kept apart from `lastError`.
+   *
+   * A daemon that writes `discovery.json` and then dies (a database it will
+   * not open) leaves a stale, unexpired endpoint behind; the ladder reads it,
+   * dials a dead port, and the socket's generic "WebSocket connection error"
+   * used to replace the daemon's own reason within a second. A transport
+   * error says nothing new about why the daemon is gone, so it never
+   * overwrites this. Replaced by the next failed bootstrap; cleared only by a
+   * socket that actually opens.
+   */
+  private bootError: string | null = null;
   private ring: ServerEvent[] = [];
 
   private readonly eventListeners = new Set<(event: ServerEvent) => void>();
@@ -221,8 +234,12 @@ export class DaemonEventsClient {
     return this.status;
   }
 
+  /**
+   * Why the daemon is unreachable: the last bootstrap's reason while one is
+   * standing, else the socket's own last failure.
+   */
   getLastError(): string | null {
-    return this.lastError;
+    return this.bootError ?? this.lastError;
   }
 
   /** Newest-first ring of received events. */
@@ -263,7 +280,7 @@ export class DaemonEventsClient {
       this.openSocket(info);
     } catch (error) {
       if (gen !== this.generation) return;
-      this.lastError = error instanceof Error ? error.message : String(error);
+      this.bootError = error instanceof Error ? error.message : String(error);
       this.setStatus("error");
       this.scheduleReconnect();
     }
@@ -330,6 +347,7 @@ export class DaemonEventsClient {
 
     socket.onopen = () => {
       this.lastError = null;
+      this.bootError = null;
       this.backoffMs = BACKOFF_BASE_MS;
       this.setStatus("connected");
       // A first connect cannot have missed anything; every later one can.
