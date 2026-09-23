@@ -7,11 +7,9 @@
 //! the global registry — global registration would change
 //! `registered_tool_names()` and thus the triage prompt on the legacy path.
 
-use crate::daemon_config::DaemonConfig;
 use crate::memory::scope_context::MemoryScopeContext;
 use crate::orchestrator::{forget_memory, store_memory};
 use crate::tools::registry::{BuiltInTool, ToolContext};
-use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use openalpaca_llm::ToolDefinition;
 use std::sync::Arc;
@@ -22,20 +20,14 @@ use std::sync::Arc;
 pub struct MemoryStoreTool {
     db: Option<openalpaca_storage::Database>,
     embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
-    daemon_config: Arc<ArcSwap<DaemonConfig>>,
 }
 
 impl MemoryStoreTool {
     pub fn new(
         db: Option<openalpaca_storage::Database>,
         embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
-        daemon_config: Arc<ArcSwap<DaemonConfig>>,
     ) -> Self {
-        Self {
-            db,
-            embedder,
-            daemon_config,
-        }
+        Self { db, embedder }
     }
 }
 
@@ -63,7 +55,6 @@ impl BuiltInTool for MemoryStoreTool {
         store_memory(
             self.db.as_ref(),
             &self.embedder,
-            &self.daemon_config,
             content,
             ctx.owner_id.as_deref(),
             &scope_ctx,
@@ -173,15 +164,11 @@ mod tests {
         }
     }
 
-    fn default_config() -> Arc<ArcSwap<DaemonConfig>> {
-        Arc::new(ArcSwap::from_pointee(DaemonConfig::default()))
-    }
-
     #[tokio::test]
     async fn test_memory_store_forget_roundtrip_matches_old_handler_contract() {
         let dir = tempfile::tempdir().unwrap();
         let db = make_db(&dir);
-        let store = MemoryStoreTool::new(Some(db.clone()), None, default_config());
+        let store = MemoryStoreTool::new(Some(db.clone()), None);
         let forget = MemoryForgetTool::new(Some(db.clone()));
         let ctx = owner_ctx("user1");
 
@@ -231,9 +218,8 @@ mod tests {
         let dir_tool = tempfile::tempdir().unwrap();
         let dir_core = tempfile::tempdir().unwrap();
         let (db_tool, db_core) = (make_db(&dir_tool), make_db(&dir_core));
-        let cfg = default_config();
 
-        let tool = MemoryStoreTool::new(Some(db_tool), None, cfg.clone());
+        let tool = MemoryStoreTool::new(Some(db_tool), None);
         let via_tool = tool
             .execute_with_context(
                 &serde_json::json!({"content": "release day is Friday"}),
@@ -244,7 +230,6 @@ mod tests {
         let via_core = crate::orchestrator::store_memory(
             Some(&db_core),
             &None,
-            &cfg,
             "release day is Friday",
             Some("user1"),
             &crate::memory::scope_context::MemoryScopeContext::global_only(),
@@ -256,8 +241,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_tools_require_owner_and_db() {
-        let cfg = default_config();
-        let store = MemoryStoreTool::new(None, None, cfg.clone());
+        let store = MemoryStoreTool::new(None, None);
         // No DB → the old handler's unavailability error.
         let err = store
             .execute_with_context(
@@ -271,7 +255,7 @@ mod tests {
         // No owner → the old handler's owner error.
         let dir = tempfile::tempdir().unwrap();
         let db = make_db(&dir);
-        let store = MemoryStoreTool::new(Some(db.clone()), None, cfg);
+        let store = MemoryStoreTool::new(Some(db.clone()), None);
         let err = store
             .execute_with_context(&serde_json::json!({"content": "x"}), &ToolContext::default())
             .await

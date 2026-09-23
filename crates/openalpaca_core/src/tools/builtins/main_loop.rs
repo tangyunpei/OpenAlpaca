@@ -161,11 +161,7 @@ pub fn main_loop_tool_set(
         definitions.push(store_def.clone());
         instances.push((
             store_def,
-            Arc::new(MemoryStoreTool::new(
-                db.clone(),
-                embedder,
-                daemon_config.clone(),
-            )) as Arc<dyn BuiltInTool>,
+            Arc::new(MemoryStoreTool::new(db.clone(), embedder)) as Arc<dyn BuiltInTool>,
         ));
 
         let forget_def = memory_forget_tool_definition();

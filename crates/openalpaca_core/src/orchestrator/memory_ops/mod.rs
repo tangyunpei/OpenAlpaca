@@ -1,7 +1,5 @@
-use crate::daemon_config::DaemonConfig;
 use crate::memory::scope_context::MemoryScopeContext;
 use crate::memory::task_extraction::{PersistResult, persist_memory_item};
-use arc_swap::ArcSwap;
 use openalpaca_storage::Database;
 use openalpaca_storage::models::memory::{MemoryKind, MemoryScope, MemorySource};
 use openalpaca_storage::repository::MemoryRepository;
@@ -15,13 +13,9 @@ use std::sync::Arc;
 /// stores as Global scope.
 ///
 /// Used by the `memory_store` builtin tool (Routing V2).
-///
-/// `_daemon_config` is unread: it carried the two supersession thresholds,
-/// and stays on the signature until the memory config fields themselves go.
 pub(crate) async fn store_memory(
     db: Option<&Database>,
     embedder: &Option<Arc<dyn openalpaca_llm::Embedder>>,
-    _daemon_config: &Arc<ArcSwap<DaemonConfig>>,
     content: &str,
     owner_id: Option<&str>,
     scope_ctx: &MemoryScopeContext,
