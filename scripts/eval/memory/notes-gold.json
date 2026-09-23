@@ -1,0 +1,2027 @@
+[
+  {
+    "id": "fbce4294-581d-5cd9-a7be-16a79598e75a",
+    "title": "The user's name and how to address her",
+    "kind": "fact",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.name",
+    "aliases": [
+      "林薇",
+      "Wei",
+      "Lin",
+      "name"
+    ],
+    "tags": [
+      "identity"
+    ],
+    "body": "## Knowledge\nThe user is Lin Wei (林薇). She uses she/her and likes to be called Wei in chat.\n## Evidence and limits\nStated by the user herself when she set up the assistant.\n## Recheck when\nShe asks to be addressed differently.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-01-08T09:00:00Z"
+  },
+  {
+    "id": "589ec820-c3d7-508c-a70a-2d889329a67d",
+    "title": "用户住在杭州",
+    "kind": "fact",
+    "scope": "global",
+    "project": null,
+    "language": "zh",
+    "fact_key": "user.home_city",
+    "aliases": [
+      "Hangzhou",
+      "home city",
+      "杭州",
+      "timezone",
+      "时区"
+    ],
+    "tags": [
+      "identity",
+      "location"
+    ],
+    "body": "## Knowledge\n林薇住在杭州西湖区，时区是 Asia/Shanghai（UTC+8）。\n## Evidence and limits\n用户自己说的；具体街道没有记录。\n## Recheck when\n她提到搬家。",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-01-08T09:05:00Z"
+  },
+  {
+    "id": "f539564c-231b-5efe-bba6-28955e6df58b",
+    "title": "The user's birthday",
+    "kind": "fact",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.birthday",
+    "aliases": [
+      "生日",
+      "date of birth",
+      "birthday"
+    ],
+    "tags": [
+      "identity"
+    ],
+    "body": "## Knowledge\nLin Wei was born on 14 March 1991.\n## Evidence and limits\nStated by the user; year confirmed when she mentioned turning 35 in 2026.\n## Recheck when\nNever expected to change.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-01-08T09:10:00Z"
+  },
+  {
+    "id": "c0489a40-6678-5f2d-98e8-1973ebb7fd57",
+    "title": "The user's current job at Quillpay",
+    "kind": "fact",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.employer",
+    "aliases": [
+      "Quillpay",
+      "工作",
+      "employer",
+      "manager",
+      "Priya"
+    ],
+    "tags": [
+      "work"
+    ],
+    "body": "## Knowledge\nLin Wei is a backend engineer at Quillpay, a fintech start-up in Hangzhou, since September 2021.\nShe is on the Ledger Platform team; her manager is Priya Raman.\n## Evidence and limits\nStated by the user. Title and team are as of January 2026.\n## Recheck when\nShe mentions a promotion, a team change or a new employer.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-01-08T09:15:00Z"
+  },
+  {
+    "id": "f5ae2a6d-4f64-52f4-9145-39da8657e0fe",
+    "title": "用户之前在 Norden Labs 工作",
+    "kind": "fact",
+    "scope": "global",
+    "project": null,
+    "language": "zh",
+    "fact_key": "user.previous_employer",
+    "aliases": [
+      "Norden Labs",
+      "previous job",
+      "上一份工作",
+      "Shanghai"
+    ],
+    "tags": [
+      "work",
+      "history"
+    ],
+    "body": "## Knowledge\n2016 年到 2021 年，林薇在上海的 Norden Labs 做数据工程师，主要用 Python 和 Spark。\n## Evidence and limits\n用户在聊简历时说的。\n## Recheck when\n她补充这段经历的细节。",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-01-12T10:00:00Z"
+  },
+  {
+    "id": "ba289b57-b950-594d-8dc1-4140b58d85df",
+    "title": "The user's partner Tomas",
+    "kind": "fact",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.partner",
+    "aliases": [
+      "Tomas",
+      "boyfriend",
+      "伴侣",
+      "男朋友"
+    ],
+    "tags": [
+      "family"
+    ],
+    "body": "## Knowledge\nLin Wei's partner is Tomas Lindqvist, who is Swedish and works as a UX designer.\nTomas's birthday is 10 August.\n## Evidence and limits\nStated by the user when planning a birthday dinner in 2026.\n## Recheck when\nShe corrects any of it.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-01-15T18:00:00Z"
+  },
+  {
+    "id": "52f82d00-2f60-5caf-b30b-5c1e9bacd312",
+    "title": "用户的狗 Mochi",
+    "kind": "fact",
+    "scope": "global",
+    "project": null,
+    "language": "zh",
+    "fact_key": "user.pet",
+    "aliases": [
+      "Mochi",
+      "麻糬",
+      "dog",
+      "狗",
+      "corgi",
+      "柯基"
+    ],
+    "tags": [
+      "family",
+      "pet"
+    ],
+    "body": "## Knowledge\n林薇养了一只柯基，叫 Mochi（麻糬），2022 年领养的。她每天早上七点遛狗。\n## Evidence and limits\n用户提到过多次；狗的体重和生日没有记录。\n## Recheck when\n遛狗时间变化。",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-01-15T18:10:00Z"
+  },
+  {
+    "id": "eca96db9-98b9-5def-a63d-c3c39a10ea0e",
+    "title": "Editor: vim (until June 2026)",
+    "kind": "preference",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.editor",
+    "aliases": [
+      "vim",
+      "editor"
+    ],
+    "tags": [
+      "tooling"
+    ],
+    "body": "## Knowledge\nUntil the start of June 2026 Lin Wei's editor was vim, with a plain vimrc and no plugin manager.\n## Evidence and limits\nHer stated preference from January to May 2026. Replaced by Helix in June 2026.\n## Recheck when\nHistorical only.",
+    "valid_from": null,
+    "valid_to": "2026-06-01T00:00:00Z",
+    "supersedes": [],
+    "created_at": "2026-01-20T11:00:00Z"
+  },
+  {
+    "id": "bdda0cb4-a2d7-5ee0-a896-963c2f496427",
+    "title": "Editor: Helix (since June 2026)",
+    "kind": "preference",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.editor",
+    "aliases": [
+      "Helix",
+      "hx",
+      "editor",
+      "编辑器"
+    ],
+    "tags": [
+      "tooling"
+    ],
+    "body": "## Knowledge\nSince June 2026 Lin Wei's editor is Helix (`hx`). She uses its default keymap and the Gruvbox theme.\nBefore that she used vim.\n## Evidence and limits\nStated by the user on 3 June 2026 after two weeks of trying Helix.\n## Recheck when\nShe mentions switching editors again.",
+    "valid_from": "2026-06-01T00:00:00Z",
+    "valid_to": null,
+    "supersedes": [
+      "eca96db9-98b9-5def-a63d-c3c39a10ea0e"
+    ],
+    "created_at": "2026-06-03T09:30:00Z"
+  },
+  {
+    "id": "360fa8e1-b71c-5bf1-afb7-3854794bc0d1",
+    "title": "Dark mode and Gruvbox everywhere",
+    "kind": "preference",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.theme",
+    "aliases": [
+      "dark mode",
+      "Gruvbox",
+      "font",
+      "主题",
+      "深色模式"
+    ],
+    "tags": [
+      "tooling"
+    ],
+    "body": "## Knowledge\nLin Wei wants dark mode in every app. Her editor theme is Gruvbox Dark and her coding font is JetBrains Mono at 13 pt.\n## Evidence and limits\nStated preference; applies to the terminal, editor and any generated screenshots.\n## Recheck when\nShe asks for a different theme.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-01-20T11:10:00Z"
+  },
+  {
+    "id": "d412219c-5b71-511e-ad65-41e7c5771387",
+    "title": "喝茶不喝咖啡",
+    "kind": "preference",
+    "scope": "global",
+    "project": null,
+    "language": "zh",
+    "fact_key": "user.drink",
+    "aliases": [
+      "tea",
+      "coffee",
+      "龙井",
+      "茶",
+      "咖啡",
+      "Longjing"
+    ],
+    "tags": [
+      "food"
+    ],
+    "body": "## Knowledge\n林薇只喝茶，不喝咖啡。最喜欢龙井。下午三点以后不喝任何含咖啡因的饮料。\n## Evidence and limits\n用户自己说的。\n## Recheck when\n她提到开始喝咖啡。",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-01-22T14:00:00Z"
+  },
+  {
+    "id": "0d47adbd-f5eb-57c1-b054-9385ff3d6a3c",
+    "title": "How the user wants answers written",
+    "kind": "preference",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.answer_style",
+    "aliases": [
+      "concise",
+      "bullet list",
+      "emoji",
+      "回答风格"
+    ],
+    "tags": [
+      "communication"
+    ],
+    "body": "## Knowledge\nLin Wei wants concise answers. Summaries as bullet lists. No emoji. Code in fenced blocks with a language tag.\n## Evidence and limits\nStated preference, repeated twice.\n## Recheck when\nShe asks for longer or more formal answers.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-01-22T14:10:00Z"
+  },
+  {
+    "id": "b897fbe1-ca49-5041-8354-8f376deb884b",
+    "title": "中文闲聊，英文写技术内容",
+    "kind": "preference",
+    "scope": "global",
+    "project": null,
+    "language": "zh",
+    "fact_key": "user.language",
+    "aliases": [
+      "language",
+      "语言",
+      "Chinese",
+      "English",
+      "中文",
+      "英文"
+    ],
+    "tags": [
+      "communication"
+    ],
+    "body": "## Knowledge\n和林薇闲聊用中文；代码评审、技术文档和 commit message 用英文。数字一律用阿拉伯数字。\n## Evidence and limits\n用户明确要求的。\n## Recheck when\n她要求改变语言。",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-01-22T14:15:00Z"
+  },
+  {
+    "id": "86d3c819-b107-5ef5-a97a-62d76b695298",
+    "title": "Commit message style",
+    "kind": "preference",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.commit_style",
+    "aliases": [
+      "commit message",
+      "Conventional Commits",
+      "提交信息"
+    ],
+    "tags": [
+      "tooling",
+      "git"
+    ],
+    "body": "## Knowledge\nCommits follow Conventional Commits (`feat:`, `fix:`, `docs:` …), an imperative subject of at most 72 characters,\nno emoji anywhere in the message, and a body wrapped at 72 columns.\n## Evidence and limits\nStated preference; applies to every repository she works in.\n## Recheck when\nA project she joins has its own convention.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-01-25T10:00:00Z"
+  },
+  {
+    "id": "d20e3d13-3ba2-50a8-9bcc-d1cd509c51f5",
+    "title": "Code formatting preferences",
+    "kind": "preference",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.code_style",
+    "aliases": [
+      "indentation",
+      "line width",
+      "代码风格",
+      "formatting"
+    ],
+    "tags": [
+      "tooling"
+    ],
+    "body": "## Knowledge\n4-space indentation, a maximum line width of 100, trailing commas in multi-line literals, and early returns over nested ifs.\n## Evidence and limits\nStated preference for the code the assistant writes; a project formatter wins when one exists.\n## Recheck when\nShe mentions a formatter change.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-01-25T10:05:00Z"
+  },
+  {
+    "id": "110a879c-3608-5272-94ae-f610a9d9d394",
+    "title": "Database preference: PostgreSQL",
+    "kind": "preference",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.database",
+    "aliases": [
+      "PostgreSQL",
+      "Postgres",
+      "psql",
+      "MongoDB",
+      "数据库"
+    ],
+    "tags": [
+      "tooling"
+    ],
+    "body": "## Knowledge\nLin Wei prefers PostgreSQL for anything new and avoids MongoDB. She uses `psql` from the terminal rather than a GUI client.\n## Evidence and limits\nStated preference.\n## Recheck when\nA project forces another database.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-01-25T10:10:00Z"
+  },
+  {
+    "id": "cf02620f-5620-5a47-ae88-460fd37f419c",
+    "title": "Python tooling: uv and ruff",
+    "kind": "preference",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.python_tooling",
+    "aliases": [
+      "uv",
+      "pip",
+      "poetry",
+      "ruff",
+      "Python"
+    ],
+    "tags": [
+      "tooling",
+      "python"
+    ],
+    "body": "## Knowledge\nFor Python she uses `uv` (not pip or poetry) for environments and dependencies, and `ruff` for both linting and formatting.\nPython 3.13 is her default interpreter.\n## Evidence and limits\nStated preference in February 2026.\n## Recheck when\nShe mentions another tool.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-02-02T09:00:00Z"
+  },
+  {
+    "id": "55da76c5-8f67-5628-a520-4cd45df14bb7",
+    "title": "周回顾：周五下午四点",
+    "kind": "preference",
+    "scope": "global",
+    "project": null,
+    "language": "zh",
+    "fact_key": "user.weekly_review",
+    "aliases": [
+      "weekly review",
+      "周回顾",
+      "周五"
+    ],
+    "tags": [
+      "routine"
+    ],
+    "body": "## Knowledge\n林薇每周五下午 16:00 做周回顾，需要一份本周完成事项的列表。\n## Evidence and limits\n2026 年 1 月记录的。\n## Recheck when\n她改时间。",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-01-05T08:00:00Z"
+  },
+  {
+    "id": "28215b64-1fbc-5779-be03-28ff04dadb3c",
+    "title": "周回顾：周一上午九点半",
+    "kind": "preference",
+    "scope": "global",
+    "project": null,
+    "language": "zh",
+    "fact_key": "user.weekly_review",
+    "aliases": [
+      "weekly review",
+      "周回顾",
+      "周一",
+      "Monday"
+    ],
+    "tags": [
+      "routine"
+    ],
+    "body": "## Knowledge\n林薇每周一上午 9:30 做周回顾。她要一份上周任务的 bullet 摘要，按项目分组，先 Lantern 后 Moss。\n## Evidence and limits\n2026 年 4 月用户说的。\n## Recheck when\n她改时间或格式。",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-04-06T08:00:00Z"
+  },
+  {
+    "id": "f5ec00b0-3491-5a92-940e-607602ab1056",
+    "title": "Standing rule: never push to main directly",
+    "kind": "decision",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.rule.no_direct_push",
+    "aliases": [
+      "push to main",
+      "direct push",
+      "PR only",
+      "直接推送"
+    ],
+    "tags": [
+      "git",
+      "rule"
+    ],
+    "body": "## Knowledge\nNothing is ever pushed to `main` directly, in any repository. Every change, documentation included, goes through a pull request.\n## Evidence and limits\nA standing instruction from the user, restated after an accidental push in 2025.\n## Recheck when\nShe lifts the rule explicitly.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-01-25T10:20:00Z"
+  },
+  {
+    "id": "f2024d48-d9b4-5704-81b1-1e30289c186b",
+    "title": "Personal cloud budget",
+    "kind": "decision",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.cloud_budget",
+    "aliases": [
+      "budget",
+      "cloud spend",
+      "Hetzner",
+      "预算"
+    ],
+    "tags": [
+      "money"
+    ],
+    "body": "## Knowledge\nPersonal cloud spending is capped at 200 USD per month across Cloudflare and one Hetzner VPS, with a warning at 150 USD.\n## Evidence and limits\nDecided by the user in February 2026.\n## Recheck when\nShe raises or lowers the cap.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-02-10T09:00:00Z"
+  },
+  {
+    "id": "add8b06d-fbf9-5904-b384-e3398ff1793c",
+    "title": "Shellfish allergy",
+    "kind": "fact",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.allergy",
+    "aliases": [
+      "allergy",
+      "shellfish",
+      "过敏",
+      "海鲜",
+      "shrimp"
+    ],
+    "tags": [
+      "health",
+      "food"
+    ],
+    "body": "## Knowledge\nLin Wei has a severe shellfish allergy: no shrimp, crab, lobster or oysters. Peanuts and tree nuts are fine.\n## Evidence and limits\nStated by the user; relevant to any restaurant or recipe suggestion.\n## Recheck when\nNever expected to change.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-02-10T09:10:00Z"
+  },
+  {
+    "id": "b68de6ef-298c-5450-ad04-b1ed1e92535e",
+    "title": "跑步计划和半马目标",
+    "kind": "fact",
+    "scope": "global",
+    "project": null,
+    "language": "zh",
+    "fact_key": "user.running",
+    "aliases": [
+      "running",
+      "跑步",
+      "half marathon",
+      "半马",
+      "杭州马拉松",
+      "pace"
+    ],
+    "tags": [
+      "health",
+      "sport"
+    ],
+    "body": "## Knowledge\n林薇每周二和周六跑 5 公里，目前配速 6'10\"/km。目标是 2026 年 11 月的杭州马拉松半程。\n## Evidence and limits\n用户 2026 年 3 月说的；配速会变。\n## Recheck when\n比赛结束或者计划改变。",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-03-01T08:00:00Z"
+  },
+  {
+    "id": "7711906b-b500-5443-b7da-a0ddc8847b62",
+    "title": "Reading taste: science fiction",
+    "kind": "preference",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.reading",
+    "aliases": [
+      "books",
+      "science fiction",
+      "科幻",
+      "Ted Chiang",
+      "刘慈欣"
+    ],
+    "tags": [
+      "hobby"
+    ],
+    "body": "## Knowledge\nLin Wei reads mostly science fiction. Favourite authors: Ted Chiang and Liu Cixin. Her reading notes are published on Moss.\n## Evidence and limits\nStated preference.\n## Recheck when\nShe mentions a new favourite.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-02-14T20:00:00Z"
+  },
+  {
+    "id": "17310b78-2539-5802-a542-9aa6380ca979",
+    "title": "Laptop: ThinkPad X1 Carbon on Fedora (until November 2025)",
+    "kind": "fact",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.laptop",
+    "aliases": [
+      "ThinkPad",
+      "Fedora",
+      "laptop"
+    ],
+    "tags": [
+      "hardware"
+    ],
+    "body": "## Knowledge\nUntil mid-November 2025 Lin Wei's laptop was a ThinkPad X1 Carbon Gen 9 running Fedora.\n## Evidence and limits\nHistorical; replaced by a MacBook Air M3.\n## Recheck when\nHistorical only.",
+    "valid_from": null,
+    "valid_to": "2025-11-15T00:00:00Z",
+    "supersedes": [],
+    "created_at": "2026-01-20T11:20:00Z"
+  },
+  {
+    "id": "d812f264-4ab3-5182-972e-919103cffa0e",
+    "title": "Laptop: MacBook Air M3 (since November 2025)",
+    "kind": "fact",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.laptop",
+    "aliases": [
+      "MacBook",
+      "M3",
+      "macOS",
+      "laptop",
+      "电脑",
+      "机器"
+    ],
+    "tags": [
+      "hardware"
+    ],
+    "body": "## Knowledge\nSince November 2025 Lin Wei works on a MacBook Air M3 with 16 GB of memory, running macOS. Before that she used a ThinkPad on Fedora.\n## Evidence and limits\nStated by the user; the M3 is Apple silicon (arm64), which matters for toolchains.\n## Recheck when\nShe mentions a new machine.",
+    "valid_from": "2025-11-15T00:00:00Z",
+    "valid_to": null,
+    "supersedes": [
+      "17310b78-2539-5802-a542-9aa6380ca979"
+    ],
+    "created_at": "2026-01-20T11:25:00Z"
+  },
+  {
+    "id": "be63eca1-2428-53ab-be74-0eb068bdfeb3",
+    "title": "GitHub handle",
+    "kind": "fact",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.github",
+    "aliases": [
+      "GitHub",
+      "handle",
+      "username",
+      "用户名"
+    ],
+    "tags": [
+      "identity",
+      "git"
+    ],
+    "body": "## Knowledge\nLin Wei's GitHub handle is `linwei-dev`. Her work organisation on GitHub is `quillpay`.\n## Evidence and limits\nStated by the user.\n## Recheck when\nShe renames the account.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-01-25T10:30:00Z"
+  },
+  {
+    "id": "40583509-f62c-5781-b93d-c55451845ae1",
+    "title": "键盘：HHKB，Caps Lock 映射为 Ctrl",
+    "kind": "preference",
+    "scope": "global",
+    "project": null,
+    "language": "zh",
+    "fact_key": "user.keyboard",
+    "aliases": [
+      "keyboard",
+      "HHKB",
+      "键盘",
+      "Caps Lock"
+    ],
+    "tags": [
+      "hardware"
+    ],
+    "body": "## Knowledge\n林薇用 HHKB Professional Hybrid Type-S 键盘，Caps Lock 映射成 Ctrl，用 QWERTY 布局。\n## Evidence and limits\n用户说的。\n## Recheck when\n她换键盘。",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-02-14T20:10:00Z"
+  },
+  {
+    "id": "3992ba1b-372a-5d49-a95f-aa84e8ba530a",
+    "title": "学日语，目标 N3",
+    "kind": "fact",
+    "scope": "global",
+    "project": null,
+    "language": "zh",
+    "fact_key": "user.japanese",
+    "aliases": [
+      "Japanese",
+      "日语",
+      "JLPT",
+      "N3",
+      "Anki",
+      "Sato"
+    ],
+    "tags": [
+      "learning"
+    ],
+    "body": "## Knowledge\n林薇在学日语，目标是 2026 年 12 月考过 JLPT N3。每天用 Anki 复习 20 分钟，周四晚上跟 Sato 老师上课。\n## Evidence and limits\n用户 2026 年 2 月说的。\n## Recheck when\n考试结束或者课程变化。",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-02-20T21:00:00Z"
+  },
+  {
+    "id": "73c3f368-d646-5e3f-845e-b319ed050190",
+    "title": "以前开本田飞度（2026 年 4 月卖掉）",
+    "kind": "fact",
+    "scope": "global",
+    "project": null,
+    "language": "zh",
+    "fact_key": "user.commute",
+    "aliases": [
+      "car",
+      "汽车",
+      "本田",
+      "Honda Fit",
+      "飞度"
+    ],
+    "tags": [
+      "transport"
+    ],
+    "body": "## Knowledge\n林薇以前开一辆 2018 年的本田飞度，2026 年 4 月 20 日卖掉了。\n## Evidence and limits\n历史信息；卖车后改坐地铁。\n## Recheck when\n仅作历史。",
+    "valid_from": null,
+    "valid_to": "2026-04-20T00:00:00Z",
+    "supersedes": [],
+    "created_at": "2026-04-21T09:00:00Z"
+  },
+  {
+    "id": "b0c61c22-beaa-5a3d-9c41-931fe42cc1e6",
+    "title": "现在坐地铁 5 号线通勤",
+    "kind": "fact",
+    "scope": "global",
+    "project": null,
+    "language": "zh",
+    "fact_key": "user.commute",
+    "aliases": [
+      "commute",
+      "通勤",
+      "metro",
+      "地铁",
+      "Line 5",
+      "5 号线"
+    ],
+    "tags": [
+      "transport"
+    ],
+    "body": "## Knowledge\n2026 年 4 月卖掉车之后，林薇坐地铁 5 号线通勤，从西湖区到滨江区的公司大约 40 分钟。\n## Evidence and limits\n用户说的。\n## Recheck when\n她搬家或换工作。",
+    "valid_from": "2026-04-20T00:00:00Z",
+    "valid_to": null,
+    "supersedes": [
+      "73c3f368-d646-5e3f-845e-b319ed050190"
+    ],
+    "created_at": "2026-04-21T09:05:00Z"
+  },
+  {
+    "id": "d4d77cce-aaee-5fdc-9ebe-65e9603a27e3",
+    "title": "每周日去山姆采购",
+    "kind": "preference",
+    "scope": "global",
+    "project": null,
+    "language": "zh",
+    "fact_key": "user.grocery",
+    "aliases": [
+      "grocery",
+      "采购",
+      "山姆",
+      "Sam's Club",
+      "周日"
+    ],
+    "tags": [
+      "routine"
+    ],
+    "body": "## Knowledge\n林薇每周日去山姆会员店采购一周的东西。常买的：农夫山泉、燕麦、无糖酸奶。\n## Evidence and limits\n用户说的习惯。\n## Recheck when\n她提到换地方。",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-02-22T10:00:00Z"
+  },
+  {
+    "id": "56daf89a-bb02-51d2-8953-f606e5aff1dd",
+    "title": "父母在宁波",
+    "kind": "fact",
+    "scope": "global",
+    "project": null,
+    "language": "zh",
+    "fact_key": "user.parents",
+    "aliases": [
+      "parents",
+      "父母",
+      "宁波",
+      "Ningbo",
+      "妈妈",
+      "爸爸"
+    ],
+    "tags": [
+      "family"
+    ],
+    "body": "## Knowledge\n林薇的父母住在宁波，她每个月回去一次。母亲叫陈红，父亲叫林建国。\n## Evidence and limits\n用户说的。\n## Recheck when\n父母搬家。",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-02-22T10:10:00Z"
+  },
+  {
+    "id": "2548ab97-fb4c-5a69-9f94-fbc5706b2bc2",
+    "title": "Doctor and annual check-up",
+    "kind": "fact",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.doctor",
+    "aliases": [
+      "doctor",
+      "GP",
+      "医生",
+      "体检",
+      "check-up",
+      "hospital"
+    ],
+    "tags": [
+      "health"
+    ],
+    "body": "## Knowledge\nLin Wei's GP is Dr. Qian Ming at Zhejiang Provincial People's Hospital. She has an annual check-up every October and takes no regular medication.\n## Evidence and limits\nStated by the user.\n## Recheck when\nShe mentions a new doctor or a prescription.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-03-05T09:00:00Z"
+  },
+  {
+    "id": "88ed0b78-2b34-5897-be90-41f6a684540c",
+    "title": "Passport expiry",
+    "kind": "fact",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.passport",
+    "aliases": [
+      "passport",
+      "护照",
+      "renewal",
+      "expiry"
+    ],
+    "tags": [
+      "admin"
+    ],
+    "body": "## Knowledge\nLin Wei's passport expires on 18 February 2027. She wants to start the renewal by November 2026.\n## Evidence and limits\nStated by the user.\n## Recheck when\nAfter the renewal.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-03-05T09:10:00Z"
+  },
+  {
+    "id": "61de9275-35d8-51a8-91be-b43bf6430dd5",
+    "title": "Notes live in Obsidian; Notion was declined",
+    "kind": "decision",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.notes_app",
+    "aliases": [
+      "Obsidian",
+      "Notion",
+      "notes",
+      "笔记",
+      "vault"
+    ],
+    "tags": [
+      "tooling",
+      "rejected"
+    ],
+    "body": "## Knowledge\nIn February 2026 Lin Wei declined moving to Notion, for privacy and offline access. Her notes live in an Obsidian vault at `~/Vault`, with a daily-notes template.\n## Evidence and limits\nHer decision; the assistant should not suggest Notion again.\n## Recheck when\nShe raises the question herself.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-02-25T09:00:00Z"
+  },
+  {
+    "id": "afb93bd9-af74-52b8-b174-cb205a407802",
+    "title": "Neovim migration abandoned (October 2025)",
+    "kind": "episode",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.episode.neovim",
+    "aliases": [
+      "Neovim",
+      "nvim",
+      "Lua config"
+    ],
+    "tags": [
+      "tooling",
+      "failed"
+    ],
+    "body": "## Knowledge\nIn October 2025 Lin Wei tried migrating from vim to Neovim with a Lua config. She abandoned it after two weeks because of plugin churn and went back to vim (and later to Helix).\n## Evidence and limits\nTold by the user in January 2026.\n## Recheck when\nShe wants to try Neovim again.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-01-20T11:30:00Z"
+  },
+  {
+    "id": "e962bf67-7c00-51c5-b0c2-52184801ad23",
+    "title": "Résumé draft requested, then cancelled (June 2026)",
+    "kind": "episode",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.episode.resume",
+    "aliases": [
+      "résumé",
+      "resume",
+      "CV",
+      "简历",
+      "Singapore"
+    ],
+    "tags": [
+      "work",
+      "cancelled"
+    ],
+    "body": "## Knowledge\nOn 2 June 2026 Lin Wei asked for a résumé draft for a backend role in Singapore. On 3 June she cancelled it: she decided to stay at Quillpay through 2027. No résumé was produced.\n## Evidence and limits\nBoth messages are in the transcript.\n## Recheck when\nShe asks about job applications again.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-06-03T10:00:00Z"
+  },
+  {
+    "id": "3c4b572a-5e6b-5354-8d04-fc62f3e8ad5f",
+    "title": "拒绝了批量删除过期分支的建议（2026-08-15）",
+    "kind": "episode",
+    "scope": "global",
+    "project": null,
+    "language": "zh",
+    "fact_key": "user.episode.branch_cleanup",
+    "aliases": [
+      "stale branches",
+      "过期分支",
+      "delete branches",
+      "分支清理"
+    ],
+    "tags": [
+      "git",
+      "rejected"
+    ],
+    "body": "## Knowledge\n2026 年 8 月 15 日，助手建议删掉 lantern 仓库里 30 多个已合并的过期分支。林薇拒绝了：她要自己先归档分支列表，之后再说。什么都没删。\n## Evidence and limits\n对话记录里有。\n## Recheck when\n她主动要求清理。",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-08-15T15:00:00Z"
+  },
+  {
+    "id": "900fe1ee-77ae-5ee8-a693-4751ba634072",
+    "title": "订餐厅失败（2026-07-09）",
+    "kind": "episode",
+    "scope": "global",
+    "project": null,
+    "language": "zh",
+    "fact_key": "user.episode.restaurant",
+    "aliases": [
+      "restaurant",
+      "餐厅",
+      "预订",
+      "绿茶",
+      "booking"
+    ],
+    "tags": [
+      "failed"
+    ],
+    "body": "## Knowledge\n2026 年 7 月 9 日林薇让助手订\"绿茶餐厅\"周五晚上两个人的位子。助手没有任何预订接口，操作失败了。她后来自己在大众点评上订好了。\n## Evidence and limits\n对话记录里有；助手至今没有订餐能力。\n## Recheck when\n接入了预订工具。",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-07-09T19:00:00Z"
+  },
+  {
+    "id": "41a08195-90d0-51d6-a92d-3ebda61e1910",
+    "title": "Stockholm trip in October 2026",
+    "kind": "fact",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.travel.stockholm_2026",
+    "aliases": [
+      "Stockholm",
+      "斯德哥尔摩",
+      "trip",
+      "旅行",
+      "CET",
+      "October"
+    ],
+    "tags": [
+      "travel"
+    ],
+    "body": "## Knowledge\nLin Wei will be in Stockholm from 5 to 19 October 2026 visiting Tomas's family. During that window meetings should be scheduled in CET (UTC+1 after the clocks change on 25 October is not relevant; the trip ends before).\n## Evidence and limits\nStated by the user in August 2026.\n## Recheck when\nAfter 19 October 2026, or if the dates move.",
+    "valid_from": "2026-10-05T00:00:00Z",
+    "valid_to": "2026-10-19T23:59:59Z",
+    "supersedes": [],
+    "created_at": "2026-08-20T10:00:00Z"
+  },
+  {
+    "id": "944b902b-7e38-58db-a0e2-f12322ba7822",
+    "title": "Music while coding",
+    "kind": "preference",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.music",
+    "aliases": [
+      "music",
+      "lo-fi",
+      "Spotify",
+      "Apple Music",
+      "音乐"
+    ],
+    "tags": [
+      "hobby"
+    ],
+    "body": "## Knowledge\nLin Wei listens to lo-fi while coding and to nothing during meetings. She uses Apple Music, having moved off Spotify in March 2026.\n## Evidence and limits\nStated preference.\n## Recheck when\nShe mentions another service.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-03-10T09:00:00Z"
+  },
+  {
+    "id": "261bf869-0284-504a-8d98-50ef319ff350",
+    "title": "作息：23:30 睡，6:30 起",
+    "kind": "fact",
+    "scope": "global",
+    "project": null,
+    "language": "zh",
+    "fact_key": "user.sleep",
+    "aliases": [
+      "sleep",
+      "作息",
+      "wake up",
+      "起床",
+      "morning meetings",
+      "早会"
+    ],
+    "tags": [
+      "routine"
+    ],
+    "body": "## Knowledge\n林薇通常 23:30 睡觉，6:30 起床。上午 9:30 之前不安排会议。\n## Evidence and limits\n用户说的习惯。\n## Recheck when\n她说作息变了。",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-03-10T09:10:00Z"
+  },
+  {
+    "id": "583167e2-2a34-5ceb-9c7d-4bfcd8f449fc",
+    "title": "Two-factor: YubiKey",
+    "kind": "decision",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.mfa",
+    "aliases": [
+      "YubiKey",
+      "2FA",
+      "MFA",
+      "two-factor",
+      "双因素"
+    ],
+    "tags": [
+      "security"
+    ],
+    "body": "## Knowledge\nLin Wei uses a YubiKey 5C as the second factor for GitHub and 1Password. A backup key is kept at home. She does not use SMS codes.\n## Evidence and limits\nStated by the user; no key material is recorded here.\n## Recheck when\nShe changes her security setup.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-03-12T09:00:00Z"
+  },
+  {
+    "id": "85cfe8aa-1f7c-58c6-ba5a-4b7acb53b923",
+    "title": "Shell: fish with starship",
+    "kind": "preference",
+    "scope": "global",
+    "project": null,
+    "language": "en",
+    "fact_key": "user.shell",
+    "aliases": [
+      "shell",
+      "fish",
+      "starship",
+      "zoxide",
+      "终端"
+    ],
+    "tags": [
+      "tooling"
+    ],
+    "body": "## Knowledge\nLin Wei's shell is fish with the starship prompt. She uses `zoxide` for directory jumping and has `gs` aliased to `git status`.\n## Evidence and limits\nStated preference; scripts she asks for should still be POSIX sh or bash, not fish.\n## Recheck when\nShe changes shells.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-03-12T09:10:00Z"
+  },
+  {
+    "id": "406c9791-ad5a-5131-ab68-caccf7d222fd",
+    "title": "耳机：Sony WH-1000XM5",
+    "kind": "fact",
+    "scope": "global",
+    "project": null,
+    "language": "zh",
+    "fact_key": "user.headphones",
+    "aliases": [
+      "headphones",
+      "耳机",
+      "Sony",
+      "XM5"
+    ],
+    "tags": [
+      "hardware"
+    ],
+    "body": "## Knowledge\n林薇用 Sony WH-1000XM5 耳机；2026 年 5 月换过左边的耳罩。\n## Evidence and limits\n用户说的。\n## Recheck when\n她换耳机。",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-05-12T09:00:00Z"
+  },
+  {
+    "id": "9f5fc84b-f5a8-5c09-b4be-c220e989df18",
+    "title": "Lantern: Quillpay's ledger-reconciliation service",
+    "kind": "reference",
+    "scope": "project",
+    "project": "lantern",
+    "language": "en",
+    "fact_key": "lantern.overview",
+    "aliases": [
+      "Lantern",
+      "灯笼",
+      "reconciliation",
+      "对账"
+    ],
+    "tags": [
+      "lantern"
+    ],
+    "body": "## Knowledge\nLantern (灯笼) is Quillpay's ledger-reconciliation service, written in Rust. Repository: `github.com/quillpay/lantern`.\nOwned by the Ledger Platform team; in production since September 2025.\n## Evidence and limits\nFrom the repository README and the user.\n## Recheck when\nThe service is split or renamed.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-01-10T09:00:00Z"
+  },
+  {
+    "id": "5c5cd247-4d17-5aa6-8a36-ce8e8a95d849",
+    "title": "Lantern build, test and lint commands",
+    "kind": "procedure",
+    "scope": "project",
+    "project": "lantern",
+    "language": "en",
+    "fact_key": "lantern.build",
+    "aliases": [
+      "build",
+      "test",
+      "nextest",
+      "clippy",
+      "编译",
+      "测试",
+      "just run"
+    ],
+    "tags": [
+      "lantern",
+      "commands"
+    ],
+    "body": "## Knowledge\nBuild: `cargo build --workspace`. Test: `cargo nextest run --workspace`. Lint: `cargo clippy --all-targets -- -D warnings`.\nFormat check: `cargo fmt --check`. Run locally: `just run` (listens on port 8790).\n## Evidence and limits\nFrom the repository's `justfile` and CI; verified in January 2026.\n## Recheck when\nThe justfile or CI changes.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-01-10T09:10:00Z"
+  },
+  {
+    "id": "45301a3d-e467-598f-ae3a-8539a9780aa8",
+    "title": "Lantern deployment",
+    "kind": "procedure",
+    "scope": "project",
+    "project": "lantern",
+    "language": "en",
+    "fact_key": "lantern.deploy",
+    "aliases": [
+      "deploy",
+      "staging",
+      "production",
+      "部署",
+      "发布",
+      "release workflow"
+    ],
+    "tags": [
+      "lantern",
+      "commands"
+    ],
+    "body": "## Knowledge\nStaging: `just deploy staging`, which needs the VPN and `LANTERN_DEPLOY_TOKEN` from the 1Password vault \"Lantern-dev\" (never typed into the shell history).\nProduction: only through the GitHub Actions `release` workflow, triggered by a `v*` tag. There is no manual production deploy.\n## Evidence and limits\nFrom the runbook; verified with the user in February 2026.\n## Recheck when\nThe release workflow changes.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-02-05T09:00:00Z"
+  },
+  {
+    "id": "09ac90e3-aefd-5be8-ba0b-3ae4ec6ad02e",
+    "title": "Lantern 分支和 PR 规范",
+    "kind": "procedure",
+    "scope": "project",
+    "project": "lantern",
+    "language": "zh",
+    "fact_key": "lantern.branches",
+    "aliases": [
+      "branch naming",
+      "分支",
+      "PR",
+      "squash",
+      "default branch",
+      "main",
+      "master"
+    ],
+    "tags": [
+      "lantern",
+      "git"
+    ],
+    "body": "## Knowledge\n分支命名 `lw/<topic>`。每个 PR 至少一个 reviewer，通常是 Priya。合并用 squash merge。默认分支是 `main`（2026 年 2 月从 `master` 改名）。\n## Evidence and limits\n仓库 CONTRIBUTING.md 和用户说明。\n## Recheck when\n规范改了。",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-02-05T09:10:00Z"
+  },
+  {
+    "id": "80469bd8-a498-53a2-9642-258ad45a7db4",
+    "title": "Lantern database migrations",
+    "kind": "procedure",
+    "scope": "project",
+    "project": "lantern",
+    "language": "en",
+    "fact_key": "lantern.migrations",
+    "aliases": [
+      "migrations",
+      "sqlx migrate",
+      "迁移",
+      "schema change"
+    ],
+    "tags": [
+      "lantern",
+      "database"
+    ],
+    "body": "## Knowledge\nMigrations use sqlx: apply with `sqlx migrate run`, create with `sqlx migrate add -r <name>` (reversible). They live in `migrations/`.\nNever edit a migration that has already been applied anywhere; add a new one.\n## Evidence and limits\nTeam rule; from the user.\n## Recheck when\nThe migration tool changes.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-03-12T10:00:00Z"
+  },
+  {
+    "id": "38ddc21d-3106-5690-9738-94e7c19e664a",
+    "title": "Lantern 本地环境",
+    "kind": "procedure",
+    "scope": "project",
+    "project": "lantern",
+    "language": "zh",
+    "fact_key": "lantern.local_env",
+    "aliases": [
+      "local env",
+      "本地环境",
+      ".env.local",
+      "docker compose",
+      "5433",
+      "database URL"
+    ],
+    "tags": [
+      "lantern",
+      "commands"
+    ],
+    "body": "## Knowledge\n本地配置放在 `.env.local`（git-ignored）。本地数据库 URL 是 `postgres://lantern:lantern@localhost:5433/lantern_dev`。\n起依赖：`docker compose -f compose.dev.yml up -d`（Postgres 16 和一个假的 partner API）。\n## Evidence and limits\n用户 2026 年 3 月确认。\n## Recheck when\ncompose 文件改了。",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-03-12T10:10:00Z"
+  },
+  {
+    "id": "30017627-5ab4-52b0-88b8-0643a4c3a408",
+    "title": "Money is Decimal, never f64",
+    "kind": "decision",
+    "scope": "project",
+    "project": "lantern",
+    "language": "en",
+    "fact_key": "lantern.money_type",
+    "aliases": [
+      "Decimal",
+      "f64",
+      "money",
+      "rounding",
+      "金额",
+      "浮点"
+    ],
+    "tags": [
+      "lantern",
+      "decision"
+    ],
+    "body": "## Knowledge\nAll money in Lantern is `rust_decimal::Decimal`. Floating point is forbidden for amounts. Decided on 12 May 2026 after a rounding incident in batch #4471.\n## Evidence and limits\nTeam decision recorded in ADR-007 of the repository.\n## Recheck when\nNever expected to change.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-05-12T16:00:00Z"
+  },
+  {
+    "id": "e49d4a2a-9429-5037-90dd-74e6ed27f2e1",
+    "title": "Lantern moved from diesel to sqlx (March 2026)",
+    "kind": "decision",
+    "scope": "project",
+    "project": "lantern",
+    "language": "en",
+    "fact_key": "lantern.db_layer",
+    "aliases": [
+      "sqlx",
+      "diesel",
+      "ORM",
+      "database layer"
+    ],
+    "tags": [
+      "lantern",
+      "decision"
+    ],
+    "body": "## Knowledge\nIn March 2026 Lantern switched its database layer from diesel to sqlx, for async support and compile-time checked queries. New code must not use diesel.\n## Evidence and limits\nCompleted on 10 March 2026; the last diesel module was removed in PR #188.\n## Recheck when\nNever expected to reverse.",
+    "valid_from": "2026-03-10T00:00:00Z",
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-03-12T10:20:00Z"
+  },
+  {
+    "id": "62277bc0-ef28-5fd8-bc1b-7f2765c079b3",
+    "title": "Kafka 提案被否决（2026 年 7 月）",
+    "kind": "decision",
+    "scope": "project",
+    "project": "lantern",
+    "language": "zh",
+    "fact_key": "lantern.event_streaming",
+    "aliases": [
+      "Kafka",
+      "event streaming",
+      "LISTEN/NOTIFY",
+      "outbox",
+      "事件流"
+    ],
+    "tags": [
+      "lantern",
+      "rejected"
+    ],
+    "body": "## Knowledge\n2026 年 7 月，Priya 提议给 Lantern 引入 Kafka 做事件流。团队否决了：改用 PostgreSQL 的 LISTEN/NOTIFY 加一张 outbox 表。年内不再重提 Kafka。\n## Evidence and limits\n团队会议决定，用户转述。\n## Recheck when\n2027 年之后，或者事件量超过 Postgres 能承受的范围。",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-07-15T14:00:00Z"
+  },
+  {
+    "id": "e8a38e14-3da1-5cf1-9ccd-9b90a6fd6c31",
+    "title": "nextest under Rosetta failed; use the native toolchain",
+    "kind": "episode",
+    "scope": "project",
+    "project": "lantern",
+    "language": "en",
+    "fact_key": "lantern.episode.rosetta",
+    "aliases": [
+      "Rosetta",
+      "SIGILL",
+      "x86_64",
+      "aarch64",
+      "toolchain"
+    ],
+    "tags": [
+      "lantern",
+      "failed"
+    ],
+    "body": "## Knowledge\nIn December 2025 `cargo nextest run` under Rosetta (an x86_64 toolchain on the M3) crashed with SIGILL inside `ring`.\nThe fix was to use the native `aarch64-apple-darwin` toolchain. Rosetta is not supported for Lantern.\n## Evidence and limits\nReproduced by the user twice.\n## Recheck when\nThe `ring` dependency is replaced.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2025-12-15T11:00:00Z"
+  },
+  {
+    "id": "49adb6bf-6ff0-5c3b-acd0-aa8194c9c63b",
+    "title": "The flaky test reconcile_partial_batch",
+    "kind": "reference",
+    "scope": "project",
+    "project": "lantern",
+    "language": "en",
+    "fact_key": "lantern.flaky_test",
+    "aliases": [
+      "flaky",
+      "reconcile_partial_batch",
+      "#212",
+      "ignored test"
+    ],
+    "tags": [
+      "lantern",
+      "testing"
+    ],
+    "body": "## Knowledge\n`reconcile_partial_batch` is flaky (a timing race). It is `#[ignore]`d until issue #212 is fixed. Do not \"fix\" it by adding retries or sleeps.\n## Evidence and limits\nTeam agreement; issue #212 is open as of September 2026.\n## Recheck when\nIssue #212 closes.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-04-02T10:00:00Z"
+  },
+  {
+    "id": "9cedc3e8-3b90-5439-90c4-27afcb5deac0",
+    "title": "Lantern on-call 轮值",
+    "kind": "fact",
+    "scope": "project",
+    "project": "lantern",
+    "language": "zh",
+    "fact_key": "lantern.oncall",
+    "aliases": [
+      "on-call",
+      "值班",
+      "轮值",
+      "PagerDuty",
+      "企业微信",
+      "Thursday"
+    ],
+    "tags": [
+      "lantern",
+      "ops"
+    ],
+    "body": "## Knowledge\non-call 每周四换班。林薇的轮值周从 9 月 24 日和 10 月 22 日（2026 年）开始。告警从 PagerDuty 转到企业微信。\n## Evidence and limits\n排班表，2026 年 9 月。\n## Recheck when\n排班表更新。",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-09-01T09:00:00Z"
+  },
+  {
+    "id": "dd38b503-c00a-551e-bad9-0690f6988510",
+    "title": "Lantern release cadence and steps",
+    "kind": "procedure",
+    "scope": "project",
+    "project": "lantern",
+    "language": "en",
+    "fact_key": "lantern.release",
+    "aliases": [
+      "release",
+      "cadence",
+      "tag",
+      "git cliff",
+      "bump",
+      "发版"
+    ],
+    "tags": [
+      "lantern",
+      "commands"
+    ],
+    "body": "## Knowledge\nReleases go out every second Wednesday. Steps: `just bump <patch|minor>`, changelog with `git cliff`, then push a `vX.Y.Z` tag, which triggers the release workflow.\n## Evidence and limits\nFrom the release runbook; matches the deploy note.\n## Recheck when\nThe cadence changes.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-02-05T09:20:00Z"
+  },
+  {
+    "id": "b2b5ee9a-7dea-5edc-b93b-7de4535ac8df",
+    "title": "Lantern SLOs",
+    "kind": "fact",
+    "scope": "project",
+    "project": "lantern",
+    "language": "en",
+    "fact_key": "lantern.slo",
+    "aliases": [
+      "SLO",
+      "p95",
+      "latency",
+      "error rate",
+      "Grafana",
+      "性能目标"
+    ],
+    "tags": [
+      "lantern",
+      "ops"
+    ],
+    "body": "## Knowledge\nSLO: `/v1/reconcile` p95 latency under 120 ms and an error rate under 0.1 %. Dashboards live in the Grafana folder \"Lantern\".\n## Evidence and limits\nFrom the SLO document, 2026.\n## Recheck when\nThe SLO document is revised.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-04-02T10:10:00Z"
+  },
+  {
+    "id": "2f09c3c7-fbe3-50d6-9db4-9130c79fe65f",
+    "title": "Staging database: lantern_staging on pg-staging-1",
+    "kind": "fact",
+    "scope": "project",
+    "project": "lantern",
+    "language": "en",
+    "fact_key": "lantern.staging.db",
+    "aliases": [
+      "staging database",
+      "staging DB",
+      "pg-staging"
+    ],
+    "tags": [
+      "lantern",
+      "ops"
+    ],
+    "body": "## Knowledge\nThe staging database is `lantern_staging` on host `pg-staging-1`.\n## Evidence and limits\nRecorded 2 March 2026 from the staging `.env`.\n## Recheck when\nThe staging infrastructure moves.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-03-02T10:00:00Z"
+  },
+  {
+    "id": "f74fe29a-4800-545e-936c-c95ddb6fbd87",
+    "title": "Staging database: lantern_stg on pg-staging-2",
+    "kind": "fact",
+    "scope": "project",
+    "project": "lantern",
+    "language": "en",
+    "fact_key": "lantern.staging.db",
+    "aliases": [
+      "staging database",
+      "staging DB",
+      "pg-staging-2",
+      "lantern_stg"
+    ],
+    "tags": [
+      "lantern",
+      "ops"
+    ],
+    "body": "## Knowledge\nAfter the June 2026 infrastructure move the staging database is `lantern_stg` on host `pg-staging-2`.\n## Evidence and limits\nRecorded 20 June 2026 from the updated runbook.\n## Recheck when\nThe staging infrastructure moves again.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-06-20T10:00:00Z"
+  },
+  {
+    "id": "f46f7a75-7041-5aa9-8344-7b823d624e40",
+    "title": "Rotating a partner API key",
+    "kind": "procedure",
+    "scope": "project",
+    "project": "lantern",
+    "language": "en",
+    "fact_key": "lantern.rotate_key",
+    "aliases": [
+      "rotate key",
+      "API key",
+      "密钥轮换",
+      "partner key",
+      "90 days"
+    ],
+    "tags": [
+      "lantern",
+      "ops",
+      "commands"
+    ],
+    "body": "## Knowledge\nRun `just rotate-key <partner>`, store the new key in the 1Password vault \"Lantern-dev\", then post in `#lantern-ops`. Partner keys expire every 90 days.\n## Evidence and limits\nFrom the ops runbook.\n## Recheck when\nThe rotation tooling changes.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-04-10T10:00:00Z"
+  },
+  {
+    "id": "40218f16-724e-5f31-aac5-80f6b6289467",
+    "title": "Lantern 日志",
+    "kind": "reference",
+    "scope": "project",
+    "project": "lantern",
+    "language": "zh",
+    "fact_key": "lantern.logging",
+    "aliases": [
+      "logs",
+      "日志",
+      "request_id",
+      "Loki",
+      "JSON logs"
+    ],
+    "tags": [
+      "lantern",
+      "ops"
+    ],
+    "body": "## Knowledge\n日志是 JSON 格式（tracing-subscriber）。`request_id` 字段必须在所有下游调用里透传。本地看日志用 `just logs`；生产日志在 Loki。\n## Evidence and limits\n仓库文档。\n## Recheck when\n日志栈换了。",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-04-10T10:10:00Z"
+  },
+  {
+    "id": "9e1551ed-5c33-5446-9b39-edd8d76766c9",
+    "title": "Lantern reviewers",
+    "kind": "fact",
+    "scope": "project",
+    "project": "lantern",
+    "language": "en",
+    "fact_key": "lantern.reviewers",
+    "aliases": [
+      "reviewer",
+      "code review",
+      "Priya",
+      "Chen Bo",
+      "评审"
+    ],
+    "tags": [
+      "lantern",
+      "git"
+    ],
+    "body": "## Knowledge\nDefault reviewer: Priya Raman (`@priya-r`). Database migrations also need Chen Bo (`@chenbo`). Reviews are expected within one working day.\n## Evidence and limits\nTeam convention, 2026.\n## Recheck when\nThe team changes.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-02-05T09:30:00Z"
+  },
+  {
+    "id": "7b9cf686-abb2-520b-b605-cbdc0a3056a7",
+    "title": "Lantern CI",
+    "kind": "reference",
+    "scope": "project",
+    "project": "lantern",
+    "language": "en",
+    "fact_key": "lantern.ci",
+    "aliases": [
+      "CI",
+      "GitHub Actions",
+      "cargo deny",
+      "ci.yml"
+    ],
+    "tags": [
+      "lantern",
+      "commands"
+    ],
+    "body": "## Knowledge\nCI is GitHub Actions `ci.yml` on `ubuntu-24.04`: build, nextest, clippy, fmt and `cargo deny`. A red `cargo deny` blocks the merge.\n## Evidence and limits\nFrom the workflow file, April 2026.\n## Recheck when\nThe workflow changes.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-04-10T10:20:00Z"
+  },
+  {
+    "id": "d67f2bbc-9a4e-54e8-aac9-9142ac41b6ee",
+    "title": "Outbound retry policy",
+    "kind": "decision",
+    "scope": "project",
+    "project": "lantern",
+    "language": "en",
+    "fact_key": "lantern.retry_policy",
+    "aliases": [
+      "retry",
+      "backoff",
+      "idempotency",
+      "重试"
+    ],
+    "tags": [
+      "lantern",
+      "decision"
+    ],
+    "body": "## Knowledge\nOutbound partner calls retry 3 times with exponential backoff (200 ms base, 2 s cap). The idempotency key is the ledger batch id.\n## Evidence and limits\nADR-005 in the repository.\n## Recheck when\nA partner changes its idempotency contract.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-05-20T10:00:00Z"
+  },
+  {
+    "id": "199c045a-846c-5d2b-a28e-2929e852e9c3",
+    "title": "Lantern secrets handling",
+    "kind": "procedure",
+    "scope": "project",
+    "project": "lantern",
+    "language": "en",
+    "fact_key": "lantern.secrets",
+    "aliases": [
+      "secrets",
+      "1Password",
+      "op run",
+      "环境变量",
+      "密钥"
+    ],
+    "tags": [
+      "lantern",
+      "security"
+    ],
+    "body": "## Knowledge\nSecrets are never committed in env files. `LANTERN_*` variables come from the 1Password CLI: `op run --env-file=.env.op -- just run`.\n## Evidence and limits\nTeam rule.\n## Recheck when\nThe secret manager changes.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-05-20T10:10:00Z"
+  },
+  {
+    "id": "d5dc170b-63bd-56f1-b478-16392d64aeee",
+    "title": "Lantern listens on port 8080",
+    "kind": "fact",
+    "scope": "project",
+    "project": "lantern",
+    "language": "en",
+    "fact_key": "lantern.service.port",
+    "aliases": [
+      "port",
+      "端口",
+      "8080"
+    ],
+    "tags": [
+      "lantern",
+      "ops"
+    ],
+    "body": "## Knowledge\nThe Lantern service listens on port 8080 locally.\n## Evidence and limits\nRecorded 1 October 2025 from the first README.\n## Recheck when\nThe default port changes.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2025-10-01T09:00:00Z"
+  },
+  {
+    "id": "35643d2e-a709-5dc4-99e2-d617c485740e",
+    "title": "Lantern listens on port 8790",
+    "kind": "fact",
+    "scope": "project",
+    "project": "lantern",
+    "language": "en",
+    "fact_key": "lantern.service.port",
+    "aliases": [
+      "port",
+      "端口",
+      "8790"
+    ],
+    "tags": [
+      "lantern",
+      "ops"
+    ],
+    "body": "## Knowledge\nThe Lantern service listens on port 8790 locally (moved off 8080 to stop clashing with the partner mock).\n## Evidence and limits\nRecorded 2 April 2026 from the justfile.\n## Recheck when\nThe default port changes.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-04-02T09:00:00Z"
+  },
+  {
+    "id": "32e3e248-26e5-5cde-b3f1-b5d09b54690a",
+    "title": "Moss（苔）：个人静态站点生成器",
+    "kind": "reference",
+    "scope": "project",
+    "project": "moss",
+    "language": "zh",
+    "fact_key": "moss.overview",
+    "aliases": [
+      "Moss",
+      "苔",
+      "blog",
+      "博客",
+      "static site",
+      "读书笔记"
+    ],
+    "tags": [
+      "moss"
+    ],
+    "body": "## Knowledge\nMoss（苔）是林薇的个人项目：一个用 Python 写的静态站点生成器，生成她的中文读书笔记博客 `moss.linwei.dev`。\n仓库在 `~/code/moss`，GitHub 上是 `linwei-dev/moss`。\n## Evidence and limits\n用户介绍的。\n## Recheck when\n项目改名或者换语言。",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-01-18T20:00:00Z"
+  },
+  {
+    "id": "128da25c-f994-5add-907a-1859261d4e82",
+    "title": "Moss build, preview and test commands",
+    "kind": "procedure",
+    "scope": "project",
+    "project": "moss",
+    "language": "en",
+    "fact_key": "moss.build",
+    "aliases": [
+      "build",
+      "serve",
+      "preview",
+      "pytest",
+      "构建",
+      "预览",
+      "4000"
+    ],
+    "tags": [
+      "moss",
+      "commands"
+    ],
+    "body": "## Knowledge\nBuild: `uv run moss build` (writes `dist/`). Preview: `uv run moss serve --port 4000`. Tests: `uv run pytest -q`.\nLint and format: `ruff check .` and `ruff format`.\n## Evidence and limits\nFrom the README, updated May 2026 when the output directory became `dist/`.\n## Recheck when\nThe CLI changes.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-05-10T20:00:00Z"
+  },
+  {
+    "id": "1f3b13c4-dea3-541e-a64c-20bc1efe058c",
+    "title": "Moss deployment to Cloudflare Pages",
+    "kind": "procedure",
+    "scope": "project",
+    "project": "moss",
+    "language": "en",
+    "fact_key": "moss.deploy",
+    "aliases": [
+      "deploy",
+      "wrangler",
+      "Cloudflare Pages",
+      "部署",
+      "上线"
+    ],
+    "tags": [
+      "moss",
+      "commands"
+    ],
+    "body": "## Knowledge\nDeploy with `wrangler pages deploy dist --project-name moss`. DNS is on Cloudflare. There is no CI: deploys are run from the laptop after `uv run moss build`.\n## Evidence and limits\nFrom the user, 2026.\n## Recheck when\nA CI pipeline is added.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-05-10T20:10:00Z"
+  },
+  {
+    "id": "e4e109a8-4129-5689-b547-cb1901ee63ff",
+    "title": "Moss 内容格式",
+    "kind": "reference",
+    "scope": "project",
+    "project": "moss",
+    "language": "zh",
+    "fact_key": "moss.content",
+    "aliases": [
+      "front matter",
+      "slug",
+      "pypinyin",
+      "images",
+      "WebP",
+      "文章",
+      "图片"
+    ],
+    "tags": [
+      "moss"
+    ],
+    "body": "## Knowledge\n文章在 `content/notes/*.md`。front matter 字段：`title`、`date`、`tags`，可选 `book`。slug 用 `pypinyin` 从标题生成。\n图片放在 `content/images/`，构建时用 Pillow 转成 WebP，最长边 1600 像素。\n## Evidence and limits\n仓库文档。\n## Recheck when\n内容格式改了。",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-01-18T20:10:00Z"
+  },
+  {
+    "id": "1cdfac00-4307-5c20-b98c-d3385fafd85d",
+    "title": "Kept Jinja2; a hand-written template engine was rejected",
+    "kind": "decision",
+    "scope": "project",
+    "project": "moss",
+    "language": "en",
+    "fact_key": "moss.templating",
+    "aliases": [
+      "Jinja2",
+      "templates",
+      "template engine",
+      "模板"
+    ],
+    "tags": [
+      "moss",
+      "rejected"
+    ],
+    "body": "## Knowledge\nIn April 2026 Lin Wei considered replacing Jinja2 with a hand-written template engine for Moss. She rejected the idea: not worth the maintenance. Moss keeps Jinja2.\n## Evidence and limits\nHer decision, stated on 14 April 2026.\n## Recheck when\nShe raises it again.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-04-14T20:00:00Z"
+  },
+  {
+    "id": "facd99a8-a0bd-55bf-b07c-b8112deb086d",
+    "title": "Pandoc 管道太慢，放弃了（2026 年 1 月）",
+    "kind": "episode",
+    "scope": "project",
+    "project": "moss",
+    "language": "zh",
+    "fact_key": "moss.episode.pandoc",
+    "aliases": [
+      "Pandoc",
+      "markdown-it-py",
+      "footnotes",
+      "脚注",
+      "Markdown"
+    ],
+    "tags": [
+      "moss",
+      "failed"
+    ],
+    "body": "## Knowledge\n2026 年 1 月林薇试过用 Pandoc 做 Moss 的 Markdown 管道，每次全量构建要 90 秒，放弃了。现在用 `markdown-it-py` 加 footnote 插件。\n## Evidence and limits\n用户说的。\n## Recheck when\nPandoc 性能有变化，或者文章数量变化。",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-01-28T20:00:00Z"
+  },
+  {
+    "id": "e4ba0eee-12e6-5aee-920b-47f45ed2ebf3",
+    "title": "No analytics and no comments on Moss",
+    "kind": "decision",
+    "scope": "project",
+    "project": "moss",
+    "language": "en",
+    "fact_key": "moss.analytics",
+    "aliases": [
+      "analytics",
+      "Google Analytics",
+      "Plausible",
+      "comments",
+      "统计",
+      "评论"
+    ],
+    "tags": [
+      "moss",
+      "rejected"
+    ],
+    "body": "## Knowledge\nMoss has no analytics: Google Analytics and Plausible were both rejected in March 2026 for reader privacy. There is no comment system either.\n## Evidence and limits\nHer decision.\n## Recheck when\nShe asks for reader statistics.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-03-08T20:00:00Z"
+  },
+  {
+    "id": "005e519a-6a01-5e8d-bf96-1492badedcf4",
+    "title": "Moss output directory: _site (until May 2026)",
+    "kind": "fact",
+    "scope": "project",
+    "project": "moss",
+    "language": "en",
+    "fact_key": "moss.output_dir",
+    "aliases": [
+      "_site",
+      "output directory"
+    ],
+    "tags": [
+      "moss"
+    ],
+    "body": "## Knowledge\nUntil May 2026 Moss wrote its build output to `_site/`.\n## Evidence and limits\nHistorical; changed to `dist/` on 10 May 2026.\n## Recheck when\nHistorical only.",
+    "valid_from": null,
+    "valid_to": "2026-05-10T00:00:00Z",
+    "supersedes": [],
+    "created_at": "2026-01-18T20:20:00Z"
+  },
+  {
+    "id": "71b9cde4-585f-5b94-a15d-42cae6c0e230",
+    "title": "Moss output directory: dist (since May 2026)",
+    "kind": "fact",
+    "scope": "project",
+    "project": "moss",
+    "language": "en",
+    "fact_key": "moss.output_dir",
+    "aliases": [
+      "dist",
+      "output directory",
+      "输出目录",
+      "build output"
+    ],
+    "tags": [
+      "moss"
+    ],
+    "body": "## Knowledge\nSince 10 May 2026 Moss writes its build output to `dist/`, matching wrangler's default. It used to be `_site/`.\n## Evidence and limits\nChanged by the user in PR #41.\n## Recheck when\nThe build tool changes.",
+    "valid_from": "2026-05-10T00:00:00Z",
+    "valid_to": null,
+    "supersedes": [
+      "005e519a-6a01-5e8d-bf96-1492badedcf4"
+    ],
+    "created_at": "2026-05-10T20:20:00Z"
+  },
+  {
+    "id": "b06901d5-5151-5665-97d6-c899757dd602",
+    "title": "Moss targets Python 3.12",
+    "kind": "fact",
+    "scope": "project",
+    "project": "moss",
+    "language": "en",
+    "fact_key": "moss.python.version",
+    "aliases": [
+      "Python version",
+      "3.12",
+      ".python-version"
+    ],
+    "tags": [
+      "moss",
+      "python"
+    ],
+    "body": "## Knowledge\nMoss targets Python 3.12; `.python-version` says 3.12.\n## Evidence and limits\nRecorded 1 February 2026.\n## Recheck when\nThe interpreter is upgraded.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-02-01T20:00:00Z"
+  },
+  {
+    "id": "7a80315b-555a-55a8-8c79-27b3a23b1615",
+    "title": "Moss 升级到 Python 3.13",
+    "kind": "fact",
+    "scope": "project",
+    "project": "moss",
+    "language": "zh",
+    "fact_key": "moss.python.version",
+    "aliases": [
+      "Python 版本",
+      "3.13",
+      ".python-version",
+      "Python version"
+    ],
+    "tags": [
+      "moss",
+      "python"
+    ],
+    "body": "## Knowledge\n2026 年 8 月 Moss 升级到 Python 3.13，`.python-version` 现在是 3.13。\n## Evidence and limits\n2026 年 8 月 22 日记录。\n## Recheck when\n再升级的时候。",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-08-22T20:00:00Z"
+  },
+  {
+    "id": "d65b04e6-a55e-5971-a751-6371283030bc",
+    "title": "Moss RSS feed",
+    "kind": "reference",
+    "scope": "project",
+    "project": "moss",
+    "language": "en",
+    "fact_key": "moss.rss",
+    "aliases": [
+      "RSS",
+      "feed",
+      "feed.xml",
+      "订阅"
+    ],
+    "tags": [
+      "moss"
+    ],
+    "body": "## Knowledge\nThe RSS feed is at `/feed.xml` and carries the last 20 posts. It is generated by `moss/feed.py` and checked with the W3C feed validator before a deploy.\n## Evidence and limits\nFrom the repository.\n## Recheck when\nThe feed module changes.",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-03-08T20:10:00Z"
+  },
+  {
+    "id": "cd688c62-4938-58f7-90df-f8617aafa6a0",
+    "title": "Moss 站点配色和字体",
+    "kind": "preference",
+    "scope": "project",
+    "project": "moss",
+    "language": "zh",
+    "fact_key": "moss.theme",
+    "aliases": [
+      "colors",
+      "配色",
+      "font",
+      "字体",
+      "思源宋体",
+      "moss green",
+      "苔绿"
+    ],
+    "tags": [
+      "moss",
+      "design"
+    ],
+    "body": "## Knowledge\n背景色 `#f4f1ea`（米色），正文 `#2b2b2b`，链接 `#1f6f5f`（苔绿）。字体用思源宋体。站点不做深色模式切换。\n## Evidence and limits\n用户的设计决定。\n## Recheck when\n她改主题。",
+    "valid_from": null,
+    "valid_to": null,
+    "supersedes": [],
+    "created_at": "2026-03-08T20:20:00Z"
+  }
+]

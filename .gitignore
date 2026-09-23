@@ -111,6 +111,8 @@ apps/openalpaca-gui/src-tauri/gen/
 !docs/agent-loop.md
 !docs/tools/*.md
 !scripts/eval/steer_routing/README.md
+!scripts/eval/memory/README.md
+!scripts/eval/memory/judge-prompt.md
 !docs/api/*
 !docs/api/apps/*.md
 !docs/api/crates/*.md
