@@ -11,7 +11,7 @@ use colored::Colorize;
 use serde::{Deserialize, Serialize};
 
 use crate::client::DaemonClient;
-use crate::output::{OutputFormat, TableRow, print_list, status_color};
+use crate::output::{OutputFormat, TableRow, print_list, status_color, truncate};
 
 #[derive(Args)]
 pub struct TasksArgs {
@@ -241,14 +241,6 @@ impl TableRow for TaskItem {
             agents,
             created,
         )
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}...", &s[..max.saturating_sub(3)])
-    } else {
-        s.to_string()
     }
 }
 
@@ -563,6 +555,30 @@ mod tests {
             created_at: Some("2026-09-04T09:15:00.000Z".to_string()),
             subagent_count,
         }
+    }
+
+    /// A title is whatever the owner typed — the dispatcher caps it at 50
+    /// **characters**, which is up to 150 bytes — and the TITLE column cuts at
+    /// 28. Under the old byte-slicing `truncate`, `&title[..25]` landed inside
+    /// the ninth Chinese character and `openalpaca tasks list` panicked on the
+    /// row instead of printing it.
+    #[test]
+    fn a_long_chinese_title_renders_instead_of_panicking() {
+        plain();
+        let mut row = item(0);
+        row.title = "审核连接器的错误处理并把发现整理成一份带行号的报告交给我谢谢你了".to_string();
+        assert!(row.title.len() > 28, "the title is longer in bytes than the column");
+        assert!(!row.title.is_char_boundary(25), "byte 25 is inside a character");
+
+        let rendered = row.table_row();
+
+        // 25 characters kept, then the ellipsis — whole characters only.
+        assert!(
+            rendered.contains("审核连接器的错误处理并把发现整理成一份带行号的报告..."),
+            "{rendered}"
+        );
+        assert!(rendered.contains("task-123"));
+        assert!(rendered.contains("running"));
     }
 
     /// S10: a run parked by a script carries the declaration on the row, so

@@ -1,9 +1,16 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+
+import { setStopIntent } from "@/lib/connection";
 
 import type { ModelEntry } from "@/lib/api/types";
 
-import { Composer, composerPlaceholder, type ComposerProps } from "./Composer";
+import {
+  Composer,
+  STOPPED_PLACEHOLDER,
+  composerPlaceholder,
+  type ComposerProps,
+} from "./Composer";
 
 const MODELS: ModelEntry[] = [
   {
@@ -147,5 +154,32 @@ describe("Composer — blocked state (§3.16a)", () => {
     expect(screen.getByRole("button", { name: /Approve/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: /Deny/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Always allow" })).toBeDisabled();
+  });
+});
+
+/**
+ * §6.3: while this window's daemon is stopped, nothing can be sent — through
+ * the one gate Send and Enter already share — and the placeholder says why.
+ * The draft is kept.
+ */
+describe("Composer — daemon stopped", () => {
+  it("closes Send and Enter, says why, and keeps the draft", () => {
+    setStopIntent("stopped_here");
+    try {
+      const props = setup({ value: "audit the connectors" });
+      const textarea = screen.getByLabelText("Message");
+
+      expect(textarea).toHaveAttribute("placeholder", STOPPED_PLACEHOLDER);
+      expect(textarea).toHaveValue("audit the connectors");
+      expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+      fireEvent.keyDown(textarea, { key: "Enter" });
+      expect(props.onSend).not.toHaveBeenCalled();
+
+      // Start clears the intent, and the same composer sends again.
+      act(() => setStopIntent(null));
+      expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+    } finally {
+      setStopIntent(null);
+    }
   });
 });

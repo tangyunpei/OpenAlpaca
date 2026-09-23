@@ -107,18 +107,20 @@ If you add a surface whose route does not exist, add a registry entry and render
 
 ### Tauri shell (`src-tauri/src/lib.rs`)
 
-Two commands, both returning `{ baseUrl, token, instanceId }`:
+Four commands. The first two return `{ baseUrl, token, instanceId }`:
 
-- `ensure_daemon_running` — the boot path. It reads `discovery.json` and probes the daemon's listen address with a TCP connect (300 ms). A live daemon is used as-is, even when the file's own 24 h expiry has lapsed. A dead or missing one is replaced: the shell spawns `openalpacad` detached and polls every 200 ms, for up to 5 s, until the new daemon accepts connections. A stale file left by a crashed daemon therefore never gets returned.
+- `ensure_daemon_running` — the boot path. It reads `discovery.json` and probes the daemon's listen address with a TCP connect (300 ms). A live daemon is used as-is, even when the file's own 24 h expiry has lapsed. A dead or missing one is replaced: the shell spawns `openalpacad` detached and polls every 200 ms, for up to 5 s, until the new daemon accepts connections. A stale file left by a crashed daemon therefore never gets returned. A daemon that does not come up is reported with the end of what this spawn wrote to `daemon.log` (up to 40 lines), or with the fact that it wrote nothing.
 - `get_connection_info` — the reconnect path. It reads `discovery.json` and rejects it if the token has expired. It does not probe liveness.
+- `read_daemon_log_tail(lines)` — the last `lines` lines of `state/logs/daemon.log`, `""` when there is none. It reads the file directly, so it answers when nothing serves `/v1/*`; it backs Settings → Connection's `Show daemon log`.
+- `await_daemon_stopped` — after the webview has asked the daemon to shut down (`POST /v1/command`), waits up to 15 s for its process to exit and then for its singleton lock to be free, and returns `{ outcome, pid, waitedMs }` (`outcome`: `not_running`, `stopped`, `lock_still_held` or `still_alive`). It signals nothing: the shell never kills a process.
 
 Spawning, in detail:
 
 - The binary is looked up next to the GUI executable. Debug builds fall back to `PATH`; release builds fail with an "incorrectly installed" error.
 - The shell creates `~/.openalpaca/` and `~/.openalpaca/config/` first (`store::ensure_store`, `store::ensure_runtime_config_dir`). The daemon ignores an `OPENALPACA_CONFIG_DIR` that does not exist, so the directory has to be there before the spawn.
-- The child runs with its working directory at the store root, `OPENALPACA_CONFIG_DIR` set to that config directory, and no stdio. It is detached (`setsid` on Unix, `DETACHED_PROCESS` on Windows), so it outlives the app.
+- The child runs with its working directory at the store root and `OPENALPACA_CONFIG_DIR` set to that config directory. Its stdin is null; its stdout and stderr are appended to `state/logs/daemon.log` — the file `openalpaca daemon start` writes, rotated the same way (16 MB, three older generations) — and it is started with `store::MANAGED_LOG_ENV` set, so `GET /v1/status` reports that file as its `log_path` (T30). It is detached (`setsid` on Unix, `DETACHED_PROCESS` on Windows), so it outlives the app; on Unix a thread waits on it so that it is reaped when it exits.
 
-The webview never reads `discovery.json` itself. `src/lib/connection.ts` wraps the two commands, caches the result, and treats a changed `instanceId` as a daemon restart: every id the client holds is dead, so it re-bootstraps and drops all server-derived state.
+The webview never reads `discovery.json` itself. `src/lib/connection.ts` wraps the four commands, caches the connection info the first two return, and treats a changed `instanceId` as a daemon restart: every id the client holds is dead, so it re-bootstraps and drops all server-derived state.
 
 ### Frontend (`src/`)
 

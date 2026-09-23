@@ -106,9 +106,10 @@ export const GAPS: Record<GapId, GapDescriptor> = {
   // `GET /v1/status` carries `started_at`/`uptime_secs` from the top of the
   // daemon's own `async_main`, `schema_version` read from the open database
   // rather than counted from the migration files, and `log_path` — the
-  // CLI-managed `state/logs/daemon.log`, or `null` for a daemon started any
-  // other way, which is the honest answer rather than a path to a file nobody
-  // wrote. It also carries §4.8's two size totals and the boot session-log
+  // launcher-managed `state/logs/daemon.log` (the CLI's, or since T30 this
+  // app's own sidecar's), or `null` for a daemon started any other way, which
+  // is the honest answer rather than a path to a file nobody wrote. It also
+  // carries §4.8's two size totals and the boot session-log
   // sweep, so the Connection panel says what the store costs. The daemon log
   // is bounded in the same change (16 MB, three generations), because serving
   // a path to an unbounded file would be an invitation.
@@ -122,6 +123,10 @@ export const GAPS: Record<GapId, GapDescriptor> = {
   // `GET /v1/settings/llm`; only the write was missing. The model picker's
   // `off` group badge is still not drawn — `GET /v1/models` lists models, not
   // providers, and a disabled provider simply has none there.
+  // The API-key editor was never a gap here — every key route already existed
+  // — but the GUI's own absence, and it is closed: `Add key` in Settings →
+  // Models & keys (`views/settings/AddKeyForm.tsx`, D-F) writes
+  // `PUT /v1/settings/llm` and refuses a switched-off provider before it can.
   // The detail half of GAP-17 closed with Phase 8 item 6 (T49):
   // `GET /v1/connectors` rows carry `source` (the token the count was grouped
   // by), `registered` (the manager holds a spawned handle) and `messages_7d`

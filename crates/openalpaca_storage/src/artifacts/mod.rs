@@ -29,12 +29,11 @@
 //!
 //! Step 0 is [`HeadReservation`] (R24, the rule T26 gave uploads): a *new*
 //! artifact claims its name with `O_EXCL` before a byte is written, because
-//! step 4's rename would otherwise replace whatever stands there. An artifact
-//! is addressed by name, so unlike an upload there is no sequence to bump: the
-//! only two answers are to reclaim the name or to refuse it, and which one
-//! applies is decided by the rows (R33 — see below). Superseding an artifact
-//! skips step 0: its own row already owns the name, and step 3 moves that file
-//! aside itself.
+//! step 4's rename would otherwise replace whatever stands there. A name some
+//! file already holds is stepped past to the next `NN-`, exactly as an upload
+//! does (R33 as revised — see below); only an empty reservation is reclaimed.
+//! Superseding an artifact skips step 0: its own row already owns the name,
+//! and step 3 moves that file aside itself.
 //!
 //! All the steps run inside one `with_connection` transaction, which is also
 //! what serialises concurrent `put`s (the `Database` mutex is held for the whole
@@ -75,22 +74,27 @@
 //! bytes land and before `tx.commit()` (an FK violation on `task_id`, a unique
 //! index conflict, a disk-full `INSERT`) leaves exactly the same thing on disk.
 //!
-//! ## The head name: reclaim or refuse (R33)
+//! ## The head name: step past, never clobber (R33, revised)
 //!
-//! **The row is the commit.** Bytes at an address that no `file_assets` and no
-//! `artifact_versions` row references are an *uncommitted write*, and belong to
-//! nobody — the same rule the `.versions/` recovery above applies. So when a
-//! create finds its head name taken ([`reserve_head`]):
+//! A create's `NN-` comes from the rows: one past the highest the directory's
+//! rows address. The rows do not know every file on disk, though — a create
+//! that died between step 4 and `tx.commit()` leaves bytes no row describes,
+//! and so does `openalpaca config reset --factory`, which deletes the database
+//! and promises to leave every artifact file where it is. The two are
+//! indistinguishable on disk, so a row-less file with bytes in it is **never**
+//! treated as garbage. When a create meets its head name taken
+//! ([`reserve_head`]):
 //!
 //! | What holds the name | Action |
 //! |---|---|
-//! | A file no row of this store's address space (`project_root` + `rel_path`) references — the head of a create that died between step 4 and `tx.commit()`, or its empty step-0 reservation | Removed (`warn`, with the path and size), the name claimed, the write continues. |
-//! | A file some row *does* reference — a concurrent writer, an upload addressing the same `rel_path`, an artifact version | [`ArtifactError::NameTaken`]: this store will not destroy bytes it can account for. |
-//! | A file no row references that cannot be removed (a directory at the name, a permission denial) | [`ArtifactError::NameTaken`], and the **one state the protocol cannot recover on its own** — a human must move it aside. Bounded to a single title in a single run/loose directory: another title, or another day, is unaffected. |
+//! | An **empty** regular file no row references — the step-0 reservation of a create that died before step 4 | Removed (`warn`), the name claimed. Removing it destroys no bytes, whoever made it. |
+//! | Anything else: a file with bytes (a crash orphan, a pre-reset artifact), a file or version some row references, a directory, a `.versions/<stem>/` left beside the name | Left exactly as it is; the create takes the next `NN-` and tries again. |
+//! | Every one of [`MAX_HEAD_PROBES`] names taken | [`ArtifactError::NameTaken`] — a store with that many stray copies of one title in one directory needs a human, not a guess. |
 //!
-//! Within the process the reclaim is never needed: [`HeadReservation`]'s `Drop`
-//! removes the file on every path out of `put` but the committed one. It exists
-//! for the crash that ends the process between the two.
+//! The price of a create that died after step 4 is one stray file beside the
+//! retry's head, one number on. Within the process even that never happens:
+//! [`HeadReservation`]'s `Drop` removes the file on every path out of `put` but
+//! the committed one.
 //!
 //! ## The hand edit (§4.8, "User edits a file by hand")
 //!
@@ -173,6 +177,7 @@ use crate::Database;
 use crate::content_io::{fsync_dir, remove_best_effort, sha256_hex};
 use crate::models::file_asset::FileAssetStatus;
 use crate::models::{ArtifactKind, ArtifactOrigin};
+use crate::sql::escape_like;
 use crate::store::{
     ContentKind, StoreScope, artifact_extension, artifact_file_name, confine_to_root, content_dir,
     leading_sequence, loose_dir, project_root_at, relative_to, run_dir, version_file_path,
@@ -252,17 +257,15 @@ pub enum ArtifactError {
         size_bytes: u64,
         limit: u64,
     },
-    /// R24: the head name is held by a file this store will not replace —
-    /// because a row describes it (a concurrent or foreign writer, an upload at
-    /// the same `rel_path`, a retained version), or because it could not be
-    /// removed.
+    /// R24/R33: a new artifact found every one of the [`MAX_HEAD_PROBES`]
+    /// names it tried, from its row-implied head name on, held by something
+    /// this store will not replace — a file with bytes no row describes, a row's file or
+    /// version, a directory. `path` is the first name tried.
     ///
-    /// An artifact is addressed *by name*, so unlike an upload there is no
-    /// sequence to bump: the only two answers are to reclaim the name and to
-    /// refuse it. R33 draws that line at the rows — bytes no row references are
-    /// an uncommitted write and get reclaimed; anything else is refused, since
-    /// replacing bytes this store *can* account for is the one thing the write
-    /// protocol exists to prevent.
+    /// The store steps past a taken name rather than reclaiming it, because a
+    /// row-less file is as likely the user's (a factory reset keeps every
+    /// artifact file) as an interrupted create's; this is what is left when
+    /// stepping past runs out.
     NameTaken { path: String },
 }
 
@@ -305,8 +308,8 @@ impl fmt::Display for ArtifactError {
             ),
             Self::NameTaken { path } => write!(
                 f,
-                "{path} is held by a file this store will not replace — another row \
-                 describes it, or it could not be removed; move it aside and write again"
+                "no free name in {MAX_HEAD_PROBES} tries from {path}: each is held by a \
+                 file this store will not replace; move them aside and write again"
             ),
         }
     }
@@ -925,14 +928,6 @@ impl<'a> ArtifactStore<'a> {
                     row.file_name
                 );
             }
-            let seq = match existing {
-                Some(row) => row.seq,
-                None => siblings.iter().map(|r| r.seq).max().unwrap_or(0) + 1,
-            };
-
-            let head_name = artifact_file_name(seq, new.title, &ext);
-            let head_path = confine_to_root(&artifacts_root, &dir.join(&head_name))?;
-            let head_rel = format!("{rel_dir}/{head_name}");
 
             // --- The unnoticed hand edit (§4.8) ------------------------------
             // The head this write is about to replace may hold bytes nobody
@@ -964,11 +959,27 @@ impl<'a> ArtifactStore<'a> {
             // a *new* artifact reserves — superseding one already owns the name
             // its own row addresses, and step 3 moves that file aside itself.
             // The reservation is dropped (and the file with it) on every path
-            // out of this closure but the committed one.
-            let reservation = match existing {
-                Some(_) => None,
-                None => Some(reserve_head(&tx, &project_key, &head_rel, &head_path)?),
+            // out of this closure but the committed one. A new artifact's `NN-`
+            // starts one past the rows' highest and moves on past any name a
+            // file already holds (R33, as revised — see `reserve_head`).
+            let (head_name, reservation) = match existing {
+                Some(row) => (artifact_file_name(row.seq, new.title, &ext), None),
+                None => {
+                    let first_seq = siblings.iter().map(|r| r.seq).max().unwrap_or(0) + 1;
+                    let (name, reservation) = reserve_head(
+                        &tx,
+                        &project_key,
+                        &artifacts_root,
+                        &dir,
+                        &rel_dir,
+                        first_seq,
+                        |seq| artifact_file_name(seq, new.title, &ext),
+                    )?;
+                    (name, Some(reservation))
+                }
             };
+            let head_path = confine_to_root(&artifacts_root, &dir.join(&head_name))?;
+            let head_rel = format!("{rel_dir}/{head_name}");
             let rotated_rel = write_bytes(
                 &artifacts_root,
                 &dir,
@@ -1482,7 +1493,7 @@ impl<'a> ArtifactStore<'a> {
     ///
     /// Rows only. Moving the store *directory*, when the caller is asking for a
     /// move rather than recording one that already happened, is
-    /// [`crate::store::migrate::move_project_store`].
+    /// [`crate::store::project_move::move_project_store`].
     ///
     /// **Path-scoped, not owner-scoped**, and deliberately: `session` and `task`
     /// carry no `owner_id`, so a half-scoped transaction would leave a project
@@ -2468,48 +2479,104 @@ fn dir_rows(conn: &Connection, project_key: &str, rel_dir: &str) -> Result<Vec<D
     Ok(out)
 }
 
-/// R33: claim the head name, reclaiming it first if what holds it is an
-/// **uncommitted write**.
+/// How far past the row-implied sequence a create probes for a free head name
+/// before refusing — the bound uploads use ([`crate::uploads`]). Reaching it
+/// means dozens of files in one run/loose directory already hold this title's
+/// names without a row: a broken or reset-and-reused store, and an
+/// [`ArtifactError::NameTaken`] the user should see rather than a clobber.
+const MAX_HEAD_PROBES: u32 = 32;
+
+/// R33 (revised): claim a head name for a **new** artifact, never taking one
+/// from a file this store cannot prove is its own.
 ///
-/// The row is the commit. Bytes at the head address that no `file_assets` or
-/// `artifact_versions` row references are therefore garbage by definition —
-/// the same rule the `.versions/` recovery applies — and the state a create
-/// leaves behind when the process dies between the final rename and
-/// `tx.commit()`, which the in-process [`HeadReservation`] guard cannot cover.
-/// Without this, one power loss would refuse that one address forever.
+/// The name starts at `first_seq` — one past the highest `NN-` any row in the
+/// directory addresses — and a name is passed over, untouched, when
 ///
-/// A file some row *does* describe is a genuine collision — a concurrent or
-/// foreign writer, an upload addressing the same `rel_path` — and stays
-/// [`ArtifactError::NameTaken`]. So does one that cannot be removed.
-fn reserve_head<'a>(
+/// - some row of this store's address space already references it (a head, an
+///   upload at the same `rel_path`, a retained version) — even with no file
+///   there, a second row at one address is a corrupt store;
+/// - `.versions/<stem>/` already exists beside it — a later supersede would
+///   rotate into, and `fs::rename` would replace, versions nobody here wrote;
+/// - a file (or anything else) already stands at it, *unless* that is an empty
+///   regular file no row references.
+///
+/// That one exception is the reclaim R33 was written for: a create that died
+/// between its `O_EXCL` reservation and the final rename leaves exactly an
+/// empty file. Removing it destroys no bytes, whoever made it. Anything with
+/// bytes in it is **not** proof of an interrupted create — a factory reset
+/// leaves every pre-reset artifact on disk with no row, and those are the
+/// user's — so it keeps its name and the new artifact takes the next one. The
+/// price of a create that died *after* the final rename is one stray file with
+/// its bytes in it, beside the head the retry writes one number on; the
+/// alternative price was the user's data.
+fn reserve_head(
     conn: &Connection,
     project_key: &str,
-    head_rel: &str,
-    head_path: &'a Path,
-) -> Result<HeadReservation<'a>> {
-    let taken = match HeadReservation::claim(head_path) {
-        Ok(reservation) => return Ok(reservation),
-        Err(e) => e,
-    };
-    let is_name_taken = matches!(
-        taken.downcast_ref::<ArtifactError>(),
-        Some(ArtifactError::NameTaken { .. })
-    );
-    if !is_name_taken || rel_path_is_referenced(conn, project_key, head_rel)? {
-        return Err(taken);
+    artifacts_root: &Path,
+    dir: &Path,
+    rel_dir: &str,
+    first_seq: u32,
+    name_for: impl Fn(u32) -> String,
+) -> Result<(String, HeadReservation)> {
+    let mut first_path = None;
+    for seq in first_seq..first_seq.saturating_add(MAX_HEAD_PROBES) {
+        let name = name_for(seq);
+        let path = confine_to_root(artifacts_root, &dir.join(&name))?;
+        let rel = format!("{rel_dir}/{name}");
+        first_path.get_or_insert_with(|| path.clone());
+        if rel_path_is_referenced(conn, project_key, &rel)? || has_version_dir(&path)? {
+            continue;
+        }
+        if let Some(reservation) = HeadReservation::claim(&path)? {
+            return Ok((name, reservation));
+        }
+        if reclaim_empty_orphan(&path)
+            && let Some(reservation) = HeadReservation::claim(&path)?
+        {
+            return Ok((name, reservation));
+        }
+        tracing::info!(
+            "{} is held by a file no artifact row describes; leaving it untouched \
+             and taking the next name",
+            path.display()
+        );
     }
+    let path = first_path.unwrap_or_else(|| dir.to_path_buf());
+    Err(anyhow::Error::new(ArtifactError::NameTaken {
+        path: path.to_string_lossy().to_string(),
+    }))
+}
 
-    let size = fs::metadata(head_path).map(|m| m.len()).unwrap_or(0);
-    tracing::warn!(
-        "Reclaiming {} ({size} bytes): no artifact row describes it, so it is an \
-         uncommitted write left behind by an interrupted create",
-        head_path.display()
-    );
-    if let Err(e) = fs::remove_file(head_path) {
-        tracing::warn!("Failed to remove {}: {e}", head_path.display());
-        return Err(taken);
+/// Does `.versions/<stem>/` already exist beside the head name `path`?
+fn has_version_dir(path: &Path) -> Result<bool> {
+    let version_dir = version_file_path(path, 1)?
+        .parent()
+        .map(Path::to_path_buf)
+        .with_context(|| format!("no version directory for {}", path.display()))?;
+    Ok(fs::symlink_metadata(version_dir).is_ok())
+}
+
+/// Remove what stands at `path` when — and only when — it is an empty regular
+/// file: the abandoned `O_EXCL` reservation of a create that died before its
+/// final rename. The caller has already established that no row references
+/// it. `true` when the name is free again.
+fn reclaim_empty_orphan(path: &Path) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() && meta.len() == 0 => {}
+        _ => return false,
     }
-    HeadReservation::claim(head_path)
+    tracing::warn!(
+        "Reclaiming {}: an empty file no artifact row describes is the reservation \
+         of a create that never finished",
+        path.display()
+    );
+    match fs::remove_file(path) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!("Failed to remove {}: {e}", path.display());
+            false
+        }
+    }
 }
 
 /// Does any row of this store address `rel` — a head in `file_assets` or a
@@ -2541,29 +2608,26 @@ fn rel_path_is_referenced(conn: &Connection, project_key: &str, rel: &str) -> Re
 /// dropping the guard removes it. That is what keeps a failed write (a rolled
 /// back `INSERT`, a disk-full `artifact_versions` row) from stranding an
 /// unreferenced file that the *next* attempt at the same address would then
-/// refuse as a taken name.
-struct HeadReservation<'a> {
-    path: &'a Path,
+/// have to step past.
+struct HeadReservation {
+    path: PathBuf,
     armed: bool,
 }
 
-impl<'a> HeadReservation<'a> {
-    /// Claim `path`, or [`ArtifactError::NameTaken`] if something already holds
-    /// it. `reserve_head` calls this twice: once blind, and — after a failed
-    /// first claim proved no row of this store references `path` and the
-    /// row-less head was reclaimed — once more.
-    fn claim(path: &'a Path) -> Result<Self> {
+impl HeadReservation {
+    /// Claim `path`, or `None` if something already stands at it (a file, a
+    /// directory, a dangling symlink — `O_EXCL` follows none of them).
+    fn claim(path: &Path) -> Result<Option<Self>> {
         match fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(path)
         {
-            Ok(_) => Ok(Self { path, armed: true }),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                Err(anyhow::Error::new(ArtifactError::NameTaken {
-                    path: path.to_string_lossy().to_string(),
-                }))
-            }
+            Ok(_) => Ok(Some(Self {
+                path: path.to_path_buf(),
+                armed: true,
+            })),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
             Err(e) => {
                 Err(anyhow::Error::new(e).context(format!("failed to create {}", path.display())))
             }
@@ -2576,10 +2640,10 @@ impl<'a> HeadReservation<'a> {
     }
 }
 
-impl Drop for HeadReservation<'_> {
+impl Drop for HeadReservation {
     fn drop(&mut self) {
         if self.armed {
-            remove_best_effort(self.path);
+            remove_best_effort(&self.path);
         }
     }
 }
@@ -2778,18 +2842,6 @@ fn default_mime(kind: ArtifactKind) -> &'static str {
 /// §4.9: diffs are text-only — `kind ∈ {image, binary}` is not.
 fn is_text_kind(kind: ArtifactKind) -> bool {
     !matches!(kind, ArtifactKind::Image | ArtifactKind::Binary)
-}
-
-/// Escapes the `LIKE` metacharacters for a pattern used with `ESCAPE '\'`.
-fn escape_like(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for ch in input.chars() {
-        if matches!(ch, '\\' | '%' | '_') {
-            out.push('\\');
-        }
-        out.push(ch);
-    }
-    out
 }
 
 /// `(added, removed)` for a line diff: the `+` and `-` lines its unified patch

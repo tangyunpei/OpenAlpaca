@@ -438,18 +438,17 @@ fn put_refuses_to_supersede_another_owners_artifact() {
 // put — the head reservation and the address rule (R24)
 // ============================================================================
 
-/// R33. The row is the commit, so bytes at the head address that no row
-/// references are an *uncommitted write* — what a create leaves behind when the
-/// process dies between the final rename and `tx.commit()`, which the in-process
-/// `Drop` guard cannot cover. The next put reclaims them and continues, instead
-/// of refusing that address for good.
+/// R33, as revised. A row-less file *with bytes* at the head address is either
+/// the head of a create that died between the final rename and `tx.commit()`,
+/// or a file that outlived its rows for a reason that makes it the user's (a
+/// factory reset). Nothing on disk tells the two apart, so the store never
+/// takes the name from it: the file keeps its bytes and the new artifact
+/// takes the next `NN-`.
 #[test]
-fn a_row_less_head_left_by_a_crashed_create_is_reclaimed() {
+fn a_row_less_head_with_bytes_keeps_its_name_and_the_create_steps_past_it() {
     let f = Fixture::new();
     let scope = f.scope();
 
-    // What the daemon would find after a power loss: the bytes of a create
-    // that got as far as step 4 and never committed a row.
     let day_dir = f.artifacts_root().join("loose/2026-09-01");
     fs::create_dir_all(&day_dir).unwrap();
     let orphan = day_dir.join("01-notes.md");
@@ -460,27 +459,75 @@ fn a_row_less_head_left_by_a_crashed_create_is_reclaimed() {
     let (record, created) = f.store().put(new).unwrap();
 
     assert!(created);
-    assert_eq!(record.name, "01-notes.md");
-    assert_eq!(
-        fs::read_to_string(&orphan).unwrap(),
-        "hello",
-        "the new bytes are the head"
-    );
-    assert_eq!(
-        f.store().list(&ArtifactQuery::new(OWNER)).unwrap().1,
-        1,
-        "exactly one row describes the address"
-    );
-    assert!(
-        !day_dir.join(".versions/01-notes/v0.md").exists(),
-        "the orphan was garbage, not a version"
-    );
+    assert_eq!(record.name, "02-notes.md");
+    assert_eq!(fs::read(&orphan).unwrap(), b"bytes with no row");
+    assert_eq!(fs::read_to_string(&record.storage_path).unwrap(), "hello");
     assert_no_tmp_leftovers(&day_dir);
+
+    // The artifact is the one at 02-: writing the title again supersedes it,
+    // and the file at 01- is still nobody's business.
+    let mut again = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"v2");
+    again.created = at(1);
+    let (again, created) = f.store().put(again).unwrap();
+    assert!(!created);
+    assert_eq!(again.id, record.id);
+    assert_eq!(again.name, "02-notes.md");
+    assert_eq!(fs::read(&orphan).unwrap(), b"bytes with no row");
 }
 
-/// The cheaper half of the same crash: a create that died right after
-/// `create_new` leaves an empty reservation and no row. Same rule, same
-/// recovery.
+/// The finding this ruling answers: `config reset --factory` deletes the
+/// database and promises the artifact files "stay exactly where they are". The
+/// fresh database has no rows, so the same title on the same day computes the
+/// same `01-` name the pre-reset artifact holds — and must not take it.
+#[test]
+fn an_artifact_written_after_a_factory_reset_never_replaces_a_pre_reset_file() {
+    let f = Fixture::new();
+    let scope = f.scope();
+
+    let mut before = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Summary", b"old\n");
+    before.created = at(1);
+    let (before, _) = f.store().put(before).unwrap();
+    assert_eq!(before.name, "01-summary.md");
+    let day_dir = f.artifacts_root().join("loose/2026-09-01");
+    let snapshot = |p: &Path| fs::read(p).unwrap();
+    let head_before = snapshot(&day_dir.join("01-summary.md"));
+    assert_eq!(head_before, b"old\n");
+
+    // The reset: a new, empty database over the same store.
+    let fresh_dir = tempdir().unwrap();
+    let fresh = Database::open(&fresh_dir.path().join("fresh.db")).unwrap();
+    let store = ArtifactStore::new(&fresh);
+
+    let mut after = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Summary", b"new\n");
+    after.created = at(1);
+    let (after, created) = store.put(after).unwrap();
+    assert!(created);
+    assert_eq!(after.name, "02-summary.md");
+    assert_eq!(snapshot(&day_dir.join("01-summary.md")), head_before);
+    assert_eq!(fs::read_to_string(&after.storage_path).unwrap(), "new\n");
+
+    // And superseding the new one rotates into its own history, not the old.
+    let mut after_v2 = NewArtifact::new(
+        OWNER,
+        &scope,
+        ArtifactKind::Markdown,
+        "Summary",
+        b"new v2\n",
+    );
+    after_v2.created = at(1);
+    store.put(after_v2).unwrap();
+    assert_eq!(
+        fs::read_to_string(day_dir.join(".versions/02-summary/v1.md")).unwrap(),
+        "new\n"
+    );
+    assert!(!day_dir.join(".versions/01-summary").exists());
+    assert_eq!(snapshot(&day_dir.join("01-summary.md")), head_before);
+}
+
+/// The cheaper half of the crash: a create that died right after `create_new`
+/// leaves an empty reservation and no row. Removing an empty file destroys no
+/// bytes, so this is the one case the store still reclaims — the retry keeps
+/// the name it would have had.
 #[test]
 fn an_empty_reservation_left_by_a_crashed_create_is_reclaimed() {
     let f = Fixture::new();
@@ -495,13 +542,15 @@ fn an_empty_reservation_left_by_a_crashed_create_is_reclaimed() {
     let (record, created) = f.store().put(new).unwrap();
 
     assert!(created);
+    assert_eq!(record.name, "01-notes.md");
     assert_eq!(fs::read_to_string(&record.storage_path).unwrap(), "hello");
+    assert!(!day_dir.join("02-notes.md").exists());
 }
 
-/// The other half of R33: a file a row *does* reference is not this store's to
-/// reclaim. `dir_rows` only sees produced heads, so an upload — the other
-/// writer of `file_assets` — addressing the same `project_root` + `rel_path` is
-/// a genuine collision, and the write refuses rather than destroying it.
+/// A file a row *does* reference is never taken either. `dir_rows` only sees
+/// produced heads, so an upload — the other writer of `file_assets` —
+/// addressing the same `project_root` + `rel_path` is stepped past like any
+/// other held name.
 #[test]
 fn a_head_another_row_describes_is_never_overwritten() {
     let f = Fixture::new();
@@ -515,34 +564,42 @@ fn a_head_another_row_describes_is_never_overwritten() {
 
     let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"hello");
     new.created = at(1);
-    let err = f.store().put(new).unwrap_err();
+    let (record, created) = f.store().put(new).unwrap();
 
-    assert_eq!(
-        err.downcast_ref::<ArtifactError>()
-            .unwrap_or_else(|| panic!("not an ArtifactError: {err}"))
-            .code(),
-        "ARTIFACT_NAME_TAKEN"
-    );
+    assert!(created);
+    assert_eq!(record.name, "02-notes.md");
     assert_eq!(
         fs::read(&taken).unwrap(),
         b"bytes another row describes",
         "the file must be left exactly as it was"
     );
-    let produced = ArtifactQuery {
-        origin: Some(ArtifactOrigin::Produced),
-        ..ArtifactQuery::new(OWNER)
-    };
-    assert_eq!(
-        f.store().list(&produced).unwrap().1,
-        0,
-        "and no produced row was written"
-    );
     assert_no_tmp_leftovers(&day_dir);
+}
+
+/// A referenced *empty* file is not an abandoned reservation: a row owns it.
+/// The zero-length reclaim applies only to what no row describes.
+#[test]
+fn an_empty_file_a_row_describes_is_never_reclaimed() {
+    let f = Fixture::new();
+    let scope = f.scope();
+
+    let day_dir = f.artifacts_root().join("loose/2026-09-01");
+    fs::create_dir_all(&day_dir).unwrap();
+    let taken = day_dir.join("01-notes.md");
+    fs::write(&taken, b"").unwrap();
+    f.foreign_row("upload-1", "loose/2026-09-01/01-notes.md", &taken);
+
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"hello");
+    new.created = at(1);
+    let (record, _) = f.store().put(new).unwrap();
+
+    assert_eq!(record.name, "02-notes.md");
+    assert_eq!(fs::read(&taken).unwrap(), b"");
 }
 
 /// A version row references bytes just as a head row does — the `.versions/`
 /// side of the same rule. A file some artifact's history still points at is
-/// never reclaimed.
+/// never taken.
 #[test]
 fn a_head_a_version_row_still_points_at_is_never_overwritten() {
     let f = Fixture::new();
@@ -560,7 +617,76 @@ fn a_head_a_version_row_still_points_at_is_never_overwritten() {
 
     let mut second = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Beta", b"b\n");
     second.created = at(1);
-    let err = f.store().put(second).unwrap_err();
+    let (beta, _) = f.store().put(second).unwrap();
+
+    assert_eq!(beta.name, "03-beta.md");
+    assert_eq!(fs::read(&taken).unwrap(), b"a version's bytes");
+}
+
+/// A `.versions/<stem>/` with no head beside it — the user deleted a pre-reset
+/// head and kept its history. Taking that name would make the new artifact's
+/// first supersede rotate into, and `fs::rename` replace, versions nobody in
+/// this database wrote.
+#[test]
+fn a_name_whose_version_directory_survives_is_stepped_past() {
+    let f = Fixture::new();
+    let scope = f.scope();
+
+    let day_dir = f.artifacts_root().join("loose/2026-09-01");
+    let history = day_dir.join(".versions/01-notes");
+    fs::create_dir_all(&history).unwrap();
+    fs::write(history.join("v1.md"), b"a pre-reset version").unwrap();
+
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"hello");
+    new.created = at(1);
+    let (record, _) = f.store().put(new).unwrap();
+
+    assert_eq!(record.name, "02-notes.md");
+    assert!(!day_dir.join("01-notes.md").exists());
+    assert_eq!(
+        fs::read(history.join("v1.md")).unwrap(),
+        b"a pre-reset version"
+    );
+}
+
+/// A directory at the name used to be the one state R33 could not recover on
+/// its own. It is stepped past like anything else that holds a name.
+#[test]
+fn a_directory_at_the_head_name_is_stepped_past() {
+    let f = Fixture::new();
+    let scope = f.scope();
+
+    let day_dir = f.artifacts_root().join("loose/2026-09-01");
+    fs::create_dir_all(day_dir.join("01-notes.md")).unwrap();
+
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"hello");
+    new.created = at(1);
+    let (record, _) = f.store().put(new).unwrap();
+
+    assert_eq!(record.name, "02-notes.md");
+    assert!(day_dir.join("01-notes.md").is_dir());
+}
+
+/// Stepping past is bounded. When every name it may try is held, the create
+/// refuses with `ARTIFACT_NAME_TAKEN` and every file is left as it was.
+#[test]
+fn a_create_that_finds_every_name_held_refuses_and_touches_nothing() {
+    let f = Fixture::new();
+    let scope = f.scope();
+
+    let day_dir = f.artifacts_root().join("loose/2026-09-01");
+    fs::create_dir_all(&day_dir).unwrap();
+    for seq in 1..=MAX_HEAD_PROBES {
+        fs::write(
+            day_dir.join(artifact_file_name(seq, "Notes", "md")),
+            format!("stray {seq}"),
+        )
+        .unwrap();
+    }
+
+    let mut new = NewArtifact::new(OWNER, &scope, ArtifactKind::Markdown, "Notes", b"hello");
+    new.created = at(1);
+    let err = f.store().put(new).unwrap_err();
 
     assert_eq!(
         err.downcast_ref::<ArtifactError>()
@@ -568,7 +694,16 @@ fn a_head_a_version_row_still_points_at_is_never_overwritten() {
             .code(),
         "ARTIFACT_NAME_TAKEN"
     );
-    assert_eq!(fs::read(&taken).unwrap(), b"a version's bytes");
+    for seq in 1..=MAX_HEAD_PROBES {
+        assert_eq!(
+            fs::read_to_string(day_dir.join(artifact_file_name(seq, "Notes", "md"))).unwrap(),
+            format!("stray {seq}")
+        );
+    }
+    let next = day_dir.join(artifact_file_name(MAX_HEAD_PROBES + 1, "Notes", "md"));
+    assert!(!next.exists(), "the probe stops at its bound");
+    assert_eq!(f.store().list(&ArtifactQuery::new(OWNER)).unwrap().1, 0);
+    assert_no_tmp_leftovers(&day_dir);
 }
 
 /// R33 is about the crash the process does not survive; inside the process the
@@ -1264,6 +1399,11 @@ fn list_filters_and_totals() {
     let mut q = ArtifactQuery::new(OWNER);
     q.q = Some("%".to_string());
     assert_eq!(store.list(&q).unwrap().1, 0);
+    for literal in ["_", "\\"] {
+        let mut q = ArtifactQuery::new(OWNER);
+        q.q = Some(literal.to_string());
+        assert_eq!(store.list(&q).unwrap().1, 0, "{literal:?} is literal");
+    }
 
     // limit/offset page but never change the total.
     let mut q = ArtifactQuery::new(OWNER);

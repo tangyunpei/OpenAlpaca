@@ -4,8 +4,9 @@
  *
  * One route answers three questions, so the Connection panel asks once:
  * `started_at`/`uptime_secs`, `schema_version` (the open database's, not a
- * compile-time count of migration files), `log_path` (the CLI-managed
- * `daemon.log`, or `null` where none was written), the two size totals, the
+ * compile-time count of migration files), `log_path` (the launcher-managed
+ * `daemon.log` — the app's sidecar and `openalpaca daemon start` both write
+ * one — or `null` for a daemon started by hand), the two size totals, the
  * boot session-log sweep, the `retention` limits those are measured against —
  * and the project below.
  *
@@ -25,6 +26,34 @@
 import { apiFetch } from "../http";
 import { workspaceHeader } from "../workspace-header";
 import type { DaemonStatus } from "./types";
+
+/** `POST /v1/command {"command":"shutdown"}`'s answer. */
+export interface ShutdownAccepted {
+  request_id: string;
+  /** `shutting_down` — an acceptance, never a completion. */
+  status: string;
+}
+
+/**
+ * Ask the daemon to shut down gracefully.
+ *
+ * The `200 {"status":"shutting_down"}` means the daemon *accepted*: it still
+ * has up to 10 s of shutdown to run. Nothing may report "stopped" on the
+ * strength of it — `awaitDaemonStopped` (the shell) is what says it is gone.
+ * Any other `status` is treated as a refusal.
+ */
+export async function requestDaemonShutdown(): Promise<ShutdownAccepted> {
+  const accepted = await apiFetch<ShutdownAccepted>("/v1/command", {
+    method: "POST",
+    body: { command: "shutdown" },
+  });
+  if (accepted?.status !== "shutting_down") {
+    throw new Error(
+      `The daemon did not accept the shutdown (status: ${String(accepted?.status)}).`,
+    );
+  }
+  return accepted;
+}
 
 /**
  * `GET /v1/status`.

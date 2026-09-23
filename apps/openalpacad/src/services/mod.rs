@@ -87,7 +87,7 @@ pub async fn initialize_services(
                 ..Default::default()
             };
             // §5.4's global cap, "once at boot for the global cap". It runs
-            // here — after the store movers, before any writer is handed out,
+            // here — after the database opens, before any writer is handed out,
             // so nothing it examines is being appended to underneath it. The
             // per-session cap is the writer's and needs no boot pass.
             let swept = sweep_session_logs(&root, db, daemon_config).await;

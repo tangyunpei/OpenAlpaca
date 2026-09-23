@@ -43,6 +43,7 @@ use axum::{
 use openalpaca_core::tools::extensions::{
     ExtensionError, ExtensionId, ExtensionKind, ExtensionRecord, ExtensionState, UnapprovedReason,
 };
+use openalpaca_plugins::config_codec::toml_to_json;
 use openalpaca_plugins::{InstallError, InstallOutcome, PluginError};
 use serde::Deserialize;
 
@@ -798,25 +799,6 @@ fn config_json(config: &HashMap<String, toml::Value>) -> serde_json::Value {
         map.insert(key.clone(), toml_to_json(value));
     }
     serde_json::Value::Object(map)
-}
-
-pub(crate) fn toml_to_json(v: &toml::Value) -> serde_json::Value {
-    match v {
-        toml::Value::String(s) => serde_json::Value::String(s.clone()),
-        toml::Value::Integer(i) => serde_json::Value::Number((*i).into()),
-        toml::Value::Float(f) => serde_json::Number::from_f64(*f)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null),
-        toml::Value::Boolean(b) => serde_json::Value::Bool(*b),
-        toml::Value::Datetime(d) => serde_json::Value::String(d.to_string()),
-        toml::Value::Array(arr) => serde_json::Value::Array(arr.iter().map(toml_to_json).collect()),
-        toml::Value::Table(table) => serde_json::Value::Object(
-            table
-                .iter()
-                .map(|(k, v)| (k.clone(), toml_to_json(v)))
-                .collect(),
-        ),
-    }
 }
 
 pub(crate) fn json_to_toml(v: &serde_json::Value) -> toml::Value {

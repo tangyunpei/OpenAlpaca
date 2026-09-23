@@ -324,3 +324,199 @@ mod attachments {
         );
     }
 }
+
+// --- Message chunking (Telegram 4096 bytes, Discord 2000 bytes) ---
+
+#[cfg(any(feature = "telegram", feature = "discord"))]
+mod chunking {
+    use super::super::chunk_message;
+
+    /// Every property the two platform copies had, asserted at one limit.
+    fn assert_contract(max: usize) {
+        let chunk = |text: &str| chunk_message(text, max);
+        let a = |n: usize| "a".repeat(n);
+        let b = |n: usize| "b".repeat(n);
+        let c = |n: usize| "c".repeat(n);
+
+        // Chunks are within the limit, never empty, and concatenate back to
+        // the input exactly — every separator travels with the chunk it ends.
+        let split = |text: &str| -> Vec<String> {
+            let chunks = chunk(text);
+            assert_eq!(chunks.concat(), text, "chunks must rebuild the text");
+            for piece in &chunks {
+                assert!(!piece.is_empty(), "no empty chunk for non-empty text");
+                assert!(piece.len() <= max, "{} > {max}", piece.len());
+            }
+            chunks
+        };
+
+        // Empty input is one empty chunk, not zero chunks.
+        assert_eq!(chunk(""), vec![String::new()]);
+
+        // At or under the limit: one chunk, the text itself.
+        assert_eq!(split("Hello, world!"), vec!["Hello, world!"]);
+        assert_eq!(split(&a(max)), vec![a(max)]);
+
+        // No separator at all: a hard cut at the limit, measured in bytes.
+        assert_eq!(split(&a(max + 1)), vec![a(max), a(1)]);
+        assert_eq!(split(&a(max + 100)), vec![a(max), a(100)]);
+        assert_eq!(split(&a(3 * max + 1)).len(), 4);
+
+        // A paragraph break wins over a later sentence end and a later newline.
+        let q = max / 4;
+        let text = format!("{}\n\n{}. {}\n{}", a(q), b(q), c(q), a(max));
+        assert_eq!(split(&text)[0], format!("{}\n\n", a(q)));
+
+        // Then ". " wins over a later newline.
+        let text = format!("{}. {}\n{}", a(q), b(q), c(max));
+        assert_eq!(split(&text)[0], format!("{}. ", a(q)));
+
+        // Then any newline.
+        let text = format!("{}\n{}", a(max / 2), b(max));
+        assert_eq!(split(&text)[0], format!("{}\n", a(max / 2)));
+
+        // Paragraphs of the sizes the platform tests used.
+        let text = format!("{}\n\n{}\n\n{}", a(max / 2), b(max / 2), c(max / 2));
+        let chunks = split(&text);
+        assert!(chunks.len() >= 2);
+        assert!(chunks[0].ends_with("\n\n"));
+
+        // Only the first `max` bytes are searched: a separator just past the
+        // limit is not used, and one straddling it is seen only in part.
+        assert_eq!(
+            split(&format!("{}\n\nrest", a(max))),
+            vec![a(max), "\n\nrest".to_string()]
+        );
+        let straddle = format!("{}\n\n{}", a(max - 1), b(1));
+        assert_eq!(
+            split(&straddle),
+            vec![format!("{}\n", a(max - 1)), format!("\n{}", b(1))]
+        );
+
+        // A hard cut never lands inside a character: it backs off to the
+        // character's start, for a 4-byte emoji and a 3-byte CJK character.
+        assert_eq!(
+            split(&format!("{}\u{1F600}b", a(max - 1))),
+            vec![a(max - 1), "\u{1F600}b".to_string()]
+        );
+        assert_eq!(
+            split(&format!("{}\u{4e16}b", a(max - 2))),
+            vec![a(max - 2), "\u{4e16}b".to_string()]
+        );
+
+        // Text made only of multi-byte characters.
+        assert!(split(&"\u{4e16}".repeat(max / 3 + 100)).len() >= 2);
+        assert!(split(&"\u{1F600}".repeat(max / 4 + 100)).len() >= 2);
+
+        // Mixed prose with every separator kind still round-trips.
+        let prose = "第一段：会议记录。 Alpha beta.\n\u{1F600} gamma. delta\n\n".repeat(max / 20);
+        assert!(split(&prose).len() >= 2);
+    }
+
+    #[test]
+    fn discord_limit_keeps_the_contract() {
+        assert_contract(2000);
+    }
+
+    #[test]
+    fn telegram_limit_keeps_the_contract() {
+        assert_contract(4096);
+    }
+
+    /// Below the longest UTF-8 character a hard cut could floor to 0 and the
+    /// loop would never advance, so such a limit is refused outright.
+    #[test]
+    #[should_panic(expected = "a chunk must fit any UTF-8 character")]
+    fn a_limit_below_one_character_is_refused() {
+        chunk_message("\u{1F600}\u{1F600}", 3);
+    }
+
+    #[test]
+    fn test_floor_char_boundary_std() {
+        let s = "Hello\u{4e16}\u{754c}"; // "Hello世界" = 5 + 3 + 3 = 11 bytes
+        // Boundary in the middle of '世' (bytes 5..8)
+        assert_eq!(s.floor_char_boundary(6), 5);
+        assert_eq!(s.floor_char_boundary(7), 5);
+        assert_eq!(s.floor_char_boundary(8), 8); // exactly on boundary
+        assert_eq!(s.floor_char_boundary(100), 11); // beyond end
+        assert_eq!(s.floor_char_boundary(0), 0);
+    }
+}
+
+// --- Inbound rate limit (Telegram keys by i64 chat, Discord by u64 channel) ---
+
+#[cfg(any(feature = "telegram", feature = "discord"))]
+mod rate_limit {
+    use super::super::KeyedRateLimiter;
+    use std::time::{Duration, Instant};
+
+    fn stamp(limiter: &KeyedRateLimiter<u64>, key: u64) -> Instant {
+        *limiter.last_accepted.lock().unwrap().get(&key).unwrap()
+    }
+
+    #[test]
+    fn the_first_message_passes() {
+        let limiter = KeyedRateLimiter::new(Duration::from_secs(1));
+        assert!(limiter.check(12345u64).is_none());
+    }
+
+    #[test]
+    fn a_second_message_inside_the_interval_is_refused_with_the_wait() {
+        let limiter = KeyedRateLimiter::new(Duration::from_secs(1));
+        assert!(limiter.check(12345u64).is_none());
+        let wait = limiter.check(12345).expect("refused");
+        assert!(wait > Duration::ZERO && wait <= Duration::from_secs(1));
+    }
+
+    /// A refused message does not restart the interval, so a chat that keeps
+    /// talking is let through once the first interval is up.
+    #[test]
+    fn a_refusal_does_not_restart_the_interval() {
+        let limiter = KeyedRateLimiter::new(Duration::from_secs(1));
+        assert!(limiter.check(7u64).is_none());
+        let accepted = stamp(&limiter, 7);
+        assert!(limiter.check(7).is_some());
+        assert_eq!(stamp(&limiter, 7), accepted);
+    }
+
+    #[test]
+    fn a_message_after_the_interval_passes_and_restarts_it() {
+        let limiter = KeyedRateLimiter::new(Duration::from_millis(40));
+        assert!(limiter.check(7u64).is_none());
+        let accepted = stamp(&limiter, 7);
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(limiter.check(7).is_none());
+        assert!(stamp(&limiter, 7) > accepted);
+    }
+
+    #[test]
+    fn keys_do_not_interfere() {
+        let limiter = KeyedRateLimiter::new(Duration::from_secs(1));
+        assert!(limiter.check(111u64).is_none());
+        assert!(limiter.check(222).is_none());
+        assert!(limiter.check(111).is_some());
+    }
+
+    /// Each connector owns its own limiter: the same number seen by two
+    /// instances is two conversations.
+    #[test]
+    fn two_limiters_do_not_share_a_key() {
+        let telegram = KeyedRateLimiter::<i64>::new(Duration::from_secs(1));
+        let discord = KeyedRateLimiter::<u64>::new(Duration::from_secs(1));
+        assert!(telegram.check(7).is_none());
+        assert!(discord.check(7).is_none());
+    }
+
+    #[test]
+    fn a_poisoned_lock_is_recovered() {
+        let limiter = KeyedRateLimiter::new(Duration::from_secs(1));
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = limiter.last_accepted.lock().unwrap();
+            panic!("poison the limiter's lock");
+        }));
+        assert!(poisoned.is_err());
+        assert!(limiter.last_accepted.is_poisoned());
+        assert!(limiter.check(8u64).is_none());
+        assert!(limiter.check(8).is_some());
+    }
+}

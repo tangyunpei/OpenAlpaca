@@ -1,5 +1,6 @@
 use super::*;
 use std::fs::File;
+use std::path::PathBuf;
 use std::time::Duration;
 use tempfile::tempdir;
 use tokio::time::timeout;
@@ -123,4 +124,116 @@ fn a_watcher_that_cannot_do_its_job_is_still_an_error() {
         ))),
         tracing::Level::ERROR
     );
+}
+
+// ── The handler itself, driven without a poll thread or a real clock wait ──
+
+fn event(kind: notify::EventKind, paths: &[&str]) -> Result<Event, notify::Error> {
+    let mut e = Event::new(kind);
+    for p in paths {
+        e = e.add_path(PathBuf::from(p));
+    }
+    Ok(e)
+}
+
+fn modified() -> notify::EventKind {
+    notify::EventKind::Modify(notify::event::ModifyKind::Any)
+}
+
+fn drain(rx: &mut mpsc::Receiver<WakeEvent>) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        match ev {
+            WakeEvent::FileChanged { path, change_type } => out.push((path, change_type)),
+            other => panic!("expected FileChanged, got {other:?}"),
+        }
+    }
+    out
+}
+
+/// One event naming several paths wakes once per path, in the order `notify`
+/// listed them, each carrying the event kind's `Debug` text — and a path named
+/// twice in the same event is debounced like any other repeat.
+#[test]
+fn one_event_with_several_paths_wakes_once_per_path_in_order() {
+    let (tx, mut rx) = mpsc::channel(10);
+    let mut handle = debounced_handler(tx);
+
+    handle(event(modified(), &["/w/from", "/w/to", "/w/from"]));
+
+    let kind = format!("{:?}", modified());
+    assert_eq!(
+        drain(&mut rx),
+        vec![
+            ("/w/from".to_string(), kind.clone()),
+            ("/w/to".to_string(), kind)
+        ]
+    );
+}
+
+/// Opening or closing a file is not a change; nothing wakes and nothing is
+/// recorded, so the next real change to that path is not debounced away.
+#[test]
+fn an_access_only_event_wakes_nothing_and_debounces_nothing() {
+    let (tx, mut rx) = mpsc::channel(10);
+    let mut handle = debounced_handler(tx);
+
+    handle(event(
+        notify::EventKind::Access(notify::event::AccessKind::Any),
+        &["/w/a"],
+    ));
+    assert!(drain(&mut rx).is_empty());
+
+    handle(event(modified(), &["/w/a"]));
+    assert_eq!(drain(&mut rx).len(), 1);
+}
+
+/// A repeat of the same path inside the window is dropped; another path is
+/// not; and once the window has passed the same path wakes again.
+#[test]
+fn a_repeat_inside_the_window_is_debounced_per_path() {
+    let (tx, mut rx) = mpsc::channel(10);
+    let mut handle = debounced_handler(tx);
+
+    handle(event(modified(), &["/w/a"]));
+    handle(event(modified(), &["/w/a"]));
+    handle(event(modified(), &["/w/b"]));
+    let paths: Vec<String> = drain(&mut rx).into_iter().map(|(p, _)| p).collect();
+    assert_eq!(paths, vec!["/w/a", "/w/b"]);
+
+    std::thread::sleep(Duration::from_millis(DEBOUNCE_MS as u64 + 20));
+    handle(event(modified(), &["/w/a"]));
+    assert_eq!(drain(&mut rx).len(), 1, "the window is over");
+}
+
+/// A full queue drops the wake instead of blocking the watcher thread — and
+/// the dropped path's time is still recorded, so an immediate repeat of it is
+/// debounced even after the queue has room again.
+#[test]
+fn a_full_queue_drops_the_wake_without_blocking() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let mut handle = debounced_handler(tx);
+
+    handle(event(modified(), &["/w/a", "/w/b"]));
+    let paths: Vec<String> = drain(&mut rx).into_iter().map(|(p, _)| p).collect();
+    assert_eq!(paths, vec!["/w/a"], "the second wake found the queue full");
+
+    handle(event(modified(), &["/w/b"]));
+    assert!(
+        drain(&mut rx).is_empty(),
+        "the dropped path was stamped before the send"
+    );
+}
+
+/// A receiver that has gone away, or an error from the watcher, is logged and
+/// never panics the watcher thread.
+#[test]
+fn a_closed_queue_or_a_watch_error_does_not_panic() {
+    let (tx, rx) = mpsc::channel(1);
+    drop(rx);
+    let mut handle = debounced_handler(tx);
+
+    handle(event(modified(), &["/w/a"]));
+    handle(Err(notify::Error::path_not_found()));
+    handle(Err(notify::Error::generic("the backend gave up")));
 }

@@ -104,11 +104,6 @@ pub struct SpawnSubagentTool {
     max_concurrent_subagents: usize,
     /// Semaphore limiting concurrent subagent spawns per lead agent.
     concurrency_semaphore: Arc<tokio::sync::Semaphore>,
-    /// Pre-computed static part of the subagent system prompt (Opt-LA-3).
-    /// Contains `{PERSONA}` and `{TOOL_GUIDANCE}` placeholders for substitution.
-    /// Kept for fallback; main path uses PromptBuilder with context distillation.
-    #[allow(dead_code)]
-    prompt_template: String,
     /// Optional confirmation broker for interactive tool approval.
     confirmation_broker: Option<Arc<crate::security::confirmation::ConfirmationBroker>>,
     /// ContextManager for distilling parent context into sub-agent packages.
@@ -158,23 +153,6 @@ impl SpawnSubagentTool {
         compose_engine: Arc<crate::compose::ComposeEngine>,
         unattended: bool,
     ) -> Self {
-        let prompt_template = "\
-            <identity>\n{PERSONA}\n</identity>\n\n\
-            <scope>\n\
-            You are a subagent working on a single objective assigned by a lead agent. \
-            Focus exclusively on your assigned objective. Do not attempt work outside your scope.\n\
-            </scope>\n\n\
-            <output-format>\n\
-            Provide a clear, complete result. Start with a brief summary of what you accomplished, \
-            followed by the detailed output. The lead agent will use your result to synthesize a \
-            final response, so be thorough and specific.\n\
-            </output-format>\n\n\
-            <constraints>\n\
-            You operate independently — you cannot communicate with other subagents directly. \
-            Use workspace_read and workspace_write tools to access or share data across agents.\n\
-            </constraints>{TOOL_GUIDANCE}"
-            .to_string();
-
         Self {
             router,
             tool_registry,
@@ -192,7 +170,6 @@ impl SpawnSubagentTool {
             max_concurrent_subagents,
             concurrency_semaphore: Arc::new(tokio::sync::Semaphore::new(max_concurrent_subagents)),
             workspace,
-            prompt_template,
             confirmation_broker,
             context_manager,
             parent_bundle,
@@ -221,7 +198,13 @@ impl BuiltInTool for SpawnSubagentTool {
 
         tracing::info!(
             target_agent = agent_id,
-            objective_preview = &objective[..objective.len().min(80)],
+            // 80 **bytes**, cut on a character boundary: the objective is
+            // model-authored text and `&objective[..80]` panicked on any
+            // multi-byte character straddling the cut. This log line is at
+            // INFO — the daemon's default level — and runs before the
+            // self-spawn and depth guards, so the panic was reachable in a
+            // stock install.
+            objective_preview = crate::utils::text::byte_prefix(objective, 80),
             task_id = %self.task_id,
             "Lead agent spawning subagent"
         );

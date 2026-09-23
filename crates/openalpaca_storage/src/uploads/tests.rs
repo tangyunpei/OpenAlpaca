@@ -593,10 +593,11 @@ fn a_re_upload_heals_a_row_already_marked_missing() {
 // The rows that predate D2
 // ============================================================================
 
-/// Existing content-addressed blobs stay where they are — moving them is the
-/// boot-time re-home's job, never a `put`'s: their `storage_path` is untouched
-/// by a new upload, they still resolve, and a duplicate of their bytes dedups to
-/// them rather than being re-placed under `uploads/`.
+/// Rows written before D2 keep their content-addressed `storage_path` forever:
+/// nothing moves them any more (D-D retired the boot re-home). A `put` must go
+/// on leaving them where they are, must go on resolving them, and must go on
+/// deduping to them — this is a permanent shape of the table, not a transient
+/// one.
 #[test]
 fn pre_d2_content_addressed_rows_still_resolve_and_still_dedup() {
     let fx = Fixture::new();

@@ -667,7 +667,7 @@ On validation failure:
   - `InvalidJson`: no deterministic fix is available (JSON extraction was already attempted during validation); the original output passes through.
   - `repair_attempted` / `repair_succeeded` are recorded in the invocation telemetry (see Section 10).
 
-LLM-based self-repair (`repair_prompt()`) exists in the code but is not wired up.
+LLM-based self-repair is not implemented: the only repair is the deterministic one above.
 
 ### Soft `max_tokens` Warning and Hard `max_length` Truncation
 

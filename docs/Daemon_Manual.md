@@ -73,7 +73,7 @@ root is the human's:
 - master key: `~/.openalpaca/state/.master_key`
 - rotated copies of hand-edited config: `~/.openalpaca/state/backups/`
 - plugins: `~/.openalpaca/plugins/` — one directory per plugin, plus `.permissions.toml` (approvals and the ENABLE bit for all plugins), `.config/<name>.toml` (per-plugin config), `.data/<name>/` (per-plugin durable state, kept across an update) and `.trash/` (where an uninstalled plugin's directory is moved)
-- self-description: `~/.openalpaca/README.md` (what every entry is, with a retention class) and `.layout` (layout version and this install's id), both seeded when the store is created
+- self-description: `~/.openalpaca/README.md` (what every entry is, with a retention class) and `.layout` (layout version and this install's id), both seeded when the store is created. A `README.md` that is still, byte for byte, the text an earlier build seeded is brought up to date at the next boot (the earlier texts called deleting `state/` a factory reset, which would also lose `.master_key` and the embedding model); one you have edited is never touched
 - content, home scope: one directory per content kind under the root, created on first use — `artifacts/`, `uploads/`, `sessions/`, `memory/`, `skills/`, `scratch/`, `cache/`
 - embedding model cache: `~/.openalpaca/state/cache/fastembed` — where the
   local embedding backend puts the ~1 GB model it downloads on first use
@@ -82,23 +82,28 @@ root is the human's:
   library default with a `WARN` naming it, rather than dropping a gigabyte
   under the daemon's working directory
 - a project's own store: `<project>/.openalpaca/` — the same content shape, so an artifact of a project lives beside the project
-- daemon log (CLI-managed startup): `~/.openalpaca/state/logs/daemon.log` —
-  appended across restarts and rotated by `openalpaca daemon start` when it is
-  past 16 MB (`daemon.log.1` … `.3`, oldest dropped), so it costs at most four
-  files. `GET /v1/status` reports the path only for a daemon that
-  `openalpaca daemon start` launched. A daemon started any other way
-  (`cargo run`, the GUI sidecar) writes no log file and reports `null`, even
-  when an older `daemon.log` is still there. When `openalpaca gui start`
+- daemon log (launcher-managed startup): `~/.openalpaca/state/logs/daemon.log` —
+  the daemon's stdout and stderr, appended across restarts and rotated by
+  whichever launcher starts it when it is past 16 MB (`daemon.log.1` … `.3`,
+  oldest dropped), so it costs at most four files. Both launchers write it:
+  `openalpaca daemon start` and the GUI app's sidecar. `GET /v1/status`
+  reports the path for a daemon either of them launched; a daemon started by
+  hand (a bare `cargo run`, or `openalpacad` in a terminal) writes to its
+  terminal instead and reports `null`, even when an older `daemon.log` is still
+  there. When `openalpaca gui start`
   launches the GUI from a source checkout (`bun run tauri dev`), its output
   goes beside it as `gui.log`.
 
 ## Startup and Lifecycle
 
 1. Parse the command line (none expected; `--help`/`--version` print and exit here), then initialize tracing/logging.
-2. Seed the `~/.openalpaca` home store, then move a legacy app directory into it
-   — once, before the lock is taken, because the lock file itself moves
-   (`store::ensure_store` + `store::migrate::move_app_root`; see
-   [Installation Manual](Installation_Manual.md#migrating-from-the-old-data-directory)).
+2. Seed the `~/.openalpaca` home store, then check whether a development build's
+   data directory is still on this machine (`store::ensure_store` +
+   `store::legacy_root::check_legacy_root`). Nothing is moved. A directory
+   holding a database, a `.master_key` or a `config/` **while this install has no
+   database yet** stops the boot with a message naming both paths; anything less
+   is one `WARN`. See [If You Have Data From an Older
+   Build](Installation_Manual.md#if-you-have-data-from-an-older-build).
 3. Acquire single-instance lock (`openalpacad.lock`).
 4. Resolve config directory, seed missing default configs, and ensure master key.
 5. Install signal handlers.
@@ -114,7 +119,33 @@ root is the human's:
 9. Bootstrap persona documents (SOUL/USER/IDENTITY/BOOTSTRAP) if missing.
 10. Start orchestrator, wake manager, plugin manager, MCP clients, connectors, hot reload, background workers, and HTTP router.
 
-Shutdown can be initiated by signal handling or daemon command endpoint. A watchdog force-exits the process (exit code 1) if graceful shutdown takes longer than 10 seconds; after a forced exit, a stale `discovery.json` may be left behind.
+Shutdown can be initiated by a signal (SIGINT/SIGTERM) or by `POST
+/v1/command {"command":"shutdown"}`; both converge on one cancellation. The
+daemon then stops accepting connections and waits for in-flight responses to
+finish, after which it runs its shutdown tail in this order: flush the cost
+tracker to the database; flush every session log; close every MCP connection
+and kill every plugin child; stop the connectors; stop the wake scheduler and
+file watchers; remove `discovery.json`.
+
+A watchdog bounds all of it at **10 seconds** from the cancellation. The
+session-log flush and the extension sweep each take only what is left of that
+window. If the window runs out, the process exits with code 1 and skips
+whatever of the tail had not run — possibly unflushed spend, dropped
+session-log records, orphaned MCP and plugin children, connectors that never
+deregistered, and a stale `discovery.json` (the next boot overwrites it, and the
+CLI checks that the pid it names is a live daemon before trusting it).
+
+Open connections no longer run that window out. An open
+`GET /v1/chat/stream/{id}` body used to hold the wait for in-flight responses
+until the watchdog fired; it now ends with a farewell `error` frame (see
+[SSE Chat Stream](#sse-chat-stream)). An open `/v1/events` socket never held
+the shutdown — the HTTP server stops tracking a connection once it upgrades —
+but it stayed open and silent until the process died under it; it now gets a
+`daemon_shutting_down` frame and a 1001 close (see
+[WebSocket Events](#websocket-events)). Work that is still running — a chat
+turn, a workflow, a follow-up, a scheduled skill — is not drained: it stops
+when the process does, and a run left in flight is marked `interrupted` on the
+next boot (step 8).
 
 ## Config Resolution
 
@@ -143,7 +174,7 @@ Important runtime files:
   - inside a directory being filled, an existing file is never overwritten;
   - one `INFO` line per directory names the count and the path, and a per-file failure is a `WARN` that does not stop the rest.
 - A workflow is led by an agent template: one with the `orchestration` capability when there is one, otherwise any template that can be spawned. When no agent templates are loaded at all, the workflow request fails with "No agent templates are installed…" and names the `config/agents` directory. That is a different message from "All agents are busy", which clears by itself.
-- The AES-256-GCM master key lives at `~/.openalpaca/state/.master_key` (`store::master_key_dir()`); a key left in a legacy app directory is moved there by the boot-time mover. The daemon exports it as `OPENALPACA_MASTER_KEY` for its own process; startup fails hard if the key cannot be ensured.
+- The AES-256-GCM master key lives at `~/.openalpaca/state/.master_key` (`store::master_key_dir()`). The daemon exports it as `OPENALPACA_MASTER_KEY` for its own process; startup fails hard if the key cannot be ensured.
 - Persona documents (`SOUL.md`, `USER.md`, `IDENTITY.md`, and conditionally `BOOTSTRAP.md`) are written into `<config>/orchestrator/` from templates if absent.
 
 ## Hot Reload
@@ -409,7 +440,7 @@ extension routes differ by design: they answer a flat `{"error": "<word>"}`.
 |---|---|
 | `GET /` | Name and version. Public. |
 | `GET /v1/health` | Liveness: status, version, pid, instance id. Public. |
-| `GET /v1/status` | Where the daemon keeps things and how it is doing: store root, state dir, database path, project root, start time and uptime, schema version, `log_path` (only when the CLI manages the log), upload and artifact bytes, the session-log limits and the last boot sweep, `routing.resume_enabled`, and the `llm` block described under [The effective model](#the-effective-model). |
+| `GET /v1/status` | Where the daemon keeps things and how it is doing: store root, state dir, database path, project root, start time and uptime, schema version, `log_path` (only when a launcher — `openalpaca daemon start` or the GUI app — manages the log), upload and artifact bytes, the session-log limits and the last boot sweep, `routing.resume_enabled`, the `llm` block described under [The effective model](#the-effective-model), and `busy` — what the daemon has in flight right now, as three counts and never contents: `running_tasks` (runs queued, running or paused, which a stop would leave `interrupted`), `pending_confirmations` (approval prompts nobody has answered) and `connected_clients` (open `/v1/events` sockets, the caller's own included). `busy` is `null` on a daemon with no confirmation broker, rather than a block with a guessed zero in it. |
 | `GET /v1/me` | The local user id, the default lane key, and the sources this user has conversations under. |
 | `POST /v1/command` | Daemon commands: `echo`, `process` (runs a full turn), `link_generate`, `link_consume`, `shutdown`. Takes `unattended`. |
 | `GET /v1/events/history` | Persisted events. Filters: `task_id`, `agent_id`, `event_type`. Paged with `before` (an event id, exclusive) and `limit`; always answers `{events, next_before}`. |
@@ -606,6 +637,21 @@ Skills whose frontmatter sets `invoke.cron` (see the Skill Template Reference) a
 - Payload: `openalpaca_api::events::ServerEvent`
 - Includes operational, task, agent, security, and orchestration events.
 
+**Shutdown.** When the daemon begins shutting down, every open socket receives
+one `daemon_shutting_down` frame — `{"type", "grace_secs", "ts",
+"instance_id"}`, where `grace_secs` is the force-exit window (10) — and is then
+closed with WebSocket code **1001** ("going away"), reason
+`daemon_shutting_down`. The frame is composed **per socket** rather than
+broadcast, because the two race: a socket taking its shutdown arm in the same
+tick would never forward a broadcast frame, and a client that learns of a stop
+only by watching its socket die cannot tell a deliberate stop from a crash.
+Before this frame existed the socket simply stayed open and silent until the
+process exited under it. The frame is not persisted to `event_log`, and
+**nothing is replayed** — the socket is best-effort by design, so a shutdown
+mid-stream is one more gap and the usual resync-and-refetch covers it. A client
+that does not know the frame (`openalpaca daemon tail` prints it as an unknown
+event) still sees the 1001 close.
+
 ### SSE Chat Stream
 
 1. `POST /v1/chat` starts the turn and answers `{stream_id, lane_key,
@@ -624,7 +670,7 @@ comments are sent every `[server] sse_keep_alive_secs` (default 15).
 | `confirmation_requested` | `{"request_id", "tool_name", "tool_arguments"}` | A tool is waiting for approval. Does not end the stream. |
 | `confirmation_resolved` | `{"request_id", "outcome"}` | That prompt is no longer pending. Does not end the stream. |
 | `done` | see below | The turn finished. Terminal. |
-| `error` | `{"message": "..."}` | The turn failed. Terminal. |
+| `error` | `{"message": "..."}` | The turn failed, or the daemon is shutting down. Terminal. |
 
 The `done` payload:
 
@@ -683,6 +729,21 @@ assistant message, sent as the one fallback `delta`, carried on `done.content`.
 the same line is the message, but the error channel is kept: the stream's
 terminal frame is `error` rather than `done`, and no assistant message is
 stored.
+
+**A shutdown ends the stream.** When the daemon begins shutting down — `POST
+/v1/command {"command":"shutdown"}`, SIGINT or SIGTERM — an open stream that
+has not yet sent its `done` or `error` gets one last `error` frame and ends:
+
+> The daemon is shutting down, so this stream ended before the turn finished.
+> If the turn had started a workflow, that run comes back as `interrupted` when
+> the daemon starts again — rerun it to pick the work back up.
+
+Anything already buffered is delivered first, so a turn whose `done` was in the
+buffer is told it finished, not that it was cut off; a stream that has already
+sent its terminal frame just ends. Nothing the turn produces after the farewell
+is relayed. Until this existed, an open stream held the shutdown open until the
+10-second watchdog force-exited the daemon (see
+[Startup and Lifecycle](#startup-and-lifecycle)).
 
 **A turn never claims a run it did not start.** Before a main-loop answer is
 returned, the daemon checks any task id the answer states. If no
@@ -802,6 +863,10 @@ The wire names below are the `type` tag of `ServerEvent`
 list is the whole union. Every frame also carries `ts` and `instance_id`.
 
 - `heartbeat`, `command_received`, `wake`
+- `daemon_shutting_down` (`grace_secs`) — sent **per socket** by
+  `/v1/events`'s shutdown arm, immediately before a `Close(1001,
+  "daemon_shutting_down")`, never through the broadcaster and never written to
+  `event_log`
 - `task_status`, `agent_status`, `agent_config_changed`
 - `workflow_started`, `workflow_progress`, `workflow_steered`
 - `subagent_span` — one subagent lane of a run opening or closing: the
@@ -833,7 +898,8 @@ already wrote keep their `event_type` and still list from
 that name.
 
 Persisted rows use the same words with two exceptions: `agent_status` is
-logged as `agent_status_change`, and `heartbeat` is not persisted at all
+logged as `agent_status_change`, and neither `heartbeat` nor
+`daemon_shutting_down` is persisted at all
 (`apps/openalpacad/src/events/persistence.rs`).
 
 ## Background Tasks
@@ -851,7 +917,7 @@ The daemon runs periodic workers, all cancelled together on shutdown (intervals 
 
 - SQLite location is resolved by `openalpaca_storage::store::database_path()` — `~/.openalpaca/state/openalpaca.db`. Every path in the layout comes from that module; no crate joins a literal directory name onto a store root.
 - Migrations are embedded and applied from `openalpaca_storage::migrations::MIGRATIONS`. The unreleased chain is consolidated into `crates/openalpaca_storage/src/migrations/001_baseline.sql`, which initializes schema version 42 directly. Existing version-42 databases remain usable; older development schemas are rejected rather than upgraded. The next migration version is 43. `GET /v1/status` reports the version the open database is actually at.
-- **If your database is refused.** Startup fails with `Unsupported legacy schema version <n>: this build starts at schema version 42 and cannot upgrade a database created by an older one`, followed by the absolute path of the file. No migration runs — the old schema and its rows are left exactly as they were. There are two ways out, and both are yours to choose: delete `~/.openalpaca/state/openalpaca.db` together with its `-wal` and `-shm` siblings, after which the next start builds a fresh database at version 42 and every row you had (conversations, memories, tasks, and the rows indexing artifacts and uploads) is gone, the artifact and upload *files* staying on disk unreferenced; or open the database with a build from before the squash and export what you want to keep first. No CLI verb will do it for you: `openalpaca config reset --factory` opens the database before it dispatches the action (`apps/openalpaca/src/commands/config.rs`), so it fails with the same error — and a factory reset empties tables rather than replacing a schema, which would not have helped anyway.
+- **If your database is refused.** Startup fails with `Unsupported legacy schema version <n>: this build starts at schema version 42 and cannot upgrade a database created by an older one`, followed by the verb that rescues it and the absolute path of the file. No migration runs — the old schema and its rows are left exactly as they were. There are two ways out, and both are yours to choose. Run `openalpaca config reset --factory`: it deletes that file together with its `-wal` and `-shm` siblings and clears `llm.toml` and `daemon.toml`, after which the next start builds a fresh database at version 42 and every row you had (conversations, memories, tasks, and the rows indexing artifacts and uploads) is gone, the artifact and upload *files* staying on disk unreferenced. The verb reaches a database in this state precisely because it opens none — it deletes files and asks the schema nothing — and it is the only form of `openalpaca config` that clears one (`set`, `get` and a keyed `reset` on an `ai.*` or `daemon.*` key open no database either, and work meanwhile, but leave it refused); it refuses while a daemon is running, prints the absolute store root, and requires you to type `factory-reset` at a terminal. Or, if you want any of those rows back first, open the database with a build from before the squash, export what you want to keep, and then run the reset. A different startup failure — `an older OpenAlpaca install's data is still on this machine` — is not this one; see [Installation Manual → If You Have Data From an Older Build](Installation_Manual.md#if-you-have-data-from-an-older-build).
 - Session logs live at `~/.openalpaca/sessions/<id>/` and are bounded by **size only**:
   - `[orchestrator.sessions] log_max_session_bytes` (default 256 MiB) per session. On exceed the writer drops whole oldest segments, never the live one, and records the `seq` range that went.
   - `log_max_total_bytes` (default 2 GiB) across all of them, swept once at boot, oldest-touched archived session first, never an active one.
@@ -875,9 +941,35 @@ POST /v1/command
 {"command":"shutdown"}
 ```
 
+The answer — `200 {"request_id", "status": "shutting_down"}` — is an
+**acceptance, not a completion.** The daemon replies first and raises the
+shutdown about 100 ms later, so that the reply can leave; the process is gone
+only once the shutdown tail has run, which can take up to the 10-second window
+described in [Startup and Lifecycle](#startup-and-lifecycle). Nothing in the
+answer says the daemon has stopped. A client that needs to know waits on the
+daemon's **process**, then on its **single-instance lock** — never on the port,
+which closes first while the lock is still held — as `openalpaca daemon stop`,
+`openalpaca daemon restart` and the GUI app's `Stop daemon` all do (15 s,
+`openalpaca_storage::daemon_lifecycle`). Starting a new daemon before the lock
+is free makes the new one exit at once. The request is behind the bearer token
+like every other `/v1/*` route, and it drains nothing: see what a stop
+interrupts under [Startup and Lifecycle](#startup-and-lifecycle).
+
+**Where the daemon's output goes.** A daemon started by `openalpaca daemon
+start` or by the GUI app writes its stdout and stderr — every `tracing` line,
+and every fatal start-up refusal — to `state/logs/daemon.log` under the store
+root, rotated at 16 MB with three older generations kept. The GUI sidecar used
+to discard that output, so a daemon that refused to start told a bundle-only
+user nothing but "did not become ready"; it now shares the CLI's treatment, and
+when a start times out the app quotes the end of what that start wrote. Lines
+carry ANSI colour codes when read raw (`tracing` writes them even to a file);
+the app strips them for display and changes nothing else.
+
 ## Troubleshooting
 
 - Daemon already running: check lock/discovery and stop existing instance cleanly.
+- The GUI app says the daemon did not start within 5 seconds: the rest of that message is the daemon's own reason, quoted from the end of `state/logs/daemon.log` — the same text the CLI launcher would have written there. Settings → Connection → `Show daemon log` reads more of it. "…and wrote nothing to its log" means the daemon binary never ran: check it is installed beside the app.
+- `openalpaca daemon restart` stops the daemon but starts nothing, and exits with status 2: the old daemon was not completely gone 15 s after it was asked to stop, so starting a new one would have lost the single-instance lock. The message says which of two things happened. "`The daemon (PID …) is still running 15s after it was asked to stop, so nothing was restarted.`" — read the daemon log it names (`state/logs/daemon.log` under the store root) to see what it is doing, stop it with the `kill -9 <pid>` it prints, then `openalpaca daemon start`. "`The daemon (PID …) exited, but something still holds the single-instance lock 15s after it was asked to stop, so nothing was restarted.`" — another daemon is probably already running on this store; check `openalpaca daemon status` before starting one. `openalpaca daemon stop` reports the same two cases and exits 2 as well.
 - Discovery expired: restart daemon to rotate token and rewrite discovery.
 - DB lock/contention: ensure single daemon instance and avoid conflicting external writers.
 - Config not loading: verify resolved config directory and presence of expected files.

@@ -445,11 +445,17 @@ pub fn delete_daemon_value(key: &str) -> Result<()> {
 /// Writes a minimal empty TOML file. The daemon runtime fills in defaults
 /// via `DaemonConfig::default()` when the file has no overrides.
 pub fn clear_daemon_config() -> Result<()> {
-    let path = daemon_config_path()?;
+    clear_daemon_config_at(&daemon_config_path()?)
+}
+
+/// [`clear_daemon_config`] on a path the caller already resolved — the
+/// factory reset's, so that what it resets is exactly the file its warning
+/// named.
+pub fn clear_daemon_config_at(path: &std::path::Path) -> Result<()> {
     if !path.exists() {
         return Ok(());
     }
-    std::fs::write(&path, "# Reset to defaults\n")
+    std::fs::write(path, "# Reset to defaults\n")
         .with_context(|| format!("Failed to write {}", path.display()))?;
     Ok(())
 }

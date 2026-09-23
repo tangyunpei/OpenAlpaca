@@ -42,6 +42,15 @@
  * configured default is not routable, the daemon's own `effective_default_model`
  * is shown — a picker that disagrees with every reply is the worst kind of
  * silent substitution.
+ *
+ * Keys are added here (D-F, DESIGN_SPEC §5.4a): `Add key` in the card header
+ * and on each row opens `AddKeyForm`, which refuses a switched-off provider
+ * before any typing and offers this section's own `toggleProvider` as the way
+ * out — the same mutation the row's switch calls. Each row then lists the
+ * keys it holds — masked as the daemon masks them — with `Make primary`
+ * (`PUT /v1/settings/llm/keys/priority`, whose body really is `key_id`, unlike
+ * the upsert's `id`) and a two-click `Remove`
+ * (`DELETE /v1/settings/llm/keys/{provider}/{key_id}`), which has no undo.
  */
 
 import { useState } from "react";
@@ -56,19 +65,20 @@ import {
   useLlmSettings,
   useModels,
   useRefreshModels,
+  useRemoveKey,
+  useSetKeyPriority,
   useSetProviderEnabled,
 } from "@/hooks/useSettings";
 import { formatSpend, useUsageSummary } from "@/hooks/useUsage";
+import { effectiveModelNote } from "@/lib/model-availability";
 import { useProjectStore } from "@/stores/project";
 import { useUiStore } from "@/stores/ui";
 
+import { AddKeyForm } from "./AddKeyForm";
 import { GapNote, ListCard, ListRow, ListState, Toggle } from "./primitives";
 import { compactCount } from "./format";
-import {
-  effectiveModelNote,
-  providerKeyLine,
-  providerToggleToast,
-} from "./models-copy";
+import { keyRowSummary } from "./key-rows";
+import { providerKeyLine, providerToggleToast } from "./models-copy";
 import { providerToggleErrorCopy } from "./provider-toggle";
 
 export function ModelsSection() {
@@ -79,6 +89,8 @@ export function ModelsSection() {
   const orchestrator = useOrchestratorConfig();
   const updateOrchestrator = useUpdateOrchestratorConfig();
   const setProviderEnabled = useSetProviderEnabled();
+  const removeKey = useRemoveKey();
+  const setKeyPriority = useSetKeyPriority();
   const projectPath = useProjectStore((s) => s.path);
   // `GET /v1/status` is where the daemon reports the pair (L3); it is already
   // this window's polling query, so reading it here costs a cache hit.
@@ -90,6 +102,11 @@ export function ModelsSection() {
   // /v1/settings/llm` reports the file, which by then says `enabled = true` —
   // so it is kept here until the next toggle of that row answers.
   const [notLoaded, setNotLoaded] = useState<Record<string, string>>({});
+  // The provider the `Add key` form is open on, or `null` when it is shut.
+  const [addingFor, setAddingFor] = useState<string | null>(null);
+  // The one key whose `Remove` has been clicked once and waits for the second
+  // click, as `provider/id`. Any blur disarms it: deleting a key has no undo.
+  const [armedKey, setArmedKey] = useState<string | null>(null);
 
   const providers = Object.entries(llm.data?.providers ?? {});
   const activeModel = orchestrator.data?.model ?? llm.data?.orchestrator.model;
@@ -125,6 +142,34 @@ export function ModelsSection() {
         // the id the owner has to fix.
         onError: (error) =>
           showToast(providerToggleErrorCopy(provider, error, activeModel)),
+      },
+    );
+  };
+
+  const makePrimary = (provider: string, keyId: string) => {
+    setKeyPriority.mutate(
+      { provider, key_id: keyId, priority: "primary" },
+      {
+        onSuccess: () => showToast(`${keyId} is now primary for ${provider}`),
+        onError: (error) =>
+          showToast(`Could not change the priority — ${error.message}`),
+      },
+    );
+  };
+
+  const remove = (provider: string, keyId: string) => {
+    const armed = `${provider}/${keyId}`;
+    if (armedKey !== armed) {
+      setArmedKey(armed);
+      return;
+    }
+    setArmedKey(null);
+    removeKey.mutate(
+      { provider, keyId },
+      {
+        onSuccess: () => showToast(`Removed ${keyId} from ${provider}`),
+        onError: (error) =>
+          showToast(`Could not remove the key — ${error.message}`),
       },
     );
   };
@@ -167,11 +212,14 @@ export function ModelsSection() {
         </p>
       )}
 
+      {/* `Add key`, not `Add provider`: the providers are compiled in and
+          `GET /v1/settings/llm` enumerates every one of them, so there is no
+          provider to add — what an owner can add is a key (D-F, §5.4a). */}
       <ListCard
-        addLabel="Add provider"
+        addLabel="Add key"
         onAdd={() =>
-          showToast(
-            "Adding a provider needs the key editor, which is not built yet",
+          setAddingFor(
+            addingFor === null ? (providers[0]?.[0] ?? "anthropic") : null,
           )
         }
         actions={
@@ -184,6 +232,16 @@ export function ModelsSection() {
           </Button>
         }
       >
+        {addingFor !== null && (
+          <AddKeyForm
+            provider={addingFor}
+            onChangeProvider={setAddingFor}
+            onDone={showToast}
+            onCancel={() => setAddingFor(null)}
+            onEnableProvider={(provider) => toggleProvider(provider, true)}
+            enableBusy={setProviderEnabled.isPending}
+          />
+        )}
         <ListState
           pending={llm.isPending}
           error={llm.error}
@@ -229,6 +287,57 @@ export function ModelsSection() {
                         On, but no models loaded
                       </span>
                     )}
+                    {info.keys.length > 0 && (
+                      <ul
+                        aria-label={`${provider} keys`}
+                        className="m-0 mt-[6px] flex list-none flex-col gap-[4px] p-0"
+                      >
+                        {info.keys.map((key) => {
+                          const armed = armedKey === `${provider}/${key.id}`;
+                          return (
+                            <li
+                              key={key.id}
+                              className="flex flex-wrap items-center gap-[6px]"
+                            >
+                              <span className="min-w-0 font-mono text-xs text-secondary">
+                                {keyRowSummary(key)}
+                              </span>
+                              {key.notes !== null && key.notes !== "" && (
+                                <span className="text-xs text-faint">
+                                  {key.notes}
+                                </span>
+                              )}
+                              {key.priority !== "primary" && (
+                                <Button
+                                  variant="ghostXs"
+                                  aria-label={`Make ${key.id} primary`}
+                                  disabled={setKeyPriority.isPending}
+                                  onClick={() => makePrimary(provider, key.id)}
+                                >
+                                  Make primary
+                                </Button>
+                              )}
+                              <Button
+                                variant="ghostXs"
+                                aria-label={
+                                  armed
+                                    ? `Confirm removing ${key.id}`
+                                    : `Remove ${key.id}`
+                                }
+                                disabled={removeKey.isPending}
+                                onClick={() => remove(provider, key.id)}
+                                onBlur={() => {
+                                  if (armed) setArmedKey(null);
+                                }}
+                                className={armed ? "text-red-ink" : undefined}
+                              >
+                                {armed ? "Confirm remove" : "Remove"}
+                              </Button>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
                   </>
                 }
                 chips={
@@ -255,13 +364,27 @@ export function ModelsSection() {
                       : `${compactCount(today.tokens)} tok today · ${formatSpend(today.usd)}`
                 }
                 control={
-                  <Toggle
-                    checked={info.enabled}
-                    label={`Enable ${provider}`}
-                    disabled={setProviderEnabled.isPending}
-                    disabledReason="switching…"
-                    onChange={(next) => toggleProvider(provider, next)}
-                  />
+                  <span className="flex shrink-0 items-center gap-[8px]">
+                    {/* The shortest path from "On, but not loaded — No keys
+                        for …" to the field that fixes it. Kept for a keyless
+                        provider too: the form then says there is nothing to
+                        type, which is the answer rather than a missing
+                        control. */}
+                    <Button
+                      variant="ghostXs"
+                      aria-label={`Add key for ${provider}`}
+                      onClick={() => setAddingFor(provider)}
+                    >
+                      Add key
+                    </Button>
+                    <Toggle
+                      checked={info.enabled}
+                      label={`Enable ${provider}`}
+                      disabled={setProviderEnabled.isPending}
+                      disabledReason="switching…"
+                      onChange={(next) => toggleProvider(provider, next)}
+                    />
+                  </span>
                 }
               />
             );

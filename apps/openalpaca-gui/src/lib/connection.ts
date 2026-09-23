@@ -1,14 +1,22 @@
 /**
  * Daemon discovery and auth (API_MAP §1).
  *
- * The webview never reads `discovery.json`. Two Tauri commands do — the names
- * are read from `src-tauri/src/lib.rs`'s `tauri::generate_handler!`:
+ * The webview never reads `discovery.json`. Tauri commands do — the names are
+ * read from `src-tauri/src/lib.rs`'s `tauri::generate_handler!`:
  *
  *   `ensure_daemon_running` — probes liveness, spawns the sidecar if dead,
- *                             polls up to ~5 s. Use on boot.
+ *                             polls up to ~5 s. Use on boot. When the daemon
+ *                             does not come up, the rejection carries the end
+ *                             of what it wrote to `daemon.log` — its own
+ *                             reason, verbatim.
  *   `get_connection_info`   — reads discovery + expiry check. Use on reconnect.
+ *   `read_daemon_log_tail`  — the end of `daemon.log`, read straight from the
+ *                             file, so it answers with no daemon serving.
+ *   `await_daemon_stopped`  — after `POST /v1/command {"command":"shutdown"}`,
+ *                             waits until the process and its lock are gone.
  *
- * Both return `ConnectionInfo`, serialized to the webview in camelCase.
+ * The first two return `ConnectionInfo`, serialized to the webview in
+ * camelCase.
  *
  * `instanceId` is the identity guard: a change means the daemon restarted, so
  * every `task_id`, `stream_id` and `request_id` the client holds is dead and
@@ -82,6 +90,180 @@ async function invokeConnection(
     );
   }
   return raw;
+}
+
+/**
+ * The last `lines` lines of the daemon log, newest last — `""` when there is
+ * no log yet.
+ *
+ * Read by the shell straight from `daemon.log`, not through the daemon, so it
+ * answers for a daemon that would not start as well as one that is running.
+ * Colour escapes are gone and nothing else is changed: render it verbatim.
+ */
+export async function readDaemonLogTail(lines: number): Promise<string> {
+  let raw: unknown;
+  try {
+    raw = await invoke("read_daemon_log_tail", { lines });
+  } catch (cause) {
+    throw new ConnectionError(
+      typeof cause === "string"
+        ? cause
+        : "Tauri command `read_daemon_log_tail` failed",
+      cause,
+    );
+  }
+  if (typeof raw !== "string") {
+    throw new ConnectionError(
+      "`read_daemon_log_tail` returned an unexpected payload",
+      raw,
+    );
+  }
+  return raw;
+}
+
+// ── Stop intent ─────────────────────────────────────────────────────────────
+
+/**
+ * Why this window has no daemon.
+ *
+ * `null`                — it should have one; a closed socket is a failure and
+ *                         the reconnect ladder is right to climb.
+ * `"stopped_here"`      — this window stopped it. Set before the shutdown
+ *                         POST, cleared by `Start daemon`.
+ * `"stopped_elsewhere"` — the daemon said it was going away (the
+ *                         `daemon_shutting_down` frame) and this window did
+ *                         not ask. The CLI, or another window, stopped it.
+ *
+ * While it is non-null nothing climbs a ladder and nothing respawns a daemon:
+ * auto-restarting a daemon the user just stopped is exactly wrong, so the way
+ * back is an explicit `Start daemon`. Window-level and never persisted —
+ * reopening the app is a fresh intent to use it, and `ensure_daemon_running`
+ * spawning a daemon on that boot is correct.
+ */
+export type StopIntent = "stopped_here" | "stopped_elsewhere" | null;
+
+let stopIntent: StopIntent = null;
+let stoppedAt: number | null = null;
+const stopIntentListeners = new Set<(intent: StopIntent) => void>();
+
+export function getStopIntent(): StopIntent {
+  return stopIntent;
+}
+
+/** Wall-clock ms the current stop intent was set; `null` while there is none. */
+export function getStoppedAt(): number | null {
+  return stoppedAt;
+}
+
+export function setStopIntent(
+  next: StopIntent,
+  now: number = Date.now(),
+): void {
+  if (next === stopIntent) return;
+  stopIntent = next;
+  stoppedAt = next === null ? null : now;
+  // A phase belongs to one stop; a new intent (or none) starts from nothing.
+  setStopPhase(null);
+  for (const listener of stopIntentListeners) listener(next);
+}
+
+export function subscribeStopIntent(
+  listener: (intent: StopIntent) => void,
+): () => void {
+  stopIntentListeners.add(listener);
+  return () => stopIntentListeners.delete(listener);
+}
+
+/**
+ * How far this window's own stop has got — meaningful only while the intent
+ * is `"stopped_here"`, and reset whenever the intent changes.
+ *
+ * `"stopping"` — from the shutdown POST until `await_daemon_stopped`
+ *                answers. The process may still hold its lock for up to 15 s,
+ *                so nothing may start a daemon yet: a replacement spawned now
+ *                loses the singleton-lock race and exits.
+ * the rest     — what that wait concluded (`StopResult["kind"]` for a stop
+ *                the daemon accepted). `"stopped"` covers `not_running` too.
+ */
+export type StopPhase =
+  | "stopping"
+  | "stopped"
+  | "still_alive"
+  | "lock_still_held"
+  | "unconfirmed"
+  | null;
+
+let stopPhase: StopPhase = null;
+const stopPhaseListeners = new Set<(phase: StopPhase) => void>();
+
+export function getStopPhase(): StopPhase {
+  return stopPhase;
+}
+
+export function setStopPhase(next: StopPhase): void {
+  if (next === stopPhase) return;
+  stopPhase = next;
+  for (const listener of stopPhaseListeners) listener(next);
+}
+
+export function subscribeStopPhase(
+  listener: (phase: StopPhase) => void,
+): () => void {
+  stopPhaseListeners.add(listener);
+  return () => stopPhaseListeners.delete(listener);
+}
+
+/**
+ * What `await_daemon_stopped` concluded. Only `not_running` and `stopped`
+ * mean a daemon may be started now; `pid` is set only for `still_alive`.
+ */
+export interface DaemonStopReport {
+  outcome: "not_running" | "stopped" | "lock_still_held" | "still_alive";
+  pid: number | null;
+  waitedMs: number;
+}
+
+const STOP_OUTCOMES: ReadonlySet<string> = new Set([
+  "not_running",
+  "stopped",
+  "lock_still_held",
+  "still_alive",
+]);
+
+/**
+ * Wait — up to 15 s, in the shell — until the daemon's process has exited and
+ * its single-instance lock is free. The shutdown route's `200` says only that
+ * the daemon was asked; this is what says it is gone.
+ */
+export async function awaitDaemonStopped(): Promise<DaemonStopReport> {
+  let raw: unknown;
+  try {
+    raw = await invoke("await_daemon_stopped");
+  } catch (cause) {
+    throw new ConnectionError(
+      typeof cause === "string"
+        ? cause
+        : "Tauri command `await_daemon_stopped` failed",
+      cause,
+    );
+  }
+  const report = raw as Partial<DaemonStopReport> | null;
+  if (
+    typeof report !== "object" ||
+    report === null ||
+    typeof report.outcome !== "string" ||
+    !STOP_OUTCOMES.has(report.outcome)
+  ) {
+    throw new ConnectionError(
+      "`await_daemon_stopped` returned an unexpected payload",
+      raw,
+    );
+  }
+  return {
+    outcome: report.outcome,
+    pid: typeof report.pid === "number" ? report.pid : null,
+    waitedMs: typeof report.waitedMs === "number" ? report.waitedMs : 0,
+  };
 }
 
 /** The cached connection, or `null` before the first successful bootstrap. */

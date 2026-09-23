@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use console::style;
 use dialoguer::{Confirm, Input, Password, Select, theme::ColorfulTheme};
 use openalpaca_llm::{ClaudeCodeCliProvider, CodexCliProvider};
+use openalpaca_storage::ConfigRepository;
 use openalpaca_storage::config_schema::{self, ConfigBackend};
-use openalpaca_storage::{ConfigRepository, Database};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -14,7 +14,7 @@ use super::ai_config;
 use super::daemon_config_cli;
 use crate::client::DaemonClient;
 
-pub(super) fn run_interactive(repo: &ConfigRepository, db: &Database) -> Result<()> {
+pub(super) fn run_interactive(repo: &ConfigRepository) -> Result<()> {
     println!("{}", style("OpenAlpaca Configuration Mode").bold().cyan());
 
     let mut config_map: HashMap<String, String> = HashMap::new();
@@ -83,15 +83,18 @@ pub(super) fn run_interactive(repo: &ConfigRepository, db: &Database) -> Result<
                         .with_prompt("DANGER: Type 'yes' to WIPE ALL configuration")
                         .interact_text()?;
 
+                    // Wipes what the label says — configuration. It used to
+                    // call a row-wiping "factory reset" that took tasks,
+                    // memories and sessions with it. The real factory reset
+                    // deletes the database file, which this editor holds open,
+                    // so it cannot be offered here: it is `openalpaca config
+                    // reset --factory`, run with nothing holding the database.
                     if input == "yes" || input == "y" {
-                        db.factory_reset()?;
+                        repo.clear_all()?;
                         let _ = ai_config::clear_ai_config();
                         let _ = daemon_config_cli::clear_daemon_config();
                         config_map.clear();
-                        println!(
-                            "{}",
-                            style("All configuration wiped (Factory Reset). Exiting.").green()
-                        );
+                        println!("{}", style("All configuration wiped. Exiting.").green());
                         break;
                     } else {
                         println!("{}", style("Cancelled.").red());

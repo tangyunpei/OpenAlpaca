@@ -7,9 +7,7 @@ use dialoguer::{Input, Select, theme::ColorfulTheme};
 use serde::{Deserialize, Serialize};
 
 use crate::client::DaemonClient;
-use crate::output::{OutputFormat, TableRow, print_list, status_color};
-
-use super::llm::truncate;
+use crate::output::{OutputFormat, TableRow, print_list, status_color, truncate};
 
 #[derive(Args)]
 pub struct KeysArgs {

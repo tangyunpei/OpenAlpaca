@@ -1,10 +1,10 @@
 //! Telegram message handling: dispatch, link/unlink commands, attachments.
 
 use super::delivery::{download_telegram_file, send_with_retry};
-use super::rate_limiter::ChatRateLimiter;
 use super::TelegramConnector;
 use crate::common::{
-    LinkResult, format_denial_message, handle_link_token, redact_token, resolve_principal,
+    KeyedRateLimiter, LinkResult, format_denial_message, handle_link_token,
+    intercept_confirmation_reply, redact_token, resolve_principal,
 };
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
@@ -13,7 +13,7 @@ use openalpaca_core::{
     bus::EventBus,
     daemon_config::DaemonConfig,
     gateway::{Gateway, GatewayRequest, ResolvedAttachment},
-    security::confirmation::{ConfirmationBroker, ConfirmationResponse},
+    security::confirmation::ConfirmationBroker,
     security::policy::Scope,
     types::Capability,
 };
@@ -33,7 +33,7 @@ impl TelegramConnector {
         bus: Arc<EventBus>,
         gateway: Arc<Gateway>,
         daemon_config: Arc<ArcSwap<DaemonConfig>>,
-        rate_limiter: Arc<ChatRateLimiter>,
+        rate_limiter: Arc<KeyedRateLimiter<i64>>,
         confirmation_broker: Option<Arc<ConfirmationBroker>>,
         pending_confirmations: Arc<DashMap<i64, VecDeque<String>>>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -58,57 +58,24 @@ impl TelegramConnector {
             text.chars().take(50).collect::<String>()
         );
 
-        // Intercept confirmation responses (/yes, /y, /no, /n)
-        let text_lower = text.trim().to_lowercase();
-        if matches!(text_lower.as_str(), "/yes" | "/y" | "/no" | "/n") {
-            if let Some(broker) = confirmation_broker.as_ref() {
-                let request_id = pending_confirmations
-                    .get_mut(&chat_id.0)
-                    .and_then(|mut q| q.pop_front());
-
-                if let Some(request_id) = request_id {
-                    let approved = matches!(text_lower.as_str(), "/yes" | "/y");
-                    let remaining = pending_confirmations
-                        .get(&chat_id.0)
-                        .map(|q| q.len())
-                        .unwrap_or(0);
-                    let reply = if approved {
-                        if remaining > 0 {
-                            format!("Approved. Tool execution will proceed.\n({} more pending — reply /yes or /no)", remaining)
-                        } else {
-                            "Approved. Tool execution will proceed.".to_string()
-                        }
-                    } else if remaining > 0 {
-                        format!("Denied. Tool execution has been cancelled.\n({} more pending — reply /yes or /no)", remaining)
-                    } else {
-                        "Denied. Tool execution has been cancelled.".to_string()
-                    };
-
-                    match broker.respond(
-                        &request_id,
-                        ConfirmationResponse {
-                            approved,
-                            approval_scope: None,
-                        },
-                    ) {
-                        Ok(()) => {
-                            info!(
-                                "Confirmation {} for request {} in chat {}",
-                                if approved { "approved" } else { "denied" },
-                                request_id,
-                                chat_id
-                            );
-                        }
-                        Err(e) => {
-                            warn!("Failed to deliver confirmation response: {}", e);
-                        }
-                    }
-
-                    bot.send_message(chat_id, &reply).await?;
-                    return Ok(());
-                }
-                // No pending confirmation — fall through to normal handling
-            }
+        // Intercept confirmation responses (/yes, /y, /no, /n) BEFORE the
+        // ordinary rate limit, so a bare "/yes" is never the message that gets
+        // told to wait. `intercept_confirmation_reply` returns `None` when the
+        // text is not one of the four commands or this chat has nothing
+        // pending, and the turn falls through to normal handling — the same
+        // shared implementation Discord and iMessage use (CON-01). It owns the
+        // FIFO pop, the "N more pending" wording and the broker-error warning;
+        // sending, and propagating a send failure, stay Telegram's.
+        if let Some(broker) = confirmation_broker.as_ref()
+            && let Some(reply) = intercept_confirmation_reply(
+                &text,
+                &chat_id.0,
+                broker,
+                &pending_confirmations,
+            )
+        {
+            bot.send_message(chat_id, &reply).await?;
+            return Ok(());
         }
 
         // Check rate limiter

@@ -56,11 +56,6 @@ impl DaemonClient {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn base_url(&self) -> &str {
-        &self.base_url
-    }
-
     pub fn token(&self) -> &str {
         &self.token
     }
@@ -71,14 +66,6 @@ impl DaemonClient {
         let resp = self.http.get(&url).send().await?;
         let resp = check_response(resp).await?;
         Ok(resp.json().await?)
-    }
-
-    /// GET returning raw Response.
-    #[allow(dead_code)]
-    pub async fn get_raw(&self, path: &str) -> Result<Response> {
-        let url = format!("{}{}", self.base_url, path);
-        let resp = self.http.get(&url).send().await?;
-        check_response(resp).await
     }
 
     /// POST with JSON body and JSON response.

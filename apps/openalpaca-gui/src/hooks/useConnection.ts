@@ -11,19 +11,26 @@ import {
   useQueryClient,
   type UseQueryResult,
 } from "@tanstack/react-query";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 
 import { getDaemonStatus } from "@/lib/api/status";
 import { getHealth } from "@/lib/api/telemetry";
 import type { DaemonStatus, HealthResponse } from "@/lib/api/types";
 import {
-  bootstrapConnection,
   getCachedConnection,
+  getStopIntent,
+  getStopPhase,
+  getStoppedAt,
   shortInstanceId,
   subscribeConnection,
   subscribeInstanceChange,
+  subscribeStopIntent,
+  subscribeStopPhase,
   type ConnectionInfo,
+  type StopIntent,
+  type StopPhase,
 } from "@/lib/connection";
+import { startDaemon } from "@/lib/daemon-control";
 import { daemonEvents, type EventsStatus } from "@/lib/events";
 import { qk } from "@/lib/query-keys";
 import { useProjectStore } from "@/stores/project";
@@ -35,13 +42,33 @@ export function useConnectionInfo(): ConnectionInfo | null {
   return info;
 }
 
+/**
+ * Why this window has no daemon — `null` while it should have one
+ * (`lib/connection.ts`'s stop intent).
+ */
+export function useStopIntent(): StopIntent {
+  return useSyncExternalStore(subscribeStopIntent, getStopIntent);
+}
+
+/**
+ * How far this window's own stop has got (`lib/connection.ts`'s stop phase):
+ * `"stopping"` until the shell says the process is gone, then its answer.
+ */
+export function useStopPhase(): StopPhase {
+  return useSyncExternalStore(subscribeStopPhase, getStopPhase);
+}
+
 /** `GET /v1/health` — unauthenticated liveness plus the instance id. */
 export function useHealth(): UseQueryResult<HealthResponse> {
+  // A stopped daemon is a state, not an incident: nothing polls a daemon this
+  // window knows is not there. Cached data stays readable.
+  const stopped = useStopIntent() !== null;
   return useQuery({
     queryKey: qk.health(),
     queryFn: ({ signal }) => getHealth(signal),
     refetchInterval: 30_000,
     staleTime: 10_000,
+    enabled: !stopped,
   });
 }
 
@@ -63,11 +90,13 @@ export function useHealth(): UseQueryResult<HealthResponse> {
 export function useDaemonStatus(
   workspacePath: string | null,
 ): UseQueryResult<DaemonStatus> {
+  const stopped = useStopIntent() !== null;
   return useQuery({
     queryKey: qk.status(workspacePath),
     queryFn: ({ signal }) => getDaemonStatus(workspacePath, signal),
     refetchInterval: 30_000,
     staleTime: 10_000,
+    enabled: !stopped,
   });
 }
 
@@ -114,7 +143,31 @@ export interface ConnectionStatus {
   /** The design's `connected · 7f3a` chip. */
   instanceChip: string | null;
   endpoint: string | null;
+  /**
+   * Why the last attempt to reach the daemon failed, verbatim, or `null`.
+   *
+   * For a daemon that would not start this is `ensure_daemon_running`'s
+   * rejection, which ends with the daemon's own log lines — a legacy-schema
+   * database, an older install's data, another daemon holding the lock. It
+   * used to reach nobody: the sidecar's output went to `/dev/null`. A later
+   * socket failure does not replace it (a daemon that died after writing
+   * discovery leaves a stale endpoint the ladder dials); only a socket that
+   * opens clears it.
+   */
+  lastError: string | null;
+  /** Why this window has no daemon, or `null` while it should have one. */
+  stopIntent: StopIntent;
+  /** When the stop intent was set (wall-clock ms), or `null`. */
+  stoppedAt: number | null;
+  /**
+   * This window's own stop: `"stopping"` while the process may still hold
+   * its lock (nothing may start a daemon then), afterwards what the wait
+   * concluded. `null` with no stop of this window's.
+   */
+  stopPhase: StopPhase;
   reconnect: () => Promise<void>;
+  /** `Start daemon`: clear the stop intent, bootstrap, refetch everything. */
+  start: () => Promise<void>;
 }
 
 export function useConnectionStatus(): ConnectionStatus {
@@ -123,9 +176,21 @@ export function useConnectionStatus(): ConnectionStatus {
   const [socket, setSocket] = useState<EventsStatus>(() =>
     daemonEvents.getStatus(),
   );
+  const [lastError, setLastError] = useState<string | null>(() =>
+    daemonEvents.getLastError(),
+  );
   const client = useQueryClient();
 
-  useEffect(() => daemonEvents.onStatus(setSocket), []);
+  // The client records the error before it announces the status it causes,
+  // so reading it on every status change is reading it at the right time.
+  useEffect(
+    () =>
+      daemonEvents.onStatus((next) => {
+        setSocket(next);
+        setLastError(daemonEvents.getLastError());
+      }),
+    [],
+  );
 
   // A daemon restart invalidates every cached id, not just the socket.
   useEffect(
@@ -136,10 +201,20 @@ export function useConnectionStatus(): ConnectionStatus {
     [client],
   );
 
+  // `connect()` bootstraps (`ensure_daemon_running`) itself and records a
+  // failure where `lastError` reads it. Bootstrapping here first, outside the
+  // client, turned a daemon that would not start into an unhandled rejection
+  // nobody saw.
   const reconnect = useCallback(async () => {
     daemonEvents.disconnect();
-    await bootstrapConnection();
     await daemonEvents.connect();
+    await client.invalidateQueries();
+  }, [client]);
+
+  const stopIntent = useStopIntent();
+  const stopPhase = useStopPhase();
+  const start = useCallback(async () => {
+    await startDaemon();
     await client.invalidateQueries();
   }, [client]);
 
@@ -152,6 +227,11 @@ export function useConnectionStatus(): ConnectionStatus {
     connected: socket === "connected" && health.isSuccess,
     instanceChip: instanceId === null ? null : shortInstanceId(instanceId),
     endpoint: info === null ? null : info.baseUrl.replace(/^https?:\/\//, ""),
+    lastError,
+    stopIntent,
+    stoppedAt: stopIntent === null ? null : getStoppedAt(),
+    stopPhase,
     reconnect,
+    start,
   };
 }

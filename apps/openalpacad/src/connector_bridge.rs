@@ -81,15 +81,39 @@ fn validate_discord_recipient(recipient: &str) -> Result<DiscordRecipient, Strin
     if recipient == "default" {
         return Ok(DiscordRecipient::Default);
     }
-    recipient
-        .parse::<u64>()
-        .map(DiscordRecipient::ChannelId)
-        .map_err(|_| {
-            format!(
-                "Invalid Discord channel_id: '{}'. Must be a numeric snowflake ID.",
-                recipient
-            )
-        })
+    // Zero parses as a u64 but is no snowflake, and `Id::new(0)` panics in
+    // twilight — a model that invents `channel_id: "0"` must get an error, not
+    // take the daemon's tool call down with it.
+    match recipient.parse::<u64>() {
+        Ok(id) if id != 0 => Ok(DiscordRecipient::ChannelId(id)),
+        _ => Err(format!(
+            "Invalid Discord channel_id: '{}'. Must be a numeric snowflake ID.",
+            recipient
+        )),
+    }
+}
+
+/// The owner's remembered Discord channel, or the error a send reports. A
+/// stored `0` (only a hand edit produces one) is no channel, for the reason
+/// above. The same rule as core's `direct_send::has_default_recipient`, so the
+/// prompt never offers a default this send would refuse.
+fn default_discord_channel(db: &Database, owner: &str) -> Result<u64, String> {
+    PreferenceRepository::new(db)
+        .get(owner, "discord.last_channel_id")
+        .ok()
+        .flatten()
+        .and_then(|p| p.value.parse::<u64>().ok())
+        .filter(|id| *id != 0)
+        .ok_or_else(|| "No default Discord channel found. Please specify a channel_id.".to_string())
+}
+
+/// The one place a `u64` becomes a Discord channel id: `Id::new` panics on 0.
+fn discord_channel(
+    id: u64,
+) -> Result<twilight_model::id::Id<twilight_model::id::marker::ChannelMarker>, String> {
+    twilight_model::id::Id::new_checked(id).ok_or_else(|| {
+        format!("Invalid Discord channel_id: '{id}'. Must be a numeric snowflake ID.")
+    })
 }
 
 // ── ConnectorSendBridge ──────────────────────────────────────────────
@@ -229,22 +253,13 @@ impl ConnectorSendProvider for ConnectorSendBridge {
                     .ok_or("Discord not configured (no token)")?;
                 let channel_id = match validate_discord_recipient(recipient)? {
                     DiscordRecipient::Default => {
-                        let pref_repo = PreferenceRepository::new(&self.db);
-                        pref_repo
-                            .get(&self.local_user_id, "discord.last_channel_id")
-                            .ok()
-                            .flatten()
-                            .and_then(|p| p.value.parse::<u64>().ok())
-                            .ok_or(
-                                "No default Discord channel found. Please specify a channel_id.",
-                            )?
+                        default_discord_channel(&self.db, &self.local_user_id)?
                     }
                     DiscordRecipient::ChannelId(id) => id,
                 };
-                use twilight_model::id::{Id, marker::ChannelMarker};
                 openalpaca_connectors::discord::send_with_retry(
                     &http,
-                    Id::<ChannelMarker>::new(channel_id),
+                    discord_channel(channel_id)?,
                     content,
                 )
                 .await?;
@@ -393,20 +408,12 @@ impl ConnectorSendProvider for ConnectorSendBridge {
                     .ok_or("Discord not configured (no token)")?;
                 let channel_id = match validate_discord_recipient(recipient)? {
                     DiscordRecipient::Default => {
-                        let pref_repo = PreferenceRepository::new(&self.db);
-                        pref_repo
-                            .get(&self.local_user_id, "discord.last_channel_id")
-                            .ok()
-                            .flatten()
-                            .and_then(|p| p.value.parse::<u64>().ok())
-                            .ok_or(
-                                "No default Discord channel found. Please specify a channel_id.",
-                            )?
+                        default_discord_channel(&self.db, &self.local_user_id)?
                     }
                     DiscordRecipient::ChannelId(id) => id,
                 };
-                use twilight_model::id::{Id, marker::ChannelMarker};
                 use twilight_model::http::attachment::Attachment;
+                let channel = discord_channel(channel_id)?;
                 let file_data = tokio::fs::read(file_path)
                     .await
                     .map_err(|e| format!("Failed to read file: {e}"))?;
@@ -415,9 +422,7 @@ impl ConnectorSendProvider for ConnectorSendBridge {
                     let attachment =
                         Attachment::from_bytes(filename.to_string(), file_data.clone(), 1);
                     let attachments = [attachment];
-                    let req = http
-                        .create_message(Id::<ChannelMarker>::new(channel_id))
-                        .attachments(&attachments);
+                    let req = http.create_message(channel).attachments(&attachments);
                     let req = if let Some(cap) = caption {
                         req.content(cap)
                     } else {
@@ -547,5 +552,44 @@ mod tests {
         // Discord snowflakes are unsigned — negative numbers should fail
         let result = validate_discord_recipient("-12345");
         assert!(result.is_err());
+    }
+    /// `Id::new(0)` panics in twilight, so zero must be refused before any id
+    /// is built — whether the model named it or a hand edit stored it.
+    #[test]
+    fn a_zero_discord_channel_is_refused_not_panicked_on() {
+        assert!(validate_discord_recipient("0").is_err());
+        assert!(discord_channel(0).is_err());
+        assert_eq!(discord_channel(42).unwrap().get(), 42);
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("t.db")).unwrap();
+        let prefs = PreferenceRepository::new(&db);
+        assert!(
+            default_discord_channel(&db, "owner").is_err(),
+            "nothing stored is no default"
+        );
+        prefs
+            .set("owner", "discord.last_channel_id", "0", None)
+            .unwrap();
+        assert!(
+            default_discord_channel(&db, "owner").is_err(),
+            "a stored zero is no default"
+        );
+        prefs
+            .set(
+                "owner",
+                "discord.last_channel_id",
+                "123456789012345678",
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            default_discord_channel(&db, "owner").unwrap(),
+            123456789012345678
+        );
+        assert!(
+            default_discord_channel(&db, "someone-else").is_err(),
+            "the default is the owner's"
+        );
     }
 }

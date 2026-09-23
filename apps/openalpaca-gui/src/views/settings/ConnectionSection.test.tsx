@@ -5,13 +5,16 @@
  * a plain `DaemonStatus | undefined` prop, so no daemon-connection or
  * usage/tasks hooks need mocking to exercise its rendering.
  */
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { DaemonStatus, SessionSweep } from "@/lib/api/types";
+import { useUiStore } from "@/stores/ui";
 
 import {
   ConnectionSection,
+  DAEMON_LOG_LINES,
   StorageCard,
   homeStoreLabel,
 } from "./ConnectionSection";
@@ -55,18 +58,85 @@ vi.mock("@/hooks/useWorkspaces", () => ({
 /** What `GET /v1/status` has answered, per test. */
 const daemon = vi.hoisted(() => ({ data: undefined as unknown }));
 
+/** The window's own view of the connection, mutable per test. */
+const link = vi.hoisted(() => ({
+  connected: true,
+  lastError: null as string | null,
+  stopIntent: null as "stopped_here" | "stopped_elsewhere" | null,
+  stopPhase: null as
+    | "stopping"
+    | "stopped"
+    | "still_alive"
+    | "lock_still_held"
+    | "unconfirmed"
+    | null,
+  start: vi.fn(),
+  reconnect: vi.fn(),
+  refetch: vi.fn(() => Promise.resolve()),
+}));
+
 vi.mock("@/hooks/useConnection", () => ({
   useConnectionStatus: () => ({
     info: null,
     health: undefined,
-    socket: "connected",
-    connected: true,
+    socket: link.connected ? "connected" : "error",
+    connected: link.connected,
     instanceChip: "7f3a",
     endpoint: "127.0.0.1:51823",
-    reconnect: vi.fn(),
+    lastError: link.lastError,
+    stopIntent: link.stopIntent,
+    stoppedAt: link.stopIntent === null ? null : Date.now(),
+    stopPhase: link.stopPhase,
+    reconnect: link.reconnect,
+    start: link.start,
   }),
-  useDaemonStatus: () => ({ data: daemon.data, isPending: false, error: null }),
+  useDaemonStatus: () => ({
+    data: daemon.data,
+    isPending: false,
+    error: null,
+    refetch: link.refetch,
+  }),
 }));
+
+/** Connectors, read only by the stop dialog (T32's silence line). */
+const connectorRows = vi.hoisted(() => ({ data: [] as unknown[] }));
+vi.mock("@/hooks/useConnectors", () => ({
+  useConnectors: () => ({
+    data: connectorRows.data,
+    isPending: false,
+    error: null,
+  }),
+}));
+
+/** The stop itself — the flow's own tests are `lib/daemon-control.test.ts`. */
+const control = vi.hoisted(() => ({ stop: vi.fn() }));
+vi.mock("@/lib/daemon-control", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/daemon-control")>()),
+  stopDaemon: control.stop,
+}));
+
+/** The shell's `read_daemon_log_tail`, as the section reaches it. */
+const shellLog = vi.hoisted(() => ({ read: vi.fn() }));
+
+vi.mock("@/lib/connection", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/connection")>()),
+  readDaemonLogTail: shellLog.read,
+}));
+
+afterEach(() => {
+  link.connected = true;
+  link.lastError = null;
+  link.stopIntent = null;
+  link.stopPhase = null;
+  link.start.mockReset();
+  link.reconnect.mockReset();
+  link.refetch.mockReset();
+  link.refetch.mockImplementation(() => Promise.resolve());
+  control.stop.mockReset();
+  connectorRows.data = [];
+  shellLog.read.mockReset();
+  daemon.data = undefined;
+});
 
 vi.mock("@/hooks/useTasks", () => ({
   useTasks: () => ({
@@ -250,5 +320,276 @@ describe("where a project-less run's files go (G7)", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText(/~\/\.openalpaca/)).toBeNull();
     daemon.data = undefined;
+  });
+});
+
+/**
+ * A daemon that would not start used to say nothing: the sidecar's output
+ * went to `/dev/null`, and the one string that reached the window was "did
+ * not become ready within timeout". The shell's rejection now ends with the
+ * daemon's own log lines, and the panel shows them exactly as written.
+ */
+describe("why the daemon would not start", () => {
+  const refusal =
+    "The daemon did not start within 5 seconds. Its log (/s/state/logs/daemon.log) ends with:\n" +
+    "\n" +
+    "2026-09-22T10:00:00Z ERROR openalpacad: FATAL: an older OpenAlpaca install's data is still on this machine, and this build\n" +
+    "does not move it for you.\n" +
+    "\n" +
+    "  Older install:  /old";
+
+  it("renders the shell's reason verbatim, line breaks and all, while unreachable", () => {
+    link.connected = false;
+    link.lastError = refusal;
+    render(<ConnectionSection />);
+
+    const block = screen.getByLabelText("Why the daemon is unreachable");
+    expect(block.tagName).toBe("PRE");
+    expect(block.textContent).toBe(refusal);
+  });
+
+  it("shows no reason once the window is connected, even if one was recorded", () => {
+    link.connected = true;
+    link.lastError = refusal;
+    render(<ConnectionSection />);
+
+    expect(screen.queryByLabelText("Why the daemon is unreachable")).toBeNull();
+  });
+
+  it("shows nothing when unreachable with no reason recorded", () => {
+    link.connected = false;
+    link.lastError = null;
+    render(<ConnectionSection />);
+
+    expect(screen.queryByLabelText("Why the daemon is unreachable")).toBeNull();
+  });
+});
+
+describe("Show daemon log", () => {
+  it("reads the last 200 lines through the shell and shows them as written", async () => {
+    const user = userEvent.setup();
+    shellLog.read.mockResolvedValue("line one\n\n  indented line two");
+    render(<ConnectionSection />);
+
+    await user.click(screen.getByRole("button", { name: "Show daemon log" }));
+
+    expect(shellLog.read).toHaveBeenCalledWith(DAEMON_LOG_LINES);
+    expect(DAEMON_LOG_LINES).toBe(200);
+    const block = await screen.findByLabelText("Daemon log");
+    expect(block.textContent).toBe("line one\n\n  indented line two");
+    expect(
+      screen.getByRole("button", { name: "Hide daemon log" }),
+    ).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("reads again on Refresh, and never before it is opened", async () => {
+    const user = userEvent.setup();
+    shellLog.read.mockResolvedValue("first");
+    render(<ConnectionSection />);
+    expect(shellLog.read).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Show daemon log" }));
+    await screen.findByText("first");
+    shellLog.read.mockResolvedValue("second");
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+
+    expect(await screen.findByText("second")).toBeInTheDocument();
+    expect(shellLog.read).toHaveBeenCalledTimes(2);
+  });
+
+  it("says the log is empty rather than drawing an empty block", async () => {
+    const user = userEvent.setup();
+    shellLog.read.mockResolvedValue("");
+    render(<ConnectionSection />);
+
+    await user.click(screen.getByRole("button", { name: "Show daemon log" }));
+
+    expect(
+      await screen.findByText("The daemon log is empty."),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("Daemon log")).toBeNull();
+  });
+
+  it("says why when the shell cannot read it", async () => {
+    const user = userEvent.setup();
+    shellLog.read.mockRejectedValue(new Error("permission denied"));
+    render(<ConnectionSection />);
+
+    await user.click(screen.getByRole("button", { name: "Show daemon log" }));
+
+    expect(
+      await screen.findByText(
+        "Could not read the daemon log: permission denied",
+      ),
+    ).toBeInTheDocument();
+  });
+});
+
+/**
+ * T30: both launchers write `daemon.log` now, so a `null` log path means a
+ * daemon started by hand — the note used to blame "a daemon the app launched
+ * itself", which is exactly the one that has a log now.
+ */
+describe("a daemon with no log of its own (T30)", () => {
+  it("says it was started by hand, not that the app launched it", () => {
+    daemon.data = status({ log_path: null });
+    render(<ConnectionSection />);
+
+    const note = screen.getByText(/no daemon\.log/i);
+    expect(note).toHaveTextContent("started by hand");
+    expect(note.textContent ?? "").not.toMatch(/launched itself/);
+  });
+});
+
+describe("Stop daemon (§5.5)", () => {
+  it("opens the confirmation and sends nothing until it is confirmed", async () => {
+    const user = userEvent.setup();
+    control.stop.mockResolvedValue({ kind: "stopped" });
+    daemon.data = status({
+      busy: {
+        running_tasks: 1,
+        pending_confirmations: 0,
+        connected_clients: 2,
+      },
+    });
+    render(<ConnectionSection />);
+
+    await user.click(screen.getByRole("button", { name: "Stop daemon…" }));
+
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveTextContent(
+      "Right now: 1 workflow running · 2 windows connected.",
+    );
+    // The busy count is re-read on open, and nothing is stopped by opening.
+    expect(link.refetch).toHaveBeenCalledTimes(1);
+    expect(control.stop).not.toHaveBeenCalled();
+
+    const stop = await screen.findByRole("button", { name: "Stop daemon" });
+    await vi.waitFor(() => expect(stop).toBeEnabled());
+    await user.click(stop);
+
+    expect(control.stop).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() =>
+      expect(useUiStore.getState().toast).toBe("Daemon stopped."),
+    );
+  });
+
+  it("keeps the dialog's Stop disabled while the fresh read is in flight", async () => {
+    const user = userEvent.setup();
+    link.refetch.mockImplementation(() => new Promise(() => {}));
+    daemon.data = status();
+    render(<ConnectionSection />);
+
+    await user.click(screen.getByRole("button", { name: "Stop daemon…" }));
+
+    expect(screen.getByRole("button", { name: "Stop daemon" })).toBeDisabled();
+  });
+
+  it("warns of connector silence only when a connector is running", async () => {
+    const user = userEvent.setup();
+    connectorRows.data = [{ id: "telegram", status: "running" }];
+    daemon.data = status();
+    render(<ConnectionSection />);
+
+    await user.click(screen.getByRole("button", { name: "Stop daemon…" }));
+
+    expect(screen.getByRole("dialog")).toHaveTextContent(
+      /Telegram, Discord or iMessage will get no reply and no error/,
+    );
+  });
+
+  it("cannot be asked of a daemon this window cannot reach", () => {
+    link.connected = false;
+    render(<ConnectionSection />);
+
+    expect(screen.getByRole("button", { name: "Stop daemon…" })).toBeDisabled();
+  });
+});
+
+/**
+ * §6.3: a stopped daemon is a state, not an incident. The card says who
+ * stopped it in the neutral token, `Start daemon` replaces `Reconnect`, and
+ * no stale failure is drawn as if it were the reason.
+ */
+describe("while the daemon is stopped", () => {
+  it("says this window stopped it and offers Start, not Reconnect or Stop", async () => {
+    const user = userEvent.setup();
+    link.connected = false;
+    link.stopIntent = "stopped_here";
+    link.lastError = "WebSocket connection error";
+    render(<ConnectionSection />);
+
+    expect(screen.getByText("Daemon stopped")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "stopped" })).toBeInTheDocument();
+    expect(screen.getByText(/^stopped /)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reconnect" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Stop daemon…" })).toBeNull();
+    expect(screen.queryByLabelText("Why the daemon is unreachable")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Start daemon" }));
+    expect(link.start).toHaveBeenCalledTimes(1);
+    expect(link.reconnect).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The POST's `200` closes the dialog, but the old process can hold its
+   * lock for up to 15 s more; a daemon started then loses the lock race and
+   * exits. Start waits for the shell's answer, and the title is that answer.
+   */
+  it("holds Start while the stop is still in its shutdown tail", async () => {
+    const user = userEvent.setup();
+    link.connected = false;
+    link.stopIntent = "stopped_here";
+    link.stopPhase = "stopping";
+    const { rerender } = render(<ConnectionSection />);
+
+    expect(screen.getByText("Stopping the daemon…")).toBeInTheDocument();
+    expect(screen.queryByText("Daemon stopped")).toBeNull();
+    const held = screen.getByRole("button", { name: "Stopping…" });
+    expect(held).toBeDisabled();
+    fireEvent.click(held);
+    expect(link.start).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Start daemon" })).toBeNull();
+
+    // The wait answered: the process is gone and its lock free.
+    link.stopPhase = "stopped";
+    rerender(<ConnectionSection />);
+    expect(screen.getByText("Daemon stopped")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Start daemon" }));
+    expect(link.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("titles the card by what the wait found, not by the request", () => {
+    link.connected = false;
+    link.stopIntent = "stopped_here";
+    const titles: Array<[typeof link.stopPhase, string]> = [
+      ["still_alive", "Daemon did not stop"],
+      ["lock_still_held", "Daemon exited, lock still held"],
+      ["unconfirmed", "Daemon stop not confirmed"],
+    ];
+    for (const [phase, title] of titles) {
+      link.stopPhase = phase;
+      const { unmount } = render(<ConnectionSection />);
+      expect(screen.getByText(title)).toBeInTheDocument();
+      expect(screen.queryByText("Daemon stopped")).toBeNull();
+      expect(screen.getByText(/^stop asked /)).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Start daemon" }),
+      ).toBeEnabled();
+      unmount();
+    }
+  });
+
+  it("says when it was stopped from elsewhere", () => {
+    link.connected = false;
+    link.stopIntent = "stopped_elsewhere";
+    render(<ConnectionSection />);
+
+    expect(
+      screen.getByText("Daemon stopped from elsewhere"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Start daemon" }),
+    ).toBeInTheDocument();
   });
 });

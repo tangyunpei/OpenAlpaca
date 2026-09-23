@@ -89,7 +89,7 @@ fn an_unsupported_old_database_is_refused_without_changing_its_schema_or_data() 
             message.contains(&format!("Unsupported legacy schema version {version}")),
             "opening an old database must deliberately refuse it: {message}"
         );
-        // The remedy is deleting the file, so the refusal has to say which file.
+        // The remedy deletes the file, so the refusal has to say which file.
         // The store root is overridable, and a developer reading this line in a
         // log has no other way to find out.
         let named = std::path::absolute(&db_path).unwrap();
@@ -102,9 +102,15 @@ fn an_unsupported_old_database_is_refused_without_changing_its_schema_or_data() 
             message.contains(&format!("schema version {}", migrations::BASELINE_VERSION)),
             "the refusal must name the version this build starts at: {message}"
         );
+        // Guard and verb are pinned together on purpose: this refusal is the
+        // only place a user is told how to get out of it, and the verb it names
+        // is the only form of `openalpaca config` that opens no database
+        // (`apps/openalpaca/src/commands/config_factory_reset.rs`). If that verb
+        // is ever renamed or made to open the database again, this line fails
+        // before the manuals go stale.
         assert!(
-            message.contains("Delete "),
-            "the refusal must prescribe deleting that file: {message}"
+            message.contains("openalpaca config reset --factory"),
+            "the refusal must name the verb that rescues the database: {message}"
         );
 
         let conn = Connection::open(&db_path).unwrap();
@@ -754,90 +760,6 @@ fn test_partial_index_allows_one_active_session_per_lane() {
     .unwrap();
 }
 
-/// `factory_reset` must empty every table holding user content, including
-/// those no foreign key reaches. `lane_followups` is free-standing: a queued
-/// follow-up that survives the wipe is fired by `GatewayFollowupRunner` as a
-/// turn against the emptied database.
-#[test]
-fn factory_reset_empties_current_schema_tables() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = Database::open(&dir.path().join("reset.db")).unwrap();
-    db.with_connection(|conn| {
-        conn.execute(
-            "INSERT INTO session (id, lane_key, source, status, created_at, updated_at) \
-             VALUES ('s1', 'u:gui', 'gui', 'active', datetime('now'), datetime('now'))",
-            [],
-        )?;
-        conn.execute(
-            "INSERT INTO lane_followups (lane_key, kind, content, principal_json, status) \
-             VALUES ('u:gui', 'followup', 'and then check the logs', '{}', 'queued')",
-            [],
-        )?;
-        seed_an_artifact_and_its_version(conn)?;
-        Ok(())
-    })
-    .unwrap();
-    db.factory_reset()
-        .expect("factory_reset must succeed on the current schema");
-    let (sessions, followups, versions): (i64, i64, i64) = db
-        .with_connection(|conn| {
-            Ok((
-                conn.query_row("SELECT COUNT(*) FROM session", [], |r| r.get(0))?,
-                conn.query_row("SELECT COUNT(*) FROM lane_followups", [], |r| r.get(0))?,
-                conn.query_row("SELECT COUNT(*) FROM artifact_versions", [], |r| r.get(0))?,
-            ))
-        })
-        .unwrap();
-    assert_eq!(sessions, 0, "the reset empties the session table");
-    assert_eq!(
-        followups, 0,
-        "a queued follow-up must not outlive a factory reset"
-    );
-    assert_eq!(versions, 0, "version history goes with the rows");
-}
-
-/// One produced artifact row and one `artifact_versions` row for it.
-fn seed_an_artifact_and_its_version(conn: &Connection) -> Result<()> {
-    conn.execute(
-        "INSERT INTO file_assets \
-            (id, owner_id, sha256, filename, mime_type, size_bytes, storage_path, status, origin) \
-         VALUES ('f1', 'owner', 'sha', '01-notes.md', 'text/markdown', 4, \
-                 '/nowhere/01-notes.md', 'ready', 'produced')",
-        [],
-    )?;
-    conn.execute(
-        "INSERT INTO artifact_versions (artifact_id, version, rel_path, sha256, size_bytes) \
-         VALUES ('f1', 1, 'loose/2026-09-01/01-notes.md', 'sha', 4)",
-        [],
-    )?;
-    Ok(())
-}
-
-/// The reset names every table it empties rather than leaning on a cascade —
-/// the rule `subagent_span`'s line already states in as many words. Proven the
-/// only way it can be: with `foreign_keys` off, where an unnamed child table
-/// simply survives.
-#[test]
-fn factory_reset_empties_artifact_versions_without_the_cascade() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = Database::open(&dir.path().join("reset-nofk.db")).unwrap();
-    db.with_connection(|conn| {
-        seed_an_artifact_and_its_version(conn)?;
-        conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
-        Ok(())
-    })
-    .unwrap();
-
-    db.factory_reset().unwrap();
-
-    let versions: i64 = db
-        .with_connection(|conn| {
-            Ok(conn.query_row("SELECT COUNT(*) FROM artifact_versions", [], |r| r.get(0))?)
-        })
-        .unwrap();
-    assert_eq!(versions, 0, "the DELETE is named, not inherited");
-}
-
 /// The usage summary needs a timestamp-leading index to avoid a full scan
 /// of the append-only call log on every completion refetch.
 #[test]
@@ -929,5 +851,94 @@ fn test_execution_log_counts_use_timestamp_indexes() {
             .unwrap()
             .get("summarise"),
         Some(&1)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `delete_database_files` — the file set a factory reset removes.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn deleting_a_database_takes_its_wal_and_shm_with_it() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("x.db");
+    drop(Database::open(&db_path).unwrap());
+    // A clean close checkpoints the sidecars away; the point under test is the
+    // file set, not SQLite's behaviour, so they are written by hand.
+    let wal = dir.path().join("x.db-wal");
+    let shm = dir.path().join("x.db-shm");
+    std::fs::write(&wal, b"stale").unwrap();
+    std::fs::write(&shm, b"stale").unwrap();
+    let keep = dir.path().join("keep.txt");
+    std::fs::write(&keep, b"mine").unwrap();
+
+    delete_database_files(&db_path).unwrap();
+
+    assert!(!db_path.exists(), "the database file must be gone");
+    assert!(!wal.exists(), "the -wal sidecar must be gone");
+    assert!(!shm.exists(), "the -shm sidecar must be gone");
+    assert_eq!(
+        std::fs::read(&keep).unwrap(),
+        b"mine",
+        "a file that is not part of the database must be left alone"
+    );
+}
+
+#[test]
+fn deleting_a_database_that_is_not_there_succeeds() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("absent.db");
+
+    delete_database_files(&db_path).unwrap();
+
+    let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+    assert!(
+        left.is_empty(),
+        "deleting a missing database must create nothing: {left:?}"
+    );
+}
+
+#[test]
+fn a_refused_legacy_database_opens_at_the_baseline_after_its_files_are_deleted() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("openalpaca.db");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+             CREATE TABLE legacy_data (id INTEGER PRIMARY KEY, content TEXT NOT NULL);
+             INSERT INTO legacy_data (id, content) VALUES (7, 'about to go');",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO schema_version (version) VALUES (?1)",
+            [migrations::BASELINE_VERSION - 1],
+        )
+        .unwrap();
+    }
+    std::fs::write(dir.path().join("openalpaca.db-wal"), b"stale").unwrap();
+    std::fs::write(dir.path().join("openalpaca.db-shm"), b"stale").unwrap();
+    assert!(
+        Database::open(&db_path).is_err(),
+        "the version-{} database must be refused before the delete",
+        migrations::BASELINE_VERSION - 1
+    );
+
+    delete_database_files(&db_path).unwrap();
+
+    let db = Database::open(&db_path).expect("a deleted database must open fresh");
+    assert_eq!(db.schema_version().unwrap(), migrations::BASELINE_VERSION);
+    let legacy_tables: i64 = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'legacy_data'",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(
+        legacy_tables, 0,
+        "the legacy rows must not survive the delete"
     );
 }

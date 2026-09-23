@@ -1,24 +1,23 @@
 // crates/openalpaca_mcp/src/lifecycle.rs
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::error::McpError;
 
 /// Connection state for an [`crate::McpClient`]. Stored under a `RwLock` in the inner.
 #[derive(Debug)]
-#[allow(dead_code)] // fields exposed via Debug for observability; read via match in reconnect paths
 pub(crate) enum ConnectionState {
     Connecting,
     Connected,
-    Reconnecting { attempt: u32, next_at: Instant },
+    Reconnecting { attempt: u32 },
     Disconnected,
     Failed { reason: McpError },
 }
 
 /// Public, owned snapshot of a client's [`ConnectionState`].
 ///
-/// `ConnectionState` is crate-private (it carries a live [`McpError`] and an
-/// [`Instant`]); this is the shape callers outside the crate can read via
+/// `ConnectionState` is crate-private (it carries a live [`McpError`]); this
+/// is the shape callers outside the crate can read via
 /// [`crate::McpClient::connection_state`] — enough to render *why* a client is
 /// down without exposing the internal enum.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,7 +34,7 @@ impl From<&ConnectionState> for ConnectionSnapshot {
         match state {
             ConnectionState::Connecting => Self::Connecting,
             ConnectionState::Connected => Self::Connected,
-            ConnectionState::Reconnecting { attempt, .. } => {
+            ConnectionState::Reconnecting { attempt } => {
                 Self::Reconnecting { attempt: *attempt }
             }
             ConnectionState::Disconnected => Self::Disconnected,

@@ -231,5 +231,87 @@ pub fn store_attachment(
     })
 }
 
+/// Split a message into chunks of at most `max_bytes` bytes, a chat
+/// platform's message-length limit. Prefers splitting at paragraph boundaries
+/// (\n\n), then sentence boundaries (. ), then any newline, then falls back to
+/// a hard cut at a valid UTF-8 char boundary. Every separator stays with the
+/// chunk it ends, so the chunks concatenate back to `text`; empty text is one
+/// empty chunk.
+///
+/// `max_bytes` must fit the longest UTF-8 character (4 bytes), or a hard cut
+/// could back off to 0 and never advance. Callers pass their platform's
+/// constant.
+#[cfg(any(feature = "telegram", feature = "discord"))]
+pub(crate) fn chunk_message(text: &str, max_bytes: usize) -> Vec<String> {
+    assert!(max_bytes >= 4, "a chunk must fit any UTF-8 character");
+    if text.len() <= max_bytes {
+        return vec![text.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        if remaining.len() <= max_bytes {
+            chunks.push(remaining.to_string());
+            break;
+        }
+
+        // Find a safe byte boundary to slice up to (avoids panic on multi-byte UTF-8)
+        let boundary = remaining.floor_char_boundary(max_bytes);
+        let slice = &remaining[..boundary];
+
+        // Try paragraph boundary
+        let split_at = slice
+            .rfind("\n\n")
+            .map(|i| i + 2) // include the newlines
+            // Try sentence boundary
+            .or_else(|| slice.rfind(". ").map(|i| i + 2))
+            // Try any newline
+            .or_else(|| slice.rfind('\n').map(|i| i + 1))
+            // Hard cut at safe char boundary
+            .unwrap_or(boundary);
+
+        chunks.push(remaining[..split_at].to_string());
+        remaining = &remaining[split_at..];
+    }
+
+    chunks
+}
+
+/// Per-conversation limiter on **inbound** messages: at most one message per
+/// `min_interval` per key (a Telegram chat id, a Discord channel id). Each
+/// connector owns its own instance, so equal ids on two platforms never
+/// share a slot.
+#[cfg(any(feature = "telegram", feature = "discord"))]
+pub(crate) struct KeyedRateLimiter<K> {
+    last_accepted: std::sync::Mutex<std::collections::HashMap<K, std::time::Instant>>,
+    min_interval: std::time::Duration,
+}
+
+#[cfg(any(feature = "telegram", feature = "discord"))]
+impl<K: Eq + std::hash::Hash> KeyedRateLimiter<K> {
+    pub(crate) fn new(min_interval: std::time::Duration) -> Self {
+        Self {
+            last_accepted: std::sync::Mutex::new(std::collections::HashMap::new()),
+            min_interval,
+        }
+    }
+
+    /// `None` lets the message through and restarts this key's interval;
+    /// `Some(wait)` refuses it and leaves the interval where it was.
+    pub(crate) fn check(&self, key: K) -> Option<std::time::Duration> {
+        let mut map = self.last_accepted.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(last) = map.get(&key) {
+            let elapsed = last.elapsed();
+            if elapsed < self.min_interval {
+                return Some(self.min_interval - elapsed);
+            }
+        }
+        map.insert(key, std::time::Instant::now());
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests;

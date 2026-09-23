@@ -4,6 +4,7 @@
 //! since a freshly-bootstrapped identity starts with placeholder values that the
 //! agent fills in during its first conversation.
 
+use super::persona_frontmatter;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -49,98 +50,6 @@ impl fmt::Display for IdentityParseError {
 }
 
 impl std::error::Error for IdentityParseError {}
-
-// ---------------------------------------------------------------------------
-// Frontmatter helpers (inlined from soul.rs / user.rs to avoid coupling)
-// ---------------------------------------------------------------------------
-
-fn strip_outer_quotes(value: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.len() >= 2
-        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
-            || (trimmed.starts_with('\'') && trimmed.ends_with('\'')))
-    {
-        trimmed[1..trimmed.len() - 1].trim().to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-fn split_frontmatter(input: &str) -> Result<(Vec<String>, Vec<String>), IdentityParseError> {
-    let mut lines = input.lines();
-    let first = lines.next().unwrap_or_default();
-    if first.trim() != "---" {
-        return Err(IdentityParseError::MissingFrontmatter);
-    }
-
-    let mut frontmatter = Vec::new();
-    let mut body = Vec::new();
-    let mut in_frontmatter = true;
-
-    for line in lines {
-        if in_frontmatter {
-            if line.trim() == "---" {
-                in_frontmatter = false;
-                continue;
-            }
-            frontmatter.push(line.to_string());
-            continue;
-        }
-        body.push(line.to_string());
-    }
-
-    if in_frontmatter {
-        return Err(IdentityParseError::UnterminatedFrontmatter);
-    }
-
-    Ok((frontmatter, body))
-}
-
-fn parse_frontmatter(lines: &[String]) -> Result<IdentityFrontmatter, IdentityParseError> {
-    let mut summary: Option<String> = None;
-    let mut read_when: Vec<String> = Vec::new();
-
-    let mut idx = 0usize;
-    while idx < lines.len() {
-        let trimmed = lines[idx].trim();
-        if trimmed.is_empty() {
-            idx += 1;
-            continue;
-        }
-
-        if let Some(rest) = trimmed.strip_prefix("summary:") {
-            summary = Some(strip_outer_quotes(rest));
-            idx += 1;
-            continue;
-        }
-        if trimmed.starts_with("read_when:") {
-            idx += 1;
-            while idx < lines.len() {
-                let item = lines[idx].trim();
-                if item.is_empty() {
-                    idx += 1;
-                    continue;
-                }
-                if let Some(v) = item.strip_prefix("- ") {
-                    read_when.push(strip_outer_quotes(v));
-                    idx += 1;
-                    continue;
-                }
-                break;
-            }
-            continue;
-        }
-
-        idx += 1;
-    }
-
-    let summary = summary.ok_or(IdentityParseError::MissingField("summary"))?;
-    if read_when.is_empty() {
-        return Err(IdentityParseError::MissingField("read_when"));
-    }
-
-    Ok(IdentityFrontmatter { summary, read_when })
-}
 
 // ---------------------------------------------------------------------------
 // Body parsing
@@ -230,8 +139,21 @@ fn parse_body_fields(lines: &[String]) -> (String, String, String, String, Strin
 /// All body fields are optional (empty string if not present).
 /// Only the YAML frontmatter is required.
 pub fn parse_identity_markdown(input: &str) -> Result<IdentityDocument, IdentityParseError> {
-    let (frontmatter_lines, body_lines) = split_frontmatter(input)?;
-    let frontmatter = parse_frontmatter(&frontmatter_lines)?;
+    let (fm, body_lines) = persona_frontmatter::parse(
+        input,
+        IdentityParseError::MissingFrontmatter,
+        IdentityParseError::UnterminatedFrontmatter,
+    )?;
+    let summary = fm
+        .summary
+        .ok_or(IdentityParseError::MissingField("summary"))?;
+    if fm.read_when.is_empty() {
+        return Err(IdentityParseError::MissingField("read_when"));
+    }
+    let frontmatter = IdentityFrontmatter {
+        summary,
+        read_when: fm.read_when,
+    };
     let (name, creature, vibe, emoji, avatar) = parse_body_fields(&body_lines);
 
     Ok(IdentityDocument {

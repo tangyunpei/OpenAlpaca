@@ -11,7 +11,11 @@ import {
   type ServerEventType,
   type SocketLike,
 } from "./events";
-import type { ConnectionInfo } from "./connection";
+import {
+  getStopIntent,
+  setStopIntent,
+  type ConnectionInfo,
+} from "./connection";
 
 const INFO: ConnectionInfo = {
   baseUrl: "http://127.0.0.1:51823",
@@ -396,6 +400,79 @@ describe("DaemonEventsClient", () => {
     client.disconnect();
   });
 
+  /**
+   * The CLI or another window stopped the daemon. It says so on the socket
+   * before it closes it, and a window that did not ask must neither climb a
+   * ladder against it nor ever respawn it — it records who stopped it and
+   * waits for an explicit Start.
+   */
+  it("treats a daemon_shutting_down frame it did not ask for as stopped elsewhere, and schedules nothing", async () => {
+    setStopIntent(null);
+    const refresh = vi.fn(() => Promise.resolve(INFO));
+    const bootstrap = vi.fn(() => Promise.resolve(INFO));
+    const client = makeClient({ refresh, bootstrap, random: () => 0 });
+    const seen: ServerEventType[] = [];
+    client.onEvent((event) => seen.push(event.type));
+    await client.connect();
+    const socket = latest();
+    socket.onopen?.({});
+
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "daemon_shutting_down",
+        grace_secs: 10,
+        ts: "2026-09-22T10:00:00Z",
+        instance_id: INFO.instanceId,
+      }),
+    });
+    expect(getStopIntent()).toBe("stopped_elsewhere");
+    // Still an ordinary frame for everyone else — the Event log shows it.
+    expect(seen).toEqual(["daemon_shutting_down"]);
+
+    socket.onclose?.({});
+    expect(client.getStatus()).toBe("disconnected");
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(refresh).not.toHaveBeenCalled();
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+    setStopIntent(null);
+  });
+
+  it("keeps this window's own stop intent when the frame arrives", async () => {
+    setStopIntent("stopped_here");
+    const client = makeClient();
+    await client.connect();
+    latest().onmessage?.({
+      data: JSON.stringify({
+        type: "daemon_shutting_down",
+        grace_secs: 10,
+        ts: "2026-09-22T10:00:00Z",
+        instance_id: INFO.instanceId,
+      }),
+    });
+    expect(getStopIntent()).toBe("stopped_here");
+    setStopIntent(null);
+    client.disconnect();
+  });
+
+  /** `resume()` reads discovery on every rung and never bootstraps. */
+  it("resumes the ladder without bootstrapping", async () => {
+    const refresh = vi.fn(() => Promise.resolve(INFO));
+    const bootstrap = vi.fn(() => Promise.resolve(INFO));
+    const client = makeClient({ refresh, bootstrap, random: () => 0.5 });
+    await client.connect();
+    client.disconnect();
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+
+    client.resume();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+    expect(client.getStatus()).toBe("connecting");
+    client.disconnect();
+  });
+
   it("stops reconnecting after disconnect(), and nulls handlers before closing", async () => {
     const refresh = vi.fn(() => Promise.resolve(INFO));
     const client = makeClient({ refresh, random: () => 0 });
@@ -517,6 +594,75 @@ describe("DaemonEventsClient", () => {
     expect(refresh).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(1600);
     expect(refresh).toHaveBeenCalledTimes(2);
+
+    client.disconnect();
+  });
+
+  /**
+   * A daemon that wrote `discovery.json` and then died on its database leaves
+   * a stale endpoint: the ladder dials it and the socket fails. That failure
+   * is not a reason, and it must not replace the one the bootstrap brought
+   * back — only a socket that opens retires it.
+   */
+  it("keeps the bootstrap's reason through a later socket failure, until a socket opens", async () => {
+    const reason =
+      "The daemon did not start within 5 seconds. Its log ends with:\n\nFATAL: legacy schema v39";
+    const client = makeClient({
+      bootstrap: () => Promise.reject(new Error(reason)),
+      random: () => 0,
+    });
+    const seen: Array<string | null> = [];
+    client.onStatus(() => seen.push(client.getLastError()));
+
+    await client.connect();
+    expect(client.getLastError()).toBe(reason);
+
+    // The ladder's first rung reads the stale discovery and dials the port.
+    await vi.advanceTimersByTimeAsync(800);
+    expect(sockets).toHaveLength(1);
+    latest().onerror?.({});
+    latest().onclose?.({});
+
+    expect(client.getStatus()).toBe("disconnected");
+    expect(client.getLastError()).toBe(reason);
+    expect(seen).not.toContain("WebSocket connection error");
+
+    // A daemon that does answer retires it.
+    await vi.advanceTimersByTimeAsync(1600);
+    latest().onopen?.({});
+    expect(client.getStatus()).toBe("connected");
+    expect(client.getLastError()).toBeNull();
+
+    // And a transport failure after that is reported as what it is.
+    latest().onerror?.({});
+    expect(client.getLastError()).toBe("WebSocket connection error");
+
+    client.disconnect();
+  });
+
+  /**
+   * A bootstrap that succeeds retires the previous bootstrap's failure even
+   * before any socket opens: the user fixed the cause and pressed Reconnect,
+   * the daemon came up, and if its socket then fails the card must say so —
+   * not repeat a log tail from the start that has since worked.
+   */
+  it("a later bootstrap that succeeds retires the earlier one's reason", async () => {
+    const reason =
+      "The daemon did not start within 5 seconds. Its log ends with:\n\nFATAL: legacy schema v39";
+    const bootstrap = vi
+      .fn<() => Promise<ConnectionInfo>>()
+      .mockRejectedValueOnce(new Error(reason))
+      .mockResolvedValueOnce(INFO);
+    const client = makeClient({ bootstrap });
+
+    await client.connect();
+    expect(client.getLastError()).toBe(reason);
+
+    // Reconnect: this bootstrap succeeds, and the socket fails before opening.
+    await client.connect();
+    expect(bootstrap).toHaveBeenCalledTimes(2);
+    latest().onerror?.({});
+    expect(client.getLastError()).toBe("WebSocket connection error");
 
     client.disconnect();
   });

@@ -1067,9 +1067,10 @@ export interface DaemonStatus {
   /** The migration version the open database is at, not a compile-time count. */
   schema_version: number;
   /**
-   * `<state_dir>/logs/daemon.log`, when the CLI wrote one. `null` for a daemon
-   * started any other way (`cargo run`, the GUI sidecar) — there is no such
-   * file to copy a path to.
+   * `<state_dir>/logs/daemon.log`, when this daemon's launcher pointed its
+   * output there — the app's sidecar and `openalpaca daemon start` both do
+   * (T30). `null` for a daemon started by hand (a bare `cargo run`) — there
+   * is no file of its own to copy a path to.
    */
   log_path: string | null;
   /** Bytes the user uploaded — what the daemon's upload cap is read against. */
@@ -1097,6 +1098,23 @@ export interface DaemonStatus {
    * why every reader treats it as optional.
    */
   llm?: DaemonLlmStatus | null;
+  /**
+   * What the daemon has in flight right now, as counts only (T23). `null`
+   * when the daemon has no confirmation broker, and absent from a daemon
+   * built before the block existed — so a reader treats both as "cannot
+   * tell", never as "idle".
+   */
+  busy?: DaemonBusyStatus | null;
+}
+
+/** `GET /v1/status`'s `busy` block — counts, never contents (T23). */
+export interface DaemonBusyStatus {
+  /** Runs queued, running or paused — what a stop now would interrupt. */
+  running_tasks: number;
+  /** Tool-approval prompts nobody has answered yet. */
+  pending_confirmations: number;
+  /** Open `/v1/events` sockets, this window's own included. */
+  connected_clients: number;
 }
 
 /**

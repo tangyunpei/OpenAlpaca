@@ -16,7 +16,14 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 pub(crate) struct HomeStoreGuard {
     _lock: MutexGuard<'static, ()>,
     prev: Option<OsString>,
+    /// The user-home variables [`HomeStoreGuard::set_with_home`] replaced, to
+    /// restore on drop. Empty for [`HomeStoreGuard::set`].
+    prev_home: Vec<(&'static str, Option<OsString>)>,
 }
+
+/// What `directories::ProjectDirs` reads to place the legacy app dir: `HOME`
+/// everywhere on unix, and `XDG_DATA_HOME` first on Linux when it is set.
+const USER_HOME_VARS: [&str; 2] = ["HOME", "XDG_DATA_HOME"];
 
 impl HomeStoreGuard {
     pub(crate) fn set(path: &Path) -> Self {
@@ -25,13 +32,52 @@ impl HomeStoreGuard {
         // SAFETY: serialized by ENV_LOCK; every test that reads the variable
         // holds the same guard.
         unsafe { std::env::set_var(HOME_STORE_ENV, path) };
-        Self { _lock: lock, prev }
+        Self {
+            _lock: lock,
+            prev,
+            prev_home: Vec::new(),
+        }
+    }
+
+    /// [`HomeStoreGuard::set`], and also points the user's home directory at
+    /// `home` — for any test that can reach [`legacy_root::legacy_app_dir`].
+    ///
+    /// `OPENALPACA_HOME_STORE` does not move the legacy root: it resolves
+    /// through `directories::ProjectDirs`, which reads `HOME`, so under
+    /// [`HomeStoreGuard::set`] alone such a test would resolve the real
+    /// `~/Library/Application Support/OpenAlpaca`. Same lock, no second one.
+    /// Panics — restoring everything on the way out — if the legacy root still
+    /// resolves outside `home`: a test must never be able to reach it.
+    pub(crate) fn set_with_home(path: &Path, home: &Path) -> Self {
+        let mut guard = Self::set(path);
+        guard.prev_home = USER_HOME_VARS
+            .iter()
+            .map(|var| (*var, std::env::var_os(var)))
+            .collect();
+        // SAFETY: still holding ENV_LOCK, taken by `set` above.
+        unsafe {
+            std::env::set_var("HOME", home);
+            std::env::remove_var("XDG_DATA_HOME");
+        }
+        let legacy = legacy_root::legacy_app_dir().expect("the legacy app dir must resolve");
+        assert!(
+            legacy.starts_with(home),
+            "HOME override did not sandbox the legacy root ({}); refusing to run",
+            legacy.display()
+        );
+        guard
     }
 }
 
 impl Drop for HomeStoreGuard {
     fn drop(&mut self) {
         // SAFETY: as above — still holding ENV_LOCK.
+        for (var, prev) in self.prev_home.drain(..) {
+            match prev {
+                Some(v) => unsafe { std::env::set_var(var, v) },
+                None => unsafe { std::env::remove_var(var) },
+            }
+        }
         match self.prev.take() {
             Some(v) => unsafe { std::env::set_var(HOME_STORE_ENV, v) },
             None => unsafe { std::env::remove_var(HOME_STORE_ENV) },
@@ -120,7 +166,6 @@ fn test_paths_are_consistent() {
     let discovery = discovery_path().unwrap();
     let lock = lock_path().unwrap();
     let db = database_path().unwrap();
-    let assets = interim_assets_dir().unwrap();
     let logs = logs_dir().unwrap();
     let backups = backups_dir().unwrap();
     // L11: the embedding model's ~1 GB of weights is regenerable machine
@@ -130,13 +175,12 @@ fn test_paths_are_consistent() {
 
     assert_eq!(state, tmp.path().join("state"));
     assert!(state.is_dir(), "state_dir() creates the directory");
-    for p in [&discovery, &lock, &db, &assets, &logs, &backups, &embeddings] {
+    for p in [&discovery, &lock, &db, &logs, &backups, &embeddings] {
         assert!(p.starts_with(&state), "{} is not under state/", p.display());
     }
     assert!(discovery.ends_with("discovery.json"));
     assert!(lock.ends_with("openalpacad.lock"));
     assert!(db.ends_with("openalpaca.db"));
-    assert!(assets.ends_with("assets"));
     assert!(logs.is_dir() && logs.ends_with("logs"));
     assert!(backups.is_dir() && backups.ends_with("backups"));
     assert_eq!(embeddings, state.join("cache").join("fastembed"));
@@ -168,7 +212,6 @@ fn path_queries_do_not_create_the_store() {
         database_path().unwrap(),
         discovery_path().unwrap(),
         lock_path().unwrap(),
-        interim_assets_dir().unwrap(),
         runtime_config_dir().unwrap(),
     ] {
         assert!(
@@ -180,15 +223,46 @@ fn path_queries_do_not_create_the_store() {
     assert!(!root.exists(), "a path query created {}", root.display());
 }
 
-/// Where a pre-D2 upload's bytes sat: `state/assets/ab/cd/<sha256>`.
-///
-/// A fixture, not a path the system computes any more — the one upload writer
-/// places bytes under `uploads/`, and the boot-time re-home takes what is left
-/// here from the rows' own `storage_path`. It lives here so the two test modules
-/// that reconstruct the old layout spell it the same way.
-pub(crate) fn interim_blob_path(sha256: &str) -> PathBuf {
-    interim_assets_dir()
+/// The one guarantee `open_home_database` exists for: a process that opens the
+/// database before any daemon has run still gets a private `state/`, rather
+/// than one SQLite made at the process umask beside `.master_key`.
+#[cfg(unix)]
+#[test]
+fn open_home_database_creates_the_state_directory_at_0700() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("home");
+    // `open_home_database` checks for a legacy root first, so `HOME` is
+    // sandboxed too (and holds no legacy root).
+    let _guard = HomeStoreGuard::set_with_home(&root, &tmp.path().join("user"));
+    assert!(!root.join("state").exists());
+
+    let db = open_home_database().unwrap();
+    drop(db);
+
+    let mode = fs::metadata(root.join("state"))
         .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o700, "state/ is {:o}", mode & 0o777);
+    assert!(root.join("state").join("openalpaca.db").exists());
+    assert_eq!(
+        database_path().unwrap(),
+        root.join("state").join("openalpaca.db")
+    );
+}
+
+/// Where a pre-D2 upload's bytes sit: `state/assets/ab/cd/<sha256>`.
+///
+/// A fixture, not a path the system computes any more — nothing writes there
+/// and nothing moves what is there. It lives here, beside the private
+/// `state_dir_path` it is spelled from, so a test that reconstructs the old
+/// layout does not re-derive it.
+pub(crate) fn interim_blob_path(sha256: &str) -> PathBuf {
+    state_dir_path()
+        .unwrap()
+        .join("assets")
         .join(&sha256[0..2])
         .join(&sha256[2..4])
         .join(sha256)
@@ -239,7 +313,13 @@ fn ensure_store_seeds_the_home_root() {
         readme.contains("Retention class"),
         "README lacks the retention-class column"
     );
-    assert!(readme.contains("factory reset"));
+    assert!(readme.contains("openalpaca config reset --factory"));
+    // Taken literally, "deleting `state/` is a factory reset" destroys the
+    // embedding model and the master key; the verb deletes the database only.
+    assert!(
+        !readme.contains("is a factory reset"),
+        "the README must not equate deleting state/ with a factory reset"
+    );
     assert!(
         !root.join(".gitignore").exists(),
         "the home root carries no .gitignore"
@@ -256,9 +336,118 @@ fn ensure_store_seeds_the_home_root() {
     assert_eq!(install_id(&root).unwrap().as_deref(), Some(id.as_str()));
 }
 
+/// A store seeded by an earlier build carries a README that calls deleting
+/// `state/` a factory reset. Nobody edited it, so it is brought up to date —
+/// every earlier text, not just the last.
+#[test]
+fn ensure_store_replaces_an_unedited_superseded_home_readme() {
+    let tmp = tempdir().unwrap();
+    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
+    let root = ensure_store(&StoreScope::Home).unwrap();
+    let readme = root.join("README.md");
+
+    for (n, old) in SUPERSEDED_HOME_READMES.iter().enumerate() {
+        assert!(
+            old.contains("Deleting `state/` is a factory reset"),
+            "superseded text {n} is the one this replaces"
+        );
+        fs::write(&readme, old).unwrap();
+        ensure_store(&StoreScope::Home).unwrap();
+        assert_eq!(
+            fs::read_to_string(&readme).unwrap(),
+            HOME_README,
+            "superseded text {n} must be replaced by the current one"
+        );
+    }
+    assert!(
+        !SUPERSEDED_HOME_READMES.contains(&HOME_README),
+        "the current text must not be listed as superseded"
+    );
+}
+
+/// The refresh is documentation and must never stop a boot. `ensure_store`
+/// runs before the daemon's singleton lock and in the GUI and the CLI too, so
+/// two launchers can refresh at once and the loser's rename fails. A temp path
+/// that cannot be written stands in for that race: the store still opens, and
+/// the old text stays for the next boot to replace.
+#[test]
+fn a_readme_refresh_that_fails_does_not_fail_ensure_store() {
+    let tmp = tempdir().unwrap();
+    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
+    let root = ensure_store(&StoreScope::Home).unwrap();
+    let readme = root.join("README.md");
+    fs::write(&readme, SUPERSEDED_HOME_READMES[0]).unwrap();
+    // `write_atomic` writes `README.md.tmp` first; a directory there makes
+    // that fail exactly as a lost rename race does.
+    fs::create_dir(root.join("README.md.tmp")).unwrap();
+
+    ensure_store(&StoreScope::Home).expect("a failed README refresh must not fail ensure_store");
+    assert_eq!(
+        fs::read_to_string(&readme).unwrap(),
+        SUPERSEDED_HOME_READMES[0],
+        "the refresh failed, so the old text is left for the next boot"
+    );
+}
+
+/// A tripwire, not a spec: the refresh above only reaches stores seeded by a
+/// text listed in `SUPERSEDED_HOME_READMES`. Changing `HOME_README` without
+/// listing the text it replaces would strand every store seeded by this build.
+#[test]
+fn a_changed_home_readme_lists_the_text_it_replaces() {
+    use sha2::{Digest, Sha256};
+    assert_eq!(
+        format!("{:x}", Sha256::digest(HOME_README.as_bytes())),
+        "eceb21d5c6376fbcf29b09ab5e0774d3f62ace62a82468fad3ff257d2cc2a9a5",
+        "HOME_README changed: save its previous text as \
+         store/superseded_readmes/home-<next>.txt, list it in \
+         SUPERSEDED_HOME_READMES, then update this digest"
+    );
+}
+
+/// The README is the user's the moment they change it: an edited earlier
+/// text — even by one byte — and any text of their own are left alone.
+#[test]
+fn ensure_store_leaves_an_edited_home_readme_alone() {
+    let tmp = tempdir().unwrap();
+    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
+    let root = ensure_store(&StoreScope::Home).unwrap();
+    let readme = root.join("README.md");
+
+    let edited_old = format!("{}\nMy note: keep backups.\n", SUPERSEDED_HOME_READMES[4]);
+    let trimmed_old = SUPERSEDED_HOME_READMES[0].trim_end().to_owned();
+    for mine in [edited_old, trimmed_old, "# my own notes\n".to_owned()] {
+        fs::write(&readme, &mine).unwrap();
+        ensure_store(&StoreScope::Home).unwrap();
+        assert_eq!(fs::read_to_string(&readme).unwrap(), mine);
+    }
+}
+
+/// Only the home README is refreshed; a project store's is never rewritten,
+/// even with a superseded home text in it.
+#[test]
+fn a_project_readme_is_never_refreshed() {
+    let tmp = tempdir().unwrap();
+    // `ensure_store` asks whether a root is the home root, which resolves it.
+    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
+    let project = tmp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let scope = StoreScope::Project(project);
+    let root = ensure_store(&scope).unwrap();
+    let readme = root.join("README.md");
+    fs::write(&readme, SUPERSEDED_HOME_READMES[4]).unwrap();
+    ensure_store(&scope).unwrap();
+    assert_eq!(
+        fs::read_to_string(&readme).unwrap(),
+        SUPERSEDED_HOME_READMES[4]
+    );
+}
+
 #[test]
 fn ensure_store_seeds_a_project_root() {
     let tmp = tempdir().unwrap();
+    // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
+    // without this it would canonicalize the owner's real store.
+    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
     let project = tmp.path().to_path_buf();
     let scope = StoreScope::Project(project.clone());
 
@@ -332,6 +521,9 @@ fn ensure_store_on_a_project_that_is_the_home_root_seeds_the_home_metadata() {
 #[test]
 fn unknown_entries_names_only_what_the_store_did_not_create() {
     let tmp = tempdir().unwrap();
+    // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
+    // without this it would canonicalize the owner's real store.
+    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
     let scope = StoreScope::Project(tmp.path().to_path_buf());
     let root = ensure_store(&scope).unwrap();
     // Two kinds the store created, and two names it did not.
@@ -352,6 +544,9 @@ fn unknown_entries_names_only_what_the_store_did_not_create() {
 #[test]
 fn unknown_entries_treats_state_and_plugins_as_home_only_names() {
     let tmp = tempdir().unwrap();
+    // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
+    // without this it would canonicalize the owner's real store.
+    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
     let scope = StoreScope::Project(tmp.path().to_path_buf());
     let root = ensure_store(&scope).unwrap();
     fs::create_dir_all(root.join("state")).unwrap();
@@ -379,6 +574,9 @@ fn unknown_entries_treats_state_and_plugins_as_home_only_names() {
 #[test]
 fn unknown_entries_treats_config_as_reserved_in_both_scopes() {
     let tmp = tempdir().unwrap();
+    // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
+    // without this it would canonicalize the owner's real store.
+    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
     let scope = StoreScope::Project(tmp.path().to_path_buf());
     let root = ensure_store(&scope).unwrap();
     fs::create_dir_all(root.join("config")).unwrap();
@@ -405,6 +603,9 @@ fn unknown_entries_treats_config_as_reserved_in_both_scopes() {
 #[test]
 fn unknown_entries_reserves_dot_versions_even_though_nothing_writes_it_at_the_root() {
     let tmp = tempdir().unwrap();
+    // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
+    // without this it would canonicalize the owner's real store.
+    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
     let scope = StoreScope::Project(tmp.path().to_path_buf());
     let root = ensure_store(&scope).unwrap();
     fs::create_dir_all(root.join(".versions")).unwrap();
@@ -452,6 +653,9 @@ fn a_malformed_layout_marker_is_repaired_not_appended_to() {
 #[test]
 fn layout_lines_this_module_does_not_own_are_preserved() {
     let tmp = tempdir().unwrap();
+    // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
+    // without this it would canonicalize the owner's real store.
+    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
     let project = tmp.path().to_path_buf();
     let scope = StoreScope::Project(project.clone());
     let root = ensure_store(&scope).unwrap();
@@ -472,6 +676,9 @@ fn layout_lines_this_module_does_not_own_are_preserved() {
 #[test]
 fn a_project_store_records_its_own_root_once() {
     let tmp = tempdir().unwrap();
+    // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
+    // without this it would canonicalize the owner's real store.
+    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
     let project = tmp.path().canonicalize().unwrap();
     let scope = StoreScope::Project(project.clone());
     let root = ensure_store(&scope).unwrap();
@@ -569,4 +776,223 @@ fn content_dirs_have_the_same_shape_in_both_scopes() {
 #[test]
 fn a_relative_project_root_is_rejected() {
     assert!(store_root(&StoreScope::Project(PathBuf::from("relative/proj"))).is_err());
+}
+
+// ============================================================================
+// Daemon log: rotation and tail (moved from the CLI's process manager, which
+// was its only launcher; the GUI sidecar now shares it)
+// ============================================================================
+
+/// Below the threshold the log is left exactly as it is: rotating a small
+/// file would throw away the only copy of a short run's output.
+#[test]
+fn a_log_under_the_cap_is_not_rotated() {
+    let root = tempdir().unwrap();
+    let log = root.path().join("daemon.log");
+    fs::write(&log, b"one short run\n").unwrap();
+
+    rotate_log(&log, DAEMON_LOG_MAX_BYTES, DAEMON_LOG_KEEP).expect("rotation should succeed");
+
+    assert_eq!(fs::read(&log).unwrap(), b"one short run\n");
+    assert!(!root.path().join("daemon.log.1").exists());
+}
+
+/// A missing log is the ordinary first start, not an error.
+#[test]
+fn a_missing_log_is_not_an_error() {
+    let root = tempdir().unwrap();
+    rotate_log(
+        &root.path().join("daemon.log"),
+        DAEMON_LOG_MAX_BYTES,
+        DAEMON_LOG_KEEP,
+    )
+    .expect("a first start rotates nothing");
+}
+
+/// The real 16 MB threshold, exercised with a sparse file so the test does
+/// not write 16 MB: past it, `daemon.log` becomes `daemon.log.1` and the live
+/// name is free for a fresh file.
+#[test]
+fn a_log_over_sixteen_megabytes_is_rotated_to_dot_one() {
+    let root = tempdir().unwrap();
+    let log = root.path().join("daemon.log");
+    fs::File::create(&log)
+        .unwrap()
+        .set_len(DAEMON_LOG_MAX_BYTES + 1)
+        .unwrap();
+
+    rotate_log(&log, DAEMON_LOG_MAX_BYTES, DAEMON_LOG_KEEP).expect("rotation should succeed");
+
+    assert!(!log.exists(), "the live name is free after a rotation");
+    let rotated = root.path().join("daemon.log.1");
+    assert_eq!(
+        fs::metadata(&rotated).unwrap().len(),
+        DAEMON_LOG_MAX_BYTES + 1
+    );
+}
+
+/// Keep three: every generation shifts down one and the fourth is dropped, so
+/// the log costs at most four files however long the daemon runs.
+#[test]
+fn rotation_keeps_three_generations_and_drops_the_oldest() {
+    let root = tempdir().unwrap();
+    let log = root.path().join("daemon.log");
+    for (name, body) in [
+        ("daemon.log", "live"),
+        ("daemon.log.1", "gen1"),
+        ("daemon.log.2", "gen2"),
+        ("daemon.log.3", "gen3"),
+    ] {
+        fs::write(root.path().join(name), body).unwrap();
+    }
+
+    // A tiny cap: the keep rule is what is under test, not the threshold.
+    rotate_log(&log, 2, DAEMON_LOG_KEEP).expect("rotation should succeed");
+
+    assert!(!log.exists());
+    let read = |name: &str| fs::read_to_string(root.path().join(name)).unwrap();
+    assert_eq!(read("daemon.log.1"), "live");
+    assert_eq!(read("daemon.log.2"), "gen1");
+    assert_eq!(read("daemon.log.3"), "gen2");
+    assert!(
+        !root.path().join("daemon.log.4").exists(),
+        "the fourth generation is dropped, never accumulated"
+    );
+
+    // And again, to prove the shift is not a one-off.
+    fs::write(&log, "live-2").unwrap();
+    rotate_log(&log, 2, DAEMON_LOG_KEEP).expect("rotation should succeed");
+    assert_eq!(read("daemon.log.1"), "live-2");
+    assert_eq!(read("daemon.log.2"), "live");
+    assert_eq!(read("daemon.log.3"), "gen1");
+    assert!(!root.path().join("daemon.log.4").exists());
+}
+
+/// The shared entry point both launchers call resolves the log through the
+/// store root — the sandboxed one here — and, like the name it rotates,
+/// creates nothing when there is nothing to rotate.
+#[test]
+fn rotate_daemon_log_rotates_the_store_log_and_creates_nothing_on_a_fresh_root() {
+    let tmp = tempdir().unwrap();
+    let _guard = HomeStoreGuard::set(tmp.path());
+
+    rotate_daemon_log().expect("a fresh root rotates nothing");
+    assert!(
+        !tmp.path().join("state").exists(),
+        "rotating a log that is not there must not create the store"
+    );
+
+    let log = logs_dir().unwrap().join("daemon.log");
+    fs::File::create(&log)
+        .unwrap()
+        .set_len(DAEMON_LOG_MAX_BYTES + 1)
+        .unwrap();
+    rotate_daemon_log().expect("rotation should succeed");
+    assert!(!log.exists());
+    assert!(logs_dir().unwrap().join("daemon.log.1").exists());
+}
+
+#[test]
+fn log_tail_with_fewer_lines_than_asked_is_all_of_them() {
+    assert_eq!(log_tail("one\ntwo\n", 20), "one\ntwo");
+}
+
+#[test]
+fn log_tail_keeps_only_the_newest_lines_and_ignores_the_trailing_newline() {
+    let text = "a\nb\nc\nd\ne\n";
+    assert_eq!(log_tail(text, 2), "d\ne");
+    assert_eq!(log_tail("a\nb\nc\n\n\n", 2), "b\nc", "trailing blanks are not lines");
+    assert_eq!(log_tail("a\r\nb\r\n", 5), "a\nb", "CRLF ends a line like LF");
+}
+
+/// Verbatim is the rule: a blank line *inside* the window is part of what was
+/// written — the legacy-root refusal is paragraphs — while the blank lines the
+/// window would open with are not worth a line of the panel.
+#[test]
+fn log_tail_keeps_inner_blank_lines_and_drops_the_leading_ones() {
+    let refusal = "FATAL: first paragraph\n\n  Older install:  /x\n\nTo discard it, rename /x.\n";
+    assert_eq!(
+        log_tail(refusal, 20),
+        "FATAL: first paragraph\n\n  Older install:  /x\n\nTo discard it, rename /x."
+    );
+    // The window of three opens on a blank line, which is dropped rather than
+    // shown as an empty first row.
+    assert_eq!(
+        log_tail(refusal, 3),
+        "  Older install:  /x\n\nTo discard it, rename /x."
+    );
+}
+
+#[test]
+fn log_tail_of_empty_or_blank_input_is_empty() {
+    assert_eq!(log_tail("", 20), "");
+    assert_eq!(log_tail("\n\n  \n", 20), "");
+    assert_eq!(log_tail("one\n", 0), "");
+}
+
+/// `tracing` writes colour even into a file; the panel shows text.
+#[test]
+fn log_tail_removes_ansi_colour_escapes_and_nothing_else() {
+    let line = "\u{1b}[2m2026-09-22T10:00:00Z\u{1b}[0m \u{1b}[31mERROR\u{1b}[0m \u{1b}[2mopenalpacad\u{1b}[0m\u{1b}[2m:\u{1b}[0m FATAL: [brackets] stay";
+    assert_eq!(
+        log_tail(line, 1),
+        "2026-09-22T10:00:00Z ERROR openalpacad: FATAL: [brackets] stay"
+    );
+}
+
+#[test]
+fn read_log_tail_of_a_missing_file_is_empty() {
+    let root = tempdir().unwrap();
+    assert_eq!(
+        read_log_tail(&root.path().join("daemon.log"), 0, 20).unwrap(),
+        ""
+    );
+}
+
+/// A run that wrote nothing reads as nothing — never as the previous run's
+/// last words presented as this one's.
+#[test]
+fn read_log_tail_reads_only_what_the_run_appended() {
+    let root = tempdir().unwrap();
+    let log = root.path().join("daemon.log");
+    fs::write(&log, "previous run: ERROR something old\n").unwrap();
+    let from = fs::metadata(&log).unwrap().len();
+
+    assert_eq!(read_log_tail(&log, from, 20).unwrap(), "");
+
+    let mut file = fs::OpenOptions::new().append(true).open(&log).unwrap();
+    std::io::Write::write_all(&mut file, b"this run: FATAL: why it stopped\n").unwrap();
+    assert_eq!(
+        read_log_tail(&log, from, 20).unwrap(),
+        "this run: FATAL: why it stopped"
+    );
+    assert_eq!(
+        read_log_tail(&log, 0, 20).unwrap(),
+        "previous run: ERROR something old\nthis run: FATAL: why it stopped"
+    );
+    // A `from` past the end means the file was rotated under us: all of what
+    // is there now is the run's.
+    assert_eq!(
+        read_log_tail(&log, u64::MAX, 1).unwrap(),
+        "this run: FATAL: why it stopped"
+    );
+}
+
+/// A large log costs one bounded read, and the fragment the window lands in
+/// the middle of is dropped rather than shown cut mid-line.
+#[test]
+fn read_log_tail_of_a_large_log_never_shows_a_line_cut_in_half() {
+    let root = tempdir().unwrap();
+    let log = root.path().join("daemon.log");
+    let line = format!("{}\n", "x".repeat(99));
+    let body = line.repeat(2_000) + "the last line\n";
+    fs::write(&log, &body).unwrap();
+    assert!(body.len() as u64 > LOG_TAIL_READ_BYTES);
+
+    let tail = read_log_tail(&log, 0, 100_000).unwrap();
+    assert!(tail.ends_with("the last line"));
+    for kept in tail.lines().filter(|l| *l != "the last line") {
+        assert_eq!(kept.len(), 99, "a line was cut: {kept:?}");
+    }
+    assert!(tail.len() as u64 <= LOG_TAIL_READ_BYTES);
 }

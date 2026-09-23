@@ -144,6 +144,8 @@ vi.mock("@/hooks/useSettings", () => ({
     ]),
   useSetProviderEnabled: () => mutation(),
   useRefreshModels: () => mutation(),
+  useSetKeyPriority: () => mutation(),
+  useRemoveKey: () => mutation(),
 }));
 
 vi.mock("@/hooks/useOrchestrator", async (importOriginal) => ({

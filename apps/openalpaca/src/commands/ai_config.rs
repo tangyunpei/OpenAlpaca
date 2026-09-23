@@ -276,7 +276,13 @@ pub fn list_ai_entries() -> Result<Vec<(String, String, String)>> {
 
 /// Clear all AI/LLM configuration in `llm.toml`, resetting to defaults.
 pub fn clear_ai_config() -> Result<()> {
-    let path = llm_config_path()?;
+    clear_ai_config_at(&llm_config_path()?)
+}
+
+/// [`clear_ai_config`] on a path the caller already resolved — the factory
+/// reset's, so that what it clears is exactly the file its warning named.
+pub fn clear_ai_config_at(path: &std::path::Path) -> Result<()> {
+    let path = path.to_path_buf();
     if !path.exists() {
         return Ok(());
     }

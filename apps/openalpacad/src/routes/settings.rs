@@ -859,12 +859,13 @@ mod tests {
     use chrono::TimeZone;
     use openalpaca_storage::{Database, LlmUsageDaily, LlmUsageRepository, ProviderCallUsage};
     use std::fs;
-    use std::path::PathBuf;
 
-    fn temp_dir(prefix: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&dir).expect("temp dir should be creatable");
-        dir
+    /// Removed when the guard drops, on a failed assert too.
+    fn temp_dir(prefix: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("{prefix}-"))
+            .tempdir()
+            .expect("temp dir should be creatable")
     }
 
     fn test_db() -> (tempfile::TempDir, Database) {
@@ -1058,7 +1059,8 @@ mod tests {
 
     #[test]
     fn cli_backends_config_uses_explicit_llm_config_path() {
-        let dir = temp_dir("openalpacad-cli-backends");
+        let tmp = temp_dir("openalpacad-cli-backends");
+        let dir = tmp.path();
         let llm_path = dir.join("llm.toml");
         fs::write(
             &llm_path,
@@ -1072,19 +1074,16 @@ enabled = false
         let cfg = load_cli_backends_config(&llm_path);
         let claude = cfg.claude_code.expect("claude config should be present");
         assert_eq!(claude.enabled, Some(false));
-
-        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn cli_backends_config_returns_default_when_missing() {
-        let dir = temp_dir("openalpacad-cli-backends-missing");
+        let tmp = temp_dir("openalpacad-cli-backends-missing");
+        let dir = tmp.path();
         let missing = dir.join("missing.toml");
 
         let cfg = load_cli_backends_config(&missing);
         assert!(cfg.claude_code.is_none());
         assert!(cfg.codex.is_none());
-
-        let _ = fs::remove_dir_all(dir);
     }
 }

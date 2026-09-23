@@ -7,7 +7,8 @@
 //!
 //! ```text
 //! ~/.openalpaca/
-//!   README.md          seeded once; explains every entry
+//!   README.md          seeded once; explains every entry (refreshed only while
+//!                      it is an unedited earlier seeding)
 //!   .layout            line 1: layout version; line 2 (home root only): install_id=<uuid-v4>
 //!   state/             MACHINE STATE — opaque, never user-edited, never committed
 //!     openalpaca.db (+ -wal, -shm), discovery.json, openalpacad.lock, .master_key
@@ -24,7 +25,8 @@
 //! root.
 
 mod artifact;
-pub mod migrate;
+pub mod legacy_root;
+pub mod project_move;
 
 pub use artifact::{
     artifact_extension, artifact_file_name, confine_to_root, leading_sequence, loose_dir, run_dir,
@@ -44,6 +46,10 @@ pub const STORE_DIR_NAME: &str = ".openalpaca";
 
 /// Layout version written to line 1 of `.layout`.
 pub const LAYOUT_VERSION: u32 = 1;
+
+/// The database file name under `state/`, so [`database_path`] and
+/// [`open_home_database`] cannot drift.
+const DB_FILE: &str = "openalpaca.db";
 
 const LAYOUT_FILE: &str = ".layout";
 const README_FILE: &str = "README.md";
@@ -88,13 +94,7 @@ fn resolve_home_root(override_value: Option<PathBuf>, home: Option<PathBuf>) -> 
 
 /// `home_root()/state` — machine state. Created (0700 on Unix) if missing.
 pub fn state_dir() -> Result<PathBuf> {
-    state_dir_in(&home_root()?)
-}
-
-/// [`state_dir`] under an explicit root — for the mover, which works on the two
-/// roots it was given rather than on the ambient one.
-pub(crate) fn state_dir_in(root: &Path) -> Result<PathBuf> {
-    let dir = root.join("state");
+    let dir = home_root()?.join("state");
     create_private_dir(&dir)?;
     Ok(dir)
 }
@@ -107,7 +107,27 @@ fn state_dir_path() -> Result<PathBuf> {
 
 /// `state/openalpaca.db`
 pub fn database_path() -> Result<PathBuf> {
-    Ok(state_dir_path()?.join("openalpaca.db"))
+    Ok(state_dir_path()?.join(DB_FILE))
+}
+
+/// Opens this install's database, creating `state/` (0700 on unix) if it is not
+/// there — the ordering every process outside the daemon's boot preamble needs.
+///
+/// The daemon makes `state/` itself, long before it opens anything
+/// (`discovery::acquire_single_instance_lock` calls [`state_dir`]). Every other
+/// process — `openalpaca config`, the connector examples — has no such step, so
+/// this is where the private directory is guaranteed. Going through
+/// [`database_path`] instead would let SQLite create `state/` at the process
+/// umask, leaving `.master_key` and `discovery.json` world-readable.
+///
+/// It also runs [`legacy_root::check_legacy_root_result`] first: opening the
+/// database **creates** it, so a process that opens before checking is exactly
+/// the process that strands an older install's data.
+pub fn open_home_database() -> Result<crate::database::Database> {
+    legacy_root::check_legacy_root_result()?;
+    let path = state_dir()?.join(DB_FILE);
+    crate::database::Database::open(&path)
+        .with_context(|| format!("Failed to open {}", path.display()))
 }
 
 /// `state/discovery.json`
@@ -133,10 +153,12 @@ pub fn logs_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// `state/logs/daemon.log` — the log the CLI-managed daemon writes to.
+/// `state/logs/daemon.log` — the log a launched daemon writes to.
 ///
-/// One name, two consumers: `openalpaca`'s process manager opens it (rotating
-/// first, so it stays bounded) and `GET /v1/status` reports it when it exists.
+/// One name, three consumers: both launchers — `openalpaca daemon start` and
+/// the GUI sidecar — point the child's stdout and stderr at it (rotating
+/// first, with [`rotate_daemon_log`], so it stays bounded), and
+/// `GET /v1/status` reports it when it exists.
 /// Non-creating, like [`database_path`] — naming a file is not a reason to
 /// make its directory, and the status route's question is whether the file is
 /// *there*.
@@ -147,14 +169,162 @@ pub fn daemon_log_path() -> Result<PathBuf> {
 const LOGS_DIR: &str = "logs";
 const DAEMON_LOG_FILE: &str = "daemon.log";
 
-/// Set on the environment of the child `openalpaca daemon start` spawns —
-/// marks *this* daemon instance as the one whose stdout/stderr the manager
-/// rotated and opened `daemon_log_path()` for. `GET /v1/status` gates
-/// `log_path` on this in addition to the file existing, so a daemon started
-/// any other way (the GUI sidecar, a bare `cargo run`) never reports a path
-/// to some *other* daemon's leftover `daemon.log` just because one happens to
-/// be sitting there (T44 fix round 1, Important #3).
+/// Set on the environment of a daemon whose launcher pointed its stdout and
+/// stderr at `daemon_log_path()` and rotated the file first — marks *this*
+/// daemon instance as that file's owner. `openalpaca daemon start` and the GUI
+/// sidecar both set it; a bare `cargo run` does not. `GET /v1/status` gates
+/// `log_path` on this in addition to the file existing, so a daemon nobody
+/// pointed at the file never reports a path to some *other* daemon's leftover
+/// `daemon.log` just because one happens to be sitting there (T44 fix round 1,
+/// Important #3). The meaning is ownership, not which launcher: the sidecar
+/// used to send its daemon's output to `/dev/null`, and was left out for that
+/// reason alone (T30).
 pub const MANAGED_LOG_ENV: &str = "OPENALPACA_MANAGED_LOG";
+
+/// `daemon.log` is rotated once it is past this size — 16 MB.
+pub const DAEMON_LOG_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Rotated generations kept: `daemon.log.1` … `daemon.log.3`, so the log costs
+/// at most four files however long a daemon runs.
+pub const DAEMON_LOG_KEEP: usize = 3;
+
+/// The most a tail read takes from the end of a log — one seek and one short
+/// read, however large the file has grown.
+pub const LOG_TAIL_READ_BYTES: u64 = 64 * 1024;
+
+/// Rotate `daemon.log` once it is past [`DAEMON_LOG_MAX_BYTES`], keeping
+/// [`DAEMON_LOG_KEEP`] generations.
+///
+/// The file is a launched daemon's stdout and stderr, and nothing else bounds
+/// it: a long-lived daemon that logs at `info` would fill a disk given months.
+/// The caps are deliberately dumb — a size check at launch, no timer, no
+/// compression, no dependency. Shared, because there are two launchers and
+/// only one of them used to do this: the GUI sidecar discarded its daemon's
+/// output entirely, which is how a fatal boot error came to reach nobody.
+///
+/// Callers treat a failure as a warning, never as a reason not to start: a
+/// daemon that will not start because its log could not be renamed is the
+/// worse bug.
+pub fn rotate_daemon_log() -> Result<()> {
+    let path = daemon_log_path()?;
+    rotate_log(&path, DAEMON_LOG_MAX_BYTES, DAEMON_LOG_KEEP)
+        .with_context(|| format!("Failed to rotate {}", path.display()))
+}
+
+/// Shift a log's generations down one when it is past `max_bytes`.
+///
+/// `daemon.log` → `.1` → `.2` → … → `.{keep}`, and whatever was at `.{keep}`
+/// is gone. A log that does not exist, or that is still under the cap, is left
+/// alone — the first start of a fresh install rotates nothing.
+fn rotate_log(path: &Path, max_bytes: u64, keep: usize) -> std::io::Result<()> {
+    match fs::metadata(path) {
+        Ok(meta) if meta.len() > max_bytes => {}
+        // Absent, or small enough: nothing to do. An unreadable log is not a
+        // reason to refuse to start, so it is treated the same way.
+        _ => return Ok(()),
+    }
+
+    // Oldest first, so no rename can overwrite a generation that has not moved
+    // yet. `keep` is the last one kept, which makes `.{keep}` the one dropped.
+    let _ = fs::remove_file(log_generation(path, keep));
+    for n in (1..keep).rev() {
+        let from = log_generation(path, n);
+        if from.exists() {
+            fs::rename(&from, log_generation(path, n + 1))?;
+        }
+    }
+    fs::rename(path, log_generation(path, 1))
+}
+
+/// `daemon.log` + `.n` — appended, never substituted, so the base name's own
+/// extension survives.
+fn log_generation(path: &Path, n: usize) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(format!(".{n}"));
+    PathBuf::from(name)
+}
+
+/// The last `lines` lines a log gained at or after byte `from`, newest last.
+///
+/// Reads at most [`LOG_TAIL_READ_BYTES`] from the end of the file. `from` is
+/// where the run being asked about began writing — the file's length just
+/// before that daemon was spawned, or `0` for the whole file — so a daemon
+/// that died before writing a byte reads as an empty tail, never as the
+/// *previous* run's last words presented as this one's. When the window
+/// starts inside that range, its first line is a fragment of one it did not
+/// reach and is dropped: nothing is shown cut mid-line. A missing file is an
+/// empty tail. Everything else is [`log_tail`]'s.
+pub fn read_log_tail(path: &Path, from: u64, lines: usize) -> std::io::Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(e) => return Err(e),
+    };
+    let len = file.metadata()?.len();
+    // A file shorter than `from` was rotated or truncated under us: the run's
+    // output, if any, is all of what is there now.
+    let from = if from > len { 0 } else { from };
+    let start = from.max(len.saturating_sub(LOG_TAIL_READ_BYTES));
+    file.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::new();
+    file.take(LOG_TAIL_READ_BYTES).read_to_end(&mut bytes)?;
+
+    let text = String::from_utf8_lossy(&bytes);
+    let text = if start > from {
+        text.split_once('\n').map_or("", |(_, rest)| rest)
+    } else {
+        &text
+    };
+    Ok(log_tail(text, lines))
+}
+
+/// The last `lines` lines of `text`, newest last, as a person should read them.
+///
+/// Verbatim otherwise: no line is reworded, prefixed or cut, and a blank line
+/// *inside* the window stays — a multi-paragraph refusal (the legacy-root one
+/// is) must still read as the paragraphs it was written in. Three things are
+/// removed, none of them text: trailing blank lines (a log ends in a newline,
+/// and a daemon that died mid-write can leave more), the blank lines the
+/// window would otherwise open with, and ANSI colour escapes — the daemon's
+/// `tracing` output carries them even into a file, and a panel that renders
+/// the tail would print them as `[2m` noise.
+pub fn log_tail(text: &str, lines: usize) -> String {
+    let cleaned: Vec<String> = text.lines().map(strip_ansi).collect();
+    let end = cleaned
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .map_or(0, |last| last + 1);
+    let window = &cleaned[end.saturating_sub(lines)..end];
+    let first = window
+        .iter()
+        .position(|line| !line.trim().is_empty())
+        .unwrap_or(window.len());
+    window[first..].join("\n")
+}
+
+/// `line` without its ANSI CSI escape sequences (`ESC [` … final byte), which
+/// is every colour and style code `tracing`'s formatter writes.
+fn strip_ansi(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            // Parameter and intermediate bytes, then one final byte in
+            // `@`..=`~`. A sequence the line ends inside is dropped whole.
+            for next in chars.by_ref() {
+                if ('@'..='~').contains(&next) {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
 
 /// `state/cache/fastembed` — the local embedding model's own cache, created if
 /// missing (L11).
@@ -184,18 +354,6 @@ pub fn backups_dir() -> Result<PathBuf> {
     fs::create_dir_all(&dir)
         .with_context(|| format!("Failed to create backups directory: {}", dir.display()))?;
     Ok(dir)
-}
-
-/// `state/assets` — where uploads lived before D2, content-addressed as
-/// `ab/cd/<sha256>`.
-///
-/// Nothing writes here any more: [`crate::uploads::UploadStore`] is the one
-/// upload writer and it places bytes under `uploads/`. The directory exists only
-/// on an installation that predates D2, and only until the boot-time re-home
-/// ([`crate::uploads::rehome_pre_d2_uploads`]) has emptied and removed it — the
-/// one caller left. Nothing new is to be designed against it.
-pub fn interim_assets_dir() -> Result<PathBuf> {
-    Ok(state_dir_path()?.join("assets"))
 }
 
 /// `home_root()/plugins` — user-dropped plugin directories. Created if missing.
@@ -304,7 +462,10 @@ pub fn store_root(scope: &StoreScope) -> Result<PathBuf> {
 
 /// Creates the store root and seeds its metadata: `README.md`, `.layout`
 /// (and, for a project store, `.gitignore`). Idempotent — each file is written
-/// only when absent, so user edits stick.
+/// only when absent, so user edits stick. The one exception is a home
+/// `README.md` byte-identical to a text an earlier build seeded
+/// ([`SUPERSEDED_HOME_READMES`]): nobody edited it, it is ours, and it is
+/// brought up to date.
 ///
 /// On the home root, `.layout` line 2 carries `install_id=<uuid-v4>`, written
 /// once and never rewritten.
@@ -324,6 +485,22 @@ pub fn ensure_store(scope: &StoreScope) -> Result<PathBuf> {
     let readme = root.join(README_FILE);
     if !readme.exists() {
         write_new(&readme, readme_text(is_home))?;
+    } else if is_home && is_superseded_home_readme(&readme) {
+        // Best-effort: the README is documentation, and `ensure_store` runs
+        // before the daemon's singleton lock (and in the GUI and the CLI), so
+        // two launchers can refresh it at once. The loser's rename finds its
+        // shared `README.md.tmp` already moved into place by the winner; that
+        // must never stop a boot.
+        match write_atomic(&readme, HOME_README) {
+            Ok(()) => tracing::info!(
+                "Updated {}: it was an earlier build's text, unedited",
+                readme.display()
+            ),
+            Err(e) => tracing::warn!(
+                "Could not refresh {} (an earlier build's text): {e:#}",
+                readme.display()
+            ),
+        }
     }
 
     if !is_home {
@@ -707,12 +884,14 @@ const HOME_README: &str = r#"# OpenAlpaca — home store
 Created and maintained by OpenAlpaca. The rule for this directory: **`state/` is
 the machine's; everything else here is yours.**
 
-Deleting `state/` is a factory reset. Deleting a content directory loses those
-files only.
+A factory reset (`openalpaca config reset --factory`) deletes the database
+inside `state/` and nothing else there — the master key, the embedding cache,
+the logs and the backups stay. Deleting a content directory loses those files
+only.
 
 | Entry | Holds | Retention class |
 |---|---|---|
-| `state/` | database (+ WAL/SHM), `discovery.json`, `openalpacad.lock`, `.master_key` | never swept — deleting it is a factory reset |
+| `state/` | database (+ WAL/SHM), `discovery.json`, `openalpacad.lock`, `.master_key` | never swept — a factory reset deletes the database here and leaves the rest |
 | `state/backups/` | rotated copies of hand-edited config (`<name>.bak.<ts>`, `<name>.unparseable-<ts>`) | regenerable — swept freely; never user-edited |
 | `state/logs/` | `daemon.log`, `gui.log` | regenerable — swept freely |
 | `state/cache/` | derived data the machine can rebuild — `fastembed/` holds the local embedding model (~1 GB) | regenerable — deleting it costs a re-download |
@@ -752,6 +931,44 @@ Directories OpenAlpaca did not create are never touched and never swept.
 it is written only when absent, so your edits stick. `.layout` records this
 store's layout version — do not edit it.
 "#;
+
+/// Every home README an earlier build seeded, byte for byte, oldest first —
+/// recovered from the history of [`HOME_README`]. Each one says that deleting
+/// `state/` is a factory reset, which taken literally destroys `.master_key`
+/// and the ~1 GB embedding model; `openalpaca config reset --factory` deletes
+/// the database and nothing else there. A seeded README is written only when
+/// absent, so without this every existing store would keep that sentence.
+///
+/// When [`HOME_README`] changes, its previous text is appended here, so a
+/// store seeded by the build before keeps being refreshed.
+const SUPERSEDED_HOME_READMES: [&str; 5] = [
+    include_str!("superseded_readmes/home-1.txt"),
+    include_str!("superseded_readmes/home-2.txt"),
+    include_str!("superseded_readmes/home-3.txt"),
+    include_str!("superseded_readmes/home-4.txt"),
+    include_str!("superseded_readmes/home-5.txt"),
+];
+
+/// Whether `path` holds exactly one of [`SUPERSEDED_HOME_READMES`]. Anything
+/// else — an edit, an unreadable file, a directory — is the user's and is
+/// left alone. The length is checked first, so a large file is never read.
+fn is_superseded_home_readme(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file()
+        || !SUPERSEDED_HOME_READMES
+            .iter()
+            .any(|old| old.len() as u64 == meta.len())
+    {
+        return false;
+    }
+    fs::read(path).is_ok_and(|bytes| {
+        SUPERSEDED_HOME_READMES
+            .iter()
+            .any(|old| old.as_bytes() == bytes.as_slice())
+    })
+}
 
 fn readme_text(is_home: bool) -> &'static str {
     if is_home { HOME_README } else { PROJECT_README }

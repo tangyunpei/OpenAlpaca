@@ -248,16 +248,7 @@ pub async fn get_agent_config_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let service = match &state.agent_config_service {
-        Some(s) => s,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({ "error": "Agent config service not available" })),
-            )
-                .into_response();
-        }
-    };
+    let service = &state.agent_config_service;
 
     match service.get_agent_config(&id) {
         Ok((config, version)) => (
@@ -285,16 +276,7 @@ pub async fn update_agent_config_handler(
     Path(id): Path<String>,
     Json(body): Json<UpdateAgentConfigRequest>,
 ) -> impl IntoResponse {
-    let service = match &state.agent_config_service {
-        Some(s) => s,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({ "error": "Agent config service not available" })),
-            )
-                .into_response();
-        }
-    };
+    let service = &state.agent_config_service;
 
     match service.update_agent_config(&id, body.config, body.config_version) {
         Ok(new_version) => {
@@ -337,16 +319,7 @@ pub async fn create_agent_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateAgentRequest>,
 ) -> impl IntoResponse {
-    let service = match &state.agent_config_service {
-        Some(s) => s,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({ "error": "Agent config service not available" })),
-            )
-                .into_response();
-        }
-    };
+    let service = &state.agent_config_service;
 
     match service.create_agent(body.config) {
         Ok(agent_id) => {
@@ -378,16 +351,7 @@ pub async fn create_agent_from_toml_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateAgentFromTomlRequest>,
 ) -> impl IntoResponse {
-    let service = match &state.agent_config_service {
-        Some(s) => s,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({ "error": "Agent config service not available" })),
-            )
-                .into_response();
-        }
-    };
+    let service = &state.agent_config_service;
 
     match service.create_agent_from_toml(&body.toml_content) {
         Ok(agent_id) => {
@@ -419,16 +383,7 @@ pub async fn delete_agent_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let service = match &state.agent_config_service {
-        Some(s) => s,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({ "error": "Agent config service not available" })),
-            )
-                .into_response();
-        }
-    };
+    let service = &state.agent_config_service;
 
     match service.delete_agent(&id) {
         Ok(()) => {
@@ -542,16 +497,7 @@ pub async fn create_template_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateTemplateRequest>,
 ) -> impl IntoResponse {
-    let service = match &state.agent_config_service {
-        Some(s) => s,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({ "error": "Agent config service not available" })),
-            )
-                .into_response();
-        }
-    };
+    let service = &state.agent_config_service;
 
     match service.create_template_from_toml_config(body.config) {
         Ok(template_id) => {
@@ -584,16 +530,7 @@ pub async fn update_template_handler(
     Path(id): Path<String>,
     Json(body): Json<UpdateTemplateRequest>,
 ) -> impl IntoResponse {
-    let service = match &state.agent_config_service {
-        Some(s) => s,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({ "error": "Agent config service not available" })),
-            )
-                .into_response();
-        }
-    };
+    let service = &state.agent_config_service;
 
     // Convert JSON config to AgentTemplate
     let template = body.config.into_template();
@@ -627,16 +564,7 @@ pub async fn delete_template_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let service = match &state.agent_config_service {
-        Some(s) => s,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({ "error": "Agent config service not available" })),
-            )
-                .into_response();
-        }
-    };
+    let service = &state.agent_config_service;
 
     match service.delete_template(&id) {
         Ok(()) => {

@@ -33,17 +33,22 @@
 //! and so does a path that resolves to no project at all or to the home store,
 //! which is not a project (`MemoryScopeContext::for_request`).
 //!
-//! **`log_path` is the CLI-managed log, or nothing** (N2, resolved: serve it).
-//! `openalpaca daemon start` points the child's stdout and stderr at
-//! `state/logs/daemon.log`, rotates it at 16 MB, and marks the child with
-//! `store::MANAGED_LOG_ENV` — this run's own claim to the file, not just
-//! *a* file that happens to be there. A daemon started any other way
-//! (`cargo run`, the GUI sidecar), or one that inherited someone else's
-//! leftover `daemon.log` without the marker, reports `null`: the honest
+//! **`log_path` is the launcher-managed log, or nothing** (N2, resolved:
+//! serve it). Both launchers — `openalpaca daemon start` and the GUI sidecar —
+//! point the child's stdout and stderr at `state/logs/daemon.log`, rotate it
+//! at 16 MB, and mark the child with `store::MANAGED_LOG_ENV` — this run's own
+//! claim to the file, not just *a* file that happens to be there. A daemon
+//! started any other way (a bare `cargo run`), or one that inherited someone
+//! else's leftover `daemon.log` without the marker, reports `null`: the honest
 //! answer for a path this run never opened, never a path to something it did
-//! not write (Important #3, T44 fix round 1). Phase B (a real in-daemon
-//! appender, and un-discarding the sidecar's stdout) is a separate task; this
-//! route reports what exists today.
+//! not write (Important #3, T44 fix round 1). The sidecar used to discard its
+//! daemon's output and so reported `null` too; it owns the file now (T30). A
+//! real in-daemon appender remains a separate task.
+//!
+//! **`busy` is the workload, as counts** (owner decision T23, adopted): the
+//! non-terminal runs, the unanswered approval prompts and the open event
+//! sockets — enough for a client to warn honestly before it stops the daemon,
+//! and nothing a list route would add. `null` without a confirmation broker.
 
 use std::sync::Arc;
 
@@ -55,8 +60,9 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use openalpaca_core::daemon_config::{RoutingConfig, SessionsConfig};
+use openalpaca_core::security::confirmation::ConfirmationBroker;
 use openalpaca_core::session_log::{SessionLogService, sweep::SweepReport};
-use openalpaca_storage::{Database, FileAssetRepository, store};
+use openalpaca_storage::{Database, FileAssetRepository, TaskRepository, store};
 use serde::Serialize;
 
 use crate::state::AppState;
@@ -84,7 +90,8 @@ pub struct StatusResponse {
     pub uptime_secs: u64,
     /// The migration version the open database is actually at.
     pub schema_version: i32,
-    /// `<state_dir>/logs/daemon.log`, when the CLI wrote one; `null` otherwise.
+    /// `<state_dir>/logs/daemon.log`, when this run's launcher pointed it
+    /// there (`openalpaca daemon start` or the GUI sidecar); `null` otherwise.
     pub log_path: Option<String>,
     /// Bytes the user uploaded — the total the 500 MB cap is read against.
     pub upload_bytes: i64,
@@ -102,6 +109,32 @@ pub struct StatusResponse {
     /// that is the one the owner configured (L3). `null` when this daemon has
     /// no LLM router at all.
     pub llm: Option<LlmStatus>,
+    /// What this daemon has in flight right now, as counts (T23). `null` when
+    /// the daemon has no confirmation broker, so the block is never half-true.
+    pub busy: Option<BusyStatus>,
+}
+
+/// What this daemon has in flight right now — counts only, never contents
+/// (owner decision T23, adopted).
+///
+/// Exists so a client can warn honestly before it stops the daemon. It is
+/// deliberately not a list: the two list routes that would answer the same
+/// question are both unscoped, and one of them (`GET /v1/chat/confirmations`)
+/// carries full tool arguments, which is owner decision T22. A count leaks the
+/// existence of work, which this route already leaks by serving uptime and
+/// store sizes at all. It widens what `GET /v1/status` describes — the
+/// installation, and now also the workload — which is why it was a decision.
+#[derive(Debug, Serialize)]
+pub struct BusyStatus {
+    /// Runs in a non-terminal state (queued, running, paused) — what the next
+    /// boot would mark `interrupted` if the daemon stopped now.
+    pub running_tasks: u64,
+    /// Tool-approval prompts nobody has answered yet. In memory; a stop drops
+    /// them with no resolution frame.
+    pub pending_confirmations: u64,
+    /// Open `/v1/events` sockets — GUI windows plus any `openalpaca daemon
+    /// tail`. Includes the caller's own window when the caller has one.
+    pub connected_clients: u64,
 }
 
 /// The configured default model against the one that would actually answer
@@ -237,9 +270,10 @@ pub(crate) struct StatusInputs<'a> {
     pub now: DateTime<Utc>,
     pub db: &'a Database,
     pub session_log: Option<&'a SessionLogService>,
-    /// Whether `openalpaca daemon start` marked *this* run as the owner of
-    /// `store::daemon_log_path()` (Important #3). Gates `log_path` alongside
-    /// the file existing — the file alone is not proof this run wrote it.
+    /// Whether this run's launcher marked it as the owner of
+    /// `store::daemon_log_path()` (Important #3, T30). Gates `log_path`
+    /// alongside the file existing — the file alone is not proof this run
+    /// wrote it.
     pub managed_log: bool,
     /// `orchestrator.sessions`, as this daemon is actually enforcing it.
     pub sessions_config: SessionsConfig,
@@ -248,6 +282,11 @@ pub(crate) struct StatusInputs<'a> {
     /// The live router, for the effective-model question (L3). `None` when the
     /// daemon has no LLM configured — the echo-stub boot.
     pub llm_router: Option<&'a openalpaca_llm::LlmRouter>,
+    /// The broker holding the unanswered approval prompts. `None` makes the
+    /// whole `busy` block `null` rather than a block with a guessed zero in it.
+    pub confirmation_broker: Option<&'a ConfirmationBroker>,
+    /// Open `/v1/events` sockets (`EventBroadcaster::client_count`).
+    pub connected_clients: usize,
 }
 
 /// `GET /v1/status`
@@ -265,6 +304,8 @@ pub async fn status_handler(State(state): State<Arc<AppState>>, headers: HeaderM
                 .llm_settings_service
                 .as_ref()
                 .map(|service| service.router().as_ref()),
+            confirmation_broker: Some(&state.confirmation_broker),
+            connected_clients: state.event_broadcaster.client_count(),
         },
         &headers,
     )
@@ -292,6 +333,19 @@ fn status_response(inputs: &StatusInputs<'_>, headers: &HeaderMap) -> Response {
     let bytes = match FileAssetRepository::new(inputs.db).storage_bytes_by_origin() {
         Ok(bytes) => bytes,
         Err(e) => return database_unavailable(e),
+    };
+    // Counted only when all three counts can be: with no broker there is no
+    // honest `pending_confirmations`, so there is no block.
+    let busy = match inputs.confirmation_broker {
+        None => None,
+        Some(broker) => match TaskRepository::new(inputs.db).count_non_terminal() {
+            Ok(running_tasks) => Some(BusyStatus {
+                running_tasks,
+                pending_confirmations: broker.pending_count() as u64,
+                connected_clients: inputs.connected_clients as u64,
+            }),
+            Err(e) => return database_unavailable(e),
+        },
     };
 
     let body = StatusResponse {
@@ -329,6 +383,7 @@ fn status_response(inputs: &StatusInputs<'_>, headers: &HeaderMap) -> Response {
                 default_model,
             }
         }),
+        busy,
     };
     (StatusCode::OK, Json(body)).into_response()
 }
@@ -355,18 +410,19 @@ fn store_roots() -> anyhow::Result<(String, String, String)> {
     ))
 }
 
-/// The CLI-managed daemon log, reported only when it is really there *and*
-/// this run is the one that opened it.
+/// The launcher-managed daemon log, reported only when it is really there
+/// *and* this run is the one it was opened for.
 ///
 /// `store::daemon_log_path()` creates nothing, so asking the question does not
-/// answer it: a daemon the CLI never started has no `state/logs/daemon.log`
-/// and says so with `null` rather than handing the GUI a path whose Copy
-/// button would put a non-existent file on the clipboard. The file existing
-/// is not enough on its own, though — a GUI- or `cargo run`-launched daemon
-/// can find a previous CLI daemon's log sitting at the exact same path, and
+/// answer it: a daemon no launcher pointed at the file has no
+/// `state/logs/daemon.log` and says so with `null` rather than handing the GUI
+/// a path whose Copy button would put a non-existent file on the clipboard.
+/// The file existing is not enough on its own, though — a `cargo run`-launched
+/// daemon can find a previous daemon's log sitting at the exact same path, and
 /// reporting that would hand the owner a file whose newest line predates the
 /// running daemon (Important #3, T44 fix round 1). `managed` is that second
-/// check: only a run `openalpaca daemon start` itself opened the file for.
+/// check: only a run whose launcher (`openalpaca daemon start` or the GUI
+/// sidecar, T30) opened the file for it.
 fn daemon_log_path(managed: bool) -> Option<String> {
     if !managed {
         return None;

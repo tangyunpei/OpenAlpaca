@@ -19,15 +19,12 @@ tokio-tungstenite.workspace = true
 clap.workspace = true
 reqwest = { workspace = true, features = ["stream", "multipart"] }
 mime_guess.workspace = true
-tokio-stream.workspace = true
 colored.workspace = true
 urlencoding.workspace = true
 dialoguer.workspace = true
 console.workspace = true
 nix.workspace = true
 sysinfo.workspace = true
-log.workspace = true
-env_logger.workspace = true
 rustyline.workspace = true
 
 # Workspace crates

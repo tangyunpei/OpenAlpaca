@@ -122,10 +122,11 @@ openalpaca daemon restart
 
 Notes:
 - `start` launches daemon and then GUI unless `--daemon-only` is set.
-- `stop` stops both daemon and GUI.
-- `restart` restarts daemon only.
+- `stop` asks the daemon to stop and waits until its process has exited and its single-instance lock is free — at most 15 s — and stops nothing else: an open app window stays open, keeps its unsent draft and shows `stopped elsewhere` (below). To quit the app too, run `openalpaca gui stop`. A daemon still there after 15 s is reported with its PID, the daemon log to read and the `kill -9` that finishes the job by hand, and `stop` exits with status 2.
+- `restart` restarts the daemon only. It stops it the same way and starts the new one only once the old process has exited **and** the lock is free: a daemon keeps the lock for up to 10 s after its port closes, and a new one started into it would exit at once. If the old daemon is not gone within 15 s, nothing is started — `restart` prints why, and the commands that finish the job, and exits with status 2.
 - `status` reads the discovery file and calls the daemon's health endpoint. It prints status, version, PID, instance id and URL.
-- `tail` streams live daemon events (not historical query output); `--count` limits the number of events shown, default `0` = unlimited (Ctrl+C to stop).
+- `tail` streams live daemon events (not historical query output); `--count` limits the number of events shown, default `0` = unlimited (Ctrl+C to stop). When the daemon shuts down, `tail` prints its `daemon_shutting_down` frame as an unknown event and then `Connection closed by server`.
+- The CLI and the GUI app manage one daemon, not one each. A `stop` or `restart` from here shows in an open app window as `stopped elsewhere`; the app does not start a daemon again until someone chooses `Start daemon` there, which after a `restart` finds the new one. This verb sends the daemon SIGTERM and the app sends `POST /v1/command {"command":"shutdown"}`; the daemon treats the two as one shutdown, and both then wait the same way — for the process, then for the lock.
 - `start` finds `openalpacad` in this order: `OPENALPACA_DAEMON_BIN=/abs/path/openalpacad`, next to the `openalpaca` binary (symlinks followed), `../libexec/`, then `PATH`. From a repository checkout it falls back to `cargo run -p openalpacad`.
 - Daemon startup sets `OPENALPACA_CONFIG_DIR` to `~/.openalpaca/config` and runs the daemon with `~/.openalpaca` as its working directory.
 - The daemon's output is appended to `~/.openalpaca/state/logs/daemon.log`; `start` prints the path. A log past 16 MB is rotated at start (`daemon.log.1` … `.3`).
@@ -144,7 +145,7 @@ openalpaca config reset [<key>] [--factory]
 
 Notes:
 - Bare `openalpaca config` (no subcommand) opens an interactive configuration TUI.
-- `config` operates directly on the local database and TOML files — no running daemon required (the TUI's agent-management screen is the exception; it talks to the daemon).
+- `config` operates directly on the local database and TOML files — no running daemon required. Two exceptions: the TUI's agent-management screen talks to the daemon, and `reset --factory` refuses while one is running. A file-backed key (`ai.*`, `daemon.*`) does not open the database at all, so `set`, `get` and a keyed `reset` on those keys work even when the database is refused; `list`, a keyless `reset` and the interactive editor all need it.
 - `--all` includes unset keys with their defaults; `-v/--verbose` adds a source column (db / llm.toml / daemon.toml).
 - `set` validates keys against the config schema; unknown keys get "did you mean" suggestions. A sensitive value (a token, an API key) is masked wherever it is printed.
 - `get` prints the stored value, or the schema default followed by `(default)` when nothing is stored.
@@ -168,7 +169,15 @@ openalpaca config list --all -v
 
 Which file is edited: the one in `OPENALPACA_CONFIG_DIR` when that names a directory; otherwise `~/.openalpaca/config/<file>` when it exists; otherwise `./config/<file>` under the current directory (a repository checkout). A daemon running on the same config directory watches `llm.toml` and `daemon.toml` and picks an edit up without a restart.
 
-`reset <key>` deletes that one key. `reset` with no key resets all configuration after a confirmation (agents and data are preserved). `reset --factory` performs a full storage reset (wipes agents, memories, everything), also after a confirmation.
+`reset <key>` deletes that one key, from whichever backend owns it — the database, `llm.toml` or `daemon.toml`. `reset` with no key clears all configuration after a confirmation (agents and data are preserved). `<key>` and `--factory` are mutually exclusive.
+
+`reset --factory` is the rescue verb. It deletes the database file `~/.openalpaca/state/openalpaca.db` together with its `-wal` and `-shm` siblings, then clears `config/llm.toml` (provider settings and every API key in it, including the keychain entries those keys point at) and resets `config/daemon.toml` to its defaults. The next daemon start builds an empty database at the current schema version. It is the way out of `Unsupported legacy schema version …`, and the only form of `config` that clears a refused database. It reaches one because it opens no database — it deletes the files and asks the schema nothing. Every other form that needs the database opens it and dies on the same guard; a file-backed `ai.*` or `daemon.*` key (above) opens none either, so it still works, but it leaves the database as refused as it was.
+
+- It **refuses while a daemon is running.** Stop it with `openalpaca daemon stop` first. Deleting a file the daemon has open would leave it writing into an unlinked inode while the next start created a second database beside it. The check is the daemon's own singleton lock, taken before the prompt and held until the files are gone, so a daemon that is still booting also refuses it, and a daemon started while the prompt is open — the app, or `daemon start` in another terminal — exits on the lock instead of opening the database. When the lock is held but no running daemon can be found — one still booting, or a lock file you cannot write (a daemon once run under `sudo` leaves `state/openalpacad.lock` owned by root) — it refuses with a message naming that file instead of telling you to stop a daemon that `openalpaca daemon stop` will not find.
+- It prints the absolute store root it is about to wipe — `OPENALPACA_HOME_STORE` may point anywhere — and the absolute paths of the `llm.toml` and `daemon.toml` it will clear, found the way `config set` finds them (above), so a run from a repository checkout names the checkout's own `./config/` files when that is where they resolve; a file that does not exist is named as none. It then requires you to type `factory-reset`. `y` is not enough, there is no `--yes` flag, and the prompt cannot be answered by a pipe: run it at a terminal.
+- **No backup is taken and there is no undo.**
+- **Not touched:** `state/cache/` (the local embedding model, ~1 GB), `state/.master_key`, `state/logs/`, `state/backups/`, `config/mcp.toml`, `config/agents/`, `config/skills/`, `config/orchestrator/`, and `~/.openalpaca/plugins/`.
+- **Left on disk, now unreferenced:** everything under `artifacts/`, `uploads/` and `sessions/`. The rows that indexed those files are gone; the bytes are not. Delete the directories yourself if you want the space back.
 
 ### `gui`
 
@@ -179,7 +188,7 @@ openalpaca gui start
 openalpaca gui stop
 ```
 
-`start` looks for the app bundle in this order: `OPENALPACA_GUI_APP=/abs/path/openalpaca-gui.app`, `~/Applications/openalpaca-gui.app`, `/Applications/openalpaca-gui.app`. From a repository checkout it falls back to the Tauri dev build.
+`start` looks for the app bundle in this order: `OPENALPACA_GUI_APP=/abs/path/openalpaca-gui.app`, `~/Applications/openalpaca-gui.app`, `/Applications/openalpaca-gui.app`. From a repository checkout it falls back to the Tauri dev build. `stop` sends SIGTERM to the app's process — on macOS the bundle's `openalpaca_gui` — and leaves the daemon running; an unsent draft in the app is lost.
 
 ### `connector`
 
@@ -598,7 +607,7 @@ Would purge /Users/me/code/my-project
 Nothing was deleted. Re-run with -y to carry this out.
 ```
 
-- The daemon refuses rather than guesses, the same way the re-base does: nothing of yours recorded under the path is a `404`, and so is a root holding rows that belong to another owner; a run there that is queued, running or paused — or a conversation with a run in flight — is a `409` `WORKSPACE_BUSY` (a queued run has not started yet, but it already named this root and is about to resolve the store the moment it does), and with `--all` one busy root refuses the whole call rather than purging the others; a path resolving to the home store is a `409` `WORKSPACE_IS_HOME` (the home store is not a project, and a factory reset is deleting `~/.openalpaca/state/`, a separate deliberate act); a relative path is a `400`.
+- The daemon refuses rather than guesses, the same way the re-base does: nothing of yours recorded under the path is a `404`, and so is a root holding rows that belong to another owner; a run there that is queued, running or paused — or a conversation with a run in flight — is a `409` `WORKSPACE_BUSY` (a queued run has not started yet, but it already named this root and is about to resolve the store the moment it does), and with `--all` one busy root refuses the whole call rather than purging the others; a path resolving to the home store is a `409` `WORKSPACE_IS_HOME` (the home store is not a project, and a factory reset is `openalpaca config reset --factory`, a separate deliberate act); a relative path is a `400`.
 - A purge is not reversible and there is no undo. Back up `<project>/.openalpaca` first if you might want the transcripts again.
 
 ### `chat`
@@ -713,7 +722,8 @@ A tool on the confirm list suspends the turn and asks before it runs.
 
 - Discovery missing/expired: start or restart daemon. `Discovery token has expired` means the daemon has been up for more than 24 hours — `openalpaca daemon restart`.
 - Auth errors: ensure CLI and daemon use the same current discovery file (the same `OPENALPACA_HOME_STORE`, if you set one).
-- `daemon status` unhealthy: inspect the daemon log (`~/.openalpaca/state/logs/daemon.log` for a daemon started with `openalpaca daemon start`) and `RUST_LOG` settings.
+- `daemon status` unhealthy: inspect the daemon log (`~/.openalpaca/state/logs/daemon.log` for a daemon started with `openalpaca daemon start` or by the GUI app) and `RUST_LOG` settings.
+- `daemon stop` or `restart` exits with status 2: the old daemon was not gone 15 s after it was asked to stop. The message says whether the process is still running (it prints the `kill -9 <pid>` that finishes the job) or something still holds the single-instance lock (check `openalpaca daemon status`). `restart` starts nothing in either case.
 - Chat/stream failures: verify daemon is reachable on `127.0.0.1` and token is valid.
 - A chat turn fails with no routable model: run `openalpaca llm status` — its `Model:` line names the fix. With a local Ollama that is `openalpaca config set ai.ollama.enabled true`, then `openalpaca llm models --refresh`.
 - A scripted or piped turn reports that a tool needs an approval it cannot ask for: the turn was unattended, so the tool was refused without a prompt. Run that work from the GUI or from an interactive `openalpaca chat`, and approve it there.

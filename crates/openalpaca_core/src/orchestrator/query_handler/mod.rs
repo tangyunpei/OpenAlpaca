@@ -1,6 +1,5 @@
 use super::Orchestrator;
 use openalpaca_llm::{ChatMessage, ContentPart, ImageSource, Role, ToolChoice};
-use openalpaca_storage::repository::PreferenceRepository;
 
 /// Optional overrides for handle_simple_query loop configuration.
 pub(super) enum LoopOverrides {
@@ -190,30 +189,9 @@ impl Orchestrator {
             return String::new();
         }
 
-        let pref_repo = PreferenceRepository::new(db);
         let mut block = String::from("<send_context>\n");
         for ch in &sendable {
-            let has_default = match ch.as_str() {
-                "telegram" => pref_repo
-                    .get(owner, "telegram.last_chat_id")
-                    .ok()
-                    .flatten()
-                    .and_then(|p| p.value.parse::<i64>().ok())
-                    .is_some(),
-                "imessage" => {
-                    pref_repo
-                        .get(owner, "imessage.last_reply_target")
-                        .ok()
-                        .flatten()
-                        .is_some()
-                        || pref_repo
-                            .get(owner, "imessage.last_chat_id")
-                            .ok()
-                            .flatten()
-                            .is_some()
-                }
-                _ => false,
-            };
+            let has_default = super::direct_send::has_default_recipient(db, owner, ch);
 
             let recipient_fmt = match ch.as_str() {
                 "telegram" => "\"default\" | numeric chat_id",

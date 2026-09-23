@@ -89,34 +89,63 @@ does not choose this layout — it asks the storage crate for it
 ```
 
 When the GUI spawns the daemon it sets the child's working directory to that
-root and `OPENALPACA_CONFIG_DIR` to `<root>/config`
-(`src-tauri/src/lib.rs`, `spawn_daemon`). A project you point the GUI at keeps
+root and `OPENALPACA_CONFIG_DIR` to `<root>/config`, and appends the daemon's
+output to `<root>/state/logs/daemon.log` — the same file, under the same
+rotation (16 MB, three older generations kept), that `openalpaca daemon start`
+writes (`src-tauri/src/lib.rs`, `spawn_daemon`). A project you point the GUI at keeps
 its own store at `<project>/.openalpaca/`.
 
-First boot of a rebuilt daemon moves the contents of the legacy directory
-(`~/Library/Application Support/OpenAlpaca` on macOS) into this root once. The
-move is idempotent and resumable but **not reversible** — back the old
-directory up first, and quit any old daemon, which otherwise blocks the move.
+Nothing is moved into this root for you. If a development build's data directory
+(`~/Library/Application Support/OpenAlpaca` on macOS) is still on the machine,
+the daemon says so. It refuses to start only when that directory holds a
+database, a `.master_key` or a `config/` **and** this root has no database yet —
+rather than come up on an empty database beside it; the app then shows the
+daemon's own message in Settings → Connection, read from `daemon.log`. Otherwise
+it starts, and logs one warning per boot while that directory still holds a
+database, `.master_key`, `config/`, `plugins/` or `assets/`. See [If You Have Data From an Older
+Build](Installation_Manual.md#if-you-have-data-from-an-older-build).
 
 ## Connection lifecycle
 
-The webview asks the Rust shell for a connection; two Tauri commands are the
+The webview asks the Rust shell for a connection; these Tauri commands are the
 whole bridge (`src-tauri/src/lib.rs`):
 
 - `ensure_daemon_running` — the boot path. It reads `state/discovery.json` and
   probes liveness by opening a TCP connection to the advertised address
   (300 ms). A live daemon is used even if the file's 24 h expiry has lapsed,
   because liveness is the authoritative signal. If nothing answers, the daemon
-  is spawned detached (`setsid` on Unix) and the command polls for up to about
-  five seconds (25 × 200 ms) for a daemon that both advertises itself and
-  accepts connections.
+  is spawned detached (`setsid` on Unix), its output appended to
+  `state/logs/daemon.log`, and the command polls for up to about five seconds
+  (25 × 200 ms) for a daemon that both advertises itself and accepts
+  connections. **If none does, the error says why:** it ends with the last
+  lines this spawn wrote to the log — the daemon's own refusal, verbatim (an
+  older schema, an older install's data still on the machine, another daemon
+  holding the lock) — or says the daemon wrote nothing at all. Only this
+  spawn's lines are quoted, never an earlier run's.
 - `get_connection_info` — the reconnect path. It re-reads discovery and checks
   the expiry without spawning anything.
+- `await_daemon_stopped` — waits until a daemon asked to stop is really gone:
+  its process first, then the single-instance lock, for up to 15 s. It signals
+  nothing.
+- `read_daemon_log_tail` — the end of `state/logs/daemon.log`, read straight
+  from the file, so it answers when no daemon is serving anything.
 
-Both return `{ baseUrl, token, instanceId }`. `instanceId` is the identity
+The first two return `{ baseUrl, token, instanceId }`. `instanceId` is the identity
 guard: if it changes, the daemon restarted, so every `task_id`, `stream_id` and
 `request_id` the client holds is dead and the app re-bootstraps rather than
 merely reopening its socket (`src/lib/connection.ts`).
+
+**Three ways to have no daemon, told apart.** A window that stopped the daemon
+itself (Settings → Connection → `Stop daemon…`) says `stopped`; one whose daemon
+announced it was going away — the CLI or another window stopped it, and the
+daemon sends a `daemon_shutting_down` frame before it closes the socket — says
+`stopped elsewhere`. In both, the dot is the neutral grey, nothing polls,
+nothing reconnects and **nothing starts the daemon again on its own**: the way
+back is `Start daemon`. A daemon that went away without saying so (a crash,
+`kill -9`, the machine sleeping) is `disconnected`, red, and the window keeps
+trying to reconnect by itself (1 s, doubling to 30 s), which reads discovery and
+never spawns anything. Reopening the app is a fresh start either way — the stop
+is not remembered, and the app starts a daemon on boot as it always does.
 
 **Live events.** One WebSocket carries the daemon's whole `ServerEvent`
 firehose: `GET /v1/events?token=…` — browsers cannot set WebSocket headers, so
@@ -137,7 +166,11 @@ loud; it is never appended to the answer, and nothing stores it. A turn that
 reaches no answer at all — it ran out of tool rounds, hit its cost cap, or was
 cut short — arrives as one plain line saying so and naming the last tool error,
 in the assistant bubble like any other reply, and it is in the transcript after
-a reload. A turn never ends with an empty bubble.
+a reload. A turn never ends with an empty bubble. A daemon that shuts down
+mid-turn ends the stream with one `error` frame that says so — and that a
+workflow the turn had started comes back `interrupted` — rather than leaving it
+hanging; being the daemon's own terminal frame, it retires this turn's
+main-loop approval card with it.
 
 **Auth.** HTTP requests carry the discovery bearer token in a header. The
 WebSocket, the SSE stream and the artifact content routes take `?token=`
@@ -269,6 +302,16 @@ Besides messages, the transcript carries:
 The run pill and the file chips are read off stored history, so they survive a
 reload. The run-report card is built from the live `workflow_started` /
 `task_status` frames and does not.
+
+**When nothing can answer.** An empty transcript on an install where the
+daemon can route no model carries a first-run card: the daemon's own reading
+of its `llm` block (`GET /v1/status`), a reminder that a local model needs no
+API key, and one button to Settings → Models & keys. It is derived, never
+stored — there is no "setup completed" flag anywhere — so it disappears the
+moment a model becomes routable and comes back if one stops. While the status
+request is still in flight the card is **not** drawn: an unanswered daemon is
+not a daemon with no model. The card never blocks the composer; a message
+sent into it is answered by the daemon's own sentence naming this screen.
 
 **Composer.** Two mutually exclusive states. Normally: a growing textarea, the
 `Attach` button, the model picker, and today's spend. While a tool confirmation
@@ -547,6 +590,50 @@ rather than shown as `0`, because a zero is a claim.
 The liveness dot and instance id (`GET /v1/health`), the endpoint, and
 `Reconnect` (re-bootstrap, then reopen the socket).
 
+**Stop daemon…** opens a confirmation before anything happens. It re-reads what
+the daemon is doing — `Right now: 2 workflows running · 1 tool waiting for
+approval · 3 windows connected.` (this window counts), or, from a daemon too old
+to say, a line saying the window cannot tell — and `Stop daemon` stays disabled
+until that read has answered. `Cancel` is the default button and Escape
+cancels; nothing asks you to type a word. What the dialog tells you is what a
+stop does, and no more:
+
+- everything stops immediately — nothing is finished first;
+- a running workflow is cut off mid-step and comes back marked `interrupted`
+  when the daemon starts again — open it in Work and choose Rerun;
+- anything you typed at a running workflow while it worked is kept and
+  delivered on that conversation's next turn;
+- a reply that is streaming is lost, and a tool waiting for your approval is
+  dropped without running;
+- when a connector is running, people messaging OpenAlpaca from Telegram,
+  Discord or iMessage get no reply and no error until you start it again —
+  there is no farewell message;
+- your conversations, artifacts, uploads and memories are untouched.
+
+The app asks the daemon to shut down (`POST /v1/command`), then waits — up to
+15 s — for its process to exit and its lock to be released before it says
+`Daemon stopped.`; a daemon that does not go, or a lock something else still
+holds, is reported with the terminal command to finish the job. Until that
+wait answers the card reads `Stopping the daemon…` and its button `Stopping…`,
+greyed out: a daemon started while the old one still holds its lock would lose
+to it and exit. Afterwards the card's title is what the wait found —
+`Daemon stopped`, or `Daemon did not stop`, `Daemon exited, lock still held`,
+`Daemon stop not confirmed` — never just what was asked. A request the
+daemon refuses leaves the window connected. **While stopped**, the card reads
+`Daemon stopped` (or `Daemon stopped from elsewhere`) with when it happened,
+`Start daemon` replaces `Reconnect`, the composer's Send is closed with "The
+daemon is stopped — start it to send a message." (a draft is kept), and nothing
+polls. `Start daemon` starts one — the sidecar, if nothing is running — and
+refetches everything, because a new daemon has a new port, token and instance
+id.
+
+**When the daemon is unreachable**, the card shows why, in a scrolling block,
+exactly as the shell reported it — for a daemon that would not start, that is
+the end of what it wrote to `daemon.log` before it gave up. `Show daemon log`
+reads the last 200 lines of `state/logs/daemon.log` straight from the file
+(`Refresh` re-reads; nothing polls), so it works for a daemon that is running
+but misbehaving and for one that never came up.
+
 Today's spend and tokens come from `GET /v1/usage/summary`, and so does the day
 itself — the daemon's UTC date rather than the browser's local one. Today's run
 count is the run list filtered to that same date, so all three figures mean the
@@ -563,10 +650,11 @@ own, the `*_max_daily_cost_usd` keys under `[orchestrator.costs]` in
 `GET /v1/status` supplies uptime, the open database's `schema_version`, the
 store's two size totals kept deliberately apart (uploaded bytes, which the
 upload quota is read against, and produced bytes, which are never charged), what
-the boot session-log sweep did, and `Copy log path`. The log path is `null` for
-a daemon this run did not launch — a sidecar, a `cargo run`, or one that merely
-found an older CLI daemon's leftover log — and the button is inert there,
-because a path to a file this daemon did not write is worse than no path.
+the boot session-log sweep did, and `Copy log path`. Both launchers — this app
+and `openalpaca daemon start` — write `daemon.log` and claim it, so the path is
+`null` only for a daemon started by hand (a bare `cargo run`), or one that
+merely found an older daemon's leftover log; the button is inert there, because
+a path to a file this daemon did not write is worse than no path.
 
 **The project.** One absolute path, typed, kept on this machine. The daemon
 reads it as `x-workspace-path` on `POST /v1/chat`; runs started from here record
@@ -594,20 +682,39 @@ The provider list and its keys (`GET /v1/settings/llm`), the model catalogue
 `GET /v1/usage/summary`'s `by_provider`; a provider with no calls today says so
 rather than borrowing a lifetime number.
 
-**Keys are read-only here for now.** Each row counts the provider's keys, but
-the key editor is not built: `Add provider` answers with a toast saying so, and
-nothing in this section adds, removes or reorders a key. A local provider needs
-no key at all; see below.
+**Adding a key.** `Add key` in the card header opens the form; each provider
+row has its own `Add key` beside the switch. Pick the provider, paste the key,
+and save. `Check key` is optional and separate: it asks the daemon to look at
+the key (`POST /v1/settings/llm/validate`) and reports what it found, but a
+check that fails or times out never stops a save — the router finds out on the
+first real call either way. Priority (`primary` / `fallback`), source and a
+note are the same fields `openalpaca llm keys add` asks for (see the
+[CLI Manual](CLI_Manual.md)). The key field is hidden, and the key is cleared
+from the form once it is saved.
 
-A cloud provider therefore takes two steps, in this order:
+**A cloud provider takes two steps, in this order, and the form enforces it.**
+Turn the provider's switch on first, then add the key. Every provider starts
+off, and adding a key does not turn one on. Saving a key for a switched-off
+provider would be accepted by the daemon and achieve nothing — the router
+drops a disabled provider's models from its catalogue and only the enable puts
+them back — so the form refuses before saving, says why, and puts a
+`Turn <provider> on` button in the refusal. It does not flip the switch for
+you, and it does not save first and offer afterwards. While a switch is still
+being applied the form waits for the daemon's answer before it will save, so a
+switch that fails cannot leave a key behind on a provider that stayed off.
+Between the two steps
+the row reads `On, but not loaded`, as described next.
 
-1. Turn the provider's switch on here (or run
-   `openalpaca config set ai.<provider>.enabled true`). Every provider starts
-   off, and adding a key does not turn one on.
-2. Add the key from the CLI: `openalpaca llm keys add --provider <name>`, which
-   asks for the key with hidden input (see the [CLI Manual](CLI_Manual.md)).
-
-Between the two steps the row reads `On, but not loaded`, as described next.
+**Keys already stored.** Each provider row lists its keys: the masked secret
+exactly as the daemon masks it, the priority, the source, and the health
+`GET /v1/settings/llm` reports (`health unknown` for a key nothing has used
+yet). A key written by the CLI shows the source label the CLI wrote.
+`Make primary` promotes a fallback key (`PUT /v1/settings/llm/keys/priority`);
+`Remove` deletes one on a second click (`DELETE
+/v1/settings/llm/keys/{provider}/{key_id}`), and clicking anywhere else first
+disarms it. There is no undo, and removing the last key of the only enabled
+provider leaves the install unable to answer — the chat's first-run card
+comes back.
 
 The per-provider switch writes the bit to `llm.toml` and moves the router
 live (`PUT /v1/settings/llm/providers/{provider}/enabled`): a disable unloads
@@ -624,10 +731,13 @@ reload the row says `On, but no models loaded` instead.
 no key at all, so its row reads `no key needed · <strategy>` where a cloud
 provider counts its keys, and the switch is the whole setup: there is nothing
 to type first. The enable's own answer says what the daemon then found —
-`ollama on — found 3 models`, or `it reported no models`, or `its model list
-could not be read (<reason>)`. A zero is never left to speak for itself. (A key
-you wrote by hand for a local provider is still counted; the line reports what
-is there.)
+`ollama on — found 3 models`, or `it reported no models`, or — when the daemon
+could not ask it, usually because Ollama is not running — `ollama on, but it
+could not be reached (<reason>) — start it and press Refresh models`. A zero is
+never left to speak for itself. (A key you wrote by hand for a local provider
+is still counted; the line reports what is there.) `Add key` on a local
+provider's row opens the form on a page that says there is nothing to type: no
+key field, no save button, and the switch if it is off.
 
 **Refresh models.** The card header carries a `Refresh models` button
 (`POST /v1/models/refresh`): every loaded provider is asked what it can serve,
@@ -791,24 +901,30 @@ rendering review happens; there is no daily spend bar because there is no
 overall daily budget; there is no per-tool switch because ENABLE is per
 extension; the replay-resume button is hidden unless the daemon enables it.
 
-One absence is the GUI's own rather than the daemon's: the API-key editor in
-Settings → Models & keys is not built yet, although the daemon serves the key
-routes. `Add provider` says so in a toast, and `openalpaca llm keys` is the way
-to manage keys until it exists.
-
 ## Troubleshooting
 
-**Cannot connect.** The shell probes TCP liveness before trusting
-`state/discovery.json`, so a stale file is not the usual cause. Check that a
-daemon can start at all (`openalpaca daemon status`, or run `openalpacad` in a
-terminal and read its output) and that `state/discovery.json` exists and is
-readable. In `bun run dev` there is no Tauri bridge, so both connection
-commands fail by design.
+**Cannot connect.** Settings → Connection shows why: a daemon that would not
+start leaves its reason at the end of `state/logs/daemon.log`, and the card
+quotes it (`Show daemon log` reads more). The shell probes TCP liveness before
+trusting `state/discovery.json`, so a stale file is not the usual cause. If the
+error says the daemon wrote nothing to its log, the daemon binary did not run
+at all — check it is installed beside the app. In `bun run dev` there is no
+Tauri bridge, so every shell command fails by design.
+
+**The window says the daemon is stopped.** `stopped` means this window stopped
+it; `stopped elsewhere` means it announced it was going away — `openalpaca
+daemon stop` or `restart`, or another window. Neither comes back on its own:
+choose `Start daemon` in Settings → Connection (after a CLI `restart`, that finds
+the new daemon rather than starting a second one). If the dialog said the daemon
+did not stop within 15 seconds, run `openalpaca daemon stop` from a terminal
+first. A red `disconnected` is different — the daemon went away unannounced, and
+the window is already trying to reconnect.
 
 **Connection flaps.** Watch the instance id in Settings → Connection: a change
 means the daemon restarted, and the app deliberately re-bootstraps and drops
-every id it held. Repeated restarts are a daemon problem — read the log path
-that panel copies, or `state/logs/daemon.log` for a CLI-managed daemon.
+every id it held. Repeated restarts are a daemon problem — read the log
+(`Show daemon log` in that panel, or the path it copies:
+`state/logs/daemon.log`).
 
 **A list looks stale.** The event socket is best-effort and the daemon drops
 frames for a lagged client without telling it. Anything that arrived over the
@@ -820,7 +936,8 @@ shows the daemon's own reason under the switch — a `200` that wrote the bit
 without loading the provider says so, and an enable that loaded but found
 nothing to serve says that instead. `config/llm.toml` is seeded on first daemon
 start with every provider off and no keys. A cloud provider needs both: its
-switch on, then a key (`openalpaca llm keys add`). A **local** provider needs
+switch on, then a key (`Add key` on its row, or `openalpaca llm keys add`); the
+form refuses a key for a provider whose switch is off. A **local** provider needs
 no key — turn `ollama` on, and `Refresh models` after a later `ollama pull`. See
 [Installation Manual → Local Models (Ollama)](Installation_Manual.md#local-models-ollama).
 

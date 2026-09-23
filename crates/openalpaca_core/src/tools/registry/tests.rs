@@ -1005,6 +1005,28 @@ fn test_tool_name_validation() {
     assert!(registry.register(make_tool_with_name("good_tool")).is_ok());
 }
 
+/// The limit is on bytes and the refusal's preview is cut at byte 32, so an
+/// over-long **non-ASCII** name — `<server>__<tool>` from a remote MCP server
+/// is not validated as ASCII anywhere — used to panic while building the
+/// error instead of returning it. 100 CJK characters are 300 bytes, and byte
+/// 32 falls inside the eleventh of them.
+#[test]
+fn test_tool_name_validation_rejects_long_non_ascii_without_panicking() {
+    let registry = ToolRegistry::default();
+    let name = "日".repeat(100);
+    assert_eq!(name.len(), 300);
+    let err = registry
+        .register(make_tool_with_name(&name))
+        .expect_err("a 300-byte name must be refused");
+    assert!(err.contains("exceeds 256 byte limit"), "{err}");
+    // The preview kept whole characters and stayed inside its byte budget.
+    assert!(err.contains("'日日日日日日日日日日..."), "{err}");
+    // A 4-byte emoji name refuses the same way.
+    let emoji = "🙂".repeat(100);
+    assert_eq!(emoji.len(), 400);
+    assert!(registry.register(make_tool_with_name(&emoji)).is_err());
+}
+
 #[tokio::test]
 async fn test_unknown_type_rejected_via_validation() {
     // json_value_matches_type is private, so we test it indirectly through

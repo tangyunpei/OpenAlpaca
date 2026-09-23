@@ -78,9 +78,9 @@ openalpaca llm keys add --provider anthropic   # prompts for the key, a source a
 ```
 
 Keep this order: switch the provider on, then add the key. Both take effect
-without a restart. In the desktop app the same on/off switch is
-under Settings → Models & keys; the app has no key editor yet, so add a cloud
-key from the CLI.
+without a restart. The desktop app does the same two steps on one screen —
+Settings → Models & keys, where `Add key` refuses to save until the provider
+is switched on and offers the switch in the refusal.
 
 Check the result:
 
@@ -133,10 +133,14 @@ openalpaca daemon tail         # follow daemon events; -c N stops after N
   and config are kept.
 - **Uninstall:** `./scripts/release/uninstall.sh`. It leaves `~/.openalpaca`
   in place; delete that directory yourself for a complete cleanup.
-- **Coming from an older install** that kept its data under
-  `~/Library/Application Support/OpenAlpaca`? Read
-  [Migrating From the Old Data Directory](Installation_Manual.md#migrating-from-the-old-data-directory)
-  first — the move is automatic and not reversible.
+- **Have a development build's data** under
+  `~/Library/Application Support/OpenAlpaca`? Nothing is moved for you. If that
+  directory holds a database, a `.master_key` or a `config/` and `~/.openalpaca`
+  has no database yet, the daemon refuses to start rather than come up on an
+  empty database beside it; otherwise it starts, and warns once per boot while that
+  directory still holds a database, `.master_key`, `config/`, `plugins/` or `assets/`.
+  Read [If You Have Data From an Older
+  Build](Installation_Manual.md#if-you-have-data-from-an-older-build) first.
 
 ## Next
 

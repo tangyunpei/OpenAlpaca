@@ -14,7 +14,9 @@
 
 import {
   bootstrapConnection,
+  getStopIntent,
   refreshConnection,
+  setStopIntent,
   wsUrl,
   type ConnectionInfo,
 } from "./connection";
@@ -40,6 +42,11 @@ export type ConfirmationOutcome =
 // prettier-ignore
 export type ServerEvent =
   | { type: "heartbeat"; ts: string; instance_id: string; _id: number }
+  // The daemon is going away. Sent per socket, immediately before a close with
+  // code 1001 — never broadcast, and never replayed. `grace_secs` is the
+  // daemon's force-exit window, so a window can say how long it will be before
+  // the process is gone for certain.
+  | { type: "daemon_shutting_down"; grace_secs: number; ts: string; instance_id: string; _id: number }
   | { type: "command_received"; request_id: string; command: string; ts: string; instance_id: string; _id: number }
   | { type: "wake"; wake: unknown; ts: string; instance_id: string; _id: number }
   | { type: "connector_status"; id: string; status: string; ts: string; instance_id: string; _id: number }
@@ -199,7 +206,20 @@ export class DaemonEventsClient {
   private disconnectedAt: number | null = null;
 
   private status: EventsStatus = "idle";
+  /** The socket's own last failure — overwritten by every transport error. */
   private lastError: string | null = null;
+  /**
+   * Why the last bootstrap failed, kept apart from `lastError`.
+   *
+   * A daemon that writes `discovery.json` and then dies (a database it will
+   * not open) leaves a stale, unexpired endpoint behind; the ladder reads it,
+   * dials a dead port, and the socket's generic "WebSocket connection error"
+   * used to replace the daemon's own reason within a second. A transport
+   * error says nothing new about why the daemon is gone, so it never
+   * overwrites this. Replaced by the next failed bootstrap; cleared only by a
+   * socket that actually opens.
+   */
+  private bootError: string | null = null;
   private ring: ServerEvent[] = [];
 
   private readonly eventListeners = new Set<(event: ServerEvent) => void>();
@@ -214,8 +234,12 @@ export class DaemonEventsClient {
     return this.status;
   }
 
+  /**
+   * Why the daemon is unreachable: the last bootstrap's reason while one is
+   * standing, else the socket's own last failure.
+   */
   getLastError(): string | null {
-    return this.lastError;
+    return this.bootError ?? this.lastError;
   }
 
   /** Newest-first ring of received events. */
@@ -252,14 +276,31 @@ export class DaemonEventsClient {
       const info = await this.deps.bootstrap();
       // Cancelled, or a newer attempt took over while we were waiting.
       if (gen !== this.generation) return;
+      // This bootstrap succeeded, so an earlier one's failure no longer
+      // stands: a socket that now fails before opening must report its own
+      // reason, not a daemon log tail from a start that has since worked.
+      this.bootError = null;
       this.adoptInstance(info.instanceId);
       this.openSocket(info);
     } catch (error) {
       if (gen !== this.generation) return;
-      this.lastError = error instanceof Error ? error.message : String(error);
+      this.bootError = error instanceof Error ? error.message : String(error);
       this.setStatus("error");
       this.scheduleReconnect();
     }
+  }
+
+  /**
+   * Climb the reconnect ladder from here, without bootstrapping: every rung
+   * re-reads discovery and none spawns a daemon. For a window that must get
+   * back to a daemon that may be there, but must not start one — a stop whose
+   * request never reached the daemon.
+   */
+  resume(): void {
+    this.clearTimer();
+    this.reconnectEnabled = true;
+    this.backoffMs = BACKOFF_BASE_MS;
+    this.scheduleReconnect();
   }
 
   /** Close the socket and stop reconnecting. */
@@ -310,6 +351,7 @@ export class DaemonEventsClient {
 
     socket.onopen = () => {
       this.lastError = null;
+      this.bootError = null;
       this.backoffMs = BACKOFF_BASE_MS;
       this.setStatus("connected");
       // A first connect cannot have missed anything; every later one can.
@@ -333,6 +375,16 @@ export class DaemonEventsClient {
         ...(parsed as object),
         _id: this.nextEventId++,
       } as ServerEvent;
+      // The daemon has said the socket is about to close *and why*. Climbing
+      // a ladder against a daemon that is going away on purpose is noise, and
+      // the ladder must never be what brings it back. If this window did not
+      // ask, someone else stopped it — the CLI, or another window. Still
+      // delivered below like any other frame, so the Event log shows it.
+      if (tagged.type === "daemon_shutting_down") {
+        this.reconnectEnabled = false;
+        this.clearTimer();
+        if (getStopIntent() === null) setStopIntent("stopped_elsewhere");
+      }
       this.ring = [tagged, ...this.ring].slice(0, this.deps.ringSize);
       for (const listener of this.eventListeners) listener(tagged);
     };

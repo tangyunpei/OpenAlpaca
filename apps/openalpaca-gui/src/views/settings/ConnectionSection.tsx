@@ -20,13 +20,28 @@
  * Also real since Phase 8: **uptime, `Schema vNN` and `Copy log path`** —
  * GAP-14, closed. `GET /v1/status` carries `started_at`/`uptime_secs`, the open
  * database's `schema_version` (not a compile-time count of migration files) and
- * the CLI-managed `log_path`, plus §4.8's two size totals, `retention` (the
- * limits those totals are measured against) and what the boot session-log
- * sweep did. The log path is `null` for a daemon this run did not launch —
- * the sidecar, a `cargo run`, or one that merely found a previous CLI
- * daemon's leftover `daemon.log` at the usual path — and the Copy button is
- * inert there, because a path to a file this daemon did not write is worse
- * than no path.
+ * the launcher-managed `log_path`, plus §4.8's two size totals, `retention`
+ * (the limits those totals are measured against) and what the boot
+ * session-log sweep did. Both launchers — this app's sidecar and
+ * `openalpaca daemon start` — write `daemon.log` and claim it (T30); the path
+ * is `null` only for a daemon started by hand (a bare `cargo run`), or one
+ * that merely found a previous daemon's leftover `daemon.log` at the usual
+ * path, and the Copy button is inert there, because a path to a file this
+ * daemon did not write is worse than no path.
+ *
+ * **Stop and Start** (DESIGN_SPEC §5.5, §5.6). `Stop daemon…` opens the
+ * confirmation (`StopDaemonDialog`), which re-reads `GET /v1/status` for the
+ * `busy` counts before it will stop anything, and the stop itself is
+ * `lib/daemon-control.ts`'s: the intent is set and the socket closed *before*
+ * the shutdown POST, so no ladder climbs and nothing respawns the daemon.
+ * While stopped the card says so in the neutral token, `Reconnect` gives way
+ * to `Start daemon` — reconnecting to a daemon that is not there is not a
+ * thing to offer — and nothing polls.
+ *
+ * **Why the daemon would not start** is shown here too, verbatim: the shell's
+ * `ensure_daemon_running` rejection ends with what the daemon wrote to its
+ * log before it gave up, and `Show daemon log` reads the file directly — both
+ * work with no daemon serving anything, which is exactly when they matter.
  *
  * The spend *cap* line is a decision, not a gap: per **N4** there is no daily
  * budget and none is coming, so today's total has no denominator and the
@@ -35,10 +50,18 @@
  * own numbers.
  */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
+import { StopDaemonDialog } from "@/components/overlays/StopDaemonDialog";
 import { Button, Eyebrow } from "@/components/ui";
 import { useConnectionStatus, useDaemonStatus } from "@/hooks/useConnection";
+import { useConnectors } from "@/hooks/useConnectors";
+import {
+  readDaemonLogTail,
+  type StopIntent,
+  type StopPhase,
+} from "@/lib/connection";
+import { stopDaemon, stopToast } from "@/lib/daemon-control";
 import { useTasks } from "@/hooks/useTasks";
 import { capsNote, formatSpend, useUsageSummary } from "@/hooks/useUsage";
 import { useMovedProject, useRebaseWorkspace } from "@/hooks/useWorkspaces";
@@ -46,6 +69,9 @@ import { formatFileSize, type DaemonStatus } from "@/lib/api/types";
 import { isAbsolutePath, useProjectStore } from "@/stores/project";
 import { useUiStore } from "@/stores/ui";
 
+import { relativeTime } from "@/views/library/format";
+
+import { isEnabled as connectorIsOn } from "./ConnectorsSection";
 import { Card, GapNote, StatCard, StatusCard } from "./primitives";
 import { compactCount, formatUptime } from "./format";
 
@@ -55,6 +81,14 @@ export function ConnectionSection() {
   const status = useDaemonStatus(projectPath);
   const summary = useUsageSummary();
   const showToast = useUiStore((s) => s.showToast);
+  const [stopOpen, setStopOpen] = useState(false);
+  const intent = connection.stopIntent ?? null;
+  const stopped = intent !== null;
+  // The old process may hold its lock for up to 15 s after the POST; a
+  // daemon started in that tail loses the lock race and exits.
+  const phase =
+    intent === "stopped_here" ? (connection.stopPhase ?? null) : null;
+  const stopping = phase === "stopping";
 
   // Run count for "today" is still a client-side filter — there is no date
   // filter on `GET /v1/tasks` and no rollup that counts runs — but the day it
@@ -81,9 +115,14 @@ export function ConnectionSection() {
   return (
     <div className="flex flex-col gap-[16px]">
       <StatusCard
-        ok={connection.connected}
-        title={connection.connected ? "Daemon connected" : "Daemon unreachable"}
-        meta={`uptime ${formatUptime(status.data?.uptime_secs)}`}
+        ok={!stopped && connection.connected}
+        idle={stopped}
+        title={statusTitle(intent, connection.connected, phase)}
+        meta={
+          stopped
+            ? stoppedMeta(connection.stoppedAt ?? null, phase)
+            : `uptime ${formatUptime(status.data?.uptime_secs)}`
+        }
         cells={[
           { label: "Instance", value: connection.instanceChip ?? "—" },
           { label: "Endpoint", value: connection.endpoint ?? "—" },
@@ -96,16 +135,35 @@ export function ConnectionSection() {
           },
         ]}
       >
-        <div className="mt-[16px] flex gap-[6px]">
-          <Button
-            variant="secondarySm"
-            onClick={() => {
-              void connection.reconnect();
-              showToast("Reconnecting to the daemon…");
-            }}
-          >
-            Reconnect
-          </Button>
+        <div className="mt-[16px] flex flex-wrap gap-[6px]">
+          {stopped ? (
+            <Button
+              variant="secondarySm"
+              disabled={stopping}
+              title={
+                stopping
+                  ? "Waiting for the daemon's process to exit and free its lock"
+                  : undefined
+              }
+              onClick={() => {
+                if (stopping) return;
+                void connection.start();
+                showToast("Starting the daemon…");
+              }}
+            >
+              {stopping ? "Stopping…" : "Start daemon"}
+            </Button>
+          ) : (
+            <Button
+              variant="secondarySm"
+              onClick={() => {
+                void connection.reconnect();
+                showToast("Reconnecting to the daemon…");
+              }}
+            >
+              Reconnect
+            </Button>
+          )}
           <Button
             variant="ghostSm"
             disabled={logPath === null}
@@ -118,14 +176,32 @@ export function ConnectionSection() {
           >
             Copy log path
           </Button>
+          {!stopped && (
+            <Button
+              variant="ghostSm"
+              disabled={!connection.connected}
+              onClick={() => setStopOpen(true)}
+            >
+              Stop daemon…
+            </Button>
+          )}
         </div>
         {logPath === null && status.data !== undefined && (
           <GapNote>
-            This daemon has no daemon.log — the log file is written by
-            `openalpaca daemon start`, not by a daemon the app launched itself.
+            This daemon has no daemon.log — the app and `openalpaca daemon
+            start` write one for the daemons they launch, and this one was
+            started by hand.
           </GapNote>
         )}
+        {!stopped && !connection.connected && connection.lastError ? (
+          <LogBlock label="Why the daemon is unreachable">
+            {connection.lastError}
+          </LogBlock>
+        ) : null}
+        <DaemonLogDisclosure />
       </StatusCard>
+
+      {stopOpen && <StopDaemonFlow onClose={() => setStopOpen(false)} />}
 
       <StorageCard status={status.data} />
 
@@ -158,6 +234,167 @@ export function ConnectionSection() {
       </StatCard>
 
       <ProjectCard homeRoot={status.data?.home_root ?? null} />
+    </div>
+  );
+}
+
+/**
+ * The status card's title, stopped or not (§6.3). A stop from this window is
+ * titled by what `await_daemon_stopped` concluded, never by the intent alone:
+ * the POST's `200` only says the daemon was asked.
+ */
+export function statusTitle(
+  intent: StopIntent,
+  connected: boolean,
+  phase: StopPhase = null,
+): string {
+  if (intent === "stopped_here") {
+    switch (phase) {
+      case "stopping":
+        return "Stopping the daemon…";
+      case "still_alive":
+        return "Daemon did not stop";
+      case "lock_still_held":
+        return "Daemon exited, lock still held";
+      case "unconfirmed":
+        return "Daemon stop not confirmed";
+      default:
+        return "Daemon stopped";
+    }
+  }
+  if (intent === "stopped_elsewhere") return "Daemon stopped from elsewhere";
+  return connected ? "Daemon connected" : "Daemon unreachable";
+}
+
+function stoppedMeta(stoppedAt: number | null, phase: StopPhase): string {
+  if (phase === "stopping") return "waiting for the process to exit";
+  // Only a stop the wait confirmed is "stopped"; otherwise it was asked.
+  const word = phase === null || phase === "stopped" ? "stopped" : "stop asked";
+  if (stoppedAt === null) return word;
+  return `${word} ${relativeTime(new Date(stoppedAt).toISOString())}`;
+}
+
+/**
+ * The confirmation and the stop behind it.
+ *
+ * Mounted only while open, so its reads run only then: the status is
+ * re-asked on open for a current `busy` count, and `Stop daemon` waits for
+ * that answer (or its failure) before it can be pressed. The dialog closes on
+ * the shutdown POST's response either way; the outcome is a toast, and the
+ * window's state is the stop intent's.
+ */
+function StopDaemonFlow({ onClose }: { onClose: () => void }) {
+  const projectPath = useProjectStore((s) => s.path);
+  const status = useDaemonStatus(projectPath);
+  const connectors = useConnectors();
+  const showToast = useUiStore((s) => s.showToast);
+  const [reading, setReading] = useState(true);
+  const [stopping, setStopping] = useState(false);
+
+  // One fresh read on open. `refetch` settles with the query's own result;
+  // whether it answered or failed, the dialog then shows what it has.
+  const refetch = useRef(status.refetch);
+  useEffect(() => {
+    let live = true;
+    void Promise.resolve(refetch.current?.()).finally(() => {
+      if (live) setReading(false);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  const connectorsRunning = (connectors.data ?? []).some((connector) =>
+    connectorIsOn(connector.status),
+  );
+
+  return (
+    <StopDaemonDialog
+      busy={status.data?.busy}
+      connectorsRunning={connectorsRunning}
+      reading={reading}
+      stopping={stopping}
+      onCancel={onClose}
+      onConfirm={() => {
+        setStopping(true);
+        void stopDaemon(undefined, onClose).then((result) =>
+          showToast(stopToast(result)),
+        );
+      }}
+    />
+  );
+}
+
+/** How many lines `Show daemon log` reads — the spec's 200. */
+export const DAEMON_LOG_LINES = 200;
+
+/**
+ * Text from the daemon or its log, shown exactly as written: a `<pre>` with
+ * its own scroll, never a toast (a toast is gone in under three seconds, and
+ * this is something to read).
+ */
+function LogBlock({ label, children }: { label: string; children: string }) {
+  return (
+    <pre
+      aria-label={label}
+      className="mt-[12px] mb-0 max-h-[320px] overflow-auto rounded-md border border-line-subtle bg-code-chip px-[11px] py-[9px] font-mono text-2xs-plus leading-[1.5] whitespace-pre text-ink"
+    >
+      {children}
+    </pre>
+  );
+}
+
+/**
+ * `Show daemon log` — the end of `daemon.log`, read by the shell straight from
+ * the file, for a daemon that started but is misbehaving as much as for one
+ * that would not start. Read when opened and again on `Refresh`; never
+ * polled.
+ */
+export function DaemonLogDisclosure() {
+  const [open, setOpen] = useState(false);
+  const [tail, setTail] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  function load() {
+    setError(null);
+    readDaemonLogTail(DAEMON_LOG_LINES).then(
+      (text) => setTail(text),
+      (cause: unknown) => {
+        setTail(null);
+        setError(cause instanceof Error ? cause.message : String(cause));
+      },
+    );
+  }
+
+  return (
+    <div className="mt-[12px]">
+      <div className="flex gap-[6px]">
+        <Button
+          variant="ghostSm"
+          aria-expanded={open}
+          onClick={() => {
+            const next = !open;
+            setOpen(next);
+            if (next) load();
+          }}
+        >
+          {open ? "Hide daemon log" : "Show daemon log"}
+        </Button>
+        {open && (
+          <Button variant="ghostSm" onClick={load}>
+            Refresh
+          </Button>
+        )}
+      </div>
+      {open && error !== null && (
+        <GapNote>Could not read the daemon log: {error}</GapNote>
+      )}
+      {open && error === null && tail === "" && (
+        <GapNote>The daemon log is empty.</GapNote>
+      )}
+      {open && error === null && tail !== null && tail !== "" && (
+        <LogBlock label="Daemon log">{tail}</LogBlock>
+      )}
     </div>
   );
 }

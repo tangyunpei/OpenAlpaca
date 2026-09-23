@@ -3,12 +3,14 @@
 use anyhow::Result;
 use console::style;
 use dialoguer::{Confirm, theme::ColorfulTheme};
+use openalpaca_storage::ConfigRepository;
 use openalpaca_storage::config_schema::{self, ConfigBackend};
-use openalpaca_storage::{ConfigRepository, Database};
 use serde::Serialize;
 use std::collections::HashMap;
 
 use super::ai_config;
+use super::config::ConfigEnv;
+use super::config_factory_reset;
 use super::daemon_config_cli;
 use crate::output::OutputFormat;
 
@@ -24,7 +26,7 @@ pub(super) struct ConfigEntry {
     pub description: Option<String>,
 }
 
-pub(super) fn cmd_set(repo: &ConfigRepository, key: &str, value: &str) -> Result<()> {
+pub(super) fn cmd_set(env: &mut dyn ConfigEnv, key: &str, value: &str) -> Result<()> {
     let def = config_schema::lookup(key);
 
     if def.is_none() {
@@ -48,7 +50,8 @@ pub(super) fn cmd_set(repo: &ConfigRepository, key: &str, value: &str) -> Result
         ConfigBackend::DaemonToml => daemon_config_cli::set_daemon_value(key, &normalized)?,
         ConfigBackend::SystemConfig => {
             let kind = def.kind.as_db_kind();
-            repo.set(key, &normalized, kind)?;
+            let db = env.database()?;
+            ConfigRepository::new(&db).set(key, &normalized, kind)?;
         }
     }
 
@@ -61,7 +64,7 @@ pub(super) fn cmd_set(repo: &ConfigRepository, key: &str, value: &str) -> Result
     Ok(())
 }
 
-pub(super) fn cmd_get(repo: &ConfigRepository, key: &str) -> Result<()> {
+pub(super) fn cmd_get(env: &mut dyn ConfigEnv, key: &str) -> Result<()> {
     let def = config_schema::lookup(key);
     let backend = def
         .as_ref()
@@ -72,7 +75,10 @@ pub(super) fn cmd_get(repo: &ConfigRepository, key: &str) -> Result<()> {
     let value = match backend {
         ConfigBackend::LlmToml => ai_config::get_ai_value(key)?,
         ConfigBackend::DaemonToml => daemon_config_cli::get_daemon_value(key)?,
-        ConfigBackend::SystemConfig => repo.get(key)?,
+        ConfigBackend::SystemConfig => {
+            let db = env.database()?;
+            ConfigRepository::new(&db).get(key)?
+        }
     };
 
     match value {
@@ -98,13 +104,16 @@ pub(super) fn cmd_get(repo: &ConfigRepository, key: &str) -> Result<()> {
 }
 
 pub(super) fn cmd_list(
-    repo: &ConfigRepository,
+    env: &mut dyn ConfigEnv,
     all: bool,
     format: OutputFormat,
     verbose: bool,
 ) -> Result<()> {
-    // Gather values from all backends
-    let db_items = repo.list()?;
+    // Gather values from all backends. `list` is the inventory verb, so it
+    // opens the database even though most keys live in TOML: silently leaving
+    // out the database half would be a lie about what is configured.
+    let db = env.database()?;
+    let db_items = ConfigRepository::new(&db).list()?;
     let db_map: HashMap<String, (String, String)> = db_items
         .into_iter()
         .map(|(k, v, kind)| (k, (v, kind)))
@@ -431,27 +440,10 @@ fn print_key_row(
     }
 }
 
-pub(super) fn cmd_reset(
-    repo: &ConfigRepository,
-    db: &Database,
-    key: Option<String>,
-    factory: bool,
-) -> Result<()> {
+pub(super) fn cmd_reset(env: &mut dyn ConfigEnv, key: Option<String>, factory: bool) -> Result<()> {
     if factory {
-        let confirm = Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt("DANGER: This will wipe ALL data (agents, memories, config). Continue?")
-            .default(false)
-            .interact()?;
-
-        if confirm {
-            db.factory_reset()?;
-            ai_config::clear_ai_config()?;
-            daemon_config_cli::clear_daemon_config()?;
-            println!("All configuration and data wiped (Factory Reset).");
-        } else {
-            println!("Cancelled.");
-        }
-        return Ok(());
+        // Opens nothing: see `config_factory_reset`.
+        return config_factory_reset::run(&*env);
     }
 
     if let Some(k) = key {
@@ -463,17 +455,23 @@ pub(super) fn cmd_reset(
         match backend {
             ConfigBackend::LlmToml => ai_config::delete_ai_value(&k)?,
             ConfigBackend::DaemonToml => daemon_config_cli::delete_daemon_value(&k)?,
-            ConfigBackend::SystemConfig => repo.delete(&k)?,
+            ConfigBackend::SystemConfig => {
+                let db = env.database()?;
+                ConfigRepository::new(&db).delete(&k)?
+            }
         }
         println!("Key '{}' reset (deleted).", k);
     } else {
+        // Opened before the question: a refusal that arrives only after the
+        // user has said yes is a question we had no business asking.
+        let db = env.database()?;
         let confirm = Confirm::with_theme(&ColorfulTheme::default())
             .with_prompt("Reset ALL configuration? (agents and data will be preserved)")
             .default(false)
             .interact()?;
 
         if confirm {
-            repo.clear_all()?;
+            ConfigRepository::new(&db).clear_all()?;
             ai_config::clear_ai_config()?;
             daemon_config_cli::clear_daemon_config()?;
             println!("Config reset (agents and data preserved).");

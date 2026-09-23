@@ -17,6 +17,10 @@ pub struct CreateTaskRequest {
     /// client-supplied value would let one request mint a row nobody can
     /// operate, or one attributed to somebody else. Kept on the wire because
     /// removing a required field breaks every existing caller for nothing.
+    ///
+    /// Never read, therefore, and that is the ruling rather than an
+    /// oversight — the allow records it so the build stays warning-free.
+    #[allow(dead_code)]
     pub created_by: String,
     /// The lane the run belongs to, and the lane the caller must own: a run
     /// launched onto a lane posts its report into that conversation, so naming

@@ -9,12 +9,14 @@
 
 - OpenAlpaca Storage Module
 - Provides the single path module (`store`), the discovery mechanism,
-- the singleton lock, and the SQLite database for daemon/GUI/CLI coordination.
+- the singleton lock, the daemon-liveness primitive (`daemon_lifecycle`),
+- and the SQLite database for daemon/GUI/CLI coordination.
 
 ## Modules
 
 - `artifacts` (crates/openalpaca_storage/src/artifacts/mod.rs)
 - `config_schema` (crates/openalpaca_storage/src/config_schema/mod.rs)
+- `daemon_lifecycle` (crates/openalpaca_storage/src/daemon_lifecycle.rs)
 - `database` (crates/openalpaca_storage/src/database/mod.rs)
 - `discovery` (crates/openalpaca_storage/src/discovery/mod.rs)
 - `migrations` (crates/openalpaca_storage/src/migrations/mod.rs)
@@ -27,7 +29,7 @@
 
 - `pub use artifacts::{ ArtifactDiff, ArtifactError, ArtifactQuery, ArtifactRecord, ArtifactStore, ArtifactVersionRow, HomeScopeRows, NewArtifact, PurgeCounts, PurgeKept, PurgeOutcome, PurgePlan, PurgeSession, RebaseCounts, USER_EDIT_NOTE, VerifyReport, WorkspaceRows, };`
 - `pub use database::Database;`
-- `pub use models::{Agent, EventLog, Memory, MemoryRole};`
+- `pub use models::EventLog;`
 - `pub use models::{AgentMetrics, AgentTaskHistory, SubAgentConfig};`
 - `pub use models::{ArtifactKind, ArtifactOrigin};`
 - `pub use models::{OutcomeKind, Task, TaskStatus};`
@@ -38,7 +40,7 @@
 - `pub use models::MessageFeedback;`
 - `pub use models::{PREVIEW_CHARS, SkillExecutionEntry, ToolExecutionEntry};`
 - `pub use models::SkillHealthMetrics;`
-- `pub use repository::{ ARTIFACT_ROLE, ATTACHMENT_ROLE, AgentRepository, ConfigRepository, ConversationRepository, EventLogRepository, FOLLOWUP_KIND_FOLLOWUP, FOLLOWUP_KIND_UNPROCESSED_STEERING, FileAssetRepository, FollowupRecord, FollowupRepository, IdentityRepository, LlmUsageRepository, MemoryRepository, MessageFeedbackRepository, OrchestratorLatencyRepository, PreferenceRepository, ProducedArtifact, SESSION_ACTIVE, SESSION_ARCHIVED, SessionFilter, SkillExecutionRepository, StorageBytes, SubAgentRepository, SubagentSpanRepository, TaskRepository, resolve_skill_key, };`
+- `pub use repository::{ ARTIFACT_ROLE, ATTACHMENT_ROLE, ConfigRepository, ConversationRepository, EventLogRepository, FOLLOWUP_KIND_FOLLOWUP, FOLLOWUP_KIND_UNPROCESSED_STEERING, FileAssetRepository, FollowupRecord, FollowupRepository, IdentityRepository, LlmUsageRepository, MemoryRepository, MessageFeedbackRepository, OrchestratorLatencyRepository, PreferenceRepository, ProducedArtifact, SESSION_ACTIVE, SESSION_ARCHIVED, SessionFilter, SkillExecutionRepository, StorageBytes, SubAgentRepository, SubagentSpanRepository, TaskRepository, resolve_skill_key, };`
 - `pub use repository::llm_usage::{LlmUsageDaily, ProviderCallUsage};`
 - `pub use repository::subagent_span::{ NewSubagentSpan, SPAN_DETAIL_INTERRUPTED, SpanState, SubagentSpanRecord, TemplateRunCount, };`
 - `pub use uploads::{NewUpload, StoredUpload, UploadError, UploadStore};`

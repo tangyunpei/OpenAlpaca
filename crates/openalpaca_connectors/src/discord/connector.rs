@@ -5,8 +5,8 @@
 //! (same pattern as iMessage connector).
 
 use crate::common::{
-    LinkResult, format_confirmation_prompt, format_denial_message, handle_link_token,
-    intercept_confirmation_reply, redact_token, resolve_principal,
+    KeyedRateLimiter, LinkResult, format_confirmation_prompt, format_denial_message,
+    handle_link_token, intercept_confirmation_reply, redact_token, resolve_principal,
 };
 use crate::{Connector, ConnectorError};
 use arc_swap::ArcSwap;
@@ -23,9 +23,9 @@ use openalpaca_core::{
     types::Capability,
 };
 use openalpaca_storage::{Database, IdentityRepository, PreferenceRepository};
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use twilight_gateway::{EventTypeFlags, Intents, Shard, ShardId, StreamExt as _};
@@ -38,39 +38,7 @@ const DISCORD_MAX_LENGTH: usize = 2000;
 /// Prefers splitting at paragraph boundaries (\n\n), then sentence boundaries (. ),
 /// then falls back to hard cut at a valid UTF-8 char boundary.
 pub fn chunk_message(text: &str) -> Vec<String> {
-    if text.len() <= DISCORD_MAX_LENGTH {
-        return vec![text.to_string()];
-    }
-
-    let mut chunks = Vec::new();
-    let mut remaining = text;
-
-    while !remaining.is_empty() {
-        if remaining.len() <= DISCORD_MAX_LENGTH {
-            chunks.push(remaining.to_string());
-            break;
-        }
-
-        // Find a safe byte boundary to slice up to (avoids panic on multi-byte UTF-8)
-        let boundary = remaining.floor_char_boundary(DISCORD_MAX_LENGTH);
-        let slice = &remaining[..boundary];
-
-        // Try paragraph boundary
-        let split_at = slice
-            .rfind("\n\n")
-            .map(|i| i + 2) // include the newlines
-            // Try sentence boundary
-            .or_else(|| slice.rfind(". ").map(|i| i + 2))
-            // Try any newline
-            .or_else(|| slice.rfind('\n').map(|i| i + 1))
-            // Hard cut at safe char boundary
-            .unwrap_or(boundary);
-
-        chunks.push(remaining[..split_at].to_string());
-        remaining = &remaining[split_at..];
-    }
-
-    chunks
+    crate::common::chunk_message(text, DISCORD_MAX_LENGTH)
 }
 
 /// Send a message with exponential backoff retry (3 attempts: 1s, 2s, 4s).
@@ -136,34 +104,6 @@ fn resolve_confirmation_channel(db: &Database, lane_key: &str) -> Option<u64> {
         .filter(|id| *id != 0)
 }
 
-/// Simple per-channel rate limiter. Allows at most 1 message per `min_interval` per channel.
-struct ChannelRateLimiter {
-    last_sent: Mutex<HashMap<u64, Instant>>,
-    min_interval: Duration,
-}
-
-impl ChannelRateLimiter {
-    fn new(min_interval: Duration) -> Self {
-        Self {
-            last_sent: Mutex::new(HashMap::new()),
-            min_interval,
-        }
-    }
-
-    /// Check if a message can be sent to this channel. Returns wait duration if rate limited.
-    fn check(&self, channel_id: u64) -> Option<Duration> {
-        let mut map = self.last_sent.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(last) = map.get(&channel_id) {
-            let elapsed = last.elapsed();
-            if elapsed < self.min_interval {
-                return Some(self.min_interval - elapsed);
-            }
-        }
-        map.insert(channel_id, Instant::now());
-        None
-    }
-}
-
 /// DiscordConnector manages the Discord bot lifecycle and message handling.
 ///
 /// Uses twilight's `Shard::next_event()` event loop with `tokio::select!`
@@ -175,7 +115,7 @@ pub struct DiscordConnector {
     gateway: Arc<Gateway>,
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
     cancel_token: CancellationToken,
-    rate_limiter: Arc<ChannelRateLimiter>,
+    rate_limiter: Arc<KeyedRateLimiter<u64>>,
     confirmation_broker: Option<Arc<ConfirmationBroker>>,
     /// Maps channel_id -> queue of request_ids for pending tool confirmations.
     /// VecDeque allows FIFO processing when multiple tools need confirmation.
@@ -200,7 +140,7 @@ impl DiscordConnector {
             gateway,
             daemon_config,
             cancel_token,
-            rate_limiter: Arc::new(ChannelRateLimiter::new(Duration::from_secs(1))),
+            rate_limiter: Arc::new(KeyedRateLimiter::new(Duration::from_secs(1))),
             confirmation_broker: None,
             pending_confirmations: Arc::new(DashMap::new()),
         }
@@ -674,78 +614,27 @@ impl Connector for DiscordConnector {
 mod tests {
     use super::*;
 
+    /// Discord cuts at its own 2000-byte limit; the algorithm itself is
+    /// pinned once, at both platforms' limits, in `common::tests::chunking`.
     #[test]
-    fn test_chunk_message_short() {
-        let text = "Hello, world!";
-        let chunks = chunk_message(text);
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0], "Hello, world!");
+    fn chunk_message_uses_the_discord_limit() {
+        assert_eq!(DISCORD_MAX_LENGTH, 2000);
+        assert_eq!(chunk_message(&"a".repeat(2000)).len(), 1);
+        let lens: Vec<usize> = chunk_message(&"a".repeat(2001))
+            .iter()
+            .map(String::len)
+            .collect();
+        assert_eq!(lens, [2000, 1]);
     }
 
-    #[test]
-    fn test_chunk_message_exact_limit() {
-        let text = "a".repeat(DISCORD_MAX_LENGTH);
-        let chunks = chunk_message(&text);
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].len(), DISCORD_MAX_LENGTH);
-    }
-
-    #[test]
-    fn test_chunk_message_over_limit() {
-        let text = "a".repeat(DISCORD_MAX_LENGTH + 100);
-        let chunks = chunk_message(&text);
-        assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].len(), DISCORD_MAX_LENGTH);
-        assert_eq!(chunks[1].len(), 100);
-    }
-
-    #[test]
-    fn test_chunk_message_paragraph_split() {
-        let para1 = "a".repeat(1500);
-        let para2 = "b".repeat(1000);
-        let text = format!("{}\n\n{}", para1, para2);
-        let chunks = chunk_message(&text);
-        assert_eq!(chunks.len(), 2);
-        assert!(chunks[0].ends_with('\n'));
-    }
-
-    #[test]
-    fn test_chunk_message_empty() {
-        let chunks = chunk_message("");
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0], "");
-    }
-
-    #[test]
-    fn test_chunk_message_multibyte_utf8() {
-        // 3-byte chars: each char is 3 bytes
-        let text = "\u{4e16}".repeat(700); // 700 * 3 = 2100 bytes > 2000
-        let chunks = chunk_message(&text);
-        assert!(chunks.len() >= 2);
-        // Verify no panic from slicing mid-character
-        for chunk in &chunks {
-            assert!(chunk.is_char_boundary(chunk.len()));
-        }
-    }
-
-    #[test]
-    fn test_rate_limiter_allows_first() {
-        let limiter = ChannelRateLimiter::new(Duration::from_secs(1));
-        assert!(limiter.check(12345).is_none());
-    }
-
-    #[test]
-    fn test_rate_limiter_blocks_second() {
-        let limiter = ChannelRateLimiter::new(Duration::from_secs(1));
-        limiter.check(12345);
-        assert!(limiter.check(12345).is_some());
-    }
-
+    /// Discord keys the shared limiter by u64 channel snowflake; the limiter
+    /// itself is pinned in `common::tests::rate_limit`.
     #[test]
     fn test_rate_limiter_different_channels() {
-        let limiter = ChannelRateLimiter::new(Duration::from_secs(1));
-        limiter.check(12345);
+        let limiter = KeyedRateLimiter::<u64>::new(Duration::from_secs(1));
+        limiter.check(u64::MAX);
         assert!(limiter.check(67890).is_none());
+        assert!(limiter.check(u64::MAX).is_some());
     }
 
     fn test_db() -> Database {

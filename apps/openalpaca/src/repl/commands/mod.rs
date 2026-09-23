@@ -153,7 +153,11 @@ async fn cmd_agents(client: &DaemonClient) -> anyhow::Result<()> {
                 let id = a["id"].as_str().unwrap_or("-");
                 let name = a["name"].as_str().unwrap_or("-");
                 let status = a["status"].as_str().unwrap_or("-");
-                let short_id = &id[..8.min(id.len())];
+                // 8 **bytes**, cut on a character boundary. An agent id comes
+                // from a template's frontmatter — a plugin-contributed
+                // template's included — and nothing validates it as ASCII, so
+                // `&id[..8]` panicked whenever byte 8 fell inside a character.
+                let short_id = &id[..id.floor_char_boundary(8)];
                 println!(
                     "  {} {} - {}",
                     short_id.dimmed(),

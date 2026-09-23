@@ -146,38 +146,65 @@ config the installed daemon actually reads (not any repo checkout).
 The whole runtime root can be moved with `OPENALPACA_HOME_STORE`; see
 [Runtime Overrides](#runtime-overrides).
 
-## Migrating From the Old Data Directory
+## If You Have Data From an Older Build
 
-Older installs kept everything under `~/Library/Application Support/OpenAlpaca`
-(macOS), `~/.local/share/openalpaca` (Linux) or `%APPDATA%\OpenAlpaca\data`
-(Windows). The **daemon** moves that directory's contents into the
-`~/.openalpaca` layout on its first boot, before it takes the singleton lock.
-On the CLI side exactly one command runs the same move itself —
-`openalpaca config` (in every form: `set`, `get`, `list`, `reset`, and the bare
-interactive editor), because it is the only one that opens the database
-directly instead of asking the daemon. Every other `openalpaca` subcommand
-talks to the running daemon over HTTP, so for those the move is whatever the
-daemon already did. It is one move either way:
+Builds before this one kept everything under
+`~/Library/Application Support/OpenAlpaca` (macOS),
+`~/.local/share/openalpaca` (Linux) or `%APPDATA%\OpenAlpaca\data` (Windows),
+and moved that directory into `~/.openalpaca` on their first boot. **This build
+does not move anything.** OpenAlpaca was never released, so no installed copy
+ever wrote to the old location; if you have one, it is from a development build.
 
-- The move is **idempotent and resumable** (a process killed mid-move
-  finishes on the next boot) but **not reversible** — back up the old
-  directory before upgrading if you want to keep a fallback.
-- A **still-running old daemon blocks the move**: stop it first (`openalpaca
-  daemon stop` against the old install, or kill the process holding
-  `openalpacad.lock` in the old directory).
-- If **both** the old directory and `~/.openalpaca/state` end up holding an
-  `openalpaca.db`, the mover refuses to choose between them and aborts before
-  it renames anything: the daemon exits instead of starting, and `openalpaca
-  config` exits instead of reading the database. The error names both paths;
-  move one aside and start again. Every other CLI command is unaffected in
-  itself — it opens no database — but it needs a daemon that will not start
-  until the two are one.
-- The move is a rename, so it **cannot cross volumes**. If
-  `OPENALPACA_HOME_STORE` puts the new root on another disk, the daemon stops
-  with an error naming both paths; move the directory by hand and start again.
-- Anything the mover doesn't recognize left behind in the old directory
-  produces a boot warning (check the daemon log) rather than being deleted
-  silently.
+What happens instead:
+
+- If an old directory holds a database, a `.master_key` or a `config/`
+  directory **and** `~/.openalpaca/state/openalpaca.db` does not exist yet, the
+  daemon **refuses to start**. Starting would create an empty database and leave
+  your conversations, memories, tasks and encrypted config with nothing pointing
+  at them. The error names both directories and lists exactly what to move
+  where. Nothing is changed and nothing is lost — it is a refusal, not a
+  failure.
+- Otherwise — `~/.openalpaca` already has its own database, or the old
+  directory holds only `assets/`, `plugins/` or a stray `openalpaca.db-wal` /
+  `-shm` — the daemon starts and logs one warning per boot naming both paths.
+  The warning continues while the old directory holds any of `openalpaca.db`
+  (or its `-wal` / `-shm`), `.master_key`, `config/`, `plugins/` or `assets/` —
+  so it continues after the hand move below, which leaves `assets/` there on
+  purpose.
+- **Do not delete the old directory while any upload row points into it.** If
+  you carried its database over, the uploads that database recorded are still
+  read from the old `assets/` by absolute path, and deleting the directory
+  loses their files. As the warning itself says, check for uploaded files
+  still addressed by absolute path before deleting anything. On macOS this
+  must print `0`:
+
+  ```bash
+  sqlite3 ~/.openalpaca/state/openalpaca.db \
+    "SELECT count(*) FROM file_assets WHERE storage_path LIKE '$HOME/Library/Application Support/OpenAlpaca/%'"
+  ```
+
+  Once nothing points there, move or delete the directory and the warning
+  stops.
+- `openalpaca config` — the one CLI command that opens the database directly
+  instead of asking the daemon — applies the same rule and exits with the same
+  message, in every form that opens the database (`config reset --factory` and
+  a file-backed `ai.*` or `daemon.*` key open none, so they do not check — and
+  a factory reset never touches the old directory, so it does not clear this).
+  Every other `openalpaca` subcommand talks to the daemon over HTTP
+  and is unaffected in itself, though it still needs a daemon that will start.
+
+To carry old data over by hand, with no OpenAlpaca process running:
+
+| From the old directory | To |
+|---|---|
+| `openalpaca.db`, `openalpaca.db-wal`, `openalpaca.db-shm`, `.master_key` | `~/.openalpaca/state/` |
+| `config/`, `plugins/` | `~/.openalpaca/` (merge into what is there) |
+| `assets/` | **leave it where it is** |
+
+`assets/` stays put because uploaded files are recorded by absolute path:
+moving that directory breaks every row that points into it. Everything else in
+the old directory — logs, `discovery.json`, `openalpacad.lock`, `repl_history` —
+is regenerated and can be discarded.
 
 ## Run and Verify
 
@@ -225,9 +252,10 @@ cannot answer until you enable one:
 
   Both take effect without a restart. If you added the key first and
   `openalpaca llm status` shows no usable cloud model, run
-  `openalpaca llm models --refresh` or restart the daemon. The desktop app has the on/off switch
-  (Settings → Models & keys) but no key editor yet, so keys go in through the
-  CLI. See [CLI Manual → `llm`](CLI_Manual.md#llm) for the other key commands.
+  `openalpaca llm models --refresh` or restart the daemon. The desktop app does
+  both on one screen (Settings → Models & keys): the provider switch and an
+  `Add key` form that refuses to save against a switched-off provider. See
+  [CLI Manual → `llm`](CLI_Manual.md#llm) for the other key commands.
 
 `openalpaca llm status` shows the result, and names the fix when nothing is
 routable.
@@ -422,9 +450,9 @@ Re-run installer with a newer artifact:
 
 Upgrade keeps:
 
-- `~/.openalpaca` data and config (see [Migrating From the Old Data
-  Directory](#migrating-from-the-old-data-directory) if you're upgrading from
-  an install that kept its data elsewhere)
+- `~/.openalpaca` data and config (if you have a development build's data
+  elsewhere, see [If You Have Data From an Older
+  Build](#if-you-have-data-from-an-older-build) — it is not moved for you)
 
 Upgrade replaces:
 
@@ -476,9 +504,9 @@ the platform's data-directory convention.
   `openalpaca daemon start`, after the daemon itself has started. Use
   `openalpaca daemon start --daemon-only`, and open the app from the desktop
   entry or by running the AppImage.
-- **Older installs:** legacy data lived at `~/.local/share/openalpaca` and is
-  moved on first boot; see [Migrating From the Old Data
-  Directory](#migrating-from-the-old-data-directory).
+- **Older installs:** a development build's data may sit at
+  `~/.local/share/openalpaca`. It is **not** moved for you; see [If You Have
+  Data From an Older Build](#if-you-have-data-from-an-older-build).
 
 ### Windows
 
@@ -528,16 +556,16 @@ The uninstaller removes the GUI MSI, the prefix, the Start Menu folder and the
     The installer already runs best-effort quarantine removal; if needed:
     - `xattr -dr com.apple.quarantine ~/Applications/openalpaca-gui.app`
 - Daemon not starting
-  - Check `~/.openalpaca/state/logs/daemon.log`. Only a daemon started with
-    `openalpaca daemon start` writes it; the copy the desktop app starts on its
-    own discards its output, so stop that one and start from the CLI to get a
-    log. Each start rotates a file that has passed 16 MB and keeps three older
-    generations (`daemon.log.1` to `.3`).
+  - Check `~/.openalpaca/state/logs/daemon.log`. Both launchers write it —
+    `openalpaca daemon start` and the daemon the desktop app starts on its own.
+    In the app, a start that fails quotes the end of that log in its error, and
+    Settings → Connection → `Show daemon log` reads more of it. Each start
+    rotates a file that has passed 16 MB and keeps three older generations
+    (`daemon.log.1` to `.3`).
 - `No model is available: no enabled provider offers one`
   - A fresh install has every provider switched off. Turn one on; see
     [Connect a model](#connect-a-model).
-- `two databases: ... has not moved yet and ... already exists` at startup
-  - Both the old and new data directories hold an `openalpaca.db`. Keep the
-    one you want (the legacy file is the older install's data), move or
-    remove the other, and restart. See [Migrating From the Old Data
-    Directory](#migrating-from-the-old-data-directory).
+- `FATAL: an older OpenAlpaca install's data is still on this machine` at startup
+  - A development build's data directory is still present and this install has
+    no database yet. The message lists what to move where. See [If You Have Data
+    From an Older Build](#if-you-have-data-from-an-older-build).

@@ -391,6 +391,39 @@ fn interrupt_all_non_terminal_sweeps_only_live_rows() {
     assert!(repo.list_non_terminal().unwrap().is_empty());
 }
 
+/// `GET /v1/status`'s `busy.running_tasks` counts exactly the rows the boot
+/// sweep would flip — never a second opinion about which runs are live.
+#[test]
+fn count_non_terminal_equals_the_listing_it_counts() {
+    let db = setup_db();
+    let repo = TaskRepository::new(&db);
+    assert_eq!(repo.count_non_terminal().unwrap(), 0);
+    assert_eq!(repo.list_non_terminal().unwrap().len(), 0);
+
+    for (id, status) in [
+        ("queued", TaskStatus::Queued),
+        ("running-1", TaskStatus::Running),
+        ("running-2", TaskStatus::Running),
+        ("paused", TaskStatus::Paused),
+        ("completed", TaskStatus::Completed),
+        ("failed", TaskStatus::Failed),
+        ("cancelled", TaskStatus::Cancelled),
+        ("interrupted", TaskStatus::Interrupted),
+    ] {
+        let mut task = make_task(id, id);
+        task.status = status;
+        repo.create(&task).unwrap();
+    }
+
+    let count = repo.count_non_terminal().unwrap();
+    assert_eq!(count, 4, "queued + two running + paused");
+    assert_eq!(count, repo.list_non_terminal().unwrap().len() as u64);
+
+    repo.interrupt_all_non_terminal("stopped").unwrap();
+    assert_eq!(repo.count_non_terminal().unwrap(), 0);
+    assert_eq!(repo.list_non_terminal().unwrap().len(), 0);
+}
+
 /// `interrupted` is terminal: a new incarnation cannot re-enter the loop that
 /// was running, so the row is finished. That is what makes `rerun` the restart
 /// verb and `start` refuse (R43).

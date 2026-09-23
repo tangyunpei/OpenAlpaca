@@ -369,52 +369,6 @@ fn parse_agent_frontmatter_lines(
 }
 
 // ---------------------------------------------------------------------------
-// Body parsing (same as middleware/skill.rs — lenient, all sections optional)
-// ---------------------------------------------------------------------------
-
-fn parse_body_sections(lines: &[String]) -> (String, HashMap<String, String>) {
-    let mut sections: HashMap<String, String> = HashMap::new();
-    let mut current_section: Option<String> = None;
-    let mut current_lines: Vec<String> = Vec::new();
-    let mut full_body = String::new();
-
-    for line in lines {
-        // Build full body text
-        if !full_body.is_empty() || !line.trim().is_empty() {
-            if !full_body.is_empty() {
-                full_body.push('\n');
-            }
-            full_body.push_str(line);
-        }
-
-        if let Some(heading) = line.trim().strip_prefix("## ") {
-            // Save previous section
-            if let Some(ref name) = current_section {
-                let content = current_lines.join("\n").trim().to_string();
-                if !content.is_empty() {
-                    sections.insert(name.clone(), content);
-                }
-            }
-            current_section = Some(heading.trim().to_string());
-            current_lines.clear();
-        } else if current_section.is_some() {
-            current_lines.push(line.to_string());
-        }
-    }
-
-    // Save last section
-    if let Some(ref name) = current_section {
-        let content = current_lines.join("\n").trim().to_string();
-        if !content.is_empty() {
-            sections.insert(name.clone(), content);
-        }
-    }
-
-    let body = full_body.trim_end().to_string();
-    (body, sections)
-}
-
-// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -430,7 +384,7 @@ pub fn parse_agent_frontmatter(input: &str) -> Result<AgentTemplateFrontmatter, 
 pub fn parse_agent_markdown(input: &str) -> Result<AgentTemplate, AgentParseError> {
     let (frontmatter_lines, body_lines) = split_frontmatter(input)?;
     let frontmatter = parse_agent_frontmatter_lines(&frontmatter_lines)?;
-    let (body, sections) = parse_body_sections(&body_lines);
+    let (body, sections) = crate::middleware::body_sections::parse_body_sections(&body_lines);
 
     Ok(AgentTemplate {
         frontmatter,

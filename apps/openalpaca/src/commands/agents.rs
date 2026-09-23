@@ -7,7 +7,7 @@ use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
 use serde::{Deserialize, Serialize};
 
 use crate::client::DaemonClient;
-use crate::output::{OutputFormat, TableRow, print_list, status_color};
+use crate::output::{OutputFormat, TableRow, print_list, status_color, truncate};
 
 #[derive(Args)]
 pub struct AgentsArgs {
@@ -155,14 +155,6 @@ impl TableRow for AgentItem {
             truncate(model, 18),
             truncate(&skills, 18),
         )
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}...", &s[..max.saturating_sub(3)])
-    } else {
-        s.to_string()
     }
 }
 

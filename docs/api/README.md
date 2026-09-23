@@ -16,8 +16,6 @@
 - [openalpaca_core](crates/openalpaca_core.md)
 - [openalpaca_llm](crates/openalpaca_llm.md)
 - [openalpaca_mcp](crates/openalpaca_mcp.md)
-- [openalpaca_platform](crates/openalpaca_platform.md)
-- [openalpaca_platform_macos](crates/openalpaca_platform_macos.md)
 - [openalpaca_plugins](crates/openalpaca_plugins.md)
 - [openalpaca_storage](crates/openalpaca_storage.md)
 - [openalpaca_wake](crates/openalpaca_wake.md)

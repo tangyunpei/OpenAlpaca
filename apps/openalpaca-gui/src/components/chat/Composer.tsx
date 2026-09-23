@@ -29,6 +29,7 @@
 import { useLayoutEffect, useRef } from "react";
 
 import { Button } from "@/components/ui";
+import { useStopIntent } from "@/hooks/useConnection";
 import { cn } from "@/lib/cn";
 import { dragCarriesFiles } from "@/lib/drag";
 import { formatFileSize, type ModelEntry } from "@/lib/api/types";
@@ -66,6 +67,10 @@ export interface ComposerSteerTarget {
   /** Two or three words — the run's short label. */
   label: string;
 }
+
+/** The placeholder while this window's daemon is stopped (§6.3). */
+export const STOPPED_PLACEHOLDER =
+  "The daemon is stopped — start it to send a message.";
 
 export function composerPlaceholder(steer: ComposerSteerTarget | null): string {
   if (steer === null) return "Ask, or describe a job to run in the background…";
@@ -221,6 +226,7 @@ export function Composer(props: ComposerProps) {
 
   const textarea = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const stopIntent = useStopIntent();
 
   /** Anything the browser handed us as files, on any of the three paths. */
   const attach = (files: FileList | null | undefined): boolean => {
@@ -307,7 +313,10 @@ export function Composer(props: ComposerProps) {
   // drop it. Wait for it rather than send a turn missing a file the user
   // attached.
   const uploading = hasUploadInFlight(attachments);
-  const canSend = value.trim() !== "" && !sending && !uploading;
+  // A stopped daemon closes the same gate everything else does: Send and
+  // Enter both read `canSend`, and the draft stays editable and kept.
+  const stopped = stopIntent !== null;
+  const canSend = value.trim() !== "" && !sending && !uploading && !stopped;
 
   return (
     <div
@@ -378,7 +387,9 @@ export function Composer(props: ComposerProps) {
             rows={1}
             value={value}
             aria-label="Message"
-            placeholder={composerPlaceholder(steer)}
+            placeholder={
+              stopped ? STOPPED_PLACEHOLDER : composerPlaceholder(steer)
+            }
             onChange={(event) => onChange(event.target.value)}
             onPaste={(event) => {
               // A pasted image is an attachment, not text: take it, and only

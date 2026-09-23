@@ -15,7 +15,9 @@ use axum::body::to_bytes;
 use chrono::TimeDelta;
 use openalpaca_core::daemon_config::{RoutingConfig, SessionsConfig};
 use openalpaca_core::session_log::{SessionLogLimits, SessionLogService};
-use openalpaca_storage::{Database, FileAssetRepository};
+use openalpaca_core::security::confirmation::{ConfirmationBroker, ConfirmationRequest};
+use openalpaca_storage::models::task::{Task, TaskStatus};
+use openalpaca_storage::{Database, FileAssetRepository, TaskRepository};
 use openalpaca_storage::models::file_asset::{FileAsset, FileAssetStatus};
 use tempfile::TempDir;
 
@@ -45,6 +47,8 @@ fn inputs<'a>(db: &'a Database, started_at: DateTime<Utc>) -> StatusInputs<'a> {
         sessions_config: SessionsConfig::default(),
         routing_config: RoutingConfig::default(),
         llm_router: None,
+        confirmation_broker: None,
+        connected_clients: 0,
     }
 }
 
@@ -513,5 +517,98 @@ context = 32768
     assert_eq!(
         body["llm"]["effective_default_model"], "qwen3:8b",
         "…and the ladder still says what will answer: {body}"
+    );
+}
+
+/// T23: with no confirmation broker there is no honest pending-prompt count,
+/// so there is no `busy` block at all — never one with a guessed zero.
+#[tokio::test]
+async fn busy_is_null_when_the_daemon_has_no_confirmation_broker() {
+    let tmp = TempDir::new().unwrap();
+    let _guard = HomeStoreGuard::set(&tmp.path().join(".openalpaca"));
+    let db = test_db(&tmp);
+
+    let mut ins = inputs(&db, Utc::now());
+    ins.connected_clients = 3;
+    let body = body_of(status_response(&ins, &headers_with(None))).await;
+
+    assert!(body["busy"].is_null(), "no broker, no block: {body}");
+}
+
+fn task(id: &str, status: TaskStatus) -> Task {
+    let now = Utc::now();
+    Task {
+        id: id.to_string(),
+        title: id.to_string(),
+        description: None,
+        status,
+        priority: 0,
+        progress_current: None,
+        progress_total: None,
+        result_summary: None,
+        created_by: "owner".to_string(),
+        source_lane: "owner:gui".to_string(),
+        created_at: now,
+        updated_at: now,
+        completed_at: None,
+        state_json: None,
+        state_version: 0,
+        outcome_json: None,
+        outcome_kind: None,
+        artifact_count: 0,
+        workspace_id: None,
+        source_task_id: None,
+        session_id: None,
+        unattended: false,
+    }
+}
+
+/// T23: three counts, each from the thing that owns it — the task table's
+/// non-terminal rows, the broker's pending map, the sockets the caller
+/// reports. Terminal runs are not work in flight.
+#[tokio::test]
+async fn busy_counts_live_runs_pending_prompts_and_connected_clients() {
+    let tmp = TempDir::new().unwrap();
+    let _guard = HomeStoreGuard::set(&tmp.path().join(".openalpaca"));
+    let db = test_db(&tmp);
+    let tasks = TaskRepository::new(&db);
+    for (id, status) in [
+        ("running", TaskStatus::Running),
+        ("queued", TaskStatus::Queued),
+        ("completed", TaskStatus::Completed),
+        ("interrupted", TaskStatus::Interrupted),
+    ] {
+        tasks.create(&task(id, status)).unwrap();
+    }
+    let broker = ConfirmationBroker::new();
+    let _pending = broker.request(&ConfirmationRequest {
+        request_id: "req-1".to_string(),
+        agent_id: "orchestrator".to_string(),
+        tool_name: "shell".to_string(),
+        tool_arguments: serde_json::json!({ "command": "never serialised" }),
+        stream_id: None,
+        lane_key: None,
+        task_id: Some("running".to_string()),
+        agent_instance_id: None,
+        timestamp: Utc::now(),
+    });
+
+    let mut ins = inputs(&db, Utc::now());
+    ins.confirmation_broker = Some(&broker);
+    ins.connected_clients = 2;
+    let body = body_of(status_response(&ins, &headers_with(None))).await;
+
+    assert_eq!(
+        body["busy"],
+        serde_json::json!({
+            "running_tasks": 2,
+            "pending_confirmations": 1,
+            "connected_clients": 2,
+        }),
+        "counts only: {body}"
+    );
+    assert!(
+        !body.to_string().contains("never serialised"),
+        "a count must not carry the prompt's arguments: {body}"
     );
 }

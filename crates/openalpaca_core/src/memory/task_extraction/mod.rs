@@ -444,7 +444,7 @@ pub async fn persist_memory_item_with_embedding(
                     "Memory persist: superseded #{} -> #{}: {}",
                     old_id,
                     new_id,
-                    &content[..content.len().min(60)]
+                    crate::utils::text::byte_prefix(content, 60)
                 );
                 PersistResult::Superseded {
                     old_id,
@@ -471,7 +471,7 @@ pub async fn persist_memory_item_with_embedding(
                 }
                 tracing::debug!(
                     "Memory persist: stored new: {}",
-                    &content[..content.len().min(60)]
+                    crate::utils::text::byte_prefix(content, 60)
                 );
                 PersistResult::Inserted(new_id)
             }

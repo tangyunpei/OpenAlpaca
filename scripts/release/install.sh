@@ -132,10 +132,11 @@ sed_inplace() {
 
 # The runtime data/config root: `<home>/.openalpaca` on every platform (it
 # does not follow the OS's data-directory convention — see
-# `crates/openalpaca_storage/src/store/mod.rs::home_root()`). The daemon's
-# own first-boot mover relocates a pre-root-move install's legacy directory
-# (`~/Library/Application Support/OpenAlpaca` on macOS, `~/.local/share/openalpaca`
-# on Linux) here automatically; this script never needs the old path.
+# `crates/openalpaca_storage/src/store/mod.rs::home_root()`).
+# A development build's legacy directory (`~/Library/Application Support/OpenAlpaca`
+# on macOS, `~/.local/share/openalpaca` on Linux) is NOT relocated by anything:
+# the daemon only reports it (and refuses to start when it would otherwise come
+# up on an empty database beside it). This script never touches the old path.
 data_dir() {
   echo "$HOME/.openalpaca"
 }

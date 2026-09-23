@@ -26,11 +26,11 @@
 //!
 //! The address of record is `project_root` + `rel_path` (relative to
 //! `<store>/uploads`); `storage_path` stays the resolved absolute path, so the
-//! content and open routes need no change. Rows written before D2 — the
-//! content-addressed blobs under `state/assets/` — are given the same address at
-//! boot by [`rehome`], not by this writer: a `put` never moves an existing row's
-//! bytes, and until that pass has run a pre-D2 row keeps resolving from where it
-//! is.
+//! content and open routes need no change. Rows written before D2 — content-addressed
+//! blobs under `state/assets/` — are **left exactly where they are**. Nothing moves
+//! them: their `storage_path` is absolute, so they keep resolving, and a `put` never
+//! moves an existing row's bytes. Such a row has no `rel_path`; every code path that
+//! reads one must keep tolerating that.
 //!
 //! **Dedup is a sha256 query scoped to this owner's uploads, never the path.**
 //! Two uploads of the same bytes by the same owner resolve to the first row and
@@ -82,10 +82,6 @@
 //! other. The bytes are in place before the transaction commits, so a failure
 //! anywhere leaves at worst an unreferenced file, never a row pointing at
 //! nothing.
-
-mod rehome;
-
-pub use rehome::rehome_pre_d2_uploads;
 
 use std::fmt;
 use std::fs;

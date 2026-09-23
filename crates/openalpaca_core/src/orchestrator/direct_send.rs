@@ -4,6 +4,7 @@
 //! entirely and call the connector backend directly.
 
 use super::Orchestrator;
+use openalpaca_storage::Database;
 use openalpaca_storage::repository::PreferenceRepository;
 use regex::Regex;
 use std::sync::LazyLock;
@@ -147,6 +148,32 @@ pub(super) fn extract_send_params(text: &str) -> Option<DirectSendParams> {
     None
 }
 
+// ── Default recipient ─────────────────────────────────────────────────────
+
+/// Whether `owner` has a remembered default recipient on `channel` — the one
+/// check behind both the direct send below and `<send_context>`. Telegram
+/// needs an i64 chat id; iMessage needs `last_reply_target` or `last_chat_id`
+/// to exist at all; Discord needs a u64 channel id. A database error, or any
+/// other channel, reads as no default.
+pub(super) fn has_default_recipient(db: &Database, owner: &str, channel: &str) -> bool {
+    let prefs = PreferenceRepository::new(db);
+    let get = |key: &str| prefs.get(owner, key).ok().flatten();
+    match channel {
+        "telegram" => get("telegram.last_chat_id")
+            .and_then(|p| p.value.parse::<i64>().ok())
+            .is_some(),
+        "imessage" => {
+            get("imessage.last_reply_target").is_some() || get("imessage.last_chat_id").is_some()
+        }
+        // Zero is no snowflake: the daemon's send refuses it (twilight's
+        // `Id::new(0)` panics), so the prompt must not offer it either.
+        "discord" => get("discord.last_channel_id")
+            .and_then(|p| p.value.parse::<u64>().ok())
+            .is_some_and(|id| id != 0),
+        _ => false,
+    }
+}
+
 // ── Orchestrator integration ──────────────────────────────────────────────
 
 impl Orchestrator {
@@ -179,35 +206,7 @@ impl Orchestrator {
             (Some(db), Some(id)) => (db, id),
             _ => return None,
         };
-        let pref_repo = PreferenceRepository::new(db);
-        let has_default = match params.channel.as_str() {
-            "telegram" => pref_repo
-                .get(owner, "telegram.last_chat_id")
-                .ok()
-                .flatten()
-                .and_then(|p| p.value.parse::<i64>().ok())
-                .is_some(),
-            "imessage" => {
-                pref_repo
-                    .get(owner, "imessage.last_reply_target")
-                    .ok()
-                    .flatten()
-                    .is_some()
-                    || pref_repo
-                        .get(owner, "imessage.last_chat_id")
-                        .ok()
-                        .flatten()
-                        .is_some()
-            }
-            "discord" => pref_repo
-                .get(owner, "discord.last_channel_id")
-                .ok()
-                .flatten()
-                .and_then(|p| p.value.parse::<u64>().ok())
-                .is_some(),
-            _ => false,
-        };
-        if !has_default {
+        if !has_default_recipient(db, owner, &params.channel) {
             return None;
         }
 

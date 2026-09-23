@@ -246,7 +246,7 @@ into a **value copy** of the registry made for that request.
   invocation.  Putting them in the shared registry would leak them into
   every other tool listing, so each of those callers copies the registry
   and adds its own.
-- Registration validates tool names (non-empty, ≤ 256 chars, no null bytes)
+- Registration validates tool names (non-empty, ≤ 256 **bytes** of UTF-8 — not characters, so a non-ASCII name reaches the limit sooner — no null bytes)
   and updates an inverted capability index (string capabilities plus
   provider-derived virtual capabilities) used by `resolve_capabilities()`.
 - TOML custom tools are still loaded only at daemon startup; changing

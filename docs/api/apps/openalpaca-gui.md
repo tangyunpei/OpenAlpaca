@@ -126,7 +126,7 @@
 
 - WebSocket client source: `apps/openalpaca-gui/src/lib/events.ts`.
 - Parsed `ServerEvent` discriminators:
-- `agent_config_changed`, `agent_status`, `artifact_written`, `chat_stream_ended`, `chat_stream_started`, `circuit_breaker_tripped`, `command_received`, `connector_status`, `daemon_config_changed`, `extension_capability_withdrawn`, `extension_capability_withheld`, `extension_state_changed`, `followup_cancelled`, `followup_queued`, `heartbeat`, `key_status_changed`, `llm_call_completed`, `orchestrator_config_changed`, `security_violation`, `session_changed`, `skill_catalog_updated`, `skill_completed`, `skill_failed`, `skill_invocation_started`, `soul_updated`, `subagent_span`, `task_status`, `tool_confirmation_requested`, `tool_confirmation_resolved`, `tool_executed`, `wake`, `workflow_progress`, `workflow_started`, `workflow_steered`
+- `agent_config_changed`, `agent_status`, `artifact_written`, `chat_stream_ended`, `chat_stream_started`, `circuit_breaker_tripped`, `command_received`, `connector_status`, `daemon_config_changed`, `daemon_shutting_down`, `extension_capability_withdrawn`, `extension_capability_withheld`, `extension_state_changed`, `followup_cancelled`, `followup_queued`, `heartbeat`, `key_status_changed`, `llm_call_completed`, `orchestrator_config_changed`, `security_violation`, `session_changed`, `skill_catalog_updated`, `skill_completed`, `skill_failed`, `skill_invocation_started`, `soul_updated`, `subagent_span`, `task_status`, `tool_confirmation_requested`, `tool_confirmation_resolved`, `tool_executed`, `wake`, `workflow_progress`, `workflow_started`, `workflow_steered`
 
 ## Related Links
 
@@ -136,7 +136,7 @@
 ## Tauri Commands
 
 - Source: `apps/openalpaca-gui/src-tauri/src/lib.rs`
-- Commands: `ensure_daemon_running`, `get_connection_info`
+- Commands: `await_daemon_stopped`, `ensure_daemon_running`, `get_connection_info`, `read_daemon_log_tail`
 
 ## API Module Map
 
@@ -245,7 +245,7 @@
 ### `status.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/status.ts`
-- Exported functions: `getDaemonStatus`
+- Exported functions: `getDaemonStatus`, `requestDaemonShutdown`
 - Endpoints: `GET /v1/status`
 
 ### `tasks.test.ts`

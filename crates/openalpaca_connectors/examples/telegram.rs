@@ -27,12 +27,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("TELOXIDE_TOKEN").expect("TELOXIDE_TOKEN environment variable not set");
 
     // 3. Connect to the real system database (shared with Daemon).
-    //    Through the store mover: `Database::open` creates what it does not
-    //    find, so opening the destination directly could pre-create an empty
-    //    database in the way of the one the mover is about to relocate.
+    //    Through `open_home_database`: it checks for an older install's data
+    //    directory before opening, and makes `state/` at 0700 the way the
+    //    daemon's own boot does.
     println!("Using Database: {}", store::database_path()?.display());
 
-    let db = store::migrate::open_store_database()?;
+    let db = store::open_home_database()?;
     let bus = EventBus::default();
 
     println!("Starting Telegram Connector Example...");

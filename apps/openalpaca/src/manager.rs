@@ -1,8 +1,7 @@
 use anyhow::{Context, Result};
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
-use openalpaca_storage::discovery;
-use openalpaca_storage::store;
+use openalpaca_storage::{daemon_lifecycle, discovery, store};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -11,18 +10,6 @@ use sysinfo::System;
 const DAEMON_BIN_ENV: &str = "OPENALPACA_DAEMON_BIN";
 const GUI_APP_ENV: &str = "OPENALPACA_GUI_APP";
 const DAEMON_CONFIG_ENV: &str = "OPENALPACA_CONFIG_DIR";
-
-/// Rotate `daemon.log` once it is past 16 MB, and keep three generations —
-/// so the log costs at most four files, however long a daemon runs.
-///
-/// The file is the daemon's stdout and stderr: nothing else bounds it, and a
-/// long-lived daemon that logs at `info` will fill a disk given months. The
-/// caps are deliberately dumb — a size check at start, no timer, no
-/// compression, no dependency — because the alternative (a real in-daemon
-/// appender, and un-discarding the GUI sidecar's stdout) is a separate piece
-/// of work and this file must not grow unbounded while it waits.
-const LOG_MAX_BYTES: u64 = 16 * 1024 * 1024;
-const LOG_KEEP: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DaemonLaunch {
@@ -52,9 +39,10 @@ pub fn start_daemon() -> Result<()> {
     // Bound it before opening it: a log that is already past its cap becomes
     // `daemon.log.1` and this run starts a fresh one. A rotation that fails is
     // reported and not fatal — a daemon that will not start because its log
-    // could not be renamed would be the worse bug.
-    if let Err(e) = rotate_log(&log_path, LOG_MAX_BYTES, LOG_KEEP) {
-        println!("⚠️  Could not rotate the daemon log ({e}); appending to it as it is.");
+    // could not be renamed would be the worse bug. The rotation is the
+    // store's, shared with the GUI sidecar, the other launcher.
+    if let Err(e) = store::rotate_daemon_log() {
+        println!("⚠️  Could not rotate the daemon log ({e:#}); appending to it as it is.");
     }
     // Append, not truncate: the rotation is what bounds the file, so a restart
     // no longer silently discards the previous run's output.
@@ -89,60 +77,48 @@ pub fn start_daemon() -> Result<()> {
     Ok(())
 }
 
-/// Verify the given PID belongs to a live `openalpacad` process.
+/// What [`stop_daemon`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopRequest {
+    /// Nothing was running: no `discovery.json`, or a stale one naming a pid
+    /// that is not a live `openalpacad` (said on stdout, not signalled).
+    NotRunning,
+    /// SIGTERM was delivered to this pid. The daemon has been *asked* to stop;
+    /// it is gone only once `daemon_lifecycle` says so.
+    Signalled(u32),
+}
+
+/// Ask the daemon `discovery.json` names to stop, with SIGTERM.
 ///
-/// A stale discovery.json (left after a crash/reboot) can point at a PID the OS
-/// has since recycled for an unrelated process; signalling or trusting it blindly
-/// would kill/misreport that process. Check the process identity first.
-fn pid_is_daemon(pid: u32) -> bool {
-    let mut s = System::new();
-    s.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-    match s.process(sysinfo::Pid::from_u32(pid)) {
-        Some(proc_) => {
-            let name_matches = proc_.name().to_string_lossy().contains("openalpacad");
-            let exe_matches = proc_
-                .exe()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().contains("openalpacad"))
-                .unwrap_or(false);
-            name_matches || exe_matches
-        }
-        None => false,
-    }
-}
-
-/// Stop the Daemon using PID from discovery.json.
-pub fn stop_daemon() -> Result<()> {
-    if let Some(d) = discovery::read_discovery()? {
-        if !pid_is_daemon(d.pid) {
-            println!(
-                "⚠️  PID {} is not a running openalpacad (stale discovery.json?); not signalling.",
-                d.pid
-            );
-            return Ok(());
-        }
-        println!("🛑 Stopping Daemon (PID: {})...", d.pid);
-        let pid = Pid::from_raw(d.pid as i32);
-
-        match signal::kill(pid, Signal::SIGTERM) {
-            Ok(_) => println!("✅ Signal sent."),
-            Err(e) => println!("⚠️  Failed to send signal: {}", e),
-        }
-
-        // Wait a bit?
-    } else {
+/// Returns as soon as the signal is delivered — the daemon's shutdown takes up
+/// to 10 s after that, so a caller that needs it gone waits on the pid with
+/// `daemon_lifecycle::wait_for_pid_exit`. A signal that cannot be delivered is
+/// an error: the daemon is still running, and reporting success would let a
+/// restart start a second one into its lock.
+pub fn stop_daemon() -> Result<StopRequest> {
+    let Some(d) = discovery::read_discovery()? else {
         println!("⚠️  No active daemon found (discovery.json missing).");
+        return Ok(StopRequest::NotRunning);
+    };
+    if !daemon_lifecycle::pid_is_daemon(d.pid) {
+        println!(
+            "⚠️  PID {} is not a running openalpacad (stale discovery.json?); not signalling.",
+            d.pid
+        );
+        return Ok(StopRequest::NotRunning);
     }
-    Ok(())
+    println!("🛑 Stopping Daemon (PID: {})...", d.pid);
+    signal::kill(Pid::from_raw(d.pid as i32), Signal::SIGTERM)
+        .with_context(|| format!("Failed to send SIGTERM to the daemon (PID {})", d.pid))?;
+    Ok(StopRequest::Signalled(d.pid))
 }
 
-/// Check if daemon process is running.
+/// Whether `discovery.json` names a live `openalpacad` (not a recycled PID).
+///
+/// The CLI's one name for the predicate; the implementation is shared with
+/// the app shell in `openalpaca_storage::daemon_lifecycle`.
 pub fn is_daemon_running() -> bool {
-    if let Ok(Some(d)) = discovery::read_discovery() {
-        // Verify the PID exists AND is actually openalpacad (not a recycled PID).
-        return pid_is_daemon(d.pid);
-    }
-    false
+    daemon_lifecycle::running_daemon_pid().is_some()
 }
 
 /// Start GUI (Tauri)
@@ -190,6 +166,17 @@ pub fn start_gui() -> Result<()> {
 /// Stop GUI (Naive approach: lookup by name or port?)
 /// Dev environment: killing the `npm` process doesn't always kill children.
 /// We might need to find "openalpaca-gui" process.
+/// Whether a process name is the desktop app. The installed macOS bundle runs
+/// its Cargo binary, `openalpaca-gui.app/Contents/MacOS/openalpaca_gui` — an
+/// underscore — which the hyphenated match alone never found, so `gui stop`
+/// reported "No GUI process found" with the app open. `openalpaca-gui` and
+/// `OpenAlpaca` stay for the Linux packages and dev builds they were written for.
+fn is_gui_process_name(name: &str) -> bool {
+    name.contains("openalpaca_gui")
+        || name.contains("openalpaca-gui")
+        || name.contains("OpenAlpaca")
+}
+
 pub fn stop_gui() -> Result<()> {
     println!("🛑 Stopping GUI...");
     let mut s = System::new();
@@ -198,9 +185,7 @@ pub fn stop_gui() -> Result<()> {
 
     for (pid, process) in s.processes() {
         let name = process.name().to_string_lossy();
-        if name.contains("openalpaca-gui") || name.contains("OpenAlpaca") {
-            // In dev mode, the process name might be different on Mac.
-            // Usually "OpenAlpaca" key.
+        if is_gui_process_name(&name) {
             println!("Found potential GUI process: {} ({})", name, pid);
             #[cfg(unix)]
             {
@@ -218,39 +203,6 @@ pub fn stop_gui() -> Result<()> {
     Ok(())
 }
 
-/// Shift the log's generations down one when it is past `max_bytes`.
-///
-/// `daemon.log` → `.1` → `.2` → … → `.{keep}`, and whatever was at `.{keep}`
-/// is gone. A log that does not exist, or that is still under the cap, is left
-/// alone — the first start of a fresh install rotates nothing.
-fn rotate_log(path: &Path, max_bytes: u64, keep: usize) -> std::io::Result<()> {
-    match fs::metadata(path) {
-        Ok(meta) if meta.len() > max_bytes => {}
-        // Absent, or small enough: nothing to do. An unreadable log is not a
-        // reason to refuse to start, so it is treated the same way.
-        _ => return Ok(()),
-    }
-
-    // Oldest first, so no rename can overwrite a generation that has not moved
-    // yet. `keep` is the last one kept, which makes `.{keep}` the one dropped.
-    let _ = fs::remove_file(generation(path, keep));
-    for n in (1..keep).rev() {
-        let from = generation(path, n);
-        if from.exists() {
-            fs::rename(&from, generation(path, n + 1))?;
-        }
-    }
-    fs::rename(path, generation(path, 1))
-}
-
-/// `daemon.log` + `.n` — appended, never substituted, so the base name's own
-/// extension survives.
-fn generation(path: &Path, n: usize) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(format!(".{n}"));
-    PathBuf::from(name)
-}
-
 fn daemon_launch_command(launch: &DaemonLaunch, runtime_dir: &Path, config_dir: &Path) -> Command {
     let mut cmd = match launch {
         DaemonLaunch::Binary(path) => Command::new(path),
@@ -266,8 +218,9 @@ fn daemon_launch_command(launch: &DaemonLaunch, runtime_dir: &Path, config_dir: 
     cmd.current_dir(runtime_dir);
     cmd.env(DAEMON_CONFIG_ENV, config_dir);
     // This run is the one that rotated and opened `daemon.log` for the child
-    // — mark it so `GET /v1/status` can tell it apart from a daemon the CLI
-    // never touched (Important #3, T44 fix round 1).
+    // — mark it so `GET /v1/status` can tell it apart from a daemon nobody
+    // pointed at the file (Important #3, T44 fix round 1). The GUI sidecar
+    // sets the same marker for the same reason (T30).
     cmd.env(store::MANAGED_LOG_ENV, "1");
     cmd
 }
@@ -466,6 +419,21 @@ fn is_executable_file(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// The installed macOS app is `openalpaca_gui`; the daemon and the CLI
+    /// must never match.
+    #[test]
+    fn the_app_is_recognised_by_its_real_process_name() {
+        use super::is_gui_process_name;
+        assert!(
+            is_gui_process_name("openalpaca_gui"),
+            "the macOS bundle's binary"
+        );
+        assert!(is_gui_process_name("openalpaca-gui"));
+        assert!(is_gui_process_name("OpenAlpaca"));
+        assert!(!is_gui_process_name("openalpacad"), "never the daemon");
+        assert!(!is_gui_process_name("openalpaca"), "never the CLI itself");
+    }
+
     use super::*;
     use std::fs;
 
@@ -483,89 +451,11 @@ mod tests {
         }
     }
 
-    /// Below the threshold the log is left exactly as it is: rotating a small
-    /// file would throw away the only copy of a short run's output.
-    #[test]
-    fn a_log_under_the_cap_is_not_rotated() {
-        let root = tempfile::TempDir::new().unwrap();
-        let log = root.path().join("daemon.log");
-        fs::write(&log, b"one short run\n").unwrap();
-
-        rotate_log(&log, LOG_MAX_BYTES, LOG_KEEP).expect("rotation should succeed");
-
-        assert_eq!(fs::read(&log).unwrap(), b"one short run\n");
-        assert!(!log.with_extension("log.1").exists());
-    }
-
-    /// A missing log is the ordinary first start, not an error.
-    #[test]
-    fn a_missing_log_is_not_an_error() {
-        let root = tempfile::TempDir::new().unwrap();
-        rotate_log(&root.path().join("daemon.log"), LOG_MAX_BYTES, LOG_KEEP)
-            .expect("a first start rotates nothing");
-    }
-
-    /// The real 16 MB threshold, exercised with a sparse file so the test does
-    /// not write 16 MB: past it, `daemon.log` becomes `daemon.log.1` and the
-    /// live name is free for a fresh file.
-    #[test]
-    fn a_log_over_sixteen_megabytes_is_rotated_to_dot_one() {
-        let root = tempfile::TempDir::new().unwrap();
-        let log = root.path().join("daemon.log");
-        fs::File::create(&log)
-            .unwrap()
-            .set_len(LOG_MAX_BYTES + 1)
-            .unwrap();
-
-        rotate_log(&log, LOG_MAX_BYTES, LOG_KEEP).expect("rotation should succeed");
-
-        assert!(!log.exists(), "the live name is free after a rotation");
-        let rotated = root.path().join("daemon.log.1");
-        assert_eq!(fs::metadata(&rotated).unwrap().len(), LOG_MAX_BYTES + 1);
-    }
-
-    /// Keep three: every generation shifts down one and the fourth is dropped,
-    /// so the log costs at most four files however long the daemon runs.
-    #[test]
-    fn rotation_keeps_three_generations_and_drops_the_oldest() {
-        let root = tempfile::TempDir::new().unwrap();
-        let log = root.path().join("daemon.log");
-        for (name, body) in [
-            ("daemon.log", "live"),
-            ("daemon.log.1", "gen1"),
-            ("daemon.log.2", "gen2"),
-            ("daemon.log.3", "gen3"),
-        ] {
-            fs::write(root.path().join(name), body).unwrap();
-        }
-
-        // A tiny cap: the keep rule is what is under test, not the threshold.
-        rotate_log(&log, 2, LOG_KEEP).expect("rotation should succeed");
-
-        assert!(!log.exists());
-        let read = |name: &str| fs::read_to_string(root.path().join(name)).unwrap();
-        assert_eq!(read("daemon.log.1"), "live");
-        assert_eq!(read("daemon.log.2"), "gen1");
-        assert_eq!(read("daemon.log.3"), "gen2");
-        assert!(
-            !root.path().join("daemon.log.4").exists(),
-            "the fourth generation is dropped, never accumulated"
-        );
-
-        // And again, to prove the shift is not a one-off.
-        fs::write(&log, "live-2").unwrap();
-        rotate_log(&log, 2, LOG_KEEP).expect("rotation should succeed");
-        assert_eq!(read("daemon.log.1"), "live-2");
-        assert_eq!(read("daemon.log.2"), "live");
-        assert_eq!(read("daemon.log.3"), "gen1");
-        assert!(!root.path().join("daemon.log.4").exists());
-    }
-
-    /// `GET /v1/status` must never hand a GUI- or `cargo run`-launched daemon
-    /// some earlier CLI daemon's leftover `daemon.log` just because the file
-    /// exists — so the manager marks every child it spawns as the log's
-    /// owner, and the daemon gates on the marker as well as the file
-    /// (Important #3, T44 fix round 1).
+    /// `GET /v1/status` must never hand a `cargo run`-launched daemon some
+    /// earlier daemon's leftover `daemon.log` just because the file exists —
+    /// so each launcher that points a child at the log marks it as the log's
+    /// owner (this one, and the GUI sidecar since T30), and the daemon gates
+    /// on the marker as well as the file (Important #3, T44 fix round 1).
     #[test]
     fn daemon_launch_command_marks_the_child_as_the_logs_owner() {
         let launch = DaemonLaunch::Binary(PathBuf::from("/usr/local/bin/openalpacad"));

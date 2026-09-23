@@ -1,16 +1,19 @@
 //! OpenAlpaca Storage Module
 //!
 //! Provides the single path module (`store`), the discovery mechanism,
-//! the singleton lock, and the SQLite database for daemon/GUI/CLI coordination.
+//! the singleton lock, the daemon-liveness primitive (`daemon_lifecycle`),
+//! and the SQLite database for daemon/GUI/CLI coordination.
 
 pub mod artifacts;
 pub mod config_schema;
 mod content_io;
+pub mod daemon_lifecycle;
 pub mod database;
 pub mod discovery;
 pub mod migrations;
 pub mod models;
 pub mod repository;
+mod sql;
 pub mod store;
 pub mod uploads;
 
@@ -23,7 +26,7 @@ pub use artifacts::{
     RebaseCounts, USER_EDIT_NOTE, VerifyReport, WorkspaceRows,
 };
 pub use database::Database;
-pub use models::{Agent, EventLog, Memory, MemoryRole};
+pub use models::EventLog;
 pub use models::{AgentMetrics, AgentTaskHistory, SubAgentConfig};
 pub use models::{ArtifactKind, ArtifactOrigin};
 pub use models::{OutcomeKind, Task, TaskStatus};
@@ -35,7 +38,7 @@ pub use models::MessageFeedback;
 pub use models::{PREVIEW_CHARS, SkillExecutionEntry, ToolExecutionEntry};
 pub use models::SkillHealthMetrics;
 pub use repository::{
-    ARTIFACT_ROLE, ATTACHMENT_ROLE, AgentRepository, ConfigRepository, ConversationRepository,
+    ARTIFACT_ROLE, ATTACHMENT_ROLE, ConfigRepository, ConversationRepository,
     EventLogRepository, FOLLOWUP_KIND_FOLLOWUP, FOLLOWUP_KIND_UNPROCESSED_STEERING,
     FileAssetRepository, FollowupRecord, FollowupRepository, IdentityRepository,
     LlmUsageRepository, MemoryRepository,

@@ -596,6 +596,7 @@
 | `sessions` | `SessionsStatus` |
 | `routing` | `RoutingStatus` |
 | `llm` | `Option<LlmStatus>` |
+| `busy` | `Option<BusyStatus>` |
 
 ## Streaming
 

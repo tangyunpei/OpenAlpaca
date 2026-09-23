@@ -8,59 +8,8 @@ use tracing::{error, warn};
 pub(super) const TELEGRAM_MAX_LENGTH: usize = 4096;
 
 /// Split a message into chunks that fit within Telegram's message limit.
-/// Prefers splitting at paragraph boundaries (\n\n), then sentence boundaries (. ),
-/// then falls back to hard cut at a valid UTF-8 char boundary.
 pub(super) fn chunk_message(text: &str) -> Vec<String> {
-    if text.len() <= TELEGRAM_MAX_LENGTH {
-        return vec![text.to_string()];
-    }
-
-    let mut chunks = Vec::new();
-    let mut remaining = text;
-
-    while !remaining.is_empty() {
-        if remaining.len() <= TELEGRAM_MAX_LENGTH {
-            chunks.push(remaining.to_string());
-            break;
-        }
-
-        // Find a safe byte boundary to slice up to (avoids panic on multi-byte UTF-8)
-        let boundary = remaining.floor_char_boundary(TELEGRAM_MAX_LENGTH);
-        let slice = &remaining[..boundary];
-
-        // Try paragraph boundary
-        let split_at = slice
-            .rfind("\n\n")
-            .map(|i| i + 2) // include the newlines
-            // Try sentence boundary
-            .or_else(|| slice.rfind(". ").map(|i| i + 2))
-            // Try any newline
-            .or_else(|| slice.rfind('\n').map(|i| i + 1))
-            // Hard cut at safe char boundary
-            .unwrap_or(boundary);
-
-        chunks.push(remaining[..split_at].to_string());
-        remaining = &remaining[split_at..];
-    }
-
-    chunks
-}
-
-/// Escape special characters for Telegram MarkdownV2 format.
-/// Characters that must be escaped: _ * [ ] ( ) ~ ` > # + - = | { } . !
-#[allow(dead_code)] // used in tests only
-pub(super) fn escape_markdown_v2(text: &str) -> String {
-    let special_chars = [
-        '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!',
-    ];
-    let mut result = String::with_capacity(text.len() * 2);
-    for ch in text.chars() {
-        if special_chars.contains(&ch) {
-            result.push('\\');
-        }
-        result.push(ch);
-    }
-    result
+    crate::common::chunk_message(text, TELEGRAM_MAX_LENGTH)
 }
 
 /// Send a message with exponential backoff retry (3 attempts: 1s, 2s, 4s).

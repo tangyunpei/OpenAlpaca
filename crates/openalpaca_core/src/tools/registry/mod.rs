@@ -406,7 +406,7 @@ impl ToolRegistry {
 
     /// Register a tool. Safe to call at any time, including after wrapping in Arc.
     ///
-    /// Returns `Err` if the tool name is empty, exceeds 256 characters, or
+    /// Returns `Err` if the tool name is empty, exceeds 256 bytes, or
     /// contains null bytes.
     pub fn register(&self, tool: RegisteredTool) -> Result<(), String> {
         let name = &tool.definition.name;
@@ -414,9 +414,14 @@ impl ToolRegistry {
             return Err("Tool name cannot be empty".to_string());
         }
         if name.len() > 256 {
+            // The limit is bytes, and so is the preview: a name is
+            // `<server>__<tool>` from a remote MCP server, so it can be any
+            // UTF-8 at all. `&name[..32]` turned this handled refusal into a
+            // panic on the MCP load path whenever byte 32 of an over-long
+            // non-ASCII name fell inside a character.
             return Err(format!(
-                "Tool name '{}...' exceeds 256 char limit",
-                &name[..32.min(name.len())]
+                "Tool name '{}...' exceeds 256 byte limit",
+                crate::utils::text::byte_prefix(name, 32)
             ));
         }
         if name.contains('\0') {
