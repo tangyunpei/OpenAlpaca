@@ -1399,6 +1399,11 @@ fn list_filters_and_totals() {
     let mut q = ArtifactQuery::new(OWNER);
     q.q = Some("%".to_string());
     assert_eq!(store.list(&q).unwrap().1, 0);
+    for literal in ["_", "\\"] {
+        let mut q = ArtifactQuery::new(OWNER);
+        q.q = Some(literal.to_string());
+        assert_eq!(store.list(&q).unwrap().1, 0, "{literal:?} is literal");
+    }
 
     // limit/offset page but never change the total.
     let mut q = ArtifactQuery::new(OWNER);

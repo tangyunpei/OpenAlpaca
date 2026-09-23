@@ -13,6 +13,7 @@
 
 use crate::Database;
 use crate::models::conversation::{Conversation, ConversationMessage};
+use crate::sql::escape_like;
 use anyhow::Result;
 use rusqlite::OptionalExtension;
 
@@ -59,20 +60,6 @@ pub struct SessionFilter<'a> {
     pub q: Option<&'a str>,
     pub limit: i64,
     pub offset: i64,
-}
-
-/// Escapes a user-supplied `LIKE` needle so `%`, `_` and the escape character
-/// itself match literally. Paired with `ESCAPE '\'` on every pattern built from
-/// it — without both halves a search for `100%` matches every row.
-fn escape_like(needle: &str) -> String {
-    let mut out = String::with_capacity(needle.len());
-    for ch in needle.chars() {
-        if matches!(ch, '\\' | '%' | '_') {
-            out.push('\\');
-        }
-        out.push(ch);
-    }
-    out
 }
 
 /// Repository for conversation message CRUD operations

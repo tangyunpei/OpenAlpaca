@@ -177,6 +177,7 @@ use crate::Database;
 use crate::content_io::{fsync_dir, remove_best_effort, sha256_hex};
 use crate::models::file_asset::FileAssetStatus;
 use crate::models::{ArtifactKind, ArtifactOrigin};
+use crate::sql::escape_like;
 use crate::store::{
     ContentKind, StoreScope, artifact_extension, artifact_file_name, confine_to_root, content_dir,
     leading_sequence, loose_dir, project_root_at, relative_to, run_dir, version_file_path,
@@ -2841,18 +2842,6 @@ fn default_mime(kind: ArtifactKind) -> &'static str {
 /// §4.9: diffs are text-only — `kind ∈ {image, binary}` is not.
 fn is_text_kind(kind: ArtifactKind) -> bool {
     !matches!(kind, ArtifactKind::Image | ArtifactKind::Binary)
-}
-
-/// Escapes the `LIKE` metacharacters for a pattern used with `ESCAPE '\'`.
-fn escape_like(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for ch in input.chars() {
-        if matches!(ch, '\\' | '%' | '_') {
-            out.push('\\');
-        }
-        out.push(ch);
-    }
-    out
 }
 
 /// `(added, removed)` for a line diff: the `+` and `-` lines its unified patch

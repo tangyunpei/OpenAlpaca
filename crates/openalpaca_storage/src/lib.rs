@@ -13,6 +13,7 @@ pub mod discovery;
 pub mod migrations;
 pub mod models;
 pub mod repository;
+mod sql;
 pub mod store;
 pub mod uploads;
 
