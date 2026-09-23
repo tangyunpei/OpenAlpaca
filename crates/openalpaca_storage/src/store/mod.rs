@@ -714,12 +714,14 @@ const HOME_README: &str = r#"# OpenAlpaca — home store
 Created and maintained by OpenAlpaca. The rule for this directory: **`state/` is
 the machine's; everything else here is yours.**
 
-Deleting `state/` is a factory reset. Deleting a content directory loses those
-files only.
+A factory reset (`openalpaca config reset --factory`) deletes the database
+inside `state/` and nothing else there — the master key, the embedding cache,
+the logs and the backups stay. Deleting a content directory loses those files
+only.
 
 | Entry | Holds | Retention class |
 |---|---|---|
-| `state/` | database (+ WAL/SHM), `discovery.json`, `openalpacad.lock`, `.master_key` | never swept — deleting it is a factory reset |
+| `state/` | database (+ WAL/SHM), `discovery.json`, `openalpacad.lock`, `.master_key` | never swept — a factory reset deletes the database here and leaves the rest |
 | `state/backups/` | rotated copies of hand-edited config (`<name>.bak.<ts>`, `<name>.unparseable-<ts>`) | regenerable — swept freely; never user-edited |
 | `state/logs/` | `daemon.log`, `gui.log` | regenerable — swept freely |
 | `state/cache/` | derived data the machine can rebuild — `fastembed/` holds the local embedding model (~1 GB) | regenerable — deleting it costs a re-download |

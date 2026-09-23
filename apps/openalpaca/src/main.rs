@@ -20,6 +20,8 @@ mod commands;
 mod manager;
 mod output;
 mod repl;
+#[cfg(test)]
+pub(crate) mod test_util;
 mod unattended;
 
 use anyhow::Result;

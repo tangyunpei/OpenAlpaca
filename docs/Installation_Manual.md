@@ -169,7 +169,10 @@ What happens instead:
   old directory; move or delete it yourself and the warning stops.
 - `openalpaca config` — the one CLI command that opens the database directly
   instead of asking the daemon — applies the same rule and exits with the same
-  message. Every other `openalpaca` subcommand talks to the daemon over HTTP
+  message, in every form that opens the database (`config reset --factory` and
+  a file-backed `ai.*` or `daemon.*` key open none, so they do not check — and
+  a factory reset never touches the old directory, so it does not clear this).
+  Every other `openalpaca` subcommand talks to the daemon over HTTP
   and is unaffected in itself, though it still needs a daemon that will start.
 
 To carry old data over by hand, with no OpenAlpaca process running:

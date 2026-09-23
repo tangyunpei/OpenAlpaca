@@ -1232,11 +1232,14 @@ async fn an_all_dry_run_names_the_home_stores_state_as_kept() {
         .find(|e| e["entry"] == "state/")
         .expect("the plan never mentions state/");
     assert_eq!(state["action"], "keep");
+    let retention = state["retention"].as_str().unwrap();
+    assert!(retention.contains("factory reset"));
+    // A factory reset deletes the database, not the directory: telling a user
+    // that deleting `state/` is one would cost them the master key and the
+    // embedding model too.
     assert!(
-        state["retention"]
-            .as_str()
-            .unwrap()
-            .contains("factory reset")
+        retention.contains("only the database"),
+        "the plan must say a factory reset deletes only the database: {retention}"
     );
     // Nothing happened — it is still a dry run.
     assert_eq!(f.row_count("SELECT COUNT(*) FROM session"), 1);

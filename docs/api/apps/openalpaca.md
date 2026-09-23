@@ -93,6 +93,12 @@
   - `reset` (fields: `key`, `factory`)
 - Parsed flags: `--all`, `--factory`, `--format`, `--verbose`
 
+### `config_factory_reset`
+
+- Source: `apps/openalpaca/src/commands/config_factory_reset.rs`
+- No `Subcommand` enum found in module.
+- Parsed flags: none
+
 ### `config_handlers`
 
 - Source: `apps/openalpaca/src/commands/config_handlers.rs`

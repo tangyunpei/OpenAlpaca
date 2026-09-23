@@ -163,7 +163,7 @@ fn shell_word(word: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::ai_config_helpers::tests::EnvSandbox;
+    use crate::test_util::EnvSandbox;
     use std::time::Duration;
 
     const PID: u32 = 41_287;

@@ -144,7 +144,7 @@ openalpaca config reset [<key>] [--factory]
 
 Notes:
 - Bare `openalpaca config` (no subcommand) opens an interactive configuration TUI.
-- `config` operates directly on the local database and TOML files — no running daemon required (the TUI's agent-management screen is the exception; it talks to the daemon).
+- `config` operates directly on the local database and TOML files — no running daemon required. Two exceptions: the TUI's agent-management screen talks to the daemon, and `reset --factory` refuses while one is running. A file-backed key (`ai.*`, `daemon.*`) does not open the database at all, so `set`, `get` and a keyed `reset` on those keys work even when the database is refused; `list`, a keyless `reset` and the interactive editor all need it.
 - `--all` includes unset keys with their defaults; `-v/--verbose` adds a source column (db / llm.toml / daemon.toml).
 - `set` validates keys against the config schema; unknown keys get "did you mean" suggestions. A sensitive value (a token, an API key) is masked wherever it is printed.
 - `get` prints the stored value, or the schema default followed by `(default)` when nothing is stored.
@@ -168,7 +168,15 @@ openalpaca config list --all -v
 
 Which file is edited: the one in `OPENALPACA_CONFIG_DIR` when that names a directory; otherwise `~/.openalpaca/config/<file>` when it exists; otherwise `./config/<file>` under the current directory (a repository checkout). A daemon running on the same config directory watches `llm.toml` and `daemon.toml` and picks an edit up without a restart.
 
-`reset <key>` deletes that one key. `reset` with no key resets all configuration after a confirmation (agents and data are preserved). `reset --factory` performs a full storage reset (wipes agents, memories, everything), also after a confirmation.
+`reset <key>` deletes that one key, from whichever backend owns it — the database, `llm.toml` or `daemon.toml`. `reset` with no key clears all configuration after a confirmation (agents and data are preserved). `<key>` and `--factory` are mutually exclusive.
+
+`reset --factory` is the rescue verb. It deletes the database file `~/.openalpaca/state/openalpaca.db` together with its `-wal` and `-shm` siblings, then clears `config/llm.toml` (provider settings and every API key in it, including the keychain entries those keys point at) and resets `config/daemon.toml` to its defaults. The next daemon start builds an empty database at the current schema version. It is the way out of `Unsupported legacy schema version …`, because it is the one form of `config` that opens no database at all — every other form that needs the database opens it, and dies on the same guard.
+
+- It **refuses while a daemon is running.** Stop it with `openalpaca daemon stop` first. Deleting a file the daemon has open would leave it writing into an unlinked inode while the next start created a second database beside it.
+- It prints the absolute store root it is about to wipe — `OPENALPACA_HOME_STORE` may point anywhere — and requires you to type `factory-reset`. `y` is not enough, there is no `--yes` flag, and the prompt cannot be answered by a pipe: run it at a terminal.
+- **No backup is taken and there is no undo.**
+- **Not touched:** `state/cache/` (the local embedding model, ~1 GB), `state/.master_key`, `state/logs/`, `state/backups/`, `config/mcp.toml`, `config/agents/`, `config/skills/`, `config/orchestrator/`, and `~/.openalpaca/plugins/`.
+- **Left on disk, now unreferenced:** everything under `artifacts/`, `uploads/` and `sessions/`. The rows that indexed those files are gone; the bytes are not. Delete the directories yourself if you want the space back.
 
 ### `gui`
 
@@ -598,7 +606,7 @@ Would purge /Users/me/code/my-project
 Nothing was deleted. Re-run with -y to carry this out.
 ```
 
-- The daemon refuses rather than guesses, the same way the re-base does: nothing of yours recorded under the path is a `404`, and so is a root holding rows that belong to another owner; a run there that is queued, running or paused — or a conversation with a run in flight — is a `409` `WORKSPACE_BUSY` (a queued run has not started yet, but it already named this root and is about to resolve the store the moment it does), and with `--all` one busy root refuses the whole call rather than purging the others; a path resolving to the home store is a `409` `WORKSPACE_IS_HOME` (the home store is not a project, and a factory reset is deleting `~/.openalpaca/state/`, a separate deliberate act); a relative path is a `400`.
+- The daemon refuses rather than guesses, the same way the re-base does: nothing of yours recorded under the path is a `404`, and so is a root holding rows that belong to another owner; a run there that is queued, running or paused — or a conversation with a run in flight — is a `409` `WORKSPACE_BUSY` (a queued run has not started yet, but it already named this root and is about to resolve the store the moment it does), and with `--all` one busy root refuses the whole call rather than purging the others; a path resolving to the home store is a `409` `WORKSPACE_IS_HOME` (the home store is not a project, and a factory reset is `openalpaca config reset --factory`, a separate deliberate act); a relative path is a `400`.
 - A purge is not reversible and there is no undo. Back up `<project>/.openalpaca` first if you might want the transcripts again.
 
 ### `chat`

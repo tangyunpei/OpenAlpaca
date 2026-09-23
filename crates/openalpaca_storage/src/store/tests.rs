@@ -313,7 +313,13 @@ fn ensure_store_seeds_the_home_root() {
         readme.contains("Retention class"),
         "README lacks the retention-class column"
     );
-    assert!(readme.contains("factory reset"));
+    assert!(readme.contains("openalpaca config reset --factory"));
+    // Taken literally, "deleting `state/` is a factory reset" destroys the
+    // embedding model and the master key; the verb deletes the database only.
+    assert!(
+        !readme.contains("is a factory reset"),
+        "the README must not equate deleting state/ with a factory reset"
+    );
     assert!(
         !root.join(".gitignore").exists(),
         "the home root carries no .gitignore"

@@ -973,7 +973,7 @@ pub(crate) async fn purge_workspaces(deps: &PurgeDeps<'_>, request: PurgeRequest
             plan_entry(
                 "state/",
                 "the machine's — the database, keys and logs",
-                "never swept; deleting it is a factory reset",
+                "never swept; a factory reset deletes only the database inside it",
                 "keep",
             ),
         ]);

@@ -1,6 +1,7 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use openalpaca_storage::{ConfigRepository, store};
+use openalpaca_storage::{ConfigRepository, Database, store};
+use std::path::Path;
 
 use crate::output::OutputFormat;
 
@@ -35,29 +36,86 @@ pub enum ConfigAction {
     Reset {
         /// Key to reset (omit for all config)
         key: Option<String>,
-        /// Full factory reset (wipes agents, memories, everything)
-        #[arg(long)]
+        /// Full factory reset: deletes the database file and clears llm.toml/daemon.toml
+        #[arg(long, conflicts_with = "key")]
         factory: bool,
     },
 }
 
-pub async fn run(args: ConfigArgs) -> Result<()> {
-    // Checks for an older install's data directory first: opening the database
-    // *creates* one, so opening before checking is what strands it.
-    let db = store::open_home_database()?;
-    let repo = ConfigRepository::new(&db);
+/// Everything `config` reaches outside its own process state, behind one seam.
+///
+/// The factory reset's whole point is that it opens **no** database — it is the
+/// one form of this verb that survives a schema the build refuses. A claim like
+/// that is only worth as much as the test behind it, so the opener is injected
+/// and the test uses one that panics. The daemon check and the terminal prompt
+/// ride along for the same reason: neither is available in a test binary.
+pub(super) trait ConfigEnv {
+    /// The store database. Opened at most once, and only by the arms that need it.
+    fn database(&mut self) -> Result<Database>;
 
+    /// Whether an `openalpacad` is running against this store.
+    fn daemon_is_running(&self) -> bool;
+
+    /// Shows the factory-reset warning and reads the typed confirmation word.
+    /// `Ok(false)` means the user declined; an error means we could not ask.
+    fn confirm_factory_reset(&self, root: &Path) -> Result<bool>;
+}
+
+#[derive(Default)]
+pub(super) struct RealConfigEnv {
+    opened: Option<Database>,
+}
+
+impl ConfigEnv for RealConfigEnv {
+    fn database(&mut self) -> Result<Database> {
+        if self.opened.is_none() {
+            // Checks for an older install's data directory first: opening the
+            // database *creates* one, so opening before checking is what strands
+            // it. Through `state_dir()`, so `state/` is 0700 even when no daemon
+            // has ever run here. This is the CLI's one call site.
+            self.opened = Some(store::open_home_database()?);
+        }
+        // `Database` is an `Arc<Mutex<Connection>>` behind a `Clone`, so handing
+        // out an owned clone costs nothing and spares every caller a lifetime.
+        Ok(self.opened.clone().expect("just opened"))
+    }
+
+    fn daemon_is_running(&self) -> bool {
+        crate::manager::is_daemon_running()
+    }
+
+    fn confirm_factory_reset(&self, root: &Path) -> Result<bool> {
+        super::config_factory_reset::prompt_on_terminal(root)
+    }
+}
+
+pub async fn run(args: ConfigArgs) -> Result<()> {
+    run_with(args, &mut RealConfigEnv::default())
+}
+
+/// The dispatcher. Each arm opens the database only if it needs one — a
+/// file-backed key (`ai.*`, `daemon.*`) never does, and `reset --factory` must
+/// not, because the database it exists to delete may be one this build refuses.
+pub(super) fn run_with(args: ConfigArgs, env: &mut dyn ConfigEnv) -> Result<()> {
     match args.action {
-        Some(ConfigAction::Set { key, value }) => cmd_set(&repo, &key, &value)?,
-        Some(ConfigAction::Get { key }) => cmd_get(&repo, &key)?,
+        Some(ConfigAction::Set { key, value }) => cmd_set(env, &key, &value),
+        Some(ConfigAction::Get { key }) => cmd_get(env, &key),
         Some(ConfigAction::List {
             all,
             format,
             verbose,
-        }) => cmd_list(&repo, all, format, verbose)?,
-        Some(ConfigAction::Reset { key, factory }) => cmd_reset(&repo, &db, key, factory)?,
-        None => run_interactive(&repo, &db)?,
+        }) => cmd_list(env, all, format, verbose),
+        Some(ConfigAction::Reset { key, factory }) => cmd_reset(env, key, factory),
+        None => {
+            let db = env.database().context(
+                "the interactive configuration editor needs a working database; \
+                 `openalpaca config set|get|reset` on an `ai.*` or `daemon.*` key, and \
+                 `openalpaca config reset --factory`, still work without one",
+            )?;
+            run_interactive(&ConfigRepository::new(&db))
+        }
     }
-
-    Ok(())
 }
+
+#[cfg(test)]
+pub(super) mod tests;
