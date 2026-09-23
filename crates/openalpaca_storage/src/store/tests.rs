@@ -336,6 +336,88 @@ fn ensure_store_seeds_the_home_root() {
     assert_eq!(install_id(&root).unwrap().as_deref(), Some(id.as_str()));
 }
 
+/// A store seeded by an earlier build carries a README that calls deleting
+/// `state/` a factory reset. Nobody edited it, so it is brought up to date —
+/// every earlier text, not just the last.
+#[test]
+fn ensure_store_replaces_an_unedited_superseded_home_readme() {
+    let tmp = tempdir().unwrap();
+    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
+    let root = ensure_store(&StoreScope::Home).unwrap();
+    let readme = root.join("README.md");
+
+    for (n, old) in SUPERSEDED_HOME_READMES.iter().enumerate() {
+        assert!(
+            old.contains("Deleting `state/` is a factory reset"),
+            "superseded text {n} is the one this replaces"
+        );
+        fs::write(&readme, old).unwrap();
+        ensure_store(&StoreScope::Home).unwrap();
+        assert_eq!(
+            fs::read_to_string(&readme).unwrap(),
+            HOME_README,
+            "superseded text {n} must be replaced by the current one"
+        );
+    }
+    assert!(
+        !SUPERSEDED_HOME_READMES.contains(&HOME_README),
+        "the current text must not be listed as superseded"
+    );
+}
+
+/// A tripwire, not a spec: the refresh above only reaches stores seeded by a
+/// text listed in `SUPERSEDED_HOME_READMES`. Changing `HOME_README` without
+/// listing the text it replaces would strand every store seeded by this build.
+#[test]
+fn a_changed_home_readme_lists_the_text_it_replaces() {
+    use sha2::{Digest, Sha256};
+    assert_eq!(
+        format!("{:x}", Sha256::digest(HOME_README.as_bytes())),
+        "eceb21d5c6376fbcf29b09ab5e0774d3f62ace62a82468fad3ff257d2cc2a9a5",
+        "HOME_README changed: save its previous text as \
+         store/superseded_readmes/home-<next>.txt, list it in \
+         SUPERSEDED_HOME_READMES, then update this digest"
+    );
+}
+
+/// The README is the user's the moment they change it: an edited earlier
+/// text — even by one byte — and any text of their own are left alone.
+#[test]
+fn ensure_store_leaves_an_edited_home_readme_alone() {
+    let tmp = tempdir().unwrap();
+    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
+    let root = ensure_store(&StoreScope::Home).unwrap();
+    let readme = root.join("README.md");
+
+    let edited_old = format!("{}\nMy note: keep backups.\n", SUPERSEDED_HOME_READMES[4]);
+    let trimmed_old = SUPERSEDED_HOME_READMES[0].trim_end().to_owned();
+    for mine in [edited_old, trimmed_old, "# my own notes\n".to_owned()] {
+        fs::write(&readme, &mine).unwrap();
+        ensure_store(&StoreScope::Home).unwrap();
+        assert_eq!(fs::read_to_string(&readme).unwrap(), mine);
+    }
+}
+
+/// Only the home README is refreshed; a project store's is never rewritten,
+/// even with a superseded home text in it.
+#[test]
+fn a_project_readme_is_never_refreshed() {
+    let tmp = tempdir().unwrap();
+    // `ensure_store` asks whether a root is the home root, which resolves it.
+    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
+    let project = tmp.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    let scope = StoreScope::Project(project);
+    let root = ensure_store(&scope).unwrap();
+    let readme = root.join("README.md");
+    fs::write(&readme, SUPERSEDED_HOME_READMES[4]).unwrap();
+    ensure_store(&scope).unwrap();
+    assert_eq!(
+        fs::read_to_string(&readme).unwrap(),
+        SUPERSEDED_HOME_READMES[4]
+    );
+}
+
 #[test]
 fn ensure_store_seeds_a_project_root() {
     let tmp = tempdir().unwrap();

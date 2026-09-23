@@ -7,7 +7,8 @@
 //!
 //! ```text
 //! ~/.openalpaca/
-//!   README.md          seeded once; explains every entry
+//!   README.md          seeded once; explains every entry (refreshed only while
+//!                      it is an unedited earlier seeding)
 //!   .layout            line 1: layout version; line 2 (home root only): install_id=<uuid-v4>
 //!   state/             MACHINE STATE — opaque, never user-edited, never committed
 //!     openalpaca.db (+ -wal, -shm), discovery.json, openalpacad.lock, .master_key
@@ -461,7 +462,10 @@ pub fn store_root(scope: &StoreScope) -> Result<PathBuf> {
 
 /// Creates the store root and seeds its metadata: `README.md`, `.layout`
 /// (and, for a project store, `.gitignore`). Idempotent — each file is written
-/// only when absent, so user edits stick.
+/// only when absent, so user edits stick. The one exception is a home
+/// `README.md` byte-identical to a text an earlier build seeded
+/// ([`SUPERSEDED_HOME_READMES`]): nobody edited it, it is ours, and it is
+/// brought up to date.
 ///
 /// On the home root, `.layout` line 2 carries `install_id=<uuid-v4>`, written
 /// once and never rewritten.
@@ -481,6 +485,12 @@ pub fn ensure_store(scope: &StoreScope) -> Result<PathBuf> {
     let readme = root.join(README_FILE);
     if !readme.exists() {
         write_new(&readme, readme_text(is_home))?;
+    } else if is_home && is_superseded_home_readme(&readme) {
+        write_atomic(&readme, HOME_README)?;
+        tracing::info!(
+            "Updated {}: it was an earlier build's text, unedited",
+            readme.display()
+        );
     }
 
     if !is_home {
@@ -911,6 +921,44 @@ Directories OpenAlpaca did not create are never touched and never swept.
 it is written only when absent, so your edits stick. `.layout` records this
 store's layout version — do not edit it.
 "#;
+
+/// Every home README an earlier build seeded, byte for byte, oldest first —
+/// recovered from the history of [`HOME_README`]. Each one says that deleting
+/// `state/` is a factory reset, which taken literally destroys `.master_key`
+/// and the ~1 GB embedding model; `openalpaca config reset --factory` deletes
+/// the database and nothing else there. A seeded README is written only when
+/// absent, so without this every existing store would keep that sentence.
+///
+/// When [`HOME_README`] changes, its previous text is appended here, so a
+/// store seeded by the build before keeps being refreshed.
+const SUPERSEDED_HOME_READMES: [&str; 5] = [
+    include_str!("superseded_readmes/home-1.txt"),
+    include_str!("superseded_readmes/home-2.txt"),
+    include_str!("superseded_readmes/home-3.txt"),
+    include_str!("superseded_readmes/home-4.txt"),
+    include_str!("superseded_readmes/home-5.txt"),
+];
+
+/// Whether `path` holds exactly one of [`SUPERSEDED_HOME_READMES`]. Anything
+/// else — an edit, an unreadable file, a directory — is the user's and is
+/// left alone. The length is checked first, so a large file is never read.
+fn is_superseded_home_readme(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file()
+        || !SUPERSEDED_HOME_READMES
+            .iter()
+            .any(|old| old.len() as u64 == meta.len())
+    {
+        return false;
+    }
+    fs::read(path).is_ok_and(|bytes| {
+        SUPERSEDED_HOME_READMES
+            .iter()
+            .any(|old| old.as_bytes() == bytes.as_slice())
+    })
+}
 
 fn readme_text(is_home: bool) -> &'static str {
     if is_home { HOME_README } else { PROJECT_README }

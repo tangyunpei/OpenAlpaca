@@ -73,7 +73,7 @@ root is the human's:
 - master key: `~/.openalpaca/state/.master_key`
 - rotated copies of hand-edited config: `~/.openalpaca/state/backups/`
 - plugins: `~/.openalpaca/plugins/` — one directory per plugin, plus `.permissions.toml` (approvals and the ENABLE bit for all plugins), `.config/<name>.toml` (per-plugin config), `.data/<name>/` (per-plugin durable state, kept across an update) and `.trash/` (where an uninstalled plugin's directory is moved)
-- self-description: `~/.openalpaca/README.md` (what every entry is, with a retention class) and `.layout` (layout version and this install's id), both seeded when the store is created
+- self-description: `~/.openalpaca/README.md` (what every entry is, with a retention class) and `.layout` (layout version and this install's id), both seeded when the store is created. A `README.md` that is still, byte for byte, the text an earlier build seeded is brought up to date at the next boot (the earlier texts called deleting `state/` a factory reset, which would also lose `.master_key` and the embedding model); one you have edited is never touched
 - content, home scope: one directory per content kind under the root, created on first use — `artifacts/`, `uploads/`, `sessions/`, `memory/`, `skills/`, `scratch/`, `cache/`
 - embedding model cache: `~/.openalpaca/state/cache/fastembed` — where the
   local embedding backend puts the ~1 GB model it downloads on first use
