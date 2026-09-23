@@ -166,6 +166,17 @@ pub fn start_gui() -> Result<()> {
 /// Stop GUI (Naive approach: lookup by name or port?)
 /// Dev environment: killing the `npm` process doesn't always kill children.
 /// We might need to find "openalpaca-gui" process.
+/// Whether a process name is the desktop app. The installed macOS bundle runs
+/// its Cargo binary, `openalpaca-gui.app/Contents/MacOS/openalpaca_gui` — an
+/// underscore — which the hyphenated match alone never found, so `gui stop`
+/// reported "No GUI process found" with the app open. `openalpaca-gui` and
+/// `OpenAlpaca` stay for the Linux packages and dev builds they were written for.
+fn is_gui_process_name(name: &str) -> bool {
+    name.contains("openalpaca_gui")
+        || name.contains("openalpaca-gui")
+        || name.contains("OpenAlpaca")
+}
+
 pub fn stop_gui() -> Result<()> {
     println!("🛑 Stopping GUI...");
     let mut s = System::new();
@@ -174,9 +185,7 @@ pub fn stop_gui() -> Result<()> {
 
     for (pid, process) in s.processes() {
         let name = process.name().to_string_lossy();
-        if name.contains("openalpaca-gui") || name.contains("OpenAlpaca") {
-            // In dev mode, the process name might be different on Mac.
-            // Usually "OpenAlpaca" key.
+        if is_gui_process_name(&name) {
             println!("Found potential GUI process: {} ({})", name, pid);
             #[cfg(unix)]
             {
@@ -410,6 +419,21 @@ fn is_executable_file(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// The installed macOS app is `openalpaca_gui`; the daemon and the CLI
+    /// must never match.
+    #[test]
+    fn the_app_is_recognised_by_its_real_process_name() {
+        use super::is_gui_process_name;
+        assert!(
+            is_gui_process_name("openalpaca_gui"),
+            "the macOS bundle's binary"
+        );
+        assert!(is_gui_process_name("openalpaca-gui"));
+        assert!(is_gui_process_name("OpenAlpaca"));
+        assert!(!is_gui_process_name("openalpacad"), "never the daemon");
+        assert!(!is_gui_process_name("openalpaca"), "never the CLI itself");
+    }
+
     use super::*;
     use std::fs;
 
