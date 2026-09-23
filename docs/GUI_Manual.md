@@ -132,6 +132,18 @@ guard: if it changes, the daemon restarted, so every `task_id`, `stream_id` and
 `request_id` the client holds is dead and the app re-bootstraps rather than
 merely reopening its socket (`src/lib/connection.ts`).
 
+**Three ways to have no daemon, told apart.** A window that stopped the daemon
+itself (Settings → Connection → `Stop daemon…`) says `stopped`; one whose daemon
+announced it was going away — the CLI or another window stopped it, and the
+daemon sends a `daemon_shutting_down` frame before it closes the socket — says
+`stopped elsewhere`. In both, the dot is the neutral grey, nothing polls,
+nothing reconnects and **nothing starts the daemon again on its own**: the way
+back is `Start daemon`. A daemon that went away without saying so (a crash,
+`kill -9`, the machine sleeping) is `disconnected`, red, and the window keeps
+trying to reconnect by itself (1 s, doubling to 30 s), which reads discovery and
+never spawns anything. Reopening the app is a fresh start either way — the stop
+is not remembered, and the app starts a daemon on boot as it always does.
+
 **Live events.** One WebSocket carries the daemon's whole `ServerEvent`
 firehose: `GET /v1/events?token=…` — browsers cannot set WebSocket headers, so
 the token rides in the query string. The socket drives cache invalidation
@@ -571,6 +583,38 @@ rather than shown as `0`, because a zero is a claim.
 The liveness dot and instance id (`GET /v1/health`), the endpoint, and
 `Reconnect` (re-bootstrap, then reopen the socket).
 
+**Stop daemon…** opens a confirmation before anything happens. It re-reads what
+the daemon is doing — `Right now: 2 workflows running · 1 tool waiting for
+approval · 3 windows connected.` (this window counts), or, from a daemon too old
+to say, a line saying the window cannot tell — and `Stop daemon` stays disabled
+until that read has answered. `Cancel` is the default button and Escape
+cancels; nothing asks you to type a word. What the dialog tells you is what a
+stop does, and no more:
+
+- everything stops immediately — nothing is finished first;
+- a running workflow is cut off mid-step and comes back marked `interrupted`
+  when the daemon starts again — open it in Work and choose Rerun;
+- anything you typed at a running workflow while it worked is kept and
+  delivered on that conversation's next turn;
+- a reply that is streaming is lost, and a tool waiting for your approval is
+  dropped without running;
+- when a connector is running, people messaging OpenAlpaca from Telegram,
+  Discord or iMessage get no reply and no error until you start it again —
+  there is no farewell message;
+- your conversations, artifacts, uploads and memories are untouched.
+
+The app asks the daemon to shut down (`POST /v1/command`), then waits — up to
+15 s — for its process to exit and its lock to be released before it says
+`Daemon stopped.`; a daemon that does not go, or a lock something else still
+holds, is reported with the terminal command to finish the job. A request the
+daemon refuses leaves the window connected. **While stopped**, the card reads
+`Daemon stopped` (or `Daemon stopped from elsewhere`) with when it happened,
+`Start daemon` replaces `Reconnect`, the composer's Send is closed with "The
+daemon is stopped — start it to send a message." (a draft is kept), and nothing
+polls. `Start daemon` starts one — the sidecar, if nothing is running — and
+refetches everything, because a new daemon has a new port, token and instance
+id.
+
 **When the daemon is unreachable**, the card shows why, in a scrolling block,
 exactly as the shell reported it — for a daemon that would not start, that is
 the end of what it wrote to `daemon.log` before it gave up. `Show daemon log`
@@ -851,6 +895,15 @@ trusting `state/discovery.json`, so a stale file is not the usual cause. If the
 error says the daemon wrote nothing to its log, the daemon binary did not run
 at all — check it is installed beside the app. In `bun run dev` there is no
 Tauri bridge, so every shell command fails by design.
+
+**The window says the daemon is stopped.** `stopped` means this window stopped
+it; `stopped elsewhere` means it announced it was going away — `openalpaca
+daemon stop` or `restart`, or another window. Neither comes back on its own:
+choose `Start daemon` in Settings → Connection (after a CLI `restart`, that finds
+the new daemon rather than starting a second one). If the dialog said the daemon
+did not stop within 15 seconds, run `openalpaca daemon stop` from a terminal
+first. A red `disconnected` is different — the daemon went away unannounced, and
+the window is already trying to reconnect.
 
 **Connection flaps.** Watch the instance id in Settings → Connection: a change
 means the daemon restarted, and the app deliberately re-bootstraps and drops

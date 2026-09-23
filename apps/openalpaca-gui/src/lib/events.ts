@@ -14,7 +14,9 @@
 
 import {
   bootstrapConnection,
+  getStopIntent,
   refreshConnection,
+  setStopIntent,
   wsUrl,
   type ConnectionInfo,
 } from "./connection";
@@ -267,6 +269,19 @@ export class DaemonEventsClient {
     }
   }
 
+  /**
+   * Climb the reconnect ladder from here, without bootstrapping: every rung
+   * re-reads discovery and none spawns a daemon. For a window that must get
+   * back to a daemon that may be there, but must not start one — a stop whose
+   * request never reached the daemon.
+   */
+  resume(): void {
+    this.clearTimer();
+    this.reconnectEnabled = true;
+    this.backoffMs = BACKOFF_BASE_MS;
+    this.scheduleReconnect();
+  }
+
   /** Close the socket and stop reconnecting. */
   disconnect(): void {
     this.reconnectEnabled = false;
@@ -338,6 +353,16 @@ export class DaemonEventsClient {
         ...(parsed as object),
         _id: this.nextEventId++,
       } as ServerEvent;
+      // The daemon has said the socket is about to close *and why*. Climbing
+      // a ladder against a daemon that is going away on purpose is noise, and
+      // the ladder must never be what brings it back. If this window did not
+      // ask, someone else stopped it — the CLI, or another window. Still
+      // delivered below like any other frame, so the Event log shows it.
+      if (tagged.type === "daemon_shutting_down") {
+        this.reconnectEnabled = false;
+        this.clearTimer();
+        if (getStopIntent() === null) setStopIntent("stopped_elsewhere");
+      }
       this.ring = [tagged, ...this.ring].slice(0, this.deps.ringSize);
       for (const listener of this.eventListeners) listener(tagged);
     };

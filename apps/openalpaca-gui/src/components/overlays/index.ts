@@ -5,3 +5,4 @@ export * from "./commands";
 export * from "./ToastHost";
 export * from "./useCommandCatalog";
 export * from "./useCommandShortcuts";
+export * from "./StopDaemonDialog";

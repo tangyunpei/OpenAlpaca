@@ -98,6 +98,11 @@ export function Card({
 
 export interface StatusCardProps {
   ok: boolean;
+  /**
+   * A deliberate absence — a daemon that was stopped — rather than a failure:
+   * the dot takes the neutral muted token, never the error red.
+   */
+  idle?: boolean;
   title: string;
   /** Right-aligned mono meta — uptime in the design. */
   meta?: React.ReactNode;
@@ -107,6 +112,7 @@ export interface StatusCardProps {
 
 export function StatusCard({
   ok,
+  idle = false,
   title,
   meta,
   cells,
@@ -117,10 +123,10 @@ export function StatusCard({
       <div className="flex items-center gap-[10px]">
         <span
           role="img"
-          aria-label={ok ? "connected" : "disconnected"}
+          aria-label={ok ? "connected" : idle ? "stopped" : "disconnected"}
           className={cn(
             "block h-[8px] w-[8px] shrink-0 rounded-full",
-            ok ? "bg-green" : "bg-red",
+            ok ? "bg-green" : idle ? "bg-muted-fg" : "bg-red",
           )}
         />
         <span className="text-md-plus font-semibold text-ink">{title}</span>

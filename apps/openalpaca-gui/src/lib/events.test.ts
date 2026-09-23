@@ -11,7 +11,11 @@ import {
   type ServerEventType,
   type SocketLike,
 } from "./events";
-import type { ConnectionInfo } from "./connection";
+import {
+  getStopIntent,
+  setStopIntent,
+  type ConnectionInfo,
+} from "./connection";
 
 const INFO: ConnectionInfo = {
   baseUrl: "http://127.0.0.1:51823",
@@ -393,6 +397,79 @@ describe("DaemonEventsClient", () => {
 
     expect(signals.map((s) => s.reason)).toContain("instance_changed");
     expect(client.getEvents()).toHaveLength(0);
+    client.disconnect();
+  });
+
+  /**
+   * The CLI or another window stopped the daemon. It says so on the socket
+   * before it closes it, and a window that did not ask must neither climb a
+   * ladder against it nor ever respawn it — it records who stopped it and
+   * waits for an explicit Start.
+   */
+  it("treats a daemon_shutting_down frame it did not ask for as stopped elsewhere, and schedules nothing", async () => {
+    setStopIntent(null);
+    const refresh = vi.fn(() => Promise.resolve(INFO));
+    const bootstrap = vi.fn(() => Promise.resolve(INFO));
+    const client = makeClient({ refresh, bootstrap, random: () => 0 });
+    const seen: ServerEventType[] = [];
+    client.onEvent((event) => seen.push(event.type));
+    await client.connect();
+    const socket = latest();
+    socket.onopen?.({});
+
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "daemon_shutting_down",
+        grace_secs: 10,
+        ts: "2026-09-22T10:00:00Z",
+        instance_id: INFO.instanceId,
+      }),
+    });
+    expect(getStopIntent()).toBe("stopped_elsewhere");
+    // Still an ordinary frame for everyone else — the Event log shows it.
+    expect(seen).toEqual(["daemon_shutting_down"]);
+
+    socket.onclose?.({});
+    expect(client.getStatus()).toBe("disconnected");
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(refresh).not.toHaveBeenCalled();
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+    setStopIntent(null);
+  });
+
+  it("keeps this window's own stop intent when the frame arrives", async () => {
+    setStopIntent("stopped_here");
+    const client = makeClient();
+    await client.connect();
+    latest().onmessage?.({
+      data: JSON.stringify({
+        type: "daemon_shutting_down",
+        grace_secs: 10,
+        ts: "2026-09-22T10:00:00Z",
+        instance_id: INFO.instanceId,
+      }),
+    });
+    expect(getStopIntent()).toBe("stopped_here");
+    setStopIntent(null);
+    client.disconnect();
+  });
+
+  /** `resume()` reads discovery on every rung and never bootstraps. */
+  it("resumes the ladder without bootstrapping", async () => {
+    const refresh = vi.fn(() => Promise.resolve(INFO));
+    const bootstrap = vi.fn(() => Promise.resolve(INFO));
+    const client = makeClient({ refresh, bootstrap, random: () => 0.5 });
+    await client.connect();
+    client.disconnect();
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+
+    client.resume();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+    expect(client.getStatus()).toBe("connecting");
     client.disconnect();
   });
 

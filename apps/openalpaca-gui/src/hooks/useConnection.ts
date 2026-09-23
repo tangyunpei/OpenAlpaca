@@ -11,18 +11,23 @@ import {
   useQueryClient,
   type UseQueryResult,
 } from "@tanstack/react-query";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 
 import { getDaemonStatus } from "@/lib/api/status";
 import { getHealth } from "@/lib/api/telemetry";
 import type { DaemonStatus, HealthResponse } from "@/lib/api/types";
 import {
   getCachedConnection,
+  getStopIntent,
+  getStoppedAt,
   shortInstanceId,
   subscribeConnection,
   subscribeInstanceChange,
+  subscribeStopIntent,
   type ConnectionInfo,
+  type StopIntent,
 } from "@/lib/connection";
+import { startDaemon } from "@/lib/daemon-control";
 import { daemonEvents, type EventsStatus } from "@/lib/events";
 import { qk } from "@/lib/query-keys";
 import { useProjectStore } from "@/stores/project";
@@ -34,13 +39,25 @@ export function useConnectionInfo(): ConnectionInfo | null {
   return info;
 }
 
+/**
+ * Why this window has no daemon — `null` while it should have one
+ * (`lib/connection.ts`'s stop intent).
+ */
+export function useStopIntent(): StopIntent {
+  return useSyncExternalStore(subscribeStopIntent, getStopIntent);
+}
+
 /** `GET /v1/health` — unauthenticated liveness plus the instance id. */
 export function useHealth(): UseQueryResult<HealthResponse> {
+  // A stopped daemon is a state, not an incident: nothing polls a daemon this
+  // window knows is not there. Cached data stays readable.
+  const stopped = useStopIntent() !== null;
   return useQuery({
     queryKey: qk.health(),
     queryFn: ({ signal }) => getHealth(signal),
     refetchInterval: 30_000,
     staleTime: 10_000,
+    enabled: !stopped,
   });
 }
 
@@ -62,11 +79,13 @@ export function useHealth(): UseQueryResult<HealthResponse> {
 export function useDaemonStatus(
   workspacePath: string | null,
 ): UseQueryResult<DaemonStatus> {
+  const stopped = useStopIntent() !== null;
   return useQuery({
     queryKey: qk.status(workspacePath),
     queryFn: ({ signal }) => getDaemonStatus(workspacePath, signal),
     refetchInterval: 30_000,
     staleTime: 10_000,
+    enabled: !stopped,
   });
 }
 
@@ -122,7 +141,13 @@ export interface ConnectionStatus {
    * used to reach nobody: the sidecar's output went to `/dev/null`.
    */
   lastError: string | null;
+  /** Why this window has no daemon, or `null` while it should have one. */
+  stopIntent: StopIntent;
+  /** When the stop intent was set (wall-clock ms), or `null`. */
+  stoppedAt: number | null;
   reconnect: () => Promise<void>;
+  /** `Start daemon`: clear the stop intent, bootstrap, refetch everything. */
+  start: () => Promise<void>;
 }
 
 export function useConnectionStatus(): ConnectionStatus {
@@ -166,6 +191,12 @@ export function useConnectionStatus(): ConnectionStatus {
     await client.invalidateQueries();
   }, [client]);
 
+  const stopIntent = useStopIntent();
+  const start = useCallback(async () => {
+    await startDaemon();
+    await client.invalidateQueries();
+  }, [client]);
+
   const instanceId = health.data?.instance_id ?? info?.instanceId ?? null;
 
   return {
@@ -176,6 +207,9 @@ export function useConnectionStatus(): ConnectionStatus {
     instanceChip: instanceId === null ? null : shortInstanceId(instanceId),
     endpoint: info === null ? null : info.baseUrl.replace(/^https?:\/\//, ""),
     lastError,
+    stopIntent,
+    stoppedAt: stopIntent === null ? null : getStoppedAt(),
     reconnect,
+    start,
   };
 }

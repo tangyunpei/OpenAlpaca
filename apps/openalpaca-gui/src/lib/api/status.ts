@@ -27,6 +27,34 @@ import { apiFetch } from "../http";
 import { workspaceHeader } from "../workspace-header";
 import type { DaemonStatus } from "./types";
 
+/** `POST /v1/command {"command":"shutdown"}`'s answer. */
+export interface ShutdownAccepted {
+  request_id: string;
+  /** `shutting_down` — an acceptance, never a completion. */
+  status: string;
+}
+
+/**
+ * Ask the daemon to shut down gracefully.
+ *
+ * The `200 {"status":"shutting_down"}` means the daemon *accepted*: it still
+ * has up to 10 s of shutdown to run. Nothing may report "stopped" on the
+ * strength of it — `awaitDaemonStopped` (the shell) is what says it is gone.
+ * Any other `status` is treated as a refusal.
+ */
+export async function requestDaemonShutdown(): Promise<ShutdownAccepted> {
+  const accepted = await apiFetch<ShutdownAccepted>("/v1/command", {
+    method: "POST",
+    body: { command: "shutdown" },
+  });
+  if (accepted?.status !== "shutting_down") {
+    throw new Error(
+      `The daemon did not accept the shutdown (status: ${String(accepted?.status)}).`,
+    );
+  }
+  return accepted;
+}
+
 /**
  * `GET /v1/status`.
  *

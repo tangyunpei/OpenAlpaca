@@ -10,6 +10,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { DaemonStatus, SessionSweep } from "@/lib/api/types";
+import { useUiStore } from "@/stores/ui";
 
 import {
   ConnectionSection,
@@ -61,6 +62,10 @@ const daemon = vi.hoisted(() => ({ data: undefined as unknown }));
 const link = vi.hoisted(() => ({
   connected: true,
   lastError: null as string | null,
+  stopIntent: null as "stopped_here" | "stopped_elsewhere" | null,
+  start: vi.fn(),
+  reconnect: vi.fn(),
+  refetch: vi.fn(() => Promise.resolve()),
 }));
 
 vi.mock("@/hooks/useConnection", () => ({
@@ -72,9 +77,34 @@ vi.mock("@/hooks/useConnection", () => ({
     instanceChip: "7f3a",
     endpoint: "127.0.0.1:51823",
     lastError: link.lastError,
-    reconnect: vi.fn(),
+    stopIntent: link.stopIntent,
+    stoppedAt: link.stopIntent === null ? null : Date.now(),
+    reconnect: link.reconnect,
+    start: link.start,
   }),
-  useDaemonStatus: () => ({ data: daemon.data, isPending: false, error: null }),
+  useDaemonStatus: () => ({
+    data: daemon.data,
+    isPending: false,
+    error: null,
+    refetch: link.refetch,
+  }),
+}));
+
+/** Connectors, read only by the stop dialog (T32's silence line). */
+const connectorRows = vi.hoisted(() => ({ data: [] as unknown[] }));
+vi.mock("@/hooks/useConnectors", () => ({
+  useConnectors: () => ({
+    data: connectorRows.data,
+    isPending: false,
+    error: null,
+  }),
+}));
+
+/** The stop itself — the flow's own tests are `lib/daemon-control.test.ts`. */
+const control = vi.hoisted(() => ({ stop: vi.fn() }));
+vi.mock("@/lib/daemon-control", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/daemon-control")>()),
+  stopDaemon: control.stop,
 }));
 
 /** The shell's `read_daemon_log_tail`, as the section reaches it. */
@@ -88,6 +118,13 @@ vi.mock("@/lib/connection", async (importOriginal) => ({
 afterEach(() => {
   link.connected = true;
   link.lastError = null;
+  link.stopIntent = null;
+  link.start.mockReset();
+  link.reconnect.mockReset();
+  link.refetch.mockReset();
+  link.refetch.mockImplementation(() => Promise.resolve());
+  control.stop.mockReset();
+  connectorRows.data = [];
   shellLog.read.mockReset();
   daemon.data = undefined;
 });
@@ -392,5 +429,109 @@ describe("a daemon with no log of its own (T30)", () => {
     const note = screen.getByText(/no daemon\.log/i);
     expect(note).toHaveTextContent("started by hand");
     expect(note.textContent ?? "").not.toMatch(/launched itself/);
+  });
+});
+
+describe("Stop daemon (§5.5)", () => {
+  it("opens the confirmation and sends nothing until it is confirmed", async () => {
+    const user = userEvent.setup();
+    control.stop.mockResolvedValue({ kind: "stopped" });
+    daemon.data = status({
+      busy: {
+        running_tasks: 1,
+        pending_confirmations: 0,
+        connected_clients: 2,
+      },
+    });
+    render(<ConnectionSection />);
+
+    await user.click(screen.getByRole("button", { name: "Stop daemon…" }));
+
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveTextContent(
+      "Right now: 1 workflow running · 2 windows connected.",
+    );
+    // The busy count is re-read on open, and nothing is stopped by opening.
+    expect(link.refetch).toHaveBeenCalledTimes(1);
+    expect(control.stop).not.toHaveBeenCalled();
+
+    const stop = await screen.findByRole("button", { name: "Stop daemon" });
+    await vi.waitFor(() => expect(stop).toBeEnabled());
+    await user.click(stop);
+
+    expect(control.stop).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() =>
+      expect(useUiStore.getState().toast).toBe("Daemon stopped."),
+    );
+  });
+
+  it("keeps the dialog's Stop disabled while the fresh read is in flight", async () => {
+    const user = userEvent.setup();
+    link.refetch.mockImplementation(() => new Promise(() => {}));
+    daemon.data = status();
+    render(<ConnectionSection />);
+
+    await user.click(screen.getByRole("button", { name: "Stop daemon…" }));
+
+    expect(screen.getByRole("button", { name: "Stop daemon" })).toBeDisabled();
+  });
+
+  it("warns of connector silence only when a connector is running", async () => {
+    const user = userEvent.setup();
+    connectorRows.data = [{ id: "telegram", status: "running" }];
+    daemon.data = status();
+    render(<ConnectionSection />);
+
+    await user.click(screen.getByRole("button", { name: "Stop daemon…" }));
+
+    expect(screen.getByRole("dialog")).toHaveTextContent(
+      /Telegram, Discord or iMessage will get no reply and no error/,
+    );
+  });
+
+  it("cannot be asked of a daemon this window cannot reach", () => {
+    link.connected = false;
+    render(<ConnectionSection />);
+
+    expect(screen.getByRole("button", { name: "Stop daemon…" })).toBeDisabled();
+  });
+});
+
+/**
+ * §6.3: a stopped daemon is a state, not an incident. The card says who
+ * stopped it in the neutral token, `Start daemon` replaces `Reconnect`, and
+ * no stale failure is drawn as if it were the reason.
+ */
+describe("while the daemon is stopped", () => {
+  it("says this window stopped it and offers Start, not Reconnect or Stop", async () => {
+    const user = userEvent.setup();
+    link.connected = false;
+    link.stopIntent = "stopped_here";
+    link.lastError = "WebSocket connection error";
+    render(<ConnectionSection />);
+
+    expect(screen.getByText("Daemon stopped")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "stopped" })).toBeInTheDocument();
+    expect(screen.getByText(/^stopped /)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reconnect" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Stop daemon…" })).toBeNull();
+    expect(screen.queryByLabelText("Why the daemon is unreachable")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Start daemon" }));
+    expect(link.start).toHaveBeenCalledTimes(1);
+    expect(link.reconnect).not.toHaveBeenCalled();
+  });
+
+  it("says when it was stopped from elsewhere", () => {
+    link.connected = false;
+    link.stopIntent = "stopped_elsewhere";
+    render(<ConnectionSection />);
+
+    expect(
+      screen.getByText("Daemon stopped from elsewhere"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Start daemon" }),
+    ).toBeInTheDocument();
   });
 });

@@ -30,7 +30,7 @@ import { useUiStore } from "@/stores/ui";
 import { GapNote, ListCard, ListRow, ListState, Toggle } from "./primitives";
 
 /** The daemon reports free-form status strings; these read as "on". */
-function isEnabled(status: string): boolean {
+export function isEnabled(status: string): boolean {
   return /^(connected|running|active|enabled|live)$/i.test(status.trim());
 }
 

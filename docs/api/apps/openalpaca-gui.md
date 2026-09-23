@@ -245,7 +245,7 @@
 ### `status.ts`
 
 - Source: `apps/openalpaca-gui/src/lib/api/status.ts`
-- Exported functions: `getDaemonStatus`
+- Exported functions: `getDaemonStatus`, `requestDaemonShutdown`
 - Endpoints: `GET /v1/status`
 
 ### `tasks.test.ts`

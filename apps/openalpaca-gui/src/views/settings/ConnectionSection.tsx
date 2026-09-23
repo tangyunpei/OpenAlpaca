@@ -29,6 +29,15 @@
  * path, and the Copy button is inert there, because a path to a file this
  * daemon did not write is worse than no path.
  *
+ * **Stop and Start** (DESIGN_SPEC §5.5, §5.6). `Stop daemon…` opens the
+ * confirmation (`StopDaemonDialog`), which re-reads `GET /v1/status` for the
+ * `busy` counts before it will stop anything, and the stop itself is
+ * `lib/daemon-control.ts`'s: the intent is set and the socket closed *before*
+ * the shutdown POST, so no ladder climbs and nothing respawns the daemon.
+ * While stopped the card says so in the neutral token, `Reconnect` gives way
+ * to `Start daemon` — reconnecting to a daemon that is not there is not a
+ * thing to offer — and nothing polls.
+ *
  * **Why the daemon would not start** is shown here too, verbatim: the shell's
  * `ensure_daemon_running` rejection ends with what the daemon wrote to its
  * log before it gave up, and `Show daemon log` reads the file directly — both
@@ -41,11 +50,14 @@
  * own numbers.
  */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
+import { StopDaemonDialog } from "@/components/overlays/StopDaemonDialog";
 import { Button, Eyebrow } from "@/components/ui";
 import { useConnectionStatus, useDaemonStatus } from "@/hooks/useConnection";
+import { useConnectors } from "@/hooks/useConnectors";
 import { readDaemonLogTail } from "@/lib/connection";
+import { stopDaemon, stopToast } from "@/lib/daemon-control";
 import { useTasks } from "@/hooks/useTasks";
 import { capsNote, formatSpend, useUsageSummary } from "@/hooks/useUsage";
 import { useMovedProject, useRebaseWorkspace } from "@/hooks/useWorkspaces";
@@ -53,6 +65,9 @@ import { formatFileSize, type DaemonStatus } from "@/lib/api/types";
 import { isAbsolutePath, useProjectStore } from "@/stores/project";
 import { useUiStore } from "@/stores/ui";
 
+import { relativeTime } from "@/views/library/format";
+
+import { isEnabled as connectorIsOn } from "./ConnectorsSection";
 import { Card, GapNote, StatCard, StatusCard } from "./primitives";
 import { compactCount, formatUptime } from "./format";
 
@@ -62,6 +77,9 @@ export function ConnectionSection() {
   const status = useDaemonStatus(projectPath);
   const summary = useUsageSummary();
   const showToast = useUiStore((s) => s.showToast);
+  const [stopOpen, setStopOpen] = useState(false);
+  const intent = connection.stopIntent ?? null;
+  const stopped = intent !== null;
 
   // Run count for "today" is still a client-side filter — there is no date
   // filter on `GET /v1/tasks` and no rollup that counts runs — but the day it
@@ -88,9 +106,14 @@ export function ConnectionSection() {
   return (
     <div className="flex flex-col gap-[16px]">
       <StatusCard
-        ok={connection.connected}
-        title={connection.connected ? "Daemon connected" : "Daemon unreachable"}
-        meta={`uptime ${formatUptime(status.data?.uptime_secs)}`}
+        ok={!stopped && connection.connected}
+        idle={stopped}
+        title={statusTitle(intent, connection.connected)}
+        meta={
+          stopped
+            ? stoppedMeta(connection.stoppedAt ?? null)
+            : `uptime ${formatUptime(status.data?.uptime_secs)}`
+        }
         cells={[
           { label: "Instance", value: connection.instanceChip ?? "—" },
           { label: "Endpoint", value: connection.endpoint ?? "—" },
@@ -103,16 +126,28 @@ export function ConnectionSection() {
           },
         ]}
       >
-        <div className="mt-[16px] flex gap-[6px]">
-          <Button
-            variant="secondarySm"
-            onClick={() => {
-              void connection.reconnect();
-              showToast("Reconnecting to the daemon…");
-            }}
-          >
-            Reconnect
-          </Button>
+        <div className="mt-[16px] flex flex-wrap gap-[6px]">
+          {stopped ? (
+            <Button
+              variant="secondarySm"
+              onClick={() => {
+                void connection.start();
+                showToast("Starting the daemon…");
+              }}
+            >
+              Start daemon
+            </Button>
+          ) : (
+            <Button
+              variant="secondarySm"
+              onClick={() => {
+                void connection.reconnect();
+                showToast("Reconnecting to the daemon…");
+              }}
+            >
+              Reconnect
+            </Button>
+          )}
           <Button
             variant="ghostSm"
             disabled={logPath === null}
@@ -125,6 +160,15 @@ export function ConnectionSection() {
           >
             Copy log path
           </Button>
+          {!stopped && (
+            <Button
+              variant="ghostSm"
+              disabled={!connection.connected}
+              onClick={() => setStopOpen(true)}
+            >
+              Stop daemon…
+            </Button>
+          )}
         </div>
         {logPath === null && status.data !== undefined && (
           <GapNote>
@@ -133,13 +177,15 @@ export function ConnectionSection() {
             started by hand.
           </GapNote>
         )}
-        {!connection.connected && connection.lastError ? (
+        {!stopped && !connection.connected && connection.lastError ? (
           <LogBlock label="Why the daemon is unreachable">
             {connection.lastError}
           </LogBlock>
         ) : null}
         <DaemonLogDisclosure />
       </StatusCard>
+
+      {stopOpen && <StopDaemonFlow onClose={() => setStopOpen(false)} />}
 
       <StorageCard status={status.data} />
 
@@ -173,6 +219,72 @@ export function ConnectionSection() {
 
       <ProjectCard homeRoot={status.data?.home_root ?? null} />
     </div>
+  );
+}
+
+/** The status card's title, stopped or not (§6.3). */
+export function statusTitle(
+  intent: "stopped_here" | "stopped_elsewhere" | null,
+  connected: boolean,
+): string {
+  if (intent === "stopped_here") return "Daemon stopped";
+  if (intent === "stopped_elsewhere") return "Daemon stopped from elsewhere";
+  return connected ? "Daemon connected" : "Daemon unreachable";
+}
+
+function stoppedMeta(stoppedAt: number | null): string {
+  if (stoppedAt === null) return "stopped";
+  return `stopped ${relativeTime(new Date(stoppedAt).toISOString())}`;
+}
+
+/**
+ * The confirmation and the stop behind it.
+ *
+ * Mounted only while open, so its reads run only then: the status is
+ * re-asked on open for a current `busy` count, and `Stop daemon` waits for
+ * that answer (or its failure) before it can be pressed. The dialog closes on
+ * the shutdown POST's response either way; the outcome is a toast, and the
+ * window's state is the stop intent's.
+ */
+function StopDaemonFlow({ onClose }: { onClose: () => void }) {
+  const projectPath = useProjectStore((s) => s.path);
+  const status = useDaemonStatus(projectPath);
+  const connectors = useConnectors();
+  const showToast = useUiStore((s) => s.showToast);
+  const [reading, setReading] = useState(true);
+  const [stopping, setStopping] = useState(false);
+
+  // One fresh read on open. `refetch` settles with the query's own result;
+  // whether it answered or failed, the dialog then shows what it has.
+  const refetch = useRef(status.refetch);
+  useEffect(() => {
+    let live = true;
+    void Promise.resolve(refetch.current?.()).finally(() => {
+      if (live) setReading(false);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  const connectorsRunning = (connectors.data ?? []).some((connector) =>
+    connectorIsOn(connector.status),
+  );
+
+  return (
+    <StopDaemonDialog
+      busy={status.data?.busy}
+      connectorsRunning={connectorsRunning}
+      reading={reading}
+      stopping={stopping}
+      onCancel={onClose}
+      onConfirm={() => {
+        setStopping(true);
+        void stopDaemon(undefined, onClose).then((result) =>
+          showToast(stopToast(result)),
+        );
+      }}
+    />
   );
 }
 

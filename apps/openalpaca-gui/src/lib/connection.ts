@@ -12,6 +12,8 @@
  *   `get_connection_info`   — reads discovery + expiry check. Use on reconnect.
  *   `read_daemon_log_tail`  — the end of `daemon.log`, read straight from the
  *                             file, so it answers with no daemon serving.
+ *   `await_daemon_stopped`  — after `POST /v1/command {"command":"shutdown"}`,
+ *                             waits until the process and its lock are gone.
  *
  * The first two return `ConnectionInfo`, serialized to the webview in
  * camelCase.
@@ -117,6 +119,110 @@ export async function readDaemonLogTail(lines: number): Promise<string> {
     );
   }
   return raw;
+}
+
+// ── Stop intent ─────────────────────────────────────────────────────────────
+
+/**
+ * Why this window has no daemon.
+ *
+ * `null`                — it should have one; a closed socket is a failure and
+ *                         the reconnect ladder is right to climb.
+ * `"stopped_here"`      — this window stopped it. Set before the shutdown
+ *                         POST, cleared by `Start daemon`.
+ * `"stopped_elsewhere"` — the daemon said it was going away (the
+ *                         `daemon_shutting_down` frame) and this window did
+ *                         not ask. The CLI, or another window, stopped it.
+ *
+ * While it is non-null nothing climbs a ladder and nothing respawns a daemon:
+ * auto-restarting a daemon the user just stopped is exactly wrong, so the way
+ * back is an explicit `Start daemon`. Window-level and never persisted —
+ * reopening the app is a fresh intent to use it, and `ensure_daemon_running`
+ * spawning a daemon on that boot is correct.
+ */
+export type StopIntent = "stopped_here" | "stopped_elsewhere" | null;
+
+let stopIntent: StopIntent = null;
+let stoppedAt: number | null = null;
+const stopIntentListeners = new Set<(intent: StopIntent) => void>();
+
+export function getStopIntent(): StopIntent {
+  return stopIntent;
+}
+
+/** Wall-clock ms the current stop intent was set; `null` while there is none. */
+export function getStoppedAt(): number | null {
+  return stoppedAt;
+}
+
+export function setStopIntent(
+  next: StopIntent,
+  now: number = Date.now(),
+): void {
+  if (next === stopIntent) return;
+  stopIntent = next;
+  stoppedAt = next === null ? null : now;
+  for (const listener of stopIntentListeners) listener(next);
+}
+
+export function subscribeStopIntent(
+  listener: (intent: StopIntent) => void,
+): () => void {
+  stopIntentListeners.add(listener);
+  return () => stopIntentListeners.delete(listener);
+}
+
+/**
+ * What `await_daemon_stopped` concluded. Only `not_running` and `stopped`
+ * mean a daemon may be started now; `pid` is set only for `still_alive`.
+ */
+export interface DaemonStopReport {
+  outcome: "not_running" | "stopped" | "lock_still_held" | "still_alive";
+  pid: number | null;
+  waitedMs: number;
+}
+
+const STOP_OUTCOMES: ReadonlySet<string> = new Set([
+  "not_running",
+  "stopped",
+  "lock_still_held",
+  "still_alive",
+]);
+
+/**
+ * Wait — up to 15 s, in the shell — until the daemon's process has exited and
+ * its single-instance lock is free. The shutdown route's `200` says only that
+ * the daemon was asked; this is what says it is gone.
+ */
+export async function awaitDaemonStopped(): Promise<DaemonStopReport> {
+  let raw: unknown;
+  try {
+    raw = await invoke("await_daemon_stopped");
+  } catch (cause) {
+    throw new ConnectionError(
+      typeof cause === "string"
+        ? cause
+        : "Tauri command `await_daemon_stopped` failed",
+      cause,
+    );
+  }
+  const report = raw as Partial<DaemonStopReport> | null;
+  if (
+    typeof report !== "object" ||
+    report === null ||
+    typeof report.outcome !== "string" ||
+    !STOP_OUTCOMES.has(report.outcome)
+  ) {
+    throw new ConnectionError(
+      "`await_daemon_stopped` returned an unexpected payload",
+      raw,
+    );
+  }
+  return {
+    outcome: report.outcome,
+    pid: typeof report.pid === "number" ? report.pid : null,
+    waitedMs: typeof report.waitedMs === "number" ? report.waitedMs : 0,
+  };
 }
 
 /** The cached connection, or `null` before the first successful bootstrap. */

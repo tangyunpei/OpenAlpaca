@@ -29,6 +29,31 @@ describe("connection status mapping (§3.6)", () => {
     expect(connectionLabel("error")).toBe("connection error");
   });
 
+  /**
+   * A stopped daemon is neither an error nor a wait: the neutral tone, and a
+   * word that says who stopped it — whatever the socket's own state says.
+   */
+  it("reads a stop intent as stopped, never as a failure", () => {
+    expect(connectionTone("disconnected", false, "stopped_here")).toBe(
+      "stopped",
+    );
+    expect(connectionTone("error", false, "stopped_elsewhere")).toBe("stopped");
+    expect(connectionLabel("disconnected", "stopped_here")).toBe("stopped");
+    expect(connectionLabel("disconnected", "stopped_elsewhere")).toBe(
+      "stopped elsewhere",
+    );
+    // No intent: the three socket states are exactly as before.
+    expect(connectionTone("disconnected", false, null)).toBe("down");
+    expect(connectionLabel("disconnected", null)).toBe("disconnected");
+
+    render(
+      <ConnectionRowView tone="stopped" label="stopped" instance="7f3a" />,
+    );
+    const dot = screen.getByRole("img", { name: "Daemon stopped" });
+    expect(dot.className).toContain("bg-muted-fg");
+    expect(dot.className).not.toContain("bg-red");
+  });
+
   it("shows the four-character instance id, and omits it when unknown", () => {
     const { rerender } = render(
       <ConnectionRowView tone="up" label="connected" instance="7f3a" />,
