@@ -365,6 +365,30 @@ fn ensure_store_replaces_an_unedited_superseded_home_readme() {
     );
 }
 
+/// The refresh is documentation and must never stop a boot. `ensure_store`
+/// runs before the daemon's singleton lock and in the GUI and the CLI too, so
+/// two launchers can refresh at once and the loser's rename fails. A temp path
+/// that cannot be written stands in for that race: the store still opens, and
+/// the old text stays for the next boot to replace.
+#[test]
+fn a_readme_refresh_that_fails_does_not_fail_ensure_store() {
+    let tmp = tempdir().unwrap();
+    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
+    let root = ensure_store(&StoreScope::Home).unwrap();
+    let readme = root.join("README.md");
+    fs::write(&readme, SUPERSEDED_HOME_READMES[0]).unwrap();
+    // `write_atomic` writes `README.md.tmp` first; a directory there makes
+    // that fail exactly as a lost rename race does.
+    fs::create_dir(root.join("README.md.tmp")).unwrap();
+
+    ensure_store(&StoreScope::Home).expect("a failed README refresh must not fail ensure_store");
+    assert_eq!(
+        fs::read_to_string(&readme).unwrap(),
+        SUPERSEDED_HOME_READMES[0],
+        "the refresh failed, so the old text is left for the next boot"
+    );
+}
+
 /// A tripwire, not a spec: the refresh above only reaches stores seeded by a
 /// text listed in `SUPERSEDED_HOME_READMES`. Changing `HOME_README` without
 /// listing the text it replaces would strand every store seeded by this build.
@@ -421,6 +445,9 @@ fn a_project_readme_is_never_refreshed() {
 #[test]
 fn ensure_store_seeds_a_project_root() {
     let tmp = tempdir().unwrap();
+    // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
+    // without this it would canonicalize the owner's real store.
+    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
     let project = tmp.path().to_path_buf();
     let scope = StoreScope::Project(project.clone());
 
@@ -494,6 +521,9 @@ fn ensure_store_on_a_project_that_is_the_home_root_seeds_the_home_metadata() {
 #[test]
 fn unknown_entries_names_only_what_the_store_did_not_create() {
     let tmp = tempdir().unwrap();
+    // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
+    // without this it would canonicalize the owner's real store.
+    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
     let scope = StoreScope::Project(tmp.path().to_path_buf());
     let root = ensure_store(&scope).unwrap();
     // Two kinds the store created, and two names it did not.
@@ -514,6 +544,9 @@ fn unknown_entries_names_only_what_the_store_did_not_create() {
 #[test]
 fn unknown_entries_treats_state_and_plugins_as_home_only_names() {
     let tmp = tempdir().unwrap();
+    // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
+    // without this it would canonicalize the owner's real store.
+    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
     let scope = StoreScope::Project(tmp.path().to_path_buf());
     let root = ensure_store(&scope).unwrap();
     fs::create_dir_all(root.join("state")).unwrap();
@@ -541,6 +574,9 @@ fn unknown_entries_treats_state_and_plugins_as_home_only_names() {
 #[test]
 fn unknown_entries_treats_config_as_reserved_in_both_scopes() {
     let tmp = tempdir().unwrap();
+    // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
+    // without this it would canonicalize the owner's real store.
+    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
     let scope = StoreScope::Project(tmp.path().to_path_buf());
     let root = ensure_store(&scope).unwrap();
     fs::create_dir_all(root.join("config")).unwrap();
@@ -567,6 +603,9 @@ fn unknown_entries_treats_config_as_reserved_in_both_scopes() {
 #[test]
 fn unknown_entries_reserves_dot_versions_even_though_nothing_writes_it_at_the_root() {
     let tmp = tempdir().unwrap();
+    // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
+    // without this it would canonicalize the owner's real store.
+    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
     let scope = StoreScope::Project(tmp.path().to_path_buf());
     let root = ensure_store(&scope).unwrap();
     fs::create_dir_all(root.join(".versions")).unwrap();
@@ -614,6 +653,9 @@ fn a_malformed_layout_marker_is_repaired_not_appended_to() {
 #[test]
 fn layout_lines_this_module_does_not_own_are_preserved() {
     let tmp = tempdir().unwrap();
+    // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
+    // without this it would canonicalize the owner's real store.
+    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
     let project = tmp.path().to_path_buf();
     let scope = StoreScope::Project(project.clone());
     let root = ensure_store(&scope).unwrap();
@@ -634,6 +676,9 @@ fn layout_lines_this_module_does_not_own_are_preserved() {
 #[test]
 fn a_project_store_records_its_own_root_once() {
     let tmp = tempdir().unwrap();
+    // `ensure_store` asks `is_the_home_root`, which resolves `home_root()`:
+    // without this it would canonicalize the owner's real store.
+    let _guard = HomeStoreGuard::set(&tmp.path().join("home"));
     let project = tmp.path().canonicalize().unwrap();
     let scope = StoreScope::Project(project.clone());
     let root = ensure_store(&scope).unwrap();

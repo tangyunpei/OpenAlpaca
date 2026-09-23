@@ -486,11 +486,21 @@ pub fn ensure_store(scope: &StoreScope) -> Result<PathBuf> {
     if !readme.exists() {
         write_new(&readme, readme_text(is_home))?;
     } else if is_home && is_superseded_home_readme(&readme) {
-        write_atomic(&readme, HOME_README)?;
-        tracing::info!(
-            "Updated {}: it was an earlier build's text, unedited",
-            readme.display()
-        );
+        // Best-effort: the README is documentation, and `ensure_store` runs
+        // before the daemon's singleton lock (and in the GUI and the CLI), so
+        // two launchers can refresh it at once. The loser's rename finds its
+        // shared `README.md.tmp` already moved into place by the winner; that
+        // must never stop a boot.
+        match write_atomic(&readme, HOME_README) {
+            Ok(()) => tracing::info!(
+                "Updated {}: it was an earlier build's text, unedited",
+                readme.display()
+            ),
+            Err(e) => tracing::warn!(
+                "Could not refresh {} (an earlier build's text): {e:#}",
+                readme.display()
+            ),
+        }
     }
 
     if !is_home {
