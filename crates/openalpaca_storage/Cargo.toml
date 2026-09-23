@@ -22,6 +22,7 @@ uuid.workspace = true
 sha2.workspace = true
 unicode-normalization.workspace = true
 similar.workspace = true
+sysinfo.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

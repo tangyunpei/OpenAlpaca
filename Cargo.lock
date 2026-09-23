@@ -4303,6 +4303,7 @@ dependencies = [
  "sha2",
  "similar",
  "sqlite-vec",
+ "sysinfo",
  "tempfile",
  "tracing",
  "tracing-test",

@@ -1,11 +1,13 @@
 //! OpenAlpaca Storage Module
 //!
 //! Provides the single path module (`store`), the discovery mechanism,
-//! the singleton lock, and the SQLite database for daemon/GUI/CLI coordination.
+//! the singleton lock, the daemon-liveness primitive (`daemon_lifecycle`),
+//! and the SQLite database for daemon/GUI/CLI coordination.
 
 pub mod artifacts;
 pub mod config_schema;
 mod content_io;
+pub mod daemon_lifecycle;
 pub mod database;
 pub mod discovery;
 pub mod migrations;

@@ -1,8 +1,7 @@
 use anyhow::{Context, Result};
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
-use openalpaca_storage::discovery;
-use openalpaca_storage::store;
+use openalpaca_storage::{daemon_lifecycle, discovery, store};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -89,32 +88,10 @@ pub fn start_daemon() -> Result<()> {
     Ok(())
 }
 
-/// Verify the given PID belongs to a live `openalpacad` process.
-///
-/// A stale discovery.json (left after a crash/reboot) can point at a PID the OS
-/// has since recycled for an unrelated process; signalling or trusting it blindly
-/// would kill/misreport that process. Check the process identity first.
-fn pid_is_daemon(pid: u32) -> bool {
-    let mut s = System::new();
-    s.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-    match s.process(sysinfo::Pid::from_u32(pid)) {
-        Some(proc_) => {
-            let name_matches = proc_.name().to_string_lossy().contains("openalpacad");
-            let exe_matches = proc_
-                .exe()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().contains("openalpacad"))
-                .unwrap_or(false);
-            name_matches || exe_matches
-        }
-        None => false,
-    }
-}
-
 /// Stop the Daemon using PID from discovery.json.
 pub fn stop_daemon() -> Result<()> {
     if let Some(d) = discovery::read_discovery()? {
-        if !pid_is_daemon(d.pid) {
+        if !daemon_lifecycle::pid_is_daemon(d.pid) {
             println!(
                 "⚠️  PID {} is not a running openalpacad (stale discovery.json?); not signalling.",
                 d.pid
@@ -136,13 +113,12 @@ pub fn stop_daemon() -> Result<()> {
     Ok(())
 }
 
-/// Check if daemon process is running.
+/// Whether `discovery.json` names a live `openalpacad` (not a recycled PID).
+///
+/// The CLI's one name for the predicate; the implementation is shared with
+/// the app shell in `openalpaca_storage::daemon_lifecycle`.
 pub fn is_daemon_running() -> bool {
-    if let Ok(Some(d)) = discovery::read_discovery() {
-        // Verify the PID exists AND is actually openalpacad (not a recycled PID).
-        return pid_is_daemon(d.pid);
-    }
-    false
+    daemon_lifecycle::running_daemon_pid().is_some()
 }
 
 /// Start GUI (Tauri)

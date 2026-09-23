@@ -9,12 +9,14 @@
 
 - OpenAlpaca Storage Module
 - Provides the single path module (`store`), the discovery mechanism,
-- the singleton lock, and the SQLite database for daemon/GUI/CLI coordination.
+- the singleton lock, the daemon-liveness primitive (`daemon_lifecycle`),
+- and the SQLite database for daemon/GUI/CLI coordination.
 
 ## Modules
 
 - `artifacts` (crates/openalpaca_storage/src/artifacts/mod.rs)
 - `config_schema` (crates/openalpaca_storage/src/config_schema/mod.rs)
+- `daemon_lifecycle` (crates/openalpaca_storage/src/daemon_lifecycle.rs)
 - `database` (crates/openalpaca_storage/src/database/mod.rs)
 - `discovery` (crates/openalpaca_storage/src/discovery/mod.rs)
 - `migrations` (crates/openalpaca_storage/src/migrations/mod.rs)
