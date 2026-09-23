@@ -191,10 +191,7 @@ impl Orchestrator {
 
         let mut block = String::from("<send_context>\n");
         for ch in &sendable {
-            // `<send_context>` has never reported a Discord default, although
-            // the direct send uses one.
-            let has_default =
-                ch != "discord" && super::direct_send::has_default_recipient(db, owner, ch);
+            let has_default = super::direct_send::has_default_recipient(db, owner, ch);
 
             let recipient_fmt = match ch.as_str() {
                 "telegram" => "\"default\" | numeric chat_id",

@@ -6250,9 +6250,9 @@ async fn a_direct_send_reports_the_turns_attachments_skipped() {
 }
 
 /// **CORE-08** — the direct send and `<send_context>` read one owner's
-/// remembered default recipient per channel. Each row is (channel, the
-/// preference rows stored for the owner, whether the direct send fires,
-/// whether `<send_context>` says `default=true`).
+/// remembered default recipient per channel, and agree on every channel.
+/// `<send_context>` used to say `default=false` for Discord whatever was
+/// stored, while the direct send used the stored channel id.
 #[tokio::test]
 async fn the_direct_send_and_send_context_read_the_same_default_recipient() {
     struct AllChannels;
@@ -6275,82 +6275,44 @@ async fn the_direct_send_and_send_context_read_the_same_default_recipient() {
         }
     }
 
-    // (channel, preference key stored for the owner, its value, the direct
-    // send fires, `<send_context>` says `default=true`)
-    type Row = (&'static str, &'static str, Option<&'static str>, bool, bool);
+    // (channel, preference key stored for the owner, its value, whether the
+    // owner has a default: the direct send fires and `default=true`)
+    type Row = (&'static str, &'static str, Option<&'static str>, bool);
     let rows: &[Row] = &[
-        ("telegram", "telegram.last_chat_id", Some("42"), true, true),
-        (
-            "telegram",
-            "telegram.last_chat_id",
-            Some("-1001234"),
-            true,
-            true,
-        ),
-        (
-            "telegram",
-            "telegram.last_chat_id",
-            Some("chat-42"),
-            false,
-            false,
-        ),
-        ("telegram", "telegram.last_chat_id", None, false, false),
+        ("telegram", "telegram.last_chat_id", Some("42"), true),
+        ("telegram", "telegram.last_chat_id", Some("-1001234"), true),
+        ("telegram", "telegram.last_chat_id", Some("chat-42"), false),
+        ("telegram", "telegram.last_chat_id", None, false),
         // iMessage: either key, present at all, is enough.
         (
             "imessage",
             "imessage.last_reply_target",
             Some("+15551234567"),
             true,
-            true,
         ),
-        (
-            "imessage",
-            "imessage.last_chat_id",
-            Some("chat123"),
-            true,
-            true,
-        ),
-        (
-            "imessage",
-            "imessage.last_reply_target",
-            Some(""),
-            true,
-            true,
-        ),
-        ("imessage", "imessage.last_reply_target", None, false, false),
+        ("imessage", "imessage.last_chat_id", Some("chat123"), true),
+        ("imessage", "imessage.last_reply_target", Some(""), true),
+        ("imessage", "imessage.last_reply_target", None, false),
         // Discord: a u64 channel id; zero is not rejected.
         (
             "discord",
             "discord.last_channel_id",
             Some("123456789012345678"),
             true,
-            false,
         ),
-        ("discord", "discord.last_channel_id", Some("0"), true, false),
-        (
-            "discord",
-            "discord.last_channel_id",
-            Some("-5"),
-            false,
-            false,
-        ),
-        (
-            "discord",
-            "discord.last_channel_id",
-            Some("general"),
-            false,
-            false,
-        ),
-        ("discord", "discord.last_channel_id", None, false, false),
+        ("discord", "discord.last_channel_id", Some("0"), true),
+        ("discord", "discord.last_channel_id", Some("-5"), false),
+        ("discord", "discord.last_channel_id", Some("general"), false),
+        ("discord", "discord.last_channel_id", None, false),
         // Another channel's key is not this channel's default.
-        ("discord", "telegram.last_chat_id", Some("42"), false, false),
+        ("discord", "telegram.last_chat_id", Some("42"), false),
     ];
 
     let dir = tempfile::tempdir().unwrap();
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
     {
         let prefs = openalpaca_storage::repository::PreferenceRepository::new(&db);
-        for (i, (_, key, value, _, _)) in rows.iter().enumerate() {
+        for (i, (_, key, value, _)) in rows.iter().enumerate() {
             if let Some(value) = value {
                 prefs.set(&format!("owner-{i}"), key, value, None).unwrap();
             }
@@ -6380,7 +6342,7 @@ async fn the_direct_send_and_send_context_read_the_same_default_recipient() {
     );
     orch.set_connector_send_provider(Arc::new(AllChannels));
 
-    for (i, (channel, key, value, sends, prompts)) in rows.iter().enumerate() {
+    for (i, (channel, key, value, has_default)) in rows.iter().enumerate() {
         let stored = (key, value);
         let owner = format!("owner-{i}");
         // `转发` passes the intent gate for every channel; the English
@@ -6391,7 +6353,7 @@ async fn the_direct_send_and_send_context_read_the_same_default_recipient() {
             .await;
         assert_eq!(
             sent.is_some(),
-            *sends,
+            *has_default,
             "direct send, {channel} with {stored:?}: {sent:?}"
         );
         if let Some(result) = sent {
@@ -6403,7 +6365,7 @@ async fn the_direct_send_and_send_context_read_the_same_default_recipient() {
         }
         let context = orch.build_send_context(Some(&owner));
         assert!(
-            context.contains(&format!("- {channel}: default={prompts} (")),
+            context.contains(&format!("- {channel}: default={has_default} (")),
             "send_context, {channel} with {stored:?}:\n{context}"
         );
     }
