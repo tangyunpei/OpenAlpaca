@@ -388,17 +388,7 @@ pub async fn send_chat_handler(
     headers: HeaderMap,
     Json(body): Json<ChatSendRequest>,
 ) -> impl IntoResponse {
-    let chat_service = match &state.chat_service {
-        Some(svc) => svc,
-        None => {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "CHAT_NOT_CONFIGURED",
-                "Chat service is not configured",
-            )
-            .into_response();
-        }
-    };
+    let chat_service = &state.chat_service;
 
     let principal = &state.local_user_id;
 
@@ -473,17 +463,7 @@ pub async fn chat_stream_handler(
         return (StatusCode::UNAUTHORIZED, "Invalid token").into_response();
     }
 
-    let chat_service = match &state.chat_service {
-        Some(svc) => svc,
-        None => {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "CHAT_NOT_CONFIGURED",
-                "Chat service is not configured",
-            )
-            .into_response();
-        }
-    };
+    let chat_service = &state.chat_service;
 
     let rx = match chat_service.stream_manager().get_receiver(&stream_id) {
         Some(rx) => rx,
@@ -667,17 +647,7 @@ pub async fn get_chat_history_handler(
     State(state): State<Arc<AppState>>,
     Query(query): Query<HistoryQuery>,
 ) -> impl IntoResponse {
-    let chat_service = match &state.chat_service {
-        Some(svc) => svc,
-        None => {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "CHAT_NOT_CONFIGURED",
-                "Chat service is not configured",
-            )
-            .into_response();
-        }
-    };
+    let chat_service = &state.chat_service;
 
     let limit = query.limit.unwrap_or(50);
     let offset = query.offset.unwrap_or(0);
@@ -730,17 +700,7 @@ pub async fn delete_chat_history_handler(
     State(state): State<Arc<AppState>>,
     Query(query): Query<DeleteHistoryQuery>,
 ) -> impl IntoResponse {
-    let chat_service = match &state.chat_service {
-        Some(svc) => svc,
-        None => {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "CHAT_NOT_CONFIGURED",
-                "Chat service is not configured",
-            )
-            .into_response();
-        }
-    };
+    let chat_service = &state.chat_service;
 
     let lane_key = query.lane_key.as_deref().unwrap_or(&state.default_lane_key);
 
@@ -872,9 +832,7 @@ pub async fn delete_feedback_handler(
 /// waiting is not acting on it. Answering stays owner-scoped at
 /// `POST /v1/chat/confirmations/{request_id}`, which is unchanged.
 pub async fn list_confirmations(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    Json(pending_confirmations(
-        state.confirmation_broker.as_deref(),
-    ))
+    Json(pending_confirmations(Some(&state.confirmation_broker)))
 }
 
 /// The body of [`list_confirmations`] — split out so the shape is provable
@@ -917,17 +875,7 @@ pub async fn confirm_tool(
     Path(request_id): Path<String>,
     Json(body): Json<ConfirmationBody>,
 ) -> impl IntoResponse {
-    let broker = match &state.confirmation_broker {
-        Some(b) => b,
-        None => {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "CONFIRMATION_NOT_CONFIGURED",
-                "Confirmation broker is not configured",
-            )
-            .into_response();
-        }
-    };
+    let broker = &state.confirmation_broker;
 
     match broker.respond(
         &request_id,

@@ -304,7 +304,7 @@ pub async fn status_handler(State(state): State<Arc<AppState>>, headers: HeaderM
                 .llm_settings_service
                 .as_ref()
                 .map(|service| service.router().as_ref()),
-            confirmation_broker: state.confirmation_broker.as_deref(),
+            confirmation_broker: Some(&state.confirmation_broker),
             connected_clients: state.event_broadcaster.client_count(),
         },
         &headers,

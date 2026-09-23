@@ -1706,7 +1706,6 @@ every send), not `created_at`.
 
 | Condition               | Response                                                                                                                                                                                |
 | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| chat service absent     | `503 { error: { code: "CHAT_NOT_CONFIGURED" } }` on POST and on stream GET                                                                                                              |
 | bad/expired token       | `401 "Invalid token"` (plain text) on the stream GET                                                                                                                                    |
 | stream gone / >5 s late | `404 { error: { code: "STREAM_NOT_FOUND", message: "Stream not found or expired" } }`                                                                                                   |
 | unknown attachment      | `404 ATTACHMENT_NOT_FOUND` / `403 ATTACHMENT_ACCESS_DENIED` on POST                                                                                                                     |

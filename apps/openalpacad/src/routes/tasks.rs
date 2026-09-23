@@ -477,7 +477,7 @@ pub async fn get_task_timeline_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    task_timeline(&state.db, state.confirmation_broker.as_deref(), &id)
+    task_timeline(&state.db, Some(&state.confirmation_broker), &id)
 }
 
 /// POST /v1/tasks/{id}/action
