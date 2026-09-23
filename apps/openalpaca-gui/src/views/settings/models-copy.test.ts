@@ -89,7 +89,9 @@ describe("what a provider toggle says afterwards", () => {
           discovery_error: "connection refused",
         }),
       ),
-    ).toBe("ollama on — its model list could not be read (connection refused)");
+    ).toBe(
+      "ollama on, but it could not be reached (connection refused) — start it and press Refresh models",
+    );
   });
 
   it("keeps the older facts: a disable, and a write that did not load", () => {

@@ -234,9 +234,10 @@ cannot answer until you enable one:
 
   Both take effect without a restart. If you added the key first and
   `openalpaca llm status` shows no usable cloud model, run
-  `openalpaca llm models --refresh` or restart the daemon. The desktop app has the on/off switch
-  (Settings → Models & keys) but no key editor yet, so keys go in through the
-  CLI. See [CLI Manual → `llm`](CLI_Manual.md#llm) for the other key commands.
+  `openalpaca llm models --refresh` or restart the daemon. The desktop app does
+  both on one screen (Settings → Models & keys): the provider switch and an
+  `Add key` form that refuses to save against a switched-off provider. See
+  [CLI Manual → `llm`](CLI_Manual.md#llm) for the other key commands.
 
 `openalpaca llm status` shows the result, and names the fix when nothing is
 routable.

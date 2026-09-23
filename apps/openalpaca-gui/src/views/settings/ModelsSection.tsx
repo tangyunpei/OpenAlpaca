@@ -42,6 +42,11 @@
  * configured default is not routable, the daemon's own `effective_default_model`
  * is shown — a picker that disagrees with every reply is the worst kind of
  * silent substitution.
+ *
+ * Keys are added here (D-F, DESIGN_SPEC §5.4a): `Add key` in the card header
+ * and on each row opens `AddKeyForm`, which refuses a switched-off provider
+ * before any typing and offers this section's own `toggleProvider` as the way
+ * out — the same mutation the row's switch calls.
  */
 
 import { useState } from "react";
@@ -63,6 +68,7 @@ import { effectiveModelNote } from "@/lib/model-availability";
 import { useProjectStore } from "@/stores/project";
 import { useUiStore } from "@/stores/ui";
 
+import { AddKeyForm } from "./AddKeyForm";
 import { GapNote, ListCard, ListRow, ListState, Toggle } from "./primitives";
 import { compactCount } from "./format";
 import { providerKeyLine, providerToggleToast } from "./models-copy";
@@ -87,6 +93,8 @@ export function ModelsSection() {
   // /v1/settings/llm` reports the file, which by then says `enabled = true` —
   // so it is kept here until the next toggle of that row answers.
   const [notLoaded, setNotLoaded] = useState<Record<string, string>>({});
+  // The provider the `Add key` form is open on, or `null` when it is shut.
+  const [addingFor, setAddingFor] = useState<string | null>(null);
 
   const providers = Object.entries(llm.data?.providers ?? {});
   const activeModel = orchestrator.data?.model ?? llm.data?.orchestrator.model;
@@ -164,11 +172,14 @@ export function ModelsSection() {
         </p>
       )}
 
+      {/* `Add key`, not `Add provider`: the providers are compiled in and
+          `GET /v1/settings/llm` enumerates every one of them, so there is no
+          provider to add — what an owner can add is a key (D-F, §5.4a). */}
       <ListCard
-        addLabel="Add provider"
+        addLabel="Add key"
         onAdd={() =>
-          showToast(
-            "Adding a provider needs the key editor, which is not built yet",
+          setAddingFor(
+            addingFor === null ? (providers[0]?.[0] ?? "anthropic") : null,
           )
         }
         actions={
@@ -181,6 +192,16 @@ export function ModelsSection() {
           </Button>
         }
       >
+        {addingFor !== null && (
+          <AddKeyForm
+            provider={addingFor}
+            onChangeProvider={setAddingFor}
+            onDone={showToast}
+            onCancel={() => setAddingFor(null)}
+            onEnableProvider={(provider) => toggleProvider(provider, true)}
+            enableBusy={setProviderEnabled.isPending}
+          />
+        )}
         <ListState
           pending={llm.isPending}
           error={llm.error}
@@ -252,13 +273,27 @@ export function ModelsSection() {
                       : `${compactCount(today.tokens)} tok today · ${formatSpend(today.usd)}`
                 }
                 control={
-                  <Toggle
-                    checked={info.enabled}
-                    label={`Enable ${provider}`}
-                    disabled={setProviderEnabled.isPending}
-                    disabledReason="switching…"
-                    onChange={(next) => toggleProvider(provider, next)}
-                  />
+                  <span className="flex shrink-0 items-center gap-[8px]">
+                    {/* The shortest path from "On, but not loaded — No keys
+                        for …" to the field that fixes it. Kept for a keyless
+                        provider too: the form then says there is nothing to
+                        type, which is the answer rather than a missing
+                        control. */}
+                    <Button
+                      variant="ghostXs"
+                      aria-label={`Add key for ${provider}`}
+                      onClick={() => setAddingFor(provider)}
+                    >
+                      Add key
+                    </Button>
+                    <Toggle
+                      checked={info.enabled}
+                      label={`Enable ${provider}`}
+                      disabled={setProviderEnabled.isPending}
+                      disabledReason="switching…"
+                      onChange={(next) => toggleProvider(provider, next)}
+                    />
+                  </span>
                 }
               />
             );

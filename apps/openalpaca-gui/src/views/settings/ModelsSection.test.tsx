@@ -53,6 +53,8 @@ const state = vi.hoisted(() => ({
     { model: string; fallback_models: string[] } | undefined,
   /** Every `PUT /v1/orchestrator/config` body the section sent. */
   writes: [] as Array<{ model: string; fallback_models: string[] }>,
+  /** Every `PUT /v1/settings/llm` body the key form sent. */
+  upserts: [] as Array<{ provider: string; key: Record<string, unknown> }>,
 }));
 
 vi.mock("@/hooks/useSettings", async (importOriginal) => ({
@@ -98,6 +100,13 @@ vi.mock("@/hooks/useSettings", async (importOriginal) => ({
         );
     },
   }),
+  useUpsertKey: () => ({
+    isPending: false,
+    mutate: (input: { provider: string; key: Record<string, unknown> }) => {
+      state.upserts.push(input);
+    },
+  }),
+  useValidateKey: () => ({ isPending: false, mutate: () => undefined }),
   useRefreshModels: () => ({
     isPending: false,
     mutate: (
@@ -179,6 +188,7 @@ beforeEach(() => {
     fallback_models: ["claude-sonnet-4-6"],
   };
   state.writes = [];
+  state.upserts = [];
   useUiStore.setState({ toast: null });
 });
 
@@ -401,7 +411,7 @@ describe("a provider that needs no key", () => {
     expect(screen.queryByText(/0 keys/)).toBeNull();
   });
 
-  it("can be switched on with no key editor, and is told what that found", async () => {
+  it("can be switched on with no key, and is told what that found", async () => {
     state.providers = { ollama: provider(false, false) };
     state.result = {
       id: "ollama",
@@ -536,5 +546,79 @@ describe("per-provider usage (GAP-08c, T50)", () => {
     render(<ModelsSection />);
 
     expect(screen.queryByText(/lifetime/i)).toBeNull();
+  });
+});
+
+/**
+ * D-F: the header's `Add provider` was a toast saying the key editor did not
+ * exist. There is no provider to add — the three are compiled in — so the
+ * control is `Add key`, and it opens the form.
+ */
+describe("adding a key", () => {
+  it("opens the form from the card header, where the old toast was", async () => {
+    render(<ModelsSection />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Add key" }));
+
+    expect(screen.getByRole("radiogroup", { name: "Provider" })).toBeVisible();
+    expect(screen.getByRole("radio", { name: "anthropic" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    expect(screen.getByLabelText("API key")).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "Adding a provider needs the key editor, which is not built yet",
+      ),
+    ).toBeNull();
+    expect(useUiStore.getState().toast).toBeNull();
+    expect(screen.queryByRole("button", { name: "Add provider" })).toBeNull();
+  });
+
+  it("opens on the row's own provider from that row's Add key", async () => {
+    state.providers = {
+      anthropic: provider(true),
+      ollama: provider(false, false),
+    };
+    render(<ModelsSection />);
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Add key for ollama" }),
+    );
+
+    expect(screen.getByRole("radio", { name: "ollama" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    // Ollama needs no key: the form says so instead of asking for one.
+    expect(screen.queryByLabelText("API key")).toBeNull();
+    expect(screen.getByText(/ollama needs no API key/)).toBeInTheDocument();
+  });
+
+  it("turns a switched-off provider on through the section's own switch path", async () => {
+    state.providers = { anthropic: provider(false) };
+    render(<ModelsSection />);
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Add key for anthropic" }),
+    );
+    expect(screen.getByText(/anthropic is switched off/)).toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Turn anthropic on" }),
+    );
+
+    // The same mutation, and the same toast, as the row's switch.
+    expect(state.calls).toEqual([{ provider: "anthropic", enabled: true }]);
+    expect(useUiStore.getState().toast).toBe("anthropic on — found 1 model");
+    expect(state.upserts).toEqual([]);
+  });
+
+  it("closes from the header button it was opened with", async () => {
+    render(<ModelsSection />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Add key" }));
+    await userEvent.click(screen.getByRole("button", { name: "Add key" }));
+
+    expect(screen.queryByRole("radiogroup", { name: "Provider" })).toBeNull();
   });
 });

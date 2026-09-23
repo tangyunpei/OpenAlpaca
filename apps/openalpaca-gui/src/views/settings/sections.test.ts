@@ -72,7 +72,7 @@ describe("Settings sections (§5.4)", () => {
       SETTINGS_SECTIONS.filter((section) => section.add !== undefined).map(
         (section) => section.add,
       ),
-    ).toEqual(["Add provider", "Connect service", "Add extension"]);
+    ).toEqual(["Add key", "Connect service", "Add extension"]);
   });
 
   it("falls back to Connection for an unknown persisted section id", () => {

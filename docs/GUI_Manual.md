@@ -607,20 +607,25 @@ The provider list and its keys (`GET /v1/settings/llm`), the model catalogue
 `GET /v1/usage/summary`'s `by_provider`; a provider with no calls today says so
 rather than borrowing a lifetime number.
 
-**Keys are read-only here for now.** Each row counts the provider's keys, but
-the key editor is not built: `Add provider` answers with a toast saying so, and
-nothing in this section adds, removes or reorders a key. A local provider needs
-no key at all; see below.
+**Adding a key.** `Add key` in the card header opens the form; each provider
+row has its own `Add key` beside the switch. Pick the provider, paste the key,
+and save. `Check key` is optional and separate: it asks the daemon to look at
+the key (`POST /v1/settings/llm/validate`) and reports what it found, but a
+check that fails or times out never stops a save — the router finds out on the
+first real call either way. Priority (`primary` / `fallback`), source and a
+note are the same fields `openalpaca llm keys add` asks for (see the
+[CLI Manual](CLI_Manual.md)). The key field is hidden, and the key is cleared
+from the form once it is saved.
 
-A cloud provider therefore takes two steps, in this order:
-
-1. Turn the provider's switch on here (or run
-   `openalpaca config set ai.<provider>.enabled true`). Every provider starts
-   off, and adding a key does not turn one on.
-2. Add the key from the CLI: `openalpaca llm keys add --provider <name>`, which
-   asks for the key with hidden input (see the [CLI Manual](CLI_Manual.md)).
-
-Between the two steps the row reads `On, but not loaded`, as described next.
+**A cloud provider takes two steps, in this order, and the form enforces it.**
+Turn the provider's switch on first, then add the key. Every provider starts
+off, and adding a key does not turn one on. Saving a key for a switched-off
+provider would be accepted by the daemon and achieve nothing — the router
+drops a disabled provider's models from its catalogue and only the enable puts
+them back — so the form refuses before saving, says why, and puts a
+`Turn <provider> on` button in the refusal. It does not flip the switch for
+you, and it does not save first and offer afterwards. Between the two steps
+the row reads `On, but not loaded`, as described next.
 
 The per-provider switch writes the bit to `llm.toml` and moves the router
 live (`PUT /v1/settings/llm/providers/{provider}/enabled`): a disable unloads
@@ -637,10 +642,13 @@ reload the row says `On, but no models loaded` instead.
 no key at all, so its row reads `no key needed · <strategy>` where a cloud
 provider counts its keys, and the switch is the whole setup: there is nothing
 to type first. The enable's own answer says what the daemon then found —
-`ollama on — found 3 models`, or `it reported no models`, or `its model list
-could not be read (<reason>)`. A zero is never left to speak for itself. (A key
-you wrote by hand for a local provider is still counted; the line reports what
-is there.)
+`ollama on — found 3 models`, or `it reported no models`, or — when the daemon
+could not ask it, usually because Ollama is not running — `ollama on, but it
+could not be reached (<reason>) — start it and press Refresh models`. A zero is
+never left to speak for itself. (A key you wrote by hand for a local provider
+is still counted; the line reports what is there.) `Add key` on a local
+provider's row opens the form on a page that says there is nothing to type: no
+key field, no save button, and the switch if it is off.
 
 **Refresh models.** The card header carries a `Refresh models` button
 (`POST /v1/models/refresh`): every loaded provider is asked what it can serve,
@@ -803,11 +811,6 @@ they appear: HTML and SVG previews are shown as source until the webview
 rendering review happens; there is no daily spend bar because there is no
 overall daily budget; there is no per-tool switch because ENABLE is per
 extension; the replay-resume button is hidden unless the daemon enables it.
-
-One absence is the GUI's own rather than the daemon's: the API-key editor in
-Settings → Models & keys is not built yet, although the daemon serves the key
-routes. `Add provider` says so in a toast, and `openalpaca llm keys` is the way
-to manage keys until it exists.
 
 ## Troubleshooting
 

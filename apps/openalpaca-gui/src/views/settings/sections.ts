@@ -58,7 +58,9 @@ export const SETTINGS_SECTIONS: readonly SettingsSectionMeta[] = [
     label: "Models & keys",
     blurb:
       "Providers the router can reach, in priority order. Pick a model to make it the chat default.",
-    add: "Add provider",
+    // The design's `Add provider`: there is no provider to add — all three
+    // are compiled in — so the real control adds a key (D-F, §5.4a).
+    add: "Add key",
   },
   {
     id: "connectors",

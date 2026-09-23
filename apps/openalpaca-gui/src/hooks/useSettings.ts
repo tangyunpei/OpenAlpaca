@@ -103,9 +103,15 @@ function useSettingsMutation<TData, TVariables>(
 }
 
 export function useUpsertKey(): UseMutationResult<void, Error, AddKeyRequest> {
+  // `qk.statusAll()` because this write can change what the daemon would
+  // answer with: a provider enabled with no key is registered nowhere, and
+  // the key is what makes `register_provider_from_config` succeed — so
+  // `llm.effective_default_model` goes from `null` to a model on *this*
+  // request, and the chat first-run card reads that field (D-G). Without it
+  // the card would sit there for up to one 30 s poll after the right action.
   return useSettingsMutation<void, AddKeyRequest>(
     (req) => upsertKey(req),
-    [qk.models.all()],
+    [qk.models.all(), qk.statusAll()],
   );
 }
 
@@ -114,8 +120,12 @@ export function useRemoveKey(): UseMutationResult<
   Error,
   { provider: string; keyId: string }
 > {
+  // The mirror of `useUpsertKey`: removing the last key of the only enabled
+  // provider unloads it on the reload, the install is unroutable again, and
+  // the first-run card has to come back without waiting for the poll.
   return useSettingsMutation<void, { provider: string; keyId: string }>(
     (input) => removeKey(input.provider, input.keyId),
+    [qk.models.all(), qk.statusAll()],
   );
 }
 

@@ -122,6 +122,10 @@ export const GAPS: Record<GapId, GapDescriptor> = {
   // `GET /v1/settings/llm`; only the write was missing. The model picker's
   // `off` group badge is still not drawn — `GET /v1/models` lists models, not
   // providers, and a disabled provider simply has none there.
+  // The API-key editor was never a gap here — every key route already existed
+  // — but the GUI's own absence, and it is closed: `Add key` in Settings →
+  // Models & keys (`views/settings/AddKeyForm.tsx`, D-F) writes
+  // `PUT /v1/settings/llm` and refuses a switched-off provider before it can.
   // The detail half of GAP-17 closed with Phase 8 item 6 (T49):
   // `GET /v1/connectors` rows carry `source` (the token the count was grouped
   // by), `registered` (the manager holds a spawned handle) and `messages_7d`

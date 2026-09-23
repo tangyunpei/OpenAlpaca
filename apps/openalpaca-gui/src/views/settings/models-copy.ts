@@ -16,7 +16,8 @@ import type { ProviderEnabledResponse, ProviderInfo } from "@/lib/api/types";
  *
  * A provider that needs no key (L1) held `0 keys · round_robin` — which reads
  * as one missing step away from working, when in fact nothing is missing and
- * there is no key editor to reach for. An owner who *has* written a key for a
+ * there is no key to add (the `Add key` form says so for such a provider). An
+ * owner who *has* written a key for a
  * local provider still sees it counted: the line reports what is there.
  */
 export function providerKeyLine(info: ProviderInfo): string {
@@ -39,8 +40,10 @@ export function providerKeyLine(info: ProviderInfo): string {
 export function providerToggleToast(row: ProviderEnabledResponse): string {
   if (!row.enabled) return `${row.id} off`;
   if (!row.loaded) return `${row.id} on, but the daemon could not load it`;
+  // The sentence an owner meets when the local provider is not running, so
+  // it names the likely cause and the next step rather than a daemon internal.
   if (row.discovery_error !== null) {
-    return `${row.id} on — its model list could not be read (${row.discovery_error})`;
+    return `${row.id} on, but it could not be reached (${row.discovery_error}) — start it and press Refresh models`;
   }
   if (row.discovered_models === 0) {
     return `${row.id} on — it reported no models`;

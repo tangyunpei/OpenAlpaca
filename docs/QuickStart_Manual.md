@@ -78,9 +78,9 @@ openalpaca llm keys add --provider anthropic   # prompts for the key, a source a
 ```
 
 Keep this order: switch the provider on, then add the key. Both take effect
-without a restart. In the desktop app the same on/off switch is
-under Settings → Models & keys; the app has no key editor yet, so add a cloud
-key from the CLI.
+without a restart. The desktop app does the same two steps on one screen —
+Settings → Models & keys, where `Add key` refuses to save until the provider
+is switched on and offers the switch in the refusal.
 
 Check the result:
 
