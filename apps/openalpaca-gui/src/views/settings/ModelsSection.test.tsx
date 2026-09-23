@@ -55,6 +55,14 @@ const state = vi.hoisted(() => ({
   writes: [] as Array<{ model: string; fallback_models: string[] }>,
   /** Every `PUT /v1/settings/llm` body the key form sent. */
   upserts: [] as Array<{ provider: string; key: Record<string, unknown> }>,
+  /** Every `PUT /v1/settings/llm/keys/priority` body. */
+  priorities: [] as Array<{
+    provider: string;
+    key_id: string;
+    priority: string;
+  }>,
+  /** Every `DELETE /v1/settings/llm/keys/{provider}/{key_id}`. */
+  removals: [] as Array<{ provider: string; keyId: string }>,
 }));
 
 vi.mock("@/hooks/useSettings", async (importOriginal) => ({
@@ -107,6 +115,18 @@ vi.mock("@/hooks/useSettings", async (importOriginal) => ({
     },
   }),
   useValidateKey: () => ({ isPending: false, mutate: () => undefined }),
+  useSetKeyPriority: () => ({
+    isPending: false,
+    mutate: (input: { provider: string; key_id: string; priority: string }) => {
+      state.priorities.push(input);
+    },
+  }),
+  useRemoveKey: () => ({
+    isPending: false,
+    mutate: (input: { provider: string; keyId: string }) => {
+      state.removals.push(input);
+    },
+  }),
   useRefreshModels: () => ({
     isPending: false,
     mutate: (
@@ -189,6 +209,8 @@ beforeEach(() => {
   };
   state.writes = [];
   state.upserts = [];
+  state.priorities = [];
+  state.removals = [];
   useUiStore.setState({ toast: null });
 });
 
@@ -620,5 +642,141 @@ describe("adding a key", () => {
     await userEvent.click(screen.getByRole("button", { name: "Add key" }));
 
     expect(screen.queryByRole("radiogroup", { name: "Provider" })).toBeNull();
+  });
+});
+
+/**
+ * The keys a provider already holds. `Make primary` and `Remove` are the two
+ * writes; the priority body is `key_id` while the upsert body is `id`, and a
+ * test is the only thing that keeps the two straight.
+ */
+describe("a provider's stored keys", () => {
+  const stored = (
+    id: string,
+    priority: "primary" | "fallback",
+    source = "api_console",
+  ) => ({
+    id,
+    masked_secret: `sk-ant-…${id.slice(-4)}`,
+    tier: null,
+    priority,
+    source,
+    notes: null,
+    status: "healthy",
+    monthly_usage_usd: null,
+  });
+
+  function twoKeys() {
+    state.providers = {
+      anthropic: {
+        ...provider(true),
+        keys: [
+          stored("anthropic_1700000001", "primary"),
+          // Written by the CLI, which sends display labels.
+          stored("anthropic_1700000002", "fallback", "API Console"),
+        ],
+      },
+    };
+  }
+
+  it("lists each key with its masked secret, priority, source and health", () => {
+    twoKeys();
+    render(<ModelsSection />);
+
+    const list = screen.getByRole("list", { name: "anthropic keys" });
+    const rows = list.querySelectorAll("li");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent(
+      "sk-ant-…0001 · primary · API Console · healthy",
+    );
+    expect(rows[1]).toHaveTextContent(
+      "sk-ant-…0002 · fallback · API Console · healthy",
+    );
+  });
+
+  it("makes a fallback key primary with `key_id`, not `id`", async () => {
+    twoKeys();
+    render(<ModelsSection />);
+
+    // Only the key that is not primary offers it.
+    expect(
+      screen.queryByRole("button", {
+        name: "Make anthropic_1700000001 primary",
+      }),
+    ).toBeNull();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Make anthropic_1700000002 primary" }),
+    );
+
+    expect(state.priorities).toEqual([
+      {
+        provider: "anthropic",
+        key_id: "anthropic_1700000002",
+        priority: "primary",
+      },
+    ]);
+    expect(state.priorities[0]).not.toHaveProperty("id");
+  });
+
+  it("removes a key only on the second click", async () => {
+    twoKeys();
+    render(<ModelsSection />);
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Remove anthropic_1700000002" }),
+    );
+    expect(state.removals).toEqual([]);
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: "Confirm removing anthropic_1700000002",
+      }),
+    );
+
+    expect(state.removals).toEqual([
+      { provider: "anthropic", keyId: "anthropic_1700000002" },
+    ]);
+  });
+
+  it("disarms when the click goes elsewhere, and deletes nothing", async () => {
+    twoKeys();
+    render(<ModelsSection />);
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Remove anthropic_1700000002" }),
+    );
+    await userEvent.click(document.body);
+
+    expect(
+      screen.getByRole("button", { name: "Remove anthropic_1700000002" }),
+    ).toHaveTextContent("Remove");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Remove anthropic_1700000002" }),
+    );
+    expect(state.removals).toEqual([]);
+  });
+
+  it("disarms one key when another key's Remove is pressed", async () => {
+    twoKeys();
+    render(<ModelsSection />);
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Remove anthropic_1700000001" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Remove anthropic_1700000002" }),
+    );
+
+    expect(state.removals).toEqual([]);
+    expect(
+      screen.getByRole("button", { name: "Remove anthropic_1700000001" }),
+    ).toBeInTheDocument();
+  });
+
+  it("draws no key rows for a keyless provider that holds none", () => {
+    state.providers = { ollama: provider(true, false) };
+    render(<ModelsSection />);
+
+    expect(screen.queryByRole("list", { name: "ollama keys" })).toBeNull();
+    expect(screen.getByText("no key needed · round_robin")).toBeInTheDocument();
   });
 });

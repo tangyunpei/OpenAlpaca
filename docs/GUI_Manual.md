@@ -627,6 +627,17 @@ them back — so the form refuses before saving, says why, and puts a
 you, and it does not save first and offer afterwards. Between the two steps
 the row reads `On, but not loaded`, as described next.
 
+**Keys already stored.** Each provider row lists its keys: the masked secret
+exactly as the daemon masks it, the priority, the source, and the health
+`GET /v1/settings/llm` reports (`health unknown` for a key nothing has used
+yet). A key written by the CLI shows the source label the CLI wrote.
+`Make primary` promotes a fallback key (`PUT /v1/settings/llm/keys/priority`);
+`Remove` deletes one on a second click (`DELETE
+/v1/settings/llm/keys/{provider}/{key_id}`), and clicking anywhere else first
+disarms it. There is no undo, and removing the last key of the only enabled
+provider leaves the install unable to answer — the chat's first-run card
+comes back.
+
 The per-provider switch writes the bit to `llm.toml` and moves the router
 live (`PUT /v1/settings/llm/providers/{provider}/enabled`): a disable unloads
 the provider and takes its models out of the registry, an enable puts them
