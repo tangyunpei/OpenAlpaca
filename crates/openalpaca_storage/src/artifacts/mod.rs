@@ -1482,7 +1482,7 @@ impl<'a> ArtifactStore<'a> {
     ///
     /// Rows only. Moving the store *directory*, when the caller is asking for a
     /// move rather than recording one that already happened, is
-    /// [`crate::store::migrate::move_project_store`].
+    /// [`crate::store::project_move::move_project_store`].
     ///
     /// **Path-scoped, not owner-scoped**, and deliberately: `session` and `task`
     /// carry no `owner_id`, so a half-scoped transaction would leave a project

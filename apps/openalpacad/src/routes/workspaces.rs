@@ -63,7 +63,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use openalpaca_storage::store::{self, migrate};
+use openalpaca_storage::store::{self, project_move};
 use openalpaca_storage::{ArtifactStore, Database, PurgePlan, RebaseCounts, WorkspaceRows};
 use serde::Deserialize;
 
@@ -473,9 +473,9 @@ pub(crate) fn rebase_workspace(db: &Database, owner_id: &str, request: RebaseReq
     // cannot be undone by re-running this call is refused rather than half done.
     // Both an error (a cross-volume rename) and `Ambiguous` (a store at each
     // root) are refusals; only the other two outcomes may proceed.
-    match migrate::plan_project_store_move(Path::new(&old_root), Path::new(&new_root)) {
-        Ok(migrate::StoreMove::Rename | migrate::StoreMove::NothingToMove) => {}
-        Ok(migrate::StoreMove::Ambiguous) => {
+    match project_move::plan_project_store_move(Path::new(&old_root), Path::new(&new_root)) {
+        Ok(project_move::StoreMove::Rename | project_move::StoreMove::NothingToMove) => {}
+        Ok(project_move::StoreMove::Ambiguous) => {
             return api_error(
                 StatusCode::CONFLICT,
                 "WORKSPACE_MOVE_BLOCKED",
@@ -501,7 +501,7 @@ pub(crate) fn rebase_workspace(db: &Database, owner_id: &str, request: RebaseReq
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string()),
     };
 
-    let store_moved = match migrate::move_project_store(Path::new(&old_root), Path::new(&new_root))
+    let store_moved = match project_move::move_project_store(Path::new(&old_root), Path::new(&new_root))
     {
         Ok(moved) => moved,
         // The rows are already re-based. Saying so — with both paths — is the

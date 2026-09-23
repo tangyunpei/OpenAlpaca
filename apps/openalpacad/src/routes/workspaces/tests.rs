@@ -2,7 +2,7 @@
 //!
 //! The transaction itself belongs to `ArtifactStore::rebase_project` and is
 //! proved in `openalpaca_storage::artifacts::tests`; the store-directory move
-//! belongs to `store::migrate` and is proved there. What is proved here is what
+//! belongs to `store::project_move` and is proved there. What is proved here is what
 //! the route owns — which refusal becomes which status code, that every refusal
 //! happens *before* a row changes, and what the JSON carries.
 

@@ -25,6 +25,7 @@
 
 mod artifact;
 pub mod migrate;
+pub mod project_move;
 
 pub use artifact::{
     artifact_extension, artifact_file_name, confine_to_root, leading_sequence, loose_dir, run_dir,
