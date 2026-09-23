@@ -77,7 +77,7 @@ library.
 |---|---|---|
 | `row` | yes | `{ "id": <1..20 or "q1".."q4">, "scenario": <matrix text>, "required_outcome": <matrix text> }` |
 | `design` | yes | the design sections the expectations are read from |
-| `loads_in` | yes | `["slice-2"]`, `["slice-3"]` or both — which slice's test suite loads the file |
+| `loads_in` | yes | `["slice-2"]`, `["slice-3"]` or both — which slice's test suite loads the file; `"slice-0"` marks the already-landed 0.5 refusal (file 06), whose test exists today |
 | `notes_for_implementer` | no | prose: readings the file had to pin, and why |
 | `owners` | yes | `[{ "id", "owner_key" }]` — every owner id the file mentions, with its derived key (below) |
 | `database` | no | `{ "global_users": [ids], "local_user_id": id, "messages": [rowid strings], "tasks": [uuids] }` — the rows the identity check and source verification see; absent means the same as empty |
