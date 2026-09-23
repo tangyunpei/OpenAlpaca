@@ -119,8 +119,8 @@ fn artifact_error_status(error: &ArtifactError) -> StatusCode {
         ArtifactError::Gone { .. } => StatusCode::GONE,
         // All three are a well-formed request the store refuses on the state of
         // the address: an image is not diffable, a version above the diff cap
-        // will not be read, and a name held by a file no row describes is not
-        // writable. `NameTaken` reaches no route today — the artifact surface
+        // will not be read, and a title whose every candidate name is held by a
+        // file the store will not replace is not writable. `NameTaken` reaches no route today — the artifact surface
         // is read-only, and `artifact_write` is a tool — but the mapping
         // belongs here rather than at whichever route first writes.
         ArtifactError::NotDiffable { .. }
