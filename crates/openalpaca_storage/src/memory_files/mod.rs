@@ -141,11 +141,24 @@ pub fn project_partition_key(owner_key: &str, canonical_partition_dir: &str) -> 
     format!("proj-{owner_key}-{}", dir_key(canonical_partition_dir))
 }
 
-/// Whether `s` is a 64-character lowercase hex revision.
-pub fn is_revision(s: &str) -> bool {
-    s.len() == 64
+/// Whether `s` is exactly `len` lowercase hex characters.
+fn is_lower_hex(s: &str, len: usize) -> bool {
+    s.len() == len
         && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Whether `s` is a 64-character lowercase hex revision.
+pub fn is_revision(s: &str) -> bool {
+    is_lower_hex(s, 64)
+}
+
+/// Whether `s` has the shape of an owner key ([`OWNER_KEY_HEX`] lowercase hex
+/// characters). Every operation that takes an owner key from a caller checks
+/// this before joining it into a path: a key is a directory *name*, never a
+/// path.
+pub fn is_owner_key(s: &str) -> bool {
+    is_lower_hex(s, OWNER_KEY_HEX)
 }
 
 // ============================================================================
@@ -185,7 +198,8 @@ pub enum MemoryFilesError {
     /// `doctor --repair` met two files sharing one id (design §6).
     DuplicateId { id: NoteId, files: Vec<PathBuf> },
     /// `adopt` met an existing partition of the current owner in a scope it
-    /// would rename into (design §6).
+    /// would rename into (design §6). (An argument that is not an owner key
+    /// is `InvalidInput`, refused before anything is looked at.)
     AdoptCollision(String),
     /// A test-injected crash: the mutation stopped after the named step with
     /// the on-disk state exactly as it was at that point.

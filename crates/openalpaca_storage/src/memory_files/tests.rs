@@ -2897,6 +2897,67 @@ fn adopt_refuses_the_whole_command_on_one_collision() {
     );
 }
 
+/// The argument of `adopt` is an owner key (design §6), never a path: anything
+/// but 32 lowercase hex characters is refused before a directory is joined,
+/// so `../../state` cannot rename the store's `state/` into an owner directory.
+#[test]
+fn adopt_refuses_a_key_that_is_not_an_owner_key() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let created = p
+        .create(
+            new_note("Home note", "# H\n", NoteKind::Fact),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let snapshot_path = p.snapshot_path().to_path_buf();
+    drop(p);
+    let state = sb.home.join("state");
+    let bob_dir = sb.home.join("memory/owners").join(owner_key(BOB));
+    let before = list_snapshots().unwrap();
+    let upper = owner_key(ALICE).to_uppercase();
+    for bad in [
+        "../../state",
+        "../..",
+        "..",
+        "",
+        "state",
+        upper.as_str(),
+        "0123456789abcdef",
+        "0123456789abcdef0123456789abcdef0",
+        "0123456789abcdef0123456789abcdeg",
+    ] {
+        let err = adopt(bad, BOB, ts(2026, 9, 24, 0, 0, 0)).unwrap_err();
+        assert!(
+            matches!(err, MemoryFilesError::InvalidInput(_)),
+            "{bad:?}: {err}"
+        );
+        assert!(err.to_string().contains("owner key"), "{bad:?}: {err}");
+        assert!(
+            state.is_dir() && snapshot_path.is_file(),
+            "{bad:?}: state/ was moved"
+        );
+        assert!(!bob_dir.exists(), "{bad:?}: something was adopted");
+    }
+    let after = list_snapshots().unwrap();
+    assert_eq!(
+        before.iter().map(|(p, _)| p).collect::<Vec<_>>(),
+        after.iter().map(|(p, _)| p).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        list_owner_keys(&StoreScope::Home).unwrap(),
+        std::slice::from_ref(&owner_key(ALICE))
+    );
+    // Alice's partition is intact and still serves its note with its record.
+    let p = sb.open_home(ALICE);
+    assert_eq!(p.health(), PartitionHealth::Ready);
+    assert!(p.read(&created.id).unwrap().derived.recorded);
+    // The predicate itself.
+    assert!(is_owner_key(&owner_key(ALICE)));
+    assert!(!is_owner_key(&upper));
+    assert!(!is_owner_key("../../state"));
+}
+
 #[test]
 fn move_snapshots_are_classified_stale_abandoned_or_orphaned() {
     let dir = tempdir().unwrap();

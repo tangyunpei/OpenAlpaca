@@ -24,7 +24,7 @@ use super::snapshot::{
 };
 use super::{
     CONTROL_DIR, HISTORY_DIR, HISTORY_KEEP, MemoryFilesError, NAVIGATION_FILE, NOTES_DIR,
-    OWNERS_DIR, PROJECT_GITIGNORE_TEXT, home_partition_key, is_revision, owner_key,
+    OWNERS_DIR, PROJECT_GITIGNORE_TEXT, home_partition_key, is_owner_key, is_revision, owner_key,
     project_partition_key,
 };
 use crate::store::{ContentKind, StoreScope, content_dir, home_root, store_root};
@@ -1482,12 +1482,7 @@ pub fn list_owner_keys(scope: &StoreScope) -> Result<Vec<String>> {
                 .unwrap_or(false)
         })
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|name| {
-            name.len() == super::OWNER_KEY_HEX
-                && name
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        })
+        .filter(|name| is_owner_key(name))
         .collect();
     keys.sort();
     Ok(keys)
@@ -1566,11 +1561,19 @@ pub fn classify_move_snapshots(snapshots: &[ControlSnapshot]) -> Vec<(String, Mo
 /// orphaned owner key — the home partition and every `proj-<old>-*` snapshot
 /// — to the current owner in one command. One collision refuses the whole
 /// command; nothing is partially adopted. Returns the new partition keys.
+///
+/// `old_owner_key` is a directory name, never a path: anything but 32
+/// lowercase hex characters is refused before it is joined to anything.
 pub fn adopt(
     old_owner_key: &str,
     current_owner_id: &str,
     now: DateTime<Utc>,
 ) -> Result<Vec<String>, MemoryFilesError> {
+    if !is_owner_key(old_owner_key) {
+        return Err(MemoryFilesError::InvalidInput(format!(
+            "`{old_owner_key}` is not an owner key (32 lowercase hex characters)"
+        )));
+    }
     let new_key = owner_key(current_owner_id);
     if old_owner_key == new_key {
         return Err(MemoryFilesError::InvalidInput(
