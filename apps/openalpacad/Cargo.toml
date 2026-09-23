@@ -59,6 +59,9 @@ tempfile.workspace = true
 # `McpClient::disconnected_for_tests` — a client shell for a `ToolBackend::Mcp`
 # with no live server, which the `GET /v1/tools` origin tests need.
 openalpaca_mcp = { path = "../../crates/openalpaca_mcp", features = ["test-utils"] }
+# A real WebSocket client for `src/graceful_shutdown_tests.rs`. Already in the
+# lockfile — the CLI's `daemon tail` uses it — so no new external crate.
+tokio-tungstenite.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

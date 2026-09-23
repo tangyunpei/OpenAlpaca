@@ -114,7 +114,33 @@ root is the human's:
 9. Bootstrap persona documents (SOUL/USER/IDENTITY/BOOTSTRAP) if missing.
 10. Start orchestrator, wake manager, plugin manager, MCP clients, connectors, hot reload, background workers, and HTTP router.
 
-Shutdown can be initiated by signal handling or daemon command endpoint. A watchdog force-exits the process (exit code 1) if graceful shutdown takes longer than 10 seconds; after a forced exit, a stale `discovery.json` may be left behind.
+Shutdown can be initiated by a signal (SIGINT/SIGTERM) or by `POST
+/v1/command {"command":"shutdown"}`; both converge on one cancellation. The
+daemon then stops accepting connections and waits for in-flight responses to
+finish, after which it runs its shutdown tail in this order: flush the cost
+tracker to the database; flush every session log; close every MCP connection
+and kill every plugin child; stop the connectors; stop the wake scheduler and
+file watchers; remove `discovery.json`.
+
+A watchdog bounds all of it at **10 seconds** from the cancellation. The
+session-log flush and the extension sweep each take only what is left of that
+window. If the window runs out, the process exits with code 1 and skips
+whatever of the tail had not run — possibly unflushed spend, dropped
+session-log records, orphaned MCP and plugin children, connectors that never
+deregistered, and a stale `discovery.json` (the next boot overwrites it, and the
+CLI checks that the pid it names is a live daemon before trusting it).
+
+Open connections no longer run that window out. An open
+`GET /v1/chat/stream/{id}` body used to hold the wait for in-flight responses
+until the watchdog fired; it now ends with a farewell `error` frame (see
+[SSE Chat Stream](#sse-chat-stream)). An open `/v1/events` socket never held
+the shutdown — the HTTP server stops tracking a connection once it upgrades —
+but it stayed open and silent until the process died under it; it now gets a
+`daemon_shutting_down` frame and a 1001 close (see
+[WebSocket Events](#websocket-events)). Work that is still running — a chat
+turn, a workflow, a follow-up, a scheduled skill — is not drained: it stops
+when the process does, and a run left in flight is marked `interrupted` on the
+next boot (step 8).
 
 ## Config Resolution
 

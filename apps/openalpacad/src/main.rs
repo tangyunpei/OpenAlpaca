@@ -16,6 +16,8 @@ mod events;
 mod extraction;
 mod followup;
 mod gateway_bridge;
+#[cfg(test)]
+mod graceful_shutdown_tests;
 mod hot_reload;
 mod managers;
 mod middleware;
