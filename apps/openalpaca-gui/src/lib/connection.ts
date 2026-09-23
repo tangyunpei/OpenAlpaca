@@ -1,14 +1,20 @@
 /**
  * Daemon discovery and auth (API_MAP §1).
  *
- * The webview never reads `discovery.json`. Two Tauri commands do — the names
- * are read from `src-tauri/src/lib.rs`'s `tauri::generate_handler!`:
+ * The webview never reads `discovery.json`. Tauri commands do — the names are
+ * read from `src-tauri/src/lib.rs`'s `tauri::generate_handler!`:
  *
  *   `ensure_daemon_running` — probes liveness, spawns the sidecar if dead,
- *                             polls up to ~5 s. Use on boot.
+ *                             polls up to ~5 s. Use on boot. When the daemon
+ *                             does not come up, the rejection carries the end
+ *                             of what it wrote to `daemon.log` — its own
+ *                             reason, verbatim.
  *   `get_connection_info`   — reads discovery + expiry check. Use on reconnect.
+ *   `read_daemon_log_tail`  — the end of `daemon.log`, read straight from the
+ *                             file, so it answers with no daemon serving.
  *
- * Both return `ConnectionInfo`, serialized to the webview in camelCase.
+ * The first two return `ConnectionInfo`, serialized to the webview in
+ * camelCase.
  *
  * `instanceId` is the identity guard: a change means the daemon restarted, so
  * every `task_id`, `stream_id` and `request_id` the client holds is dead and
@@ -78,6 +84,35 @@ async function invokeConnection(
   if (!isConnectionInfo(raw)) {
     throw new ConnectionError(
       `\`${command}\` returned an unexpected payload`,
+      raw,
+    );
+  }
+  return raw;
+}
+
+/**
+ * The last `lines` lines of the daemon log, newest last — `""` when there is
+ * no log yet.
+ *
+ * Read by the shell straight from `daemon.log`, not through the daemon, so it
+ * answers for a daemon that would not start as well as one that is running.
+ * Colour escapes are gone and nothing else is changed: render it verbatim.
+ */
+export async function readDaemonLogTail(lines: number): Promise<string> {
+  let raw: unknown;
+  try {
+    raw = await invoke("read_daemon_log_tail", { lines });
+  } catch (cause) {
+    throw new ConnectionError(
+      typeof cause === "string"
+        ? cause
+        : "Tauri command `read_daemon_log_tail` failed",
+      cause,
+    );
+  }
+  if (typeof raw !== "string") {
+    throw new ConnectionError(
+      "`read_daemon_log_tail` returned an unexpected payload",
       raw,
     );
   }

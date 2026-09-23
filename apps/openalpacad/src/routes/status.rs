@@ -33,17 +33,17 @@
 //! and so does a path that resolves to no project at all or to the home store,
 //! which is not a project (`MemoryScopeContext::for_request`).
 //!
-//! **`log_path` is the CLI-managed log, or nothing** (N2, resolved: serve it).
-//! `openalpaca daemon start` points the child's stdout and stderr at
-//! `state/logs/daemon.log`, rotates it at 16 MB, and marks the child with
-//! `store::MANAGED_LOG_ENV` — this run's own claim to the file, not just
-//! *a* file that happens to be there. A daemon started any other way
-//! (`cargo run`, the GUI sidecar), or one that inherited someone else's
-//! leftover `daemon.log` without the marker, reports `null`: the honest
+//! **`log_path` is the launcher-managed log, or nothing** (N2, resolved:
+//! serve it). Both launchers — `openalpaca daemon start` and the GUI sidecar —
+//! point the child's stdout and stderr at `state/logs/daemon.log`, rotate it
+//! at 16 MB, and mark the child with `store::MANAGED_LOG_ENV` — this run's own
+//! claim to the file, not just *a* file that happens to be there. A daemon
+//! started any other way (a bare `cargo run`), or one that inherited someone
+//! else's leftover `daemon.log` without the marker, reports `null`: the honest
 //! answer for a path this run never opened, never a path to something it did
-//! not write (Important #3, T44 fix round 1). Phase B (a real in-daemon
-//! appender, and un-discarding the sidecar's stdout) is a separate task; this
-//! route reports what exists today.
+//! not write (Important #3, T44 fix round 1). The sidecar used to discard its
+//! daemon's output and so reported `null` too; it owns the file now (T30). A
+//! real in-daemon appender remains a separate task.
 
 use std::sync::Arc;
 
@@ -84,7 +84,8 @@ pub struct StatusResponse {
     pub uptime_secs: u64,
     /// The migration version the open database is actually at.
     pub schema_version: i32,
-    /// `<state_dir>/logs/daemon.log`, when the CLI wrote one; `null` otherwise.
+    /// `<state_dir>/logs/daemon.log`, when this run's launcher pointed it
+    /// there (`openalpaca daemon start` or the GUI sidecar); `null` otherwise.
     pub log_path: Option<String>,
     /// Bytes the user uploaded — the total the 500 MB cap is read against.
     pub upload_bytes: i64,
@@ -237,9 +238,10 @@ pub(crate) struct StatusInputs<'a> {
     pub now: DateTime<Utc>,
     pub db: &'a Database,
     pub session_log: Option<&'a SessionLogService>,
-    /// Whether `openalpaca daemon start` marked *this* run as the owner of
-    /// `store::daemon_log_path()` (Important #3). Gates `log_path` alongside
-    /// the file existing — the file alone is not proof this run wrote it.
+    /// Whether this run's launcher marked it as the owner of
+    /// `store::daemon_log_path()` (Important #3, T30). Gates `log_path`
+    /// alongside the file existing — the file alone is not proof this run
+    /// wrote it.
     pub managed_log: bool,
     /// `orchestrator.sessions`, as this daemon is actually enforcing it.
     pub sessions_config: SessionsConfig,
@@ -355,18 +357,19 @@ fn store_roots() -> anyhow::Result<(String, String, String)> {
     ))
 }
 
-/// The CLI-managed daemon log, reported only when it is really there *and*
-/// this run is the one that opened it.
+/// The launcher-managed daemon log, reported only when it is really there
+/// *and* this run is the one it was opened for.
 ///
 /// `store::daemon_log_path()` creates nothing, so asking the question does not
-/// answer it: a daemon the CLI never started has no `state/logs/daemon.log`
-/// and says so with `null` rather than handing the GUI a path whose Copy
-/// button would put a non-existent file on the clipboard. The file existing
-/// is not enough on its own, though — a GUI- or `cargo run`-launched daemon
-/// can find a previous CLI daemon's log sitting at the exact same path, and
+/// answer it: a daemon no launcher pointed at the file has no
+/// `state/logs/daemon.log` and says so with `null` rather than handing the GUI
+/// a path whose Copy button would put a non-existent file on the clipboard.
+/// The file existing is not enough on its own, though — a `cargo run`-launched
+/// daemon can find a previous daemon's log sitting at the exact same path, and
 /// reporting that would hand the owner a file whose newest line predates the
 /// running daemon (Important #3, T44 fix round 1). `managed` is that second
-/// check: only a run `openalpaca daemon start` itself opened the file for.
+/// check: only a run whose launcher (`openalpaca daemon start` or the GUI
+/// sidecar, T30) opened the file for it.
 fn daemon_log_path(managed: bool) -> Option<String> {
     if !managed {
         return None;

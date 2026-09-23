@@ -17,7 +17,6 @@ import { getDaemonStatus } from "@/lib/api/status";
 import { getHealth } from "@/lib/api/telemetry";
 import type { DaemonStatus, HealthResponse } from "@/lib/api/types";
 import {
-  bootstrapConnection,
   getCachedConnection,
   shortInstanceId,
   subscribeConnection,
@@ -114,6 +113,15 @@ export interface ConnectionStatus {
   /** The design's `connected · 7f3a` chip. */
   instanceChip: string | null;
   endpoint: string | null;
+  /**
+   * Why the last attempt to reach the daemon failed, verbatim, or `null`.
+   *
+   * For a daemon that would not start this is `ensure_daemon_running`'s
+   * rejection, which ends with the daemon's own log lines — a legacy-schema
+   * database, an older install's data, another daemon holding the lock. It
+   * used to reach nobody: the sidecar's output went to `/dev/null`.
+   */
+  lastError: string | null;
   reconnect: () => Promise<void>;
 }
 
@@ -123,9 +131,21 @@ export function useConnectionStatus(): ConnectionStatus {
   const [socket, setSocket] = useState<EventsStatus>(() =>
     daemonEvents.getStatus(),
   );
+  const [lastError, setLastError] = useState<string | null>(() =>
+    daemonEvents.getLastError(),
+  );
   const client = useQueryClient();
 
-  useEffect(() => daemonEvents.onStatus(setSocket), []);
+  // The client records the error before it announces the status it causes,
+  // so reading it on every status change is reading it at the right time.
+  useEffect(
+    () =>
+      daemonEvents.onStatus((next) => {
+        setSocket(next);
+        setLastError(daemonEvents.getLastError());
+      }),
+    [],
+  );
 
   // A daemon restart invalidates every cached id, not just the socket.
   useEffect(
@@ -136,9 +156,12 @@ export function useConnectionStatus(): ConnectionStatus {
     [client],
   );
 
+  // `connect()` bootstraps (`ensure_daemon_running`) itself and records a
+  // failure where `lastError` reads it. Bootstrapping here first, outside the
+  // client, turned a daemon that would not start into an unhandled rejection
+  // nobody saw.
   const reconnect = useCallback(async () => {
     daemonEvents.disconnect();
-    await bootstrapConnection();
     await daemonEvents.connect();
     await client.invalidateQueries();
   }, [client]);
@@ -152,6 +175,7 @@ export function useConnectionStatus(): ConnectionStatus {
     connected: socket === "connected" && health.isSuccess,
     instanceChip: instanceId === null ? null : shortInstanceId(instanceId),
     endpoint: info === null ? null : info.baseUrl.replace(/^https?:\/\//, ""),
+    lastError,
     reconnect,
   };
 }

@@ -1067,9 +1067,10 @@ export interface DaemonStatus {
   /** The migration version the open database is at, not a compile-time count. */
   schema_version: number;
   /**
-   * `<state_dir>/logs/daemon.log`, when the CLI wrote one. `null` for a daemon
-   * started any other way (`cargo run`, the GUI sidecar) — there is no such
-   * file to copy a path to.
+   * `<state_dir>/logs/daemon.log`, when this daemon's launcher pointed its
+   * output there — the app's sidecar and `openalpaca daemon start` both do
+   * (T30). `null` for a daemon started by hand (a bare `cargo run`) — there
+   * is no file of its own to copy a path to.
    */
   log_path: string | null;
   /** Bytes the user uploaded — what the daemon's upload cap is read against. */

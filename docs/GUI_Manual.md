@@ -89,34 +89,45 @@ does not choose this layout — it asks the storage crate for it
 ```
 
 When the GUI spawns the daemon it sets the child's working directory to that
-root and `OPENALPACA_CONFIG_DIR` to `<root>/config`
-(`src-tauri/src/lib.rs`, `spawn_daemon`). A project you point the GUI at keeps
+root and `OPENALPACA_CONFIG_DIR` to `<root>/config`, and appends the daemon's
+output to `<root>/state/logs/daemon.log` — the same file, under the same
+rotation (16 MB, three older generations kept), that `openalpaca daemon start`
+writes (`src-tauri/src/lib.rs`, `spawn_daemon`). A project you point the GUI at keeps
 its own store at `<project>/.openalpaca/`.
 
 Nothing is moved into this root for you. If a development build's data directory
 (`~/Library/Application Support/OpenAlpaca` on macOS) is still on the machine,
 the daemon says so — and refuses to start rather than come up on an empty
-database beside it. The app surfaces that as a failed connection; start the
-daemon from the CLI (`openalpaca daemon start --daemon-only`), which writes
-`~/.openalpaca/state/logs/daemon.log`, to see the message. See [If You Have Data
-From an Older Build](Installation_Manual.md#if-you-have-data-from-an-older-build).
+database beside it. The app shows the daemon's own message in Settings →
+Connection, read from `daemon.log`. See [If You Have Data From an Older
+Build](Installation_Manual.md#if-you-have-data-from-an-older-build).
 
 ## Connection lifecycle
 
-The webview asks the Rust shell for a connection; two Tauri commands are the
+The webview asks the Rust shell for a connection; these Tauri commands are the
 whole bridge (`src-tauri/src/lib.rs`):
 
 - `ensure_daemon_running` — the boot path. It reads `state/discovery.json` and
   probes liveness by opening a TCP connection to the advertised address
   (300 ms). A live daemon is used even if the file's 24 h expiry has lapsed,
   because liveness is the authoritative signal. If nothing answers, the daemon
-  is spawned detached (`setsid` on Unix) and the command polls for up to about
-  five seconds (25 × 200 ms) for a daemon that both advertises itself and
-  accepts connections.
+  is spawned detached (`setsid` on Unix), its output appended to
+  `state/logs/daemon.log`, and the command polls for up to about five seconds
+  (25 × 200 ms) for a daemon that both advertises itself and accepts
+  connections. **If none does, the error says why:** it ends with the last
+  lines this spawn wrote to the log — the daemon's own refusal, verbatim (an
+  older schema, an older install's data still on the machine, another daemon
+  holding the lock) — or says the daemon wrote nothing at all. Only this
+  spawn's lines are quoted, never an earlier run's.
 - `get_connection_info` — the reconnect path. It re-reads discovery and checks
   the expiry without spawning anything.
+- `await_daemon_stopped` — waits until a daemon asked to stop is really gone:
+  its process first, then the single-instance lock, for up to 15 s. It signals
+  nothing.
+- `read_daemon_log_tail` — the end of `state/logs/daemon.log`, read straight
+  from the file, so it answers when no daemon is serving anything.
 
-Both return `{ baseUrl, token, instanceId }`. `instanceId` is the identity
+The first two return `{ baseUrl, token, instanceId }`. `instanceId` is the identity
 guard: if it changes, the daemon restarted, so every `task_id`, `stream_id` and
 `request_id` the client holds is dead and the app re-bootstraps rather than
 merely reopening its socket (`src/lib/connection.ts`).
@@ -560,6 +571,13 @@ rather than shown as `0`, because a zero is a claim.
 The liveness dot and instance id (`GET /v1/health`), the endpoint, and
 `Reconnect` (re-bootstrap, then reopen the socket).
 
+**When the daemon is unreachable**, the card shows why, in a scrolling block,
+exactly as the shell reported it — for a daemon that would not start, that is
+the end of what it wrote to `daemon.log` before it gave up. `Show daemon log`
+reads the last 200 lines of `state/logs/daemon.log` straight from the file
+(`Refresh` re-reads; nothing polls), so it works for a daemon that is running
+but misbehaving and for one that never came up.
+
 Today's spend and tokens come from `GET /v1/usage/summary`, and so does the day
 itself — the daemon's UTC date rather than the browser's local one. Today's run
 count is the run list filtered to that same date, so all three figures mean the
@@ -576,10 +594,11 @@ own, the `*_max_daily_cost_usd` keys under `[orchestrator.costs]` in
 `GET /v1/status` supplies uptime, the open database's `schema_version`, the
 store's two size totals kept deliberately apart (uploaded bytes, which the
 upload quota is read against, and produced bytes, which are never charged), what
-the boot session-log sweep did, and `Copy log path`. The log path is `null` for
-a daemon this run did not launch — a sidecar, a `cargo run`, or one that merely
-found an older CLI daemon's leftover log — and the button is inert there,
-because a path to a file this daemon did not write is worse than no path.
+the boot session-log sweep did, and `Copy log path`. Both launchers — this app
+and `openalpaca daemon start` — write `daemon.log` and claim it, so the path is
+`null` only for a daemon started by hand (a bare `cargo run`), or one that
+merely found an older daemon's leftover log; the button is inert there, because
+a path to a file this daemon did not write is worse than no path.
 
 **The project.** One absolute path, typed, kept on this machine. The daemon
 reads it as `x-workspace-path` on `POST /v1/chat`; runs started from here record
@@ -825,17 +844,19 @@ extension; the replay-resume button is hidden unless the daemon enables it.
 
 ## Troubleshooting
 
-**Cannot connect.** The shell probes TCP liveness before trusting
-`state/discovery.json`, so a stale file is not the usual cause. Check that a
-daemon can start at all (`openalpaca daemon status`, or run `openalpacad` in a
-terminal and read its output) and that `state/discovery.json` exists and is
-readable. In `bun run dev` there is no Tauri bridge, so both connection
-commands fail by design.
+**Cannot connect.** Settings → Connection shows why: a daemon that would not
+start leaves its reason at the end of `state/logs/daemon.log`, and the card
+quotes it (`Show daemon log` reads more). The shell probes TCP liveness before
+trusting `state/discovery.json`, so a stale file is not the usual cause. If the
+error says the daemon wrote nothing to its log, the daemon binary did not run
+at all — check it is installed beside the app. In `bun run dev` there is no
+Tauri bridge, so every shell command fails by design.
 
 **Connection flaps.** Watch the instance id in Settings → Connection: a change
 means the daemon restarted, and the app deliberately re-bootstraps and drops
-every id it held. Repeated restarts are a daemon problem — read the log path
-that panel copies, or `state/logs/daemon.log` for a CLI-managed daemon.
+every id it held. Repeated restarts are a daemon problem — read the log
+(`Show daemon log` in that panel, or the path it copies:
+`state/logs/daemon.log`).
 
 **A list looks stale.** The event socket is best-effort and the daemon drops
 frames for a lagged client without telling it. Anything that arrived over the

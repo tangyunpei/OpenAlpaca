@@ -650,3 +650,222 @@ fn content_dirs_have_the_same_shape_in_both_scopes() {
 fn a_relative_project_root_is_rejected() {
     assert!(store_root(&StoreScope::Project(PathBuf::from("relative/proj"))).is_err());
 }
+
+// ============================================================================
+// Daemon log: rotation and tail (moved from the CLI's process manager, which
+// was its only launcher; the GUI sidecar now shares it)
+// ============================================================================
+
+/// Below the threshold the log is left exactly as it is: rotating a small
+/// file would throw away the only copy of a short run's output.
+#[test]
+fn a_log_under_the_cap_is_not_rotated() {
+    let root = tempdir().unwrap();
+    let log = root.path().join("daemon.log");
+    fs::write(&log, b"one short run\n").unwrap();
+
+    rotate_log(&log, DAEMON_LOG_MAX_BYTES, DAEMON_LOG_KEEP).expect("rotation should succeed");
+
+    assert_eq!(fs::read(&log).unwrap(), b"one short run\n");
+    assert!(!root.path().join("daemon.log.1").exists());
+}
+
+/// A missing log is the ordinary first start, not an error.
+#[test]
+fn a_missing_log_is_not_an_error() {
+    let root = tempdir().unwrap();
+    rotate_log(
+        &root.path().join("daemon.log"),
+        DAEMON_LOG_MAX_BYTES,
+        DAEMON_LOG_KEEP,
+    )
+    .expect("a first start rotates nothing");
+}
+
+/// The real 16 MB threshold, exercised with a sparse file so the test does
+/// not write 16 MB: past it, `daemon.log` becomes `daemon.log.1` and the live
+/// name is free for a fresh file.
+#[test]
+fn a_log_over_sixteen_megabytes_is_rotated_to_dot_one() {
+    let root = tempdir().unwrap();
+    let log = root.path().join("daemon.log");
+    fs::File::create(&log)
+        .unwrap()
+        .set_len(DAEMON_LOG_MAX_BYTES + 1)
+        .unwrap();
+
+    rotate_log(&log, DAEMON_LOG_MAX_BYTES, DAEMON_LOG_KEEP).expect("rotation should succeed");
+
+    assert!(!log.exists(), "the live name is free after a rotation");
+    let rotated = root.path().join("daemon.log.1");
+    assert_eq!(
+        fs::metadata(&rotated).unwrap().len(),
+        DAEMON_LOG_MAX_BYTES + 1
+    );
+}
+
+/// Keep three: every generation shifts down one and the fourth is dropped, so
+/// the log costs at most four files however long the daemon runs.
+#[test]
+fn rotation_keeps_three_generations_and_drops_the_oldest() {
+    let root = tempdir().unwrap();
+    let log = root.path().join("daemon.log");
+    for (name, body) in [
+        ("daemon.log", "live"),
+        ("daemon.log.1", "gen1"),
+        ("daemon.log.2", "gen2"),
+        ("daemon.log.3", "gen3"),
+    ] {
+        fs::write(root.path().join(name), body).unwrap();
+    }
+
+    // A tiny cap: the keep rule is what is under test, not the threshold.
+    rotate_log(&log, 2, DAEMON_LOG_KEEP).expect("rotation should succeed");
+
+    assert!(!log.exists());
+    let read = |name: &str| fs::read_to_string(root.path().join(name)).unwrap();
+    assert_eq!(read("daemon.log.1"), "live");
+    assert_eq!(read("daemon.log.2"), "gen1");
+    assert_eq!(read("daemon.log.3"), "gen2");
+    assert!(
+        !root.path().join("daemon.log.4").exists(),
+        "the fourth generation is dropped, never accumulated"
+    );
+
+    // And again, to prove the shift is not a one-off.
+    fs::write(&log, "live-2").unwrap();
+    rotate_log(&log, 2, DAEMON_LOG_KEEP).expect("rotation should succeed");
+    assert_eq!(read("daemon.log.1"), "live-2");
+    assert_eq!(read("daemon.log.2"), "live");
+    assert_eq!(read("daemon.log.3"), "gen1");
+    assert!(!root.path().join("daemon.log.4").exists());
+}
+
+/// The shared entry point both launchers call resolves the log through the
+/// store root — the sandboxed one here — and, like the name it rotates,
+/// creates nothing when there is nothing to rotate.
+#[test]
+fn rotate_daemon_log_rotates_the_store_log_and_creates_nothing_on_a_fresh_root() {
+    let tmp = tempdir().unwrap();
+    let _guard = HomeStoreGuard::set(tmp.path());
+
+    rotate_daemon_log().expect("a fresh root rotates nothing");
+    assert!(
+        !tmp.path().join("state").exists(),
+        "rotating a log that is not there must not create the store"
+    );
+
+    let log = logs_dir().unwrap().join("daemon.log");
+    fs::File::create(&log)
+        .unwrap()
+        .set_len(DAEMON_LOG_MAX_BYTES + 1)
+        .unwrap();
+    rotate_daemon_log().expect("rotation should succeed");
+    assert!(!log.exists());
+    assert!(logs_dir().unwrap().join("daemon.log.1").exists());
+}
+
+#[test]
+fn log_tail_with_fewer_lines_than_asked_is_all_of_them() {
+    assert_eq!(log_tail("one\ntwo\n", 20), "one\ntwo");
+}
+
+#[test]
+fn log_tail_keeps_only_the_newest_lines_and_ignores_the_trailing_newline() {
+    let text = "a\nb\nc\nd\ne\n";
+    assert_eq!(log_tail(text, 2), "d\ne");
+    assert_eq!(log_tail("a\nb\nc\n\n\n", 2), "b\nc", "trailing blanks are not lines");
+    assert_eq!(log_tail("a\r\nb\r\n", 5), "a\nb", "CRLF ends a line like LF");
+}
+
+/// Verbatim is the rule: a blank line *inside* the window is part of what was
+/// written — the legacy-root refusal is paragraphs — while the blank lines the
+/// window would open with are not worth a line of the panel.
+#[test]
+fn log_tail_keeps_inner_blank_lines_and_drops_the_leading_ones() {
+    let refusal = "FATAL: first paragraph\n\n  Older install:  /x\n\nTo discard it, rename /x.\n";
+    assert_eq!(
+        log_tail(refusal, 20),
+        "FATAL: first paragraph\n\n  Older install:  /x\n\nTo discard it, rename /x."
+    );
+    // The window of three opens on a blank line, which is dropped rather than
+    // shown as an empty first row.
+    assert_eq!(
+        log_tail(refusal, 3),
+        "  Older install:  /x\n\nTo discard it, rename /x."
+    );
+}
+
+#[test]
+fn log_tail_of_empty_or_blank_input_is_empty() {
+    assert_eq!(log_tail("", 20), "");
+    assert_eq!(log_tail("\n\n  \n", 20), "");
+    assert_eq!(log_tail("one\n", 0), "");
+}
+
+/// `tracing` writes colour even into a file; the panel shows text.
+#[test]
+fn log_tail_removes_ansi_colour_escapes_and_nothing_else() {
+    let line = "\u{1b}[2m2026-09-22T10:00:00Z\u{1b}[0m \u{1b}[31mERROR\u{1b}[0m \u{1b}[2mopenalpacad\u{1b}[0m\u{1b}[2m:\u{1b}[0m FATAL: [brackets] stay";
+    assert_eq!(
+        log_tail(line, 1),
+        "2026-09-22T10:00:00Z ERROR openalpacad: FATAL: [brackets] stay"
+    );
+}
+
+#[test]
+fn read_log_tail_of_a_missing_file_is_empty() {
+    let root = tempdir().unwrap();
+    assert_eq!(
+        read_log_tail(&root.path().join("daemon.log"), 0, 20).unwrap(),
+        ""
+    );
+}
+
+/// A run that wrote nothing reads as nothing — never as the previous run's
+/// last words presented as this one's.
+#[test]
+fn read_log_tail_reads_only_what_the_run_appended() {
+    let root = tempdir().unwrap();
+    let log = root.path().join("daemon.log");
+    fs::write(&log, "previous run: ERROR something old\n").unwrap();
+    let from = fs::metadata(&log).unwrap().len();
+
+    assert_eq!(read_log_tail(&log, from, 20).unwrap(), "");
+
+    let mut file = fs::OpenOptions::new().append(true).open(&log).unwrap();
+    std::io::Write::write_all(&mut file, b"this run: FATAL: why it stopped\n").unwrap();
+    assert_eq!(
+        read_log_tail(&log, from, 20).unwrap(),
+        "this run: FATAL: why it stopped"
+    );
+    assert_eq!(
+        read_log_tail(&log, 0, 20).unwrap(),
+        "previous run: ERROR something old\nthis run: FATAL: why it stopped"
+    );
+    // A `from` past the end means the file was rotated under us: all of what
+    // is there now is the run's.
+    assert_eq!(
+        read_log_tail(&log, u64::MAX, 1).unwrap(),
+        "this run: FATAL: why it stopped"
+    );
+}
+
+/// A large log costs one bounded read, and the fragment the window lands in
+/// the middle of is dropped rather than shown cut mid-line.
+#[test]
+fn read_log_tail_of_a_large_log_never_shows_a_line_cut_in_half() {
+    let root = tempdir().unwrap();
+    let log = root.path().join("daemon.log");
+    let line = format!("{}\n", "x".repeat(99));
+    let body = line.repeat(2_000) + "the last line\n";
+    fs::write(&log, &body).unwrap();
+    assert!(body.len() as u64 > LOG_TAIL_READ_BYTES);
+
+    let tail = read_log_tail(&log, 0, 100_000).unwrap();
+    assert!(tail.ends_with("the last line"));
+    for kept in tail.lines().filter(|l| *l != "the last line") {
+        assert_eq!(kept.len(), 99, "a line was cut: {kept:?}");
+    }
+    assert!(tail.len() as u64 <= LOG_TAIL_READ_BYTES);
+}

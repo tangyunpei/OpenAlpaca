@@ -136,7 +136,7 @@
 ## Tauri Commands
 
 - Source: `apps/openalpaca-gui/src-tauri/src/lib.rs`
-- Commands: `await_daemon_stopped`, `ensure_daemon_running`, `get_connection_info`
+- Commands: `await_daemon_stopped`, `ensure_daemon_running`, `get_connection_info`, `read_daemon_log_tail`
 
 ## API Module Map
 

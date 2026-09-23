@@ -21,13 +21,16 @@ pub struct AppState {
     /// listener binds, so `GET /v1/status`'s `uptime_secs` measures the
     /// daemon's own life and not the process table's idea of it.
     pub started_at: chrono::DateTime<chrono::Utc>,
-    /// Whether `openalpaca daemon start` marked this run as the owner of
-    /// `store::daemon_log_path()` — read once, from
-    /// `store::MANAGED_LOG_ENV`, before anything else touches the
-    /// environment. `GET /v1/status`'s `log_path` is `null` whenever this is
-    /// `false`, even if `daemon.log` happens to exist: a GUI- or
-    /// `cargo run`-launched daemon must not claim a file some other daemon's
-    /// CLI manager wrote (Important #3, T44 fix round 1).
+    /// Whether whichever launcher spawned this run pointed its stdout and
+    /// stderr at `store::daemon_log_path()` and rotated it first —
+    /// `openalpaca daemon start` and the GUI sidecar both do; a bare
+    /// `cargo run` does not. Read once, from `store::MANAGED_LOG_ENV`, before
+    /// anything else touches the environment. `GET /v1/status`'s `log_path`
+    /// is `null` whenever this is `false`, even if `daemon.log` happens to
+    /// exist: a daemon nobody pointed at the file must not claim one some
+    /// other daemon wrote (Important #3, T44 fix round 1). The meaning is
+    /// ownership, not which launcher — widened from "the CLI marked this run"
+    /// when the sidecar started writing the file too (T30).
     pub managed_log: bool,
     pub token: String,
     pub event_broadcaster: EventBroadcaster,

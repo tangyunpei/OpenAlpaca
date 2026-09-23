@@ -4,8 +4,9 @@
  *
  * One route answers three questions, so the Connection panel asks once:
  * `started_at`/`uptime_secs`, `schema_version` (the open database's, not a
- * compile-time count of migration files), `log_path` (the CLI-managed
- * `daemon.log`, or `null` where none was written), the two size totals, the
+ * compile-time count of migration files), `log_path` (the launcher-managed
+ * `daemon.log` — the app's sidecar and `openalpaca daemon start` both write
+ * one — or `null` for a daemon started by hand), the two size totals, the
  * boot session-log sweep, the `retention` limits those are measured against —
  * and the project below.
  *

@@ -82,13 +82,15 @@ root is the human's:
   library default with a `WARN` naming it, rather than dropping a gigabyte
   under the daemon's working directory
 - a project's own store: `<project>/.openalpaca/` — the same content shape, so an artifact of a project lives beside the project
-- daemon log (CLI-managed startup): `~/.openalpaca/state/logs/daemon.log` —
-  appended across restarts and rotated by `openalpaca daemon start` when it is
-  past 16 MB (`daemon.log.1` … `.3`, oldest dropped), so it costs at most four
-  files. `GET /v1/status` reports the path only for a daemon that
-  `openalpaca daemon start` launched. A daemon started any other way
-  (`cargo run`, the GUI sidecar) writes no log file and reports `null`, even
-  when an older `daemon.log` is still there. When `openalpaca gui start`
+- daemon log (launcher-managed startup): `~/.openalpaca/state/logs/daemon.log` —
+  the daemon's stdout and stderr, appended across restarts and rotated by
+  whichever launcher starts it when it is past 16 MB (`daemon.log.1` … `.3`,
+  oldest dropped), so it costs at most four files. Both launchers write it:
+  `openalpaca daemon start` and the GUI app's sidecar. `GET /v1/status`
+  reports the path for a daemon either of them launched; a daemon started by
+  hand (a bare `cargo run`, or `openalpacad` in a terminal) writes to its
+  terminal instead and reports `null`, even when an older `daemon.log` is still
+  there. When `openalpaca gui start`
   launches the GUI from a source checkout (`bun run tauri dev`), its output
   goes beside it as `gui.log`.
 
@@ -939,9 +941,20 @@ POST /v1/command
 {"command":"shutdown"}
 ```
 
+**Where the daemon's output goes.** A daemon started by `openalpaca daemon
+start` or by the GUI app writes its stdout and stderr — every `tracing` line,
+and every fatal start-up refusal — to `state/logs/daemon.log` under the store
+root, rotated at 16 MB with three older generations kept. The GUI sidecar used
+to discard that output, so a daemon that refused to start told a bundle-only
+user nothing but "did not become ready"; it now shares the CLI's treatment, and
+when a start times out the app quotes the end of what that start wrote. Lines
+carry ANSI colour codes when read raw (`tracing` writes them even to a file);
+the app strips them for display and changes nothing else.
+
 ## Troubleshooting
 
 - Daemon already running: check lock/discovery and stop existing instance cleanly.
+- The GUI app says the daemon did not start within 5 seconds: the rest of that message is the daemon's own reason, quoted from the end of `state/logs/daemon.log` — the same text the CLI launcher would have written there. Settings → Connection → `Show daemon log` reads more of it. "…and wrote nothing to its log" means the daemon binary never ran: check it is installed beside the app.
 - `openalpaca daemon restart` stops the daemon but starts nothing, and exits with status 2: the old daemon was not completely gone 15 s after it was asked to stop, so starting a new one would have lost the single-instance lock. The message says which of two things happened. "`The daemon (PID …) is still running 15s after it was asked to stop, so nothing was restarted.`" — read the daemon log it names (`state/logs/daemon.log` under the store root) to see what it is doing, stop it with the `kill -9 <pid>` it prints, then `openalpaca daemon start`. "`The daemon (PID …) exited, but something still holds the single-instance lock 15s after it was asked to stop, so nothing was restarted.`" — another daemon is probably already running on this store; check `openalpaca daemon status` before starting one. `openalpaca daemon stop` reports the same two cases and exits 2 as well.
 - Discovery expired: restart daemon to rotate token and rewrite discovery.
 - DB lock/contention: ensure single daemon instance and avoid conflicting external writers.

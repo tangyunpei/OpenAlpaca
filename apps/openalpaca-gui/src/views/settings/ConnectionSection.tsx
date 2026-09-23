@@ -20,13 +20,19 @@
  * Also real since Phase 8: **uptime, `Schema vNN` and `Copy log path`** —
  * GAP-14, closed. `GET /v1/status` carries `started_at`/`uptime_secs`, the open
  * database's `schema_version` (not a compile-time count of migration files) and
- * the CLI-managed `log_path`, plus §4.8's two size totals, `retention` (the
- * limits those totals are measured against) and what the boot session-log
- * sweep did. The log path is `null` for a daemon this run did not launch —
- * the sidecar, a `cargo run`, or one that merely found a previous CLI
- * daemon's leftover `daemon.log` at the usual path — and the Copy button is
- * inert there, because a path to a file this daemon did not write is worse
- * than no path.
+ * the launcher-managed `log_path`, plus §4.8's two size totals, `retention`
+ * (the limits those totals are measured against) and what the boot
+ * session-log sweep did. Both launchers — this app's sidecar and
+ * `openalpaca daemon start` — write `daemon.log` and claim it (T30); the path
+ * is `null` only for a daemon started by hand (a bare `cargo run`), or one
+ * that merely found a previous daemon's leftover `daemon.log` at the usual
+ * path, and the Copy button is inert there, because a path to a file this
+ * daemon did not write is worse than no path.
+ *
+ * **Why the daemon would not start** is shown here too, verbatim: the shell's
+ * `ensure_daemon_running` rejection ends with what the daemon wrote to its
+ * log before it gave up, and `Show daemon log` reads the file directly — both
+ * work with no daemon serving anything, which is exactly when they matter.
  *
  * The spend *cap* line is a decision, not a gap: per **N4** there is no daily
  * budget and none is coming, so today's total has no denominator and the
@@ -39,6 +45,7 @@ import { useState } from "react";
 
 import { Button, Eyebrow } from "@/components/ui";
 import { useConnectionStatus, useDaemonStatus } from "@/hooks/useConnection";
+import { readDaemonLogTail } from "@/lib/connection";
 import { useTasks } from "@/hooks/useTasks";
 import { capsNote, formatSpend, useUsageSummary } from "@/hooks/useUsage";
 import { useMovedProject, useRebaseWorkspace } from "@/hooks/useWorkspaces";
@@ -121,10 +128,17 @@ export function ConnectionSection() {
         </div>
         {logPath === null && status.data !== undefined && (
           <GapNote>
-            This daemon has no daemon.log — the log file is written by
-            `openalpaca daemon start`, not by a daemon the app launched itself.
+            This daemon has no daemon.log — the app and `openalpaca daemon
+            start` write one for the daemons they launch, and this one was
+            started by hand.
           </GapNote>
         )}
+        {!connection.connected && connection.lastError ? (
+          <LogBlock label="Why the daemon is unreachable">
+            {connection.lastError}
+          </LogBlock>
+        ) : null}
+        <DaemonLogDisclosure />
       </StatusCard>
 
       <StorageCard status={status.data} />
@@ -158,6 +172,80 @@ export function ConnectionSection() {
       </StatCard>
 
       <ProjectCard homeRoot={status.data?.home_root ?? null} />
+    </div>
+  );
+}
+
+/** How many lines `Show daemon log` reads — the spec's 200. */
+export const DAEMON_LOG_LINES = 200;
+
+/**
+ * Text from the daemon or its log, shown exactly as written: a `<pre>` with
+ * its own scroll, never a toast (a toast is gone in under three seconds, and
+ * this is something to read).
+ */
+function LogBlock({ label, children }: { label: string; children: string }) {
+  return (
+    <pre
+      aria-label={label}
+      className="mt-[12px] mb-0 max-h-[320px] overflow-auto rounded-md border border-line-subtle bg-code-chip px-[11px] py-[9px] font-mono text-2xs-plus leading-[1.5] whitespace-pre text-ink"
+    >
+      {children}
+    </pre>
+  );
+}
+
+/**
+ * `Show daemon log` — the end of `daemon.log`, read by the shell straight from
+ * the file, for a daemon that started but is misbehaving as much as for one
+ * that would not start. Read when opened and again on `Refresh`; never
+ * polled.
+ */
+export function DaemonLogDisclosure() {
+  const [open, setOpen] = useState(false);
+  const [tail, setTail] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  function load() {
+    setError(null);
+    readDaemonLogTail(DAEMON_LOG_LINES).then(
+      (text) => setTail(text),
+      (cause: unknown) => {
+        setTail(null);
+        setError(cause instanceof Error ? cause.message : String(cause));
+      },
+    );
+  }
+
+  return (
+    <div className="mt-[12px]">
+      <div className="flex gap-[6px]">
+        <Button
+          variant="ghostSm"
+          aria-expanded={open}
+          onClick={() => {
+            const next = !open;
+            setOpen(next);
+            if (next) load();
+          }}
+        >
+          {open ? "Hide daemon log" : "Show daemon log"}
+        </Button>
+        {open && (
+          <Button variant="ghostSm" onClick={load}>
+            Refresh
+          </Button>
+        )}
+      </div>
+      {open && error !== null && (
+        <GapNote>Could not read the daemon log: {error}</GapNote>
+      )}
+      {open && error === null && tail === "" && (
+        <GapNote>The daemon log is empty.</GapNote>
+      )}
+      {open && error === null && tail !== null && tail !== "" && (
+        <LogBlock label="Daemon log">{tail}</LogBlock>
+      )}
     </div>
   );
 }

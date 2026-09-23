@@ -6,12 +6,14 @@
  * usage/tasks hooks need mocking to exercise its rendering.
  */
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { DaemonStatus, SessionSweep } from "@/lib/api/types";
 
 import {
   ConnectionSection,
+  DAEMON_LOG_LINES,
   StorageCard,
   homeStoreLabel,
 } from "./ConnectionSection";
@@ -55,18 +57,40 @@ vi.mock("@/hooks/useWorkspaces", () => ({
 /** What `GET /v1/status` has answered, per test. */
 const daemon = vi.hoisted(() => ({ data: undefined as unknown }));
 
+/** The window's own view of the connection, mutable per test. */
+const link = vi.hoisted(() => ({
+  connected: true,
+  lastError: null as string | null,
+}));
+
 vi.mock("@/hooks/useConnection", () => ({
   useConnectionStatus: () => ({
     info: null,
     health: undefined,
-    socket: "connected",
-    connected: true,
+    socket: link.connected ? "connected" : "error",
+    connected: link.connected,
     instanceChip: "7f3a",
     endpoint: "127.0.0.1:51823",
+    lastError: link.lastError,
     reconnect: vi.fn(),
   }),
   useDaemonStatus: () => ({ data: daemon.data, isPending: false, error: null }),
 }));
+
+/** The shell's `read_daemon_log_tail`, as the section reaches it. */
+const shellLog = vi.hoisted(() => ({ read: vi.fn() }));
+
+vi.mock("@/lib/connection", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/connection")>()),
+  readDaemonLogTail: shellLog.read,
+}));
+
+afterEach(() => {
+  link.connected = true;
+  link.lastError = null;
+  shellLog.read.mockReset();
+  daemon.data = undefined;
+});
 
 vi.mock("@/hooks/useTasks", () => ({
   useTasks: () => ({
@@ -250,5 +274,123 @@ describe("where a project-less run's files go (G7)", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText(/~\/\.openalpaca/)).toBeNull();
     daemon.data = undefined;
+  });
+});
+
+/**
+ * A daemon that would not start used to say nothing: the sidecar's output
+ * went to `/dev/null`, and the one string that reached the window was "did
+ * not become ready within timeout". The shell's rejection now ends with the
+ * daemon's own log lines, and the panel shows them exactly as written.
+ */
+describe("why the daemon would not start", () => {
+  const refusal =
+    "The daemon did not start within 5 seconds. Its log (/s/state/logs/daemon.log) ends with:\n" +
+    "\n" +
+    "2026-09-22T10:00:00Z ERROR openalpacad: FATAL: an older OpenAlpaca install's data is still on this machine, and this build\n" +
+    "does not move it for you.\n" +
+    "\n" +
+    "  Older install:  /old";
+
+  it("renders the shell's reason verbatim, line breaks and all, while unreachable", () => {
+    link.connected = false;
+    link.lastError = refusal;
+    render(<ConnectionSection />);
+
+    const block = screen.getByLabelText("Why the daemon is unreachable");
+    expect(block.tagName).toBe("PRE");
+    expect(block.textContent).toBe(refusal);
+  });
+
+  it("shows no reason once the window is connected, even if one was recorded", () => {
+    link.connected = true;
+    link.lastError = refusal;
+    render(<ConnectionSection />);
+
+    expect(screen.queryByLabelText("Why the daemon is unreachable")).toBeNull();
+  });
+
+  it("shows nothing when unreachable with no reason recorded", () => {
+    link.connected = false;
+    link.lastError = null;
+    render(<ConnectionSection />);
+
+    expect(screen.queryByLabelText("Why the daemon is unreachable")).toBeNull();
+  });
+});
+
+describe("Show daemon log", () => {
+  it("reads the last 200 lines through the shell and shows them as written", async () => {
+    const user = userEvent.setup();
+    shellLog.read.mockResolvedValue("line one\n\n  indented line two");
+    render(<ConnectionSection />);
+
+    await user.click(screen.getByRole("button", { name: "Show daemon log" }));
+
+    expect(shellLog.read).toHaveBeenCalledWith(DAEMON_LOG_LINES);
+    expect(DAEMON_LOG_LINES).toBe(200);
+    const block = await screen.findByLabelText("Daemon log");
+    expect(block.textContent).toBe("line one\n\n  indented line two");
+    expect(
+      screen.getByRole("button", { name: "Hide daemon log" }),
+    ).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("reads again on Refresh, and never before it is opened", async () => {
+    const user = userEvent.setup();
+    shellLog.read.mockResolvedValue("first");
+    render(<ConnectionSection />);
+    expect(shellLog.read).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Show daemon log" }));
+    await screen.findByText("first");
+    shellLog.read.mockResolvedValue("second");
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+
+    expect(await screen.findByText("second")).toBeInTheDocument();
+    expect(shellLog.read).toHaveBeenCalledTimes(2);
+  });
+
+  it("says the log is empty rather than drawing an empty block", async () => {
+    const user = userEvent.setup();
+    shellLog.read.mockResolvedValue("");
+    render(<ConnectionSection />);
+
+    await user.click(screen.getByRole("button", { name: "Show daemon log" }));
+
+    expect(
+      await screen.findByText("The daemon log is empty."),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("Daemon log")).toBeNull();
+  });
+
+  it("says why when the shell cannot read it", async () => {
+    const user = userEvent.setup();
+    shellLog.read.mockRejectedValue(new Error("permission denied"));
+    render(<ConnectionSection />);
+
+    await user.click(screen.getByRole("button", { name: "Show daemon log" }));
+
+    expect(
+      await screen.findByText(
+        "Could not read the daemon log: permission denied",
+      ),
+    ).toBeInTheDocument();
+  });
+});
+
+/**
+ * T30: both launchers write `daemon.log` now, so a `null` log path means a
+ * daemon started by hand — the note used to blame "a daemon the app launched
+ * itself", which is exactly the one that has a log now.
+ */
+describe("a daemon with no log of its own (T30)", () => {
+  it("says it was started by hand, not that the app launched it", () => {
+    daemon.data = status({ log_path: null });
+    render(<ConnectionSection />);
+
+    const note = screen.getByText(/no daemon\.log/i);
+    expect(note).toHaveTextContent("started by hand");
+    expect(note.textContent ?? "").not.toMatch(/launched itself/);
   });
 });

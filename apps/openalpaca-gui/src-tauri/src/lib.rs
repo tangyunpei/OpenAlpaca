@@ -4,6 +4,8 @@
 //! - Connecting to the daemon via discovery.json
 //! - Ensuring the daemon is running (spawning if needed)
 //! - Waiting until a daemon the webview asked to stop is really gone
+//! - Reading the end of the daemon log, so a daemon that would not start can
+//!   say why
 
 use openalpaca_storage::daemon_lifecycle::{self, StopOutcome};
 use openalpaca_storage::discovery::{self, ConnectionInfo};
@@ -45,7 +47,7 @@ async fn ensure_daemon_running() -> Result<ConnectionInfo, String> {
     }
 
     // Step 2: Spawn the daemon process
-    spawn_daemon().map_err(|e| format!("Failed to spawn daemon: {e}"))?;
+    let log_start = spawn_daemon().map_err(|e| format!("Failed to spawn daemon: {e:#}"))?;
 
     // Step 3: Wait for the new daemon to appear AND accept connections.
     for _ in 0..25 {
@@ -58,7 +60,47 @@ async fn ensure_daemon_running() -> Result<ConnectionInfo, String> {
         }
     }
 
-    Err("Daemon did not become ready within timeout".into())
+    // It did not come up. The daemon's own reason — a legacy-schema database,
+    // an older install's data, a store it cannot create, another daemon
+    // holding the lock — is in its log, and nothing else can say it: with no
+    // daemon serving `GET /v1/status` there is nobody to ask where the log
+    // is. Only what *this* spawn wrote is read, so an earlier run's last
+    // words are never presented as this one's.
+    let log_path = store::daemon_log_path().map_err(|e| format!("{e:#}"))?;
+    let tail = store::read_log_tail(&log_path, log_start, TIMEOUT_TAIL_LINES).unwrap_or_default();
+    if tail.is_empty() {
+        Err(format!(
+            "The daemon did not start within 5 seconds, and wrote nothing to its log \
+             ({}). Check that the daemon binary is installed beside the app.",
+            log_path.display()
+        ))
+    } else {
+        Err(format!(
+            "The daemon did not start within 5 seconds. Its log ({}) ends with:\n\n{tail}",
+            log_path.display()
+        ))
+    }
+}
+
+/// How many log lines a failed start quotes. Enough for the longest refusal
+/// the daemon writes at boot (the older-install one runs to about thirty
+/// lines) with its log line in front.
+const TIMEOUT_TAIL_LINES: usize = 40;
+
+/// The last `lines` lines of the daemon log, newest last — `""` when there is
+/// no log yet.
+///
+/// Backs Settings → Connection's `Show daemon log`, for a daemon that did
+/// start but is misbehaving, or one that would not start at all: this reads
+/// the file directly, so it answers even when nothing is serving `/v1/*`.
+/// Reads at most `store::LOG_TAIL_READ_BYTES` from the end of the file; the
+/// line handling is `store::read_log_tail`'s, which is where it is tested —
+/// CI compiles none of this crate.
+#[tauri::command]
+fn read_daemon_log_tail(lines: usize) -> Result<String, String> {
+    let path = store::daemon_log_path().map_err(|e| format!("{e:#}"))?;
+    store::read_log_tail(&path, 0, lines)
+        .map_err(|e| format!("Could not read {}: {e}", path.display()))
 }
 
 /// What [`await_daemon_stopped`] concluded, serialized to the webview in
@@ -146,8 +188,12 @@ fn daemon_is_alive(d: &discovery::Discovery) -> bool {
     false
 }
 
-/// Spawn the daemon as a detached background process.
-fn spawn_daemon() -> anyhow::Result<()> {
+/// Spawn the daemon as a detached background process, its stdout and stderr
+/// appended to `daemon.log`.
+///
+/// Returns the log's length just before the spawn — where this run's output
+/// begins — so a failed start quotes only what this run wrote.
+fn spawn_daemon() -> anyhow::Result<u64> {
     // Find the daemon executable
     // In development: should be in the same target directory
     // In production: should be bundled with the app
@@ -187,6 +233,31 @@ fn spawn_daemon() -> anyhow::Result<()> {
     let app_dir = store::ensure_store(&store::StoreScope::Home)?;
     let config_dir = store::ensure_runtime_config_dir()?;
 
+    // The sidecar's output used to go to /dev/null on both platforms, so a
+    // daemon that refused to boot — a legacy-schema database, an older
+    // install's data, a store it cannot create, a master key it cannot read,
+    // another daemon already holding the lock — told the user nothing beyond
+    // "did not become ready within timeout". It now writes the same
+    // `daemon.log` the CLI launcher writes, under the same rotation, and marks
+    // itself as that file's owner so `GET /v1/status` hands the path back
+    // (T30: `MANAGED_LOG_ENV` means "the launcher pointed stdio at the file
+    // and rotated it", which is now true of both launchers).
+    store::logs_dir()?;
+    let log_path = store::daemon_log_path()?;
+    if let Err(e) = store::rotate_daemon_log() {
+        // Never fatal: a daemon that will not start because its log could not
+        // be renamed is the worse bug.
+        tracing::warn!("Could not rotate the daemon log ({e:#}); appending to it as it is.");
+    }
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| anyhow::anyhow!("Failed to open {}: {e}", log_path.display()))?;
+    let log_start = log_file.metadata().map(|m| m.len()).unwrap_or(0);
+    let stdout = std::process::Stdio::from(log_file.try_clone()?);
+    let stderr = std::process::Stdio::from(log_file);
+
     tracing::info!("Spawning daemon: {}", path_to_use.display());
     tracing::info!("Daemon runtime dir: {}", app_dir.display());
     tracing::info!("Daemon config dir: {}", config_dir.display());
@@ -198,10 +269,11 @@ fn spawn_daemon() -> anyhow::Result<()> {
         // On Unix, use setsid to detach from terminal
         let mut cmd = Command::new(&path_to_use);
         cmd.stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stdout(stdout)
+            .stderr(stderr)
             .current_dir(&app_dir)
-            .env("OPENALPACA_CONFIG_DIR", &config_dir);
+            .env("OPENALPACA_CONFIG_DIR", &config_dir)
+            .env(store::MANAGED_LOG_ENV, "1");
 
         // Create new session (detach from parent)
         unsafe {
@@ -222,15 +294,16 @@ fn spawn_daemon() -> anyhow::Result<()> {
 
         Command::new(&path_to_use)
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stdout(stdout)
+            .stderr(stderr)
             .current_dir(&app_dir)
             .env("OPENALPACA_CONFIG_DIR", &config_dir)
+            .env(store::MANAGED_LOG_ENV, "1")
             .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
             .spawn()?;
     }
 
-    Ok(())
+    Ok(log_start)
 }
 
 // ============================================================================
@@ -244,7 +317,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_connection_info,
             ensure_daemon_running,
-            await_daemon_stopped
+            await_daemon_stopped,
+            read_daemon_log_tail
         ])
         .run(tauri::generate_context!())
         .expect("Error while running Tauri application");
