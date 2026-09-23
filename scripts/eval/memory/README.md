@@ -169,7 +169,9 @@ One JSON file, rewritten after every question (a run that dies leaves
 - `status`: `complete`, `running`, or `unavailable` (with `unavailable_reason`).
 - `machine` (hostname, OS, arch, rustc), `build` (git head, `Cargo.lock`
   SHA-256, features), `conditions` (the `llm.toml` path and hash, reader
-  default model, judge model/temperature/prompt hash, notes and questions
+  default model, the main loop's round and tool-call caps, the tool-result
+  byte cap and the context buffer ratio from the effective `DaemonConfig`,
+  judge model/temperature/prompt hash, notes and questions
   paths with hashes, how many notes seeded, what was on the tool surface,
   the scratch store) and `embedder` (B only) are the run's recorded
   conditions — the report is the record; nothing is a measurement without them.

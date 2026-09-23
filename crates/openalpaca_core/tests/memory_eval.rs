@@ -565,6 +565,22 @@ struct Conditions {
     reader_temperature: Option<f32>,
     reader_max_rounds: usize,
     reader_max_cost_usd: f64,
+    /// Plan §5 controls, from the effective `DaemonConfig`. The main loop
+    /// applies `orchestrator.routing`'s caps in place of the `LoopConfig`
+    /// defaults (`simple_query_handler.rs`, `override_max_rounds`), so these
+    /// two are the reader's real round and tool-call caps and
+    /// `reader_max_rounds` is the default they replace.
+    main_loop_max_rounds: usize,
+    main_loop_max_tools_per_round: usize,
+    /// The byte cap on a tool result handed to the model
+    /// (`orchestrator.sessions.tool_result_inline_bytes`): B's
+    /// `memory_search` answer is cut here.
+    tool_result_inline_bytes: usize,
+    /// The per-turn context assembly's budget is the model window minus the
+    /// reserved tokens minus `window × this ratio`
+    /// (`execution.context.autocompact_buffer_ratio`, `prompt_ctx/manager.rs`);
+    /// the per-turn memory sections fill it greedily.
+    autocompact_buffer_ratio: f64,
     judge_model_requested: Option<String>,
     judge_temperature: f32,
     judge_max_tokens: u32,
@@ -1182,6 +1198,10 @@ async fn memory_eval() {
     cfg.orchestrator.costs.extract_every_n_turns = usize::MAX;
     cfg.orchestrator.costs.task_extract_enabled = false;
     let workflow_cap = cfg.orchestrator.routing.max_workflows_per_lane;
+    let main_loop_max_rounds = cfg.orchestrator.routing.main_loop_max_rounds;
+    let main_loop_max_tools_per_round = cfg.orchestrator.routing.main_loop_max_tools_per_round;
+    let tool_result_inline_bytes = cfg.orchestrator.sessions.tool_result_inline_bytes;
+    let autocompact_buffer_ratio = cfg.execution.context.autocompact_buffer_ratio;
     let daemon_config = Arc::new(ArcSwap::from_pointee(cfg));
 
     // B: the `memory_search` tool, exactly as the daemon registers it
@@ -1271,6 +1291,10 @@ async fn memory_eval() {
         reader_temperature: None,
         reader_max_rounds,
         reader_max_cost_usd: reader_max_cost,
+        main_loop_max_rounds,
+        main_loop_max_tools_per_round,
+        tool_result_inline_bytes,
+        autocompact_buffer_ratio,
         judge_model_requested: settings.judge_model.clone(),
         judge_temperature: JUDGE_TEMPERATURE,
         judge_max_tokens: JUDGE_MAX_TOKENS,
