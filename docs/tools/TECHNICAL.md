@@ -1053,8 +1053,10 @@ depends on the registry dropping the last reference.
   surfaced to the model.
 - **MCP resources and prompts are not implemented**: the client has no
   resource or prompt methods at all — it imports tools and nothing else.
-  Serving them is out of scope (ruling X-36), not abandoned; a future
-  phase would add the methods rather than fill in placeholders.
+  A future phase would add the methods rather than fill in placeholders,
+  and ruling X-36 fixes their lifecycle in advance: once added, a server's
+  resources and prompts are discovered, registered and withdrawn by the same
+  supervisor, under the same toggle, as its tools.
 - Retriable transport errors trigger the client's internal
   reconnect/retry loop (`max_reconnect_attempts`, exponential backoff).  A
   client sealed by a disable does not reconnect.

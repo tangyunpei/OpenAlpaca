@@ -211,7 +211,7 @@ bun run check && bun run test && bun run format:check && bun run build
 - **Moving target.** Config keys, API routes and the database schema change between commits. `001_baseline.sql` initializes schema version 42; existing version-42 databases remain usable, but earlier development schemas are no longer upgraded.
 - **Platforms.** Developed on macOS. CI builds and tests on Linux. Windows has packaging scripts, but CI does not build the Rust workspace there.
 - **Plugins** can add tools, skills and agent templates. Plugin connectors and plugin LLM providers are declared in the manifest format but not wired. They do not work.
-- **MCP** is client-side and tools only. MCP resources and prompts are stubs. Serving MCP is not a goal.
+- **MCP** is client-side and tools only. MCP resources and prompts are not implemented: the client has no resource or prompt methods. Serving MCP is not a goal.
 - **Desktop app.** Two controls are shown as unavailable because the daemon has no route for them: adding a connector, and the per-agent-template on/off switch.
 - **Resuming an interrupted run** by replay is experimental and off by default (`resume_enabled` in `daemon.toml`).
 - **Costs.** A chat turn is capped at $1. A workflow's lead agent is capped at $3 by its shipped template (`daemon.toml` defaults to $5 where a template sets nothing). There is no overall daily budget; only the small background jobs (profile extraction, summaries, task extraction) have daily ceilings.

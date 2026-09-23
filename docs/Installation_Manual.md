@@ -164,9 +164,27 @@ What happens instead:
   at them. The error names both directories and lists exactly what to move
   where. Nothing is changed and nothing is lost — it is a refusal, not a
   failure.
-- If an old directory is still there but `~/.openalpaca` already has its own
-  database, you get one warning per boot naming both paths. Nothing reads the
-  old directory; move or delete it yourself and the warning stops.
+- Otherwise — `~/.openalpaca` already has its own database, or the old
+  directory holds only `assets/`, `plugins/` or a stray `openalpaca.db-wal` /
+  `-shm` — the daemon starts and logs one warning per boot naming both paths.
+  The warning continues while the old directory holds any of `openalpaca.db`
+  (or its `-wal` / `-shm`), `.master_key`, `config/`, `plugins/` or `assets/` —
+  so it continues after the hand move below, which leaves `assets/` there on
+  purpose.
+- **Do not delete the old directory while any upload row points into it.** If
+  you carried its database over, the uploads that database recorded are still
+  read from the old `assets/` by absolute path, and deleting the directory
+  loses their files. As the warning itself says, check for uploaded files
+  still addressed by absolute path before deleting anything. On macOS this
+  must print `0`:
+
+  ```bash
+  sqlite3 ~/.openalpaca/state/openalpaca.db \
+    "SELECT count(*) FROM file_assets WHERE storage_path LIKE '$HOME/Library/Application Support/OpenAlpaca/%'"
+  ```
+
+  Once nothing points there, move or delete the directory and the warning
+  stops.
 - `openalpaca config` — the one CLI command that opens the database directly
   instead of asking the daemon — applies the same rule and exits with the same
   message, in every form that opens the database (`config reset --factory` and
@@ -538,11 +556,12 @@ The uninstaller removes the GUI MSI, the prefix, the Start Menu folder and the
     The installer already runs best-effort quarantine removal; if needed:
     - `xattr -dr com.apple.quarantine ~/Applications/openalpaca-gui.app`
 - Daemon not starting
-  - Check `~/.openalpaca/state/logs/daemon.log`. Only a daemon started with
-    `openalpaca daemon start` writes it; the copy the desktop app starts on its
-    own discards its output, so stop that one and start from the CLI to get a
-    log. Each start rotates a file that has passed 16 MB and keeps three older
-    generations (`daemon.log.1` to `.3`).
+  - Check `~/.openalpaca/state/logs/daemon.log`. Both launchers write it —
+    `openalpaca daemon start` and the daemon the desktop app starts on its own.
+    In the app, a start that fails quotes the end of that log in its error, and
+    Settings → Connection → `Show daemon log` reads more of it. Each start
+    rotates a file that has passed 16 MB and keeps three older generations
+    (`daemon.log.1` to `.3`).
 - `No model is available: no enabled provider offers one`
   - A fresh install has every provider switched off. Turn one on; see
     [Connect a model](#connect-a-model).

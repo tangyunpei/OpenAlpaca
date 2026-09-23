@@ -97,9 +97,11 @@ its own store at `<project>/.openalpaca/`.
 
 Nothing is moved into this root for you. If a development build's data directory
 (`~/Library/Application Support/OpenAlpaca` on macOS) is still on the machine,
-the daemon says so — and refuses to start rather than come up on an empty
-database beside it. The app shows the daemon's own message in Settings →
-Connection, read from `daemon.log`. See [If You Have Data From an Older
+the daemon says so. It refuses to start only when that directory holds a
+database, a `.master_key` or a `config/` **and** this root has no database yet —
+rather than come up on an empty database beside it; the app then shows the
+daemon's own message in Settings → Connection, read from `daemon.log`. Otherwise
+it starts and logs one warning per boot. See [If You Have Data From an Older
 Build](Installation_Manual.md#if-you-have-data-from-an-older-build).
 
 ## Connection lifecycle
