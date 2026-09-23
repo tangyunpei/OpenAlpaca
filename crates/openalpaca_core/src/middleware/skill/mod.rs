@@ -62,7 +62,7 @@ pub fn parse_skill_markdown(input: &str) -> Result<SkillDocument, SkillParseErro
     let frontmatter: SkillFrontmatter =
         serde_yaml::from_str(yaml_str).map_err(|e| SkillParseError::InvalidYaml(e.to_string()))?;
     frontmatter.validate()?;
-    let (body, sections) = parser::parse_body_sections(&body_lines);
+    let (body, sections) = super::body_sections::parse_body_sections(&body_lines);
 
     Ok(SkillDocument {
         frontmatter,
