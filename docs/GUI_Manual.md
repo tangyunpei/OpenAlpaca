@@ -93,10 +93,13 @@ root and `OPENALPACA_CONFIG_DIR` to `<root>/config`
 (`src-tauri/src/lib.rs`, `spawn_daemon`). A project you point the GUI at keeps
 its own store at `<project>/.openalpaca/`.
 
-First boot of a rebuilt daemon moves the contents of the legacy directory
-(`~/Library/Application Support/OpenAlpaca` on macOS) into this root once. The
-move is idempotent and resumable but **not reversible** — back the old
-directory up first, and quit any old daemon, which otherwise blocks the move.
+Nothing is moved into this root for you. If a development build's data directory
+(`~/Library/Application Support/OpenAlpaca` on macOS) is still on the machine,
+the daemon says so — and refuses to start rather than come up on an empty
+database beside it. The app surfaces that as a failed connection; start the
+daemon from the CLI (`openalpaca daemon start --daemon-only`), which writes
+`~/.openalpaca/state/logs/daemon.log`, to see the message. See [If You Have Data
+From an Older Build](Installation_Manual.md#if-you-have-data-from-an-older-build).
 
 ## Connection lifecycle
 

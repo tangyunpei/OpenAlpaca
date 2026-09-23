@@ -133,10 +133,11 @@ openalpaca daemon tail         # follow daemon events; -c N stops after N
   and config are kept.
 - **Uninstall:** `./scripts/release/uninstall.sh`. It leaves `~/.openalpaca`
   in place; delete that directory yourself for a complete cleanup.
-- **Coming from an older install** that kept its data under
-  `~/Library/Application Support/OpenAlpaca`? Read
-  [Migrating From the Old Data Directory](Installation_Manual.md#migrating-from-the-old-data-directory)
-  first — the move is automatic and not reversible.
+- **Have a development build's data** under
+  `~/Library/Application Support/OpenAlpaca`? Nothing is moved for you, and the
+  daemon refuses to start rather than come up on an empty database beside it.
+  Read [If You Have Data From an Older
+  Build](Installation_Manual.md#if-you-have-data-from-an-older-build) first.
 
 ## Next
 

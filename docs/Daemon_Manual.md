@@ -95,10 +95,13 @@ root is the human's:
 ## Startup and Lifecycle
 
 1. Parse the command line (none expected; `--help`/`--version` print and exit here), then initialize tracing/logging.
-2. Seed the `~/.openalpaca` home store, then move a legacy app directory into it
-   — once, before the lock is taken, because the lock file itself moves
-   (`store::ensure_store` + `store::migrate::move_app_root`; see
-   [Installation Manual](Installation_Manual.md#migrating-from-the-old-data-directory)).
+2. Seed the `~/.openalpaca` home store, then check whether a development build's
+   data directory is still on this machine (`store::ensure_store` +
+   `store::legacy_root::check_legacy_root`). Nothing is moved. A directory
+   holding a database, a `.master_key` or a `config/` **while this install has no
+   database yet** stops the boot with a message naming both paths; anything less
+   is one `WARN`. See [If You Have Data From an Older
+   Build](Installation_Manual.md#if-you-have-data-from-an-older-build).
 3. Acquire single-instance lock (`openalpacad.lock`).
 4. Resolve config directory, seed missing default configs, and ensure master key.
 5. Install signal handlers.
@@ -169,7 +172,7 @@ Important runtime files:
   - inside a directory being filled, an existing file is never overwritten;
   - one `INFO` line per directory names the count and the path, and a per-file failure is a `WARN` that does not stop the rest.
 - A workflow is led by an agent template: one with the `orchestration` capability when there is one, otherwise any template that can be spawned. When no agent templates are loaded at all, the workflow request fails with "No agent templates are installed…" and names the `config/agents` directory. That is a different message from "All agents are busy", which clears by itself.
-- The AES-256-GCM master key lives at `~/.openalpaca/state/.master_key` (`store::master_key_dir()`); a key left in a legacy app directory is moved there by the boot-time mover. The daemon exports it as `OPENALPACA_MASTER_KEY` for its own process; startup fails hard if the key cannot be ensured.
+- The AES-256-GCM master key lives at `~/.openalpaca/state/.master_key` (`store::master_key_dir()`). The daemon exports it as `OPENALPACA_MASTER_KEY` for its own process; startup fails hard if the key cannot be ensured.
 - Persona documents (`SOUL.md`, `USER.md`, `IDENTITY.md`, and conditionally `BOOTSTRAP.md`) are written into `<config>/orchestrator/` from templates if absent.
 
 ## Hot Reload
