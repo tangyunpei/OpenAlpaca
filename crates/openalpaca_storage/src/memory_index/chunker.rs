@@ -73,8 +73,8 @@ pub fn chunk_body(body: &str) -> Vec<Chunk> {
             }
             Some((first, last, _)) => {
                 let combined = byte_len(*first, block.last);
-                let heading_cut = block.heading.is_some()
-                    && byte_len(*first, *last) >= CHUNK_TARGET_BYTES / 2;
+                let heading_cut =
+                    block.heading.is_some() && byte_len(*first, *last) >= CHUNK_TARGET_BYTES / 2;
                 if combined > CHUNK_TARGET_BYTES || heading_cut {
                     flush(&mut open, &mut chunks);
                     open = Some((block.first, block.last, current_heading.clone()));

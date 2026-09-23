@@ -36,15 +36,13 @@ pub(crate) const MAX_TERMS: usize = 32;
 /// Never applied to exact title, alias or `fact_key` matching, which compare
 /// the whole normalized query.
 pub(crate) const STOP_WORDS: &[&str] = &[
-    "a", "an", "the", "and", "or", "but", "of", "to", "in", "on", "at", "by",
-    "for", "with", "from", "as", "is", "are", "was", "were", "be", "been",
-    "being", "am", "do", "does", "did", "have", "has", "had", "i", "me", "my",
-    "we", "our", "you", "your", "he", "she", "it", "its", "they", "them",
-    "their", "this", "that", "these", "those", "what", "which", "who", "whom",
-    "how", "when", "where", "why", "not", "no", "so", "if", "than", "then",
-    "there", "here", "can", "could", "should", "would", "will", "shall", "may",
-    "might", "must", "about", "into", "over", "under", "again", "also", "just",
-    "very", "please",
+    "a", "an", "the", "and", "or", "but", "of", "to", "in", "on", "at", "by", "for", "with",
+    "from", "as", "is", "are", "was", "were", "be", "been", "being", "am", "do", "does", "did",
+    "have", "has", "had", "i", "me", "my", "we", "our", "you", "your", "he", "she", "it", "its",
+    "they", "them", "their", "this", "that", "these", "those", "what", "which", "who", "whom",
+    "how", "when", "where", "why", "not", "no", "so", "if", "than", "then", "there", "here", "can",
+    "could", "should", "would", "will", "shall", "may", "might", "must", "about", "into", "over",
+    "under", "again", "also", "just", "very", "please",
 ];
 
 /// One routed term.
@@ -101,11 +99,7 @@ impl ParsedQuery {
     /// The `unicode61` table's MATCH string: every word and literal as a
     /// quoted phrase, ORed. `None` when there is nothing to route.
     pub(crate) fn word_match(&self) -> Option<String> {
-        let parts: Vec<String> = self
-            .words()
-            .chain(self.literals())
-            .map(quote)
-            .collect();
+        let parts: Vec<String> = self.words().chain(self.literals()).map(quote).collect();
         if parts.is_empty() {
             None
         } else {
@@ -141,10 +135,7 @@ fn quote(term: &str) -> String {
 /// to indexed text and to queries alike, so the FTS tokenizers see the same
 /// bytes on both sides.
 pub fn normalize(text: &str) -> String {
-    let lowered: String = text
-        .nfkc()
-        .flat_map(char::to_lowercase)
-        .collect();
+    let lowered: String = text.nfkc().flat_map(char::to_lowercase).collect();
     lowered
         .nfd()
         .filter(|c| !('\u{0300}'..='\u{036F}').contains(c))

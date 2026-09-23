@@ -524,11 +524,10 @@ impl MemoryIndex {
         let state = read_state(&conn)?;
         let notes: i64 = conn.query_row("SELECT COUNT(*) FROM note", [], |r| r.get(0))?;
         let chunks: i64 = conn.query_row("SELECT COUNT(*) FROM chunk", [], |r| r.get(0))?;
-        let partitions: i64 = conn.query_row(
-            "SELECT COUNT(DISTINCT partition_key) FROM note",
-            [],
-            |r| r.get(0),
-        )?;
+        let partitions: i64 =
+            conn.query_row("SELECT COUNT(DISTINCT partition_key) FROM note", [], |r| {
+                r.get(0)
+            })?;
         Ok(IndexStateReport {
             state,
             schema_version: SCHEMA_VERSION,
@@ -608,10 +607,7 @@ impl MemoryIndex {
         partition_key: &str,
         records: &[IndexRecord],
     ) -> Result<RebuildReport> {
-        if let Some(stray) = records
-            .iter()
-            .find(|r| r.partition_key != partition_key)
-        {
+        if let Some(stray) = records.iter().find(|r| r.partition_key != partition_key) {
             return Err(IndexError::InvalidInput(format!(
                 "record {} names partition {:?}, not {partition_key:?}",
                 stray.id, stray.partition_key
@@ -939,7 +935,10 @@ fn upsert_in(tx: &rusqlite::Transaction<'_>, record: &IndexRecord) -> Result<usi
 /// Deletes one note's chunks (the delete trigger removes their FTS rows),
 /// aliases and catalog row.
 fn delete_note_rows(tx: &rusqlite::Transaction<'_>, note_rowid: i64) -> rusqlite::Result<()> {
-    tx.execute("DELETE FROM chunk WHERE note_rowid = ?1", params![note_rowid])?;
+    tx.execute(
+        "DELETE FROM chunk WHERE note_rowid = ?1",
+        params![note_rowid],
+    )?;
     tx.execute(
         "DELETE FROM note_alias WHERE note_rowid = ?1",
         params![note_rowid],
@@ -948,7 +947,10 @@ fn delete_note_rows(tx: &rusqlite::Transaction<'_>, note_rowid: i64) -> rusqlite
     Ok(())
 }
 
-fn delete_partition_rows(tx: &rusqlite::Transaction<'_>, partition_key: &str) -> rusqlite::Result<u64> {
+fn delete_partition_rows(
+    tx: &rusqlite::Transaction<'_>,
+    partition_key: &str,
+) -> rusqlite::Result<u64> {
     tx.execute(
         "DELETE FROM chunk WHERE partition_key = ?1",
         params![partition_key],
@@ -1053,3 +1055,101 @@ pub(crate) fn canonicalize_timestamp(field: &str, value: &str) -> Result<String>
 
 #[cfg(test)]
 mod tests;
+
+// ============================================================================
+// Reconciliation
+// ============================================================================
+
+impl MemoryIndex {
+    /// One reconciliation stat scan of a partition (design §5, *Freshness
+    /// without a watcher*): `scanner` lists the files under the partition's
+    /// `notes/` with their mtime, size and inode; the index compares that
+    /// listing to its rows and reports what is new, changed or gone. It
+    /// changes no row — only `memory_files` can re-hash and re-parse a file —
+    /// and records the scan on the partition so `index_state` can say when
+    /// it last ran.
+    pub fn reconcile<F>(&self, partition_key: &str, scanner: F) -> Result<ReconcileReport>
+    where
+        F: FnOnce() -> std::io::Result<Vec<ScanEntry>>,
+    {
+        let entries = scanner()?;
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, relative_path, mtime_ns, size, inode FROM note WHERE partition_key = ?1",
+        )?;
+        let indexed: Vec<(String, String, FileStat)> = stmt
+            .query_map(params![partition_key], |r| {
+                let size: i64 = r.get(3)?;
+                let inode: i64 = r.get(4)?;
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    FileStat {
+                        mtime_ns: r.get(2)?,
+                        size: size as u64,
+                        inode: inode as u64,
+                    },
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(stmt);
+
+        let on_disk: std::collections::HashMap<&str, &FileStat> = entries
+            .iter()
+            .map(|e| (e.relative_path.as_str(), &e.stat))
+            .collect();
+        let mut report = ReconcileReport {
+            partition_key: partition_key.to_string(),
+            scanned: entries.len(),
+            ..ReconcileReport::default()
+        };
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for (id, path, stat) in &indexed {
+            seen.insert(path.as_str());
+            match on_disk.get(path.as_str()) {
+                None => report.removed.push((id.clone(), path.clone())),
+                Some(current) if **current != *stat => {
+                    report.changed.push((id.clone(), path.clone()));
+                }
+                Some(_) => {}
+            }
+        }
+        for entry in &entries {
+            if !seen.contains(entry.relative_path.as_str()) {
+                report.added.push(entry.relative_path.clone());
+            }
+        }
+        report.added.sort();
+        report.changed.sort();
+        report.removed.sort();
+
+        conn.execute(
+            "INSERT INTO partition (partition_key, last_scan_at, last_scan_files)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(partition_key) DO UPDATE SET
+                 last_scan_at = excluded.last_scan_at,
+                 last_scan_files = excluded.last_scan_files",
+            params![
+                partition_key,
+                canon_timestamp(&Utc::now()),
+                entries.len() as i64
+            ],
+        )?;
+        Ok(report)
+    }
+
+    /// When a partition was last scanned, if ever.
+    pub fn last_scan(&self, partition_key: &str) -> Result<Option<(String, u64)>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT last_scan_at, last_scan_files FROM partition WHERE partition_key = ?1",
+            params![partition_key],
+            |r| {
+                let files: i64 = r.get(1)?;
+                Ok((r.get::<_, String>(0)?, files as u64))
+            },
+        )
+        .optional()
+        .map_err(IndexError::from)
+    }
+}
