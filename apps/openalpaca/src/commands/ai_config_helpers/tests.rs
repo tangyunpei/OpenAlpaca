@@ -55,7 +55,7 @@ impl EnvSandbox {
 
         // Fail before writing anything if the sandbox is not airtight: a test
         // must never be able to reach the real legacy application data dir.
-        let legacy = openalpaca_storage::store::migrate::legacy_app_dir()
+        let legacy = openalpaca_storage::store::legacy_root::legacy_app_dir()
             .expect("the legacy app dir must resolve");
         assert!(
             legacy.starts_with(root),

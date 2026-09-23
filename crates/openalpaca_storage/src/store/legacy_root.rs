@@ -15,17 +15,29 @@
 //! database this install already uses — is one `WARN` per boot, and nothing
 //! more: with no mover there is no choice between two databases to refuse over.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
+use directories::ProjectDirs;
 use tracing::{debug, error, warn};
 
 use super::DB_FILE;
 use super::project_move::same_dir;
 
-/// The pre-D1 application data directory. Defined beside the retired mover
-/// until that module is deleted; this is where it will live afterwards.
-pub use super::migrate::legacy_app_dir;
+/// The pre-D1 application data directory (`app_dir()` as it was):
+/// `~/Library/Application Support/OpenAlpaca` on macOS,
+/// `~/.local/share/openalpaca` on Linux, `%APPDATA%\OpenAlpaca\data` on Windows.
+///
+/// `ProjectDirs` survives only here, to compute the *old* root — never to
+/// resolve anything this install writes. The older `com.openalpaca.OpenAlpaca`
+/// leg is deliberately not carried forward: that rename happened long ago, and
+/// a surviving directory would simply be ignored.
+///
+/// It reads `HOME` (and `XDG_DATA_HOME` on Linux), not `OPENALPACA_HOME_STORE`:
+/// a test that reaches it must sandbox those too.
+pub fn legacy_app_dir() -> Option<PathBuf> {
+    ProjectDirs::from("", "", "OpenAlpaca").map(|p| p.data_dir().to_path_buf())
+}
 
 /// What a legacy root holds that must not be lost without a word: the database,
 /// the key that decrypts the config, and the config itself.

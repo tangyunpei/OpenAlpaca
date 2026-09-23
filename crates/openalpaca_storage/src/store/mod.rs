@@ -25,7 +25,6 @@
 
 mod artifact;
 pub mod legacy_root;
-pub mod migrate;
 pub mod project_move;
 
 pub use artifact::{
@@ -94,13 +93,7 @@ fn resolve_home_root(override_value: Option<PathBuf>, home: Option<PathBuf>) -> 
 
 /// `home_root()/state` — machine state. Created (0700 on Unix) if missing.
 pub fn state_dir() -> Result<PathBuf> {
-    state_dir_in(&home_root()?)
-}
-
-/// [`state_dir`] under an explicit root — for the mover, which works on the two
-/// roots it was given rather than on the ambient one.
-pub(crate) fn state_dir_in(root: &Path) -> Result<PathBuf> {
-    let dir = root.join("state");
+    let dir = home_root()?.join("state");
     create_private_dir(&dir)?;
     Ok(dir)
 }

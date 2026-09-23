@@ -106,14 +106,16 @@ fn main() -> Result<()> {
 
     info!("OpenAlpaca Daemon starting...");
 
-    // D1: everything lives under ~/.openalpaca. Seed the home store, then move
-    // any legacy app dir into it — before acquiring the singleton lock, since
-    // the lock file itself moves and the database must not be open mid-rename.
+    // D1: everything lives under ~/.openalpaca. Seed the home store, then say
+    // so loudly if an older install's data directory is still on this machine:
+    // this build does not move it (D-D), and coming up on a fresh, empty
+    // database while that data sits somewhere else is the one failure worth
+    // refusing to start over.
     if let Err(e) = store::ensure_store(&store::StoreScope::Home) {
         error!("FATAL: cannot create the OpenAlpaca home store: {e:#}");
         std::process::exit(1);
     }
-    store::migrate::move_app_root();
+    store::legacy_root::check_legacy_root();
 
     // D3: Singleton lock FIRST — prevents all multi-process races.
     // Acquired before any config I/O or key generation.
@@ -141,8 +143,8 @@ fn main() -> Result<()> {
         );
     }
 
-    // D1: master key always in the state dir (canonical, CWD-independent); the
-    // mover owns relocating an existing one.
+    // D1: master key always in the state dir (canonical, CWD-independent).
+    // Nothing relocates one from an older install's data directory (D-D).
     let master_key_dir = store::master_key_dir().context("Failed to resolve the state dir")?;
 
     // D6+D7: ensure_at is race-safe; on failure, fail fast.
@@ -217,9 +219,6 @@ async fn async_main(
     let db_path = store::database_path()?;
     let db = Database::open(&db_path).context("Failed to initialize database")?;
     info!("Database initialized: {}", db_path.display());
-    // Repairs the absolute file_asset paths the root move broke. Idempotent:
-    // matches zero rows on every boot after the first.
-    store::migrate::rebase_asset_paths(&db);
     // §5.6b: recover the undelivered interjections of every run the previous
     // generation left in flight, then mark those runs `interrupted`. MUST stay
     // here — after the DB opens and before any ingress starts
