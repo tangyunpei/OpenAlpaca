@@ -210,12 +210,12 @@ pub struct MemoryConfig {
     pub summary_max_chars: usize,
     /// Character limit for message truncation in summary input.
     pub msg_trunc_chars: usize,
-    /// L2 distance threshold for semantic supersession (lower = stricter).
-    /// Memories within this distance are considered "same topic" and will be superseded.
+    /// L2 distance threshold for semantic supersession. Parsed and clamped,
+    /// then read by nothing: a new memory no longer retires look-alikes, so
+    /// setting it changes nothing.
     pub supersession_distance_threshold: f64,
-    /// Jaccard word-overlap threshold for FTS-based supersession fallback.
-    /// Only memories with overlap >= this value are considered for supersession
-    /// when the embedder is unavailable. Range: 0.0–1.0.
+    /// Jaccard word-overlap threshold for the FTS supersession fallback.
+    /// Read by nothing, like `supersession_distance_threshold`. Range: 0.0–1.0.
     pub fts_jaccard_threshold: f64,
     /// Decay and pruning configuration.
     pub decay: MemoryDecayConfig,

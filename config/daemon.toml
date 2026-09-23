@@ -48,11 +48,14 @@ task_extract_min_content_len = 100
 # extraction_model = "claude-haiku-4-5-20251001"
 
 [orchestrator.memory]
+# fts_jaccard_threshold and supersession_distance_threshold are read by nothing:
+# a new memory no longer retires look-alikes, so setting either changes nothing.
 fts_jaccard_threshold = 0.4
 msg_trunc_chars = 1500
 prompt_recent_messages = 40
 summary_max_chars = 4000
 summary_min_new_older_messages = 12
+# Read by nothing — see fts_jaccard_threshold above.
 supersession_distance_threshold = 1
 
 [orchestrator.memory.decay]
