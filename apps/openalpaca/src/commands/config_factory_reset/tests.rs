@@ -68,10 +68,10 @@ fn a_factory_reset_never_opens_the_store_database() {
         assert!(!root.join(rel).exists(), "{rel} must be deleted");
     }
     assert_eq!(env.confirm_calls.get(), 1);
-    assert_eq!(
-        env.confirmed_root.borrow().as_deref(),
-        Some(root.as_path()),
-        "the confirmation must be shown the absolute store root"
+    let warning = env.shown_warning.borrow().clone().unwrap();
+    assert!(
+        root.is_absolute() && warning.contains(&format!("{}/state/openalpaca.db", root.display())),
+        "the confirmation must be shown the absolute store root:\n{warning}"
     );
 }
 
@@ -227,10 +227,18 @@ fn the_embedding_cache_and_the_master_key_survive_a_factory_reset() {
     }
 }
 
+/// Pure text: no file here exists, so both configuration lines say so.
+fn targets_under(root: &str) -> ResetTargets {
+    ResetTargets {
+        root: PathBuf::from(root),
+        llm_config: PathBuf::from(format!("{root}/config/llm.toml")),
+        daemon_config: PathBuf::from(format!("{root}/config/daemon.toml")),
+    }
+}
+
 #[test]
 fn the_confirmation_names_the_root_and_what_survives() {
-    let root = Path::new("/tmp/oa-test-root");
-    let warning = factory_reset_warning(root);
+    let warning = factory_reset_warning(&targets_under("/tmp/oa-test-root"));
     for needle in [
         "/tmp/oa-test-root",
         "state/openalpaca.db",
@@ -250,6 +258,62 @@ fn the_confirmation_names_the_root_and_what_survives() {
         );
     }
     assert_eq!(CONFIRM_WORD, "factory-reset");
+}
+
+/// `llm.toml` and `daemon.toml` resolve through `OPENALPACA_CONFIG_DIR`, the
+/// store's `config/`, and last `./config/` under the current directory — a
+/// checkout's own files. So the warning names each by its absolute path,
+/// never as a bare `config/…` a reader would place under the store root, and
+/// the reset clears exactly the file it named.
+#[test]
+fn the_confirmation_names_the_absolute_config_files_it_clears() {
+    let tmp = tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    assert_sandboxed(tmp.path());
+    // `EnvSandbox` points OPENALPACA_CONFIG_DIR here, outside the store root.
+    let config = tmp.path().join("config");
+    seed(&config, "llm.toml", b"");
+    seed(&config, "daemon.toml", b"[execution]\nmax_rounds = 12\n");
+
+    let mut env = FakeEnv {
+        answer: true,
+        ..FakeEnv::default()
+    };
+    factory_reset(&mut env).unwrap();
+
+    let warning = env.shown_warning.borrow().clone().unwrap();
+    for file in ["llm.toml", "daemon.toml"] {
+        let absolute = config.join(file);
+        assert!(absolute.is_absolute());
+        assert!(
+            warning.contains(&format!("  - {} — ", absolute.display())),
+            "the warning must name {} absolutely:\n{warning}",
+            absolute.display()
+        );
+    }
+    assert!(
+        !warning.contains("  - config/"),
+        "no configuration file may be named relatively:\n{warning}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(config.join("daemon.toml")).unwrap(),
+        "# Reset to defaults\n",
+        "the daemon.toml the warning named is the one reset"
+    );
+}
+
+#[test]
+fn a_missing_config_file_is_named_as_none() {
+    let warning = factory_reset_warning(&targets_under("/tmp/oa-no-such-root"));
+    for (kind, path) in [
+        ("llm.toml", "/tmp/oa-no-such-root/config/llm.toml"),
+        ("daemon.toml", "/tmp/oa-no-such-root/config/daemon.toml"),
+    ] {
+        assert!(
+            warning.contains(&format!("no {kind} to clear (there is none at {path})")),
+            "{kind}:\n{warning}"
+        );
+    }
 }
 
 #[test]

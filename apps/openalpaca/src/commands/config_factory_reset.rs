@@ -17,8 +17,9 @@ use openalpaca_storage::{discovery, store};
 use std::path::Path;
 
 use super::ai_config;
+use super::ai_config_helpers::llm_config_path;
 use super::config::ConfigEnv;
-use super::daemon_config_cli;
+use super::daemon_config_cli::{self, daemon_config_path};
 
 /// The word the user must type. Long enough that no reflex produces it,
 /// short enough to type without a mistake.
@@ -45,6 +46,15 @@ pub(super) fn run(env: &dyn ConfigEnv) -> Result<()> {
     let state_dir = db_path
         .parent()
         .context("the database path has no parent directory")?;
+    // Resolved once, here, and cleared by these same paths: they can fall
+    // back to `./config/` under the current directory — a repository
+    // checkout — so the warning must say which files these are, not
+    // `config/llm.toml`, which a reader takes to mean the store's.
+    let targets = ResetTargets {
+        root,
+        llm_config: std::path::absolute(llm_config_path()?)?,
+        daemon_config: std::path::absolute(daemon_config_path()?)?,
+    };
 
     // Before the question, not after it: a refusal that arrives only once the
     // user has typed the word is a question we had no business asking. And
@@ -55,7 +65,7 @@ pub(super) fn run(env: &dyn ConfigEnv) -> Result<()> {
     // starts now exits on it instead.
     let claim = claim_store(state_dir)?;
 
-    if !env.confirm_factory_reset(&root)? {
+    if !env.confirm_factory_reset(&factory_reset_warning(&targets))? {
         println!("Cancelled. Nothing was deleted.");
         return Ok(());
     }
@@ -72,8 +82,8 @@ pub(super) fn run(env: &dyn ConfigEnv) -> Result<()> {
     // Files first: if this fails (a permission, a locked file), the user's
     // configuration is still intact and re-running is safe.
     openalpaca_storage::database::delete_database_files(&db_path)?;
-    ai_config::clear_ai_config()?;
-    daemon_config_cli::clear_daemon_config()?;
+    ai_config::clear_ai_config_at(&targets.llm_config)?;
+    daemon_config_cli::clear_daemon_config_at(&targets.daemon_config)?;
 
     println!(
         "Factory reset complete. {} is gone; the next daemon start builds an empty one.",
@@ -103,10 +113,38 @@ fn claim_store(state_dir: &Path) -> Result<Option<impl Sized>> {
         .map_err(|e| e.context(DAEMON_RUNNING_REFUSAL))
 }
 
-/// The warning printed above the prompt. `root` is absolute —
-/// `OPENALPACA_HOME_STORE` can point anywhere, so "your store" names nothing.
-pub(super) fn factory_reset_warning(root: &Path) -> String {
-    let root = root.display();
+/// What a factory reset deletes and clears, every path absolute.
+pub(super) struct ResetTargets {
+    /// The store root — `OPENALPACA_HOME_STORE` can point anywhere, so "your
+    /// store" names nothing.
+    pub root: std::path::PathBuf,
+    /// The `llm.toml` the reset clears, resolved as `config set` resolves it.
+    pub llm_config: std::path::PathBuf,
+    /// The `daemon.toml` the reset resets, resolved the same way.
+    pub daemon_config: std::path::PathBuf,
+}
+
+/// One line of the warning's "Gone for good" list for a configuration file:
+/// its absolute path when it exists, or a plain "there is none" when it does
+/// not — clearing a missing file does nothing, and saying otherwise would
+/// name a file the reset never touches.
+fn config_line(path: &Path, what_goes: &str, kind: &str) -> String {
+    if path.exists() {
+        format!("{} — {what_goes}", path.display())
+    } else {
+        format!("no {kind} to clear (there is none at {})", path.display())
+    }
+}
+
+/// The warning printed above the prompt.
+pub(super) fn factory_reset_warning(targets: &ResetTargets) -> String {
+    let root = targets.root.display();
+    let llm = config_line(
+        &targets.llm_config,
+        "provider settings and every API key in it, including the\n    keychain entries those keys point at",
+        "llm.toml",
+    );
+    let daemon = config_line(&targets.daemon_config, "back to defaults", "daemon.toml");
     format!(
         "\
 FACTORY RESET
@@ -125,9 +163,8 @@ Gone for good:
   - every task, every run and its history
   - every memory
   - the rows that index your artifacts and uploads
-  - config/llm.toml — provider settings and every API key in it, including the
-    keychain entries those keys point at
-  - config/daemon.toml — back to defaults
+  - {llm}
+  - {daemon}
 
 Left on disk, and from now on unreferenced:
   - {root}/artifacts/
@@ -142,7 +179,7 @@ Untouched:
   - {root}/state/logs/
   - {root}/state/backups/
   - {root}/plugins/
-  - config/mcp.toml, config/agents/, config/skills/, config/orchestrator/
+  - the rest of your configuration — mcp.toml, agents/, skills/, orchestrator/
 
 No backup is taken. There is no undo.
 "
@@ -161,8 +198,8 @@ pub(super) fn prompt_accepts(typed: &str) -> bool {
 /// `dialoguer` refuses with "not a terminal" when stderr is not a TTY, so a
 /// piped or scripted invocation cannot answer this and deletes nothing. There
 /// is deliberately no `--yes` to skip it.
-pub(super) fn prompt_on_terminal(root: &Path) -> Result<bool> {
-    eprint!("{}", factory_reset_warning(root));
+pub(super) fn prompt_on_terminal(warning: &str) -> Result<bool> {
+    eprint!("{warning}");
     let typed: String = Input::with_theme(&ColorfulTheme::default())
         .with_prompt(format!(
             "Type {CONFIRM_WORD} to continue (anything else cancels)"

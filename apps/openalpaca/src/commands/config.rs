@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use openalpaca_storage::{ConfigRepository, Database, store};
-use std::path::Path;
 
 use crate::output::OutputFormat;
 
@@ -56,7 +55,7 @@ pub(super) trait ConfigEnv {
 
     /// Shows the factory-reset warning and reads the typed confirmation word.
     /// `Ok(false)` means the user declined; an error means we could not ask.
-    fn confirm_factory_reset(&self, root: &Path) -> Result<bool>;
+    fn confirm_factory_reset(&self, warning: &str) -> Result<bool>;
 }
 
 #[derive(Default)]
@@ -78,8 +77,8 @@ impl ConfigEnv for RealConfigEnv {
         Ok(self.opened.clone().expect("just opened"))
     }
 
-    fn confirm_factory_reset(&self, root: &Path) -> Result<bool> {
-        super::config_factory_reset::prompt_on_terminal(root)
+    fn confirm_factory_reset(&self, warning: &str) -> Result<bool> {
+        super::config_factory_reset::prompt_on_terminal(warning)
     }
 }
 

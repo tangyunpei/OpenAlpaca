@@ -4,7 +4,7 @@ use super::*;
 use crate::test_util::EnvSandbox;
 use clap::Parser;
 use std::cell::{Cell, RefCell};
-use std::path::PathBuf;
+use std::path::Path;
 use tempfile::tempdir;
 
 /// A `ConfigEnv` whose database cannot be opened: `database()` panics. Any
@@ -14,7 +14,8 @@ pub(in crate::commands) struct FakeEnv {
     /// What `confirm_factory_reset` answers.
     pub answer: bool,
     pub confirm_calls: Cell<usize>,
-    pub confirmed_root: RefCell<Option<PathBuf>>,
+    /// The warning the prompt was shown, verbatim.
+    pub shown_warning: RefCell<Option<String>>,
     /// Runs while the prompt is "open" — what the world does while a user
     /// is still reading the warning.
     pub during_prompt: RefCell<Option<Box<dyn FnOnce()>>>,
@@ -25,9 +26,9 @@ impl ConfigEnv for FakeEnv {
         panic!("this form of `openalpaca config` must not open the store database");
     }
 
-    fn confirm_factory_reset(&self, root: &Path) -> Result<bool> {
+    fn confirm_factory_reset(&self, warning: &str) -> Result<bool> {
         self.confirm_calls.set(self.confirm_calls.get() + 1);
-        *self.confirmed_root.borrow_mut() = Some(root.to_path_buf());
+        *self.shown_warning.borrow_mut() = Some(warning.to_owned());
         if let Some(meanwhile) = self.during_prompt.borrow_mut().take() {
             meanwhile();
         }
