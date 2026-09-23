@@ -54,6 +54,21 @@ describe("connection status mapping (§3.6)", () => {
     expect(dot.className).not.toContain("bg-red");
   });
 
+  /** Only what the shell's wait concluded may say "stopped". */
+  it("words this window's own stop by its phase", () => {
+    const label = (phase: Parameters<typeof connectionLabel>[2]) =>
+      connectionLabel("disconnected", "stopped_here", phase);
+    expect(label("stopping")).toBe("stopping");
+    expect(label("stopped")).toBe("stopped");
+    expect(label("still_alive")).toBe("still running");
+    expect(label("lock_still_held")).toBe("lock still held");
+    expect(label("unconfirmed")).toBe("stop unconfirmed");
+    // A phase never renames a stop someone else made.
+    expect(
+      connectionLabel("disconnected", "stopped_elsewhere", "stopping"),
+    ).toBe("stopped elsewhere");
+  });
+
   it("shows the four-character instance id, and omits it when unknown", () => {
     const { rerender } = render(
       <ConnectionRowView tone="up" label="connected" instance="7f3a" />,

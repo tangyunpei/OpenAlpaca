@@ -162,6 +162,8 @@ export function setStopIntent(
   if (next === stopIntent) return;
   stopIntent = next;
   stoppedAt = next === null ? null : now;
+  // A phase belongs to one stop; a new intent (or none) starts from nothing.
+  setStopPhase(null);
   for (const listener of stopIntentListeners) listener(next);
 }
 
@@ -170,6 +172,45 @@ export function subscribeStopIntent(
 ): () => void {
   stopIntentListeners.add(listener);
   return () => stopIntentListeners.delete(listener);
+}
+
+/**
+ * How far this window's own stop has got — meaningful only while the intent
+ * is `"stopped_here"`, and reset whenever the intent changes.
+ *
+ * `"stopping"` — from the shutdown POST until `await_daemon_stopped`
+ *                answers. The process may still hold its lock for up to 15 s,
+ *                so nothing may start a daemon yet: a replacement spawned now
+ *                loses the singleton-lock race and exits.
+ * the rest     — what that wait concluded (`StopResult["kind"]` for a stop
+ *                the daemon accepted). `"stopped"` covers `not_running` too.
+ */
+export type StopPhase =
+  | "stopping"
+  | "stopped"
+  | "still_alive"
+  | "lock_still_held"
+  | "unconfirmed"
+  | null;
+
+let stopPhase: StopPhase = null;
+const stopPhaseListeners = new Set<(phase: StopPhase) => void>();
+
+export function getStopPhase(): StopPhase {
+  return stopPhase;
+}
+
+export function setStopPhase(next: StopPhase): void {
+  if (next === stopPhase) return;
+  stopPhase = next;
+  for (const listener of stopPhaseListeners) listener(next);
+}
+
+export function subscribeStopPhase(
+  listener: (phase: StopPhase) => void,
+): () => void {
+  stopPhaseListeners.add(listener);
+  return () => stopPhaseListeners.delete(listener);
 }
 
 /**

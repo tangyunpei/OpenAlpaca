@@ -21,8 +21,11 @@ import { ApiError } from "./http";
 import { requestDaemonShutdown } from "./api/status";
 import {
   awaitDaemonStopped,
+  getStopIntent,
   setStopIntent,
+  setStopPhase,
   type DaemonStopReport,
+  type StopPhase,
 } from "./connection";
 import { daemonEvents } from "./events";
 
@@ -71,12 +74,18 @@ function messageOf(cause: unknown): string {
  *
  * `onPosted` fires once the shutdown POST has settled either way — the dialog
  * closes on the POST's response, and the outcome arrives as a toast.
+ *
+ * The stop phase (`lib/connection.ts`) is `"stopping"` from here until the
+ * wait answers, and then that answer — so the window neither offers `Start
+ * daemon` while the old process still holds its lock nor calls a daemon that
+ * did not go "stopped".
  */
 export async function stopDaemon(
   deps: DaemonControlDeps = defaultDaemonControlDeps,
   onPosted: () => void = () => {},
 ): Promise<StopResult> {
   setStopIntent("stopped_here");
+  setStopPhase("stopping");
   deps.disconnect();
 
   try {
@@ -99,6 +108,18 @@ export async function stopDaemon(
   }
   onPosted();
 
+  const result = await awaitResult(deps);
+  // Only this stop's own intent takes its answer; nothing can have replaced
+  // it while `Start daemon` was held, but a stale phase must never land on
+  // an intent it does not belong to.
+  if (getStopIntent() === "stopped_here") setStopPhase(result.kind);
+  return result;
+}
+
+/** `await_daemon_stopped`'s answer, as a `StopResult`. */
+async function awaitResult(
+  deps: DaemonControlDeps,
+): Promise<Extract<StopResult, { kind: NonNullable<StopPhase> }>> {
   let report: DaemonStopReport;
   try {
     report = await deps.awaitStopped();

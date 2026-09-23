@@ -18,7 +18,7 @@
  */
 
 import { useConnectionStatus } from "@/hooks/useConnection";
-import type { StopIntent } from "@/lib/connection";
+import type { StopIntent, StopPhase } from "@/lib/connection";
 import type { EventsStatus } from "@/lib/events";
 import { cn } from "@/lib/cn";
 
@@ -39,8 +39,23 @@ export function connectionTone(
 export function connectionLabel(
   status: EventsStatus,
   intent: StopIntent = null,
+  phase: StopPhase = null,
 ): string {
-  if (intent === "stopped_here") return "stopped";
+  if (intent === "stopped_here") {
+    // Only what the shell's wait concluded may say "stopped".
+    switch (phase) {
+      case "stopping":
+        return "stopping";
+      case "still_alive":
+        return "still running";
+      case "lock_still_held":
+        return "lock still held";
+      case "unconfirmed":
+        return "stop unconfirmed";
+      default:
+        return "stopped";
+    }
+  }
   if (intent === "stopped_elsewhere") return "stopped elsewhere";
   switch (status) {
     case "connected":
@@ -91,11 +106,12 @@ export function ConnectionRowView({
 }
 
 export function ConnectionRow() {
-  const { socket, connected, instanceChip, stopIntent } = useConnectionStatus();
+  const { socket, connected, instanceChip, stopIntent, stopPhase } =
+    useConnectionStatus();
   return (
     <ConnectionRowView
       tone={connectionTone(socket, connected, stopIntent)}
-      label={connectionLabel(socket, stopIntent)}
+      label={connectionLabel(socket, stopIntent, stopPhase)}
       instance={instanceChip}
     />
   );

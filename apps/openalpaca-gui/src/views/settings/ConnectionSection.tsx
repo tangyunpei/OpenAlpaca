@@ -56,7 +56,11 @@ import { StopDaemonDialog } from "@/components/overlays/StopDaemonDialog";
 import { Button, Eyebrow } from "@/components/ui";
 import { useConnectionStatus, useDaemonStatus } from "@/hooks/useConnection";
 import { useConnectors } from "@/hooks/useConnectors";
-import { readDaemonLogTail } from "@/lib/connection";
+import {
+  readDaemonLogTail,
+  type StopIntent,
+  type StopPhase,
+} from "@/lib/connection";
 import { stopDaemon, stopToast } from "@/lib/daemon-control";
 import { useTasks } from "@/hooks/useTasks";
 import { capsNote, formatSpend, useUsageSummary } from "@/hooks/useUsage";
@@ -80,6 +84,11 @@ export function ConnectionSection() {
   const [stopOpen, setStopOpen] = useState(false);
   const intent = connection.stopIntent ?? null;
   const stopped = intent !== null;
+  // The old process may hold its lock for up to 15 s after the POST; a
+  // daemon started in that tail loses the lock race and exits.
+  const phase =
+    intent === "stopped_here" ? (connection.stopPhase ?? null) : null;
+  const stopping = phase === "stopping";
 
   // Run count for "today" is still a client-side filter — there is no date
   // filter on `GET /v1/tasks` and no rollup that counts runs — but the day it
@@ -108,10 +117,10 @@ export function ConnectionSection() {
       <StatusCard
         ok={!stopped && connection.connected}
         idle={stopped}
-        title={statusTitle(intent, connection.connected)}
+        title={statusTitle(intent, connection.connected, phase)}
         meta={
           stopped
-            ? stoppedMeta(connection.stoppedAt ?? null)
+            ? stoppedMeta(connection.stoppedAt ?? null, phase)
             : `uptime ${formatUptime(status.data?.uptime_secs)}`
         }
         cells={[
@@ -130,12 +139,19 @@ export function ConnectionSection() {
           {stopped ? (
             <Button
               variant="secondarySm"
+              disabled={stopping}
+              title={
+                stopping
+                  ? "Waiting for the daemon's process to exit and free its lock"
+                  : undefined
+              }
               onClick={() => {
+                if (stopping) return;
                 void connection.start();
                 showToast("Starting the daemon…");
               }}
             >
-              Start daemon
+              {stopping ? "Stopping…" : "Start daemon"}
             </Button>
           ) : (
             <Button
@@ -222,19 +238,40 @@ export function ConnectionSection() {
   );
 }
 
-/** The status card's title, stopped or not (§6.3). */
+/**
+ * The status card's title, stopped or not (§6.3). A stop from this window is
+ * titled by what `await_daemon_stopped` concluded, never by the intent alone:
+ * the POST's `200` only says the daemon was asked.
+ */
 export function statusTitle(
-  intent: "stopped_here" | "stopped_elsewhere" | null,
+  intent: StopIntent,
   connected: boolean,
+  phase: StopPhase = null,
 ): string {
-  if (intent === "stopped_here") return "Daemon stopped";
+  if (intent === "stopped_here") {
+    switch (phase) {
+      case "stopping":
+        return "Stopping the daemon…";
+      case "still_alive":
+        return "Daemon did not stop";
+      case "lock_still_held":
+        return "Daemon exited, lock still held";
+      case "unconfirmed":
+        return "Daemon stop not confirmed";
+      default:
+        return "Daemon stopped";
+    }
+  }
   if (intent === "stopped_elsewhere") return "Daemon stopped from elsewhere";
   return connected ? "Daemon connected" : "Daemon unreachable";
 }
 
-function stoppedMeta(stoppedAt: number | null): string {
-  if (stoppedAt === null) return "stopped";
-  return `stopped ${relativeTime(new Date(stoppedAt).toISOString())}`;
+function stoppedMeta(stoppedAt: number | null, phase: StopPhase): string {
+  if (phase === "stopping") return "waiting for the process to exit";
+  // Only a stop the wait confirmed is "stopped"; otherwise it was asked.
+  const word = phase === null || phase === "stopped" ? "stopped" : "stop asked";
+  if (stoppedAt === null) return word;
+  return `${word} ${relativeTime(new Date(stoppedAt).toISOString())}`;
 }
 
 /**

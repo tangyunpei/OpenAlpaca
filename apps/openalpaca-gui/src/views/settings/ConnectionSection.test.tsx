@@ -5,7 +5,7 @@
  * a plain `DaemonStatus | undefined` prop, so no daemon-connection or
  * usage/tasks hooks need mocking to exercise its rendering.
  */
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -63,6 +63,13 @@ const link = vi.hoisted(() => ({
   connected: true,
   lastError: null as string | null,
   stopIntent: null as "stopped_here" | "stopped_elsewhere" | null,
+  stopPhase: null as
+    | "stopping"
+    | "stopped"
+    | "still_alive"
+    | "lock_still_held"
+    | "unconfirmed"
+    | null,
   start: vi.fn(),
   reconnect: vi.fn(),
   refetch: vi.fn(() => Promise.resolve()),
@@ -79,6 +86,7 @@ vi.mock("@/hooks/useConnection", () => ({
     lastError: link.lastError,
     stopIntent: link.stopIntent,
     stoppedAt: link.stopIntent === null ? null : Date.now(),
+    stopPhase: link.stopPhase,
     reconnect: link.reconnect,
     start: link.start,
   }),
@@ -119,6 +127,7 @@ afterEach(() => {
   link.connected = true;
   link.lastError = null;
   link.stopIntent = null;
+  link.stopPhase = null;
   link.start.mockReset();
   link.reconnect.mockReset();
   link.refetch.mockReset();
@@ -520,6 +529,55 @@ describe("while the daemon is stopped", () => {
     await user.click(screen.getByRole("button", { name: "Start daemon" }));
     expect(link.start).toHaveBeenCalledTimes(1);
     expect(link.reconnect).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The POST's `200` closes the dialog, but the old process can hold its
+   * lock for up to 15 s more; a daemon started then loses the lock race and
+   * exits. Start waits for the shell's answer, and the title is that answer.
+   */
+  it("holds Start while the stop is still in its shutdown tail", async () => {
+    const user = userEvent.setup();
+    link.connected = false;
+    link.stopIntent = "stopped_here";
+    link.stopPhase = "stopping";
+    const { rerender } = render(<ConnectionSection />);
+
+    expect(screen.getByText("Stopping the daemon…")).toBeInTheDocument();
+    expect(screen.queryByText("Daemon stopped")).toBeNull();
+    const held = screen.getByRole("button", { name: "Stopping…" });
+    expect(held).toBeDisabled();
+    fireEvent.click(held);
+    expect(link.start).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Start daemon" })).toBeNull();
+
+    // The wait answered: the process is gone and its lock free.
+    link.stopPhase = "stopped";
+    rerender(<ConnectionSection />);
+    expect(screen.getByText("Daemon stopped")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Start daemon" }));
+    expect(link.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("titles the card by what the wait found, not by the request", () => {
+    link.connected = false;
+    link.stopIntent = "stopped_here";
+    const titles: Array<[typeof link.stopPhase, string]> = [
+      ["still_alive", "Daemon did not stop"],
+      ["lock_still_held", "Daemon exited, lock still held"],
+      ["unconfirmed", "Daemon stop not confirmed"],
+    ];
+    for (const [phase, title] of titles) {
+      link.stopPhase = phase;
+      const { unmount } = render(<ConnectionSection />);
+      expect(screen.getByText(title)).toBeInTheDocument();
+      expect(screen.queryByText("Daemon stopped")).toBeNull();
+      expect(screen.getByText(/^stop asked /)).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Start daemon" }),
+      ).toBeEnabled();
+      unmount();
+    }
   });
 
   it("says when it was stopped from elsewhere", () => {

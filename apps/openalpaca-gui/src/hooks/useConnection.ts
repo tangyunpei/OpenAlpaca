@@ -19,13 +19,16 @@ import type { DaemonStatus, HealthResponse } from "@/lib/api/types";
 import {
   getCachedConnection,
   getStopIntent,
+  getStopPhase,
   getStoppedAt,
   shortInstanceId,
   subscribeConnection,
   subscribeInstanceChange,
   subscribeStopIntent,
+  subscribeStopPhase,
   type ConnectionInfo,
   type StopIntent,
+  type StopPhase,
 } from "@/lib/connection";
 import { startDaemon } from "@/lib/daemon-control";
 import { daemonEvents, type EventsStatus } from "@/lib/events";
@@ -45,6 +48,14 @@ export function useConnectionInfo(): ConnectionInfo | null {
  */
 export function useStopIntent(): StopIntent {
   return useSyncExternalStore(subscribeStopIntent, getStopIntent);
+}
+
+/**
+ * How far this window's own stop has got (`lib/connection.ts`'s stop phase):
+ * `"stopping"` until the shell says the process is gone, then its answer.
+ */
+export function useStopPhase(): StopPhase {
+  return useSyncExternalStore(subscribeStopPhase, getStopPhase);
 }
 
 /** `GET /v1/health` — unauthenticated liveness plus the instance id. */
@@ -148,6 +159,12 @@ export interface ConnectionStatus {
   stopIntent: StopIntent;
   /** When the stop intent was set (wall-clock ms), or `null`. */
   stoppedAt: number | null;
+  /**
+   * This window's own stop: `"stopping"` while the process may still hold
+   * its lock (nothing may start a daemon then), afterwards what the wait
+   * concluded. `null` with no stop of this window's.
+   */
+  stopPhase: StopPhase;
   reconnect: () => Promise<void>;
   /** `Start daemon`: clear the stop intent, bootstrap, refetch everything. */
   start: () => Promise<void>;
@@ -195,6 +212,7 @@ export function useConnectionStatus(): ConnectionStatus {
   }, [client]);
 
   const stopIntent = useStopIntent();
+  const stopPhase = useStopPhase();
   const start = useCallback(async () => {
     await startDaemon();
     await client.invalidateQueries();
@@ -212,6 +230,7 @@ export function useConnectionStatus(): ConnectionStatus {
     lastError,
     stopIntent,
     stoppedAt: stopIntent === null ? null : getStoppedAt(),
+    stopPhase,
     reconnect,
     start,
   };

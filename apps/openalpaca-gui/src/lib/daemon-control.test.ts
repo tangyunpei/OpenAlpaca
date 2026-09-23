@@ -9,7 +9,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   getStopIntent,
+  getStopPhase,
   setStopIntent,
+  setStopPhase,
   type ConnectionInfo,
   type DaemonStopReport,
 } from "./connection";
@@ -107,6 +109,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setStopIntent(null);
+  setStopPhase(null);
   vi.useRealTimers();
 });
 
@@ -158,6 +161,86 @@ describe("stopDaemon", () => {
     wait.resolve({ outcome: "not_running", pid: null, waitedMs: 0 });
     expect(await result).toEqual({ kind: "stopped" });
     expect(onPosted).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * The POST's `200` is only an acceptance: the process can hold its lock for
+   * up to 15 s more, and a daemon started in that tail loses the lock race.
+   * So the window is *stopping* — not stopped — until the wait answers, and
+   * then it is whatever the wait said.
+   */
+  it("is stopping from the POST until the wait answers, then what it answered", async () => {
+    const outcomes: Array<[DaemonStopReport["outcome"], string]> = [
+      ["stopped", "stopped"],
+      ["not_running", "stopped"],
+      ["still_alive", "still_alive"],
+      ["lock_still_held", "lock_still_held"],
+    ];
+    for (const [outcome, phase] of outcomes) {
+      const h = harness();
+      await connected(h);
+      const post = deferred<unknown>();
+      const wait = deferred<DaemonStopReport>();
+      const onPosted = vi.fn();
+
+      const result = stopDaemon(
+        depsFor(h.client, {
+          shutdown: () => post.promise,
+          awaitStopped: () => wait.promise,
+        }),
+        onPosted,
+      );
+      expect(getStopPhase()).toBe("stopping");
+
+      post.resolve({ status: "shutting_down" });
+      await vi.advanceTimersByTimeAsync(0);
+      // The dialog has closed; the process may still be running.
+      expect(onPosted).toHaveBeenCalledTimes(1);
+      expect(getStopPhase()).toBe("stopping");
+
+      wait.resolve({ outcome, pid: 41287, waitedMs: 3200 });
+      await result;
+      expect(getStopPhase()).toBe(phase);
+      expect(getStopIntent()).toBe("stopped_here");
+      setStopIntent(null);
+      expect(getStopPhase()).toBeNull();
+    }
+  });
+
+  it("is unconfirmed, not stopped, when the wait itself fails", async () => {
+    const h = harness();
+    await connected(h);
+
+    await stopDaemon(
+      depsFor(h.client, {
+        awaitStopped: () => Promise.reject(new Error("no Tauri bridge")),
+      }),
+    );
+
+    expect(getStopPhase()).toBe("unconfirmed");
+  });
+
+  it("leaves no phase behind when the stop never happened", async () => {
+    const refused = harness();
+    await connected(refused);
+    await stopDaemon(
+      depsFor(refused.client, {
+        shutdown: () =>
+          Promise.reject(new ApiError("forbidden", 403, "FORBIDDEN")),
+      }),
+    );
+    expect(getStopPhase()).toBeNull();
+
+    const unreachable = harness();
+    await connected(unreachable);
+    await stopDaemon(
+      depsFor(unreachable.client, {
+        shutdown: () =>
+          Promise.reject(new ApiError("Failed to fetch", 0, null)),
+      }),
+    );
+    expect(getStopPhase()).toBeNull();
+    unreachable.client.disconnect();
   });
 
   /** The daemon answered and said no: it is alive, so the window goes back. */
@@ -244,9 +327,12 @@ describe("startDaemon", () => {
     await stopDaemon(depsFor(h.client));
     expect(getStopIntent()).toBe("stopped_here");
 
+    expect(getStopPhase()).toBe("stopped");
+
     await startDaemon({ connect: () => h.client.connect() });
 
     expect(getStopIntent()).toBeNull();
+    expect(getStopPhase()).toBeNull();
     expect(h.bootstrap).toHaveBeenCalledTimes(2);
     h.latest().onopen?.({});
     expect(h.client.getStatus()).toBe("connected");

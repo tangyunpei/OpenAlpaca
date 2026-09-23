@@ -610,7 +610,12 @@ stop does, and no more:
 The app asks the daemon to shut down (`POST /v1/command`), then waits — up to
 15 s — for its process to exit and its lock to be released before it says
 `Daemon stopped.`; a daemon that does not go, or a lock something else still
-holds, is reported with the terminal command to finish the job. A request the
+holds, is reported with the terminal command to finish the job. Until that
+wait answers the card reads `Stopping the daemon…` and its button `Stopping…`,
+greyed out: a daemon started while the old one still holds its lock would lose
+to it and exit. Afterwards the card's title is what the wait found —
+`Daemon stopped`, or `Daemon did not stop`, `Daemon exited, lock still held`,
+`Daemon stop not confirmed` — never just what was asked. A request the
 daemon refuses leaves the window connected. **While stopped**, the card reads
 `Daemon stopped` (or `Daemon stopped from elsewhere`) with when it happened,
 `Start daemon` replaces `Reconnect`, the composer's Send is closed with "The
