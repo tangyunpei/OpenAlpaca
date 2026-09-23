@@ -595,8 +595,16 @@ impl MemoryIndex {
             report.chunks += upsert_in(&tx, record)?;
             report.notes += 1;
         }
+        // A bulk load leaves each FTS index as several segments; one merged
+        // segment per index makes every later term lookup one doclist read.
+        tx.execute_batch(
+            "INSERT INTO fts_word(fts_word) VALUES ('optimize');
+             INSERT INTO fts_tri(fts_tri) VALUES ('optimize');",
+        )?;
         write_state(&tx, IndexState::Ready)?;
         tx.commit()?;
+        // Fold the WAL back into the file: a rebuild's WAL is the whole index.
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         Ok(report)
     }
 
@@ -970,16 +978,23 @@ fn delete_partition_rows(
     Ok(removed as u64)
 }
 
+/// The page cache the connection keeps: the FTS indexes of a 10K-note corpus
+/// run to a couple of hundred MiB, and a search touches many of their pages;
+/// with SQLite's 2 MiB default every query re-reads and re-decodes them.
+const CACHE_SIZE_KIB: i64 = 64 * 1024;
+/// Memory-mapped I/O bound, so page reads are loads rather than syscalls.
+const MMAP_BYTES: i64 = 256 * 1024 * 1024;
+
 fn apply_pragmas(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(
-        r#"
-        PRAGMA journal_mode = WAL;
-        PRAGMA synchronous = NORMAL;
-        PRAGMA foreign_keys = ON;
-        PRAGMA busy_timeout = 5000;
-        PRAGMA temp_store = MEMORY;
-        "#,
-    )
+    conn.execute_batch(&format!(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;
+         PRAGMA foreign_keys = ON;
+         PRAGMA busy_timeout = 5000;
+         PRAGMA temp_store = MEMORY;
+         PRAGMA cache_size = -{CACHE_SIZE_KIB};
+         PRAGMA mmap_size = {MMAP_BYTES};"
+    ))
 }
 
 fn create_schema(conn: &Connection) -> rusqlite::Result<()> {
@@ -1053,6 +1068,8 @@ pub(crate) fn canonicalize_timestamp(field: &str, value: &str) -> Result<String>
     Ok(canon_timestamp(&parsed.with_timezone(&Utc)))
 }
 
+#[cfg(test)]
+mod bench;
 #[cfg(test)]
 mod fixture_tests;
 #[cfg(test)]
