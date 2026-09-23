@@ -6,7 +6,7 @@ use crate::migrations::{self, Migration};
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use sqlite_vec::sqlite3_vec_init;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Once};
 use tracing::{debug, error, info};
 
@@ -273,6 +273,48 @@ impl Database {
 
             Ok(())
         })
+    }
+}
+
+/// Deletes a SQLite database and the two files WAL mode keeps beside it.
+///
+/// This is what `openalpaca config reset --factory` does, and the reason the
+/// verb needs no open `Database`: on a schema this build refuses ([`Database::open`]
+/// bails before any SQL runs), deleting the files is the only remedy that works,
+/// and the next open sees version 0 and gets the baseline.
+///
+/// A file that is not there is not an error — a factory reset on a fresh store
+/// must succeed, not complain that there was nothing to destroy — and nothing is
+/// created on the way: the function only ever removes.
+///
+/// The sidecars go **first**. A run interrupted between the two leaves the
+/// database at the version it was already at, which is where it started; the
+/// other order could leave a stale `-wal` sitting beside a database SQLite is
+/// about to recreate.
+///
+/// The two suffixes are spelled out here on purpose rather than shared with
+/// any other module: this is the one place in the crate that owns the
+/// knowledge "a WAL-mode database is three files".
+pub fn delete_database_files(path: &Path) -> Result<()> {
+    for suffix in ["-wal", "-shm"] {
+        remove_if_present(&sidecar_path(path, suffix))?;
+    }
+    remove_if_present(path)
+}
+
+/// `openalpaca.db` + `-wal` → `openalpaca.db-wal`. Not an extension change:
+/// `Path::set_extension` would produce `openalpaca.-wal`.
+fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+fn remove_if_present(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("Failed to delete {}", path.display())),
     }
 }
 

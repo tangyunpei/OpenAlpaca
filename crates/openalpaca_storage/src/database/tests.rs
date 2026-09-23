@@ -931,3 +931,89 @@ fn test_execution_log_counts_use_timestamp_indexes() {
         Some(&1)
     );
 }
+
+// ---------------------------------------------------------------------------
+// `delete_database_files` — the file set a factory reset removes.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn deleting_a_database_takes_its_wal_and_shm_with_it() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("x.db");
+    drop(Database::open(&db_path).unwrap());
+    // A clean close checkpoints the sidecars away; the point under test is the
+    // file set, not SQLite's behaviour, so they are written by hand.
+    let wal = dir.path().join("x.db-wal");
+    let shm = dir.path().join("x.db-shm");
+    std::fs::write(&wal, b"stale").unwrap();
+    std::fs::write(&shm, b"stale").unwrap();
+    let keep = dir.path().join("keep.txt");
+    std::fs::write(&keep, b"mine").unwrap();
+
+    delete_database_files(&db_path).unwrap();
+
+    assert!(!db_path.exists(), "the database file must be gone");
+    assert!(!wal.exists(), "the -wal sidecar must be gone");
+    assert!(!shm.exists(), "the -shm sidecar must be gone");
+    assert_eq!(
+        std::fs::read(&keep).unwrap(),
+        b"mine",
+        "a file that is not part of the database must be left alone"
+    );
+}
+
+#[test]
+fn deleting_a_database_that_is_not_there_succeeds() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("absent.db");
+
+    delete_database_files(&db_path).unwrap();
+
+    let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+    assert!(
+        left.is_empty(),
+        "deleting a missing database must create nothing: {left:?}"
+    );
+}
+
+#[test]
+fn a_refused_legacy_database_opens_at_the_baseline_after_its_files_are_deleted() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("openalpaca.db");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+             CREATE TABLE legacy_data (id INTEGER PRIMARY KEY, content TEXT NOT NULL);
+             INSERT INTO legacy_data (id, content) VALUES (7, 'about to go');",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO schema_version (version) VALUES (?1)",
+            [migrations::BASELINE_VERSION - 1],
+        )
+        .unwrap();
+    }
+    std::fs::write(dir.path().join("openalpaca.db-wal"), b"stale").unwrap();
+    std::fs::write(dir.path().join("openalpaca.db-shm"), b"stale").unwrap();
+    assert!(
+        Database::open(&db_path).is_err(),
+        "the version-{} database must be refused before the delete",
+        migrations::BASELINE_VERSION - 1
+    );
+
+    delete_database_files(&db_path).unwrap();
+
+    let db = Database::open(&db_path).expect("a deleted database must open fresh");
+    assert_eq!(db.schema_version().unwrap(), migrations::BASELINE_VERSION);
+    let legacy_tables: i64 = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'legacy_data'",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(legacy_tables, 0, "the legacy rows must not survive the delete");
+}
