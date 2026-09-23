@@ -35,6 +35,15 @@ impl EventBroadcaster {
         self.tx.subscribe()
     }
 
+    /// How many receivers are subscribed right now — one per open
+    /// `/v1/events` socket, which is the only thing that subscribes (GUI
+    /// windows and `openalpaca daemon tail`). `GET /v1/status`'s
+    /// `busy.connected_clients`; it counts the caller's own window when the
+    /// caller has one open.
+    pub fn client_count(&self) -> usize {
+        self.tx.receiver_count()
+    }
+
     /// Persist and broadcast a pre-built event.
     ///
     /// For event variants constructed outside this module (e.g. the plugin

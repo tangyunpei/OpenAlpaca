@@ -425,6 +425,28 @@ impl<'a> TaskRepository<'a> {
         })
     }
 
+    /// How many runs are non-terminal right now — the rows
+    /// [`list_non_terminal`](Self::list_non_terminal) would return, counted
+    /// without materialising them.
+    ///
+    /// `GET /v1/status`'s `busy.running_tasks`: what a stop now would leave
+    /// for the next boot to mark `interrupted`. The same predicate as the
+    /// listing and the sweep, so the three cannot disagree about which rows
+    /// are live.
+    pub fn count_non_terminal(&self) -> Result<u64> {
+        self.db.with_connection(|conn| {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM task \
+                     WHERE status IN ('queued', 'running', 'paused')",
+                    [],
+                    |row| row.get(0),
+                )
+                .context("Failed to count non-terminal tasks")?;
+            Ok(u64::try_from(count).unwrap_or(0))
+        })
+    }
+
     /// Mark every non-terminal task (queued / running / paused) `interrupted`
     /// with the given detail, preserving any result summary already present.
     /// Returns the number of tasks swept.
