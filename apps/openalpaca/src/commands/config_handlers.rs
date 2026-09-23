@@ -471,7 +471,9 @@ pub(super) fn cmd_reset(env: &mut dyn ConfigEnv, key: Option<String>, factory: b
             .interact()?;
 
         if confirm {
-            ConfigRepository::new(&db).clear_all()?;
+            // "Data preserved" is only true while the owner id survives:
+            // the data is theirs by `identity.local_user_id`.
+            ConfigRepository::new(&db).clear_all_except_identity()?;
             ai_config::clear_ai_config()?;
             daemon_config_cli::clear_daemon_config()?;
             println!("Config reset (agents and data preserved).");

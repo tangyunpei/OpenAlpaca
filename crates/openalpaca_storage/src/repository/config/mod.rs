@@ -80,11 +80,22 @@ impl<'a> ConfigRepository<'a> {
         })
     }
 
-    /// Clear all configuration items.
-    pub fn clear_all(&self) -> Result<()> {
+    /// Clear every configuration item except the owner identity: every row
+    /// whose key does not start with `identity.` goes.
+    ///
+    /// `identity.local_user_id` is not configuration but the id every task,
+    /// message, session, artifact and memory row is owned under; without it
+    /// the next daemon boot mints a new owner and all of that belongs to an
+    /// id nobody is any more. The one row-wiping reset that includes it is
+    /// the factory reset, which deletes the database file instead.
+    pub fn clear_all_except_identity(&self) -> Result<()> {
         self.db.with_connection(|conn| {
-            conn.execute("DELETE FROM system_config", [])
-                .context("Failed to clear config")?;
+            // GLOB, not LIKE: case-sensitive, and `.` is literal.
+            conn.execute(
+                "DELETE FROM system_config WHERE key NOT GLOB 'identity.*'",
+                [],
+            )
+            .context("Failed to clear config")?;
             Ok(())
         })
     }
@@ -98,3 +109,6 @@ impl<'a> ConfigRepository<'a> {
         Ok(config_schema::lookup(key).and_then(|def| def.default.map(|d| d.to_string())))
     }
 }
+
+#[cfg(test)]
+mod tests;
