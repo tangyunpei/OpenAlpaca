@@ -50,6 +50,23 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
+    /// The daemon has begun shutting down and this socket is about to close.
+    ///
+    /// Sent **per socket**, by `routes/events.rs`'s cancel arm, immediately
+    /// before a `Close(1001)` frame — never broadcast through
+    /// `EventBroadcaster`. Per-socket rather than broadcast because the two
+    /// are racing: a socket that takes its cancel arm in the same tick would
+    /// never forward a broadcast frame, and a client that learns of a stop
+    /// only by watching its socket die cannot tell a deliberate stop from a
+    /// crash. Nothing persists it (`events/persistence.rs` answers `Ok(0)`).
+    ///
+    /// `grace_secs` is the daemon's force-exit window, so a client can say
+    /// how long it will be before the process is gone for certain.
+    DaemonShuttingDown {
+        grace_secs: u64,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
     CommandReceived {
         request_id: String,
         command: String,

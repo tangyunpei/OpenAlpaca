@@ -63,7 +63,10 @@ use uuid::Uuid;
 /// [`Extensions::shutdown_all`](crate::managers::extensions::Extensions::shutdown_all)
 /// derives its sweep budget from what is left of it rather than from a literal
 /// of its own.
-const FORCE_EXIT_GRACE: Duration = Duration::from_secs(10);
+///
+/// `pub(crate)` so `routes/events.rs` can tell a departing WebSocket client how
+/// long the process has left. One literal, not two.
+pub(crate) const FORCE_EXIT_GRACE: Duration = Duration::from_secs(10);
 
 fn main() -> Result<()> {
     // W1: the command line is read FIRST — before the logger, the store, the
@@ -725,6 +728,7 @@ async fn async_main(
         confirmation_broker: Some(confirmation_broker),
         tool_registry: tool_registry_for_state,
         extensions: extensions.clone(),
+        cancel_token: cancel_token.clone(),
     });
 
     let app = router::build_router(state);

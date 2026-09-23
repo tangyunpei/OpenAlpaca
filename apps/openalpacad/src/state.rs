@@ -62,4 +62,12 @@ pub struct AppState {
     /// supervisors are constructed unconditionally, so no "subsystem absent"
     /// path exists to report and `/v1/extensions` has no `503`.
     pub extensions: Arc<crate::managers::extensions::Extensions>,
+    /// The one shutdown token `main.rs` cancels the moment shutdown begins —
+    /// from `POST /v1/command {"command":"shutdown"}` or from SIGINT/SIGTERM,
+    /// which converge on the same future — before it stops accepting
+    /// connections. A handler whose connection outlives its request selects
+    /// on it: the `/v1/events` socket does, so its client is told the daemon
+    /// is going away instead of being left on a socket that dies with the
+    /// process.
+    pub cancel_token: tokio_util::sync::CancellationToken,
 }

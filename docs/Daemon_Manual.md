@@ -606,6 +606,21 @@ Skills whose frontmatter sets `invoke.cron` (see the Skill Template Reference) a
 - Payload: `openalpaca_api::events::ServerEvent`
 - Includes operational, task, agent, security, and orchestration events.
 
+**Shutdown.** When the daemon begins shutting down, every open socket receives
+one `daemon_shutting_down` frame — `{"type", "grace_secs", "ts",
+"instance_id"}`, where `grace_secs` is the force-exit window (10) — and is then
+closed with WebSocket code **1001** ("going away"), reason
+`daemon_shutting_down`. The frame is composed **per socket** rather than
+broadcast, because the two race: a socket taking its shutdown arm in the same
+tick would never forward a broadcast frame, and a client that learns of a stop
+only by watching its socket die cannot tell a deliberate stop from a crash.
+Before this frame existed the socket simply stayed open and silent until the
+process exited under it. The frame is not persisted to `event_log`, and
+**nothing is replayed** — the socket is best-effort by design, so a shutdown
+mid-stream is one more gap and the usual resync-and-refetch covers it. A client
+that does not know the frame (`openalpaca daemon tail` prints it as an unknown
+event) still sees the 1001 close.
+
 ### SSE Chat Stream
 
 1. `POST /v1/chat` starts the turn and answers `{stream_id, lane_key,
@@ -802,6 +817,10 @@ The wire names below are the `type` tag of `ServerEvent`
 list is the whole union. Every frame also carries `ts` and `instance_id`.
 
 - `heartbeat`, `command_received`, `wake`
+- `daemon_shutting_down` (`grace_secs`) — sent **per socket** by
+  `/v1/events`'s shutdown arm, immediately before a `Close(1001,
+  "daemon_shutting_down")`, never through the broadcaster and never written to
+  `event_log`
 - `task_status`, `agent_status`, `agent_config_changed`
 - `workflow_started`, `workflow_progress`, `workflow_steered`
 - `subagent_span` — one subagent lane of a run opening or closing: the
@@ -833,7 +852,8 @@ already wrote keep their `event_type` and still list from
 that name.
 
 Persisted rows use the same words with two exceptions: `agent_status` is
-logged as `agent_status_change`, and `heartbeat` is not persisted at all
+logged as `agent_status_change`, and neither `heartbeat` nor
+`daemon_shutting_down` is persisted at all
 (`apps/openalpacad/src/events/persistence.rs`).
 
 ## Background Tasks

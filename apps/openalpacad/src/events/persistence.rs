@@ -11,6 +11,12 @@ impl EventBroadcaster {
             let repo = EventLogRepository::new(db);
             let persist_result: Result<i64, _> = match event {
                 ServerEvent::Heartbeat { .. } => Ok(0), // Skip heartbeats
+                // Never reaches this function: it is composed per socket in
+                // `routes/events.rs` and written straight to the wire. The arm
+                // exists because the match is exhaustive, and it must stay
+                // `Ok(0)` — a shutdown is not an `event_log` row, and the
+                // table is never pruned (CLAUDE.md, W6).
+                ServerEvent::DaemonShuttingDown { .. } => Ok(0),
                 ServerEvent::CommandReceived {
                     request_id,
                     command,
@@ -695,6 +701,29 @@ mod tests {
         let detail = row.detail.as_ref().expect("the row carries a detail blob");
         assert!(detail["task_id"].is_null());
         assert!(detail["agent_id"].is_null());
+    }
+
+    /// `daemon_shutting_down` is written per socket, never through the
+    /// broadcaster — but if anything ever did broadcast one, it must not
+    /// become an `event_log` row: a shutdown is not history, and the table is
+    /// never pruned (W6).
+    #[test]
+    fn daemon_shutting_down_is_never_persisted() {
+        let (_dir, db) = test_db();
+        let eb = EventBroadcaster::new(16, "inst-1".to_string(), Some(db.clone()));
+
+        eb.broadcast(ServerEvent::DaemonShuttingDown {
+            grace_secs: 10,
+            ts: chrono::Utc::now(),
+            instance_id: "inst-1".to_string(),
+        });
+
+        let rows = EventLogRepository::new(&db).recent(10).unwrap();
+        assert!(
+            rows.is_empty(),
+            "a shutdown frame must not reach event_log, found {:?}",
+            rows.iter().map(|r| &r.event_type).collect::<Vec<_>>()
+        );
     }
 
     // ── GAP-10: the run goes in the indexed column ──────────────────────
