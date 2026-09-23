@@ -262,29 +262,29 @@ fn spawn_daemon() -> anyhow::Result<u64> {
     tracing::info!("Daemon runtime dir: {}", app_dir.display());
     tracing::info!("Daemon config dir: {}", config_dir.display());
 
+    let mut cmd = Command::new(&path_to_use);
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr)
+        .current_dir(&app_dir)
+        .env("OPENALPACA_CONFIG_DIR", &config_dir)
+        .env(store::MANAGED_LOG_ENV, "1");
+
+    // Only the detachment differs by platform. A platform that is neither
+    // builds the command and never spawns it, as it never did.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
 
-        // On Unix, use setsid to detach from terminal
-        let mut cmd = Command::new(&path_to_use);
-        cmd.stdin(std::process::Stdio::null())
-            .stdout(stdout)
-            .stderr(stderr)
-            .current_dir(&app_dir)
-            .env("OPENALPACA_CONFIG_DIR", &config_dir)
-            .env(store::MANAGED_LOG_ENV, "1");
-
-        // Create new session (detach from parent)
+        // On Unix, use setsid to detach from terminal: a new session,
+        // detached from the parent.
         unsafe {
             cmd.pre_exec(|| {
                 libc::setsid();
                 Ok(())
             });
         }
-
-        let child = cmd.spawn()?;
-        reap_when_it_exits(child);
+        reap_when_it_exits(cmd.spawn()?);
     }
 
     #[cfg(windows)]
@@ -293,14 +293,9 @@ fn spawn_daemon() -> anyhow::Result<u64> {
         const DETACHED_PROCESS: u32 = 0x00000008;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-        Command::new(&path_to_use)
-            .stdin(std::process::Stdio::null())
-            .stdout(stdout)
-            .stderr(stderr)
-            .current_dir(&app_dir)
-            .env("OPENALPACA_CONFIG_DIR", &config_dir)
-            .env(store::MANAGED_LOG_ENV, "1")
-            .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
+        // The `Child` is dropped, not reaped: that closes its handle and
+        // leaves the detached daemon running.
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
             .spawn()?;
     }
 
