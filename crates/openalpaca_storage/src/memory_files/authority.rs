@@ -19,7 +19,10 @@
 //!   loser's own un-honored link to the winner already reports it (one
 //!   conflict per pair; fixtures 18 and 24 read together).
 //! - **`source_forgotten`**: a note citing a source some tombstone suppresses,
-//!   unless the note was written after that forget (an edit lifts it).
+//!   unless the note was written in a later second than that forget (an edit
+//!   lifts it). The clock is to the second, so a write in the forget's own
+//!   second counts as before it — suppressed until the next edit, the safe
+//!   direction.
 
 use super::note::{Note, NoteId, NoteStatus};
 use super::snapshot::{ControlSnapshot, Origin};
@@ -96,7 +99,7 @@ pub struct DerivedNote {
     pub unhonored_links: Vec<NoteId>,
     /// The same-`fact_key` winner this note lost to, if any.
     pub same_key_loser_to: Option<NoteId>,
-    /// A cited source is suppressed by a tombstone newer than this note's
+    /// A cited source is suppressed by a tombstone at or after this note's
     /// record (design §6, *Forget contract*).
     pub source_forgotten: bool,
     /// P3: carries an un-honored link, or is a same-`fact_key` loser.
@@ -245,12 +248,13 @@ pub fn derive(inputs: &[NoteInput<'_>], snapshot: &ControlSnapshot) -> Derivatio
     let mut notes = BTreeMap::new();
     for input in inputs {
         let id = input.note.id;
+        // `<=`: a write in the forget's own second is not "after" it.
         let source_forgotten = input.note.sources.iter().any(|s| {
             let key = s.suppression_key();
             snapshot
                 .tombstones
                 .iter()
-                .any(|t| t.suppressed_sources.contains(&key) && written_at[&id] < t.forgotten_at)
+                .any(|t| t.suppressed_sources.contains(&key) && written_at[&id] <= t.forgotten_at)
         });
         let mut by = superseded_by.get(&id).cloned().unwrap_or_default();
         by.sort();

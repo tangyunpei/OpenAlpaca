@@ -2647,6 +2647,74 @@ fn source_forgotten_is_derived_and_an_edit_lifts_it() {
         view.note.sources.iter().any(|s| s.id == "4812"),
         "the citation stays"
     );
+
+    // Boundary: the clock is to the second, so a record and a forget can
+    // share one. A note written in the forget's second is suppressed too (the
+    // safe direction), an edit in that same second stays suppressed, and the
+    // next second's edit lifts it.
+    let offset = Arc::new(AtomicI64::new(0));
+    let clock = {
+        let offset = Arc::clone(&offset);
+        move || ts(2026, 9, 23, 12, 0, 0) + chrono::Duration::seconds(offset.load(Ordering::SeqCst))
+    };
+    let p = Partition::open(&StoreScope::Home, BOB)
+        .unwrap()
+        .with_clock(clock);
+    let gone = p
+        .create(
+            NewNote {
+                sources: vec![src("77")],
+                ..new_note("Gone", "# Gone\n\nx\n", NoteKind::Fact)
+            },
+            Actor::ModelTool,
+        )
+        .unwrap();
+    let kept = p
+        .create(
+            NewNote {
+                sources: vec![src("77")],
+                ..new_note("Kept", "# Kept\n\ny\n", NoteKind::Fact)
+            },
+            Actor::ModelTool,
+        )
+        .unwrap();
+    p.forget(&[(gone.id, gone.revision.clone())]).unwrap();
+    let snapshot = p.snapshot().unwrap();
+    assert_eq!(
+        snapshot.notes[&kept.id].written_at, snapshot.tombstones[0].forgotten_at,
+        "the record and the forget share a second"
+    );
+    assert!(
+        p.read(&kept.id).unwrap().derived.source_forgotten,
+        "a same-second write is suppressed"
+    );
+    let u = p
+        .update(
+            &kept.id,
+            &kept.revision,
+            edit_body("# Kept\n\ny (same second)\n"),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    assert!(u.written);
+    assert!(
+        p.read(&kept.id).unwrap().derived.source_forgotten,
+        "an edit in the forget's second stays suppressed"
+    );
+    offset.store(1, Ordering::SeqCst);
+    let u = p
+        .update(
+            &kept.id,
+            &u.revision,
+            edit_body("# Kept\n\ny (next second)\n"),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    assert!(u.written);
+    assert!(
+        !p.read(&kept.id).unwrap().derived.source_forgotten,
+        "the next second's edit lifts it"
+    );
 }
 
 #[test]
