@@ -1054,6 +1054,8 @@ pub(crate) fn canonicalize_timestamp(field: &str, value: &str) -> Result<String>
 }
 
 #[cfg(test)]
+mod fixture_tests;
+#[cfg(test)]
 mod tests;
 
 // ============================================================================

@@ -308,7 +308,20 @@ impl MemoryIndex {
         let mut chunks: HashMap<i64, ChunkEvidence> = HashMap::new();
         let mut exact: HashMap<i64, ExactEvidence> = HashMap::new();
 
-        if let Some(m) = parsed.word_match() {
+        // A literal's parts are routed only when the literal itself matches
+        // no eligible note.
+        let mut words: Vec<String> = parsed.words.clone();
+        for literal in &parsed.literals {
+            if !literal_has_hit(&conn, &literal.text, &filter)? {
+                for part in &literal.parts {
+                    if !words.contains(part) {
+                        words.push(part.clone());
+                    }
+                }
+            }
+        }
+
+        if let Some(m) = parsed.word_match(&words) {
             let rows = fts_candidates(&conn, "fts_word", &m, &filter)?;
             if rows.len() >= CANDIDATE_CAP {
                 partial = true;
@@ -319,7 +332,7 @@ impl MemoryIndex {
                 e.word_rank = Some(rank);
             }
         }
-        if let Some(m) = parsed.trigram_match() {
+        if let Some(m) = parsed.trigram_match(&words) {
             let rows = fts_candidates(&conn, "fts_tri", &m, &filter)?;
             if rows.len() >= CANDIDATE_CAP {
                 partial = true;
@@ -330,9 +343,8 @@ impl MemoryIndex {
                 e.tri_rank = Some(rank);
             }
         }
-        let shorts: Vec<&str> = parsed.shorts().collect();
-        if !shorts.is_empty() {
-            let (rows, capped) = substring_candidates(&conn, &shorts, &filter)?;
+        if !parsed.shorts.is_empty() {
+            let (rows, capped) = substring_candidates(&conn, &parsed.shorts, &filter)?;
             partial |= capped;
             for (chunk_id, note_rowid) in rows {
                 chunks.entry(chunk_id).or_default().note_rowid = note_rowid;
@@ -374,6 +386,7 @@ impl MemoryIndex {
         Ok(rank(
             q,
             &parsed,
+            &words,
             &filter,
             notes,
             chunk_rows,
@@ -425,7 +438,7 @@ fn fts_candidates(
 /// the chunks containing any of `shorts`, plus whether the cap was hit.
 fn substring_candidates(
     conn: &Connection,
-    shorts: &[&str],
+    shorts: &[String],
     filter: &Filter,
 ) -> Result<(Vec<(i64, i64)>, bool)> {
     let sql = format!(
@@ -451,11 +464,43 @@ fn substring_candidates(
         let id: i64 = row.get(0)?;
         let note_rowid: i64 = row.get(1)?;
         let fields: [String; 4] = [row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?];
-        if shorts.iter().any(|s| fields.iter().any(|f| f.contains(s))) {
+        if shorts
+            .iter()
+            .any(|s| fields.iter().any(|f| f.contains(s.as_str())))
+        {
             hits.push((id, note_rowid));
         }
     }
     Ok((hits, false))
+}
+
+/// Whether a literal, as a phrase, matches any eligible note on either
+/// table — the probe that decides whether its parts are routed.
+fn literal_has_hit(conn: &Connection, literal: &str, filter: &Filter) -> Result<bool> {
+    let phrase = format!("\"{}\"", literal.replace('"', "\"\""));
+    let mut tables = vec!["fts_word"];
+    if literal.chars().count() >= 3 {
+        tables.push("fts_tri");
+    }
+    for table in tables {
+        let sql = format!(
+            "SELECT EXISTS(
+                SELECT 1 FROM {table}
+                CROSS JOIN chunk c ON c.id = {table}.rowid
+                CROSS JOIN note n ON n.rowid = c.note_rowid
+                WHERE {table} MATCH ? AND {filter})",
+            filter = filter.clause
+        );
+        let mut params: Vec<Value> = Vec::with_capacity(filter.params.len() + 1);
+        params.push(Value::Text(phrase.clone()));
+        params.extend(filter.params.iter().cloned());
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let hit: bool = stmt.query_row(params_from_iter(params.iter()), |r| r.get(0))?;
+        if hit {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn exact_rows(
@@ -671,6 +716,7 @@ struct NoteScore {
 fn rank(
     q: &SearchQuery,
     parsed: &ParsedQuery,
+    words: &[String],
     filter: &Filter,
     notes: HashMap<i64, NoteRow>,
     chunk_rows: Vec<ChunkRow>,
@@ -707,7 +753,8 @@ fn rank(
             best: None,
         });
         let mut coverage = 0.0;
-        for word in parsed.words() {
+        for word in words {
+            let word = word.as_str();
             if text.has_token(word) {
                 entry.reasons.insert(MatchReason::Term);
                 entry.terms.insert(word.to_string());
@@ -721,14 +768,14 @@ fn rank(
                 coverage += W_TRIGRAM;
             }
         }
-        for literal in parsed.literals() {
+        for literal in parsed.literals.iter().map(|l| l.text.as_str()) {
             if text.has_phrase(literal) {
                 entry.reasons.insert(MatchReason::Phrase);
                 entry.phrases.insert(literal.to_string());
                 coverage += W_PHRASE;
             }
         }
-        for short in parsed.shorts() {
+        for short in &parsed.shorts {
             if text.contains(short) {
                 entry.shorts.insert(short.to_string());
                 coverage += W_SHORT;

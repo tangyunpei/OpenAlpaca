@@ -279,8 +279,19 @@ mod chunker_tests {
 mod query_tests {
     use super::super::query::*;
 
-    fn terms(q: &str) -> Vec<Term> {
-        parse_query(q).unwrap().terms
+    fn parsed(q: &str) -> ParsedQuery {
+        parse_query(q).unwrap()
+    }
+
+    fn words(q: &str) -> Vec<String> {
+        parsed(q).words
+    }
+
+    fn literal(text: &str, parts: &[&str]) -> Literal {
+        Literal {
+            text: text.to_string(),
+            parts: parts.iter().map(|p| p.to_string()).collect(),
+        }
     }
 
     #[test]
@@ -305,119 +316,120 @@ mod query_tests {
 
     #[test]
     fn words_of_three_or_more_characters_are_routed_and_stop_words_dropped() {
-        assert_eq!(
-            terms("what editor do I prefer?"),
-            vec![Term::Word("editor".into()), Term::Word("prefer".into())]
-        );
+        assert_eq!(words("what editor do I prefer?"), vec!["editor", "prefer"]);
         // Stop words survive when nothing else remains.
-        assert_eq!(terms("and"), vec![Term::Word("and".into())]);
-        assert_eq!(
-            terms("AND OR NOT"),
-            vec![Term::Word("and".into()), Term::Word("not".into())]
-        );
+        assert_eq!(words("and"), vec!["and"]);
+        assert_eq!(words("AND OR NOT"), vec!["and", "not"]);
         // A short Latin term is dropped beside a longer one, kept alone.
-        assert_eq!(terms("or"), vec![Term::Short("or".into())]);
-        assert_eq!(
-            terms("tabs OR tomatoes"),
-            vec![Term::Word("tabs".into()), Term::Word("tomatoes".into())]
-        );
-        assert_eq!(
-            terms("p50/p95 (ms)"),
-            vec![
-                Term::Literal("p50/p95".into()),
-                Term::Word("p50".into()),
-                Term::Word("p95".into()),
-            ]
-        );
+        let p = parsed("or");
+        assert!(p.words.is_empty());
+        assert_eq!(p.shorts, vec!["or"]);
+        let p = parsed("tabs OR tomatoes");
+        assert_eq!(p.words, vec!["tabs", "tomatoes"]);
+        assert!(p.shorts.is_empty());
+        let p = parsed("p50/p95 (ms)");
+        assert!(p.words.is_empty());
+        assert_eq!(p.literals, vec![literal("p50/p95", &["p50", "p95"])]);
+        assert!(p.shorts.is_empty());
     }
 
     #[test]
     fn short_cjk_terms_are_kept_beside_longer_ones() {
-        assert_eq!(
-            terms("简洁 quick"),
-            vec![Term::Short("简洁".into()), Term::Word("quick".into())]
-        );
-        assert_eq!(terms("答"), vec![Term::Short("答".into())]);
-        assert_eq!(terms("简洁的回答"), vec![Term::Word("简洁的回答".into())]);
+        let p = parsed("简洁 quick");
+        assert_eq!(p.words, vec!["quick"]);
+        assert_eq!(p.shorts, vec!["简洁"]);
+        assert_eq!(parsed("答").shorts, vec!["答"]);
+        assert_eq!(words("简洁的回答"), vec!["简洁的回答"]);
         // Two-character CJK is a word of the language, not a fragment.
-        let t = terms("please remind me which answer style the user 喜欢");
-        assert!(t.contains(&Term::Short("喜欢".into())));
-        assert!(t.contains(&Term::Word("answer".into())));
-        assert!(!t.iter().any(|x| x.text() == "the"));
+        let p = parsed("please remind me which answer style the user 喜欢");
+        assert_eq!(p.shorts, vec!["喜欢"]);
+        assert!(p.words.contains(&"answer".to_string()));
+        assert!(!p.words.contains(&"the".to_string()));
     }
 
     #[test]
-    fn identifiers_are_literals_plus_their_parts_and_punctuation_is_trimmed() {
+    fn identifiers_are_literals_with_fallback_parts_and_punctuation_is_trimmed() {
+        let p = parsed("OPENALPACA_HOME_STORE");
+        assert!(p.words.is_empty());
         assert_eq!(
-            terms("OPENALPACA_HOME_STORE"),
-            vec![
-                Term::Literal("openalpaca_home_store".into()),
-                Term::Word("openalpaca".into()),
-                Term::Word("home".into()),
-                Term::Word("store".into()),
-            ]
+            p.literals,
+            vec![literal(
+                "openalpaca_home_store",
+                &["openalpaca", "home", "store"]
+            )]
         );
         assert_eq!(
-            terms("openalpaca_storage::memory_files")[0],
-            Term::Literal("openalpaca_storage::memory_files".into())
+            parsed("openalpaca_storage::memory_files").literals,
+            vec![literal(
+                "openalpaca_storage::memory_files",
+                &["openalpaca", "storage", "memory", "files"]
+            )]
         );
+        assert_eq!(words("\"tabs for indentation"), vec!["tabs", "indentation"]);
+        assert_eq!(words("tabs*"), vec!["tabs"]);
+        let p = parsed("title:tabs");
+        assert!(p.words.is_empty());
+        assert_eq!(p.literals, vec![literal("title:tabs", &["title", "tabs"])]);
+        assert_eq!(words("(tabs"), vec!["tabs"]);
+        assert_eq!(words("-tabs"), vec!["tabs"]);
+        assert_eq!(words("^tabs"), vec!["tabs"]);
         assert_eq!(
-            terms("\"tabs for indentation"),
-            vec![Term::Word("tabs".into()), Term::Word("indentation".into())]
+            words("cargo test --ignored bench_"),
+            vec!["cargo", "test", "ignored", "bench"]
         );
-        assert_eq!(terms("tabs*"), vec![Term::Word("tabs".into())]);
+        // A stop word inside an identifier is not a fallback part.
         assert_eq!(
-            terms("title:tabs"),
-            vec![
-                Term::Literal("title:tabs".into()),
-                Term::Word("title".into()),
-                Term::Word("tabs".into())
-            ]
-        );
-        assert_eq!(terms("(tabs"), vec![Term::Word("tabs".into())]);
-        assert_eq!(terms("-tabs"), vec![Term::Word("tabs".into())]);
-        assert_eq!(terms("^tabs"), vec![Term::Word("tabs".into())]);
-        assert_eq!(
-            terms("cargo test --ignored bench_"),
-            vec![
-                Term::Word("cargo".into()),
-                Term::Word("test".into()),
-                Term::Word("ignored".into()),
-                Term::Word("bench".into()),
-            ]
+            parsed("for/each").literals,
+            vec![literal("for/each", &["each"])]
         );
     }
 
     #[test]
     fn punctuation_only_queries_have_no_terms_but_are_not_refused() {
-        assert!(terms("???").is_empty());
-        assert!(terms("\"").is_empty());
-        assert!(terms("; -- ").is_empty());
+        assert!(parsed("???").terms().is_empty());
+        assert!(parsed("\"").terms().is_empty());
+        assert!(parsed("; -- ").terms().is_empty());
     }
 
     #[test]
     fn match_strings_are_quoted_literals_joined_by_or() {
-        let q = parse_query("tabs AND spaces").unwrap();
-        assert_eq!(q.word_match().as_deref(), Some("\"tabs\" OR \"spaces\""));
-        assert_eq!(q.trigram_match().as_deref(), Some("\"tabs\" OR \"spaces\""));
-        let q = parse_query("{tabs} [spaces] ; DROP TABLE notes; --").unwrap();
+        let p = parsed("tabs AND spaces");
         assert_eq!(
-            q.word_match().as_deref(),
+            p.word_match(&p.words).as_deref(),
+            Some("\"tabs\" OR \"spaces\"")
+        );
+        assert_eq!(
+            p.trigram_match(&p.words).as_deref(),
+            Some("\"tabs\" OR \"spaces\"")
+        );
+        let p = parsed("{tabs} [spaces] ; DROP TABLE notes; --");
+        assert_eq!(
+            p.word_match(&p.words).as_deref(),
             Some("\"tabs\" OR \"spaces\" OR \"drop\" OR \"table\" OR \"notes\"")
         );
         // A quote inside a literal is doubled, never a delimiter.
-        let q = parse_query("a\"b\"c").unwrap();
-        assert_eq!(q.word_match().as_deref(), Some("\"a\"\"b\"\"c\""));
+        let p = parsed("a\"b\"c");
+        assert_eq!(p.word_match(&p.words).as_deref(), Some("\"a\"\"b\"\"c\""));
+        // A literal rides beside the words; the search adds its parts to the
+        // word list when the literal matches nothing.
+        let p = parsed("title:tabs");
+        assert_eq!(p.word_match(&p.words).as_deref(), Some("\"title:tabs\""));
+        assert_eq!(
+            p.word_match(&p.literals[0].parts).as_deref(),
+            Some("\"title\" OR \"tabs\" OR \"title:tabs\"")
+        );
         // Nothing routed: no MATCH at all.
-        assert_eq!(parse_query("or").unwrap().word_match(), None);
-        assert_eq!(parse_query("???").unwrap().trigram_match(), None);
+        let p = parsed("or");
+        assert_eq!(p.word_match(&p.words), None);
+        let p = parsed("???");
+        assert_eq!(p.trigram_match(&p.words), None);
     }
 
     #[test]
     fn duplicate_terms_collapse_and_the_term_count_is_capped() {
-        assert_eq!(terms("tabs tabs TABS"), vec![Term::Word("tabs".into())]);
+        assert_eq!(words("tabs tabs TABS"), vec!["tabs"]);
         let long: Vec<String> = (0..50).map(|i| format!("word{i}")).collect();
-        assert_eq!(terms(&long.join(" ")).len(), MAX_TERMS);
+        assert_eq!(words(&long.join(" ")).len(), MAX_TERMS);
     }
 }
 

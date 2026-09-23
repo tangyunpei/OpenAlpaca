@@ -7,8 +7,11 @@
 //!   routed to both FTS tables;
 //! - a **literal**: a token with punctuation inside it, an identifier or a
 //!   path (`OPENALPACA_HOME_STORE`, `crate::module`, `p50/p95`) — kept whole
-//!   as a phrase on both tables, and its alphanumeric parts of three or more
-//!   characters also become words;
+//!   as a phrase on both tables; its alphanumeric parts of three or more
+//!   characters are the **fallback** the search routes as words only when
+//!   the literal itself matches no eligible note (`title:tabs` finds a note
+//!   about tabs; `OPENALPACA_HOME_STORE` does not drag in every note that
+//!   says `openalpaca`);
 //! - a **short** term: one or two characters — routed to the bounded
 //!   substring pass when it is CJK, or when the query has no other term.
 //!
@@ -45,61 +48,50 @@ pub(crate) const STOP_WORDS: &[&str] = &[
     "under", "again", "also", "just", "very", "please",
 ];
 
-/// One routed term.
+/// An identifier or path kept whole, with the parts the search falls back
+/// to when the whole matches nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Term {
-    /// Three or more alphanumeric characters — both FTS tables.
-    Word(String),
-    /// An identifier or path kept whole — a phrase on both tables.
-    Literal(String),
-    /// One or two characters — the substring pass.
-    Short(String),
-}
-
-impl Term {
-    pub(crate) fn text(&self) -> &str {
-        match self {
-            Self::Word(s) | Self::Literal(s) | Self::Short(s) => s,
-        }
-    }
+pub(crate) struct Literal {
+    pub text: String,
+    /// Its alphanumeric runs of three or more characters, stop words
+    /// excluded, in order.
+    pub parts: Vec<String>,
 }
 
 /// A parsed query.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct ParsedQuery {
     /// The whole query normalized, with runs of whitespace collapsed to one
     /// space and the ends trimmed — what exact title and alias matching sees.
     pub normalized: String,
-    /// The routed terms, deduplicated, in query order.
-    pub terms: Vec<Term>,
+    /// Standalone words of three or more characters — both FTS tables.
+    pub words: Vec<String>,
+    /// Identifiers and paths — a phrase on both tables.
+    pub literals: Vec<Literal>,
+    /// One- and two-character terms — the substring pass.
+    pub shorts: Vec<String>,
 }
 
 impl ParsedQuery {
-    pub(crate) fn words(&self) -> impl Iterator<Item = &str> {
-        self.terms.iter().filter_map(|t| match t {
-            Term::Word(s) => Some(s.as_str()),
-            _ => None,
-        })
+    /// Every routed term's text, in query order.
+    #[cfg(test)]
+    pub(crate) fn terms(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = self.words.iter().map(String::as_str).collect();
+        out.extend(self.literals.iter().map(|l| l.text.as_str()));
+        out.extend(self.shorts.iter().map(String::as_str));
+        out
     }
 
-    pub(crate) fn literals(&self) -> impl Iterator<Item = &str> {
-        self.terms.iter().filter_map(|t| match t {
-            Term::Literal(s) => Some(s.as_str()),
-            _ => None,
-        })
-    }
-
-    pub(crate) fn shorts(&self) -> impl Iterator<Item = &str> {
-        self.terms.iter().filter_map(|t| match t {
-            Term::Short(s) => Some(s.as_str()),
-            _ => None,
-        })
-    }
-
-    /// The `unicode61` table's MATCH string: every word and literal as a
-    /// quoted phrase, ORed. `None` when there is nothing to route.
-    pub(crate) fn word_match(&self) -> Option<String> {
-        let parts: Vec<String> = self.words().chain(self.literals()).map(quote).collect();
+    /// The `unicode61` table's MATCH string over `words` and the literals:
+    /// every term a quoted phrase, ORed. `None` when there is nothing to
+    /// route.
+    pub(crate) fn word_match(&self, words: &[String]) -> Option<String> {
+        let parts: Vec<String> = words
+            .iter()
+            .map(String::as_str)
+            .chain(self.literals.iter().map(|l| l.text.as_str()))
+            .map(quote)
+            .collect();
         if parts.is_empty() {
             None
         } else {
@@ -109,10 +101,11 @@ impl ParsedQuery {
 
     /// The trigram table's MATCH string: the same terms, restricted to those
     /// of three or more characters (a shorter phrase matches nothing there).
-    pub(crate) fn trigram_match(&self) -> Option<String> {
-        let parts: Vec<String> = self
-            .words()
-            .chain(self.literals())
+    pub(crate) fn trigram_match(&self, words: &[String]) -> Option<String> {
+        let parts: Vec<String> = words
+            .iter()
+            .map(String::as_str)
+            .chain(self.literals.iter().map(|l| l.text.as_str()))
             .filter(|t| t.chars().count() >= 3)
             .map(quote)
             .collect();
@@ -196,67 +189,66 @@ pub(crate) fn parse_query(query: &str) -> Result<ParsedQuery> {
         .collect::<Vec<_>>()
         .join(" ");
 
-    let mut raw: Vec<Term> = Vec::new();
+    let mut words: Vec<String> = Vec::new();
+    let mut literals: Vec<Literal> = Vec::new();
+    let mut shorts: Vec<String> = Vec::new();
     for token in normalized_full.split_whitespace() {
         let trimmed = token.trim_matches(|c: char| !c.is_alphanumeric());
         if trimmed.is_empty() {
             continue;
         }
         if trimmed.chars().all(char::is_alphanumeric) {
-            raw.push(classify(trimmed));
-        } else {
-            raw.push(Term::Literal(trimmed.to_string()));
-            for part in tokens(trimmed) {
-                if part.chars().count() >= 3 {
-                    raw.push(Term::Word(part.to_string()));
-                }
+            if trimmed.chars().count() >= 3 {
+                words.push(trimmed.to_string());
+            } else {
+                shorts.push(trimmed.to_string());
             }
+        } else {
+            let parts: Vec<String> = tokens(trimmed)
+                .filter(|p| p.chars().count() >= 3 && !STOP_WORDS.contains(p))
+                .map(str::to_string)
+                .collect();
+            literals.push(Literal {
+                text: trimmed.to_string(),
+                parts: dedupe(parts),
+            });
         }
     }
 
-    let has_long = raw
-        .iter()
-        .any(|t| matches!(t, Term::Word(_) | Term::Literal(_)));
-    let has_non_stop = raw.iter().any(|t| match t {
-        Term::Word(w) => !STOP_WORDS.contains(&w.as_str()),
-        Term::Literal(_) => true,
-        Term::Short(_) => false,
-    });
+    let has_long = !words.is_empty() || !literals.is_empty();
+    let has_non_stop =
+        !literals.is_empty() || words.iter().any(|w| !STOP_WORDS.contains(&w.as_str()));
+    if has_non_stop {
+        words.retain(|w| !STOP_WORDS.contains(&w.as_str()));
+    }
+    shorts.retain(|s| !has_long || s.chars().all(is_cjk));
 
+    let mut parsed = ParsedQuery {
+        normalized,
+        words: dedupe(words),
+        literals: Vec::new(),
+        shorts: dedupe(shorts),
+    };
     let mut seen: HashSet<String> = HashSet::new();
-    let mut terms: Vec<Term> = Vec::new();
-    for term in raw {
-        let keep = match &term {
-            Term::Word(w) => !(has_non_stop && STOP_WORDS.contains(&w.as_str())),
-            Term::Literal(_) => true,
-            Term::Short(s) => !has_long || s.chars().all(is_cjk),
-        };
-        if !keep {
-            continue;
-        }
-        let key = format!("{}:{}", term_tag(&term), term.text());
-        if seen.insert(key) {
-            terms.push(term);
-        }
-        if terms.len() >= MAX_TERMS {
-            break;
+    for literal in literals {
+        if seen.insert(literal.text.clone()) {
+            parsed.literals.push(literal);
         }
     }
-    Ok(ParsedQuery { normalized, terms })
+    // Bound the work a long query can ask for: the first terms win.
+    let mut budget = MAX_TERMS;
+    parsed.words.truncate(budget);
+    budget -= parsed.words.len();
+    parsed.literals.truncate(budget);
+    budget -= parsed.literals.len();
+    parsed.shorts.truncate(budget);
+    Ok(parsed)
 }
 
-fn classify(token: &str) -> Term {
-    if token.chars().count() >= 3 {
-        Term::Word(token.to_string())
-    } else {
-        Term::Short(token.to_string())
-    }
-}
-
-fn term_tag(term: &Term) -> &'static str {
-    match term {
-        Term::Word(_) => "w",
-        Term::Literal(_) => "l",
-        Term::Short(_) => "s",
-    }
+fn dedupe(items: Vec<String>) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    items
+        .into_iter()
+        .filter(|item| seen.insert(item.clone()))
+        .collect()
 }
