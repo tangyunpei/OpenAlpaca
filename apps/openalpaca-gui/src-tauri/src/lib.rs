@@ -283,7 +283,8 @@ fn spawn_daemon() -> anyhow::Result<u64> {
             });
         }
 
-        cmd.spawn()?;
+        let child = cmd.spawn()?;
+        reap_when_it_exits(child);
     }
 
     #[cfg(windows)]
@@ -304,6 +305,34 @@ fn spawn_daemon() -> anyhow::Result<u64> {
     }
 
     Ok(log_start)
+}
+
+/// Wait on the spawned daemon from a thread of its own, so that when it exits
+/// it is reaped instead of lingering as a zombie child of this app.
+///
+/// `setsid` gives the daemon its own session, but this process stays its
+/// parent until one of them exits. A child nobody waits on is kept in the
+/// process table after it exits — on Linux under its old name — and every
+/// "is it gone yet?" check read that as a daemon still running: each Stop
+/// waited out its whole budget and reported `still_alive`.
+///
+/// Waiting changes nothing else. `wait` neither signals nor holds the child,
+/// the thread is never joined, and when the app quits the thread dies with
+/// it while the daemon — in its own session — keeps running and is adopted by
+/// init, which reaps it from then on. The daemon still outlives the window.
+#[cfg(unix)]
+fn reap_when_it_exits(mut child: std::process::Child) {
+    let pid = child.id();
+    let spawned = std::thread::Builder::new()
+        .name("openalpacad-reaper".into())
+        .spawn(move || match child.wait() {
+            Ok(status) => tracing::info!("Daemon (pid {pid}) exited: {status}"),
+            Err(e) => tracing::warn!("Could not wait on the daemon (pid {pid}): {e}"),
+        });
+    if let Err(e) = spawned {
+        // The daemon is up either way; only its reaping is lost.
+        tracing::warn!("Could not start the daemon reaper thread: {e}");
+    }
 }
 
 // ============================================================================

@@ -54,26 +54,65 @@ impl StopOutcome {
     }
 }
 
+/// The name a live daemon's process — or its executable's file — carries.
+const DAEMON_PROCESS_NAME: &str = "openalpacad";
+
 /// Whether `pid` is a live `openalpacad`.
 ///
 /// A stale `discovery.json` (a crash, a reboot, a forced exit) can name a pid
 /// the OS has since recycled; trusting it blindly would make a caller signal,
 /// wait on or report an unrelated process. So the process's name — or its
 /// executable's file name — must say `openalpacad`.
+///
+/// And it must be running: see [`is_live_process_named`] for why an exited
+/// process that is still in the process table is not.
 pub fn pid_is_daemon(pid: u32) -> bool {
+    pid_is_live_process_named(pid, DAEMON_PROCESS_NAME)
+}
+
+/// [`pid_is_daemon`] for any name — the process-table read, apart from the
+/// decision, so the decision can be driven against a process the test owns.
+fn pid_is_live_process_named(pid: u32, wanted: &str) -> bool {
     let mut system = sysinfo::System::new();
     system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
     match system.process(sysinfo::Pid::from_u32(pid)) {
-        Some(process) => {
-            process.name().to_string_lossy().contains("openalpacad")
-                || process
-                    .exe()
-                    .and_then(|path| path.file_name())
-                    .map(|name| name.to_string_lossy().contains("openalpacad"))
-                    .unwrap_or(false)
-        }
+        Some(process) => is_live_process_named(
+            &process.name().to_string_lossy(),
+            process
+                .exe()
+                .and_then(|path| path.file_name())
+                .map(|name| name.to_string_lossy())
+                .as_deref(),
+            process.status(),
+            wanted,
+        ),
         None => false,
     }
+}
+
+/// The decision, over what the process table says about one pid: its name,
+/// its executable's file name (when the OS will say), and its status.
+///
+/// A **zombie** has exited and is waiting for its parent to reap it; on Linux
+/// it stays in the process table under its old name until then. The app
+/// shell used to be exactly such a parent — it spawned the daemon and never
+/// waited on it — so a daemon that had stopped cleanly still read as running
+/// for as long as the app stayed open, and every stop waited out its budget
+/// and reported `StillAlive`. An exited process is not a daemon, whoever has
+/// yet to reap it; neither is one the OS reports as `Dead`.
+fn is_live_process_named(
+    name: &str,
+    exe_file_name: Option<&str>,
+    status: sysinfo::ProcessStatus,
+    wanted: &str,
+) -> bool {
+    if matches!(
+        status,
+        sysinfo::ProcessStatus::Zombie | sysinfo::ProcessStatus::Dead
+    ) {
+        return false;
+    }
+    name.contains(wanted) || exe_file_name.is_some_and(|exe| exe.contains(wanted))
 }
 
 /// The pid `discovery.json` names, when it names a live `openalpacad`.
@@ -265,5 +304,94 @@ mod tests {
     #[test]
     fn not_running_is_clear() {
         assert!(StopOutcome::NotRunning.is_clear());
+    }
+
+    /// An exited daemon its parent has not reaped yet is gone, not running —
+    /// whatever name it still carries in the process table.
+    #[test]
+    fn an_exited_daemon_awaiting_its_reap_is_not_a_live_daemon() {
+        use sysinfo::ProcessStatus;
+        for status in [ProcessStatus::Zombie, ProcessStatus::Dead] {
+            assert!(
+                !is_live_process_named(
+                    "openalpacad",
+                    Some("openalpacad"),
+                    status,
+                    DAEMON_PROCESS_NAME
+                ),
+                "{status:?} must not count as a live daemon"
+            );
+        }
+        for status in [
+            ProcessStatus::Run,
+            ProcessStatus::Sleep,
+            ProcessStatus::Idle,
+            // Stopped by a signal is suspended, not gone: it still holds the
+            // lock and the database.
+            ProcessStatus::Stop,
+        ] {
+            assert!(
+                is_live_process_named("openalpacad", None, status, DAEMON_PROCESS_NAME),
+                "{status:?} is a live daemon"
+            );
+        }
+    }
+
+    #[test]
+    fn a_live_process_is_a_daemon_by_its_name_or_its_executable() {
+        use sysinfo::ProcessStatus::Run;
+        let wanted = DAEMON_PROCESS_NAME;
+        assert!(is_live_process_named("openalpacad", None, Run, wanted));
+        assert!(is_live_process_named(
+            "main",
+            Some("openalpacad"),
+            Run,
+            wanted
+        ));
+        assert!(!is_live_process_named("bash", Some("bash"), Run, wanted));
+        assert!(!is_live_process_named("bash", None, Run, wanted));
+    }
+
+    /// The same decision against a real process table: a child this test
+    /// spawned, let exit and deliberately left unreaped. `waitid(WNOWAIT)`
+    /// blocks until the child has exited *without* reaping it, so the pid is a
+    /// zombie for the length of the assertion. A positive control first, so
+    /// the negative cannot pass on a name that never matched.
+    #[cfg(unix)]
+    #[test]
+    fn a_real_unreaped_child_is_not_a_live_process() {
+        let mut running = std::process::Command::new("/bin/sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawn sleep 5");
+        let alive = pid_is_live_process_named(running.id(), "sleep");
+        running.kill().ok();
+        running.wait().ok();
+        assert!(alive, "a running child must read as live");
+
+        let mut exited = std::process::Command::new("/bin/sleep")
+            .arg("0")
+            .spawn()
+            .expect("spawn sleep 0");
+        let pid = exited.id();
+        // SAFETY: a zeroed `siginfo_t` is a valid out-parameter; `waitid`
+        // with `WNOWAIT` leaves the child waitable, so `exited.wait()` below
+        // still reaps it.
+        let rc = unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        assert_eq!(rc, 0, "waitid: {}", std::io::Error::last_os_error());
+        let zombie_reads_live = pid_is_live_process_named(pid, "sleep");
+        exited.wait().expect("reap the child");
+        assert!(
+            !zombie_reads_live,
+            "an exited, unreaped child must not read as live"
+        );
     }
 }
