@@ -77,7 +77,7 @@ pub fn spawn_embedding_indexer(
 
 /// Spawn background memory decay task.
 ///
-/// Periodically applies importance decay and prunes low-importance memories.
+/// Periodically applies importance decay. It never prunes: see `run_memory_decay`.
 pub fn spawn_memory_decay(
     db: Database,
     daemon_config: Arc<ArcSwap<openalpaca_core::daemon_config::DaemonConfig>>,
@@ -100,39 +100,42 @@ pub fn spawn_memory_decay(
 
             let half_life = dcfg.orchestrator.memory.decay.half_life_days;
             let min_importance = dcfg.orchestrator.memory.decay.min_importance;
-            let soft_cap = dcfg.orchestrator.memory.decay.soft_cap;
 
-            let repo = openalpaca_storage::MemoryRepository::new(&db);
-
-            let owner_ids = match repo.list_owner_ids() {
-                Ok(ids) => ids,
-                Err(e) => {
-                    tracing::warn!("Memory decay: failed to list owners: {e}");
-                    continue;
-                }
-            };
-
-            let mut total_decayed = 0usize;
-            let mut total_pruned = 0usize;
-
-            for owner_id in &owner_ids {
-                match repo.apply_importance_decay(owner_id, half_life, min_importance) {
-                    Ok(n) => total_decayed += n,
-                    Err(e) => tracing::warn!("Memory decay failed for {owner_id}: {e}"),
-                }
-                match repo.prune_low_importance(owner_id, min_importance, soft_cap) {
-                    Ok(n) => total_pruned += n,
-                    Err(e) => tracing::warn!("Memory pruning failed for {owner_id}: {e}"),
-                }
-            }
-
-            if total_decayed > 0 || total_pruned > 0 {
-                tracing::info!(
-                    "Memory lifecycle: decayed {total_decayed} memories, pruned {total_pruned}"
-                );
+            let decayed = run_memory_decay(&db, half_life, min_importance);
+            if decayed > 0 {
+                tracing::info!("Memory lifecycle: decayed {decayed} memories");
             }
         }
     });
+}
+
+/// One decay pass over every owner's memories. Returns how many rows were
+/// re-scored.
+///
+/// **Decay only — nothing here deletes.** This pass used to be followed by
+/// `prune_low_importance`, which removes every non-`kb_chunk` memory at or
+/// below the floor and then everything past the soft cap. The recall path
+/// never records an access, so a preference the user saved explicitly sank to
+/// the floor and was deleted after about 125 days at the defaults. A durable
+/// memory goes only when the user or the model removes it.
+fn run_memory_decay(db: &Database, half_life_days: f64, min_importance: f64) -> usize {
+    let repo = openalpaca_storage::MemoryRepository::new(db);
+    let owner_ids = match repo.list_owner_ids() {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!("Memory decay: failed to list owners: {e}");
+            return 0;
+        }
+    };
+
+    let mut decayed = 0usize;
+    for owner_id in &owner_ids {
+        match repo.apply_importance_decay(owner_id, half_life_days, min_importance) {
+            Ok(n) => decayed += n,
+            Err(e) => tracing::warn!("Memory decay failed for {owner_id}: {e}"),
+        }
+    }
+    decayed
 }
 
 /// Spawn daemon-level heartbeat task.
@@ -409,6 +412,7 @@ pub fn spawn_telemetry_cleanup(db: Database, cancel: CancellationToken) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openalpaca_storage::{MemoryKind, MemoryScope, MemorySource};
 
     /// An orphaned upload row: past the grace period and attached to no message,
     /// so `list_orphaned` returns it.
@@ -507,6 +511,67 @@ mod tests {
                 .unwrap()
                 .is_some(),
             "the row must outlive a failed removal, or the bytes are unreachable"
+        );
+    }
+
+    /// A preference the user saved explicitly and nothing has read for 200
+    /// days: at the shipped defaults (half-life 30 d, floor 0.05) one decay
+    /// pass takes it to the floor.
+    fn stale_preference(db: &Database) -> i64 {
+        let id = openalpaca_storage::MemoryRepository::new(db)
+            .add(
+                "owner-1",
+                MemoryKind::Preference,
+                MemoryScope::Global,
+                "",
+                MemorySource::Conversation,
+                "Reply in Japanese",
+                None,
+                0.9,
+                0.9,
+            )
+            .expect("insert preference");
+        db.with_connection(|conn| {
+            conn.execute(
+                "UPDATE memory SET last_accessed_at = datetime('now', '-200 days') WHERE id = ?1",
+                [id],
+            )?;
+            Ok(())
+        })
+        .expect("age the row");
+        id
+    }
+
+    /// The cycle the daemon runs re-scores a durable memory and leaves it
+    /// there. The recall path never records an access, so a saved preference
+    /// sinks to the floor within months; a pass that also pruned would then
+    /// delete it, which is what the daemon used to do.
+    #[test]
+    fn a_decay_cycle_keeps_a_preference_that_reached_the_floor() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = test_db(&dir);
+        let id = stale_preference(&db);
+
+        assert_eq!(run_memory_decay(&db, 30.0, 0.05), 1);
+
+        let repo = openalpaca_storage::MemoryRepository::new(&db);
+        let mem = repo
+            .get(id)
+            .unwrap()
+            .expect("the preference must survive the cycle the daemon runs");
+        assert!(
+            (mem.importance - 0.05).abs() < 1e-9,
+            "decay still runs: importance should sit at the floor, got {}",
+            mem.importance
+        );
+
+        // Negative control: the prune the cycle used to call is exactly what
+        // would have removed it. Goes with `prune_low_importance` when the
+        // storage crate drops it.
+        repo.prune_low_importance("owner-1", 0.05, 500).unwrap();
+        assert!(
+            repo.get(id).unwrap().is_none(),
+            "prune_low_importance deletes a memory at the floor, which is why the cycle must not call it"
         );
     }
 }
