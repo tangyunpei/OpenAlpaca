@@ -106,9 +106,10 @@ export const GAPS: Record<GapId, GapDescriptor> = {
   // `GET /v1/status` carries `started_at`/`uptime_secs` from the top of the
   // daemon's own `async_main`, `schema_version` read from the open database
   // rather than counted from the migration files, and `log_path` — the
-  // CLI-managed `state/logs/daemon.log`, or `null` for a daemon started any
-  // other way, which is the honest answer rather than a path to a file nobody
-  // wrote. It also carries §4.8's two size totals and the boot session-log
+  // launcher-managed `state/logs/daemon.log` (the CLI's, or since T30 this
+  // app's own sidecar's), or `null` for a daemon started any other way, which
+  // is the honest answer rather than a path to a file nobody wrote. It also
+  // carries §4.8's two size totals and the boot session-log
   // sweep, so the Connection panel says what the store costs. The daemon log
   // is bounded in the same change (16 MB, three generations), because serving
   // a path to an unbounded file would be an invitation.

@@ -1036,6 +1036,12 @@ Plan reference: `tasks/api-fix-plan.md` §Phase 8 item 8.
 > **Phase B stays open**: a real in-daemon log appender, and un-discarding the GUI
 > sidecar's stdout (`src-tauri/src/lib.rs`). Until then a GUI-launched daemon has
 > no log file, which is exactly what `log_path: null` reports.
+>
+> _Since T30 (2026-09-22) the sidecar half is done: the app's own sidecar appends
+> its stdout and stderr to the same `state/logs/daemon.log`, under the same
+> rotation, and sets `MANAGED_LOG_ENV`, so a GUI-launched daemon reports that file
+> as `log_path` (§2's `Copy log path` row). The in-daemon appender is still not
+> built; a daemon started by hand still reports `null`._
 
 **UI needs:** `uptime 4d 02h`, `Schema v33`, and `Copy log path`.
 
