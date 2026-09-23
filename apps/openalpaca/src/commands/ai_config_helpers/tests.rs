@@ -25,13 +25,17 @@ const SANDBOXED: [&str; 4] = [
     "OPENALPACA_MASTER_KEY",
 ];
 
-struct EnvSandbox {
+/// The one environment sandbox of this test binary: every test in it that
+/// touches `SANDBOXED` does so through this, under `ENV_LOCK` — the binary runs
+/// all its `#[cfg(test)]` modules on parallel threads, so a second lock would
+/// not serialize anything against this one.
+pub(crate) struct EnvSandbox {
     _lock: MutexGuard<'static, ()>,
     saved: Vec<(&'static str, Option<OsString>)>,
 }
 
 impl EnvSandbox {
-    fn enter(root: &Path) -> Self {
+    pub(crate) fn enter(root: &Path) -> Self {
         let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let saved = SANDBOXED
             .iter()
@@ -39,8 +43,8 @@ impl EnvSandbox {
             .collect();
         let config = root.join("config");
         std::fs::create_dir_all(&config).unwrap();
-        // SAFETY: serialized by ENV_LOCK; these are the only tests in this
-        // binary that touch these variables.
+        // SAFETY: serialized by ENV_LOCK; every test in this binary that
+        // touches these variables holds it through this sandbox.
         unsafe {
             std::env::set_var("HOME", root);
             std::env::set_var("OPENALPACA_HOME_STORE", root.join("home"));

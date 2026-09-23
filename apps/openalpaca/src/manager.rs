@@ -88,29 +88,40 @@ pub fn start_daemon() -> Result<()> {
     Ok(())
 }
 
-/// Stop the Daemon using PID from discovery.json.
-pub fn stop_daemon() -> Result<()> {
-    if let Some(d) = discovery::read_discovery()? {
-        if !daemon_lifecycle::pid_is_daemon(d.pid) {
-            println!(
-                "⚠️  PID {} is not a running openalpacad (stale discovery.json?); not signalling.",
-                d.pid
-            );
-            return Ok(());
-        }
-        println!("🛑 Stopping Daemon (PID: {})...", d.pid);
-        let pid = Pid::from_raw(d.pid as i32);
+/// What [`stop_daemon`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopRequest {
+    /// Nothing was running: no `discovery.json`, or a stale one naming a pid
+    /// that is not a live `openalpacad` (said on stdout, not signalled).
+    NotRunning,
+    /// SIGTERM was delivered to this pid. The daemon has been *asked* to stop;
+    /// it is gone only once `daemon_lifecycle` says so.
+    Signalled(u32),
+}
 
-        match signal::kill(pid, Signal::SIGTERM) {
-            Ok(_) => println!("✅ Signal sent."),
-            Err(e) => println!("⚠️  Failed to send signal: {}", e),
-        }
-
-        // Wait a bit?
-    } else {
+/// Ask the daemon `discovery.json` names to stop, with SIGTERM.
+///
+/// Returns as soon as the signal is delivered — the daemon's shutdown takes up
+/// to 10 s after that, so a caller that needs it gone waits on the pid with
+/// `daemon_lifecycle::wait_for_pid_exit`. A signal that cannot be delivered is
+/// an error: the daemon is still running, and reporting success would let a
+/// restart start a second one into its lock.
+pub fn stop_daemon() -> Result<StopRequest> {
+    let Some(d) = discovery::read_discovery()? else {
         println!("⚠️  No active daemon found (discovery.json missing).");
+        return Ok(StopRequest::NotRunning);
+    };
+    if !daemon_lifecycle::pid_is_daemon(d.pid) {
+        println!(
+            "⚠️  PID {} is not a running openalpacad (stale discovery.json?); not signalling.",
+            d.pid
+        );
+        return Ok(StopRequest::NotRunning);
     }
-    Ok(())
+    println!("🛑 Stopping Daemon (PID: {})...", d.pid);
+    signal::kill(Pid::from_raw(d.pid as i32), Signal::SIGTERM)
+        .with_context(|| format!("Failed to send SIGTERM to the daemon (PID {})", d.pid))?;
+    Ok(StopRequest::Signalled(d.pid))
 }
 
 /// Whether `discovery.json` names a live `openalpacad` (not a recycled PID).

@@ -939,6 +939,7 @@ POST /v1/command
 ## Troubleshooting
 
 - Daemon already running: check lock/discovery and stop existing instance cleanly.
+- `openalpaca daemon restart` stops the daemon but starts nothing, and exits with status 2: the old daemon was not completely gone 15 s after it was asked to stop, so starting a new one would have lost the single-instance lock. The message says which of two things happened. "`The daemon (PID …) is still running 15s after it was asked to stop, so nothing was restarted.`" — read the daemon log it names (`state/logs/daemon.log` under the store root) to see what it is doing, stop it with the `kill -9 <pid>` it prints, then `openalpaca daemon start`. "`The daemon (PID …) exited, but something still holds the single-instance lock 15s after it was asked to stop, so nothing was restarted.`" — another daemon is probably already running on this store; check `openalpaca daemon status` before starting one. `openalpaca daemon stop` reports the same two cases and exits 2 as well.
 - Discovery expired: restart daemon to rotate token and rewrite discovery.
 - DB lock/contention: ensure single daemon instance and avoid conflicting external writers.
 - Config not loading: verify resolved config directory and presence of expected files.

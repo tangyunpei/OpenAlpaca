@@ -104,9 +104,17 @@ pub fn singleton_lock_is_free() -> bool {
 /// [`wait_for_exit_with`] for the injected form every branch is tested
 /// through.
 pub fn wait_for_daemon_exit(timeout: Duration) -> StopOutcome {
-    let Some(pid) = running_daemon_pid() else {
-        return StopOutcome::NotRunning;
-    };
+    match running_daemon_pid() {
+        Some(pid) => wait_for_pid_exit(pid, timeout),
+        None => StopOutcome::NotRunning,
+    }
+}
+
+/// [`wait_for_daemon_exit`] for a caller that already knows the pid — the
+/// one it just signalled. Waiting on that pid, rather than re-reading
+/// `discovery.json`, cannot be fooled by a daemon that has removed the file
+/// (the last step of its shutdown) but has not exited yet.
+pub fn wait_for_pid_exit(pid: u32, timeout: Duration) -> StopOutcome {
     let started = Instant::now();
     wait_for_exit_with(
         pid,

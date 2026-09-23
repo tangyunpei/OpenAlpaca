@@ -445,4 +445,4 @@ pub(super) fn read_from_config(
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

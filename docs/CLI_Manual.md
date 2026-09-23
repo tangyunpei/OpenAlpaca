@@ -122,8 +122,8 @@ openalpaca daemon restart
 
 Notes:
 - `start` launches daemon and then GUI unless `--daemon-only` is set.
-- `stop` stops both daemon and GUI.
-- `restart` restarts daemon only.
+- `stop` asks the daemon to stop and waits until its process has exited and its single-instance lock is free — at most 15 s — then stops the GUI. A daemon still there after 15 s is reported with its PID, the daemon log to read and the `kill -9` that finishes the job by hand, and `stop` exits with status 2.
+- `restart` restarts the daemon only. It stops it the same way and starts the new one only once the old process has exited **and** the lock is free: a daemon keeps the lock for up to 10 s after its port closes, and a new one started into it would exit at once. If the old daemon is not gone within 15 s, nothing is started — `restart` prints why, and the commands that finish the job, and exits with status 2.
 - `status` reads the discovery file and calls the daemon's health endpoint. It prints status, version, PID, instance id and URL.
 - `tail` streams live daemon events (not historical query output); `--count` limits the number of events shown, default `0` = unlimited (Ctrl+C to stop).
 - `start` finds `openalpacad` in this order: `OPENALPACA_DAEMON_BIN=/abs/path/openalpacad`, next to the `openalpaca` binary (symlinks followed), `../libexec/`, then `PATH`. From a repository checkout it falls back to `cargo run -p openalpacad`.
