@@ -1,5 +1,5 @@
 use super::delivery::{TELEGRAM_MAX_LENGTH, chunk_message};
-use super::rate_limiter::ChatRateLimiter;
+use crate::common::KeyedRateLimiter;
 use std::time::Duration;
 
 /// Telegram cuts at its own 4096-byte limit; the algorithm itself is pinned
@@ -15,28 +15,14 @@ fn chunk_message_uses_the_telegram_limit() {
     assert_eq!(lens, [4096, 1]);
 }
 
-#[test]
-fn test_rate_limiter_allows_first_message() {
-    let limiter = ChatRateLimiter::new(Duration::from_secs(1));
-    assert!(limiter.check(12345).is_none());
-}
-
-#[test]
-fn test_rate_limiter_blocks_rapid_messages() {
-    let limiter = ChatRateLimiter::new(Duration::from_secs(1));
-    assert!(limiter.check(12345).is_none());
-    // Second check immediately should be rate limited
-    let wait = limiter.check(12345);
-    assert!(wait.is_some());
-    assert!(wait.unwrap() <= Duration::from_secs(1));
-}
-
+/// Telegram keys the shared limiter by i64 chat id, negative for groups; the
+/// limiter itself is pinned in `common::tests::rate_limit`.
 #[test]
 fn test_rate_limiter_independent_chats() {
-    let limiter = ChatRateLimiter::new(Duration::from_secs(1));
-    assert!(limiter.check(111).is_none());
-    assert!(limiter.check(222).is_none()); // Different chat, should pass
-    assert!(limiter.check(111).is_some()); // Same chat, should be limited
+    let limiter = KeyedRateLimiter::<i64>::new(Duration::from_secs(1));
+    assert!(limiter.check(-111).is_none());
+    assert!(limiter.check(111).is_none()); // Different chat, should pass
+    assert!(limiter.check(-111).is_some()); // Same chat, should be limited
 }
 
 // ── CON-01: Telegram uses the shared confirmation logic ──────────────
@@ -72,14 +58,14 @@ fn queued_request(broker: &ConfirmationBroker, request_id: &str) -> ResponseRx {
 /// `handle_message` makes, with Telegram's own key type (`ChatId.0`, an `i64`)
 /// — and it does so **without the rate limiter ever seeing the chat**.
 ///
-/// `ChatRateLimiter::check` both reads and stamps, so "the limiter has no
+/// `KeyedRateLimiter::check` both reads and stamps, so "the limiter has no
 /// record of this chat afterwards" is the observable consequence of the
 /// intercept running before it: an operator answering two prompts in a row is
 /// never told to wait, and their next real message still gets its full quota.
 #[test]
 fn a_confirmation_reply_is_answered_before_the_rate_limiter_sees_the_chat() {
     let chat_id: i64 = -100200300;
-    let limiter = ChatRateLimiter::new(Duration::from_secs(1));
+    let limiter = KeyedRateLimiter::<i64>::new(Duration::from_secs(1));
     let broker = ConfirmationBroker::new();
     let mut rx = queued_request(&broker, "req-telegram-1");
 

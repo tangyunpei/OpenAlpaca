@@ -279,5 +279,39 @@ pub(crate) fn chunk_message(text: &str, max_bytes: usize) -> Vec<String> {
     chunks
 }
 
+/// Per-conversation limiter on **inbound** messages: at most one message per
+/// `min_interval` per key (a Telegram chat id, a Discord channel id). Each
+/// connector owns its own instance, so equal ids on two platforms never
+/// share a slot.
+#[cfg(any(feature = "telegram", feature = "discord"))]
+pub(crate) struct KeyedRateLimiter<K> {
+    last_accepted: std::sync::Mutex<std::collections::HashMap<K, std::time::Instant>>,
+    min_interval: std::time::Duration,
+}
+
+#[cfg(any(feature = "telegram", feature = "discord"))]
+impl<K: Eq + std::hash::Hash> KeyedRateLimiter<K> {
+    pub(crate) fn new(min_interval: std::time::Duration) -> Self {
+        Self {
+            last_accepted: std::sync::Mutex::new(std::collections::HashMap::new()),
+            min_interval,
+        }
+    }
+
+    /// `None` lets the message through and restarts this key's interval;
+    /// `Some(wait)` refuses it and leaves the interval where it was.
+    pub(crate) fn check(&self, key: K) -> Option<std::time::Duration> {
+        let mut map = self.last_accepted.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(last) = map.get(&key) {
+            let elapsed = last.elapsed();
+            if elapsed < self.min_interval {
+                return Some(self.min_interval - elapsed);
+            }
+        }
+        map.insert(key, std::time::Instant::now());
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests;

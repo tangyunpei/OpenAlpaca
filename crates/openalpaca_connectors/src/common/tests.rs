@@ -442,3 +442,81 @@ mod chunking {
         assert_eq!(s.floor_char_boundary(0), 0);
     }
 }
+
+// --- Inbound rate limit (Telegram keys by i64 chat, Discord by u64 channel) ---
+
+#[cfg(any(feature = "telegram", feature = "discord"))]
+mod rate_limit {
+    use super::super::KeyedRateLimiter;
+    use std::time::{Duration, Instant};
+
+    fn stamp(limiter: &KeyedRateLimiter<u64>, key: u64) -> Instant {
+        *limiter.last_accepted.lock().unwrap().get(&key).unwrap()
+    }
+
+    #[test]
+    fn the_first_message_passes() {
+        let limiter = KeyedRateLimiter::new(Duration::from_secs(1));
+        assert!(limiter.check(12345u64).is_none());
+    }
+
+    #[test]
+    fn a_second_message_inside_the_interval_is_refused_with_the_wait() {
+        let limiter = KeyedRateLimiter::new(Duration::from_secs(1));
+        assert!(limiter.check(12345u64).is_none());
+        let wait = limiter.check(12345).expect("refused");
+        assert!(wait > Duration::ZERO && wait <= Duration::from_secs(1));
+    }
+
+    /// A refused message does not restart the interval, so a chat that keeps
+    /// talking is let through once the first interval is up.
+    #[test]
+    fn a_refusal_does_not_restart_the_interval() {
+        let limiter = KeyedRateLimiter::new(Duration::from_secs(1));
+        assert!(limiter.check(7u64).is_none());
+        let accepted = stamp(&limiter, 7);
+        assert!(limiter.check(7).is_some());
+        assert_eq!(stamp(&limiter, 7), accepted);
+    }
+
+    #[test]
+    fn a_message_after_the_interval_passes_and_restarts_it() {
+        let limiter = KeyedRateLimiter::new(Duration::from_millis(40));
+        assert!(limiter.check(7u64).is_none());
+        let accepted = stamp(&limiter, 7);
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(limiter.check(7).is_none());
+        assert!(stamp(&limiter, 7) > accepted);
+    }
+
+    #[test]
+    fn keys_do_not_interfere() {
+        let limiter = KeyedRateLimiter::new(Duration::from_secs(1));
+        assert!(limiter.check(111u64).is_none());
+        assert!(limiter.check(222).is_none());
+        assert!(limiter.check(111).is_some());
+    }
+
+    /// Each connector owns its own limiter: the same number seen by two
+    /// instances is two conversations.
+    #[test]
+    fn two_limiters_do_not_share_a_key() {
+        let telegram = KeyedRateLimiter::<i64>::new(Duration::from_secs(1));
+        let discord = KeyedRateLimiter::<u64>::new(Duration::from_secs(1));
+        assert!(telegram.check(7).is_none());
+        assert!(discord.check(7).is_none());
+    }
+
+    #[test]
+    fn a_poisoned_lock_is_recovered() {
+        let limiter = KeyedRateLimiter::new(Duration::from_secs(1));
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = limiter.last_accepted.lock().unwrap();
+            panic!("poison the limiter's lock");
+        }));
+        assert!(poisoned.is_err());
+        assert!(limiter.last_accepted.is_poisoned());
+        assert!(limiter.check(8u64).is_none());
+        assert!(limiter.check(8).is_some());
+    }
+}

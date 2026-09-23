@@ -5,7 +5,6 @@
 mod connector;
 mod delivery;
 mod handler;
-mod rate_limiter;
 
 #[cfg(test)]
 mod tests;

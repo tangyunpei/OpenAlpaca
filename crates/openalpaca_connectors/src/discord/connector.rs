@@ -5,8 +5,8 @@
 //! (same pattern as iMessage connector).
 
 use crate::common::{
-    LinkResult, format_confirmation_prompt, format_denial_message, handle_link_token,
-    intercept_confirmation_reply, redact_token, resolve_principal,
+    KeyedRateLimiter, LinkResult, format_confirmation_prompt, format_denial_message,
+    handle_link_token, intercept_confirmation_reply, redact_token, resolve_principal,
 };
 use crate::{Connector, ConnectorError};
 use arc_swap::ArcSwap;
@@ -23,9 +23,9 @@ use openalpaca_core::{
     types::Capability,
 };
 use openalpaca_storage::{Database, IdentityRepository, PreferenceRepository};
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use twilight_gateway::{EventTypeFlags, Intents, Shard, ShardId, StreamExt as _};
@@ -104,34 +104,6 @@ fn resolve_confirmation_channel(db: &Database, lane_key: &str) -> Option<u64> {
         .filter(|id| *id != 0)
 }
 
-/// Simple per-channel rate limiter. Allows at most 1 message per `min_interval` per channel.
-struct ChannelRateLimiter {
-    last_sent: Mutex<HashMap<u64, Instant>>,
-    min_interval: Duration,
-}
-
-impl ChannelRateLimiter {
-    fn new(min_interval: Duration) -> Self {
-        Self {
-            last_sent: Mutex::new(HashMap::new()),
-            min_interval,
-        }
-    }
-
-    /// Check if a message can be sent to this channel. Returns wait duration if rate limited.
-    fn check(&self, channel_id: u64) -> Option<Duration> {
-        let mut map = self.last_sent.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(last) = map.get(&channel_id) {
-            let elapsed = last.elapsed();
-            if elapsed < self.min_interval {
-                return Some(self.min_interval - elapsed);
-            }
-        }
-        map.insert(channel_id, Instant::now());
-        None
-    }
-}
-
 /// DiscordConnector manages the Discord bot lifecycle and message handling.
 ///
 /// Uses twilight's `Shard::next_event()` event loop with `tokio::select!`
@@ -143,7 +115,7 @@ pub struct DiscordConnector {
     gateway: Arc<Gateway>,
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
     cancel_token: CancellationToken,
-    rate_limiter: Arc<ChannelRateLimiter>,
+    rate_limiter: Arc<KeyedRateLimiter<u64>>,
     confirmation_broker: Option<Arc<ConfirmationBroker>>,
     /// Maps channel_id -> queue of request_ids for pending tool confirmations.
     /// VecDeque allows FIFO processing when multiple tools need confirmation.
@@ -168,7 +140,7 @@ impl DiscordConnector {
             gateway,
             daemon_config,
             cancel_token,
-            rate_limiter: Arc::new(ChannelRateLimiter::new(Duration::from_secs(1))),
+            rate_limiter: Arc::new(KeyedRateLimiter::new(Duration::from_secs(1))),
             confirmation_broker: None,
             pending_confirmations: Arc::new(DashMap::new()),
         }
@@ -655,24 +627,14 @@ mod tests {
         assert_eq!(lens, [2000, 1]);
     }
 
-    #[test]
-    fn test_rate_limiter_allows_first() {
-        let limiter = ChannelRateLimiter::new(Duration::from_secs(1));
-        assert!(limiter.check(12345).is_none());
-    }
-
-    #[test]
-    fn test_rate_limiter_blocks_second() {
-        let limiter = ChannelRateLimiter::new(Duration::from_secs(1));
-        limiter.check(12345);
-        assert!(limiter.check(12345).is_some());
-    }
-
+    /// Discord keys the shared limiter by u64 channel snowflake; the limiter
+    /// itself is pinned in `common::tests::rate_limit`.
     #[test]
     fn test_rate_limiter_different_channels() {
-        let limiter = ChannelRateLimiter::new(Duration::from_secs(1));
-        limiter.check(12345);
+        let limiter = KeyedRateLimiter::<u64>::new(Duration::from_secs(1));
+        limiter.check(u64::MAX);
         assert!(limiter.check(67890).is_none());
+        assert!(limiter.check(u64::MAX).is_some());
     }
 
     fn test_db() -> Database {

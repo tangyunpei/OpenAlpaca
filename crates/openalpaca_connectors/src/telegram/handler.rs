@@ -1,11 +1,10 @@
 //! Telegram message handling: dispatch, link/unlink commands, attachments.
 
 use super::delivery::{download_telegram_file, send_with_retry};
-use super::rate_limiter::ChatRateLimiter;
 use super::TelegramConnector;
 use crate::common::{
-    LinkResult, format_denial_message, handle_link_token, intercept_confirmation_reply,
-    redact_token, resolve_principal,
+    KeyedRateLimiter, LinkResult, format_denial_message, handle_link_token,
+    intercept_confirmation_reply, redact_token, resolve_principal,
 };
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
@@ -34,7 +33,7 @@ impl TelegramConnector {
         bus: Arc<EventBus>,
         gateway: Arc<Gateway>,
         daemon_config: Arc<ArcSwap<DaemonConfig>>,
-        rate_limiter: Arc<ChatRateLimiter>,
+        rate_limiter: Arc<KeyedRateLimiter<i64>>,
         confirmation_broker: Option<Arc<ConfirmationBroker>>,
         pending_confirmations: Arc<DashMap<i64, VecDeque<String>>>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

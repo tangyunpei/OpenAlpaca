@@ -1,8 +1,7 @@
 //! Telegram Connector: struct, lifecycle, and trait implementation.
 
 use super::delivery::send_with_retry;
-use super::rate_limiter::ChatRateLimiter;
-use crate::common::format_confirmation_prompt;
+use crate::common::{KeyedRateLimiter, format_confirmation_prompt};
 use crate::{Connector, ConnectorError};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
@@ -28,7 +27,7 @@ pub struct TelegramConnector {
     bus: Arc<EventBus>,
     gateway: Arc<Gateway>,
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
-    rate_limiter: Arc<ChatRateLimiter>,
+    rate_limiter: Arc<KeyedRateLimiter<i64>>,
     confirmation_broker: Option<Arc<ConfirmationBroker>>,
     /// Maps chat_id -> queue of request_ids for pending tool confirmations.
     /// VecDeque allows FIFO processing when multiple tools need confirmation.
@@ -51,7 +50,7 @@ impl TelegramConnector {
             bus,
             gateway,
             daemon_config,
-            rate_limiter: Arc::new(ChatRateLimiter::new(Duration::from_secs(1))),
+            rate_limiter: Arc::new(KeyedRateLimiter::new(Duration::from_secs(1))),
             confirmation_broker: None,
             pending_confirmations: Arc::new(DashMap::new()),
         }
