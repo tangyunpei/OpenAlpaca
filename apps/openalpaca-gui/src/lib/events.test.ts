@@ -639,6 +639,33 @@ describe("DaemonEventsClient", () => {
 
     client.disconnect();
   });
+
+  /**
+   * A bootstrap that succeeds retires the previous bootstrap's failure even
+   * before any socket opens: the user fixed the cause and pressed Reconnect,
+   * the daemon came up, and if its socket then fails the card must say so —
+   * not repeat a log tail from the start that has since worked.
+   */
+  it("a later bootstrap that succeeds retires the earlier one's reason", async () => {
+    const reason =
+      "The daemon did not start within 5 seconds. Its log ends with:\n\nFATAL: legacy schema v39";
+    const bootstrap = vi
+      .fn<() => Promise<ConnectionInfo>>()
+      .mockRejectedValueOnce(new Error(reason))
+      .mockResolvedValueOnce(INFO);
+    const client = makeClient({ bootstrap });
+
+    await client.connect();
+    expect(client.getLastError()).toBe(reason);
+
+    // Reconnect: this bootstrap succeeds, and the socket fails before opening.
+    await client.connect();
+    expect(bootstrap).toHaveBeenCalledTimes(2);
+    latest().onerror?.({});
+    expect(client.getLastError()).toBe("WebSocket connection error");
+
+    client.disconnect();
+  });
 });
 
 describe("ServerEvent union", () => {

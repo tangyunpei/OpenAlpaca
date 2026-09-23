@@ -276,6 +276,10 @@ export class DaemonEventsClient {
       const info = await this.deps.bootstrap();
       // Cancelled, or a newer attempt took over while we were waiting.
       if (gen !== this.generation) return;
+      // This bootstrap succeeded, so an earlier one's failure no longer
+      // stands: a socket that now fails before opening must report its own
+      // reason, not a daemon log tail from a start that has since worked.
+      this.bootError = null;
       this.adoptInstance(info.instanceId);
       this.openSocket(info);
     } catch (error) {
