@@ -38,39 +38,7 @@ const DISCORD_MAX_LENGTH: usize = 2000;
 /// Prefers splitting at paragraph boundaries (\n\n), then sentence boundaries (. ),
 /// then falls back to hard cut at a valid UTF-8 char boundary.
 pub fn chunk_message(text: &str) -> Vec<String> {
-    if text.len() <= DISCORD_MAX_LENGTH {
-        return vec![text.to_string()];
-    }
-
-    let mut chunks = Vec::new();
-    let mut remaining = text;
-
-    while !remaining.is_empty() {
-        if remaining.len() <= DISCORD_MAX_LENGTH {
-            chunks.push(remaining.to_string());
-            break;
-        }
-
-        // Find a safe byte boundary to slice up to (avoids panic on multi-byte UTF-8)
-        let boundary = remaining.floor_char_boundary(DISCORD_MAX_LENGTH);
-        let slice = &remaining[..boundary];
-
-        // Try paragraph boundary
-        let split_at = slice
-            .rfind("\n\n")
-            .map(|i| i + 2) // include the newlines
-            // Try sentence boundary
-            .or_else(|| slice.rfind(". ").map(|i| i + 2))
-            // Try any newline
-            .or_else(|| slice.rfind('\n').map(|i| i + 1))
-            // Hard cut at safe char boundary
-            .unwrap_or(boundary);
-
-        chunks.push(remaining[..split_at].to_string());
-        remaining = &remaining[split_at..];
-    }
-
-    chunks
+    crate::common::chunk_message(text, DISCORD_MAX_LENGTH)
 }
 
 /// Send a message with exponential backoff retry (3 attempts: 1s, 2s, 4s).
@@ -674,58 +642,17 @@ impl Connector for DiscordConnector {
 mod tests {
     use super::*;
 
+    /// Discord cuts at its own 2000-byte limit; the algorithm itself is
+    /// pinned once, at both platforms' limits, in `common::tests::chunking`.
     #[test]
-    fn test_chunk_message_short() {
-        let text = "Hello, world!";
-        let chunks = chunk_message(text);
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0], "Hello, world!");
-    }
-
-    #[test]
-    fn test_chunk_message_exact_limit() {
-        let text = "a".repeat(DISCORD_MAX_LENGTH);
-        let chunks = chunk_message(&text);
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].len(), DISCORD_MAX_LENGTH);
-    }
-
-    #[test]
-    fn test_chunk_message_over_limit() {
-        let text = "a".repeat(DISCORD_MAX_LENGTH + 100);
-        let chunks = chunk_message(&text);
-        assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].len(), DISCORD_MAX_LENGTH);
-        assert_eq!(chunks[1].len(), 100);
-    }
-
-    #[test]
-    fn test_chunk_message_paragraph_split() {
-        let para1 = "a".repeat(1500);
-        let para2 = "b".repeat(1000);
-        let text = format!("{}\n\n{}", para1, para2);
-        let chunks = chunk_message(&text);
-        assert_eq!(chunks.len(), 2);
-        assert!(chunks[0].ends_with('\n'));
-    }
-
-    #[test]
-    fn test_chunk_message_empty() {
-        let chunks = chunk_message("");
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0], "");
-    }
-
-    #[test]
-    fn test_chunk_message_multibyte_utf8() {
-        // 3-byte chars: each char is 3 bytes
-        let text = "\u{4e16}".repeat(700); // 700 * 3 = 2100 bytes > 2000
-        let chunks = chunk_message(&text);
-        assert!(chunks.len() >= 2);
-        // Verify no panic from slicing mid-character
-        for chunk in &chunks {
-            assert!(chunk.is_char_boundary(chunk.len()));
-        }
+    fn chunk_message_uses_the_discord_limit() {
+        assert_eq!(DISCORD_MAX_LENGTH, 2000);
+        assert_eq!(chunk_message(&"a".repeat(2000)).len(), 1);
+        let lens: Vec<usize> = chunk_message(&"a".repeat(2001))
+            .iter()
+            .map(String::len)
+            .collect();
+        assert_eq!(lens, [2000, 1]);
     }
 
     #[test]

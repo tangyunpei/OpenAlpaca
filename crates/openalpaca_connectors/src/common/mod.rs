@@ -231,5 +231,53 @@ pub fn store_attachment(
     })
 }
 
+/// Split a message into chunks of at most `max_bytes` bytes, a chat
+/// platform's message-length limit. Prefers splitting at paragraph boundaries
+/// (\n\n), then sentence boundaries (. ), then any newline, then falls back to
+/// a hard cut at a valid UTF-8 char boundary. Every separator stays with the
+/// chunk it ends, so the chunks concatenate back to `text`; empty text is one
+/// empty chunk.
+///
+/// `max_bytes` must fit the longest UTF-8 character (4 bytes), or a hard cut
+/// could back off to 0 and never advance. Callers pass their platform's
+/// constant.
+#[cfg(any(feature = "telegram", feature = "discord"))]
+pub(crate) fn chunk_message(text: &str, max_bytes: usize) -> Vec<String> {
+    assert!(max_bytes >= 4, "a chunk must fit any UTF-8 character");
+    if text.len() <= max_bytes {
+        return vec![text.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        if remaining.len() <= max_bytes {
+            chunks.push(remaining.to_string());
+            break;
+        }
+
+        // Find a safe byte boundary to slice up to (avoids panic on multi-byte UTF-8)
+        let boundary = remaining.floor_char_boundary(max_bytes);
+        let slice = &remaining[..boundary];
+
+        // Try paragraph boundary
+        let split_at = slice
+            .rfind("\n\n")
+            .map(|i| i + 2) // include the newlines
+            // Try sentence boundary
+            .or_else(|| slice.rfind(". ").map(|i| i + 2))
+            // Try any newline
+            .or_else(|| slice.rfind('\n').map(|i| i + 1))
+            // Hard cut at safe char boundary
+            .unwrap_or(boundary);
+
+        chunks.push(remaining[..split_at].to_string());
+        remaining = &remaining[split_at..];
+    }
+
+    chunks
+}
+
 #[cfg(test)]
 mod tests;
