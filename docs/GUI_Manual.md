@@ -163,7 +163,11 @@ loud; it is never appended to the answer, and nothing stores it. A turn that
 reaches no answer at all — it ran out of tool rounds, hit its cost cap, or was
 cut short — arrives as one plain line saying so and naming the last tool error,
 in the assistant bubble like any other reply, and it is in the transcript after
-a reload. A turn never ends with an empty bubble.
+a reload. A turn never ends with an empty bubble. A daemon that shuts down
+mid-turn ends the stream with one `error` frame that says so — and that a
+workflow the turn had started comes back `interrupted` — rather than leaving it
+hanging; being the daemon's own terminal frame, it retires this turn's
+main-loop approval card with it.
 
 **Auth.** HTTP requests carry the discovery bearer token in a header. The
 WebSocket, the SSE stream and the artifact content routes take `?token=`
@@ -921,7 +925,8 @@ shows the daemon's own reason under the switch — a `200` that wrote the bit
 without loading the provider says so, and an enable that loaded but found
 nothing to serve says that instead. `config/llm.toml` is seeded on first daemon
 start with every provider off and no keys. A cloud provider needs both: its
-switch on, then a key (`openalpaca llm keys add`). A **local** provider needs
+switch on, then a key (`Add key` on its row, or `openalpaca llm keys add`); the
+form refuses a key for a provider whose switch is off. A **local** provider needs
 no key — turn `ollama` on, and `Refresh models` after a later `ollama pull`. See
 [Installation Manual → Local Models (Ollama)](Installation_Manual.md#local-models-ollama).
 

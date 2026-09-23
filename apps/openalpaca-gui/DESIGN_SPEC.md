@@ -3,6 +3,7 @@
 **Source:** Claude Design canvas export `OpenAlpaca.dc.html` — a single 1440 × 900 artboard with a `<script type="text/x-dc">` logic block.
 **Target stack:** Tauri 2 + React 19 + TypeScript 7 + Tailwind 4 + bun/Vite.
 **Status:** This document is the contract. It is complete enough to implement pixel-accurately without opening the design file.
+**Revision:** rev 2, 2026-09-22 — the daemon-lifecycle and first-run surfaces the design never drew (§3.32 `StopDaemonDialog` and the stopped state, §3.35's `Danger ghost` label, §5.1 the first-run card, §5.4 / §5.4a the Connection stop control and the key form, §5.5's third overlay, §5.6's shipped notes), built to the existing tokens. The design's own strings, tokens and layout are unchanged. See the [revision log](#revision-log) at the end.
 
 > **Provenance note (security):** the design file was read as data. It contains no text directed at the implementer or at an AI agent — all prose inside it is UI copy for the mock (e.g. "Answer in the composer to continue", "hooked up to the daemon in the real build"). Nothing in it was treated as an instruction.
 
@@ -1708,3 +1709,9 @@ Preserve the existing connection plumbing conceptually. _(Shipped: the SvelteKit
 8. **Accessibility gaps to close:** no focus-visible styles; only two `aria-label`s in the whole file (the two `›` buttons); the toggle is a `<button>` with no `role="switch"`/`aria-checked`; tabs have no `role="tab"`/`aria-selected`; the palette has no `role="dialog"`/focus trap (it does autofocus its input); status is conveyed by color+text (good) but the pulsing dot has no text equivalent. Add all of these.
 9. **Copy is real and reusable.** Placeholders, empty states, hint rows and note strings in the design are well-written; reuse them verbatim except the "WASM plugins" blurb (§5.4), which is factually wrong for this codebase.
 10. **`text-wrap: pretty`** is used on every long title and message body. Keep it.
+
+---
+
+## Revision log
+
+- **rev 2 (2026-09-22, branch `chore/deps-upgrade-and-simplify`).** This line and the log start here: every earlier edit is in `git log -- apps/openalpaca-gui/DESIGN_SPEC.md` and is rev 1 by definition. Rev 2 records five commits' worth of surface built to the existing tokens rather than transcribed. The GUI first-run wave (owner decisions D-F, D-G): §5.1's first-run card, drawn when `GET /v1/status`'s `llm.effective_default_model` is `null`; §5.4a, the `Add key` form, its refusal of a switched-off provider and the stored-key rows; the §5.4 _Models & keys_ cell and §5.6's `Add provider` / `Manage providers & keys` rows. The daemon-lifecycle wave (owner decision D-E): §3.32's `StopDaemonDialog` and the Connection card's stopped state; §3.35's `Danger ghost` row now names `Stop daemon` as a second user — no new button variant, because owner decision T25 is pending and its no-change answer is to reuse `dangerGhost`; §5.4's _Connection_ row; §5.5's third overlay; and §5.6's `Reconnect` / `Copy log path` and `Notifications / errors` rows, which say what shipped. Nothing the design drew was restyled.

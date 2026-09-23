@@ -941,6 +941,20 @@ POST /v1/command
 {"command":"shutdown"}
 ```
 
+The answer — `200 {"request_id", "status": "shutting_down"}` — is an
+**acceptance, not a completion.** The daemon replies first and raises the
+shutdown about 100 ms later, so that the reply can leave; the process is gone
+only once the shutdown tail has run, which can take up to the 10-second window
+described in [Startup and Lifecycle](#startup-and-lifecycle). Nothing in the
+answer says the daemon has stopped. A client that needs to know waits on the
+daemon's **process**, then on its **single-instance lock** — never on the port,
+which closes first while the lock is still held — as `openalpaca daemon stop`,
+`openalpaca daemon restart` and the GUI app's `Stop daemon` all do (15 s,
+`openalpaca_storage::daemon_lifecycle`). Starting a new daemon before the lock
+is free makes the new one exit at once. The request is behind the bearer token
+like every other `/v1/*` route, and it drains nothing: see what a stop
+interrupts under [Startup and Lifecycle](#startup-and-lifecycle).
+
 **Where the daemon's output goes.** A daemon started by `openalpaca daemon
 start` or by the GUI app writes its stdout and stderr — every `tracing` line,
 and every fatal start-up refusal — to `state/logs/daemon.log` under the store
