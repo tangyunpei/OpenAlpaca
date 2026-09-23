@@ -90,6 +90,7 @@ fn a_held_daemon_lock_refuses_the_factory_reset() {
 
     let mut env = FakeEnv {
         answer: true,
+        daemon_running: true,
         ..FakeEnv::default()
     };
     let error = factory_reset(&mut env).expect_err("a held daemon lock must refuse the reset");
@@ -103,6 +104,45 @@ fn a_held_daemon_lock_refuses_the_factory_reset() {
         env.confirm_calls.get(),
         0,
         "the question must not be asked when the answer cannot be acted on"
+    );
+    for rel in TRIO {
+        assert!(root.join(rel).exists(), "{rel} must survive a refusal");
+    }
+}
+
+/// A held lock with no daemon to be found — one still booting, or a lock file
+/// left unwritable by a daemon once run under `sudo` — still refuses, but must
+/// not say a daemon is running: that sends the user to a `daemon stop` which
+/// answers "No active daemon found".
+#[test]
+fn a_held_lock_with_no_visible_daemon_refuses_without_claiming_one() {
+    let tmp = tempdir().unwrap();
+    let _env = EnvSandbox::enter(tmp.path());
+    assert_sandboxed(tmp.path());
+    let root = home(tmp.path());
+    seed_trio(&root);
+    let _holder = LockHolder::spawn(&root);
+
+    let mut env = FakeEnv {
+        answer: true,
+        daemon_running: false,
+        ..FakeEnv::default()
+    };
+    let error = factory_reset(&mut env).expect_err("a held lock must refuse the reset");
+
+    let message = format!("{error:#}");
+    assert!(
+        !message.contains("A daemon is running"),
+        "no daemon was found, so the refusal must not claim one: {message}"
+    );
+    assert!(
+        message.contains("openalpacad.lock") && message.contains("Nothing was deleted"),
+        "the refusal must name the lock file and say nothing was deleted: {message}"
+    );
+    assert_eq!(
+        env.confirm_calls.get(),
+        0,
+        "no question for an answer we cannot act on"
     );
     for rel in TRIO {
         assert!(root.join(rel).exists(), "{rel} must survive a refusal");
@@ -132,6 +172,7 @@ fn a_daemon_that_starts_during_the_prompt_refuses_the_factory_reset() {
             *started.borrow_mut() = Some(LockHolder::spawn(&booted_root));
             seed_trio(&booted_root);
         }))),
+        daemon_running: true,
         ..FakeEnv::default()
     };
     let error = factory_reset(&mut env)

@@ -19,6 +19,9 @@ pub(in crate::commands) struct FakeEnv {
     /// Runs while the prompt is "open" — what the world does while a user
     /// is still reading the warning.
     pub during_prompt: RefCell<Option<Box<dyn FnOnce()>>>,
+    /// What `daemon_is_running` answers — the refusal's wording, not the
+    /// decision.
+    pub daemon_running: bool,
 }
 
 impl ConfigEnv for FakeEnv {
@@ -33,6 +36,10 @@ impl ConfigEnv for FakeEnv {
             meanwhile();
         }
         Ok(self.answer)
+    }
+
+    fn daemon_is_running(&self) -> bool {
+        self.daemon_running
     }
 }
 

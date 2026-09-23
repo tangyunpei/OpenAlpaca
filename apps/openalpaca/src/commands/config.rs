@@ -56,6 +56,12 @@ pub(super) trait ConfigEnv {
     /// Shows the factory-reset warning and reads the typed confirmation word.
     /// `Ok(false)` means the user declined; an error means we could not ask.
     fn confirm_factory_reset(&self, warning: &str) -> Result<bool>;
+
+    /// Whether a live `openalpacad` is detectable (discovery pid + process
+    /// name). Used only to WORD a factory-reset refusal: the lock alone decides
+    /// whether the reset runs, and a held lock with no detectable daemon is a
+    /// daemon still booting or a lock file this user cannot write.
+    fn daemon_is_running(&self) -> bool;
 }
 
 #[derive(Default)]
@@ -79,6 +85,10 @@ impl ConfigEnv for RealConfigEnv {
 
     fn confirm_factory_reset(&self, warning: &str) -> Result<bool> {
         super::config_factory_reset::prompt_on_terminal(warning)
+    }
+
+    fn daemon_is_running(&self) -> bool {
+        crate::manager::is_daemon_running()
     }
 }
 

@@ -38,6 +38,21 @@ in between lost without a word. Stop it first:
 
 then run `openalpaca config reset --factory` again.";
 
+/// Why the reset will not run when the lock is held but no daemon can be
+/// seen: one still booting (it takes the lock before it writes discovery), or
+/// a lock file this user cannot open — a daemon once run under `sudo` leaves
+/// it owned by root. Saying "a daemon is running" there would send the user to
+/// a `daemon stop` that finds nothing.
+fn store_locked_refusal(lock: &Path) -> String {
+    format!(
+        "The store's lock ({}) is held or cannot be taken, and no running daemon was \
+         found. A daemon may still be starting: wait a few seconds and run `openalpaca \
+         config reset --factory` again. If none is starting, check that you can write \
+         that file. Nothing was deleted.",
+        lock.display()
+    )
+}
+
 pub(super) fn run(env: &dyn ConfigEnv) -> Result<()> {
     // Pure path queries: neither creates `state/`, so a reset against a store
     // that is not there leaves nothing behind.
@@ -63,7 +78,7 @@ pub(super) fn run(env: &dyn ConfigEnv) -> Result<()> {
     // app opened, `daemon start` in another terminal) would otherwise have
     // the database open when it is unlinked. Holding the lock, a daemon that
     // starts now exits on it instead.
-    let claim = claim_store(state_dir)?;
+    let claim = claim_store(env, state_dir)?;
 
     if !env.confirm_factory_reset(&factory_reset_warning(&targets))? {
         println!("Cancelled. Nothing was deleted.");
@@ -76,7 +91,7 @@ pub(super) fn run(env: &dyn ConfigEnv) -> Result<()> {
     // to delete and nothing is created.
     let _claim = match claim {
         Some(held) => Some(held),
-        None => claim_store(state_dir)?,
+        None => claim_store(env, state_dir)?,
     };
 
     // Files first: if this fails (a permission, a locked file), the user's
@@ -104,13 +119,24 @@ pub(super) fn run(env: &dyn ConfigEnv) -> Result<()> {
 ///
 /// `Ok(None)` when `state/` does not exist: there is no database to protect,
 /// and taking the lock would create the directory this verb promises not to.
-fn claim_store(state_dir: &Path) -> Result<Option<impl Sized>> {
+///
+/// The lock alone decides whether the reset runs; `env.daemon_is_running()`
+/// only picks the words, so a refusal never claims a daemon nobody can find.
+fn claim_store(env: &dyn ConfigEnv, state_dir: &Path) -> Result<Option<impl Sized>> {
     if !state_dir.is_dir() {
         return Ok(None);
     }
     discovery::acquire_single_instance_lock(false)
         .map(Some)
-        .map_err(|e| e.context(DAEMON_RUNNING_REFUSAL))
+        .map_err(|e| {
+            if env.daemon_is_running() {
+                e.context(DAEMON_RUNNING_REFUSAL)
+            } else {
+                let lock =
+                    store::lock_path().unwrap_or_else(|_| state_dir.join("openalpacad.lock"));
+                e.context(store_locked_refusal(&lock))
+            }
+        })
 }
 
 /// What a factory reset deletes and clears, every path absolute.
