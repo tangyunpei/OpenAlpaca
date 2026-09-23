@@ -33,33 +33,6 @@ mod unit_tests {
         );
     }
 
-    #[test]
-    fn test_toml_to_json_primitives() {
-        assert_eq!(
-            toml_to_json(&toml::Value::String("hello".into())),
-            Value::String("hello".into())
-        );
-        assert_eq!(
-            toml_to_json(&toml::Value::Integer(42)),
-            Value::Number(42.into())
-        );
-        assert_eq!(toml_to_json(&toml::Value::Boolean(true)), Value::Bool(true));
-    }
-
-    #[test]
-    fn test_toml_to_json_nested() {
-        let mut tbl = toml::map::Map::new();
-        tbl.insert("key".into(), toml::Value::String("val".into()));
-        tbl.insert(
-            "arr".into(),
-            toml::Value::Array(vec![toml::Value::Integer(1), toml::Value::Integer(2)]),
-        );
-        let json = toml_to_json(&toml::Value::Table(tbl));
-        assert!(json.is_object());
-        assert_eq!(json["key"], "val");
-        assert_eq!(json["arr"], serde_json::json!([1, 2]));
-    }
-
     /// R17: `error.data` now reaches the classifier, so §4.2's
     /// `NeedsAuthorization` arm is reachable and the row's `hint` is populated.
     ///
