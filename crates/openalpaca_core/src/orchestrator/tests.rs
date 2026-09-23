@@ -6249,6 +6249,174 @@ async fn a_direct_send_reports_the_turns_attachments_skipped() {
     );
 }
 
+/// **CORE-08** — the direct send and `<send_context>` read one owner's
+/// remembered default recipient per channel. Each row is (channel, the
+/// preference rows stored for the owner, whether the direct send fires,
+/// whether `<send_context>` says `default=true`).
+#[tokio::test]
+async fn the_direct_send_and_send_context_read_the_same_default_recipient() {
+    struct AllChannels;
+    #[async_trait::async_trait]
+    impl crate::orchestrator::ConnectorSendProvider for AllChannels {
+        async fn send_message(
+            &self,
+            channel: &str,
+            recipient: &str,
+            content: &str,
+        ) -> Result<String, String> {
+            Ok(format!("sent to {channel}/{recipient}: {content}"))
+        }
+        fn sendable_channels(&self) -> Vec<String> {
+            vec![
+                "telegram".to_string(),
+                "imessage".to_string(),
+                "discord".to_string(),
+            ]
+        }
+    }
+
+    // (channel, preference key stored for the owner, its value, the direct
+    // send fires, `<send_context>` says `default=true`)
+    type Row = (&'static str, &'static str, Option<&'static str>, bool, bool);
+    let rows: &[Row] = &[
+        ("telegram", "telegram.last_chat_id", Some("42"), true, true),
+        (
+            "telegram",
+            "telegram.last_chat_id",
+            Some("-1001234"),
+            true,
+            true,
+        ),
+        (
+            "telegram",
+            "telegram.last_chat_id",
+            Some("chat-42"),
+            false,
+            false,
+        ),
+        ("telegram", "telegram.last_chat_id", None, false, false),
+        // iMessage: either key, present at all, is enough.
+        (
+            "imessage",
+            "imessage.last_reply_target",
+            Some("+15551234567"),
+            true,
+            true,
+        ),
+        (
+            "imessage",
+            "imessage.last_chat_id",
+            Some("chat123"),
+            true,
+            true,
+        ),
+        (
+            "imessage",
+            "imessage.last_reply_target",
+            Some(""),
+            true,
+            true,
+        ),
+        ("imessage", "imessage.last_reply_target", None, false, false),
+        // Discord: a u64 channel id; zero is not rejected.
+        (
+            "discord",
+            "discord.last_channel_id",
+            Some("123456789012345678"),
+            true,
+            false,
+        ),
+        ("discord", "discord.last_channel_id", Some("0"), true, false),
+        (
+            "discord",
+            "discord.last_channel_id",
+            Some("-5"),
+            false,
+            false,
+        ),
+        (
+            "discord",
+            "discord.last_channel_id",
+            Some("general"),
+            false,
+            false,
+        ),
+        ("discord", "discord.last_channel_id", None, false, false),
+        // Another channel's key is not this channel's default.
+        ("discord", "telegram.last_chat_id", Some("42"), false, false),
+    ];
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    {
+        let prefs = openalpaca_storage::repository::PreferenceRepository::new(&db);
+        for (i, (_, key, value, _, _)) in rows.iter().enumerate() {
+            if let Some(value) = value {
+                prefs.set(&format!("owner-{i}"), key, value, None).unwrap();
+            }
+        }
+        // Owner-scoped: a default stored for someone else is not this owner's.
+        prefs
+            .set("someone-else", "telegram.last_chat_id", "42", None)
+            .unwrap();
+    }
+
+    let bus = EventBus::default();
+    let gate = make_security_gate(&bus);
+    let orch = Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        bus,
+        SystemPersona::default(),
+        None,
+        LoopConfig::default(),
+        gate,
+        make_tool_registry(),
+        Some(db),
+        None,
+        Arc::new(skill_catalog::SkillCatalog::new()),
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    );
+    orch.set_connector_send_provider(Arc::new(AllChannels));
+
+    for (i, (channel, key, value, sends, prompts)) in rows.iter().enumerate() {
+        let stored = (key, value);
+        let owner = format!("owner-{i}");
+        // `转发` passes the intent gate for every channel; the English
+        // `send "…" to discord` does not (its keyword list names only
+        // telegram and imessage), and that gate is not what this pins.
+        let sent = orch
+            .try_direct_send(&format!("转发\"hello\"到{channel}"), Some(&owner))
+            .await;
+        assert_eq!(
+            sent.is_some(),
+            *sends,
+            "direct send, {channel} with {stored:?}: {sent:?}"
+        );
+        if let Some(result) = sent {
+            assert_eq!(
+                result,
+                Ok(format!("sent to {channel}/default: hello")),
+                "{channel} with {stored:?}"
+            );
+        }
+        let context = orch.build_send_context(Some(&owner));
+        assert!(
+            context.contains(&format!("- {channel}: default={prompts} (")),
+            "send_context, {channel} with {stored:?}:\n{context}"
+        );
+    }
+
+    let context = orch.build_send_context(Some("nobody"));
+    assert!(context.contains("- telegram: default=false ("), "{context}");
+    assert!(
+        orch.try_direct_send("转发\"hello\"到telegram", Some("nobody"))
+            .await
+            .is_none()
+    );
+}
+
 /// **A2** — a turn's own audio attachment is judged by `supports_audio`.
 ///
 /// Its fate used to be decided by `document_fate`, so a model that takes
