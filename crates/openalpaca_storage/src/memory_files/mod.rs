@@ -161,6 +161,21 @@ pub fn is_owner_key(s: &str) -> bool {
     is_lower_hex(s, OWNER_KEY_HEX)
 }
 
+/// Whether `s` has the shape of a partition key — `home-<owner-key>` or
+/// `proj-<owner-key>-<dir-key>` (design §2). What [`snapshot_path_for`]
+/// checks before joining a key into `state/memory-control/`.
+pub fn is_partition_key(s: &str) -> bool {
+    if let Some(owner) = s.strip_prefix("home-") {
+        return is_owner_key(owner);
+    }
+    if let Some(rest) = s.strip_prefix("proj-")
+        && let Some((owner, dir)) = rest.split_once('-')
+    {
+        return is_owner_key(owner) && is_lower_hex(dir, DIR_KEY_HEX);
+    }
+    false
+}
+
 // ============================================================================
 // Errors
 // ============================================================================

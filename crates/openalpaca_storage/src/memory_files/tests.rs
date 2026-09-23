@@ -2958,6 +2958,58 @@ fn adopt_refuses_a_key_that_is_not_an_owner_key() {
     assert!(!is_owner_key("../../state"));
 }
 
+/// `snapshot_path_for` is public and takes text: only the two partition-key
+/// shapes of design §2 reach `state/memory-control/`, so `../../x` is an
+/// `InvalidInput`, never a path outside the control directory.
+#[test]
+fn snapshot_path_for_refuses_a_key_that_is_not_a_partition_key() {
+    let sb = Sandbox::new();
+    let key = owner_key(ALICE);
+    let control = sb.home.join("state").join("memory-control");
+    let home_key = format!("home-{key}");
+    assert!(is_partition_key(&home_key));
+    assert_eq!(
+        snapshot_path_for(&home_key).unwrap(),
+        control.join(format!("{home_key}.json"))
+    );
+    let proj_key = format!("proj-{key}-0123456789abcdef");
+    assert!(is_partition_key(&proj_key));
+    assert_eq!(
+        snapshot_path_for(&proj_key).unwrap(),
+        control.join(format!("{proj_key}.json"))
+    );
+    let upper = key.to_uppercase();
+    for bad in [
+        "../../x".to_string(),
+        "home-../../x".to_string(),
+        format!("home-{upper}"),
+        format!("home-{key}-0123456789abcdef"),
+        format!("home-{key}/x"),
+        "home-".to_string(),
+        "home".to_string(),
+        "proj-".to_string(),
+        format!("proj-{key}"),
+        format!("proj-{key}-"),
+        format!("proj-{key}-0123456789abcde"),
+        format!("proj-{key}-0123456789abcdefg"),
+        format!("proj-{key}-0123456789ABCDEF"),
+        format!("proj-{key}--0123456789abcdef"),
+        format!("proj-{upper}-0123456789abcdef"),
+        format!("proj-{key}-../..0123456789"),
+        key.clone(),
+        String::new(),
+    ] {
+        assert!(!is_partition_key(&bad), "{bad:?}");
+        let err = snapshot_path_for(&bad).unwrap_err();
+        assert!(
+            matches!(err, MemoryFilesError::InvalidInput(_)),
+            "{bad:?}: {err}"
+        );
+        assert!(err.to_string().contains("partition key"), "{bad:?}: {err}");
+    }
+    assert!(!control.exists(), "a path query creates nothing");
+}
+
 #[test]
 fn move_snapshots_are_classified_stale_abandoned_or_orphaned() {
     let dir = tempdir().unwrap();

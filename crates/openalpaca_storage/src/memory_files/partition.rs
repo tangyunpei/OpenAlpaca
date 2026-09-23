@@ -24,8 +24,8 @@ use super::snapshot::{
 };
 use super::{
     CONTROL_DIR, HISTORY_DIR, HISTORY_KEEP, MemoryFilesError, NAVIGATION_FILE, NOTES_DIR,
-    OWNERS_DIR, PROJECT_GITIGNORE_TEXT, home_partition_key, is_owner_key, is_revision, owner_key,
-    project_partition_key,
+    OWNERS_DIR, PROJECT_GITIGNORE_TEXT, home_partition_key, is_owner_key, is_partition_key,
+    is_revision, owner_key, project_partition_key,
 };
 use crate::store::{ContentKind, StoreScope, content_dir, home_root, store_root};
 use anyhow::{Context, Result};
@@ -270,8 +270,16 @@ impl std::fmt::Debug for Partition {
     }
 }
 
-/// The snapshot file of a partition key.
-pub fn snapshot_path_for(partition_key: &str) -> Result<PathBuf> {
+/// The snapshot file of a partition key. A pure path query: it creates
+/// nothing, and a `partition_key` that is not one of the two shapes of design
+/// §2 (see [`is_partition_key`]) is `InvalidInput`, so the result is always a
+/// file directly under `state/memory-control/`.
+pub fn snapshot_path_for(partition_key: &str) -> Result<PathBuf, MemoryFilesError> {
+    if !is_partition_key(partition_key) {
+        return Err(MemoryFilesError::InvalidInput(format!(
+            "`{partition_key}` is not a partition key (home-<owner-key> or proj-<owner-key>-<dir-key>)"
+        )));
+    }
     Ok(home_root()?
         .join("state")
         .join(CONTROL_DIR)
