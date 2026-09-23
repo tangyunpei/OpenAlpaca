@@ -42,6 +42,65 @@ fn watch_error_level(e: &notify::Error) -> tracing::Level {
     }
 }
 
+/// The poll watcher's event handler: drop access-only events, debounce each
+/// path for `DEBOUNCE_MS`, and hand every surviving path to `tx` without ever
+/// blocking the watcher thread.
+fn debounced_handler(
+    tx: mpsc::Sender<WakeEvent>,
+) -> impl FnMut(Result<Event, notify::Error>) + Send + 'static {
+    // Simple debounce: track last event time per path. The handler is the
+    // map's only owner, and `notify` calls it from one thread (`FnMut`).
+    let mut last_event: HashMap<String, Instant> = HashMap::new();
+    move |res: Result<Event, notify::Error>| {
+        match res {
+            Ok(event) => {
+                let Event { kind, paths, .. } = event;
+
+                // Ignore access-only events (open/close). For wake purposes we treat
+                // everything else (including `Any`) as a relevant change signal.
+                if kind.is_access() {
+                    return;
+                }
+
+                // `notify` can return multiple paths for a single event (e.g., renames),
+                // and on some platforms the "interesting" path is not necessarily first.
+                let change_type = format!("{:?}", kind);
+                for path in paths {
+                    let path_str = path.to_string_lossy().to_string();
+
+                    // Simple debounce: skip if same path within DEBOUNCE_MS
+                    let now = Instant::now();
+                    if let Some(last_time) = last_event.get(&path_str)
+                        && now.duration_since(*last_time).as_millis() < DEBOUNCE_MS
+                    {
+                        debug!("Debounced event for: {}", path_str);
+                        continue;
+                    }
+                    last_event.insert(path_str.clone(), now);
+
+                    let wake_event = WakeEvent::FileChanged {
+                        path: path_str,
+                        change_type: change_type.clone(),
+                    };
+
+                    // Use try_send to avoid blocking the watcher thread
+                    if let Err(e) = tx.try_send(wake_event) {
+                        // Drop if channel full (backpressure)
+                        debug!("Filesystem wake event dropped (channel full or closed): {e}");
+                    }
+                }
+            }
+            Err(e) => match watch_error_level(&e) {
+                tracing::Level::INFO => info!(
+                    "Watched path is gone; it will stop being polled: {:?}",
+                    e.paths
+                ),
+                _ => error!("Watch error: {:?}", e),
+            },
+        }
+    }
+}
+
 /// Watcher for filesystem changes
 pub struct FilesystemWatcher {
     paths: Vec<PathBuf>,
@@ -91,66 +150,9 @@ impl FileWatchHandle {
 #[async_trait]
 impl EventWatcher for FilesystemWatcher {
     async fn start(&self, tx: mpsc::Sender<WakeEvent>) -> Result<()> {
-        let tx_clone = tx.clone();
-        // Simple debounce: track last event time per path
-        let last_event: Arc<Mutex<HashMap<String, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
-        let last_event_clone = last_event.clone();
-
         // Setup notify watcher
         let mut watcher = PollWatcher::new(
-            move |res: Result<Event, notify::Error>| {
-                match res {
-                    Ok(event) => {
-                        let Event { kind, paths, .. } = event;
-
-                        // Ignore access-only events (open/close). For wake purposes we treat
-                        // everything else (including `Any`) as a relevant change signal.
-                        if kind.is_access() {
-                            return;
-                        }
-
-                        // `notify` can return multiple paths for a single event (e.g., renames),
-                        // and on some platforms the "interesting" path is not necessarily first.
-                        let change_type = format!("{:?}", kind);
-                        for path in paths {
-                            let path_str = path.to_string_lossy().to_string();
-
-                            // Simple debounce: skip if same path within DEBOUNCE_MS
-                            {
-                                let mut last = last_event_clone.lock().unwrap();
-                                let now = Instant::now();
-                                if let Some(last_time) = last.get(&path_str)
-                                    && now.duration_since(*last_time).as_millis() < DEBOUNCE_MS
-                                {
-                                    debug!("Debounced event for: {}", path_str);
-                                    continue;
-                                }
-                                last.insert(path_str.clone(), now);
-                            }
-
-                            let wake_event = WakeEvent::FileChanged {
-                                path: path_str,
-                                change_type: change_type.clone(),
-                            };
-
-                            // Use try_send to avoid blocking the watcher thread
-                            if let Err(e) = tx_clone.try_send(wake_event) {
-                                // Drop if channel full (backpressure)
-                                debug!(
-                                    "Filesystem wake event dropped (channel full or closed): {e}"
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => match watch_error_level(&e) {
-                        tracing::Level::INFO => info!(
-                            "Watched path is gone; it will stop being polled: {:?}",
-                            e.paths
-                        ),
-                        _ => error!("Watch error: {:?}", e),
-                    },
-                }
-            },
+            debounced_handler(tx),
             Config::default().with_poll_interval(self.poll_interval),
         )?;
 
