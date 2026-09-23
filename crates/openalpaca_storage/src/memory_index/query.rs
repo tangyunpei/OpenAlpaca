@@ -152,6 +152,15 @@ pub fn normalize(text: &str) -> String {
         .collect()
 }
 
+/// [`normalize`] with runs of whitespace collapsed to one space and the ends
+/// trimmed — the form exact title and alias matching compares.
+pub fn normalize_exact(text: &str) -> String {
+    normalize(text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The alphanumeric runs of a normalized string — the token rule `unicode61`
 /// applies by default (letters and numbers are token characters, everything
 /// else separates).

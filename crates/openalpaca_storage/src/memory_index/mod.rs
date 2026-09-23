@@ -540,6 +540,434 @@ impl MemoryIndex {
     }
 }
 
+// ============================================================================
+// Catalog writes
+// ============================================================================
+
+/// What [`MemoryIndex::rebuild`] and [`MemoryIndex::replace_partition`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RebuildReport {
+    pub notes: usize,
+    pub chunks: usize,
+}
+
+impl MemoryIndex {
+    /// Indexes one note, replacing any row of the same `(partition_key, id)`
+    /// or the same `(partition_key, relative_path)` — a retitle moves the id
+    /// to its new path, a file rewritten under a new id replaces the old row.
+    /// Synchronous, so a service write is searchable when this returns
+    /// (design §5, *Freshness without a watcher*).
+    pub fn upsert(&self, record: &IndexRecord) -> Result<usize> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let chunks = upsert_in(&tx, record)?;
+        tx.commit()?;
+        Ok(chunks)
+    }
+
+    /// [`MemoryIndex::upsert`] for many notes in one transaction. All or none.
+    pub fn upsert_many(&self, records: &[IndexRecord]) -> Result<RebuildReport> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let mut report = RebuildReport::default();
+        for record in records {
+            report.chunks += upsert_in(&tx, record)?;
+            report.notes += 1;
+        }
+        tx.commit()?;
+        Ok(report)
+    }
+
+    /// Drops everything and indexes `records`, then marks the index `ready`.
+    /// The `rebuilding` mark is committed first on its own, so a crash inside
+    /// the rebuild leaves an index that says so and keeps what it had.
+    pub fn rebuild(&self, records: &[IndexRecord]) -> Result<RebuildReport> {
+        {
+            let conn = self.lock();
+            write_state(&conn, IndexState::Rebuilding)?;
+        }
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        tx.execute_batch(
+            "DELETE FROM chunk; DELETE FROM note_alias; DELETE FROM note; DELETE FROM partition;",
+        )?;
+        let mut report = RebuildReport::default();
+        for record in records {
+            report.chunks += upsert_in(&tx, record)?;
+            report.notes += 1;
+        }
+        write_state(&tx, IndexState::Ready)?;
+        tx.commit()?;
+        Ok(report)
+    }
+
+    /// Replaces one partition's rows with `records`, every one of which must
+    /// name that partition. Leaves the index state alone.
+    pub fn replace_partition(
+        &self,
+        partition_key: &str,
+        records: &[IndexRecord],
+    ) -> Result<RebuildReport> {
+        if let Some(stray) = records
+            .iter()
+            .find(|r| r.partition_key != partition_key)
+        {
+            return Err(IndexError::InvalidInput(format!(
+                "record {} names partition {:?}, not {partition_key:?}",
+                stray.id, stray.partition_key
+            )));
+        }
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        delete_partition_rows(&tx, partition_key)?;
+        let mut report = RebuildReport::default();
+        for record in records {
+            report.chunks += upsert_in(&tx, record)?;
+            report.notes += 1;
+        }
+        tx.commit()?;
+        Ok(report)
+    }
+
+    /// Removes one note by id. `Ok(false)` when there was no such row.
+    pub fn remove(&self, partition_key: &str, id: &str) -> Result<bool> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let rowid: Option<i64> = tx
+            .query_row(
+                "SELECT rowid FROM note WHERE partition_key = ?1 AND id = ?2",
+                params![partition_key, id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let removed = match rowid {
+            Some(rowid) => {
+                delete_note_rows(&tx, rowid)?;
+                true
+            }
+            None => false,
+        };
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    /// Removes the note indexed at `relative_path`. The verb for a
+    /// reconciliation's `removed` entry: a retitle that already moved the id
+    /// to its new path finds no row here and is a no-op, so the new row
+    /// survives.
+    pub fn remove_path(&self, partition_key: &str, relative_path: &str) -> Result<bool> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let rowid: Option<i64> = tx
+            .query_row(
+                "SELECT rowid FROM note WHERE partition_key = ?1 AND relative_path = ?2",
+                params![partition_key, relative_path],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let removed = match rowid {
+            Some(rowid) => {
+                delete_note_rows(&tx, rowid)?;
+                true
+            }
+            None => false,
+        };
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    /// Removes every row of one partition (a purge, a workspace move's
+    /// invalidation). Returns how many notes went.
+    pub fn remove_partition(&self, partition_key: &str) -> Result<u64> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let removed = delete_partition_rows(&tx, partition_key)?;
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    /// The catalog row of one note, if indexed.
+    pub fn get(&self, partition_key: &str, id: &str) -> Result<Option<IndexedNote>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT n.id, n.partition_key, n.revision, n.relative_path, n.effective_status,
+                    n.pinned, n.mtime_ns, n.size, n.inode,
+                    (SELECT COUNT(*) FROM chunk c WHERE c.note_rowid = n.rowid)
+             FROM note n WHERE n.partition_key = ?1 AND n.id = ?2",
+            params![partition_key, id],
+            indexed_note_from_row,
+        )
+        .optional()
+        .map_err(IndexError::from)
+    }
+
+    /// The active pinned notes of these partitions, newest `updated_at`
+    /// first — design §5 step 2's selection, for the caller to budget.
+    pub fn list_pinned(&self, partition_keys: &[String]) -> Result<Vec<IndexedNote>> {
+        if partition_keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.lock();
+        let placeholders = placeholders(partition_keys.len());
+        let sql = format!(
+            "SELECT n.id, n.partition_key, n.revision, n.relative_path, n.effective_status,
+                    n.pinned, n.mtime_ns, n.size, n.inode,
+                    (SELECT COUNT(*) FROM chunk c WHERE c.note_rowid = n.rowid)
+             FROM note n
+             WHERE n.pinned = 1 AND n.effective_status = 'active'
+               AND n.partition_key IN ({placeholders})
+             ORDER BY n.updated_at DESC, n.id ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(partition_keys.iter()),
+            indexed_note_from_row,
+        )?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(IndexError::from)
+    }
+}
+
+fn indexed_note_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IndexedNote> {
+    let status: String = row.get(4)?;
+    let mtime_ns: i64 = row.get(6)?;
+    let size: i64 = row.get(7)?;
+    let inode: i64 = row.get(8)?;
+    let chunks: i64 = row.get(9)?;
+    Ok(IndexedNote {
+        id: row.get(0)?,
+        partition_key: row.get(1)?,
+        revision: row.get(2)?,
+        relative_path: row.get(3)?,
+        effective_status: EffectiveStatus::parse(&status).unwrap_or(EffectiveStatus::Active),
+        pinned: row.get::<_, i64>(5)? != 0,
+        file: FileStat {
+            mtime_ns,
+            size: size as u64,
+            inode: inode as u64,
+        },
+        chunks: chunks as u32,
+    })
+}
+
+/// `?1, ?2, …` for an `IN` list.
+pub(crate) fn placeholders(n: usize) -> String {
+    (1..=n)
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Design §4's authority ordering, as a rank the ranking reads:
+/// `user` > `extracted_user` > `imported` > `external` > `extracted_other`.
+/// An unknown origin ranks with the lowest.
+pub(crate) fn authority_rank(origin: &str) -> i64 {
+    match origin {
+        "user" => 4,
+        "extracted_user" => 3,
+        "imported" => 2,
+        "external" => 1,
+        _ => 0,
+    }
+}
+
+fn validate(record: &IndexRecord) -> Result<()> {
+    for (field, value) in [
+        ("id", &record.id),
+        ("revision", &record.revision),
+        ("partition_key", &record.partition_key),
+        ("relative_path", &record.relative_path),
+    ] {
+        if value.trim().is_empty() {
+            return Err(IndexError::InvalidInput(format!(
+                "{field} must not be empty"
+            )));
+        }
+    }
+    if record.body.len() > MAX_NOTE_BYTES {
+        return Err(IndexError::InvalidInput(format!(
+            "note {} body is {} bytes; the limit is {MAX_NOTE_BYTES}",
+            record.id,
+            record.body.len()
+        )));
+    }
+    Ok(())
+}
+
+/// The insert behind every write. Returns the number of chunk rows written.
+fn upsert_in(tx: &rusqlite::Transaction<'_>, record: &IndexRecord) -> Result<usize> {
+    validate(record)?;
+    let updated_at = canonicalize_timestamp("updated_at", &record.updated_at)?;
+    let valid_from = record
+        .valid_from
+        .as_deref()
+        .map(|v| canonicalize_timestamp("valid_from", v))
+        .transpose()?;
+    let valid_to = record
+        .valid_to
+        .as_deref()
+        .map(|v| canonicalize_timestamp("valid_to", v))
+        .transpose()?;
+
+    // Replace whatever holds this id or this path in the partition.
+    let mut stale = tx.prepare_cached(
+        "SELECT rowid FROM note WHERE partition_key = ?1 AND (id = ?2 OR relative_path = ?3)",
+    )?;
+    let stale_rows: Vec<i64> = stale
+        .query_map(
+            params![record.partition_key, record.id, record.relative_path],
+            |r| r.get(0),
+        )?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(stale);
+    for rowid in stale_rows {
+        delete_note_rows(tx, rowid)?;
+    }
+
+    let norm_title = query::normalize_exact(&record.title);
+    let norm_aliases: Vec<String> = record
+        .aliases
+        .iter()
+        .map(|a| query::normalize_exact(a))
+        .filter(|a| !a.is_empty())
+        .collect();
+    let norm_tags: Vec<String> = record
+        .tags
+        .iter()
+        .map(|t| query::normalize_exact(t))
+        .filter(|t| !t.is_empty())
+        .collect();
+    let aliases_json = serde_json::to_string(&record.aliases).unwrap_or_else(|_| "[]".into());
+    let tags_json = serde_json::to_string(&record.tags).unwrap_or_else(|_| "[]".into());
+    let superseded_json =
+        serde_json::to_string(&record.superseded_by).unwrap_or_else(|_| "[]".into());
+
+    tx.execute(
+        "INSERT INTO note (
+            partition_key, id, scope, revision, relative_path, title, norm_title,
+            aliases, tags, kind, status, effective_status, origin, authority,
+            fact_key, valid_from, valid_to, updated_at, pinned, source_forgotten,
+            conflict, same_key_loser, superseded_by, body_line_offset,
+            mtime_ns, size, inode
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+            ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27
+        )",
+        params![
+            record.partition_key,
+            record.id,
+            record.scope,
+            record.revision,
+            record.relative_path,
+            record.title,
+            norm_title,
+            aliases_json,
+            tags_json,
+            record.kind,
+            record.status,
+            record.effective_status.as_str(),
+            record.origin,
+            authority_rank(&record.origin),
+            record.fact_key,
+            valid_from,
+            valid_to,
+            updated_at,
+            record.pinned as i64,
+            record.source_forgotten as i64,
+            record.conflict as i64,
+            record.same_key_loser as i64,
+            superseded_json,
+            record.body_line_offset as i64,
+            record.file.mtime_ns,
+            record.file.size as i64,
+            record.file.inode as i64,
+        ],
+    )?;
+    let note_rowid = tx.last_insert_rowid();
+
+    {
+        let mut alias_stmt =
+            tx.prepare_cached("INSERT INTO note_alias (note_rowid, norm_alias) VALUES (?1, ?2)")?;
+        for alias in &norm_aliases {
+            alias_stmt.execute(params![note_rowid, alias])?;
+        }
+    }
+
+    let mut chunks = chunker::chunk_body(&record.body);
+    if chunks.is_empty() {
+        // Title, aliases and tags stay searchable through an empty chunk.
+        chunks.push(chunker::Chunk {
+            ordinal: 0,
+            heading: None,
+            line_from: 0,
+            line_to: 0,
+            text: String::new(),
+        });
+    }
+    let fts_aliases = norm_aliases.join("\n");
+    let fts_tags = norm_tags.join("\n");
+    let mut chunk_stmt = tx.prepare_cached(
+        "INSERT INTO chunk (
+            note_rowid, partition_key, ordinal, heading, line_from, line_to,
+            excerpt, title, aliases, tags, body
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+    )?;
+    let offset = record.body_line_offset;
+    for chunk in &chunks {
+        let (line_from, line_to) = if chunk.line_from == 0 {
+            (0, 0)
+        } else {
+            (chunk.line_from + offset, chunk.line_to + offset)
+        };
+        chunk_stmt.execute(params![
+            note_rowid,
+            record.partition_key,
+            chunk.ordinal as i64,
+            chunk.heading,
+            line_from as i64,
+            line_to as i64,
+            chunk.text,
+            norm_title,
+            fts_aliases,
+            fts_tags,
+            query::normalize(&chunk.text),
+        ])?;
+    }
+    Ok(chunks.len())
+}
+
+/// Deletes one note's chunks (the delete trigger removes their FTS rows),
+/// aliases and catalog row.
+fn delete_note_rows(tx: &rusqlite::Transaction<'_>, note_rowid: i64) -> rusqlite::Result<()> {
+    tx.execute("DELETE FROM chunk WHERE note_rowid = ?1", params![note_rowid])?;
+    tx.execute(
+        "DELETE FROM note_alias WHERE note_rowid = ?1",
+        params![note_rowid],
+    )?;
+    tx.execute("DELETE FROM note WHERE rowid = ?1", params![note_rowid])?;
+    Ok(())
+}
+
+fn delete_partition_rows(tx: &rusqlite::Transaction<'_>, partition_key: &str) -> rusqlite::Result<u64> {
+    tx.execute(
+        "DELETE FROM chunk WHERE partition_key = ?1",
+        params![partition_key],
+    )?;
+    tx.execute(
+        "DELETE FROM note_alias WHERE note_rowid IN (SELECT rowid FROM note WHERE partition_key = ?1)",
+        params![partition_key],
+    )?;
+    let removed = tx.execute(
+        "DELETE FROM note WHERE partition_key = ?1",
+        params![partition_key],
+    )?;
+    tx.execute(
+        "DELETE FROM partition WHERE partition_key = ?1",
+        params![partition_key],
+    )?;
+    Ok(removed as u64)
+}
+
 fn apply_pragmas(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         r#"
