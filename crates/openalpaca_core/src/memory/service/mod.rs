@@ -152,19 +152,36 @@ impl MemoryService {
     /// verified; without one no owner can be confirmed and every context
     /// construction answers *no owner*.
     ///
-    /// A fresh or recreated index (`rebuilding`) is rebuilt from the
-    /// partitions the control snapshots name before the first request;
-    /// a valid one keeps its rows and is checked partition by partition on
-    /// first use (design §5, *Freshness without a watcher*).
+    /// Touches nothing on disk: an index that reports `rebuilding` stays so
+    /// until [`MemoryService::rebuild_index`] runs — [`Self::open_default`]
+    /// does that for the daemon, and a test does it under its own home store.
     pub fn new(db: Option<Database>, index: MemoryIndex) -> Self {
-        let service = Self {
+        Self {
             db,
             index,
             slots: WriteSlots::default(),
             touched: Mutex::new(HashSet::new()),
             fingerprints: Mutex::new(HashMap::new()),
             ring: Mutex::new(VecDeque::with_capacity(RING_CAPACITY)),
+        }
+    }
+
+    /// The daemon's service: the cache at `state/cache/memory-index-v1.sqlite`
+    /// under the home store, rebuilt from the partitions the control
+    /// snapshots name when it is fresh or was recreated (design §5, *Freshness
+    /// without a watcher*); a valid one keeps its rows and is checked
+    /// partition by partition on first use. A cache that cannot be opened at
+    /// all is replaced by an in-memory one with one WARN — the index is
+    /// disposable, the daemon is not.
+    pub fn open_default(db: Option<Database>) -> Self {
+        let index = match MemoryIndex::default_path().and_then(|p| Ok(MemoryIndex::open(&p)?)) {
+            Ok(index) => index,
+            Err(e) => {
+                tracing::warn!("memory index cache unavailable, using an in-memory index: {e:#}");
+                MemoryIndex::open_in_memory().expect("an in-memory SQLite index always opens")
+            }
         };
+        let service = Self::new(db, index);
         match service.index.index_state() {
             Ok(report) if report.state == IndexState::Rebuilding => {
                 if let Err(e) = service.rebuild_index() {
@@ -175,22 +192,6 @@ impl MemoryService {
             Err(e) => tracing::warn!("memory index state unreadable: {e}"),
         }
         service
-    }
-
-    /// The daemon's service: the cache at `state/cache/memory-index-v1.sqlite`
-    /// under the home store, rebuilt from the partitions when it is fresh or
-    /// was recreated. A cache that cannot be opened at all is replaced by an
-    /// in-memory one with one WARN — the index is disposable, the daemon is
-    /// not.
-    pub fn open_default(db: Option<Database>) -> Self {
-        let index = match MemoryIndex::default_path().and_then(|p| Ok(MemoryIndex::open(&p)?)) {
-            Ok(index) => index,
-            Err(e) => {
-                tracing::warn!("memory index cache unavailable, using an in-memory index: {e:#}");
-                MemoryIndex::open_in_memory().expect("an in-memory SQLite index always opens")
-            }
-        };
-        Self::new(db, index)
     }
 
     pub fn index(&self) -> &MemoryIndex {

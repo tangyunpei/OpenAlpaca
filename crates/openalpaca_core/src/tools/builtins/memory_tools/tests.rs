@@ -38,10 +38,9 @@ impl Harness {
         let identities = IdentityRepository::new(&db);
         identities.create_global_user(ALICE, None).unwrap();
         identities.create_global_user(BOB, None).unwrap();
-        let service = Arc::new(MemoryService::new(
-            Some(db),
-            MemoryIndex::open_in_memory().unwrap(),
-        ));
+        let service = MemoryService::new(Some(db), MemoryIndex::open_in_memory().unwrap());
+        service.rebuild_index().unwrap();
+        let service = Arc::new(service);
         Self {
             _env: env,
             root,

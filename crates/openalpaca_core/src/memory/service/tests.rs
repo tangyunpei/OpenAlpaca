@@ -41,6 +41,9 @@ impl Harness {
         identities.create_global_user(ALICE, None).unwrap();
         identities.create_global_user(BOB, None).unwrap();
         let service = MemoryService::new(Some(db.clone()), MemoryIndex::open_in_memory().unwrap());
+        // What the daemon's `open_default` does for a fresh cache — under
+        // this test's own home store, never the real one.
+        service.rebuild_index().unwrap();
         Self {
             _env: env,
             root,
