@@ -320,15 +320,13 @@ impl BuiltInTool for WorkspaceWriteTool {
 ///
 /// The memory tools are not among them: the read surface is
 /// [`memory_read_tools`] over the daemon's `MemoryService`, and the writers
-/// are per-request (`main_loop_tool_set`). `_embedder` is kept for the
-/// call sites that still pass one; nothing here reads it any more.
+/// are per-request (`main_loop_tool_set`).
 ///
 /// `workspace_root` is the explicit workspace directory for file tools.
 /// If `None`, falls back to `std::env::current_dir()` (for backward
 /// compatibility in tests and CLI).
 pub fn builtin_tools(
     db: Option<openalpaca_storage::Database>,
-    _embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
     web_search_config: Option<Arc<ArcSwap<WebSearchConfig>>>,
     workspace_root: Option<PathBuf>,
@@ -396,14 +394,13 @@ pub fn builtin_tools(
 /// and optionally `send`.
 pub fn builtin_tools_with_persona_context(
     db: Option<openalpaca_storage::Database>,
-    embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     persona_ctx: PersonaToolContext,
     daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
     web_search_config: Option<Arc<ArcSwap<WebSearchConfig>>>,
     workspace_root: Option<PathBuf>,
     connector_send_provider: Option<ConnectorSendLock>,
 ) -> Vec<RegisteredTool> {
-    let mut tools = builtin_tools(db, embedder, daemon_config, web_search_config, workspace_root);
+    let mut tools = builtin_tools(db, daemon_config, web_search_config, workspace_root);
     tools.push(update_persona_tool(persona_ctx));
     if let Some(provider) = connector_send_provider {
         tools.push(send::send_tool(provider));

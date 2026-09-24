@@ -142,26 +142,33 @@ impl Fixture {
             .unwrap();
     }
 
-    fn memory(&self, content: &str, scope_id: &str) {
-        self.memory_owned(content, scope_id, OWNER);
-    }
-
-    fn memory_owned(&self, content: &str, scope_id: &str, owner: &str) {
+    /// A `file_assets` row addressed under an arbitrary `root` at `rel` —
+    /// the way another project's artifact looks from here.
+    fn asset_under(&self, id: &str, root: &str, rel: &str) {
         self.db
             .with_connection(|conn| {
                 conn.execute(
-                    "INSERT INTO memory
-                        (owner_id, kind, scope, scope_id, source, content, content_hash)
-                     VALUES (?1, 'fact', 'workspace', ?2, 'test', ?3, ?3)",
-                    rusqlite::params![owner, scope_id, content],
+                    "INSERT INTO file_assets
+                        (id, owner_id, sha256, filename, mime_type, size_bytes, storage_path,
+                         status, origin, project_root, rel_path)
+                     VALUES (?1, ?2, 'sha', 'notes.md', 'text/markdown', 0, ?3, 'ready',
+                             'produced', ?4, ?5)",
+                    rusqlite::params![
+                        id,
+                        OWNER,
+                        format!("{root}/.openalpaca/artifacts/{rel}"),
+                        root,
+                        rel
+                    ],
                 )?;
                 Ok(())
             })
             .unwrap();
     }
 
-    /// `(sessions, tasks, memories)` still naming `root`.
-    fn members_at(&self, root: &str) -> (i64, i64, i64) {
+    /// `(sessions, tasks)` still naming `root` — the two members that are not
+    /// artifact rows.
+    fn members_at(&self, root: &str) -> (i64, i64) {
         self.db
             .with_connection(|conn| {
                 let one = |sql: &str| -> Result<i64> {
@@ -170,7 +177,6 @@ impl Fixture {
                 Ok((
                     one("SELECT COUNT(*) FROM session WHERE workspace_id = ?1")?,
                     one("SELECT COUNT(*) FROM task WHERE workspace_id = ?1")?,
-                    one("SELECT COUNT(*) FROM memory WHERE scope = 'workspace' AND scope_id = ?1")?,
                 ))
             })
             .unwrap()
@@ -1557,10 +1563,9 @@ fn rebase_project_moves_all_four_members_together() {
     f.session("session-1", &old);
     f.task_in("task-1", &old, "completed");
     f.task_in("task-2", &old, "queued");
-    f.memory("a workspace fact", &old);
     // Bystanders under another root.
     f.session("session-2", "/elsewhere");
-    f.memory("someone else's fact", "/elsewhere");
+    f.task_in("task-3", "/elsewhere", "completed");
 
     let counts = f.store().rebase_project(&old, new_root).unwrap();
     assert_eq!(
@@ -1569,17 +1574,12 @@ fn rebase_project_moves_all_four_members_together() {
             file_assets: 2,
             sessions: 1,
             tasks: 2,
-            memories: 1,
         }
     );
 
-    assert_eq!(f.members_at(&old), (0, 0, 0), "nothing is left behind");
-    assert_eq!(f.members_at(new_root), (1, 2, 1));
-    assert_eq!(
-        f.members_at("/elsewhere"),
-        (1, 0, 1),
-        "bystanders untouched"
-    );
+    assert_eq!(f.members_at(&old), (0, 0), "nothing is left behind");
+    assert_eq!(f.members_at(new_root), (1, 2));
+    assert_eq!(f.members_at("/elsewhere"), (1, 1), "bystanders untouched");
 
     let moved_upload = f.store().get("upload-1", OWNER).unwrap().unwrap();
     assert_eq!(moved_upload.project_root.as_deref(), Some(new_root));
@@ -1639,14 +1639,14 @@ fn a_failing_member_rolls_the_whole_rebase_back() {
     let (produced, _) = f.store().put(produced).unwrap();
     f.session("session-1", &old);
     f.task_in("task-1", &old, "completed");
-    f.memory("the same fact", &old);
 
-    // The collision: `idx_memory_content_hash` is
-    // (owner_id, scope, scope_id, content_hash), so re-keying this memory onto
-    // a root that already holds the same content violates it. That is the
-    // failure the one transaction exists for — two projects' memories must not
-    // silently merge, and the other three members must not move without it.
-    f.memory("the same fact", new_root);
+    // The collision: `idx_file_assets_addr` is (project_root, rel_path), so
+    // re-keying this artifact onto a root that already holds a file at the
+    // same address violates it. That is the failure the one transaction
+    // exists for — two projects must not silently merge, and the other two
+    // members, which the transaction has already rewritten by the time the
+    // artifact statement runs, must not stay moved without it.
+    f.asset_under("theirs", new_root, produced.rel_path.as_deref().unwrap());
 
     let err = f.store().rebase_project(&old, new_root).unwrap_err();
     assert!(
@@ -1664,8 +1664,12 @@ fn a_failing_member_rolls_the_whole_rebase_back() {
         Some(old.as_str()),
         "the artifact row rolled back with the rest"
     );
-    assert_eq!(f.members_at(&old), (1, 1, 1));
-    assert_eq!(f.members_at(new_root), (0, 0, 1), "only its own memory");
+    assert_eq!(
+        f.members_at(&old),
+        (1, 1),
+        "the session and the run were re-keyed before the collision and rolled back"
+    );
+    assert_eq!(f.members_at(new_root), (0, 0));
 }
 
 #[test]
@@ -1691,7 +1695,6 @@ fn workspace_rows_counts_the_members_and_the_runs_in_flight() {
     f.session("session-1", &root);
     f.task_in("done", &root, "completed");
     f.task_in("queued", &root, "queued");
-    f.memory("a fact", &root);
 
     let rows = f.store().workspace_rows(&root, None).unwrap();
     assert_eq!(
@@ -1700,7 +1703,6 @@ fn workspace_rows_counts_the_members_and_the_runs_in_flight() {
             file_assets: 1,
             sessions: 1,
             tasks: 2,
-            memories: 1,
         }
     );
     assert_eq!(
@@ -1748,7 +1750,7 @@ fn busy_tasks_counts_queued_running_and_paused_but_not_a_finished_run() {
 }
 
 #[test]
-fn workspace_rows_scopes_the_two_members_that_have_an_owner() {
+fn workspace_rows_scopes_the_one_member_that_has_an_owner() {
     let f = Fixture::new();
     let root = f.project_root().to_string_lossy().to_string();
     let scope = f.scope();
@@ -1759,22 +1761,18 @@ fn workspace_rows_scopes_the_two_members_that_have_an_owner() {
     let mut theirs = NewArtifact::new("owner-2", &scope, ArtifactKind::Markdown, "Theirs", b"b");
     theirs.created = at(1);
     f.store().put(theirs).unwrap();
-    f.memory("mine", &root);
-    f.memory_owned("theirs", &root, "owner-2");
     f.session("session-1", &root);
     f.task_in("task-1", &root, "completed");
 
     let all = f.store().workspace_rows(&root, None).unwrap();
     assert_eq!(all.counts.file_assets, 2);
-    assert_eq!(all.counts.memories, 2);
     assert_eq!(all.other_owners, 0, "an unscoped count leaves nobody out");
 
     let mine = f.store().workspace_rows(&root, Some(OWNER)).unwrap();
     assert_eq!(mine.counts.file_assets, 1);
-    assert_eq!(mine.counts.memories, 1);
     assert_eq!(
-        mine.other_owners, 2,
-        "one artifact and one memory belong to somebody else"
+        mine.other_owners, 1,
+        "one artifact belongs to somebody else"
     );
     // `session` and `task` carry no owner, so their counts are the root's
     // either way — which is why the route refuses rather than half-scopes.
@@ -1783,7 +1781,7 @@ fn workspace_rows_scopes_the_two_members_that_have_an_owner() {
 
     let nobody = f.store().workspace_rows(&root, Some("owner-3")).unwrap();
     assert_eq!(nobody.counts.file_assets, 0);
-    assert_eq!(nobody.other_owners, 4);
+    assert_eq!(nobody.other_owners, 2);
 }
 
 // ============================================================================
@@ -1798,7 +1796,6 @@ fn seed_for_purge(f: &Fixture, root: &str) {
     f.session("session-2", "/elsewhere");
     f.task_in("task-1", root, "completed");
     f.task_in("task-2", "/elsewhere", "completed");
-    f.memory("a workspace fact", root);
 
     f.db
         .with_connection(|conn| {
@@ -1894,7 +1891,7 @@ fn purge_project_takes_the_conversations_the_runs_and_the_uploads() {
     );
 
     // The bystanders under the other root are all still there.
-    assert_eq!(f.members_at("/elsewhere"), (1, 1, 0));
+    assert_eq!(f.members_at("/elsewhere"), (1, 1));
     let count = |sql: &str| -> i64 {
         f.db.with_connection(|conn| Ok(conn.query_row(sql, [], |r| r.get(0))?))
             .unwrap()
@@ -1907,13 +1904,9 @@ fn purge_project_takes_the_conversations_the_runs_and_the_uploads() {
     assert_eq!(count("SELECT COUNT(*) FROM dispatch_decisions"), 0);
     assert_eq!(count("SELECT COUNT(*) FROM llm_call_log"), 0);
 
-    // The keeps, named in the plan and true in the table.
-    assert_eq!(plan.kept, PurgeKept { artifacts: 1, memories: 1 });
+    // The keep, named in the plan and true in the table.
+    assert_eq!(plan.kept, PurgeKept { artifacts: 1 });
     assert!(f.store().get(&produced.id, OWNER).unwrap().is_some());
-    assert_eq!(
-        count("SELECT COUNT(*) FROM memory WHERE scope = 'workspace'"),
-        1
-    );
 
     // The run outside the root keeps its row and loses the link, exactly as
     // `delete_session` does it.
@@ -2041,16 +2034,16 @@ fn purging_a_root_nothing_names_changes_nothing() {
     let outcome = f.store().purge_project("/nowhere").unwrap();
     assert!(outcome.counts.is_empty());
     assert!(outcome.session_ids.is_empty());
-    assert_eq!(f.members_at(&root), (1, 1, 1));
+    assert_eq!(f.members_at(&root), (1, 1));
 }
 
 #[test]
-fn project_roots_lists_every_root_the_four_members_name() {
+fn project_roots_lists_every_root_the_three_members_name() {
     let f = Fixture::new();
     let root = f.project_root().to_string_lossy().to_string();
     f.session("session-1", &root);
     f.task_in("task-1", "/b-root", "completed");
-    f.memory("a fact", "/a-root");
+    f.asset_under("asset-a", "/a-root", "notes.md");
     // The home scope is not a project and never appears, whether it is
     // recorded as `NULL` or as `''` — nothing writes `''` today, but the two
     // halves of a `--all` plan must still partition the table.

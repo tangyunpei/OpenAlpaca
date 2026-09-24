@@ -570,9 +570,10 @@ function ProjectCard({ homeRoot }: { homeRoot: string | null }) {
 /**
  * The moved-project offer (plan §4.8, P-12).
  *
- * A project's path is its identity in four places — its artifacts, its
- * conversations, its runs and its workspace memories — so moving the directory
- * strands all four at once. The daemon can re-attach them in one transaction,
+ * A project's path is its identity in three places — its artifacts, its
+ * conversations and its runs — so moving the directory strands all three at
+ * once (its memory notes are files inside the directory and move with it).
+ * The daemon can re-attach them in one transaction,
  * but it cannot know where the project went; the owner does, and has just said
  * so by choosing this path.
  *
@@ -628,7 +629,7 @@ function MovedProjectOffer({ path }: { path: string | null }) {
   }
   if (moved === null) return null;
 
-  const { artifacts, sessions, tasks, memories } = moved.rows;
+  const { artifacts, sessions, tasks } = moved.rows;
   const failure = rebase.error;
   // The daemon refuses a re-base while anything under the old root is still
   // running (`409 WORKSPACE_BUSY`), and this card already has the count.
@@ -639,8 +640,8 @@ function MovedProjectOffer({ path }: { path: string | null }) {
       <p className="m-0 text-base leading-[1.6] text-ink">
         This project&rsquo;s store records{" "}
         <span className="font-mono text-2xs-plus">{moved.from}</span>. Its{" "}
-        {artifacts} artifacts, {sessions} conversations, {tasks} runs and{" "}
-        {memories} memories still point there.
+        {artifacts} artifacts, {sessions} conversations and {tasks} runs still
+        point there.
       </p>
 
       {moved.activeTasks > 0 && (
@@ -660,7 +661,7 @@ function MovedProjectOffer({ path }: { path: string | null }) {
         {confirming ? (
           <>
             <span className="text-base text-secondary">
-              Re-base all four onto this path?
+              Re-base all three onto this path?
             </span>
             <Button
               variant="primarySm"
@@ -673,9 +674,8 @@ function MovedProjectOffer({ path }: { path: string | null }) {
                       setConfirming(false);
                       showToast(
                         `Re-based ${result.moved.artifacts} artifacts, ` +
-                          `${result.moved.sessions} conversations, ` +
-                          `${result.moved.tasks} runs and ` +
-                          `${result.moved.memories} memories`,
+                          `${result.moved.sessions} conversations and ` +
+                          `${result.moved.tasks} runs`,
                       );
                     },
                   },

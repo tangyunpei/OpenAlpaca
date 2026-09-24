@@ -101,10 +101,6 @@ impl TaskDispatcher {
         security_gate: Arc<SecurityGate>,
         tool_registry: Arc<ToolRegistry>,
         db: Option<Database>,
-        // Read by nothing since the task-output extraction moved to the
-        // memory service (plan 3.4); the parameter goes with the embedder
-        // itself in 3.5, when `Orchestrator::new` loses it too.
-        _embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
         daemon_config: Arc<ArcSwap<DaemonConfig>>,
         connector_status: Arc<RwLock<Option<Arc<dyn ConnectorStatusProvider>>>>,
         skill_catalog: Arc<crate::orchestrator::skill_catalog::SkillCatalog>,

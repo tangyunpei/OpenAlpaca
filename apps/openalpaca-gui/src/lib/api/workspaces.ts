@@ -2,9 +2,10 @@
  * `/v1/workspaces` — the project a store belongs to, and re-basing it when the
  * directory moved (plan §4.8, P-12).
  *
- * A project's path is its identity in four places — its artifacts, its
- * conversations, its runs and its workspace memories — so moving the directory
- * strands all four at once. The daemon can re-attach them in one transaction,
+ * A project's path is its identity in three places — its artifacts, its
+ * conversations and its runs — so moving the directory strands all three at
+ * once (its memory notes are files inside the directory and move with it).
+ * The daemon can re-attach them in one transaction,
  * but only when someone tells it where the project went, and the picker is the
  * only place that knows: the owner points it at the new path.
  *
@@ -17,12 +18,11 @@
 
 import { apiFetch } from "../http";
 
-/** The four members of §4.8's one transaction, counted. */
+/** The three members of §4.8's one transaction, counted. */
 export interface WorkspaceCounts {
   artifacts: number;
   sessions: number;
   tasks: number;
-  memories: number;
 }
 
 export interface Workspace {
@@ -52,9 +52,9 @@ export interface WorkspaceRebase {
   store_moved: boolean;
 }
 
-/** Total rows across the four members — what a confirmation counts. */
+/** Total rows across the three members — what a confirmation counts. */
 export function totalRows(counts: WorkspaceCounts): number {
-  return counts.artifacts + counts.sessions + counts.tasks + counts.memories;
+  return counts.artifacts + counts.sessions + counts.tasks;
 }
 
 /** `GET /v1/workspaces?path=` — 400 for a relative or missing path. */

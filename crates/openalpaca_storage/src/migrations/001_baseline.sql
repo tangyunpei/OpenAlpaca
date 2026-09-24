@@ -1,7 +1,8 @@
--- Baseline schema: the final state of the unreleased 001-042 migration history.
--- Keep version 42 so existing databases at this schema reopen unchanged.
--- Fresh databases create this schema directly; older development schemas are
--- rejected by Database::open rather than upgraded or reset automatically.
+-- Baseline schema: the final state of the unreleased 001-042 migration history, re-squashed as version 43 without the SQL memory engine.
+-- The memory redesign replaced memory, memory_fts, memory_vec and their triggers
+-- with files, so this baseline creates none of them and needs no sqlite-vec.
+-- Fresh databases create this schema directly; every older schema, 42 included,
+-- is rejected by Database::open rather than upgraded or reset automatically.
 -- All statements run inside the database migration transaction.
 
 -- Version tracking
@@ -269,77 +270,6 @@ CREATE TABLE lane_followups (
 
 CREATE INDEX idx_lane_followups_lane_status ON lane_followups(lane_key, status, id);
 
--- Memory, full-text search, and 768-dimensional embeddings
-
-CREATE TABLE memory (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    owner_id TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    scope TEXT NOT NULL,
-    scope_id TEXT NOT NULL DEFAULT '',
-    source TEXT NOT NULL,
-    content TEXT NOT NULL,
-    content_hash TEXT NOT NULL,
-    importance REAL NOT NULL DEFAULT 0.5,
-    confidence REAL NOT NULL DEFAULT 0.7,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    metadata TEXT,
-    updated_at TEXT,
-    supersedes_id INTEGER REFERENCES memory(id) ON DELETE SET NULL,
-    last_accessed_at TEXT
-);
-
-CREATE UNIQUE INDEX idx_memory_content_hash ON memory(owner_id, scope, scope_id, content_hash);
-CREATE INDEX idx_memory_decay ON memory(owner_id, kind, last_accessed_at);
-CREATE INDEX idx_memory_importance ON memory(owner_id, importance);
-CREATE INDEX idx_memory_owner ON memory(owner_id);
-CREATE INDEX idx_memory_owner_created ON memory(owner_id, created_at DESC);
-CREATE INDEX idx_memory_owner_kind ON memory(owner_id, kind);
-CREATE INDEX idx_memory_owner_scope ON memory(owner_id, scope, scope_id);
-CREATE INDEX idx_memory_supersedes ON memory(supersedes_id);
-
-CREATE VIRTUAL TABLE memory_fts USING fts5 (
-    content,
-    owner_id UNINDEXED,
-    kind UNINDEXED,
-    scope UNINDEXED,
-    scope_id UNINDEXED,
-    source UNINDEXED,
-    content='memory',
-    content_rowid='id'
-);
-
--- Extension-owned shadow tables are created by vec0, not by this baseline.
-
-CREATE VIRTUAL TABLE memory_vec USING vec0 (
-    memory_id INTEGER PRIMARY KEY,
-    embedding float[768]
-);
-
--- Keep the external-content FTS index synchronized. Access/decay updates
--- do not reindex content; only the content-update trigger does.
-
-CREATE TRIGGER memory_ai AFTER INSERT ON memory BEGIN
-    INSERT INTO memory_fts(rowid, content, owner_id, kind, scope, scope_id, source)
-    VALUES (NEW.id, NEW.content, NEW.owner_id, NEW.kind, NEW.scope,
-            COALESCE(NEW.scope_id, ''), NEW.source);
-END;
-
-CREATE TRIGGER memory_ad AFTER DELETE ON memory BEGIN
-    INSERT INTO memory_fts(memory_fts, rowid, content, owner_id, kind, scope, scope_id, source)
-    VALUES ('delete', OLD.id, OLD.content, OLD.owner_id, OLD.kind, OLD.scope,
-            COALESCE(OLD.scope_id, ''), OLD.source);
-END;
-
-CREATE TRIGGER memory_au AFTER UPDATE OF content ON memory BEGIN
-    INSERT INTO memory_fts(memory_fts, rowid, content, owner_id, kind, scope, scope_id, source)
-    VALUES ('delete', OLD.id, OLD.content, OLD.owner_id, OLD.kind, OLD.scope,
-            COALESCE(OLD.scope_id, ''), OLD.source);
-    INSERT INTO memory_fts(rowid, content, owner_id, kind, scope, scope_id, source)
-    VALUES (NEW.id, NEW.content, NEW.owner_id, NEW.kind, NEW.scope,
-            COALESCE(NEW.scope_id, ''), NEW.source);
-END;
-
 -- Files and artifact history
 
 -- NULL project_root addresses the home store; NULL rel_path is not unique.
@@ -556,4 +486,4 @@ CREATE INDEX idx_tel_task ON tool_execution_log(task_id, id);
 CREATE INDEX idx_tel_timestamp ON tool_execution_log(timestamp, tool_name);
 CREATE INDEX idx_tel_tool_ts ON tool_execution_log(tool_name, timestamp DESC);
 
-INSERT INTO schema_version(version) VALUES (42);
+INSERT INTO schema_version(version) VALUES (43);

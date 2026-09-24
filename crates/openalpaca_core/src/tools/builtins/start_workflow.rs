@@ -245,7 +245,6 @@ mod tests {
             gate,
             tool_registry,
             db,
-            None,
             daemon_config,
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),

@@ -1,7 +1,4 @@
-pub mod chunker;
-pub mod kb;
-pub mod preferences;
 pub mod scope_context;
+pub mod service;
 pub mod task_extraction;
 pub mod workspace;
-pub mod service;

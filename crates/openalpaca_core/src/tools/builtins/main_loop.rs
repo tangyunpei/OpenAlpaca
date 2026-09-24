@@ -324,7 +324,6 @@ mod tests {
             gate,
             tool_registry.clone(),
             None,
-            None,
             daemon_config,
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(SkillCatalog::new()),
@@ -511,7 +510,7 @@ mod tests {
 
         // No session log service on the context yet.
         let (shared, dispatcher, bus, registry) = setup();
-        for tool in super::super::builtin_tools(Some(db.clone()), None, None, None, None) {
+        for tool in super::super::builtin_tools(Some(db.clone()), None, None, None) {
             if tool.definition.name == "read_result" {
                 registry.register(tool).unwrap();
             }
@@ -537,7 +536,7 @@ mod tests {
 
         // With one, as every daemon that resolved a store has.
         let (shared, dispatcher, bus, registry) = setup();
-        for tool in super::super::builtin_tools(Some(db.clone()), None, None, None, None) {
+        for tool in super::super::builtin_tools(Some(db.clone()), None, None, None) {
             if tool.definition.name == "read_result" {
                 registry.register(tool).unwrap();
             }

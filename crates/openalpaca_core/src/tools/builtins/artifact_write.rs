@@ -1141,7 +1141,6 @@ mod tests {
         let registry = ToolRegistry::default();
         for tool in super::super::builtin_tools(
             Some(fx.db.clone()),
-            None,
             Some(Arc::new(ArcSwap::from_pointee(DaemonConfig::default()))),
             None,
             None,
@@ -1221,7 +1220,6 @@ mod tests {
         let registry = ToolRegistry::default();
         for tool in super::super::builtin_tools(
             Some(fx.db.clone()),
-            None,
             Some(Arc::new(ArcSwap::from_pointee(DaemonConfig::default()))),
             None,
             Some(startup_root.path().to_path_buf()),

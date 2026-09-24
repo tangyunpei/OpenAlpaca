@@ -5,9 +5,10 @@
 //! openalpaca store purge  <project>|--all [--dry-run] [-y]
 //! ```
 //!
-//! A project's path is its identity in four places — its artifacts, its
-//! conversations, its runs and its workspace memories — so moving the directory
-//! strands all four at once. `rebase` is the one call that moves them together,
+//! A project's path is its identity in three places — its artifacts, its
+//! conversations and its runs — so moving the directory strands all three at
+//! once (its memory notes are files inside the directory and move with it).
+//! `rebase` is the one call that moves them together,
 //! and the `--dry-run` is the same question asked without the answer being
 //! written: how many rows of each kind name the old root, and what would happen
 //! to the store directory.
@@ -22,8 +23,8 @@
 //! the store. It prints a plan first — one line per entry of the store, in the
 //! retention-class terms the seeded README already uses, saying `delete` or
 //! `keep` for each — and prints it *instead of* purging unless you pass `-y`.
-//! Conversations, runs and uploads go; produced artifacts, workspace memories
-//! and anything OpenAlpaca did not create stay, and the plan says so by name
+//! Conversations, runs and uploads go; produced artifacts, the project's memory
+//! notes and anything OpenAlpaca did not create stay, and the plan says so by name
 //! rather than by omission. Unlike `rebase`'s *old* path, `<project>` is never
 //! silently walked up to an ancestor root: `purge /repo/src` is refused
 //! (`422 WORKSPACE_NOT_A_ROOT`, naming `/repo`) rather than deleting the whole
@@ -108,22 +109,20 @@ struct Counts {
     sessions: usize,
     #[serde(default)]
     tasks: usize,
-    #[serde(default)]
-    memories: usize,
 }
 
 impl Counts {
     fn is_empty(&self) -> bool {
-        self.artifacts == 0 && self.sessions == 0 && self.tasks == 0 && self.memories == 0
+        self.artifacts == 0 && self.sessions == 0 && self.tasks == 0
     }
 
-    /// `12 artifacts, 2 conversations, 3 runs, 7 memories` — every member
-    /// named, including the zeroes, because "nothing else moved" is the part a
+    /// `12 artifacts, 2 conversations, 3 runs` — every member named,
+    /// including the zeroes, because "nothing else moved" is the part a
     /// reader is checking for.
     fn describe(&self) -> String {
         format!(
-            "{} artifacts, {} conversations, {} runs, {} memories",
-            self.artifacts, self.sessions, self.tasks, self.memories
+            "{} artifacts, {} conversations, {} runs",
+            self.artifacts, self.sessions, self.tasks
         )
     }
 }
@@ -686,12 +685,8 @@ mod tests {
             artifacts: 12,
             sessions: 2,
             tasks: 0,
-            memories: 7,
         };
-        assert_eq!(
-            counts.describe(),
-            "12 artifacts, 2 conversations, 0 runs, 7 memories"
-        );
+        assert_eq!(counts.describe(), "12 artifacts, 2 conversations, 0 runs");
         assert!(!counts.is_empty());
         assert!(Counts::default().is_empty());
     }
@@ -728,7 +723,6 @@ mod tests {
                 artifacts: 12,
                 sessions: 2,
                 tasks: 3,
-                memories: 7,
             },
             active_tasks: 0,
             queued_tasks: Some(0),

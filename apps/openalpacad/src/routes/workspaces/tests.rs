@@ -237,20 +237,6 @@ impl Fixture {
         path
     }
 
-    fn memory(&self, root: &str, content: &str) {
-        self.db
-            .with_connection(|conn| {
-                conn.execute(
-                    "INSERT INTO memory (owner_id, kind, scope, scope_id, source, content,
-                                         content_hash)
-                     VALUES (?1, 'fact', 'workspace', ?2, 'test', ?3, ?3)",
-                    [OWNER, root, content],
-                )?;
-                Ok(())
-            })
-            .expect("insert memory");
-    }
-
     fn purge_deps(&self) -> PurgeDeps<'_> {
         PurgeDeps {
             db: &self.db,
@@ -617,7 +603,10 @@ async fn a_project_moved_by_hand_re_bases_its_four_members() {
     assert_eq!(body["moved"]["artifacts"], 1);
     assert_eq!(body["moved"]["sessions"], 1);
     assert_eq!(body["moved"]["tasks"], 1);
-    assert_eq!(body["moved"]["memories"], 0);
+    assert!(
+        body["moved"].get("memories").is_none(),
+        "memory is not a member of the re-base any more: {body}"
+    );
     assert_eq!(
         body["store_moved"], false,
         "the directory was already moved by hand"
@@ -952,7 +941,6 @@ async fn a_dry_run_deletes_nothing_and_lists_both_verdicts() {
     f.message("s-1");
     f.task("t-1", &root, "completed");
     f.artifact(&root, "report.md");
-    f.memory(&root, "the build takes four minutes");
     let upload = f.upload(&root, "notes.txt");
 
     let (status, body) = f.purge(Some(&root), false, true).await;
@@ -967,7 +955,10 @@ async fn a_dry_run_deletes_nothing_and_lists_both_verdicts() {
     assert_eq!(body["projects"][0]["counts"]["tasks"], 1);
     assert_eq!(body["projects"][0]["counts"]["uploads"], 1);
     assert_eq!(body["projects"][0]["kept"]["artifacts"], 1);
-    assert_eq!(body["projects"][0]["kept"]["memories"], 1);
+    assert!(
+        body["projects"][0]["kept"].get("memories").is_none(),
+        "the purge counts no memory rows — notes are files under memory/: {body}"
+    );
 
     // Both verdicts, each with the retention class it comes from.
     assert_eq!(action(&body, "sessions/"), "delete");
@@ -1000,7 +991,6 @@ async fn a_real_purge_removes_the_rows_and_the_bytes_it_named() {
     f.message("s-1");
     f.task("t-1", &root, "completed");
     f.artifact(&root, "report.md");
-    f.memory(&root, "the build takes four minutes");
     let upload = f.upload(&root, "notes.txt");
     // A name the store did not create, in the store root itself.
     let unknown = std::path::Path::new(&root)
@@ -1031,7 +1021,6 @@ async fn a_real_purge_removes_the_rows_and_the_bytes_it_named() {
         f.row_count("SELECT COUNT(*) FROM file_assets WHERE origin = 'produced'"),
         1
     );
-    assert_eq!(f.row_count("SELECT COUNT(*) FROM memory"), 1);
     assert!(
         unknown.exists(),
         "the store deleted a name it did not create"

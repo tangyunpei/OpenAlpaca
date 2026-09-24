@@ -475,7 +475,6 @@ async fn async_main(
         svcs.security_gate,
         svcs.tool_registry,
         Some(db.clone()),
-        svcs.embedder.clone(),
         svcs.skill_catalog.clone(),
         svcs.skill_router.clone(),
         daemon_config.clone(),
@@ -688,15 +687,6 @@ async fn async_main(
     ));
 
     // Step 13: Spawn background tasks
-    if let Some(ref emb) = svcs.embedder {
-        background::spawn_embedding_indexer(
-            emb.clone(),
-            db.clone(),
-            daemon_config.clone(),
-            cancel_token.clone(),
-        );
-    }
-    background::spawn_memory_decay(db.clone(), daemon_config.clone(), cancel_token.clone());
     background::spawn_file_processing_worker(
         db.clone(),
         daemon_config.clone(),
@@ -725,7 +715,6 @@ async fn async_main(
         chat_service,
         token_manager: svcs.token_manager,
         provider_usage_tracker: svcs.provider_usage_tracker,
-        embedder: svcs.embedder,
         memory_service: svcs.memory_service,
         persona_user,
         local_user_id,

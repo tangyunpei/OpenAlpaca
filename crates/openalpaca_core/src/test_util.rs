@@ -217,25 +217,3 @@ pub(crate) fn router_recording(
 /// The model the recording router defaults to: a compiled-in Anthropic id, so
 /// `ModelRegistry::with_defaults()` resolves it to the registered provider.
 pub(crate) const RECORDED_MODEL: &str = "claude-sonnet-4-6";
-
-/// An embedder that answers every text with the same 768-dimension vector —
-/// the width of the `memory_vec` table, so a row it embeds can be inserted
-/// and searched. Every text sits at distance 0 from every other, which is
-/// the harshest input for anything that decides by vector similarity.
-pub(crate) struct ConstantEmbedder;
-
-pub(crate) const CONSTANT_EMBEDDER_DIMENSIONS: u32 = 768;
-
-#[async_trait::async_trait]
-impl openalpaca_llm::Embedder for ConstantEmbedder {
-    async fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, openalpaca_llm::EmbedError> {
-        Ok(texts
-            .iter()
-            .map(|_| vec![0.25; CONSTANT_EMBEDDER_DIMENSIONS as usize])
-            .collect())
-    }
-
-    fn dimensions(&self) -> u32 {
-        CONSTANT_EMBEDDER_DIMENSIONS
-    }
-}

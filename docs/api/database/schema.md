@@ -301,28 +301,6 @@ total_cost_usd REAL DEFAULT 0
 PRIMARY KEY (date, agent_id, model)
 ```
 
-### `memory` (table)
-
-Source migration: `001_baseline.sql`
-
-```sql
-id INTEGER PRIMARY KEY AUTOINCREMENT
-owner_id TEXT NOT NULL
-kind TEXT NOT NULL
-scope TEXT NOT NULL
-scope_id TEXT NOT NULL DEFAULT ''
-source TEXT NOT NULL
-content TEXT NOT NULL
-content_hash TEXT NOT NULL
-importance REAL NOT NULL DEFAULT 0.5
-confidence REAL NOT NULL DEFAULT 0.7
-created_at TEXT NOT NULL DEFAULT (datetime('now'))
-metadata TEXT
-updated_at TEXT
-supersedes_id INTEGER REFERENCES memory(id) ON DELETE SET NULL
-last_accessed_at TEXT
-```
-
 ### `message_feedback` (table)
 
 Source migration: `001_baseline.sql`
@@ -554,14 +532,6 @@ result_ref TEXT
 | `idx_llm_call_log_agent` | `llm_call_log` | `INDEX` | `agent_id, timestamp DESC` | `001_baseline.sql` |
 | `idx_llm_call_log_task` | `llm_call_log` | `INDEX` | `task_id, timestamp DESC` | `001_baseline.sql` |
 | `idx_llm_call_log_timestamp` | `llm_call_log` | `INDEX` | `timestamp` | `001_baseline.sql` |
-| `idx_memory_content_hash` | `memory` | `UNIQUE` | `owner_id, scope, scope_id, content_hash` | `001_baseline.sql` |
-| `idx_memory_decay` | `memory` | `INDEX` | `owner_id, kind, last_accessed_at` | `001_baseline.sql` |
-| `idx_memory_importance` | `memory` | `INDEX` | `owner_id, importance` | `001_baseline.sql` |
-| `idx_memory_owner` | `memory` | `INDEX` | `owner_id` | `001_baseline.sql` |
-| `idx_memory_owner_created` | `memory` | `INDEX` | `owner_id, created_at DESC` | `001_baseline.sql` |
-| `idx_memory_owner_kind` | `memory` | `INDEX` | `owner_id, kind` | `001_baseline.sql` |
-| `idx_memory_owner_scope` | `memory` | `INDEX` | `owner_id, scope, scope_id` | `001_baseline.sql` |
-| `idx_memory_supersedes` | `memory` | `INDEX` | `supersedes_id` | `001_baseline.sql` |
 | `idx_mf_feedback` | `message_feedback` | `INDEX` | `feedback` | `001_baseline.sql` |
 | `idx_orch_latency_mode` | `orchestrator_latency` | `INDEX` | `mode, timestamp DESC` | `001_baseline.sql` |
 | `idx_orch_latency_ts` | `orchestrator_latency` | `INDEX` | `timestamp DESC` | `001_baseline.sql` |
@@ -592,8 +562,4 @@ result_ref TEXT
 
 ## Triggers
 
-| Name | Source |
-|---|---|
-| `memory_ad` | `001_baseline.sql` |
-| `memory_ai` | `001_baseline.sql` |
-| `memory_au` | `001_baseline.sql` |
+No active triggers parsed.

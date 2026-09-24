@@ -11,4 +11,4 @@
 
 | Version | Name | SQL File | Summary |
 |---|---|---|---|
-| 42 | `baseline` | `001_baseline.sql` | Baseline schema: the final state of the unreleased 001-042 migration history. |
+| 43 | `baseline` | `001_baseline.sql` | Baseline schema: the final state of the unreleased 001-042 migration history, re-squashed as version 43 without the SQL memory engine. |

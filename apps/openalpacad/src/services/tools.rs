@@ -15,7 +15,6 @@ use tracing::{info, warn};
 pub(super) async fn build_tool_registry(
     config_base_dir: &Path,
     db: &Database,
-    embedder: &Option<Arc<dyn openalpaca_llm::Embedder>>,
     memory_service: &Arc<MemoryService>,
     soul_path: &Path,
     user_path: &Path,
@@ -56,7 +55,6 @@ pub(super) async fn build_tool_registry(
     let connector_send_lock: ConnectorSendLock = Arc::new(std::sync::RwLock::new(None));
     for tool in openalpaca_core::tools::builtins::builtin_tools_with_persona_context(
         Some(db.clone()),
-        embedder.clone(),
         persona_ctx,
         Some(daemon_config.clone()),
         Some(web_search_config.clone()),

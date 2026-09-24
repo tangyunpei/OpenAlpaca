@@ -168,7 +168,6 @@ fn orchestrator_for(registry: Arc<crate::tools::ToolRegistry>) -> Orchestrator {
         Arc::new(SecurityGate::new(sandbox)),
         registry,
         None,
-        None,
         Arc::new(skill_catalog::SkillCatalog::new()),
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),

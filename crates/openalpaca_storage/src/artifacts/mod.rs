@@ -593,9 +593,14 @@ pub struct ArtifactVersionRow {
     pub created_at: String,
 }
 
-/// How many rows each member of §4.8's one transaction carried — the same four
+/// How many rows each member of §4.8's one transaction carried — the same three
 /// counts whether they were moved ([`ArtifactStore::rebase_project`]) or merely
 /// counted ([`ArtifactStore::workspace_rows`]).
+///
+/// Memory is not a member: since the memory redesign a project's notes are
+/// files inside the directory that moves (`<project>/.openalpaca/memory/`),
+/// not rows keyed by its path, so there is nothing in the database to re-key
+/// and nothing to count.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RebaseCounts {
     /// `file_assets` rows, **both** origins.
@@ -604,8 +609,6 @@ pub struct RebaseCounts {
     pub sessions: usize,
     /// `task.workspace_id` (migration 036).
     pub tasks: usize,
-    /// `memory.scope_id` where `scope = 'workspace'`.
-    pub memories: usize,
 }
 
 impl RebaseCounts {
@@ -635,9 +638,9 @@ pub struct WorkspaceRows {
     /// that is running. Reported rather than folded into `active_tasks`: the two
     /// answer different questions.
     pub queued_tasks: usize,
-    /// Rows under this root that belong to **another** owner — `file_assets`
-    /// and `memory`, the two members that carry an `owner_id` at all. Always
-    /// `0` for an unscoped count.
+    /// Rows under this root that belong to **another** owner — `file_assets`,
+    /// the one member that carries an `owner_id` at all. Always `0` for an
+    /// unscoped count.
     ///
     /// A re-base is owner-scoped, and this is how: a root holding rows the
     /// caller cannot see is a `404`, not a transaction that quietly rewrites
@@ -678,12 +681,14 @@ impl PurgeCounts {
 }
 
 /// The rows a purge deliberately leaves where they are (§4.5, §1.3 rule 3).
+///
+/// Memory notes are kept too, but they are files under the project's own
+/// `memory/` directory rather than rows, so a purge — rows only — has nothing
+/// to count for them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PurgeKept {
     /// `file_assets` rows with `origin = 'produced'` — never garbage-collected.
     pub artifacts: usize,
-    /// `memory` rows scoped to this workspace — the user's, not the store's.
-    pub memories: usize,
 }
 
 /// What the **home** scope holds of the two kinds a project purge removes.
@@ -1470,26 +1475,34 @@ impl<'a> ArtifactStore<'a> {
     }
 
     /// Re-base everything addressed under `old_root` onto `new_root` — §4.8's
-    /// "Project moved", as **one transaction** over its four members.
+    /// "Project moved", as **one transaction** over its three members.
     ///
-    /// A project's path is its identity in four places, all of them holding the
-    /// same canonical-path string, so all four move together or none does:
+    /// A project's path is its identity in three places, all of them holding
+    /// the same canonical-path string, so all three move together or none does:
     ///
     /// | Member | Column |
     /// |---|---|
-    /// | `file_assets` (**both** origins — an upload placed in a project store moved with it) | `project_root`, and the `storage_path` prefix |
     /// | `session` (039) | `workspace_id` |
     /// | `task` (036) | `workspace_id` |
-    /// | `memory` (`memory/workspace.rs`: the id *is* the canonical root) | `scope_id`, where `scope = 'workspace'` |
+    /// | `file_assets` (**both** origins — an upload placed in a project store moved with it) | `project_root`, and the `storage_path` prefix |
+    ///
+    /// Memory notes are not a member: they are files inside the project's own
+    /// store directory and move with it, keyed by nothing in the database.
     ///
     /// `rel_path` is deliberately untouched: it is the address, and it did not
     /// change. Only the root prefix does.
     ///
     /// This lives on `ArtifactStore` because §4.8 puts it here — the artifact
     /// address is the member with the most to lose from a half-applied move —
-    /// but the other three are not artifact rows and are updated by their own
+    /// but the other two are not artifact rows and are updated by their own
     /// statements, not through their repositories: a transaction is the whole
     /// point, and each repository call would open its own.
+    ///
+    /// `file_assets` goes **last**: it is the one member with a unique key a
+    /// re-base can violate (`idx_file_assets_addr`, the artifact address —
+    /// re-keying onto a root that already holds a file at the same `rel_path`
+    /// would merge two projects), and the failure that rolls the transaction
+    /// back should be able to roll something back.
     ///
     /// Rows only. Moving the store *directory*, when the caller is asking for a
     /// move rather than recording one that already happened, is
@@ -1503,11 +1516,26 @@ impl<'a> ArtifactStore<'a> {
     pub fn rebase_project(&self, old_root: &str, new_root: &str) -> Result<RebaseCounts> {
         self.db.with_connection(|conn| {
             let tx = conn.unchecked_transaction()?;
+            let sessions = tx.execute(
+                "UPDATE session SET workspace_id = ?2, updated_at = datetime('now')
+                  WHERE workspace_id = ?1",
+                rusqlite::params![old_root, new_root],
+            )?;
+            let tasks = tx.execute(
+                "UPDATE task SET workspace_id = ?2, updated_at = datetime('now')
+                  WHERE workspace_id = ?1",
+                rusqlite::params![old_root, new_root],
+            )?;
             // `missing_since` is cleared with the address it described: the
             // mark says "nothing is at `storage_path`", and `storage_path` is
             // exactly what this statement rewrites. No stat pass inside the
             // transaction (R32) — the read path is the authority on absence and
             // re-stamps on the next head read if the bytes are still away.
+            //
+            // `idx_file_assets_addr` is (project_root, rel_path): re-keying
+            // onto a root that already holds a file at the same address
+            // violates it, and that is exactly when the whole transaction must
+            // roll back rather than merge two projects.
             let file_assets = tx.execute(
                 "UPDATE file_assets
                     SET project_root = ?2,
@@ -1520,38 +1548,16 @@ impl<'a> ArtifactStore<'a> {
                   WHERE project_root = ?1",
                 rusqlite::params![old_root, new_root],
             )?;
-            let sessions = tx.execute(
-                "UPDATE session SET workspace_id = ?2, updated_at = datetime('now')
-                  WHERE workspace_id = ?1",
-                rusqlite::params![old_root, new_root],
-            )?;
-            let tasks = tx.execute(
-                "UPDATE task SET workspace_id = ?2, updated_at = datetime('now')
-                  WHERE workspace_id = ?1",
-                rusqlite::params![old_root, new_root],
-            )?;
-            // The memory repository has no re-key path of its own, so this is
-            // the statement. `idx_memory_content_hash` is
-            // (owner_id, scope, scope_id, content_hash): re-keying onto a
-            // scope that already holds the same content would violate it, and
-            // that is exactly when the whole transaction must roll back rather
-            // than merge two projects' memories.
-            let memories = tx.execute(
-                "UPDATE memory SET scope_id = ?2, updated_at = datetime('now')
-                  WHERE scope = 'workspace' AND scope_id = ?1",
-                rusqlite::params![old_root, new_root],
-            )?;
             tx.commit()?;
             Ok(RebaseCounts {
                 file_assets,
                 sessions,
                 tasks,
-                memories,
             })
         })
     }
 
-    /// What is recorded under `root` right now — the same four members
+    /// What is recorded under `root` right now — the same three members
     /// [`Self::rebase_project`] moves, plus the runs that are still in flight
     /// there.
     ///
@@ -1560,13 +1566,13 @@ impl<'a> ArtifactStore<'a> {
     /// one out from under a running task would rewrite the row without moving
     /// the process.
     ///
-    /// `owner_id` scopes the two members that carry one — `file_assets` and
-    /// `memory` — and fills [`WorkspaceRows::other_owners`] with what it
-    /// therefore left out. `session` and `task` have no owner column at all, so
-    /// their counts are the root's whether or not a caller is named; that
-    /// asymmetry is exactly why a root holding another owner's rows is refused
-    /// rather than partly re-based. `None` counts every owner, which is what
-    /// describing a root (rather than writing it) asks for.
+    /// `owner_id` scopes the one member that carries one — `file_assets` — and
+    /// fills [`WorkspaceRows::other_owners`] with what it therefore left out.
+    /// `session` and `task` have no owner column at all, so their counts are
+    /// the root's whether or not a caller is named; that asymmetry is exactly
+    /// why a root holding another owner's rows is refused rather than partly
+    /// re-based. `None` counts every owner, which is what describing a root
+    /// (rather than writing it) asks for.
     pub fn workspace_rows(&self, root: &str, owner_id: Option<&str>) -> Result<WorkspaceRows> {
         self.db.with_connection(|conn| {
             let count = |sql: &str| -> Result<usize> {
@@ -1582,28 +1588,19 @@ impl<'a> ArtifactStore<'a> {
                     })? as usize,
                 )
             };
-            let (file_assets, memories, other_owners) = match owner_id {
+            let (file_assets, other_owners) = match owner_id {
                 Some(_) => (
                     owned(
                         "SELECT COUNT(*) FROM file_assets
                           WHERE project_root = ?1 AND owner_id = ?2",
                     )?,
                     owned(
-                        "SELECT COUNT(*) FROM memory
-                          WHERE scope = 'workspace' AND scope_id = ?1 AND owner_id = ?2",
-                    )?,
-                    owned(
-                        "SELECT (SELECT COUNT(*) FROM file_assets
-                                  WHERE project_root = ?1 AND owner_id <> ?2)
-                              + (SELECT COUNT(*) FROM memory
-                                  WHERE scope = 'workspace' AND scope_id = ?1 AND owner_id <> ?2)",
+                        "SELECT COUNT(*) FROM file_assets
+                          WHERE project_root = ?1 AND owner_id <> ?2",
                     )?,
                 ),
                 None => (
                     count("SELECT COUNT(*) FROM file_assets WHERE project_root = ?1")?,
-                    count(
-                        "SELECT COUNT(*) FROM memory WHERE scope = 'workspace' AND scope_id = ?1",
-                    )?,
                     0,
                 ),
             };
@@ -1612,7 +1609,6 @@ impl<'a> ArtifactStore<'a> {
                     file_assets,
                     sessions: count("SELECT COUNT(*) FROM session WHERE workspace_id = ?1")?,
                     tasks: count("SELECT COUNT(*) FROM task WHERE workspace_id = ?1")?,
-                    memories,
                 },
                 active_tasks: count(
                     "SELECT COUNT(*) FROM task
@@ -1646,10 +1642,13 @@ impl<'a> ArtifactStore<'a> {
         })
     }
 
-    /// Every distinct project root any of the four members names, sorted.
+    /// Every distinct project root any of the three members names, sorted.
     ///
     /// `store purge --all` iterates this; the home scope is deliberately absent
-    /// (its rows carry `NULL`, and the home store is not a project).
+    /// (its rows carry `NULL`, and the home store is not a project). A project
+    /// known only by its memory partition — notes on disk, no row in any
+    /// member — is not listed here: that is the memory service's knowledge,
+    /// not the database's.
     pub fn project_roots(&self) -> Result<Vec<String>> {
         self.db.with_connection(|conn| {
             let mut stmt = conn.prepare(
@@ -1657,7 +1656,6 @@ impl<'a> ArtifactStore<'a> {
                      SELECT project_root AS root FROM file_assets
                      UNION SELECT workspace_id FROM session
                      UNION SELECT workspace_id FROM task
-                     UNION SELECT scope_id FROM memory WHERE scope = 'workspace'
                  ) WHERE root IS NOT NULL AND root <> ''
                  ORDER BY root",
             )?;
@@ -1699,9 +1697,8 @@ impl<'a> ArtifactStore<'a> {
     ///
     /// The counting mirrors [`Self::purge_project`]'s statements one for one, so
     /// a `--dry-run` and the real call cannot disagree about what is there. The
-    /// two kept members are counted for the same reason the deleted ones are:
-    /// "your artifacts and your memories stay" is a claim, and a plan that
-    /// prints it should have looked.
+    /// kept member is counted for the same reason the deleted ones are: "your
+    /// artifacts stay" is a claim, and a plan that prints it should have looked.
     pub fn purge_plan(&self, root: &str) -> Result<PurgePlan> {
         self.db.with_connection(|conn| {
             let count = |sql: &str| -> Result<usize> {
@@ -1769,9 +1766,6 @@ impl<'a> ArtifactStore<'a> {
                         "SELECT COUNT(*) FROM file_assets
                           WHERE origin = 'produced' AND project_root = ?1",
                     )?,
-                    memories: count(
-                        "SELECT COUNT(*) FROM memory WHERE scope = 'workspace' AND scope_id = ?1",
-                    )?,
                 },
                 sessions,
             })
@@ -1791,7 +1785,7 @@ impl<'a> ArtifactStore<'a> {
     /// |---|---|
     /// | `file_assets` where `origin = 'produced'` | produced artifacts are never garbage-collected (§4.5) |
     /// | an upload row a surviving message still attaches | dedup is store-blind, so the row can be another project's attachment |
-    /// | `memory` scoped to this workspace | the user's, not the store's |
+    /// | the project's memory notes | the user's, not the store's — and files under `memory/`, not rows, so a rows-only purge cannot reach them anyway |
     ///
     /// `task.session_id` on a run *outside* this root is nulled rather than
     /// cascaded, exactly as [`ConversationRepository::delete_session`] does

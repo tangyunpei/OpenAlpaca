@@ -1,8 +1,9 @@
 //! Embedded database schema and subsequent migrations.
 //!
-//! The unreleased migration history is squashed into one baseline. Its version
-//! remains 42 so databases already at that schema can reopen without changes.
-//! Older development databases are not upgraded by the baseline.
+//! The unreleased migration history is squashed into one baseline. The memory
+//! redesign re-squashed it as version 43 without the SQL memory tables, so a
+//! database at 42 — the last schema with them — is refused like every older
+//! development schema rather than upgraded (`database/mod.rs`, plan §4).
 
 /// A database migration.
 pub struct Migration {
@@ -11,9 +12,9 @@ pub struct Migration {
     pub sql: &'static str,
 }
 
-/// Migrations in execution order. Future schema changes start at version 43.
+/// Migrations in execution order. Future schema changes start at version 44.
 pub static MIGRATIONS: &[Migration] = &[Migration {
-    version: 42,
+    version: 43,
     name: "baseline",
     sql: include_str!("001_baseline.sql"),
 }];

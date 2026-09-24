@@ -6,13 +6,15 @@
 //! POST  /v1/workspaces/purge {path|all}    -> delete one project's history
 //! ```
 //!
-//! A project's path is its identity in four places — `file_assets.project_root`,
-//! `session.workspace_id`, `task.workspace_id` and the memory scope key — so
-//! moving the directory strands all four at once. Claude Code's encoded-cwd
-//! directories are the cautionary example the plan cites: a rename there leaves
-//! transcripts, memory and history under the old name for good. A path-derived
-//! identity is cheap only if re-basing is **one transaction**, which is what
-//! `ArtifactStore::rebase_project` is.
+//! A project's path is its identity in three places — `file_assets.project_root`,
+//! `session.workspace_id` and `task.workspace_id` — so moving the directory
+//! strands all three at once. Claude Code's encoded-cwd directories are the
+//! cautionary example the plan cites: a rename there leaves transcripts and
+//! history under the old name for good. A path-derived identity is cheap only
+//! if re-basing is **one transaction**, which is what
+//! `ArtifactStore::rebase_project` is. (A project's memory notes are files
+//! inside the directory that moves, not rows keyed by its path, so they are
+//! not a member of the transaction.)
 //!
 //! **A root a project came *from* is resolved the way a turn's
 //! `x-workspace-path` is** (R22, `request_project_root_uncached` — the same
@@ -222,7 +224,7 @@ fn resolve_destination(input: &str) -> Result<String, Response> {
 /// it, and the caller would only learn the resolved root from what the
 /// response deleted. So the given path is canonicalized, and then — **rows
 /// are the proof of a root (R75)** — taken as given outright when any of the
-/// four members (`file_assets`, `session`, `task`, `memory`) still names that
+/// three members (`file_assets`, `session`, `task`) still names that
 /// exact literal path, before the marker walk is even consulted: a project
 /// moved out from under a monorepo's `.git`, its own `.openalpaca` gone with
 /// it, stays purgeable by the root its rows recorded even though the walk
@@ -303,7 +305,6 @@ fn counts_json(counts: &RebaseCounts) -> serde_json::Value {
         "artifacts": counts.file_assets,
         "sessions": counts.sessions,
         "tasks": counts.tasks,
-        "memories": counts.memories,
     })
 }
 
@@ -627,10 +628,9 @@ fn plan_entries(root: &str, plan: &PurgePlan) -> Vec<serde_json::Value> {
         ),
         plan_entry(
             "memory/",
-            format!(
-                "{} workspace memories, and the reserved memory/ directory",
-                plan.kept.memories
-            ),
+            "this project's memory notes — files, not rows, so a purge of the database \
+             cannot reach them"
+                .to_string(),
             "yours — never swept",
             "keep",
         ),
@@ -927,7 +927,6 @@ pub(crate) async fn purge_workspaces(deps: &PurgeDeps<'_>, request: PurgeRequest
             "counts": purge_counts_json(&plan.counts),
             "kept": {
                 "artifacts": plan.kept.artifacts,
-                "memories": plan.kept.memories,
             },
         });
         if let Some(outcome) = outcomes.get(index) {

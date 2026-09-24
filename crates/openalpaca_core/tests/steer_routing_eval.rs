@@ -246,7 +246,7 @@ async fn steer_routing_eval() {
         gate,
         registry,
         Some(db.clone()),
-        None, // no embedder — memory_store degrades gracefully, memory_search stays off
+        // no embedder — memory_store degrades gracefully, memory_search stays off
         Arc::new(skill_catalog::SkillCatalog::new()),
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         Arc::new(ArcSwap::from_pointee(cfg)),

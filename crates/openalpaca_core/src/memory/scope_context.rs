@@ -1,7 +1,8 @@
 //! Workspace scope context: carries workspace identity through the request lifecycle.
 //!
-//! Created once in `handle_message()` and threaded to all memory read/write call sites.
-//! Provides helpers for determining write scope and building cascading search scope lists.
+//! Created once in `handle_message()` and threaded to the call sites that need
+//! the request's workspace: the memory service resolves its own partition from
+//! `request_workspace_root` (design §2), and artifact placement reads it too.
 //!
 //! Two *different* workspace values travel here, and conflating them is the
 //! defect ruling R22 fixed:
@@ -17,7 +18,6 @@
 
 use std::path::{Path, PathBuf};
 
-use openalpaca_storage::models::memory::MemoryScope;
 use openalpaca_storage::store::{self, StoreScope};
 
 /// Whether a resolved workspace root is really the home store wearing a
@@ -192,31 +192,6 @@ impl MemoryScopeContext {
         Self::default()
     }
 
-    /// Determine the default scope and scope_id for a memory write.
-    ///
-    /// If a workspace is detected, returns `(Workspace, workspace_id)`.
-    /// Otherwise returns `(Global, "")`.
-    pub fn default_write_scope(&self) -> (MemoryScope, &str) {
-        if let Some(ref ws) = self.workspace_id {
-            (MemoryScope::Workspace, ws.as_str())
-        } else {
-            (MemoryScope::Global, "")
-        }
-    }
-
-    /// Build a list of (scope, scope_id) pairs for cascading retrieval.
-    ///
-    /// Returns `[Global, Workspace?]` — Global is always included.
-    /// If a workspace is detected, Workspace scope is appended.
-    /// The caller should iterate in reverse for most-specific-first ordering.
-    pub fn cascade_scopes(&self) -> Vec<(MemoryScope, Option<&str>)> {
-        let mut scopes = vec![(MemoryScope::Global, None)];
-        if let Some(ref ws) = self.workspace_id {
-            scopes.push((MemoryScope::Workspace, Some(ws.as_str())));
-        }
-        scopes
-    }
-
     /// Whether a workspace context is available.
     pub fn has_workspace(&self) -> bool {
         self.workspace_id.is_some()
@@ -226,42 +201,6 @@ impl MemoryScopeContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_cascade_scopes_with_workspace() {
-        let ctx = MemoryScopeContext::new(Some("/home/user/project".to_string()));
-        let scopes = ctx.cascade_scopes();
-        assert_eq!(scopes.len(), 2);
-        assert_eq!(scopes[0], (MemoryScope::Global, None));
-        assert_eq!(
-            scopes[1],
-            (MemoryScope::Workspace, Some("/home/user/project"))
-        );
-    }
-
-    #[test]
-    fn test_cascade_scopes_without_workspace() {
-        let ctx = MemoryScopeContext::global_only();
-        let scopes = ctx.cascade_scopes();
-        assert_eq!(scopes.len(), 1);
-        assert_eq!(scopes[0], (MemoryScope::Global, None));
-    }
-
-    #[test]
-    fn test_default_write_scope_with_workspace() {
-        let ctx = MemoryScopeContext::new(Some("/ws".to_string()));
-        let (scope, id) = ctx.default_write_scope();
-        assert_eq!(scope, MemoryScope::Workspace);
-        assert_eq!(id, "/ws");
-    }
-
-    #[test]
-    fn test_default_write_scope_without_workspace() {
-        let ctx = MemoryScopeContext::global_only();
-        let (scope, id) = ctx.default_write_scope();
-        assert_eq!(scope, MemoryScope::Global);
-        assert_eq!(id, "");
-    }
 
     #[test]
     fn test_has_workspace() {

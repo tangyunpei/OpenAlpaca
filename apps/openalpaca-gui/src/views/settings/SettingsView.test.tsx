@@ -53,7 +53,6 @@ const workspace = vi.hoisted(() => ({
       artifacts: number;
       sessions: number;
       tasks: number;
-      memories: number;
     };
     activeTasks: number;
   } | null,
@@ -568,7 +567,7 @@ describe("SettingsView (§2.5, §5.4)", () => {
     workspace.moved = {
       from: "/Users/dev/openalpaca",
       to: "/Users/dev/moved",
-      rows: { artifacts: 12, sessions: 2, tasks: 3, memories: 7 },
+      rows: { artifacts: 12, sessions: 2, tasks: 3 },
       activeTasks: 0,
     };
     render(<SettingsView />);
@@ -577,7 +576,9 @@ describe("SettingsView (§2.5, §5.4)", () => {
     // exactly what would move.
     expect(screen.getByText("/Users/dev/openalpaca")).toBeInTheDocument();
     expect(
-      screen.getByText(/12 artifacts, 2 conversations, 3 runs and 7 memories/),
+      screen.getByText(
+        /12 artifacts, 2 conversations and 3 runs still point there/,
+      ),
     ).toBeInTheDocument();
 
     // Offering is not doing: the first click only asks.
@@ -586,7 +587,7 @@ describe("SettingsView (§2.5, §5.4)", () => {
     );
     expect(workspace.rebase).not.toHaveBeenCalled();
     expect(
-      screen.getByText("Re-base all four onto this path?"),
+      screen.getByText("Re-base all three onto this path?"),
     ).toBeInTheDocument();
 
     // And a second thought takes it away without a request.
@@ -614,7 +615,7 @@ describe("SettingsView (§2.5, §5.4)", () => {
     workspace.moved = {
       from: "/Users/dev/openalpaca",
       to: "/Users/dev/moved",
-      rows: { artifacts: 1, sessions: 0, tasks: 1, memories: 0 },
+      rows: { artifacts: 1, sessions: 0, tasks: 1 },
       activeTasks: 2,
     };
     render(<SettingsView />);
@@ -634,7 +635,7 @@ describe("SettingsView (§2.5, §5.4)", () => {
     workspace.moved = {
       from: "/Users/dev/openalpaca",
       to: "/Users/dev/moved",
-      rows: { artifacts: 1, sessions: 0, tasks: 1, memories: 0 },
+      rows: { artifacts: 1, sessions: 0, tasks: 1 },
       activeTasks: 0,
     };
     render(<SettingsView />);
@@ -649,7 +650,7 @@ describe("SettingsView (§2.5, §5.4)", () => {
     workspace.moved = {
       from: "/Users/dev/openalpaca",
       to: "/Users/dev/moved",
-      rows: { artifacts: 1, sessions: 0, tasks: 0, memories: 0 },
+      rows: { artifacts: 1, sessions: 0, tasks: 0 },
       activeTasks: 0,
     };
     workspace.rebaseError = new Error(
@@ -667,7 +668,7 @@ describe("SettingsView (§2.5, §5.4)", () => {
     workspace.moved = {
       from: "/Users/dev/openalpaca",
       to: "/Users/dev/mono/sub/proj",
-      rows: { artifacts: 1, sessions: 0, tasks: 0, memories: 0 },
+      rows: { artifacts: 1, sessions: 0, tasks: 0 },
       activeTasks: 0,
     };
     workspace.rebaseError = new Error(

@@ -5,28 +5,15 @@
 use crate::migrations::{self, Migration};
 use anyhow::{Context, Result};
 use rusqlite::Connection;
-use sqlite_vec::sqlite3_vec_init;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info};
 
-static VEC_INIT: Once = Once::new();
-
-/// Register sqlite-vec extension globally (process-wide, idempotent).
-///
-/// Uses `sqlite3_auto_extension` so every `Connection::open()` gets vec functions.
-/// The `transmute` converts `sqlite3_vec_init` (which has the sqlite3 extension
-/// entry point signature) into the `Option<unsafe extern "C" fn()>` that
-/// `sqlite3_auto_extension` expects. This is the documented pattern from
-/// the sqlite-vec crate.
-fn ensure_vec_extension() {
-    VEC_INIT.call_once(|| unsafe {
-        #[allow(clippy::missing_transmute_annotations)]
-        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
-            sqlite3_vec_init as *const (),
-        )));
-    });
-}
+/// The last schema version before the memory redesign: the baseline as it
+/// shipped with the SQL memory engine (`memory`, `memory_fts`, `memory_vec`).
+/// A database at this version is complete and working, and is refused with
+/// its own wording (plan §4) rather than the partly-migrated one.
+const PRE_MEMORY_REDESIGN_VERSION: i32 = 42;
 
 /// Database manager wrapping a SQLite connection
 #[derive(Clone)]
@@ -36,9 +23,13 @@ pub struct Database {
 
 impl Database {
     /// Open or create a database at the given path, running any pending migrations.
+    ///
+    /// No SQLite extension is registered on the way: the memory redesign
+    /// replaced the `vec0` table the old baseline declared with files, so a
+    /// fresh database needs nothing beyond SQLite itself, and the refusal of a
+    /// pre-redesign database below reads only `schema_version`, which needs no
+    /// module either.
     pub fn open(path: &Path) -> Result<Self> {
-        ensure_vec_extension();
-
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).with_context(|| {
@@ -123,8 +114,9 @@ impl Database {
         let named_file = || std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
 
         // The baseline creates the final schema directly; it cannot upgrade a
-        // partially migrated development database. Refuse before executing SQL
-        // so its existing schema and rows remain available to an older build.
+        // partially migrated development database, and it does not convert
+        // the one schema before it. Refuse before executing SQL so the
+        // existing schema and rows remain available to an older build.
         //
         // The message names both the verb and the file. `openalpaca config
         // reset --factory` is reachable from here because it opens no database
@@ -132,6 +124,31 @@ impl Database {
         // below names, and the next open sees version 0 and gets the baseline.
         // The path is still spelled out because the store root is overridable
         // with `OPENALPACA_HOME_STORE`, so "your database" identifies nothing.
+        //
+        // Two wordings. Version 42 is the last schema before the memory
+        // redesign — a complete, working database whose SQL memory tables
+        // this build no longer has (plan §4, MD-6) — so its arm says what
+        // was replaced, everything the reset removes (the API keys included),
+        // what survives, and that a pre-redesign build still opens the file.
+        // Everything older is a partly migrated development database and
+        // keeps the original wording: it is refused for the old reason.
+        if current_version == PRE_MEMORY_REDESIGN_VERSION {
+            let file = named_file();
+            anyhow::bail!(
+                "Unsupported legacy schema version {current_version}: this build starts at schema \
+                 version {baseline} and cannot read a database from before the memory redesign \
+                 — its memory storage was replaced. Run `openalpaca config reset --factory` to \
+                 delete `{file}` (with its -wal and -shm files) and start again at schema \
+                 version {baseline}. That discards every task, message, session record and \
+                 memory it holds, `llm.toml` with its API keys and keychain entries, and returns \
+                 `daemon.toml` to defaults; your artifact, upload and session files stay on disk \
+                 with nothing pointing at them, and `.master_key`, `logs/` and `backups/` are \
+                 untouched. To look anything up first, open `{file}` with an OpenAlpaca build \
+                 from before the memory redesign.",
+                baseline = migrations::BASELINE_VERSION,
+                file = file.display(),
+            );
+        }
         if current_version > 0 && current_version < migrations::BASELINE_VERSION {
             let file = named_file();
             anyhow::bail!(

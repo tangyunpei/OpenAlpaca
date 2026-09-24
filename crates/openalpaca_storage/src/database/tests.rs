@@ -53,10 +53,21 @@ fn reopening_a_current_database_preserves_its_data_and_version() {
     .unwrap();
 }
 
+/// The legacy guard covers every version in `1..BASELINE_VERSION`, with two
+/// wordings: 42 — the last schema before the memory redesign — is refused
+/// because its memory storage was replaced (plan §4, the 42 arm), everything
+/// older because the baseline cannot upgrade a partly migrated development
+/// database (the 1–41 arm, unchanged). Both name the same file, the same
+/// version this build starts at and the same verb.
 #[test]
 fn an_unsupported_old_database_is_refused_without_changing_its_schema_or_data() {
     let dir = tempdir().unwrap();
-    for version in [1, migrations::BASELINE_VERSION - 1] {
+    assert_eq!(
+        migrations::BASELINE_VERSION,
+        43,
+        "the two wordings below are pinned to the memory redesign's re-squash"
+    );
+    for version in [1, 41, 42] {
         let db_path = dir.path().join(format!("legacy-{version}.db"));
         let original_schema = {
             let conn = Connection::open(&db_path).unwrap();
@@ -112,6 +123,49 @@ fn an_unsupported_old_database_is_refused_without_changing_its_schema_or_data() 
             message.contains("openalpaca config reset --factory"),
             "the refusal must name the verb that rescues the database: {message}"
         );
+        // Start-up refusals never name each other's remedies: the newer-build
+        // sentence belongs to a different file and a different mistake.
+        assert!(
+            !message.contains("newer than this build knows"),
+            "the legacy refusal must not borrow the newer-database wording: {message}"
+        );
+        if version == 42 {
+            // The memory-redesign arm (plan §4): the reason, everything the
+            // factory reset removes — the API keys included — what survives,
+            // and that an older build still opens the file.
+            for pin in [
+                "cannot read a database from before the memory redesign",
+                "its memory storage was replaced",
+                "-wal and -shm",
+                "every task, message, session record and memory it holds",
+                "`llm.toml` with its API keys and keychain entries",
+                "returns `daemon.toml` to defaults",
+                "artifact, upload and session files stay on disk",
+                "`.master_key`, `logs/` and `backups/` are untouched",
+                "with an OpenAlpaca build from before the memory redesign",
+            ] {
+                assert!(
+                    message.contains(pin),
+                    "the version-42 refusal must say {pin:?}: {message}"
+                );
+            }
+            assert!(
+                !message.contains("cannot upgrade a database created by an older one"),
+                "a version-42 database is not a partly migrated one: {message}"
+            );
+        } else {
+            // The 1–41 arm keeps its wording verbatim: a partly migrated
+            // development database the baseline cannot upgrade.
+            assert!(
+                message.contains("cannot upgrade a database created by an older one"),
+                "the version-{version} refusal keeps the legacy wording: {message}"
+            );
+            assert!(
+                !message.contains("memory redesign"),
+                "a version-{version} database is refused for the old reason, not \
+                 because the memory storage was replaced: {message}"
+            );
+        }
 
         let conn = Connection::open(&db_path).unwrap();
         let schema = conn
@@ -309,82 +363,36 @@ fn test_foreign_keys_enforced() {
     assert!(result.is_err(), "Expected foreign key constraint error");
 }
 
+/// The memory redesign's schema (plan 3.5): a fresh database gets the 43
+/// baseline directly, and that baseline creates none of the old engine's
+/// tables — `memory`, its FTS index, the `vec0` table or the triggers that
+/// kept them in step — so opening one never needs the sqlite-vec extension.
 #[test]
-fn test_sqlite_vec_available() {
+fn a_fresh_database_opens_at_43_with_no_memory_tables() {
+    assert_eq!(migrations::BASELINE_VERSION, 43);
     let dir = tempdir().unwrap();
     let db = Database::open(&dir.path().join("test.db")).unwrap();
+    assert_eq!(db.schema_version().unwrap(), 43);
     db.with_connection(|conn| {
-        // 1. Verify extension loaded
-        let version: String = conn.query_row("SELECT vec_version()", [], |row| row.get(0))?;
+        let leftovers = conn
+            .prepare(
+                "SELECT type || ':' || name FROM sqlite_master
+                  WHERE name = 'memory' OR name LIKE 'memory!_%' ESCAPE '!'
+                  ORDER BY 1",
+            )?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         assert!(
-            !version.is_empty(),
-            "vec_version() should return a version string"
+            leftovers.is_empty(),
+            "the baseline must create no memory table, index or trigger: {leftovers:?}"
         );
-
-        // 2. Verify the schema includes the vector table
-        let exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_vec')",
+        // The rest of the schema is still there.
+        let sessions: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'session'",
             [],
             |row| row.get(0),
         )?;
-        assert!(exists, "memory_vec table should exist");
-
-        // 3. Insert a zero vector (768 floats x 4 bytes = 3072 bytes of zeroblob)
-        conn.execute(
-            "INSERT INTO memory_vec(memory_id, embedding) VALUES (1, vec_f32(zeroblob(3072)))",
-            [],
-        )?;
-
-        // 4. Verify round-trip
-        let count: i64 = conn.query_row("SELECT count(*) FROM memory_vec", [], |row| row.get(0))?;
-        assert_eq!(count, 1);
-
-        Ok(())
-    })
-    .unwrap();
-}
-
-#[test]
-fn test_fts_update_sync() {
-    let dir = tempdir().unwrap();
-    let db = Database::open(&dir.path().join("test.db")).unwrap();
-
-    db.with_connection(|c| {
-        // Insert v2 memory with "old" keyword
-        c.execute(
-            "INSERT INTO memory(owner_id, kind, scope, scope_id, source, content, content_hash)
-             VALUES ('owner-1', 'fact', 'global', '', 'conversation', 'old keyword here', 'hash1')",
-            [],
-        )?;
-        Ok(())
-    })
-    .unwrap();
-
-    // Update content to "new" keyword
-    db.with_connection(|c| {
-        c.execute(
-            "UPDATE memory SET content = 'new keyword here', content_hash = 'hash2' WHERE owner_id='owner-1'",
-            [],
-        )?;
-        Ok(())
-    })
-    .unwrap();
-
-    // Verify FTS sync: old should not match, new should match
-    db.with_connection(|c| {
-        let old_hits: i64 = c.query_row(
-            "SELECT count(*) FROM memory_fts WHERE content MATCH 'old'",
-            [],
-            |r| r.get(0),
-        )?;
-        assert_eq!(old_hits, 0, "Old keyword should NOT be found after update");
-
-        let new_hits: i64 = c.query_row(
-            "SELECT count(*) FROM memory_fts WHERE content MATCH 'new'",
-            [],
-            |r| r.get(0),
-        )?;
-        assert!(new_hits >= 1, "New keyword should be found after update");
+        assert_eq!(sessions, 1);
         Ok(())
     })
     .unwrap();
@@ -1045,25 +1053,24 @@ fn a_refused_legacy_database_opens_at_the_baseline_after_its_files_are_deleted()
 // The schema-42 fixture — `tests/fixtures/schema42.db`.
 // ---------------------------------------------------------------------------
 //
-// The memory redesign (`tasks/memory-redesign`, slice 3) re-squashes the
-// baseline to 43 without the memory tables and drops sqlite-vec, after which a
-// version-42 database is refused and can no longer be *produced*: the baseline
-// that creates it declares `memory_vec USING vec0`. The refusal test of that
-// slice opens this file with `vec0` unregistered and proves the refusal leaves
-// the bytes alone, so the fixture has to be a real schema-42 database — made
-// by `Database::open` (WAL mode, the baseline as shipped) with `memory_vec` and
-// its vec0 shadow tables holding data — not a hand-written schema.
-//
-// The generator below is `#[ignore]`d and was run once, on this build, to
-// commit the file; the test after it is what runs under plain `cargo test`.
+// A real schema-42 database — made by `Database::open` on the 42 baseline as
+// it shipped (WAL mode, sqlite-vec linked), with `memory_vec` and its vec0
+// shadow tables holding data — not a hand-written schema. It was generated
+// once, by the `#[ignore]`d `generate_schema42_fixture` test that commit
+// `2f500ea1` (slice 1) carried, and committed with the file. That generator
+// went with the engine it used (plan 3.5): this build's baseline is 43, it
+// declares no `memory_vec USING vec0`, and it links no sqlite-vec, so a
+// schema-42 database can no longer be *produced* here — which is exactly why
+// the file is committed. Its SHA-256 is
+// `29e111ce64b2eabd8bcd6bac01e2a3f0232f0f6e2469103d040d5d08c917f6b2`.
 
 /// The fixture's path, relative to the crate root.
 const SCHEMA42_FIXTURE: &str = "tests/fixtures/schema42.db";
 
-/// What the generator writes, counted in one place so it and the sanity test
-/// cannot disagree: seven `memory` rows across two owners and both scopes (one
-/// CJK, one supersession pair), six of them embedded — `supersede` deletes the
-/// superseded row's vector — plus one task and one chat message.
+/// What the generator wrote, so the refusal test can prove the rows are still
+/// there afterwards: seven `memory` rows across two owners and both scopes
+/// (one CJK, one supersession pair), six of them embedded — `supersede`
+/// deleted the superseded row's vector — plus one task and one chat message.
 const FIXTURE_MEMORY_ROWS: i64 = 7;
 const FIXTURE_EMBEDDED_ROWS: i64 = 6;
 
@@ -1076,271 +1083,116 @@ fn sha256_hex(path: &Path) -> String {
     format!("{:x}", Sha256::digest(std::fs::read(path).unwrap()))
 }
 
-/// A deterministic 768-dim vector on axis `seed`: not all zeros, and distinct
-/// per row, which is all the shadow tables need to hold real data.
-fn fixture_embedding(seed: usize) -> Vec<f32> {
-    let mut embedding = vec![0.0f32; 768];
-    embedding[seed % 768] = 1.0;
-    embedding[(seed * 97 + 1) % 768] = 0.5;
-    embedding
-}
-
-/// Regenerates `tests/fixtures/schema42.db`. Run by hand, once, on a build
-/// whose baseline is still 42 and still links sqlite-vec:
-///
-///     cargo test -p openalpaca_storage --lib -- --ignored --nocapture generate_schema42_fixture
-///
-/// It prints the file's size and SHA-256. Re-running it rewrites the fixture
-/// with fresh timestamps, so the committed bytes change; do not re-run it
-/// without meaning to.
+/// Plan §4 (MD-6) and fixture 05 of the invariant set: any opener meeting a
+/// schema-42 database is refused with the memory-redesign wording, before any
+/// statement touches a memory table, with `vec0` **not** registered on the
+/// connection, and the file's bytes are unchanged. Slice 1's sanity test
+/// opened the same copy and expected it to work; this is that test inverted.
 #[test]
-#[ignore = "regenerates the committed fixture; run by hand while the baseline is 42"]
-fn generate_schema42_fixture() {
-    use crate::models::{
-        ConversationMessage, MemoryKind, MemoryScope, MemorySource, Task, TaskStatus,
-    };
-    use crate::repository::{ConversationRepository, MemoryRepository, TaskRepository};
-
-    fn add_embedded(
-        memories: &MemoryRepository<'_>,
-        owner: &str,
-        kind: MemoryKind,
-        scope: MemoryScope,
-        scope_id: &str,
-        source: MemorySource,
-        content: &str,
-    ) -> i64 {
-        let id = memories
-            .add(
-                owner, kind, scope, scope_id, source, content, None, 0.7, 0.9,
-            )
-            .unwrap();
-        assert!(id > 0, "fixture rows are distinct; {content:?} was deduped");
-        memories
-            .insert_embedding(id, &fixture_embedding(id as usize))
-            .unwrap();
-        id
-    }
-
-    assert_eq!(
-        migrations::BASELINE_VERSION,
-        42,
-        "the fixture is a schema-42 database; this build's baseline is something else"
-    );
-
-    let dir = tempdir().unwrap();
-    let db_path = dir.path().join("schema42.db");
-    let db = Database::open(&db_path).unwrap();
-    {
-        let alpha = "user:alpha";
-        let beta = "user:beta";
-        let memories = MemoryRepository::new(&db);
-        add_embedded(
-            &memories,
-            alpha,
-            MemoryKind::Preference,
-            MemoryScope::Global,
-            "",
-            MemorySource::Conversation,
-            "User prefers vim for editing",
-        );
-        add_embedded(
-            &memories,
-            alpha,
-            MemoryKind::Fact,
-            MemoryScope::Workspace,
-            "/home/alpha/projects/notes",
-            MemorySource::Tool,
-            "The notes project keeps drafts under drafts/ and publishes from out/",
-        );
-        add_embedded(
-            &memories,
-            alpha,
-            MemoryKind::Fact,
-            MemoryScope::Global,
-            "",
-            MemorySource::Conversation,
-            "用户习惯用中文记笔记，周报每周五提交。",
-        );
-        add_embedded(
-            &memories,
-            beta,
-            MemoryKind::Fact,
-            MemoryScope::Global,
-            "",
-            MemorySource::Conversation,
-            "Beta works in the UTC+8 timezone",
-        );
-        add_embedded(
-            &memories,
-            beta,
-            MemoryKind::KbChunk,
-            MemoryScope::Workspace,
-            "/home/beta/dev/widget",
-            MemorySource::Ingestion,
-            "widget/README.md: run `bun install`, then `bun run check` before a pull request.",
-        );
-        // One supersession pair: the old row loses its vector and drops to
-        // importance 0.1; the new one points back at it and gets its own.
-        let old = add_embedded(
-            &memories,
-            alpha,
-            MemoryKind::Fact,
-            MemoryScope::Global,
-            "",
-            MemorySource::Conversation,
-            "User's default shell is bash",
-        );
-        let new = memories
-            .supersede(
-                old,
-                "User's default shell is zsh",
-                MemoryKind::Fact,
-                MemoryScope::Global,
-                "",
-                MemorySource::Conversation,
-                0.7,
-                0.9,
-                Some(&serde_json::json!({ "reason": "the user corrected it" })),
-            )
-            .unwrap();
-        assert!(new > 0, "the superseding row must be inserted");
-        memories
-            .insert_embedding(new, &fixture_embedding(new as usize))
-            .unwrap();
-        assert_eq!(memories.embedding_stats(alpha).unwrap(), (5, 4));
-        assert_eq!(memories.embedding_stats(beta).unwrap(), (2, 2));
-
-        let now = chrono::Utc::now();
-        TaskRepository::new(&db)
-            .create(&Task {
-                id: "fixture-task-1".to_string(),
-                title: "Summarise the notes project".to_string(),
-                description: Some("One run, so the task table is not empty.".to_string()),
-                status: TaskStatus::Completed,
-                priority: 0,
-                progress_current: None,
-                progress_total: None,
-                result_summary: Some("Done.".to_string()),
-                created_by: alpha.to_string(),
-                source_lane: "user:alpha:gui".to_string(),
-                created_at: now,
-                updated_at: now,
-                completed_at: Some(now),
-                state_json: None,
-                state_version: 0,
-                outcome_json: None,
-                outcome_kind: None,
-                artifact_count: 0,
-                workspace_id: None,
-                source_task_id: None,
-                session_id: None,
-                unattended: false,
-            })
-            .unwrap();
-        ConversationRepository::new(&db)
-            .insert(&ConversationMessage {
-                lane_key: "user:alpha:gui".to_string(),
-                role: "user".to_string(),
-                content: "Remember that I prefer vim.".to_string(),
-                ..Default::default()
-            })
-            .unwrap();
-    }
-
-    // Everything back into the main file, the WAL truncated, then a clean
-    // close: the fixture is one file, with no -wal or -shm beside it.
-    let (busy, wal_frames, checkpointed): (i64, i64, i64) = db
-        .with_connection(|conn| {
-            let checkpoint = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?;
-            Ok(checkpoint)
-        })
-        .unwrap();
-    assert_eq!(busy, 0, "the checkpoint must not be blocked");
-    assert_eq!(
-        wal_frames, checkpointed,
-        "every WAL frame must reach the main file"
-    );
-    drop(db);
-    for suffix in ["-wal", "-shm"] {
-        let sidecar = sidecar_path(&db_path, suffix);
-        assert!(
-            !sidecar.exists(),
-            "a clean close must leave no {}",
-            sidecar.display()
-        );
-    }
-
-    let fixture = schema42_fixture_path();
-    std::fs::create_dir_all(fixture.parent().unwrap()).unwrap();
-    std::fs::copy(&db_path, &fixture).unwrap();
-    println!(
-        "wrote {} ({} bytes, sha256 {})",
-        fixture.display(),
-        std::fs::metadata(&fixture).unwrap().len(),
-        sha256_hex(&fixture)
-    );
-}
-
-/// The committed fixture is a schema-42 database this build opens, holding the
-/// rows the generator wrote. Slice 3 of the memory redesign inverts this test:
-/// the same copy and the same hash, with `Database::open` expected to *fail*
-/// and the bytes expected unchanged (plan 3.5).
-#[test]
-fn the_schema42_fixture_opens_on_this_build_with_its_rows_intact() {
+fn the_schema42_fixture_is_refused_without_vec0_and_its_bytes_are_unchanged() {
     let dir = tempdir().unwrap();
     let copy = dir.path().join("schema42.db");
     std::fs::copy(schema42_fixture_path(), &copy).unwrap();
     let before = sha256_hex(&copy);
 
-    let db = Database::open(&copy).expect("a current-schema fixture must open");
-    assert_eq!(db.schema_version().unwrap(), 42);
-    db.with_connection(|conn| {
-        let count = |sql: &str| conn.query_row(sql, [], |row| row.get::<_, i64>(0));
-        assert_eq!(count("SELECT COUNT(*) FROM memory")?, FIXTURE_MEMORY_ROWS);
-        assert_eq!(count("SELECT COUNT(DISTINCT owner_id) FROM memory")?, 2);
-        assert_eq!(
-            count("SELECT COUNT(*) FROM memory WHERE scope = 'workspace'")?,
-            2
+    let error = Database::open(&copy)
+        .err()
+        .expect("a schema-42 database must be refused by the 43 baseline");
+    let message = format!("{error:#}");
+    // The pinned phrases of the 42 arm (fixture 05's `message_contains`).
+    for pin in [
+        "Unsupported legacy schema version 42",
+        "schema version 43",
+        "cannot read a database from before the memory redesign",
+        "its memory storage was replaced",
+        "openalpaca config reset --factory",
+        "-wal and -shm",
+        "llm.toml",
+        "artifact, upload and session files stay on disk",
+        ".master_key",
+        "with an OpenAlpaca build from before the memory redesign",
+    ] {
+        assert!(
+            message.contains(pin),
+            "the refusal must say {pin:?}: {message}"
         );
-        assert_eq!(
-            count("SELECT COUNT(*) FROM memory WHERE supersedes_id IS NOT NULL")?,
-            1
-        );
-        assert_eq!(
-            count("SELECT COUNT(*) FROM memory_fts WHERE memory_fts MATCH 'vim'")?,
-            1
-        );
-        assert_eq!(
-            count("SELECT COUNT(*) FROM memory_vec")?,
-            FIXTURE_EMBEDDED_ROWS
-        );
-        // The vec0 shadow table behind it: the fixture carries extension-owned
-        // data, not just a virtual-table declaration.
-        assert_eq!(
-            count("SELECT COUNT(*) FROM memory_vec_rowids")?,
-            FIXTURE_EMBEDDED_ROWS
-        );
-        assert_eq!(count("SELECT COUNT(*) FROM task")?, 1);
-        assert_eq!(count("SELECT COUNT(*) FROM conversation_messages")?, 1);
-        let versions = conn
-            .prepare("SELECT version FROM schema_version ORDER BY version")?
-            .query_map([], |row| row.get::<_, i32>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        assert_eq!(versions, vec![42]);
-        Ok(())
-    })
-    .unwrap();
-    drop(db);
+    }
+    assert!(
+        !message.contains("newer than this build knows"),
+        "the refusal must not borrow the newer-database wording: {message}"
+    );
+    let named = std::path::absolute(&copy).unwrap();
+    assert!(
+        message.contains(&named.display().to_string()),
+        "the refusal must name the file by its full path: {message}"
+    );
 
-    // Opening a current database runs no migration and writes nothing, so the
-    // file is byte-identical afterwards; the -wal and -shm SQLite opens beside
-    // the copy are outside the hash. This is the half slice 3 keeps.
+    // `vec0` is not registered on any connection this process opens: the
+    // extension's function is unknown and its module cannot be loaded. The
+    // refusal read only `schema_version`, which is why it worked anyway.
+    let conn = Connection::open(&copy).unwrap();
+    let vec_fn = conn
+        .query_row("SELECT vec_version()", [], |row| row.get::<_, String>(0))
+        .expect_err("vec_version() must be unknown without sqlite-vec");
+    assert!(
+        vec_fn.to_string().contains("no such function"),
+        "unexpected error for vec_version(): {vec_fn}"
+    );
+    let vec_table = conn
+        .query_row("SELECT COUNT(*) FROM memory_vec", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .expect_err("memory_vec must be unreadable without the vec0 module");
+    assert!(
+        vec_table.to_string().contains("no such module: vec0"),
+        "unexpected error for memory_vec: {vec_table}"
+    );
+    // The rows a pre-redesign build would read are all still there: the
+    // plain tables, the FTS index and the vec0 shadow tables the module owns.
+    let count = |sql: &str| conn.query_row(sql, [], |row| row.get::<_, i64>(0)).unwrap();
+    assert_eq!(count("SELECT COUNT(*) FROM memory"), FIXTURE_MEMORY_ROWS);
+    assert_eq!(count("SELECT COUNT(DISTINCT owner_id) FROM memory"), 2);
+    assert_eq!(
+        count("SELECT COUNT(*) FROM memory WHERE supersedes_id IS NOT NULL"),
+        1
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM memory_fts WHERE memory_fts MATCH 'vim'"),
+        1
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM memory_vec_rowids"),
+        FIXTURE_EMBEDDED_ROWS
+    );
+    assert_eq!(count("SELECT COUNT(*) FROM task"), 1);
+    assert_eq!(count("SELECT COUNT(*) FROM conversation_messages"), 1);
+    let versions = conn
+        .prepare("SELECT version FROM schema_version ORDER BY version")
+        .unwrap()
+        .query_map([], |row| row.get::<_, i32>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        versions,
+        vec![42],
+        "the refusal must not advance the version"
+    );
+    drop(conn);
+
+    // A second open is refused the same way (fixture 05, step 2): nothing the
+    // first attempt did changed the answer.
+    let again = Database::open(&copy)
+        .err()
+        .expect("the second open must be refused too");
+    assert!(format!("{again:#}").contains("Unsupported legacy schema version 42"));
+
+    // The refusal ran no migration and wrote nothing, so the file is
+    // byte-identical; the -wal and -shm SQLite opens beside the copy are
+    // outside the hash.
     assert_eq!(
         sha256_hex(&copy),
         before,
-        "opening the fixture must not rewrite it"
+        "refusing the fixture must not rewrite it"
     );
 }

@@ -45,7 +45,6 @@ pub struct AppState {
     pub chat_service: Arc<ChatService>,
     pub token_manager: Option<Arc<openalpaca_llm::TokenManager>>,
     pub provider_usage_tracker: Option<Arc<openalpaca_llm::ProviderUsageTracker>>,
-    pub embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     /// The memory service (memory redesign, design §7a), held for the
     /// `/v1/memories*` routes and the workspace move's quiesce hook (plan
     /// 3.7, 3.8); the same instance the tool registry and the orchestrator

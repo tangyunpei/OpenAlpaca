@@ -28,7 +28,6 @@ pub struct InitializedServices {
     pub llm_settings_service: Option<Arc<openalpaca_llm::LlmSettingsService>>,
     pub token_manager: Option<Arc<openalpaca_llm::TokenManager>>,
     pub provider_usage_tracker: Option<Arc<openalpaca_llm::ProviderUsageTracker>>,
-    pub embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     /// The memory service (memory redesign, design §7a): one per daemon,
     /// over the home store's partitions and the disposable index at
     /// `state/cache/memory-index-v1.sqlite`. The tool registry's read
@@ -135,15 +134,12 @@ pub async fn initialize_services(
     )
     .await;
 
-    // Load LLM config for embedder / token manager
+    // Load LLM config for the token manager
     let llm_config: Option<openalpaca_llm::LlmRouterConfig> = if llm_config_path.exists() {
         openalpaca_llm::read_config(&llm_config_path).ok()
     } else {
         None
     };
-
-    // Build embedder
-    let embedder = llm::build_embedder(&llm_config, &secret_store);
 
     // Credential discovery & token manager
     let cred_config = llm_config
@@ -224,7 +220,6 @@ pub async fn initialize_services(
     let (tool_registry, connector_send_lock, mcp_supervisor) = tools::build_tool_registry(
         config_base_dir,
         db,
-        &embedder,
         &memory_service,
         soul_path,
         user_path,
@@ -285,7 +280,6 @@ pub async fn initialize_services(
         llm_config_hashes,
         token_manager,
         provider_usage_tracker,
-        embedder,
         memory_service,
         agent_config_service,
         tool_registry,

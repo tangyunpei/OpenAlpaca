@@ -2325,7 +2325,6 @@ mod tests {
             gate,
             registry,
             Some(db.clone()),
-            None,
             Arc::new(skill_catalog::SkillCatalog::new()),
             Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
             Arc::new(arc_swap::ArcSwap::from_pointee(
