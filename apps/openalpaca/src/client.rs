@@ -139,6 +139,30 @@ impl DaemonClient {
         Ok(request.send().await?)
     }
 
+    /// One request — any method, per-request headers, an optional JSON body
+    /// — returning the raw response **unchecked**: the caller decides what a
+    /// non-2xx status means. What `openalpaca memory` rides: `x-workspace-path`
+    /// and `If-Match` are per-request headers there, a `409` is an outcome
+    /// to handle and a `404` a word to print, and the rest goes to
+    /// [`error_from_response`].
+    pub async fn request_raw<B: Serialize>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        headers: &[(&str, String)],
+        body: Option<&B>,
+    ) -> Result<Response> {
+        let url = format!("{}{}", self.base_url, path);
+        let mut request = self.http.request(method, &url);
+        for (name, value) in headers {
+            request = request.header(*name, value);
+        }
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        Ok(request.send().await?)
+    }
+
     /// PATCH with JSON body and JSON response.
     pub async fn patch<B: Serialize, T: DeserializeOwned>(
         &self,

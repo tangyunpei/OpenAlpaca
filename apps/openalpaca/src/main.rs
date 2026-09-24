@@ -75,6 +75,9 @@ enum Commands {
 
     /// Show or edit the persona documents (USER.md) through the daemon
     Persona(commands::persona::PersonaArgs),
+
+    /// Manage memory notes (list, search, show, add, edit, confirm, undo, forget, sync, doctor, adopt)
+    Memory(commands::memory::MemoryArgs),
 }
 
 #[tokio::main]
@@ -95,5 +98,6 @@ async fn main() -> Result<()> {
         Commands::Ext(args) => commands::ext::run(args).await,
         Commands::Store(args) => commands::store::run(args).await,
         Commands::Persona(args) => commands::persona::run(args).await,
+        Commands::Memory(args) => commands::memory::run(args).await,
     }
 }

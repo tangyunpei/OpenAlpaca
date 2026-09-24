@@ -30,6 +30,7 @@
 | `openalpaca ext` | Manage extensions — MCP servers and plugins (list, info, enable, disable, reload, approve, deny, remove) | `apps/openalpaca/src/commands/ext.rs` |
 | `openalpaca store` | Manage the content store (rebase a moved project, purge one you are done with) | `apps/openalpaca/src/commands/store.rs` |
 | `openalpaca persona` | Show or edit the persona documents (USER.md) through the daemon | `apps/openalpaca/src/commands/persona.rs` |
+| `openalpaca memory` | Manage memory notes (list, search, show, add, edit, confirm, undo, forget, sync, doctor, adopt) | `apps/openalpaca/src/commands/memory.rs` |
 
 ## Request/Query Types
 
@@ -203,6 +204,12 @@
 - Source: `apps/openalpaca/src/commands/llm_status.rs`
 - No `Subcommand` enum found in module.
 - Parsed flags: none
+
+### `memory`
+
+- Source: `apps/openalpaca/src/commands/memory.rs`
+- No `Subcommand` enum found in module.
+- Parsed flags: `--alias`, `--as-of`, `--candidates`, `--fact-key`, `--format`, `--historical`, `--history`, `--kind`, `--limit`, `--raw`, `--repair`, `--revision`, `--scope`, `--status`, `--supersedes`, `--tag`, `--title`, `--yes`, `-y`
 
 ### `persona`
 

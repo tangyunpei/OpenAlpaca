@@ -98,7 +98,7 @@ impl StreamResult {
 /// be escaped is what a header value cannot carry; `%` goes with it so that a
 /// directory literally named `50%20off` does not decode into `50 off` at the
 /// other end.
-fn encode_header_path(path: &str) -> String {
+pub(crate) fn encode_header_path(path: &str) -> String {
     let mut encoded = String::with_capacity(path.len());
     for byte in path.bytes() {
         if byte == b'%' || !(0x20..=0x7e).contains(&byte) {

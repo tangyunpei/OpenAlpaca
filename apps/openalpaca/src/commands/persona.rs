@@ -237,8 +237,9 @@ fn short(etag: &str) -> String {
 }
 
 /// `$VISUAL`, else `$EDITOR`, else `vi`, run through the shell so a value
-/// with arguments (`code --wait`) works; the file is passed as `$1`.
-fn open_in_editor(path: &Path) -> Result<()> {
+/// with arguments (`code --wait`) works; the file is passed as `$1`. Shared
+/// with `openalpaca memory add|edit`, whose round trip is the same shape.
+pub(crate) fn open_in_editor(path: &Path) -> Result<()> {
     let editor = std::env::var("VISUAL")
         .ok()
         .filter(|v| !v.trim().is_empty())
@@ -264,8 +265,8 @@ fn open_in_editor(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::{json_answer, serve};
     use clap::Parser;
-    use std::io::{Read, Write};
 
     #[derive(Parser)]
     struct Harness {
@@ -304,59 +305,6 @@ mod tests {
     const OLD_ETAG: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const NEW_ETAG: &str = "2222222222222222222222222222222222222222222222222222222222222222";
     const OTHER_ETAG: &str = "3333333333333333333333333333333333333333333333333333333333333333";
-
-    /// One canned answer per connection, served in order on a loopback port
-    /// with `Connection: close`, so the client opens a fresh connection for
-    /// each request. Returns the address and the raw requests it received.
-    fn serve(answers: Vec<String>) -> (std::net::SocketAddr, std::thread::JoinHandle<Vec<String>>) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
-        let addr = listener.local_addr().expect("the bound address");
-        let server = std::thread::spawn(move || {
-            let mut seen = Vec::new();
-            for answer in answers {
-                let (mut socket, _) = listener.accept().expect("a request arrives");
-                let mut raw = Vec::new();
-                let mut buf = [0u8; 4096];
-                // Headers first, then as many body bytes as Content-Length says.
-                loop {
-                    let n = socket.read(&mut buf).expect("the request is readable");
-                    if n == 0 {
-                        break;
-                    }
-                    raw.extend_from_slice(&buf[..n]);
-                    let text = String::from_utf8_lossy(&raw).to_string();
-                    if let Some(end) = text.find("\r\n\r\n") {
-                        let head = &text[..end];
-                        let length: usize = head
-                            .lines()
-                            .find_map(|l| {
-                                l.to_ascii_lowercase()
-                                    .strip_prefix("content-length:")
-                                    .map(|v| v.trim().parse().unwrap_or(0))
-                            })
-                            .unwrap_or(0);
-                        if raw.len() >= end + 4 + length {
-                            break;
-                        }
-                    }
-                }
-                seen.push(String::from_utf8_lossy(&raw).to_string());
-                socket
-                    .write_all(answer.as_bytes())
-                    .expect("the answer is written");
-                socket.flush().ok();
-            }
-            seen
-        });
-        (addr, server)
-    }
-
-    fn json_answer(status: &str, etag: &str, body: &str) -> String {
-        format!(
-            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nETag: \"{etag}\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        )
-    }
 
     fn get_answer() -> String {
         json_answer(
