@@ -19,6 +19,10 @@ pub enum MemoryError {
     InvalidInput(String),
     /// `not_found`: no note of this owner's partitions has that id.
     NotFound(NoteId),
+    /// `not_found`, for `?revision=`: the note exists but `.history` keeps
+    /// no copy under that revision (design §2: the last 5 service-written
+    /// revisions, and none of an external edit).
+    RevisionUnavailable { id: NoteId, revision: String },
     /// `revision_conflict`: carries the current revision.
     RevisionConflict {
         id: NoteId,
@@ -52,7 +56,7 @@ impl MemoryError {
             Self::NoOwner(_) => "fixture:no_owner",
             Self::CapabilityDenied { .. } => "fixture:capability_denied",
             Self::InvalidInput(_) => "invalid_input",
-            Self::NotFound(_) => "not_found",
+            Self::NotFound(_) | Self::RevisionUnavailable { .. } => "not_found",
             Self::RevisionConflict { .. } => "revision_conflict",
             Self::AuthorityConflict { .. } => "authority_conflict",
             Self::ConfirmRefused { .. } => "confirm_refused",
@@ -81,6 +85,10 @@ impl fmt::Display for MemoryError {
             ),
             Self::InvalidInput(m) => write!(f, "invalid input: {m}"),
             Self::NotFound(id) => write!(f, "note {id} not found"),
+            Self::RevisionUnavailable { id, revision } => write!(
+                f,
+                "note {id} has no kept revision {revision}: .history holds the last 5 service-written revisions only"
+            ),
             Self::RevisionConflict {
                 id,
                 current_revision,

@@ -2947,3 +2947,175 @@ fn every_service_write_and_a_detected_external_edit_publish_one_memory_changed()
     assert_eq!(seen[4].4, None, "a scan's finding carries no surface (P13)");
     assert!(seen.iter().all(|e| e.5 == format!("home-{ALICE_KEY}")));
 }
+
+// ============================================================================
+// History, the doctor and the owner-wide reconcile (plan 3.8)
+// ============================================================================
+
+/// `GET /v1/memories/{id}/history` and `?revision=`: the service-written
+/// revisions, newest first, and a kept revision's own body — the current
+/// facts (origin, links) beside the old bytes. An unknown revision is
+/// answered as unavailable, and a forgotten note has no history at all.
+#[test]
+fn a_notes_kept_revisions_are_listed_and_readable() {
+    let h = Harness::new();
+    let user = h.user(ALICE, None);
+    let created = h.store(&user, "Editor", "# Editor\n\nvim.\n", NoteKind::Preference);
+    let edited = h
+        .service
+        .update(
+            &user,
+            UpdateInput {
+                id: created.id,
+                expected_revision: created.revision.clone(),
+                action: edit("# Editor\n\nneovim.\n"),
+                reason: None,
+            },
+        )
+        .unwrap();
+
+    let history = h.service.history(&user, created.id).unwrap();
+    let revisions: Vec<&str> = history.iter().map(|e| e.revision.as_str()).collect();
+    assert_eq!(
+        revisions,
+        [edited.revision.as_str(), created.revision.as_str()]
+    );
+    assert!(history.iter().all(|e| e.written_at.is_some()));
+
+    let old = h
+        .service
+        .read_revision(&user, created.id, &created.revision)
+        .unwrap();
+    assert_eq!(old.body, "# Editor\n\nvim.\n");
+    assert_eq!(old.revision, created.revision);
+    assert_eq!(old.origin, Origin::User, "the note's current origin");
+    assert_eq!(
+        old.freshness,
+        Freshness::Verified,
+        "the copy's bytes hash to its name"
+    );
+    let current = h
+        .service
+        .read(
+            &user,
+            ReadInput {
+                id: created.id,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(current.body, "# Editor\n\nneovim.\n");
+
+    let err = h
+        .service
+        .read_revision(&user, created.id, &"0".repeat(64))
+        .unwrap_err();
+    assert_eq!(err.class(), "not_found");
+    assert!(err.to_string().contains("no kept revision"), "{err}");
+
+    let err = h
+        .service
+        .read_revision(&user, created.id, "not-a-revision")
+        .unwrap_err();
+    assert_eq!(err.class(), "invalid_input");
+
+    // Another owner sees nothing of it.
+    let bob = h.user(BOB, None);
+    assert_eq!(
+        h.service.history(&bob, created.id).unwrap_err().class(),
+        "not_found"
+    );
+}
+
+/// `GET /v1/memories/doctor` is the storage scan under the context's owner
+/// and project: read capability, the owner's key, the project the context
+/// resolved.
+#[test]
+fn the_doctor_reports_under_the_contexts_owner_and_project() {
+    let h = Harness::new();
+    let ws = h.workspace("proj", Some(".openalpaca"));
+    let user = h.user(ALICE, Some(&ws));
+    h.store(&user, "Global", "# G\n", NoteKind::Preference);
+    h.store(&user, "Project", "# P\n", NoteKind::Fact);
+    h.store(&h.user(BOB, None), "Bob's", "# B\n", NoteKind::Fact);
+
+    let report = h.service.doctor(&user).unwrap();
+    assert_eq!(report.owner_key, ALICE_KEY);
+    let mine: Vec<_> = report.partitions.iter().filter(|p| !p.orphan).collect();
+    assert_eq!(mine.len(), 2, "{:?}", report.partitions);
+    assert!(mine.iter().all(|p| p.notes == 1));
+    let orphans: Vec<_> = report.partitions.iter().filter(|p| p.orphan).collect();
+    assert_eq!(orphans.len(), 1);
+    assert_eq!(orphans[0].owner_key, "5c357145f3a583c080c9f1d8ee520e71");
+
+    let read_only = h
+        .ctx(ALICE, None, Surface::ModelTool, Capabilities::EXTRACTION)
+        .unwrap();
+    assert_eq!(
+        h.service.doctor(&read_only).unwrap_err().class(),
+        "fixture:capability_denied"
+    );
+}
+
+/// The daemon's reconciliation timer: every partition the owner's snapshots
+/// know — the home one and each project whose directory exists — is
+/// scanned, an edit behind the service's back is re-recorded `external`
+/// and published with no surface, and a clean pass publishes nothing.
+#[test]
+fn reconcile_owner_scans_every_known_partition_and_publishes_external_changes() {
+    let h = Harness::new();
+    let ws = h.workspace("proj", Some(".openalpaca"));
+    let at_project = h.user(ALICE, Some(&ws));
+    h.store(
+        &at_project,
+        "Global",
+        "# G\n\nglobal.\n",
+        NoteKind::Preference,
+    );
+    let project_note = h.store(&at_project, "Project", "# P\n\nproject.\n", NoteKind::Fact);
+    let mut rx = h.bus.subscribe();
+
+    let clean = h.service.reconcile_owner(ALICE).unwrap();
+    assert_eq!(clean.scanned, 2);
+    assert!(clean.changes.is_empty());
+    assert!(rx.try_recv().is_err(), "a clean scan publishes nothing");
+
+    let notes = ws
+        .join(".openalpaca")
+        .join("memory")
+        .join("owners")
+        .join(ALICE_KEY)
+        .join("notes");
+    let file = note_file_for(&notes, project_note.id).unwrap();
+    let mut text = fs::read_to_string(&file).unwrap();
+    text.push_str("\nEdited by hand.\n");
+    fs::write(&file, text).unwrap();
+
+    let found = h.service.reconcile_owner(ALICE).unwrap();
+    assert_eq!(found.changes.len(), 1);
+    assert_eq!(found.changes[0].note_id, project_note.id);
+    assert_eq!(found.changes[0].change, "external");
+    let event = rx.try_recv().expect("the change is published");
+    match event {
+        crate::events::SystemEvent::MemoryChanged {
+            note_id, surface, ..
+        } => {
+            assert_eq!(note_id, project_note.id.to_string());
+            assert_eq!(surface, None);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(rx.try_recv().is_err());
+    // The next automatic read sees the file as `external` now.
+    let view = h
+        .service
+        .read(
+            &at_project,
+            ReadInput {
+                id: project_note.id,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(view.origin, Origin::External);
+}

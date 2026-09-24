@@ -24,9 +24,11 @@
 
 mod context;
 mod error;
+mod management;
 mod mutations;
 pub mod recall;
 mod types;
+pub mod wire;
 mod write_slot;
 
 #[cfg(test)]
@@ -39,8 +41,8 @@ pub use error::MemoryError;
 pub use recall::{TRUST_LABEL, wrap_delivery};
 pub use types::{
     ExtractionProvenance, ForgetInput, ForgetItem, ForgetItemStatus, ForgetOutput, Freshness,
-    ListInput, ListItem, ListOutput, MemoryChange, MemoryUsed, Patch, ReadInput, ReadOutput,
-    RecallBudget, RecallResult, RecalledNote, RecentlyUsedItem, Retained, SearchInput,
+    HistoryEntry, ListInput, ListItem, ListOutput, MemoryChange, MemoryUsed, Patch, ReadInput,
+    ReadOutput, RecallBudget, RecallResult, RecalledNote, RecentlyUsedItem, Retained, SearchInput,
     SearchOutput, SearchResultItem, StoreInput, StoreOutput, UpdateAction, UpdateInput,
     UpdateOutput, UsedReason,
 };
@@ -685,25 +687,7 @@ impl MemoryService {
         };
         let (body, truncated) = cut_bytes(&full_body, READ_MAX_BYTES);
         let note = &view.note;
-        let frontmatter = serde_json::json!({
-            "schema": files::NOTE_SCHEMA,
-            "id": note.id.to_string(),
-            "title": note.title,
-            "kind": note.kind.as_str(),
-            "status": note.status.as_str(),
-            "fact_key": note.fact_key,
-            "aliases": note.aliases,
-            "tags": note.tags,
-            "created_at": format_ts(note.created_at),
-            "updated_at": format_ts(note.updated_at),
-            "observed_at": note.observed_at.map(format_ts),
-            "valid_from": note.valid_from.map(format_ts),
-            "valid_to": note.valid_to.map(format_ts),
-            "review_after": note.review_after.map(format_ts),
-            "pinned": note.pinned,
-            "sources": note.sources.iter().map(source_json).collect::<Vec<_>>(),
-            "supersedes": note.supersedes.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
-        });
+        let frontmatter = management::frontmatter_json(note);
         if ctx.surface == Surface::ModelTool {
             self.record_used(
                 ctx,

@@ -183,6 +183,14 @@ pub struct ReadOutput {
     pub source_forgotten: bool,
 }
 
+/// One kept revision of a note (`GET /v1/memories/{id}/history`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryEntry {
+    pub revision: String,
+    /// When the copy was written, as the file system remembers it.
+    pub written_at: Option<DateTime<Utc>>,
+}
+
 /// `memory_list` (design §7a).
 #[derive(Debug, Clone, Default)]
 pub struct ListInput {

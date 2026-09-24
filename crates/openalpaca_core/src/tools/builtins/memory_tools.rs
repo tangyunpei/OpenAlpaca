@@ -19,8 +19,8 @@
 //! (`memory_forget` and `memory_update` prompt; `memory_store` does not).
 
 use crate::memory::service::{
-    Capabilities, ForgetInput, ForgetItemStatus, ListInput, MemoryError, MemoryService, Patch,
-    ReadInput, SearchInput, StoreInput, UpdateAction, UpdateInput,
+    Capabilities, ForgetInput, ListInput, MemoryError, MemoryService, Patch, ReadInput,
+    SearchInput, StoreInput, UpdateAction, UpdateInput, wire,
 };
 use crate::tools::registry::{BuiltInTool, RegisteredTool, ToolBackend, ToolContext};
 use async_trait::async_trait;
@@ -116,18 +116,6 @@ fn parse_ts(field: &str, value: &str) -> Result<DateTime<Utc>, String> {
         .map_err(|e| format!("invalid_input: `{field}` is not an RFC 3339 timestamp: {e}"))
 }
 
-fn source_json(s: &NoteSource) -> serde_json::Value {
-    serde_json::json!({
-        "type": s.kind.as_str(),
-        "id": s.id,
-        "observed_at": s.observed_at.map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
-    })
-}
-
-fn ids_json(ids: &[NoteId]) -> Vec<String> {
-    ids.iter().map(|id| id.to_string()).collect()
-}
-
 /// `Some(None)` clears a nullable field; absent leaves it alone.
 fn double_option<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
 where
@@ -196,42 +184,7 @@ impl BuiltInTool for MemorySearchTool {
             .context_for_tool(ctx, Capabilities::READ_ONLY)
             .map_err(refuse)?;
         let out = blocking(move || service.search(&access, input).map_err(refuse)).await?;
-        let results: Vec<serde_json::Value> = out
-            .results
-            .iter()
-            .map(|r| {
-                serde_json::json!({
-                    "id": r.id.to_string(),
-                    "revision": r.revision,
-                    "title": r.title,
-                    "kind": r.kind.as_str(),
-                    "scope": r.scope.as_str(),
-                    "status": r.status.as_str(),
-                    "effective_status": r.effective_status.as_str(),
-                    "origin": r.origin.as_str(),
-                    "excerpt": r.excerpt,
-                    "heading": r.heading,
-                    "line_range": [r.line_range.0, r.line_range.1],
-                    "match": r.matches.iter().map(|m| m.as_str()).collect::<Vec<_>>(),
-                    "freshness": r.freshness.as_str(),
-                    "conflict": r.conflict,
-                    "same_key_loser": r.same_key_loser,
-                    "sources": r.sources.iter().map(source_json).collect::<Vec<_>>(),
-                    "sources_status": if r.source_forgotten { "source_forgotten" } else { "intact" },
-                    "superseded_by": ids_json(&r.superseded_by),
-                    "path": r.path,
-                    "pinned": r.pinned,
-                })
-            })
-            .collect();
-        let count = results.len();
-        Ok(serde_json::json!({
-            "results": results,
-            "count": count,
-            "partial": out.partial,
-            "index_state": out.index_state.as_str(),
-        })
-        .to_string())
+        Ok(wire::search_output_json(&out).to_string())
     }
 }
 
@@ -304,27 +257,7 @@ impl BuiltInTool for MemoryReadTool {
             .context_for_tool(ctx, Capabilities::READ_ONLY)
             .map_err(refuse)?;
         let out = blocking(move || service.read(&access, input).map_err(refuse)).await?;
-        Ok(serde_json::json!({
-            "id": out.id.to_string(),
-            "revision": out.revision,
-            "title": out.title,
-            "kind": out.kind.as_str(),
-            "scope": out.scope.as_str(),
-            "status": out.status.as_str(),
-            "effective_status": out.effective_status.as_str(),
-            "origin": out.origin.as_str(),
-            "frontmatter": out.frontmatter,
-            "body": out.body,
-            "truncated": out.truncated,
-            "path": out.path,
-            "sources": out.sources.iter().map(source_json).collect::<Vec<_>>(),
-            "sources_status": if out.source_forgotten { "source_forgotten" } else { "intact" },
-            "supersedes": ids_json(&out.supersedes),
-            "superseded_by": ids_json(&out.superseded_by),
-            "freshness": out.freshness.as_str(),
-            "conflict": out.conflict,
-        })
-        .to_string())
+        Ok(wire::read_output_json(&out).to_string())
     }
 }
 
@@ -398,29 +331,7 @@ impl BuiltInTool for MemoryListTool {
             .context_for_tool(ctx, Capabilities::READ_ONLY)
             .map_err(refuse)?;
         let out = blocking(move || service.list(&access, input).map_err(refuse)).await?;
-        let items: Vec<serde_json::Value> = out
-            .items
-            .iter()
-            .map(|i| {
-                serde_json::json!({
-                    "id": i.id.to_string(),
-                    "revision": i.revision,
-                    "title": i.title,
-                    "kind": i.kind.as_str(),
-                    "scope": i.scope.as_str(),
-                    "status": i.status.as_str(),
-                    "effective_status": i.effective_status.as_str(),
-                    "origin": i.origin.as_str(),
-                    "updated_at": i.updated_at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-                    "pinned": i.pinned,
-                })
-            })
-            .collect();
-        Ok(serde_json::json!({
-            "items": items,
-            "next_cursor": out.next_cursor,
-        })
-        .to_string())
+        Ok(wire::list_output_json(&out).to_string())
     }
 }
 
@@ -586,18 +497,7 @@ impl BuiltInTool for MemoryStoreTool {
             .context_for_tool(ctx, Capabilities::READ_WRITE)
             .map_err(refuse)?;
         let out = blocking(move || service.store(&access, input).map_err(refuse)).await?;
-        Ok(serde_json::json!({
-            "id": out.id.to_string(),
-            "revision": out.revision,
-            "scope": out.scope.as_str(),
-            "origin": out.origin.as_str(),
-            "superseded": ids_json(&out.superseded),
-            "dedup": match out.dedup {
-                openalpaca_storage::memory_files::Dedup::Created => "created",
-                openalpaca_storage::memory_files::Dedup::Existing => "existing",
-            },
-        })
-        .to_string())
+        Ok(wire::store_output_json(&out).to_string())
     }
 }
 
@@ -751,12 +651,7 @@ impl BuiltInTool for MemoryUpdateTool {
             .context_for_tool(ctx, Capabilities::READ_WRITE)
             .map_err(refuse)?;
         let out = blocking(move || service.update(&access, input).map_err(refuse)).await?;
-        Ok(serde_json::json!({
-            "id": out.id.to_string(),
-            "revision": out.revision,
-            "status": out.status.as_str(),
-        })
-        .to_string())
+        Ok(wire::update_output_json(&out).to_string())
     }
 }
 
@@ -866,32 +761,7 @@ impl BuiltInTool for MemoryForgetTool {
             .context_for_tool(ctx, Capabilities::ALL)
             .map_err(refuse)?;
         let out = blocking(move || service.forget(&access, input).map_err(refuse)).await?;
-        let results: Vec<serde_json::Value> = out
-            .results
-            .iter()
-            .map(|r| match &r.status {
-                ForgetItemStatus::Forgotten => {
-                    serde_json::json!({ "id": r.id.to_string(), "status": "forgotten" })
-                }
-                ForgetItemStatus::RevisionConflict { current_revision } => serde_json::json!({
-                    "id": r.id.to_string(),
-                    "status": "revision_conflict",
-                    "current_revision": current_revision,
-                }),
-                ForgetItemStatus::NotFound => {
-                    serde_json::json!({ "id": r.id.to_string(), "status": "not_found" })
-                }
-            })
-            .collect();
-        Ok(serde_json::json!({
-            "results": results,
-            "retained": {
-                "transcript": out.retained.transcript,
-                "session_logs": out.retained.session_logs,
-                "note": out.retained.note,
-            },
-        })
-        .to_string())
+        Ok(wire::forget_output_json(&out).to_string())
     }
 }
 
