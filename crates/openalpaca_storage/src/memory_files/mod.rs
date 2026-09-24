@@ -17,8 +17,9 @@
 //!   reconciliation of external changes;
 //! - the derived supersession, authority and same-`fact_key` computation over
 //!   a partition's notes and snapshot ([`derive`], design §6, §7b P3/P4/P6);
-//! - the offline management operations `doctor`, `doctor --repair` and
-//!   `adopt` (design §6, *Management operations*).
+//! - the management operations: the read-only `doctor` scan ([`doctor`]),
+//!   `doctor --repair` ([`Partition::repair`]) and [`adopt`] (design §6,
+//!   *Management operations*).
 //!
 //! It has no LLM, no network and no dependency on the search index: the index
 //! is `memory_index`, which takes pre-computed records, and the service that
@@ -29,6 +30,7 @@
 //! `OPENALPACA_HOME_STORE`) or from an explicit project root.
 
 mod authority;
+mod doctor;
 mod fsx;
 mod note;
 mod partition;
@@ -42,6 +44,7 @@ mod tests;
 pub use authority::{
     Conflict, ConflictKind, Derivation, DerivedNote, EffectiveStatus, NoteInput, derive,
 };
+pub use doctor::{DoctorReport, MoveSnapshotReport, PartitionReport, RefusedPartition, doctor};
 pub use note::{
     NewNote, Note, NoteId, NoteKind, NoteParseError, NotePatch, NoteScope, NoteSource, NoteStatus,
     SourceType, UnknownField, is_valid_fact_key, revision_of,

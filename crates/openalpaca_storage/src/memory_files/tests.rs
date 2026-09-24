@@ -3387,3 +3387,116 @@ fn begin_project_move_covers_every_owner_and_nothing_else() {
         "{moves:?}"
     );
 }
+
+// ============================================================================
+// `doctor`, read-only (design §6, *Management operations*; plan 3.8)
+// ============================================================================
+
+/// The read-only scan names, per partition: the owner's own (home and the
+/// named project), every other owner's as an orphan, a partition whose
+/// snapshot is gone as quarantined, the same-`fact_key` conflict, and a
+/// move that never finished as an abandoned snapshot — and it opens nothing
+/// for writing: a project `.gitignore` the service would re-assert stays as
+/// it was found.
+#[test]
+fn doctor_lists_partitions_orphans_conflicts_and_move_snapshots_without_writing() {
+    let sb = Sandbox::new();
+    let home = sb.open_home(ALICE);
+    let mut first = new_note("Editor", "# Editor\n\nvim\n", NoteKind::Preference);
+    first.fact_key = Some("editor".into());
+    home.create(first, Actor::UserSurface).unwrap();
+    let mut second = new_note(
+        "Editor, again",
+        "# Editor\n\nneovim\n",
+        NoteKind::Preference,
+    );
+    second.fact_key = Some("editor".into());
+    home.create(second, Actor::UserSurface).unwrap();
+    let project = sb.open_project(ALICE).unwrap();
+    project
+        .create(
+            new_note("Release", "# Release\n\nTag first.\n", NoteKind::Procedure),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    // Bob's home partition: an orphan when Alice asks.
+    sb.open_home(BOB)
+        .create(
+            new_note("Bob's", "# B\n", NoteKind::Fact),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    // Carol's, with its snapshot deleted: an orphan nobody can open by id.
+    let carol = "u_example_carol";
+    let carol_home = sb.open_home(carol);
+    carol_home
+        .create(
+            new_note("Carol's", "# C\n", NoteKind::Fact),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let carol_key = carol_home.partition_key().to_string();
+    std::fs::remove_file(carol_home.snapshot_path()).unwrap();
+    // A move begun and never finished: the twin binds a directory that does
+    // not exist while the old one still stands — abandoned.
+    let new_root = sb.outside.path().join("moved-project");
+    let moves =
+        begin_project_move(&sb.project_root(), &new_root, ts(2026, 9, 24, 9, 0, 0)).unwrap();
+    assert_eq!(moves.len(), 1);
+    // A cloned repository's force-added ignore file: `Partition::open` would
+    // rewrite it, the doctor must not.
+    let gitignore = project.memory_dir().join(".gitignore");
+    std::fs::write(&gitignore, "!*\n").unwrap();
+    drop((home, project, carol_home));
+
+    let report = doctor(ALICE, Some(&sb.project_root())).unwrap();
+
+    assert_eq!(report.owner_key, owner_key(ALICE));
+    let by_key = |key: &str| {
+        report
+            .partitions
+            .iter()
+            .find(|p| p.partition_key == key)
+            .unwrap_or_else(|| panic!("{key} is reported: {:?}", report.partitions))
+    };
+    let alice_home = by_key(&home_partition_key(&owner_key(ALICE)));
+    assert!(!alice_home.orphan);
+    assert_eq!(alice_home.health, PartitionHealth::Ready);
+    assert_eq!(alice_home.notes, 2);
+    assert_eq!(alice_home.unverified, 0);
+    assert_eq!(alice_home.conflicts.len(), 1);
+    assert_eq!(alice_home.conflicts[0].kind, ConflictKind::SameFactKey);
+    let alice_project = report
+        .partitions
+        .iter()
+        .find(|p| p.scope == SnapshotScope::Project && p.owner_key == owner_key(ALICE))
+        .expect("the project partition is reported");
+    assert!(!alice_project.orphan);
+    assert_eq!(alice_project.notes, 1);
+    let bob_home = by_key(&home_partition_key(&owner_key(BOB)));
+    assert!(bob_home.orphan);
+    assert_eq!(bob_home.notes, 1);
+    assert_eq!(bob_home.health, PartitionHealth::Ready);
+    let carol_home = by_key(&carol_key);
+    assert!(carol_home.orphan);
+    assert!(
+        matches!(carol_home.health, PartitionHealth::Quarantined(_)),
+        "{:?}",
+        carol_home.health
+    );
+    assert_eq!(carol_home.notes, 1);
+    assert_eq!(
+        carol_home.unverified, 1,
+        "nothing is verified without a snapshot"
+    );
+    assert_eq!(report.move_snapshots.len(), 1);
+    assert_eq!(report.move_snapshots[0].state, MoveSnapshotState::Abandoned);
+    assert_eq!(report.move_snapshots[0].partition_key, moves[0].new_key);
+    assert!(report.refused.is_empty(), "{:?}", report.refused);
+    assert!(report.unreadable_snapshots.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(&gitignore).unwrap(),
+        "!*\n",
+        "the doctor changes nothing"
+    );
+}

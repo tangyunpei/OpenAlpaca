@@ -292,6 +292,14 @@ fn now_seconds() -> DateTime<Utc> {
     to_second(Utc::now())
 }
 
+/// Whether an open may write: an ordinary open re-asserts the project
+/// `.gitignore` and runs recovery; a read-only one does neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenMode {
+    ReadWrite,
+    ReadOnly,
+}
+
 impl Partition {
     /// Opens the owner's partition in `scope` without creating anything.
     ///
@@ -305,8 +313,36 @@ impl Partition {
     /// A project partition whose `memory/` exists gets its `.gitignore`
     /// re-asserted (MD-7). A valid snapshot runs recovery (design §6).
     pub fn open(scope: &StoreScope, owner_id: &str) -> Result<Self, MemoryFilesError> {
+        Self::open_inner(scope, owner_id, owner_key(owner_id), OpenMode::ReadWrite)
+    }
+
+    /// Opens a partition **by owner key**, for reading only: the path checks
+    /// of [`Partition::open`], the snapshot loaded and the quarantine
+    /// decided, but no project `.gitignore` re-asserted and no recovery run
+    /// — the two writes an ordinary open makes. What `doctor` (design §6,
+    /// *Management operations*: "it changes nothing") opens every partition
+    /// with, another owner's included, whose id it does not know. A key that
+    /// is not 32 lowercase hex characters is refused before it is joined to
+    /// anything. Mutations through a partition opened this way are refused
+    /// by the ordinary quarantine check where they would be anyway; nothing
+    /// else distinguishes it, so a caller that opened read-only must not
+    /// write through it.
+    pub fn open_readonly(scope: &StoreScope, owner_key: &str) -> Result<Self, MemoryFilesError> {
+        if !is_owner_key(owner_key) {
+            return Err(MemoryFilesError::InvalidInput(format!(
+                "`{owner_key}` is not an owner key (32 lowercase hex characters)"
+            )));
+        }
+        Self::open_inner(scope, "", owner_key.to_string(), OpenMode::ReadOnly)
+    }
+
+    fn open_inner(
+        scope: &StoreScope,
+        owner_id: &str,
+        key: String,
+        mode: OpenMode,
+    ) -> Result<Self, MemoryFilesError> {
         let store = store_root(scope)?;
-        let key = owner_key(owner_id);
         let memory_dir = store.join(ContentKind::Memory.dir_name());
         let owners = memory_dir.join(OWNERS_DIR);
         let root = owners.join(&key);
@@ -371,7 +407,7 @@ impl Partition {
             crash: Mutex::new(None),
         };
 
-        if scope_kind == SnapshotScope::Project && memory_exists {
+        if mode == OpenMode::ReadWrite && scope_kind == SnapshotScope::Project && memory_exists {
             partition.assert_gitignore()?;
         }
 
@@ -404,7 +440,9 @@ impl Partition {
                 Err(reason) => state.quarantine = Some(reason),
             }
         }
-        partition.recover()?;
+        if mode == OpenMode::ReadWrite {
+            partition.recover()?;
+        }
         Ok(partition)
     }
 
