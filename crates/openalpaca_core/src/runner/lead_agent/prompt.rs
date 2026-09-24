@@ -5,6 +5,7 @@ use crate::compose::{
     SummaryWrapMode, SystemBlock,
 };
 use crate::middleware::prompt::SystemPersona;
+use crate::middleware::user::UserDocument;
 use crate::prompt_ctx::section::{ContextBundle, SectionPriority};
 use crate::prompt_ctx::ExecutionPath;
 use std::sync::Arc;
@@ -74,11 +75,21 @@ pub(super) fn workflow_contract_suffix(steering_attached: bool) -> String {
 /// 200 000 "because the lead agent always gets generous context", which is
 /// exactly wrong on a local model: the composer sized the prompt against a
 /// window the run does not have.
+///
+/// `user_document` is the daemon's `USER.md` (plan 3.3, design §5: one
+/// profile injection). The lead's persona mode is `Skip`, so the block is
+/// rendered by the persona layer's own `user_document_block` — under
+/// `user_budget`, `[orchestrator.prompt_budgets] user_profile_budget` — and
+/// carried right after `lead_persona` as a raw block, whose content Layer 2
+/// hashes: a changed `USER.md` is a new prompt, not a cache hit. Absent or
+/// empty, nothing is emitted and the prompt is what it always was.
 pub fn build_lead_agent_prompt_from_templates(
     compose_engine: &ComposeEngine,
     base_persona: &str,
     templates: &[AgentTemplate],
     model_window: usize,
+    user_document: Option<&UserDocument>,
+    user_budget: Option<usize>,
 ) -> String {
 
     // Available agents catalog (High — important for delegation decisions).
@@ -165,12 +176,18 @@ pub fn build_lead_agent_prompt_from_templates(
          Do not simply list raw subagent outputs — integrate, summarize, and resolve any conflicts.\n\
          </output>";
 
-    let raw_blocks: Vec<SystemBlock> = vec![
-        SystemBlock {
-            name: "lead_persona",
-            content: Arc::<str>::from(base_persona.to_string()),
-            priority: SectionPriority::Critical,
-        },
+    let mut raw_blocks: Vec<SystemBlock> = Vec::with_capacity(9);
+    raw_blocks.push(SystemBlock {
+        name: "lead_persona",
+        content: Arc::<str>::from(base_persona.to_string()),
+        priority: SectionPriority::Critical,
+    });
+    if let Some(block) =
+        user_document.and_then(|doc| crate::compose::persona::user_document_block(doc, user_budget))
+    {
+        raw_blocks.push(block);
+    }
+    raw_blocks.extend([
         SystemBlock {
             name: "lead_role",
             content: Arc::<str>::from(role_text.to_string()),
@@ -206,7 +223,7 @@ pub fn build_lead_agent_prompt_from_templates(
             content: Arc::<str>::from(output_expectations_text.to_string()),
             priority: SectionPriority::Normal,
         },
-    ];
+    ]);
 
     let persona_input = PersonaInput {
         system_persona: Arc::new(SystemPersona::default()),

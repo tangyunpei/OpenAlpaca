@@ -1,7 +1,6 @@
 pub mod conversation;
 pub mod memory;
 pub mod skill;
-pub mod user_profile;
 pub mod workspace;
 
 use crate::prompt_ctx::section::ContextSection;

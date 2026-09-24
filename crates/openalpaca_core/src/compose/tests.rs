@@ -819,9 +819,9 @@ fn make_history_input(mode: HistoryMode) -> HistoryInput {
 
 /// Construct a minimal `ContextBundle` with two UserMessage-mode sections
 /// (a memory note, which Layer 3 leaves out — plan 3.3 — and a workspace
-/// artifact, which it emits) and one SystemMessage-mode section (user
-/// profile). Exercises both Layer 3 output paths (context_messages +
-/// additional_system_blocks).
+/// artifact, which it emits) and one SystemMessage-mode section (a
+/// conversation summary). Exercises both Layer 3 output paths
+/// (context_messages + additional_system_blocks).
 fn make_test_bundle_with_memory_section() -> ContextBundle {
     ContextBundle {
         sections: vec![
@@ -852,13 +852,13 @@ fn make_test_bundle_with_memory_section() -> ContextBundle {
                 },
             },
             ContextSection {
-                source: "user_profile",
-                kind: ContextKind::UserProfile,
+                source: "conversation",
+                kind: ContextKind::ConversationSummary,
                 content: "user likes rust".to_string(),
                 token_estimate: 5,
                 priority: SectionPriority::High,
                 relevance: 1.0,
-                key: ContextKey::UserProfile,
+                key: ContextKey::ConversationSummary,
                 injection: InjectionMode::SystemMessage,
             },
         ],

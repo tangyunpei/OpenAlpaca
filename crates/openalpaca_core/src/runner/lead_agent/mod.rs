@@ -29,7 +29,12 @@ use crate::bus::EventBus;
 use crate::context::SharedContext;
 use crate::daemon_config::DaemonConfig;
 use crate::memory::scope_context::MemoryScopeContext;
+use crate::memory::service::{
+    Attribution, Capabilities, MemoryAccessContext, MemoryError, MemoryService, MemoryUsed,
+    RecallBudget, Surface, WorkspaceHint,
+};
 use crate::middleware::prompt::format_tool_guidance;
+use crate::middleware::user::UserDocument;
 use crate::prompt_ctx::ContextManager;
 use crate::prompt_ctx::section::ContextBundle;
 use crate::runner::{LoopConfig, LoopResult, run_agentic_loop_routed};
@@ -79,7 +84,13 @@ pub async fn run_lead_agent(
     shared_context: Arc<SharedContext>,
     bus: EventBus,
     db: Option<Database>,
-    embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
+    // The memory service (design §7a, *Lead agent*): the opening prompt is
+    // primed through `recall`, read-only, for `created_by`'s own partitions;
+    // `None` where no store exists (tests), and nothing is primed.
+    memory_service: Option<Arc<MemoryService>>,
+    // The daemon's `USER.md`, for the one profile block the prompt carries
+    // (plan 3.3); `None` before onboarding wrote one.
+    user_document: Option<UserDocument>,
     task_id: &str,
     created_by: &str,
     lane_key: &str,
@@ -391,6 +402,14 @@ pub async fn run_lead_agent(
         &lead_agent.preset.persona,
         &worker_templates,
         prompt_window,
+        user_document.as_ref(),
+        Some(
+            daemon_config
+                .load()
+                .orchestrator
+                .prompt_budgets
+                .user_profile_budget,
+        ),
     );
     let tool_guidance = format_tool_guidance(&tools);
     let connector_suffix = if !connector_guidance.is_empty() {
@@ -411,63 +430,33 @@ pub async fn run_lead_agent(
     // 7. Build messages (with proactive memory injection)
     let mut messages = vec![ChatMessage::system(&full_system)];
 
-    // Inject retrieved memory context so lead agent has user preferences/facts
-    if let Some(ref db) = db {
-        let repo = openalpaca_storage::repository::MemoryRepository::new(db);
-        let query_embedding = if let Some(ref emb) = embedder {
-            emb.embed(&[task_description])
-                .await
-                .ok()
-                .and_then(|v| v.into_iter().next())
-        } else {
-            None
-        };
-        let memories = retrieve_lead_memories(
-            &repo,
-            created_by,
-            task_description,
-            query_embedding.as_deref(),
-            &workspace,
-        );
-        if !memories.is_empty() {
-            // Track access for importance decay + boost
-            let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
-            let access_boost = daemon_config.load().orchestrator.memory.decay.access_boost;
-            if let Err(e) = repo.touch_accessed(&ids, access_boost) {
-                tracing::warn!("Failed to track memory access: {e}");
+    // The lead's opening memory (design §5: one recall path for every
+    // agent): `created_by`'s own partitions — global, plus the request
+    // workspace's project when there is one — matched against the task
+    // description, delivered as quoted data under the service's trust
+    // label, and recorded against this task once it is in the prompt.
+    if let Some(service) = memory_service.as_ref()
+        && let Some(ctx) =
+            lead_memory_context(service, created_by, &workspace, task_id, lane_key, source)
+    {
+        let recall_service = service.clone();
+        let recall_ctx = ctx.clone();
+        let description = task_description.to_string();
+        match tokio::task::spawn_blocking(move || {
+            lead_memory_delivery(&recall_service, &recall_ctx, &description)
+        })
+        .await
+        {
+            Ok(Some((block, used))) => {
+                messages.push(ChatMessage::user(&block));
+                service.record_delivery(&ctx.attribution, &used);
             }
-
-            let mut block = String::from("### RETRIEVED MEMORY ###\n");
-            // Derive memory budget from the context window of the model that
-            // will actually answer (M5) so it scales with the available
-            // context (context_budget is not yet constructed). A registry
-            // that knows no window — and a window of 0, which must never
-            // divide anything — keeps this site's own default.
-            let model_window = crate::runner::routed_context_window(
-                router.as_ref(),
-                lead_agent.llm_config.model.as_deref(),
-            )
-            .unwrap_or(128_000);
-            let mut budget = (model_window / 20).clamp(500, 8000);
-            for m in &memories {
-                let entry = format!(
-                    "- [{}] {}\n",
-                    m.kind.as_str(),
-                    m.content.chars().take(300).collect::<String>()
-                );
-                if entry.len() > budget {
-                    break;
-                }
-                budget -= entry.len();
-                block.push_str(&entry);
-            }
-            messages.push(ChatMessage::user(
-                &crate::orchestrator::wrap_untrusted_context(
-                    &block,
-                    "retrieved_memory",
-                    "retrieved",
-                ),
-            ));
+            Ok(None) => {}
+            Err(e) => tracing::warn!(
+                task_id,
+                error = %e,
+                "Lead memory recall did not complete; the run starts without it"
+            ),
         }
     }
 
@@ -702,35 +691,74 @@ pub async fn run_lead_agent(
     }
 }
 
-/// The memories the lead's opening prompt is primed with: up to five of
-/// `created_by`'s own, matched against the task description.
-///
-/// The run's `workspace` decides *which scopes* are read, through the same
-/// cascade every other retrieval site uses: `[Global]` for a run with no
-/// workspace — a connector lane, a scheduled skill, the GUI with no project
-/// open — and `[Global, Workspace(id)]` inside a project. The cascade's own
-/// unscoped fallback is unreachable from here because `cascade_scopes()` is
-/// never empty; a run with no workspace used to call the unscoped
-/// `search_hybrid` instead and was primed with every project's workspace
-/// memories (audit finding F1). Extracted so the scope rule can be tested
-/// against a real database without running a lead.
-fn retrieve_lead_memories(
-    repo: &openalpaca_storage::repository::MemoryRepository<'_>,
+/// The lead's memory context (design §7a, *Lead agent*): the run's
+/// `created_by` as owner — a `System` run (`/v1/command process`) and a
+/// `provider:id` owner have no partition, so the run is primed with nothing
+/// — and the request workspace root as the project, never the daemon's CWD
+/// (audit finding F1: a run with no workspace reads the global partition
+/// only, so no other project's notes reach it). `ModelTool`, read-only, and
+/// the delivery is attributed to the task, which is how a lead's recall
+/// shows in `GET /v1/memories/recently-used`. Extracted so the scope rule
+/// can be tested against a real store without running a lead.
+fn lead_memory_context(
+    service: &MemoryService,
     created_by: &str,
-    task_description: &str,
-    query_embedding: Option<&[f32]>,
     workspace: &MemoryScopeContext,
-) -> Vec<openalpaca_storage::MemoryV2> {
-    let cascade_scopes = workspace.cascade_scopes();
-    repo.search_hybrid_cascade(
+    task_id: &str,
+    lane_key: &str,
+    source: &str,
+) -> Option<MemoryAccessContext> {
+    let root = workspace
+        .request_workspace_root
+        .as_deref()
+        .map(std::path::Path::new);
+    let hint = match root {
+        Some(root) => WorkspaceHint::Root(root),
+        None => WorkspaceHint::None,
+    };
+    match service.context(
         created_by,
-        task_description,
-        query_embedding,
-        5,
-        None,
-        &cascade_scopes,
-    )
-    .unwrap_or_default()
+        hint,
+        Surface::ModelTool,
+        Capabilities::READ_ONLY,
+        Attribution {
+            lane_key: Some(lane_key.to_string()),
+            task_id: Some(task_id.to_string()),
+            request_id: None,
+            source: Some(source.to_string()),
+        },
+    ) {
+        Ok(ctx) => Some(ctx),
+        Err(MemoryError::NoOwner(_)) => None,
+        Err(e) => {
+            tracing::warn!(task_id, error = %e, "Lead memory context refused; the run starts without memory");
+            None
+        }
+    }
+}
+
+/// What the lead's opening prompt is primed with: the service's recall for
+/// the task description, rendered as one quoted-data block, and the
+/// `memory_used` entries the caller records once the block is in the
+/// prompt. `None` when nothing was selected or the recall failed (one WARN;
+/// the run is unaffected).
+fn lead_memory_delivery(
+    service: &MemoryService,
+    ctx: &MemoryAccessContext,
+    task_description: &str,
+) -> Option<(String, Vec<MemoryUsed>)> {
+    match service.recall(ctx, task_description, RecallBudget::default()) {
+        Ok(result) if result.is_empty() => None,
+        Ok(result) => Some((result.render(), result.memory_used())),
+        Err(e) => {
+            tracing::warn!(
+                task_id = ctx.attribution.task_id.as_deref().unwrap_or(""),
+                error = %e,
+                "Lead memory recall failed; the run starts without memory"
+            );
+            None
+        }
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────

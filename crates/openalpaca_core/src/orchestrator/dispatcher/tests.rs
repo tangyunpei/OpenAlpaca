@@ -45,6 +45,8 @@ fn setup_with_config_and_db(
         Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
+        Arc::new(std::sync::RwLock::new(None)),
+        Arc::new(std::sync::RwLock::new(None)),
     )
 }
 
@@ -102,6 +104,8 @@ fn setup_with_specific_router_and_db(
         Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
+        Arc::new(std::sync::RwLock::new(None)),
+        Arc::new(std::sync::RwLock::new(None)),
     )
 }
 
@@ -2050,6 +2054,8 @@ fn setup_with_tool_and_router(
         Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
+        Arc::new(std::sync::RwLock::new(None)),
+        Arc::new(std::sync::RwLock::new(None)),
     )
 }
 

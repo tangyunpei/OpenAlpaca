@@ -57,6 +57,27 @@ pub(crate) fn template_from_agent(agent: &SubAgent) -> AgentTemplate {
     }
 }
 
+/// A populated `USER.md`, the shape the persona layer renders as a
+/// `### USER PROFILE ###` block (plan 3.3: injected exactly once).
+pub(crate) const PROFILE_DOC: &str = r#"---
+title: "USER.md"
+summary: "User profile record"
+read_when:
+  - Bootstrapping a workspace manually
+---
+
+# USER.md -- About Your Human
+
+## Identity
+
+* Name: Alex
+* Timezone: PST (UTC-8)
+
+## Communication Style
+
+Prefers concise, technical responses. No filler or sycophancy.
+"#;
+
 /// Serializes every test in this crate that re-points `OPENALPACA_HOME_STORE`.
 ///
 /// The variable is process-global and every store accessor reads it on each

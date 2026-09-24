@@ -495,6 +495,12 @@ impl TaskDispatcher {
         let skill_catalog = self.skill_catalog.clone();
         let context_manager = self.context_manager.clone();
         let compose_engine = self.compose_engine.clone();
+        let memory_service = self.memory_service.read().ok().and_then(|g| g.clone());
+        let user_document = self
+            .user_document
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_else(|p| p.into_inner().clone());
 
         // This run's cancellation token — the one a `start`/`resume` claim
         // already installed, if there was one, so a cancel issued in the window
@@ -658,7 +664,8 @@ impl TaskDispatcher {
                 ctx.clone(),
                 bus.clone(),
                 db.clone(),
-                embedder.clone(),
+                memory_service,
+                user_document,
                 &task_id,
                 &created_by,
                 &lane_key,

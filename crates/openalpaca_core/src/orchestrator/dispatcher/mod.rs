@@ -20,6 +20,7 @@ use crate::context::SharedContext;
 use crate::daemon_config::DaemonConfig;
 use crate::events::SystemEvent;
 use crate::lane::LaneManager;
+use crate::middleware::user::UserDocument;
 use crate::orchestrator::ConnectorStatusProvider;
 use crate::prompt_ctx::ContextManager;
 use crate::security::gate::SecurityGate;
@@ -79,6 +80,13 @@ pub struct TaskDispatcher {
     /// Layered compose engine. Shared with the owning `Orchestrator` so
     /// prompt caches are global across conversation + task paths (Phase 4).
     pub(crate) compose_engine: Arc<crate::compose::ComposeEngine>,
+    /// The daemon's `USER.md`, shared with the owning `Orchestrator`: the one
+    /// profile block a lead prompt carries (plan 3.3).
+    user_document: Arc<RwLock<Option<UserDocument>>>,
+    /// The memory service's slot, shared with the owning `Orchestrator` and
+    /// filled by the daemon after construction (`set_memory_service`): the
+    /// lead's opening recall (design §7a).
+    memory_service: Arc<RwLock<Option<Arc<crate::memory::service::MemoryService>>>>,
 }
 
 impl TaskDispatcher {
@@ -97,6 +105,8 @@ impl TaskDispatcher {
         skill_catalog: Arc<crate::orchestrator::skill_catalog::SkillCatalog>,
         context_manager: Arc<ContextManager>,
         compose_engine: Arc<crate::compose::ComposeEngine>,
+        user_document: Arc<RwLock<Option<UserDocument>>>,
+        memory_service: Arc<RwLock<Option<Arc<crate::memory::service::MemoryService>>>>,
     ) -> Self {
         Self {
             shared_context,
@@ -115,6 +125,8 @@ impl TaskDispatcher {
             followup_runner: Arc::new(RwLock::new(None)),
             context_manager,
             compose_engine,
+            user_document,
+            memory_service,
         }
     }
 

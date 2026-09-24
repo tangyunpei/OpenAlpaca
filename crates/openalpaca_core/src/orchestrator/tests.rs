@@ -7173,3 +7173,135 @@ async fn a_repeated_question_reads_this_turns_memory_not_the_cached_one() {
     let ids: Vec<_> = used.iter().map(|u| u.id).collect();
     assert!(ids.contains(&scene.vim.id) && ids.contains(&later.id), "{used:?}");
 }
+
+// ── One profile injection (plan 3.3, design §5) ──────────────────────
+
+use crate::test_util::PROFILE_DOC;
+
+/// How many times the rendered profile block appears in one request, over
+/// every message — the persona layer's system block and, before plan 3.3,
+/// the second copy the deleted `UserProfileSource` added as a system message
+/// of its own.
+fn profile_blocks(request: &ChatRequest) -> usize {
+    request
+        .messages
+        .iter()
+        .map(|m| m.content.matches("### USER PROFILE ###").count())
+        .sum()
+}
+
+/// **Plan 3.3.** The profile is injected once per turn: the persona layer's
+/// `user_document` block, cached with the rest of the static layer. On a
+/// daemon with a database the context manager used to add a second copy.
+#[tokio::test]
+async fn the_main_loop_prompt_carries_the_user_profile_exactly_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let (orch, requests) = make_tool_mode_orchestrator_with_db(
+        None,
+        "noted",
+        DaemonConfig::default(),
+        vec![],
+        Some(db),
+    );
+    *orch.user_document.write().unwrap() =
+        Some(crate::middleware::user::parse_user_markdown(PROFILE_DOC).unwrap());
+
+    send_tool_mode(
+        &orch,
+        Uuid::new_v4(),
+        "Tell me about the Rust borrow checker in depth",
+    )
+    .await;
+    let reqs = requests.lock().unwrap();
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(
+        profile_blocks(&reqs[0]),
+        1,
+        "messages: {:?}",
+        reqs[0]
+            .messages
+            .iter()
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        reqs[0].messages[0].content.contains("Name: Alex"),
+        "the persona layer's block is the one that survives"
+    );
+}
+
+/// The same rule on the skill tier, which composes with the same persona
+/// layer and the same context manager.
+#[tokio::test]
+async fn the_skill_tier_prompt_carries_the_user_profile_exactly_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let skills = tempfile::TempDir::new().unwrap();
+    let skill_dir = skills.path().join("filer");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: \"Filer\"\ndescription: \"Files issues\"\ninvoke:\n  slash: \"/file\"\n---\n\n## Instructions\n\nFile the issue.\n",
+    )
+    .unwrap();
+    let catalog = Arc::new(skill_catalog::SkillCatalog::new());
+    catalog.scan_directory(skills.path(), crate::middleware::skill::SkillScope::Project);
+
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let router = openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(ToolModeMockLlm {
+            tool_call: None,
+            final_text: "filed".to_string(),
+            requests: requests.clone(),
+        }),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    );
+    let bus = EventBus::default();
+    let gate = make_security_gate(&bus);
+    let orch = Orchestrator::new(
+        Arc::new(SharedContext::new()),
+        Arc::new(LaneManager::new()),
+        bus,
+        SystemPersona::default(),
+        Some(Arc::new(router)),
+        LoopConfig::default(),
+        gate,
+        make_tool_registry(),
+        Some(db),
+        None,
+        catalog,
+        Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
+        Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+    );
+    *orch.user_document.write().unwrap() =
+        Some(crate::middleware::user::parse_user_markdown(PROFILE_DOC).unwrap());
+
+    let reply = orch
+        .handle_message(HandleRequest::new(
+            Uuid::new_v4(),
+            "cli",
+            "/file this bug",
+            Principal::User {
+                global_id: "user1".to_string(),
+            },
+            Scope::Global,
+            "user1:cli",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reply, "filed");
+    let reqs = requests.lock().unwrap();
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(
+        profile_blocks(&reqs[0]),
+        1,
+        "messages: {:?}",
+        reqs[0]
+            .messages
+            .iter()
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect::<Vec<_>>()
+    );
+}

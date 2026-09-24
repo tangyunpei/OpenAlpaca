@@ -144,7 +144,6 @@ impl ContextManager {
                 ContextKind::ConversationSummary => SectionPriority::High,
                 ContextKind::Memory => SectionPriority::Normal,
                 ContextKind::WorkspaceArtifact => SectionPriority::Normal,
-                ContextKind::UserProfile => SectionPriority::Low,
                 ContextKind::SkillReference => continue, // sub-agents have own skills
             };
             package_sections.push(PackageSection {
@@ -317,12 +316,12 @@ mod tests {
                 make_section("memory content", SectionPriority::Normal, 100, 0.8),
                 ContextSection {
                     source: "test",
-                    kind: ContextKind::UserProfile,
-                    content: "user prefs".to_string(),
+                    kind: ContextKind::WorkspaceArtifact,
+                    content: "workspace notes".to_string(),
                     token_estimate: 50,
                     priority: SectionPriority::Normal,
                     relevance: 0.5,
-                    key: ContextKey::UserProfile,
+                    key: ContextKey::WorkspaceArtifact("notes.md".to_string()),
                     injection: InjectionMode::SystemMessage,
                 },
             ],
@@ -336,7 +335,7 @@ mod tests {
         // Budget = 10_000 * 0.40 = 4000
         assert_eq!(package.budget, 4000);
         assert_eq!(package.sub_agent_window, 10_000);
-        // Should have: TaskDescription (Critical) + Memory (Normal) + UserProfile (Low)
+        // Should have: TaskDescription (Critical) + Memory (Normal) + WorkspaceArtifact (Normal)
         assert!(package
             .sections
             .iter()
@@ -354,12 +353,12 @@ mod tests {
                 make_section("memory content", SectionPriority::Normal, 100, 0.8),
                 ContextSection {
                     source: "test",
-                    kind: ContextKind::UserProfile,
-                    content: "user prefs".to_string(),
+                    kind: ContextKind::WorkspaceArtifact,
+                    content: "workspace notes".to_string(),
                     token_estimate: 50,
                     priority: SectionPriority::Normal,
                     relevance: 0.5,
-                    key: ContextKey::UserProfile,
+                    key: ContextKey::WorkspaceArtifact("notes.md".to_string()),
                     injection: InjectionMode::SystemMessage,
                 },
             ],
@@ -368,14 +367,18 @@ mod tests {
         };
 
         let mut constraints = AgentConstraints::default();
-        constraints.denied_sections = vec!["user_profile".to_string()];
+        constraints.denied_sections = vec!["workspace_artifact".to_string()];
         let package = manager.distill(&bundle, &constraints, 10_000, "Task", None);
 
-        // UserProfile should be filtered out
+        // The denied kind should be filtered out
         assert!(!package
             .sections
             .iter()
-            .any(|s| s.kind == PackageSectionKind::UserProfile));
+            .any(|s| s.kind == PackageSectionKind::WorkspaceArtifact));
+        assert!(package
+            .sections
+            .iter()
+            .any(|s| s.kind == PackageSectionKind::Memory));
     }
 
     #[test]

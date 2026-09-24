@@ -11,7 +11,6 @@ pub enum PackageSectionKind {
     ConversationSummary,
     Memory,
     WorkspaceArtifact,
-    UserProfile,
 }
 
 impl PackageSectionKind {
@@ -23,7 +22,6 @@ impl PackageSectionKind {
             Self::ConversationSummary => "conversation_summary",
             Self::Memory => "memory",
             Self::WorkspaceArtifact => "workspace_artifact",
-            Self::UserProfile => "user_profile",
         }
     }
 
@@ -37,7 +35,6 @@ impl PackageSectionKind {
             Self::ConversationSummary => ContextKind::ConversationSummary,
             Self::Memory => ContextKind::Memory,
             Self::WorkspaceArtifact => ContextKind::WorkspaceArtifact,
-            Self::UserProfile => ContextKind::UserProfile,
         }
     }
 
@@ -54,7 +51,6 @@ impl From<&ContextKind> for PackageSectionKind {
             ContextKind::ConversationSummary => Self::ConversationSummary,
             ContextKind::SkillReference => Self::WorkspaceArtifact,
             ContextKind::WorkspaceArtifact => Self::WorkspaceArtifact,
-            ContextKind::UserProfile => Self::UserProfile,
         }
     }
 }
@@ -86,7 +82,9 @@ impl ContextPackage {
     /// - ConversationSummary -> UserMessage { trust: Untrusted } (user-derived)
     /// - Memory -> UserMessage { trust: Untrusted } (retrieved content)
     /// - WorkspaceArtifact -> UserMessage { trust: Untrusted } (external content)
-    /// - UserProfile -> SystemMessage (loaded from config, trusted)
+    ///
+    /// The user profile is not a package section: it is the persona layer's
+    /// own block, injected once (plan 3.3).
     pub fn to_bundle(&self) -> ContextBundle {
         ContextBundle {
             sections: self
@@ -95,7 +93,6 @@ impl ContextPackage {
                 .map(|s| {
                     let injection = match s.kind {
                         PackageSectionKind::TaskDescription => InjectionMode::SystemPrompt,
-                        PackageSectionKind::UserProfile => InjectionMode::SystemMessage,
                         PackageSectionKind::PredecessorOutput => InjectionMode::UserMessage {
                             tag: "predecessor_output".to_string(),
                             trust: TrustLevel::Untrusted,
@@ -239,12 +236,6 @@ mod tests {
                     priority: SectionPriority::Critical,
                 },
                 PackageSection {
-                    kind: PackageSectionKind::UserProfile,
-                    content: "Prefers verbose".to_string(),
-                    token_estimate: 4,
-                    priority: SectionPriority::Low,
-                },
-                PackageSection {
                     kind: PackageSectionKind::PredecessorOutput,
                     content: "Found error in auth.rs".to_string(),
                     token_estimate: 6,
@@ -269,14 +260,14 @@ mod tests {
                     priority: SectionPriority::Normal,
                 },
             ],
-            total_tokens: 26,
+            total_tokens: 22,
             budget: 100,
             sub_agent_window: 200_000,
         };
 
         let bundle = package.to_bundle();
-        assert_eq!(bundle.sections.len(), 6);
-        assert_eq!(bundle.total_tokens, 26);
+        assert_eq!(bundle.sections.len(), 5);
+        assert_eq!(bundle.total_tokens, 22);
         assert_eq!(bundle.available_budget, 100);
 
         // TaskDescription -> SystemPrompt
@@ -284,32 +275,27 @@ mod tests {
             bundle.sections[0].injection,
             InjectionMode::SystemPrompt
         ));
-        // UserProfile -> SystemMessage
-        assert!(matches!(
-            bundle.sections[1].injection,
-            InjectionMode::SystemMessage
-        ));
         // PredecessorOutput -> UserMessage { Untrusted }
         assert!(matches!(
-            &bundle.sections[2].injection,
+            &bundle.sections[1].injection,
             InjectionMode::UserMessage { tag, trust }
             if tag == "predecessor_output" && *trust == TrustLevel::Untrusted
         ));
         // Memory -> UserMessage { Untrusted }
         assert!(matches!(
-            &bundle.sections[3].injection,
+            &bundle.sections[2].injection,
             InjectionMode::UserMessage { tag, trust }
             if tag == "retrieved_memory" && *trust == TrustLevel::Untrusted
         ));
         // ConversationSummary -> UserMessage { Untrusted }
         assert!(matches!(
-            &bundle.sections[4].injection,
+            &bundle.sections[3].injection,
             InjectionMode::UserMessage { tag, trust }
             if tag == "conversation_summary" && *trust == TrustLevel::Untrusted
         ));
         // WorkspaceArtifact -> UserMessage { Untrusted }
         assert!(matches!(
-            &bundle.sections[5].injection,
+            &bundle.sections[4].injection,
             InjectionMode::UserMessage { tag, trust }
             if tag == "workspace_artifact" && *trust == TrustLevel::Untrusted
         ));
@@ -413,10 +399,6 @@ mod tests {
         assert_eq!(
             PackageSectionKind::from(&ContextKind::ConversationSummary),
             PackageSectionKind::ConversationSummary
-        );
-        assert_eq!(
-            PackageSectionKind::from(&ContextKind::UserProfile),
-            PackageSectionKind::UserProfile
         );
         assert_eq!(
             PackageSectionKind::from(&ContextKind::WorkspaceArtifact),

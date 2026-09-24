@@ -591,7 +591,8 @@ fn test_lead_agent_registry_exposes_command_backend_tools() {
 #[test]
 fn test_lead_agent_prompt_includes_batch_spawn_instruction() {
     let engine = crate::compose::ComposeEngine::new(16);
-    let prompt = build_lead_agent_prompt_from_templates(&engine, "Test persona", &[], 200_000);
+    let prompt =
+        build_lead_agent_prompt_from_templates(&engine, "Test persona", &[], 200_000, None, None);
     assert!(
         prompt.contains("spawn_subagents_batch"),
         "Lead agent prompt should mention spawn_subagents_batch tool"
@@ -1301,6 +1302,7 @@ async fn run_lead_for_test(
         bus,
         None,
         None,
+        None,
         "task-1",
         "user-1",
         "user-1:cli",
@@ -1722,6 +1724,7 @@ async fn a_resumed_run_is_primed_with_its_replayed_rounds_and_the_interjection()
         EventBus::default(),
         None,
         None,
+        None,
         "task-1",
         "user-1",
         "user-1:cli",
@@ -1801,6 +1804,7 @@ async fn with_no_steering_rail_the_resume_note_is_still_an_interjection() {
         EventBus::default(),
         None,
         None,
+        None,
         "task-1",
         "user-1",
         "user-1:cli",
@@ -1869,6 +1873,7 @@ async fn the_resume_record_names_the_trim_and_the_rounds_it_dropped() {
         Arc::new(ToolRegistry::default()),
         Arc::new(SharedContext::new()),
         EventBus::default(),
+        None,
         None,
         None,
         "task-1",
@@ -1962,6 +1967,7 @@ async fn the_lead_is_budgeted_against_the_model_that_answers() {
         bus.clone(),
         None,
         None,
+        None,
         "task-1",
         "user-1",
         "user-1:cli",
@@ -2046,6 +2052,7 @@ async fn an_unattended_run_tells_the_model_the_tool_cannot_be_approved() {
         registry,
         Arc::new(SharedContext::new()),
         EventBus::default(),
+        None,
         None,
         None,
         "task-1",
@@ -2225,6 +2232,7 @@ async fn a_subagents_rounds_are_budgeted_against_the_model_that_answers() {
         Arc::new(ToolRegistry::default()),
         shared,
         EventBus::default(),
+        None,
         None,
         None,
         "task-1",
@@ -2721,124 +2729,291 @@ async fn spawn_subagent_survives_a_multibyte_objective_preview() {
     assert!(logs_contain("Lead agent spawning subagent"));
 }
 
-// ── Memory injection scope (audit finding F1) ────────────────────────
+// ── Memory injection scope (audit finding F1), through the service ────
 
-/// One owner, one global memory and one memory scoped to a project
-/// workspace, both matching the query these tests search with.
-fn memory_fixture(repo: &openalpaca_storage::repository::MemoryRepository<'_>) -> (i64, i64) {
-    use openalpaca_storage::{MemoryKind, MemoryScope, MemorySource};
+/// One owner with a global note and one note in each of two projects, all
+/// three matching the task description these tests prime with; the
+/// temp home store and the in-memory index the service runs on.
+struct LeadMemoryScene {
+    _env: crate::test_util::HomeStoreGuard,
+    root: tempfile::TempDir,
+    service: Arc<MemoryService>,
+    global: openalpaca_storage::memory_files::NoteId,
+    proj_a: openalpaca_storage::memory_files::NoteId,
+    proj_b: openalpaca_storage::memory_files::NoteId,
+}
 
-    let global_id = repo
-        .add(
-            "owner-1",
-            MemoryKind::Preference,
-            MemoryScope::Global,
-            "",
-            MemorySource::Conversation,
-            "the owner prefers terse status reports",
-            None,
-            0.5,
-            0.9,
-        )
+const LEAD_OWNER: &str = "user-1";
+
+impl LeadMemoryScene {
+    fn project(&self, name: &str) -> std::path::PathBuf {
+        self.root.path().join("ws").join(name).canonicalize().unwrap()
+    }
+
+    fn workspace(&self, name: &str) -> MemoryScopeContext {
+        let root = self.project(name).to_string_lossy().into_owned();
+        MemoryScopeContext {
+            workspace_id: Some(root.clone()),
+            request_workspace_root: Some(root),
+        }
+    }
+}
+
+fn lead_memory_scene() -> LeadMemoryScene {
+    use crate::memory::service::StoreInput;
+    use openalpaca_storage::memory_files::NoteKind;
+
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let env = crate::test_util::HomeStoreGuard::set(&home.canonicalize().unwrap());
+    let db = openalpaca_storage::Database::open(&root.path().join("db.sqlite")).unwrap();
+    openalpaca_storage::IdentityRepository::new(&db)
+        .create_global_user(LEAD_OWNER, None)
         .unwrap();
-    let workspace_id = repo
-        .add(
-            "owner-1",
-            MemoryKind::Fact,
-            MemoryScope::Workspace,
-            "/tmp/projA",
-            MemorySource::Conversation,
-            "projA status reports are posted to the release channel",
-            None,
-            0.5,
-            0.9,
-        )
-        .unwrap();
-    assert!(global_id > 0 && workspace_id > 0, "both rows must insert");
-    (global_id, workspace_id)
+    let service = MemoryService::new(
+        Some(db),
+        openalpaca_storage::memory_index::MemoryIndex::open_in_memory().unwrap(),
+    );
+    service.rebuild_index().unwrap();
+    for name in ["projA", "projB"] {
+        std::fs::create_dir_all(root.path().join("ws").join(name).join(".git")).unwrap();
+    }
+    let store = |workspace: Option<&std::path::Path>, title: &str, body: &str, kind: NoteKind| {
+        let hint = match workspace {
+            Some(path) => WorkspaceHint::Path(path),
+            None => WorkspaceHint::None,
+        };
+        let ctx = service
+            .context(
+                LEAD_OWNER,
+                hint,
+                Surface::UserSurface,
+                Capabilities::ALL,
+                Attribution::default(),
+            )
+            .unwrap();
+        service
+            .store(
+                &ctx,
+                StoreInput {
+                    title: title.into(),
+                    body: body.into(),
+                    kind: Some(kind),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .id
+    };
+    let proj_a_dir = root.path().join("ws").join("projA").canonicalize().unwrap();
+    let proj_b_dir = root.path().join("ws").join("projB").canonicalize().unwrap();
+    let global = store(
+        None,
+        "Status reports",
+        "# Status reports\n\nThe owner prefers terse status reports.\n",
+        NoteKind::Preference,
+    );
+    let proj_a = store(
+        Some(&proj_a_dir),
+        "Project A status reports",
+        "# Project A status reports\n\nprojA status reports are posted to the release channel.\n",
+        NoteKind::Fact,
+    );
+    let proj_b = store(
+        Some(&proj_b_dir),
+        "Project B status reports",
+        "# Project B status reports\n\nprojB status reports are weekly.\n",
+        NoteKind::Fact,
+    );
+    LeadMemoryScene {
+        _env: env,
+        root,
+        service: Arc::new(service),
+        global,
+        proj_a,
+        proj_b,
+    }
+}
+
+fn delivered_ids(
+    delivery: &Option<(String, Vec<crate::memory::service::MemoryUsed>)>,
+) -> Vec<openalpaca_storage::memory_files::NoteId> {
+    let (_, used) = delivery.as_ref().expect("something was delivered");
+    used.iter().map(|u| u.id).collect()
 }
 
 /// A workflow started with no workspace — a connector lane, a scheduled
 /// skill, the GUI with no project open — primes the lead with the owner's
-/// **global** memories only. The no-workspace branch used to run an
-/// unscoped search, so another project's workspace memories leaked into
-/// every such run.
+/// **global** partition only: no project's notes reach it.
 #[test]
-fn lead_memory_injection_without_workspace_reads_global_scope_only() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
-    let repo = openalpaca_storage::repository::MemoryRepository::new(&db);
-    let (global_id, _workspace_id) = memory_fixture(&repo);
-
-    let memories = retrieve_lead_memories(
-        &repo,
-        "owner-1",
-        "status reports",
-        None,
+fn lead_memory_without_workspace_reads_the_global_partition_only() {
+    let scene = lead_memory_scene();
+    let ctx = lead_memory_context(
+        &scene.service,
+        LEAD_OWNER,
         &MemoryScopeContext::global_only(),
-    );
+        "task-1",
+        "user-1:cli",
+        "cli",
+    )
+    .expect("the owner is a global_user row");
+    assert_eq!(ctx.project_root, None);
+    assert_eq!(ctx.attribution.task_id.as_deref(), Some("task-1"));
 
-    let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
-    assert_eq!(
-        ids,
-        vec![global_id],
-        "a run with no workspace must not read another project's workspace memories"
-    );
+    let delivery = lead_memory_delivery(&scene.service, &ctx, "status reports");
+    assert_eq!(delivered_ids(&delivery), vec![scene.global]);
+    let (block, _) = delivery.unwrap();
+    assert!(block.starts_with("<memory_context>\n"), "{block}");
+    assert!(block.contains(crate::memory::service::TRUST_LABEL));
+    assert!(!block.contains(&scene.proj_a.to_string()));
+    assert!(!block.contains(&scene.proj_b.to_string()));
 }
 
-/// The workspace branch: a run inside `/tmp/projA` reads that workspace's
-/// memories and the global ones — most specific first — and nothing from a
-/// different workspace.
+/// The workspace branch: a run inside project A reads that project's notes
+/// and the global ones, and nothing from project B.
 #[test]
-fn lead_memory_injection_with_workspace_reads_its_workspace_and_global() {
-    use openalpaca_storage::{MemoryKind, MemoryScope, MemorySource};
+fn lead_memory_with_workspace_reads_its_project_and_global() {
+    let scene = lead_memory_scene();
+    let ctx = lead_memory_context(
+        &scene.service,
+        LEAD_OWNER,
+        &scene.workspace("projA"),
+        "task-1",
+        "user-1:cli",
+        "cli",
+    )
+    .unwrap();
+    assert_eq!(ctx.project_root.as_deref(), Some(scene.project("projA").as_path()));
 
-    let dir = tempfile::tempdir().unwrap();
-    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
-    let repo = openalpaca_storage::repository::MemoryRepository::new(&db);
-    let (global_id, workspace_id) = memory_fixture(&repo);
-    let other_id = repo
-        .add(
-            "owner-1",
-            MemoryKind::Fact,
-            MemoryScope::Workspace,
-            "/tmp/projB",
-            MemorySource::Conversation,
-            "projB status reports are weekly",
-            None,
-            0.5,
-            0.9,
-        )
-        .unwrap();
-    assert!(other_id > 0);
+    let delivery = lead_memory_delivery(&scene.service, &ctx, "status reports");
+    let mut ids = delivered_ids(&delivery);
+    ids.sort();
+    let mut expected = vec![scene.global, scene.proj_a];
+    expected.sort();
+    assert_eq!(ids, expected);
+    assert!(!ids.contains(&scene.proj_b));
+}
 
-    let memories = retrieve_lead_memories(
-        &repo,
-        "owner-1",
-        "status reports",
+/// A `System` run (`/v1/command process`) and an unlinked `provider:id`
+/// owner have no partition (design §3): the lead is primed with nothing,
+/// and nothing is created for them.
+#[test]
+fn a_run_whose_owner_is_not_a_global_user_row_has_no_memory_context() {
+    let scene = lead_memory_scene();
+    for owner in ["system", "telegram:12345", ""] {
+        assert!(
+            lead_memory_context(
+                &scene.service,
+                owner,
+                &MemoryScopeContext::global_only(),
+                "task-1",
+                "user-1:cli",
+                "cli",
+            )
+            .is_none(),
+            "{owner}"
+        );
+    }
+}
+
+/// **Plan 3.3, one profile injection.** The lead prompt carries the daemon's
+/// `USER.md` exactly once — rendered by the persona layer's own block, right
+/// after the lead persona — and nothing at all when there is no document.
+#[test]
+fn the_lead_prompt_carries_the_user_document_exactly_once() {
+    let engine = crate::compose::ComposeEngine::new(16);
+    let doc = crate::middleware::user::parse_user_markdown(
+        crate::test_util::PROFILE_DOC,
+    )
+    .unwrap();
+    let prompt = build_lead_agent_prompt_from_templates(
+        &engine,
+        "Test persona",
+        &[],
+        200_000,
+        Some(&doc),
+        Some(1000),
+    );
+    assert_eq!(prompt.matches("### USER PROFILE ###").count(), 1, "{prompt}");
+    assert!(prompt.contains("Name: Alex"), "{prompt}");
+    let persona_at = prompt.find("Test persona").unwrap();
+    let profile_at = prompt.find("### USER PROFILE ###").unwrap();
+    let role_at = prompt.find("<role>").unwrap();
+    assert!(persona_at < profile_at && profile_at < role_at, "{prompt}");
+
+    let without =
+        build_lead_agent_prompt_from_templates(&engine, "Test persona", &[], 200_000, None, None);
+    assert_eq!(without.matches("### USER PROFILE ###").count(), 0);
+}
+
+/// End to end: the lead's first request carries its profile once in the
+/// system prompt, its memory as one quoted-data user message before the
+/// objective, and the delivery lands in the ring under the task id.
+#[tokio::test]
+async fn a_lead_run_is_primed_with_its_memory_once_and_its_profile_once() {
+    let scene = lead_memory_scene();
+    let provider = ScriptedProvider::new(vec![scripted_response("done", vec![])]);
+    let doc = crate::middleware::user::parse_user_markdown(
+        crate::test_util::PROFILE_DOC,
+    )
+    .unwrap();
+    let daemon_config = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
+
+    let result = run_lead_agent(
+        &lead_subagent(),
+        "write the status reports",
+        scripted_router(provider.clone()),
+        Arc::new(ToolRegistry::default()),
+        Arc::new(SharedContext::new()),
+        EventBus::default(),
         None,
-        &MemoryScopeContext::new(Some("/tmp/projA".to_string())),
+        Some(scene.service.clone()),
+        Some(doc),
+        "task-1",
+        LEAD_OWNER,
+        "user-1:cli",
+        "cli",
+        &daemon_config,
+        MemoryScopeContext::global_only(),
+        None,
+        None,
+        None,
+        "lead::task-1",
+        "",
+        None,
+        Arc::new(crate::orchestrator::skill_catalog::SkillCatalog::new()),
+        Arc::new(crate::prompt_ctx::ContextManager::noop()),
+        Arc::new(crate::compose::ComposeEngine::new(16)),
+        None,
+        false,
+    )
+    .await;
+    assert!(result.success);
+
+    let seen = provider.seen_messages.lock().unwrap();
+    let messages = &seen[0];
+    assert!(matches!(messages[0].role, openalpaca_llm::Role::System));
+    assert_eq!(
+        messages[0].content.matches("### USER PROFILE ###").count(),
+        1,
+        "{}",
+        messages[0].content
     );
+    let profile_copies: usize = messages
+        .iter()
+        .map(|m| m.content.matches("### USER PROFILE ###").count())
+        .sum();
+    assert_eq!(profile_copies, 1);
+    assert!(matches!(messages[1].role, openalpaca_llm::Role::User));
+    assert!(messages[1].content.starts_with("<memory_context>\n"), "{}", messages[1].content);
+    assert!(messages[1].content.contains(&scene.global.to_string()));
+    assert!(!messages[1].content.contains(&scene.proj_a.to_string()));
+    assert_eq!(messages[2].content, "write the status reports");
 
-    let ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
-    assert_eq!(ids, vec![workspace_id, global_id]);
-}
-
-/// Negative control, pinning why the lead must not call it: the storage
-/// crate's unscoped `search_hybrid` answers with every scope the owner has.
-/// That is the call the no-workspace branch used to make.
-#[test]
-fn unscoped_search_hybrid_returns_every_scope() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
-    let repo = openalpaca_storage::repository::MemoryRepository::new(&db);
-    let (global_id, workspace_id) = memory_fixture(&repo);
-
-    let memories = repo
-        .search_hybrid("owner-1", "status reports", None, 5, None, None, None)
-        .unwrap();
-
-    let mut ids: Vec<i64> = memories.iter().map(|m| m.id).collect();
-    ids.sort_unstable();
-    assert_eq!(ids, vec![global_id, workspace_id]);
+    let ring = scene.service.recently_used(10);
+    assert_eq!(ring.len(), 1);
+    assert_eq!(ring[0].id, scene.global);
+    assert_eq!(ring[0].task_id.as_deref(), Some("task-1"));
+    assert_eq!(ring[0].lane_key.as_deref(), Some("user-1:cli"));
 }

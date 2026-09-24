@@ -15,7 +15,6 @@ pub enum ContextKind {
     ConversationSummary,
     SkillReference,
     WorkspaceArtifact,
-    UserProfile,
 }
 
 impl ContextKind {
@@ -25,7 +24,6 @@ impl ContextKind {
             Self::ConversationSummary => "conversation_summary",
             Self::SkillReference => "skill_reference",
             Self::WorkspaceArtifact => "workspace_artifact",
-            Self::UserProfile => "user_profile",
         }
     }
 }
@@ -51,7 +49,6 @@ pub enum ContextKey {
     ConversationSummary,
     SkillSource(String, String),
     WorkspaceArtifact(String),
-    UserProfile,
     Package(String),
 }
 

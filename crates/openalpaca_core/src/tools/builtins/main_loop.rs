@@ -330,6 +330,8 @@ mod tests {
             Arc::new(SkillCatalog::new()),
             Arc::new(crate::prompt_ctx::ContextManager::noop()),
             Arc::new(crate::compose::ComposeEngine::new(16)),
+            Arc::new(std::sync::RwLock::new(None)),
+            Arc::new(std::sync::RwLock::new(None)),
         ));
         (ctx, dispatcher, bus, tool_registry)
     }

@@ -316,11 +316,8 @@ impl Orchestrator {
                 Box::new(
                     crate::prompt_ctx::sources::conversation::ConversationSource::new(),
                 ),
-                Box::new(
-                    crate::prompt_ctx::sources::user_profile::UserProfileSource::new(
-                        user_document.clone(),
-                    ),
-                ),
+                // The user profile is not a source: it is the persona layer's
+                // own block, injected once per turn (plan 3.3, design §5).
                 Box::new(crate::prompt_ctx::sources::skill::SkillContextSource::new()),
                 Box::new(
                     crate::prompt_ctx::sources::workspace::WorkspaceSource::new(),
@@ -350,6 +347,8 @@ impl Orchestrator {
             skill_catalog.clone(),
             context_manager.clone(),
             compose_engine.clone(),
+            user_document.clone(),
+            memory_service.clone(),
         ));
         let loop_config = {
             let mut lc = loop_config;
