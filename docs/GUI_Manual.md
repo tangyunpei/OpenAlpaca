@@ -81,10 +81,12 @@ does not choose this layout — it asks the storage crate for it
 ```text
 ~/.openalpaca/
   state/      openalpaca.db, discovery.json, openalpacad.lock, .master_key,
-              backups/, logs/
+              backups/, logs/, memory-control/ (one snapshot per memory
+              partition), cache/memory-index-v1.sqlite (the search index)
   config/     the runtime config a GUI- or CLI-managed daemon reads
   plugins/    plugin directories, plus .permissions.toml, .config/<name>.toml,
               .data/<name>/ and .trash/ — all invisible to the plugin scan
+  memory/     your memory notes: owners/<owner-key>/notes/*.md
   artifacts/ uploads/ sessions/ …   content, home scope
 ```
 
@@ -93,7 +95,8 @@ root and `OPENALPACA_CONFIG_DIR` to `<root>/config`, and appends the daemon's
 output to `<root>/state/logs/daemon.log` — the same file, under the same
 rotation (16 MB, three older generations kept), that `openalpaca daemon start`
 writes (`src-tauri/src/lib.rs`, `spawn_daemon`). A project you point the GUI at keeps
-its own store at `<project>/.openalpaca/`.
+its own store at `<project>/.openalpaca/`, with that project's memory notes under
+`memory/` (git-ignored by a `.gitignore` of its own).
 
 Nothing is moved into this root for you. If a development build's data directory
 (`~/Library/Application Support/OpenAlpaca` on macOS) is still on the machine,
@@ -179,16 +182,18 @@ headers.
 
 ## The shell
 
-One rail, always mounted, and one of four views beside it
+One rail, always mounted, and one of five views beside it
 (`src/App.tsx`, `src/components/shell/`).
 
 The **nav rail** is 196px and never scrolls. It holds, top to bottom: the
-window traffic lights, the brand, `Chat` / `Work` / `Library`, a "Running now"
-list, and at the bottom the ⌘K button, a connection row and `Settings`. The
-Work item carries a badge counting `GET /v1/tasks?status=active` — whose SQL is
+window traffic lights, the brand, `Chat` / `Work` / `Library` / `Memory`, a
+"Running now" list, and at the bottom the ⌘K button, a connection row and
+`Settings`. The Work item carries a badge counting
+`GET /v1/tasks?status=active` — whose SQL is
 `status IN ('queued','running','paused')`, so the badge and the list agree.
-Library carries **no** count: there is no count on the rail's budget, and a `0`
-beside Library would be a claim about your library the app cannot make.
+Library and Memory carry **no** count: there is no count on the rail's budget,
+and a `0` beside either would be a claim about your library or your memory the
+app cannot make.
 
 **Narrow windows.** The app window will not go below 1000×640, which is what
 the Work, Library and Settings views need — none of their columns collapses.
@@ -226,7 +231,7 @@ cards. It affects nothing else.
 | ↵ | approve a pending tool confirmation (only while blocked, in chat, palette closed) |
 | ⌘N | new background job |
 | ⌘⇧S | steer the active run |
-| ⌘1 / ⌘2 / ⌘3 | Chat / Work / Library |
+| ⌘1 / ⌘2 / ⌘3 / ⌘4 | Chat / Work / Library / Memory |
 | ⌘⇧D | toggle compact density |
 | ⌘, | Settings → Tools |
 
@@ -383,6 +388,17 @@ answer naming each file and the daemon's reason, and the file is **not** listed
 among the ones the turn used. The note is live only — the daemon stores no
 record of a skip on the message — so a reloaded transcript shows the answer
 without it.
+
+**"Notes used in this answer."** When the daemon handed the model any of your
+memory notes for a turn, a muted note under the answer lists them by title,
+each marked `recalled` (found for the question automatically), `pinned`, or
+`looked up` (the model searched or read it itself), and each opens in the
+Memory view — so a note that steered an answer the wrong way is one click from
+being corrected or forgotten. It comes from the turn's `done` frame
+(`memory_used`) and, like the skipped-attachment note, it is **live only**:
+nothing stores which notes shaped an answer, so a reloaded transcript shows the
+answer without it. A note deleted since is named by its id rather than
+guessed.
 
 **A thinking model shows its thinking.** A local reasoning model can spend ten
 seconds or more before its first token. While the turn is thinking, the
@@ -579,10 +595,75 @@ three tabs:
 (`POST /v1/files/{id}/open`) opens the file with the host's default
 application rather than revealing it in Finder; the toast says so.
 
+## Memory
+
+What OpenAlpaca remembers about you, as notes you can read, correct and
+forget (`src/views/memory/`). Each note is a Markdown file in the store — the
+same file `openalpaca memory show --raw` prints and any editor can open — and
+every action here is yours: a note you add, edit or confirm is recorded as
+written by you, which a model's tool call can never edit, archive or replace.
+The view reads the daemon's `/v1/memories*` routes and **never polls**: every
+change the daemon makes to memory, from any window, the CLI, a chat turn or an
+edit on disk, arrives as a `memory_changed` frame and refreshes what is on
+screen.
+
+Two columns, in the Library's shape. The left one, top to bottom:
+
+- **Global / This project.** Which partition the list shows. `This project` is
+  the project Settings → Connection points at, as the daemon resolved it (the
+  nearest `.git` or `.openalpaca` above it); with no project, or a path inside
+  none, the button is off and says why, and a request for it shows Global with
+  a line saying so rather than switching silently.
+- **Search notes…** A keyword search of that partition. It matches whole words
+  and parts of words (`prefer` finds `prefers`), searches a one- or
+  two-character Chinese term by a scan, and never asks a model, so a question
+  worded very differently from the note can miss it. When the index is being
+  rebuilt the results say they came from a slower file scan, and a search that
+  stopped at its limit says there may be more.
+- **Active / Candidates / Archived** chips, while nothing is searched.
+  Candidates are what the assistant *inferred* — from its own reply or from a
+  run's output — rather than heard from you: they are not used in answers until
+  you confirm them.
+- **Recently learned**, above the active list: the notes learned in the last
+  seven days from what you said, each reading `Learned from what you said ·
+  Undo`. Undo is one click, because you never asked for the note. Once you have
+  edited or confirmed such a note it is yours, and it leaves the list.
+- The notes, each with its kind, who wrote it and when, and a tag for a derived
+  state (`candidate`, `archived`, `superseded`, `conflict`), and `Add note` in the header (title, kind
+  and body, saved to the partition the list shows; a note already there word
+  for word is opened rather than written twice).
+
+The right column is one note: a pinned head — title, kind, scope, who wrote it,
+when, and tags for a candidate, a conflict or a file changed on disk — with
+`Confirm` (a candidate), `Archive` (an active note) and `Forget`, which arms on
+the first click and forgets on the second; then four tabs:
+
+- **Note** — the Markdown rendered as text elements, never as HTML (a note is a
+  file anyone can edit, so a `<script>` in one is just text), and where it came
+  from: the runs and messages it cites (a run opens in Work), the notes it
+  replaces or that replace it, its file, and whether the daemon can vouch for
+  the bytes.
+- **Raw** — the body as written, and `Edit`. A save sends only what changed,
+  against the version you opened. If the note changed meanwhile — another
+  window, a chat turn, an editor on disk — the save is refused and the view
+  says *"This note changed since you opened it. Reload to see the current
+  version — your text is kept."* `Reload` shows the current version above your
+  draft, and the next save goes against what you have now seen. A note longer
+  than 32 KiB is read-only here: edit the file itself.
+- **Diff** — the current text against one of the kept versions.
+- **History** — the last five versions the daemon wrote, newest first, each
+  with `Compare`. An edit made outside the app is not one of them, and the tab
+  says so.
+
+An empty list says *"Nothing remembered yet. Ask Alpaca to remember something,
+or add a note."* After a forget, the detail says, in the daemon's words, what a
+forget does not erase: the transcript messages and runs the note cited, the
+session logs and any backup.
+
 ## Settings
 
-A 220px section nav over a 660px-max body — the eight sections of
-`src/views/settings/sections.ts`. A nav count that has not loaded is omitted
+A 220px section nav over a 660px-max body — the nine sections of
+`src/views/settings/sections.ts` (the design's eight, and Persona). A nav count that has not loaded is omitted
 rather than shown as `0`, because a zero is a claim.
 
 ### Connection
@@ -665,10 +746,11 @@ project concept to enumerate.
 
 **If the project directory moved**, the panel offers a re-base. A project store
 records the root it was seeded at, so a store standing at a path it does not
-name is a project that moved; the offer names the old path and counts the four
-things still addressed under it — artifacts, conversations, runs and workspace
-memories — and `Re-base` moves all four in one transaction
-(`PATCH /v1/workspaces`). Nothing re-bases on its own. A re-base does not wait
+name is a project that moved; the offer names the old path and counts the
+three things still addressed under it — artifacts, conversations and runs — and
+`Re-base` moves all three in one transaction (`PATCH /v1/workspaces`). The
+project's memory notes are files inside its directory, so they moved with it;
+the re-base re-keys their record to the new path. Nothing re-bases on its own. A re-base does not wait
 for runs: while a run under the old root is still in flight the daemon refuses
 the call outright (`409 WORKSPACE_BUSY`) and changes nothing, so the panel says
 how many are in flight and holds the button until they finish — retry once they
@@ -884,6 +966,22 @@ is invented and nothing is hidden. The panel states that this persisted log is n
 socket, which carries more variants than the daemon stores and cannot be
 replayed. A single run reads its own slice through `?task_id=` on the same
 route, in the Work detail.
+
+### Persona
+
+`USER.md` — the standing instructions about you that every conversation
+carries — in one text box, read and saved through `GET|PUT /v1/persona/user`.
+It is yours to write: the assistant no longer adds what it learns to this file
+(that goes to Memory, which the section links to), so what is here is what the
+onboarding conversation wrote and what you wrote. The lines an older build's
+learner put here are still in it until you delete them.
+
+`Save` is on only when the text differs from what was loaded, `Revert` drops the
+draft. The save carries the version you opened; if the file changed meanwhile
+— the onboarding conversation, `openalpaca persona edit user`, another window —
+it is refused and the section says *"USER.md changed since you opened it.
+Reload to see the current version — your text is kept."* `Reload` shows the
+current file above your draft, and the next save goes against it.
 
 ## Surfaces the daemon does not serve
 
