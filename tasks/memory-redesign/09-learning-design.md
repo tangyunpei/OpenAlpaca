@@ -1,0 +1,1405 @@
+# Learning v2 — design and implementation plan
+
+**Status: rev 3 (2026-09-24): the owner answered LQ1–LQ4 (§10); approved for implementation; nothing is implemented yet. Rev 2 applies a verified review of rev 1 (29 findings, all accepted, two of them in part; the revision log lists each). The design is written for the owner decisions MD-10, MD-11 and MD-12 and the adopted scope in [03](03-design.md) §0 (rev 5). It is also written for the recommended answers to the four owner questions in §10. Nothing here is built until the owner approves this document.**
+
+- **Source:** `feat/markdown-memory` at `55a1dc4c`. That is design rev 5 and plan rev 4.3, with slices 0–3 implemented. Every claim about current code cites `path:line` at that commit.
+- **Where the facts come from:** three read-only surveys, of the learning pipeline, of the surfaces MD-11 and MD-12 touch, and of the six smaller items. They live in the session scratchpad and are not tracked. Everything this document relies on is restated here with its citation, so it stands without them.
+- **Where the rulings are:** the rulings taken here are §9, and the changes to 03's frozen contracts are §11.
+
+## 0. Scope
+
+### 0.1 What the owner decided (03 §0, 2026-09-24)
+
+> **MD-10** — "**Cadence:** every turn is queued; extraction runs over *all* turns since its last run when the conversation has been idle about 2 minutes, when 10 new turns have accumulated, when the user switches conversations, and before the daemon stops. Nothing is skipped, messages are no longer cut to 800/400 characters, and a reply is never delayed."
+>
+> **MD-11** — "**Replacement:** when learning finds that a new statement replaces an older note, the replacement is **automatic when the older note was itself learned** (shown in *recently learned* with one-click undo), and a **suggestion the user confirms when the older note was saved by the user** — G2 holds: nothing learned silently overrides a user-authored note."
+>
+> **MD-12** — "**Confirming a suggestion in chat:** the assistant may raise a suggested replacement, and the user answers on the same Approve/Deny card tool confirmations use; the Memory view and the CLI keep it too. The confirmation is the human's click, not the model's say-so."
+>
+> **Adopted scope:** "the extractor proposes **aliases (including the other language) and a `fact_key`**, reusing existing keys; every agent template gets memory **search** (`memory_read`); the recall header shows validity dates; a subagent's notes reach *recently used*; parsed partitions are cached; a 100K-note bench and the index size are examined; and a **learning evaluation** (conversations in, a different judge model) is added."
+
+**The owner's principle:** users change memory through chat and rarely by hand. Automatic learning, and the models' ability to search memory, therefore matter most.
+
+### 0.2 The diagnosis, checked at HEAD
+
+| # | Finding | Evidence |
+|---|---|---|
+| D1 | Only every 5th turn per lane is extracted, and only that turn is. The counter lives in memory, restarts at 0 on every boot, and counts before the owner check. | `crates/openalpaca_core/src/orchestrator/extraction.rs:125-137`; `orchestrator/mod.rs:182`, `:380` |
+| D2 | The user message is cut to 800 characters, the reply to 400 and the output to 512 tokens. The model sees no earlier turn, no existing note, no date. | `extraction.rs:185-187`, `:189-217`, `:233` |
+| D3 | The prompt asks only for title, content, kind, stated_by and confidence. `StoreInput` sets no aliases, `fact_key`, validity or `supersedes`, and the service hard-codes `observed_at: None`. | `extraction.rs:196-203`, `:359-366`; `crates/openalpaca_core/src/memory/service/mod.rs:1032` |
+| D4 | The extractor cannot read: `Capabilities::EXTRACTION` is write-only. | `memory/service/context.rs:67-72` |
+| D5 | A supersede of a `user` note from a surface the user did not direct is refused at create time, whatever the new note's status. | `crates/openalpaca_storage/src/memory_files/partition.rs:982-984` |
+| D6 | The evaluation switched learning off and graded with the reader model. | `crates/openalpaca_core/tests/memory_eval.rs:1680-1683`, `:1796`; [08](08-evaluation-report.md) §1 |
+| D7 | `RecalledNote::render` prints no validity dates. | `memory/service/types.rs:385-417` |
+| D8 | A subagent's distilled memory is recorded nowhere: `PackageSection` has no key, and `to_bundle` keys it `Package`. | `prompt_ctx/package.rs:58-65`, `:120`; plan §7a S3-R3 |
+| D9 | Every operation re-opens and re-parses the partition: `store` parses 3 times, `update` 5–6 times, `forget` once per target. | `memory_files/partition.rs:736-799`, `:969`, `:1140`; `memory/service/mod.rs:1040-1042` |
+| D10 | The 10K cache is ≈ 8× the corpus. 100K notes have never been run. | [08](08-evaluation-report.md) §4; `crates/openalpaca_storage/src/memory_index/bench.rs:27` |
+
+The survey also found problems the owner did not list:
+- **F7:** a follow-up replays the model-written `queue_followup` text as a `user` row with source `internal`, and the extractor treats that text as the user's own words (`apps/openalpacad/src/followup.rs:38-50`, `runner/lead_agent/tools.rs:1498-1515`).
+- **The "daily" caps never reset and never bind at $0:** the cost tracker is seeded once at boot and nothing resets it (`crates/openalpaca_llm/src/routing/cost_tracker/mod.rs:238-241`, `apps/openalpacad/src/services/llm.rs:197-280`).
+- **The extractor finds its source row by matching text** (`extraction.rs:448-463`), although the gateway already holds the row's id (`gateway/persistence.rs:26-34`).
+- **Shutdown cancels learning and drains nothing** (`apps/openalpacad/src/main.rs:785-796`).
+- **Undo of a learned replacement does not restore the note it replaced** (`memory_files/partition.rs:1158-1169`, `authority.rs:192-202`).
+
+### 0.3 Non-goals
+
+- **Group chat and connector audience.** MD-4 stays out. Connector lanes learn exactly as chat lanes do today, with no new audience rule.
+- **A model-side confirm.** The model's say-so never mints origin `user`. `memory_update action: confirm` stays refused from a tool (G2). Only a human's Approve on a card for one exact call confirms (§4).
+- **Embeddings, rerankers, query expansion or any model on the read path.** MD-1 stands: search stays lexical, and cross-language recall comes from the aliases the extractor now writes.
+- **A daemon-raised confirmation card.** Option N in §4.1 is rejected.
+- **Re-extracting historic sessions.** 03 §6 says "Historic sessions are not re-extracted by default". No backfill verb is built.
+- **Changing when task-output extraction runs.** It stays per finished lead run (`orchestrator/dispatcher/memory.rs:21-64`). It gains only the shared item fields (§2.7) and the durable daily gate (§1.8).
+- **Fixing the summary job's cost cap or its lack of a cancellation token** (`orchestrator/summary.rs:14-240`). Both are recorded as residue.
+- **A verb that restores a note a confirmed replacement retired.** 03 §6 says "restoring an old note is an explicit update that removes the link", and no verb does that at HEAD: `NotePatch` has no `supersedes` field (`memory_files/note.rs:1143-1152`) and the CLI editor refuses one (`apps/openalpaca/src/commands/memory.rs:925-929`). MD-11 does not need it: undo (§3.3) brings back what an *automatic* replacement retired, and a confirmed suggestion is the user's own act. The gap stays as it is and is recorded as residue.
+- **Cross-partition same-key precedence in recall.** 03 §3 rule 3 lets a project note outrank a global one for the same `fact_key`, but `same_key_loser` is derived per partition (`memory_files/authority.rs:215-225`) and recall filters only that flag (`memory_index/search.rs:223`). Learning avoids creating such pairs (§2.5); fixing recall is not this wave.
+
+---
+
+## 1. Cadence (MD-10)
+
+### 1.1 The unit of learning is a session
+
+Extraction state is kept **per session**, not per lane:
+- Message rows are indexed by `(session_id, id)` (`crates/openalpaca_storage/src/migrations/001_baseline.sql:241`).
+- R48 gives a session exactly one project (`gateway/persistence.rs:71-104`).
+- "The user switches conversations" means the session changes.
+- A lane spans sessions and projects. `{owner}:gui` is shared by the GUI and the CLI (`apps/openalpacad/src/main.rs:239`, T18).
+
+Two things follow for each window:
+- **Each row learns into its own turn's project (ruling LR1).** 03 §7a's Extraction row takes the project from "the turn's `request_workspace_root`", and 03 §3 rule 1 says a request with no workspace "reads and writes only the owner's global partition". The session's binding cannot stand in for that: an unbound session is bound by the first turn that names a workspace (`repository/conversation/mod.rs:364-378`), and a turn with no workspace never switches sessions (`gateway/persistence.rs:71-104`). So five project-less GUI turns followed by one that names project P share P's session, and so do GUI turns after a CLI turn switched the shared `{owner}:gui` session (T18). Migration 044 therefore stores each user row's root in a new `conversation_messages.workspace_root` column (§1.3): the canonical root the gateway already resolves for the turn (`gateway/router/mod.rs:317-325`), NULL when the turn named none.
+  - A row with a root learns into that project plus the home partition. A row with none learns into the home partition only.
+  - A **chunk never mixes roots** (§1.6): it ends where the root changes. An assistant reply learns under its user row's root.
+  - R48 opens a new session whenever a turn names a different project, so within one session the roots are only ever NULL or that one project.
+- **Its owner comes from the lane.** The owner is the user part of `session.lane_key`. A linked connector user's lane carries their `global_id` (`gateway/router/mod.rs:269-272`). The service's own check then applies unchanged (`memory/service/mod.rs:275-293`): an owner that is not a `global_user` row learns nothing, and its cursor advances.
+
+### 1.2 The window: which rows, and what text
+
+A **window** is the session's rows with `id > cursor`, in id order. It is read by a new `ConversationRepository::learning_window(session_id, after_id, limit)`. That query uses the existing `idx_conv_msg_session` index and selects only `id, role, content, source, created_at, request_id, workspace_root`. **It never reads `content_json` or `display_text`**, because those carry an attachment's extracted text (`gateway/persistence.rs:153-189`). This is how U2 and plan 3.4 hold for a database window: an uploaded document still cannot mint an `extracted_user` note.
+
+Each row is classified. The classification is exact because of the new `request_id` column (§1.3):
+
+| Row | In the window as | Why |
+|---|---|---|
+| `role='user'`, `request_id` set, `source <> 'internal'`, content not starting with `/`, at most 8 KiB | **user-authored** | a turn the user typed |
+| the same, over 8 KiB | **user (long; may quote other text)** | a pipe sends all of stdin as one user message (`apps/openalpaca/src/commands/chat.rs:370-395`) and a paste is indistinguishable from typing. An item that cites it is never `UserWords` (§2.4 rule 5), so a piped email or web page yields candidates, not active notes that could replace learned ones automatically (ruling LR21) |
+| `role='user'`, `source='internal'` | **assistant-written task** ("queued task (written by the assistant)") | F7: the model's own `queue_followup` text (`followup.rs:38-50`); an item that cites it is never `UserWords` (§2.4 rule 5) |
+| `role='user'` whose content starts with `/` | left out, together with its answer | today's filter (`extraction.rs:119-123`) covers slash skills, `/steer` and scheduled skills (`scheduled_skills.rs:190-194`) |
+| `role='assistant'` whose `request_id` matches an included user row | **assistant reply** | the turn's answer |
+| `role='assistant'` with `request_id` NULL | left out | extension notices (`apps/openalpacad/src/notification/mod.rs:294-306`), `post_update` notes (`runner/lead_agent/tools.rs:1306-1319`) and completion reports (`dispatcher/outcome.rs:631-680`) are not turns; task extraction covers run output (ruling LR2) |
+| a user row whose `request_id` is in flight (§1.5) | the window **stops before it** | its answer has not landed |
+
+Up to two rows **before** the cursor (the last included user row and its reply, each cut to 1 KiB) are shown as `context`. A context row is removed from an item's citations and never becomes a source; an item left citing no other row is dropped (§2.4 rule 4). Rows with `session_id` NULL are never learned. The gateway always resolves a session before it writes (`gateway/persistence.rs:116-140`), so only writers outside the gateway produce such rows.
+
+**The residual next to U2.** A shorter paste or a quoted passage inside a typed message is still a user-authored row. The prompt tells the extractor that a user row may quote other text and to extract only what the user says about themselves or their work (§2.1 rule 2); nothing deterministic proves it.
+
+### 1.3 Durable state: migration 044
+
+The schema baseline is 43, and the next migration is 44 (`crates/openalpaca_storage/src/migrations/mod.rs:15-20`). Migration **044**, file `044_learning.sql`:
+
+```sql
+-- 044: Learning v2 (tasks/memory-redesign/09): the turn id and project root on each message and a per-session learning cursor.
+ALTER TABLE conversation_messages ADD COLUMN request_id TEXT;
+ALTER TABLE conversation_messages ADD COLUMN workspace_root TEXT;
+
+CREATE TABLE learning_cursor (
+    session_id TEXT PRIMARY KEY,
+    extracted_through INTEGER NOT NULL DEFAULT 0,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Historic sessions are not re-extracted (design §6): every existing session starts at its newest message.
+INSERT INTO learning_cursor (session_id, extracted_through)
+    SELECT s.id, COALESCE((SELECT MAX(m.id) FROM conversation_messages m WHERE m.session_id = s.id), 0)
+    FROM session s;
+
+INSERT INTO schema_version(version) VALUES (44);
+```
+
+- **`request_id`.** Both gateway halves write it with the turn's request id. `persist_user_message[_with_attachments]` and `persist_assistant_message` (`gateway/persistence.rs:116-306`) gain the parameter, and `insert_row` writes it (`repository/conversation/mod.rs:101-129`).
+  - Every other writer leaves it NULL, which is what marks a non-turn row.
+  - `ConversationMessage` derives `Default`, so the new field costs one line per query (`crates/openalpaca_storage/src/models/conversation.rs:5-12`).
+  - The field is `#[serde(skip)]`. `GET /v1/chat/history` serializes this struct directly (`apps/openalpacad/src/routes/chat_types.rs:94`), and the column stays off the wire.
+- **`workspace_root`.** Only `persist_user_message[_with_attachments]` writes it, with the `workspace_path` it already receives: the canonical marker-walk root the gateway resolves for the turn (`gateway/router/mod.rs:317-325`), NULL when the turn named no project (§1.1). It is `#[serde(skip)]` like `request_id`. Assistant rows leave it NULL; they learn under their user row's root.
+- **`learning_cursor` is its own table, not a column on `session` (ruling LR4).**
+  - It leaves the session projection alone: `SESSION_COLUMNS`, `row_to_session` and the session wire are unchanged.
+  - It keeps `attempts` and `last_error` across restarts, for the bounded retry in §1.4. The retry backoff is in memory only; the boot catch-up restarts it.
+  - It is named without the `memory_` prefix, because `a_fresh_database_opens_at_43_with_no_memory_tables` fails on any table matching `memory!_%` (`crates/openalpaca_storage/src/database/tests.rs:369-380`).
+  - A session with no row reads as `extracted_through = 0`. Every session created after 044 holds only post-044 messages, so that is correct.
+- **Lifecycle.**
+  - `delete_session` deletes the cursor row in its existing transaction (`repository/conversation/mod.rs:537-570`).
+  - `DELETE /v1/chat/history` needs nothing. Message ids are `AUTOINCREMENT` and never reused (`001_baseline.sql:222`), so a cursor above the cleared rows still reads correctly.
+  - A factory reset deletes the database, and the cursor with it.
+  - An orphaned row, whose session is gone, is harmless: the catch-up query in §1.5 joins from messages.
+- **Rejected places for the watermark.**
+  - `system_config`: `openalpaca config reset` wipes it (`repository/config/mod.rs:91-100`).
+  - The control snapshot: its schema is frozen with `deny_unknown_fields` (`memory_files/snapshot.rs:124`). It is per partition, while one window writes to two. `doctor --repair` rebuilds it, and a factory reset keeps it while the database goes.
+  - In-memory state alone: it is lost on restart, and MD-10's "before the daemon stops" cannot be met inside the 10 s exit window (`main.rs:71`).
+
+### 1.4 Crash semantics: at-least-once, with writes a repeat cannot harm
+
+SQLite and the note files cannot share a transaction, so a window cannot be exactly once. The choice is **at-least-once** (ruling LR5):
+
+1. Read the window's chunk (§1.6).
+2. Call the model.
+3. Write the notes. Each is one crash-safe single-file mutation (03 §6).
+4. Advance the cursor to the chunk's last row id by compare-and-swap:
+
+   ```sql
+   INSERT INTO learning_cursor(session_id, extracted_through, attempts, last_error, updated_at)
+   SELECT ?1, ?2, 0, NULL, datetime('now') WHERE EXISTS (SELECT 1 FROM session WHERE id = ?1)
+   ON CONFLICT(session_id) DO UPDATE SET extracted_through = excluded.extracted_through, attempts = 0,
+       last_error = NULL, updated_at = excluded.updated_at
+   WHERE learning_cursor.extracted_through = ?3
+   ```
+
+A crash between steps 3 and 4 re-runs the same chunk. At-most-once (advance first) would silently lose the window, which contradicts "nothing is skipped".
+
+**Steps 3 and 4 are one blocking task.** The chunk's store loop and its cursor advance run together in one `spawn_blocking` closure (§1.7). A cancellation or a shutdown that lands after the model answered therefore never separates them. The flush's async half may be dropped, but the closure finishes, and only a process exit mid-closure can leave the cursor behind the writes.
+
+Four guards make a re-run harmless. Each is deterministic and needs no model:
+
+- **(a) Exact dedup.** A byte-identical item answers `dedup` with the existing id (03 §7b P8, Q8; `partition.rs:985-1001`). That covers effectively active notes only; S4 (§3.2) extends it to identical pending suggestions.
+- **(b) Already learned (§2.4 rule 13).** The known-notes lookup (§2.3) always collects the notes, **active or candidate**, whose `sources` cite a row of this chunk and whose origin is `extracted_user` or `extracted_other`, as `from_this_window`. No surface is recorded per note (the snapshot keeps `{revision, origin, written_at}`, `memory_files/snapshot.rs:124`), so a `ModelTool` note citing the same row counts too; that is correct, since the model's own `memory_store` already learned it. An item is dropped as `already_learned` when such a note is a candidate naming the same target the item would (a pending suggestion or inferred replacement of T), or when it has the item's identity (equal `fact_key` when both carry one, else equal `kind` and case-folded title) **and** its `## Knowledge` section equals the item's content after normalisation (§2.5). A same-key item whose value differs is not dropped: guard (c) lets it correct the earlier copy.
+- **(c) Same key is a replacement.** A re-extracted keyed item that slipped past (b) supersedes its own earlier *active* copy (§2.5, ruling LR11). Only one note stays recallable.
+- **(d) No resurrection.** Before storing, every cited message is checked with `ControlSnapshot::is_source_suppressed("message:<id>")` on both partitions. Today this function has no production caller (`memory_files/snapshot.rs:305-310`). A suppressed row is removed from the item's citations, and an item left with none is dropped. This makes 03 §6's hard guarantee ("no retrieval or replay resurrects the known records or source ids") hold for replays. Without it, a re-extracted note written after the forget is *not* derived `source_forgotten`, because that rule requires `written_at <= forgotten_at` (`memory_files/authority.rs:245-253`). Only an explicit **forget** suppresses sources; a withdrawal (undo, a dismissal, a Deny) does not (§3.3, ruling LR12).
+
+Three residuals are accepted and stated. Each needs a crash between steps 3 and 4, which is now only a process exit mid-closure:
+- a *reworded, keyless* re-extraction can leave a near-duplicate learned note, which the user sees in *recently learned* and can undo;
+- a reworded re-extraction of an inferred candidate that has no target can leave a second candidate, outside recall;
+- a suggestion dismissed after the crash and before the boot catch-up re-runs the chunk can be raised once more.
+
+**Bounded retry (ruling LR20).** Only a **reachable model's bad output** counts: output whose top level is not `{"items": [...]}`, or an `EmptyCompletion`. It leaves the cursor where it is and raises `attempts` with `last_error`. After `MAX_ATTEMPTS` (3) consecutive such failures of the same chunk, the cursor advances past it with one WARN naming the session, the row range and the error. One poisoned chunk therefore cannot block a session forever.
+
+Everything else **holds** the cursor, counts nothing, and retries the session with an in-memory backoff (60 s, doubling, capped at 1 h; the sweeper skips a session until its backoff has passed):
+- **the model is unavailable**: any router error, including `NoRoutableModel`, a network failure, an Ollama that is not running, or exhausted rate-limit retries. Today this is 03 §7b P10's `unavailable` (`orchestrator/extraction.rs:258-264`). It is logged with **one WARN when an outage starts** and one INFO when learning resumes, never once per retry, so fixture 19's "one visible line … no retry loop" still reads true: nothing loops, and the turn is untouched;
+- **a partition is quarantined** (`refuse_if_quarantined`, `memory_files/partition.rs:957`; 03 §2). The check runs in `learning_view`, *before* the model call, so no cost is spent on a window that cannot be written. The window waits for `memory doctor --repair`; 03 §2 quarantines "extraction … for that partition" and this is what that means for a queue;
+- **a store I/O error** during the store loop. The notes already written answer `dedup` or `already_learned` on the retry.
+
+A cap binding (§1.8), a yield to chat (§1.7) or a cancellation also leaves the cursor unchanged and counts nothing.
+
+### 1.5 The queue and its four triggers
+
+`LearningQueue` is a new type in `crates/openalpaca_core/src/memory/learning/queue.rs`. It lives in core, because the evaluation harness builds no daemon (§7.2). It owns its own `BackgroundJobs`, the same type as the orchestrator's (`orchestrator/background_jobs.rs:17-72`), so every flush is tracked and cancellable. In memory it keeps three things:
+- per session: `pending_user_turns`, `last_turn_at`, `due`, the retry backoff (§1.4), and whether a flush is running or queued to run again;
+- per lane: the current session;
+- the set of in-flight request ids.
+
+It has two modes. `Automatic` is the daemon's: the sweeper and the triggers below run. `Manual` is the evaluation harness's: no sweeper and no trigger starts a flush, and only `flush_session`, `flush_all` and `wait_idle` do (§7.2).
+
+**How the gateway feeds it.** The gateway gains `with_learning(Arc<LearningQueue>)`, and the daemon sets it on its one production gateway (`apps/openalpacad/src/main.rs:518`). `handle_event` creates an RAII turn guard **before it persists the user row** (`gateway/router/mod.rs:293-325`), right after the request id is minted:
+- `turn_started(request_id, lane_key)` inserts the request id into the in-flight set. The id is in flight before its row exists, so a flush that reads the window between the insert and the reply stops before the row (§1.2) instead of treating it as a finished turn and moving the cursor past its answer.
+- Once persistence resolves the session, `attach_session(request_id, session_id)` records it.
+- The guard's drop runs `turn_finished(...)` after the assistant row is written (`:414-435`), or on any earlier exit. It removes the id, stamps `last_turn_at`, and counts the turn when it was user-authored.
+- Each is one `std::sync::Mutex` update. There is no await and no database access.
+
+**The triggers.** A flush starts only when no chat turn is in flight on the daemon (§1.7).
+
+| Trigger | Rule | Source |
+|---|---|---|
+| **Idle** | A session with `pending_user_turns > 0` whose `last_turn_at` is at least `learning.idle_secs` (120) old becomes due. A sweeper in the queue checks every 15 s, so a session becomes due between 120 and 135 s after its last turn. `idle_secs = 0` switches this trigger off. | in memory; at boot, `session.last_message_at` (`repository/conversation/mod.rs:754-765`) |
+| **10 turns** | The `learning.turns_per_flush`-th (10) user-authored turn since the cursor makes the session due at once. | `turn_finished` |
+| **Switch** | The same sweeper, on each tick, reads `session.status` for the sessions it holds with pending turns (one `SELECT id FROM session WHERE id IN (…) AND status = 'archived'`, on `spawn_blocking`). A session that is no longer its lane's active one is due. Every switch archives the old session: "New chat" and the R48 project switch through `create_session`, and reopening an old conversation through `activate_session` (`repository/conversation/mod.rs:408-424`, `:439-455`). No bus subscriber is needed. | the sweeper |
+| **Stop** | `LearningQueue::drain(budget)` marks every session with pending turns due and starts flushes, ignoring the quiet rule because the server has already stopped. It waits up to `budget`, where `budget = min(SHUTDOWN_DRAIN (3 s), what is left of FORCE_EXIT_GRACE − 5 s)`. `main.rs` calls it after `server.await` returns (`:781`) and before the post-turn jobs stop. The queue's own `shutdown(3 s)` then runs concurrently with `orchestrator.background().shutdown(3 s)` (`:785-796`), so the cost flush, the session-log flush and the extension sweep keep at least 4 s of the 10 s window. | `main.rs` |
+| **Boot catch-up** (the durable half of Stop) | `BOOT_CATCHUP_DELAY` (30 s) after start, one query finds every session with unlearned user-authored rows. Each such session is marked due, and the sessions are flushed one at a time when the daemon is quiet. The query: `SELECT m.session_id FROM conversation_messages m LEFT JOIN learning_cursor c ON c.session_id = m.session_id WHERE m.role = 'user' AND m.request_id IS NOT NULL AND m.source <> 'internal' AND m.id > COALESCE(c.extracted_through, 0) GROUP BY m.session_id` | `main.rs`, after the orchestrator is built |
+
+**Stop, stated honestly.** On a local model, one extraction call takes tens of seconds ([08](08-evaluation-report.md) §3 reader p50 is 11.5 s). The drain therefore rarely finishes there, and a cloud call sometimes does. What MD-10's "before the daemon stops" guarantees is that **nothing is lost**: what the drain does not finish, the boot catch-up learns.
+
+**Deleting a conversation.** Following the recommended answer to LQ4:
+- `DELETE /v1/sessions/{id}`, `DELETE /v1/chat/history` and the workspace purge drop the session's queue state, and its unlearned turns go with the messages.
+- A flush already in flight re-checks that the session exists after the model call and before writing, and writes nothing if it is gone.
+- A deletion that races the writes is caught by `verify_sources`, which refuses a message id that no longer exists (`memory/service/mod.rs:860-903`).
+
+### 1.6 Chunking and the byte budget
+
+"Messages are no longer cut to 800/400" (MD-10). The replacement is a **byte budget that scales with the extraction model's context window**. It is computed per flush from `orchestrator::attachment_adapt::answering_model(router, extraction_model)` (`orchestrator/attachment_adapt.rs:53-68`), which is the one resolution M5, S3 and U1 already use:
+
+```text
+window  = AnsweringModel.window, or 8192 tokens when unknown (Ollama's discovery fallback)
+out_tok = min(2800, window / 4)                                   max_tokens of the request
+items   = min(costs.extract_max_items_per_call (12), (out_tok − 300) / 180)
+in_bytes = (window − out_tok − 1000) × 2                          2 bytes per token: conservative for CJK
+transcript_bytes = min(MAX_TRANSCRIPT_BYTES (24 KiB), in_bytes × 7 / 10)
+known_bytes      = min(8 KiB, in_bytes × 3 / 10)
+```
+
+- **What the budget gives.** An 8,192-token local model gets 7,201 bytes of transcript, 3,086 bytes of known notes and 9 items. A 128K model gets 24 KiB, 8 KiB and 12 items.
+- **A keyed provider's rate budget caps it too.** On a provider that needs a key, `in_bytes` is also capped so that the chunk's estimated input (the router's own bytes ÷ 4, `routing/router/capacity.rs:255-281`) is at most 40 % of that key's TPM capacity, read through `rate_headroom` (§1.7). At the default 40,000 TPM (`routing/rate_limiter/mod.rs:410-412`) the cap is 16,000 tokens, about 62 KiB, and never binds; it binds only on a key configured far below the default.
+- **Cuts to single rows.** These apply only to single rows, and never at 800/400:
+  - a user-authored row over 8 KiB keeps its first 6 KiB and last 2 KiB, around a marked `[… N bytes omitted …]`;
+  - an assistant reply or assistant-written task over 4 KiB keeps 3 KiB + 1 KiB the same way;
+  - a context row keeps 1 KiB.
+- **Chunks.** A window larger than `transcript_bytes` is split at row boundaries into consecutive chunks. A chunk also ends where the rows' `workspace_root` changes (§1.1). A user row and its reply stay together, and one turn always fits, because the per-row cuts come first.
+  - Chunks run in order. Each has its own known-notes lookup, so chunk 2 sees chunk 1's notes.
+  - Each chunk advances the cursor, so a crash repeats at most one chunk.
+  - A flush runs at most `MAX_CHUNKS_PER_FLUSH` (4) chunks. The rest stays due and runs at the next start that is quiet.
+- **The minimum.** A chunk whose user-authored text totals less than `costs.extract_min_content_len` (20 bytes) is not sent, and the cursor advances past it. This is today's filter (`extraction.rs:119-123`), applied to the chunk rather than the turn.
+
+### 1.7 Concurrency, yielding to chat, cancellation
+
+- **One flush per session.** A trigger that fires while that session's flush runs sets `rerun`, and the queue re-checks after the flush ends.
+- **One flush per daemon** (`MAX_CONCURRENT_FLUSHES = 1`). A local model serves one request at a time, and learning is background work.
+- **Start only when quiet, chunk by chunk.** A due session starts when the in-flight set is empty and has stayed empty for 20 s (`RESUME_QUIET_SECS`). The same check runs again before **every** chunk, not only before the first, so a turn that starts mid-flush stops the flush at the next chunk boundary; the session stays due.
+
+A flush shares the model with chat in one of two ways, and each gets its own rule (ruling LR7):
+
+- **A local model: yield.** The extraction model's provider is *local* when it needs no key (`LlmRouter::provider_requires_key`, `routing/router/mod.rs:415`; false only for Ollama, `crates/openalpaca_llm/src/lib.rs:75`, `providers/ollama.rs:184`), **or** when its configured `base_url` (`LlmRuntimeConfig.provider_defaults[..].base_url`, `config/llm_config/runtime.rs:105-121`) names a loopback host (`localhost`, `127.0.0.0/8`, `::1`). The second clause covers llama.cpp or LM Studio behind the `openai` provider, which needs a key and would otherwise never yield. On a local model a `turn_started` cancels the flush's model call through a per-flush child `CancellationToken`. Nothing is written, no attempt is counted, and the session stays due. The GPU then serves the reply alone.
+- **A keyed remote model: leave half the rate budget to chat.** A remote call cannot be cancelled without paying for it, and it shares the key's buckets with every chat round: each router call waits in `key_limiter.acquire(estimated_tokens)` until the RPM and TPM buckets hold enough (`routing/router/retry.rs:36`, `:64`; `routing/rate_limiter/mod.rs:327-350`). Four back-to-back 24 KiB chunks would take most of a default 40,000-token bucket, and the next chat round would sleep for the deficit. So `openalpaca_llm` gains one read-only method, `LlmRouter::rate_headroom(model) -> Option<RateHeadroom { rpm_available, rpm_capacity, tpm_available, tpm_capacity }>`. It returns the minimum over the model's provider's key limiters, read with the existing non-consuming `TokenBucket::available()` (`rate_limiter/mod.rs:101-105`). A chunk starts only when, **after** its own estimate, at least half of each bucket would remain. Otherwise the session stays due, counts nothing, and is looked at again on the next sweep. With the §1.6 cap, a chunk can always start once the key is idle. A chat round that begins while a chunk is in flight therefore finds at least half of the key's RPM and TPM. It can still wait only when its own demand exceeds that half, which chat alone can cause too.
+- **Cancellation.** The queue's shutdown token and the per-flush yield token are selected against the model call, as today (`extraction.rs:251-266`), and checked between chunks. A chunk's store loop **and its cursor advance** run as one `spawn_blocking` closure (§1.4): at most 12 single-file writes and one `UPDATE`, with no model. Today `store` blocks a tokio worker on a `Condvar` (`memory/service/write_slot.rs:1-60`, `extraction.rs:367`). This removes that.
+
+### 1.8 Cost bounds
+
+| Bound | Value | Where |
+|---|---|---|
+| Per call | `transcript_bytes` + `known_bytes` of input (§1.6), `out_tok` ≤ 2,800 output tokens, ≤ 12 items, `thinking: Disabled` (M2, as today at `extraction.rs:240`) | `memory/learning/extractor.rs` |
+| Per flush | ≤ `MAX_CHUNKS_PER_FLUSH` (4) calls, each started only with half the key's rate budget left over (§1.7) | queue |
+| Per UTC day, cost | `costs.extract_max_daily_cost_usd` (0.25, unchanged default) | durable, below |
+| Per UTC day, calls | `costs.extract_max_calls_per_day` (**new**, default 200, `0` = no cap). This is what bounds a $0 local model, where the cost cap never binds. | durable, below |
+
+**The daily-cap defect, fixed for both extractors (ruling LR8).**
+- Today the gate reads the in-memory `CostTracker`. It is seeded at boot and never reset (`cost_tracker/mod.rs:238-241`, `services/llm.rs:197-280`), so "daily" means "since boot".
+- The two extraction gates now read the durable `llm_usage_daily` for today's **UTC** date and `agent_id = "orchestrator_user_extract"` (or `"orchestrator_task_extract"`). They use a new `LlmUsageRepository::usage_today(agent_id) -> (requests, cost_usd)`, which sums over models, beside `get_today_usage` (`repository/llm_usage/mod.rs:346-368`). `record_and_log` already upserts that row on every call (`:374-419`), including an extraction whose JSON failed (`extraction.rs:284-301`).
+- When a cap binds, the window **stays queued**, with one INFO per session per day. Learning lags and loses nothing. It resumes after 00:00 UTC.
+- The summary job's cap still reads the tracker. That is recorded as residue.
+
+The 0.25 USD default is kept until L8 measures cost per flush on a cloud model (§7.3). If typical daily spend exceeds it, the owner is asked then, with numbers.
+
+### 1.9 What a reply never waits for
+
+- **The reply path does no learning work.** Its only learning work is the gateway's three in-memory updates (§1.5). It never reads the cursor, never counts rows and never takes the memory write slot.
+- **Learning's own work stays off the tokio workers.**
+  - Window reads, `learning_view` (§2.3) and cursor writes run on `spawn_blocking`.
+  - Note writes run on `spawn_blocking`, and each takes its partition's write slot for one note.
+  - A concurrent recall search can wait on the index connection for one note's reindex, which takes milliseconds.
+- **Model contention is handled by §1.7.** A flush starts only after 20 s of quiet and re-checks before each chunk. On a local model it yields the moment a turn starts. On a keyed remote model it starts a chunk only when half the key's rate budget would remain.
+- **The one per-turn read learning adds** is L4's `<memory_suggestions>` block. It reads the index, not the partition (§4.5), and re-reads at most ten files.
+- **The post-turn job loses its extraction.** In `handlers.rs:331-396` it keeps only the summary, and `extraction_turn_counter` is deleted (`orchestrator/mod.rs:182`, `:380`).
+
+### 1.10 Configuration
+
+| Key | Fate | Default, clamp |
+|---|---|---|
+| `[orchestrator.learning] enabled` | **new**; the off switch, which the evaluation uses | `true` |
+| `[orchestrator.learning] idle_secs` | **new**; MD-10's "about 2 minutes" | 120, 0..=3600 (0 = off) |
+| `[orchestrator.learning] turns_per_flush` | **new**; MD-10's "10 new turns"; replaces `extract_every_n_turns` | 10, 1..=100 |
+| `[orchestrator.costs] extract_every_n_turns` | **removed** (no compatibility code; the app is unreleased) | — |
+| `[orchestrator.costs] extract_max_items_per_turn` | **renamed** `extract_max_items_per_call` | 12, 1..=50 |
+| `[orchestrator.costs] extract_max_calls_per_day` | **new** | 200, 0..=10000 (0 = no cap) |
+| `[orchestrator.costs] extract_max_daily_cost_usd`, `task_extract_max_daily_cost_usd` | kept; now read durably (§1.8) | 0.25, 0.50 |
+| `[orchestrator.costs] extract_min_content_len` | kept; now per chunk | 20 |
+| `[orchestrator.costs] extraction_model` | kept | router default |
+| `[orchestrator.memory] memory_confidence_threshold` | kept; **gains** its registry row, its CLI row and a `config/daemon.toml` line, all of which it lacks today | 0.65, 0..=1 |
+
+**Constants, not keys.** These are engineering bounds, not owner-facing choices, and live in `memory/learning/mod.rs`: `MAX_TRANSCRIPT_BYTES` 24 KiB, `MAX_CHUNKS_PER_FLUSH` 4, `MAX_ATTEMPTS` 3, `SHUTDOWN_DRAIN` 3 s, `BOOT_CATCHUP_DELAY` 30 s, `RESUME_QUIET_SECS` 20 s, and the backoff (60 s doubling to 1 h). Only MD-10's two numbers, the off switch and the new daily call cap are keys.
+
+Rows change in four places:
+- `crates/openalpaca_core/src/daemon_config/orchestrator.rs:216-275`
+- `daemon_config/validation.rs:44-86`
+- `crates/openalpaca_storage/src/config_schema/registry.rs:308`, `:372`, `:385`
+- `apps/openalpaca/src/commands/daemon_config_cli/mod.rs:98-127`
+
+**Registry rows.** The three `[orchestrator.learning]` keys, `extract_max_calls_per_day` and `memory_confidence_threshold` each get a registry row and a CLI mapping. `extract_every_n_turns` loses its row, and the renamed key keeps one. The Daemon category therefore goes from 43 keys to **47** (`config_schema/tests.rs:101`).
+
+The only `daemon.toml` file to change is `config/daemon.toml:39-51`. The release template has no `[orchestrator.costs]` table (`scripts/release/templates/config/daemon.toml`).
+
+---
+
+## 2. Richer extraction (MD-11's input, the adopted aliases and `fact_key`)
+
+`orchestrator/extraction.rs` is replaced by `crates/openalpaca_core/src/memory/learning/extractor.rs`, which sits beside `memory/task_extraction/`. It keeps `AGENT_LABEL = "orchestrator_user_extract"` (`extraction.rs:50`). The request keeps `temperature 0.0`, `thinking: Disabled`, no caching and no fallbacks, and records usage through `record_and_log` exactly as now (`extraction.rs:222-316`).
+
+### 2.1 The prompt contract
+
+**The verbatim text is a fixture.** L2 commits the system text and the user-message template as `memory/learning/extractor_prompt.txt` (read with `include_str!`), and a golden test renders one fixed chunk and compares it byte for byte (`the_extractor_prompt_matches_its_fixture`). What follows is that text's contract; two implementers cannot diverge from a committed file.
+
+**System:** `<role>You are the memory extractor for OpenAlpaca.</role>`, plus today's JSON-only line (`extraction.rs:225-228`).
+
+**User message, in this order:**
+
+```text
+<today>2026-09-24</today>                         UTC date of the chunk's last row
+<known_notes>                                     §2.3; empty element when none
+n1 key=user.editor origin=learned kind=preference scope=global "Editor preference" — The user edits with vim.
+n2 key=user.laptop origin=saved-by-you kind=fact scope=global "Work laptop" — …
+n3 key=- origin=learned kind=episode scope=project "Lantern outage" — … [from this conversation]
+</known_notes>
+<known_keys>user.editor, user.laptop, user.commute, lantern.staging.db, …</known_keys>
+<conversation>
+R1 context user 2026-09-24T10:00:03Z: …
+R2 context assistant: …
+R3 user 2026-09-24T10:02:11Z: …
+R4 assistant 2026-09-24T10:02:40Z: …
+R5 queued-task (written by the assistant) 2026-09-24T10:05:00Z: …
+R6 user (long; may quote other text) 2026-09-24T10:07:30Z: …
+</conversation>
+<output_schema>…below…</output_schema>
+<extraction_rules>…below…</extraction_rules>
+```
+
+**The `<output_schema>` element, verbatim:**
+
+```text
+{"items": [{
+  "title": "a short title, at most 80 characters",
+  "content": "the knowledge in one to three sentences, in the user's language",
+  "kind": "preference" | "fact" | "decision" | "procedure" | "reference" | "episode",
+  "stated_by": "user" | "assistant",
+  "confidence": 0.0 to 1.0,
+  "rows": [the numbers of the rows that state it, e.g. 3],
+  "aliases": ["other names a later question might use"],
+  "fact_key": "subject.attribute" | null,
+  "replaces": "n1" | null,
+  "replace_reason": "why it replaces that note" | null,
+  "valid_from": "YYYY-MM-DD" | null,
+  "valid_to": "YYYY-MM-DD" | null
+}]}
+```
+
+**Extraction rules.** The prompt states them in these words or tighter:
+1. Extract durable knowledge **about the user** that is clearly stated or strongly implied: preferences, facts about them or their work, decisions, procedures, references and episodes. Do not invent anything.
+2. Use `stated_by: "user"` only when a `user` row says it in the user's own voice, and then cite **only** `user` rows. A user row may quote other text, such as an email, a web page or a log; extract from a quotation only what the user says about it. Anything supported by `assistant`, `queued-task` or long `user` rows is `"assistant"`.
+3. Cite in `rows` the numbers of the rows that state it. A `context` row is never enough on its own.
+4. When the conversation shows a value changing, output **only the current value**, say in `content` what it replaced and when, and set `replaces` if that older value is one of the `known_notes`.
+5. Give `aliases`: other names a later question might use, **including the other language** (Chinese for English statements and English for Chinese ones), plus common alternative spellings and proper nouns. Give 0–8. Never repeat the title.
+6. Give `fact_key` as `<subject>.<attribute>[.<qualifier>]`, in lowercase English. The subject is `user` for anything about the user themselves: their devices, commute, habits, people, schedule. It is the project's name for a fact about a project. **Reuse a key from `known_keys` when the item is about the same attribute.** Mint a new one only when none fits. Never put the value in the key: `user.editor`, not `user.editor.helix`.
+7. Set `valid_from` and `valid_to` only when the text gives the dates of an effective window, such as a trip or a contract. Keep every date the user states inside `content`, as an absolute date when the text allows.
+8. Write `title` and `content` in the language the user used.
+9. Skip pleasantries, the questions themselves, anything true only for one reply, and anything already in `known_notes` unchanged. Return at most `{items}` items, most important first, and `{"items": []}` when there is nothing to keep.
+
+### 2.2 The output schema
+
+```json
+{
+  "items": [
+    {
+      "title": "Editor preference",
+      "content": "Since June 2026 the user edits with Helix; before that, vim.",
+      "kind": "preference",
+      "stated_by": "user",
+      "confidence": 0.9,
+      "rows": [3],
+      "aliases": ["Helix", "编辑器", "文本编辑器"],
+      "fact_key": "user.editor",
+      "replaces": "n1",
+      "replace_reason": "The user said they switched from vim to Helix in June.",
+      "valid_from": null,
+      "valid_to": null
+    }
+  ]
+}
+```
+
+| Field | Type | Required | Rule |
+|---|---|---|---|
+| `title` | string | no (falls back to the content) | 1–80 characters after trimming, cut at 80 |
+| `content` | string | **yes** | 1–1,000 characters; longer makes the item invalid |
+| `kind` | `NoteKind` | no (missing = `fact`) | an unknown value makes the item invalid (as `extraction.rs:420-423`) |
+| `stated_by` | `"user"` \| `"assistant"` | no (missing = assistant) | checked against `rows` (§2.4 rule 5) |
+| `confidence` | number 0..1 | no (missing = 0) | below `memory_confidence_threshold` (0.65) the item is dropped; the number is never stored |
+| `rows` | [integer or `"R<n>"`], 1–8 | **yes** | row numbers of this chunk, as `3` or `"R3"` (both are accepted, since the transcript labels rows `R3`); context rows are removed, and the rest become `sources` (§2.4 rule 4) |
+| `aliases` | [string], 0–8 | no | each trimmed to 1–60 characters, deduplicated case-insensitively, the title removed |
+| `fact_key` | string \| null | no | 03 §4 grammar `[a-z0-9][a-z0-9._-]{0,63}`, lowercased; an invalid key becomes null and the item is kept |
+| `replaces` | `"n<k>"` \| null | no | a ref from `known_notes`; an unknown ref becomes null and the item is kept (counted `replaces_unknown`) |
+| `replace_reason` | string ≤ 200 | only with `replaces` | a missing reason becomes `"Restated in conversation."` |
+| `valid_from`, `valid_to` | `YYYY-MM-DD` or RFC 3339, or null | no | date-only `valid_from` is that day 00:00:00Z; date-only `valid_to` is **the next day** 00:00:00Z, so the stated last day is inside the half-open window (03 §4). An unparsable or inverted pair drops both bounds. |
+
+References are short (`n1`…`n20`), not UUIDs. The model cannot invent a real note id, and the mapping `n<k> → (id, revision)` is the extractor's own record of the lookup.
+
+### 2.3 The known-notes lookup
+
+This is a new internal service method: `MemoryService::learning_view(ctx, queries: &[&str], chunk_message_ids: &[i64], budget) -> LearningView`.
+- **Who may call it.** Only a context whose `surface == Extraction`; every other context is refused.
+- **What it is not.** It is not tool-reachable, records nothing in *recently used*, and publishes nothing.
+- **What stays the same.** `Capabilities::EXTRACTION` stays `{read:false, write:true, forget:false}` (`context.rs:67-72`), so no tool path gains a read. §11 records the one-line §7a amendment.
+- **Where it runs.** On `spawn_blocking`, like every other learning read (§1.9).
+
+It is deterministic: no model, no randomness. It reads the index and re-reads only the files it lists; it never parses a whole partition.
+
+**Two lookup structures join the index (ruling LR18).** The index's `note` table has no `sources` and no `supersedes` column (`memory_index/mod.rs:319-352`), so without them step 2 and §4.5's per-turn read would each parse the partition, the D9 cost. `memory_index::SCHEMA_VERSION` goes from 1 to **2** (`memory_index/mod.rs:44`), adding:
+- a `note.supersedes` column: the JSON list of ids, beside `superseded_by`;
+- a `note_source(note_rowid, source_key)` table: one row per `sources` entry (`message:<id>` or `task:<id>`), indexed on `source_key` and cascading like `note_alias`.
+
+A cache at version 1 is invalid on open and rebuilt (`memory_index/mod.rs:495-505`), which is the index's documented path (03 §5). Nothing in 03 §7a freezes the index schema, and the FTS layout is untouched (§6.4, LR16).
+
+1. **Partitions.** The home partition and, when the chunk's rows carry a root, that project's partition (§1.1).
+2. **Notes from this window.** These are notes, **active or candidate**, found through `note_source` citing any `message:<id>` of `chunk_message_ids`, with origin `extracted_user` or `extracted_other`. They are flagged `from_this_window`, and they are what the re-run guard in §1.4(b) reads. The active ones come first in `known_notes`. The candidates are not listed to the model, because a candidate is never a replacement target; they serve the guard only.
+3. **Search.** Each user-authored row of the chunk yields queries through the same query builder and index search `memory_search` uses (`memory_index/query.rs`, `search.rs`). A query is capped at 512 characters (`parse_query` refuses longer, `memory_index/query.rs:181-184`, `MAX_QUERY_CHARS` at `memory_index/mod.rs:50`), and truncating a long row would hide facts stated late in it. So a row longer than 512 characters is split at whitespace into windows of at most 512, and at most **4** windows per row are searched: the first three and the last. The builder caps each query at 32 terms and drops stop words (03 §7c Q9, Q10). The top 5 hits per query are kept, and the union is ranked by each note's best score.
+   - Only notes that are effectively active count, whether or not they are recallable. Candidates, superseded and archived notes are excluded.
+   - Each hit is verified by re-reading its file (§5 step 7).
+   - At most **20 notes** are listed, each rendered as in §2.1 with a 160-character excerpt, all within `known_bytes`. The extractor keeps the `n<k> → (id, revision)` map; §2.5 asks whether a note it finds by key is in it.
+4. **Keys.** These are the distinct `fact_key`s of effectively active notes in those partitions, read from the index rather than a partition parse (`memory_index/mod.rs:352`, the `note_partition_fact_key` index; §6.3 quick win 5). The 150 most recently updated are kept, within 2 KiB of `known_bytes`.
+5. **Origin labels.**
+   - `user` → `saved-by-you`
+   - `extracted_user` → `learned`
+   - `extracted_other` → never listed, because it is always a candidate
+   - `external` → `edited-by-hand`
+   - `imported` → `imported`
+
+   The label is what tells the model a replacement will become a suggestion. The decision itself is the service's (§2.5), never the model's.
+
+### 2.4 Validation, in order
+
+Each numbered rule is deterministic. Its outcome is counted in the flush report, which is logged as `memory learning finished` with every count below.
+
+1. The top level must be `{"items": [...]}`. Anything else is a failed attempt (§1.4).
+2. `content` must be present and at most 1,000 characters. Otherwise the item is `invalid`.
+3. `kind` must be valid when present. Otherwise the item is `invalid`.
+4. `rows` must name 1–8 rows of this chunk, **at least one of them not a context row**. Context rows are removed from `rows` and never become sources. An item with no row left is `invalid`: every learned note cites its evidence.
+5. **Provenance is checked, not trusted (ruling LR3).** `stated_by: "user"` is accepted only when **every** remaining cited row is user-authored (§1.2). An item that also cites an assistant reply, an assistant-written task or a long user row is `OtherOutput`, and so is one that cites none of the user's own rows. This closes F7. It also means text injected into an assistant reply, such as a `web_fetch` summary, cannot ride a user row into an active note, and so cannot automatically replace a learned one (§2.5). The residual, stated plainly: the check proves which rows are cited, not that the content came from them. The model writes the content, and it saw the whole window.
+6. `confidence` below the threshold drops the item (`below_threshold`).
+7. Aliases are cleaned as in §2.2.
+8. `fact_key` is cleaned as in §2.2.
+9. `replaces` is resolved as in §2.2.
+10. Validity is parsed as in §2.2.
+11. **One item per key and per target.** Two items with the same `fact_key`, or the same `replaces`, keep the one whose newest cited row is latest (`duplicate_key`). A tie on that row keeps the one the model listed first. Rule 11 runs again after §2.5 resolves each target, so two items that reach the same T by different routes (one by `replaces`, one by key) are also reduced to one.
+12. **Suppressed sources** are removed; an item left with no citation is dropped (`suppressed`, §1.4(d)).
+13. **Already learned** (§1.4(b)) drops the item (`already_learned`).
+14. At most `items` items survive (§1.6), in the model's order (`over_cap`).
+
+§2.5 adds one more outcome, `unchanged`, for an item that restates its target.
+
+### 2.5 From item to write
+
+`StoreInput` gains `observed_at: Option<DateTime<Utc>>`, accepted only on the `Extraction` surface; the file layer's `NewNote` already carries it (`partition.rs:1015`). It also gains `replace_policy: ReplacePolicy`. The service stops hard-coding `observed_at: None` (`memory/service/mod.rs:1032`).
+
+Every learned note gets:
+- `sources` = the cited rows as `{type: message, id, observed_at: <row created_at>}`;
+- `observed_at` = the `created_at` of its newest cited row, UTC to the second;
+- `aliases`, `fact_key` and validity as validated.
+
+Two notes from one chunk therefore no longer tie on R9, because their `observed_at`s come from different rows (§3.4).
+
+**The target T** of an item is found in this order:
+1. its `replaces` ref;
+2. else, when it carries `fact_key` K, the R9 winner among effectively active notes with key K, looked up in **every partition of the chunk**: the chunk's project partition first, then the home partition (ruling LR11: "a replacement is an explicit supersede with the same `fact_key`", 03 §6). The `replaces` ref already reaches both partitions, because `known_notes` spans them (§2.3), so the key must too. Otherwise `user.laptop`, a global fact, restated in a project chat would land as a second active note with the same key in the project partition. R9 groups and links exist only within one partition (`authority.rs:177`, `:215-225`), so both notes would stay recalled, which is exactly the owner's "changed preferences pile up";
+3. else none.
+
+Then rule 11 runs again over the resolved targets, and rule 13's target clause is checked (§2.4).
+
+**Is it a change? (ruling LR11, second half).** A key alone does not prove that a value changed. Rule 6 tells the model to reuse a key from `known_keys`, which lists up to 150 keys, while `known_notes` shows at most 20 notes. Exact dedup never applies to an item with a target (`partition.rs:971-1001`: it is the branch without `supersedes`), and it could not apply across days anyway, because the body carries the date. So a restatement of an unchanged fact is decided here, deterministically:
+1. **`replaces` names T.** The model compared the two and said so: a change.
+2. **T was found by key alone and was listed in `known_notes`.** The model saw T and did not call it replaced. For a **saved** T (origin `user`, `external` or `imported`), the item is dropped as `unchanged`, and no suggestion is raised. For a **learned** T, the item is dropped as `unchanged` when its content equals T's `## Knowledge` section after normalisation (NFKC, case-fold, whitespace collapsed, trailing punctuation removed). A note learned before L2 has no such section (today's body is `# {title}\n\n{content}`, `extraction.rs:436-437`), so for it the body below the title is compared. Otherwise it is a change, and the automatic replacement is undoable.
+3. **T was found by key alone and was not listed.** The model never saw T, and a change stated in new words is exactly what the lexical lookup misses: "I switched to Helix" shares no term with "The user edits with vim". This case is treated as a change. A suggestion here shows both texts (§3.5, §4.4), so a restatement costs the user one **Keep mine** and never silently retires their note.
+
+The evaluation measures how often case 3 raises a suggestion for an unchanged fact (§7.1 mode `restate`, §7.3).
+
+**Partition.**
+- **With T**, the note goes to **T's partition** (ruling LR10). A preference or a `user.*` fact restated in a project chat therefore replaces the global note it changes, instead of being refused as a cross-partition supersede (R4, `memory/service/mod.rs:998-1014`).
+- **Without T**, a `fact_key` whose subject is `user` (`user.*`) is written to the **global** partition whatever its kind (ruling LR17). This is 03 §3 rule 2's own reason for making preferences global, "a preference stated in a project chat is still the user's", applied to facts about the user: kind `fact` defaults to the project (`memory_files/note.rs:178-183`), so without this rule "user.laptop" learned in a Lantern chat would be recalled only in Lantern, and restated in Moss it would become a second note there.
+- Any other item without T is placed by kind, as today (03 §3 rule 2; `memory/service/mod.rs:979-997`).
+- A project fact such as `lantern.staging.db` restated in another project's chat, or in a chat with no project, still finds no T and lands where the chat is. This is stated residue; recall has no cross-partition same-key precedence either (§0.3).
+
+**What is written.** MD-2 is unchanged except for the suggestion row that MD-11 and G2 require:
+
+| Provenance | T | Written as | Why |
+|---|---|---|---|
+| `UserWords` | none | **active**, origin `extracted_user` | MD-2 |
+| `UserWords` | origin `extracted_user` | **active**, `extracted_user`, `supersedes: [T]` (an automatic replacement) | MD-11; honoured, since 4 ≥ 4 (`authority.rs:179`) |
+| `UserWords` | origin `user`, `external` or `imported` | **candidate**, origin `extracted_user`, `supersedes: [T]`: a **suggestion** | MD-11 and G2. `external` may be the user's own hand edit of a user note (03 §4), so only a learned target is replaced automatically (ruling LR9) |
+| `OtherOutput` | any or none | **candidate**, origin `extracted_other`, `supersedes: [T]` when T: an **inferred suggestion**, confirmable only in the Memory view or the CLI (§4.2 rule 5) | MD-2; a candidate supersedes nothing until confirmed (`authority.rs:171`) |
+
+**The race.** When T's revision moved between the lookup and the write, the service answers `revision_conflict`. The item is dropped (`conflict`) and the chunk still advances, because the change is re-stated the next time the user mentions it.
+
+### 2.6 The note body
+
+The body follows 03 §4's sections, not today's `# {title}\n\n{content}` (`extraction.rs:436-437`):
+
+```markdown
+# Editor preference
+
+## Knowledge
+Since June 2026 the user edits with Helix; before that, vim.
+
+## Evidence and limits
+From what you said on 2026-09-24. Replaces “Editor preference” (learned): The user said they switched from vim to Helix in June.
+```
+
+`OtherOutput` reads "Inferred from the conversation on <date>; not said by you." The `Replaces …` sentence is present only when T exists, and it is what the suggestion card and list show as the reason (§3.5, §4.4). The `## Knowledge` section holds exactly the item's content, which is what rule 13 and the change test in §2.5 compare.
+
+### 2.7 Task-output extraction
+
+`extract_task_memories` changes in three ways:
+- It adopts `aliases` and `fact_key` through the same item validator (§2.4 rules 7–8), and its prompt gains the `known_keys` line.
+- Its items stay candidates (`OtherOutput`) with no `replaces`.
+- Its daily gate reads the durable usage (§1.8).
+
+Its cadence and its 500/2,000-character input cut are out of scope (`memory/task_extraction/mod.rs`), because MD-10 governs chat turns.
+
+---
+
+## 3. Replacement (MD-11)
+
+### 3.1 The rule, case by case
+
+| Case | What happens | What the user sees |
+|---|---|---|
+| **Learned replaces learned** | Automatic: B is active `extracted_user` with `supersedes: [A]`, A is derived `superseded` and out of recall | *Recently learned*: "Learned from what you said · replaced “A” · **Undo**". Undo brings A back (§3.3). |
+| **Learned vs a note the user saved** | Suggestion: B is a candidate `extracted_user` with `supersedes: [X]`. X stays active and recalled; B is excluded from recall (candidates never are, 03 §7c Q10). | Memory view → **Suggestions**: "Replace “X” (saved by you) with “B”?" with the reason, **Replace** or **Keep mine**; CLI `openalpaca memory suggestions`; in chat, the card (§4) |
+| **Learned vs a hand-edited (`external`) or `imported` note** | As the row above (ruling LR9) | as above, "(edited by hand)" |
+| **Inferred (assistant or tool output) vs anything** | Candidate `extracted_other` with `supersedes: [T]`, confirmable only in the Memory view or CLI, never in chat: `memory_confirm`, its preview and `<memory_suggestions>` all refuse or skip it (§4.2 rule 5, §4.5) | Suggestions, labelled "inferred from the conversation" |
+| **A `ModelTool` `memory_store` with `supersedes`** | Unchanged: allowed against `extracted_user` and below, and `authority_conflict` against `user` (03 §4, `partition.rs:982-984`) | — |
+
+### 3.2 Storage and service changes
+
+| # | Change | Where | Why |
+|---|---|---|---|
+| S1 | A non-user-directed `supersedes` of a `user` note is refused **only when the new note would be active**. A candidate may name any target in its partition. | `memory_files/partition.rs:982-984` | Today even a suggestion cannot be written (D5). A candidate retires nothing while it stays a candidate (`authority.rs:171`), and S9 and S10 close the two ways it could stop being one other than a confirm, so this cannot weaken G2. The existing G2 tests (an active `ModelTool` supersede of a `user` note is `authority_conflict`) stay as they are. |
+| S2 | `ReplacePolicy::SuggestUnlessLearned` on `NewNote`, used by the extractor: when the target's derived origin is not `extracted_user`, `create` writes the note with `status: candidate`, and `Created` reports `suggestion: true`. The one partition load `create` already does decides it (`partition.rs:969`). | `partition.rs:955-1036`, `memory/service/mod.rs:1015-1021` | Today status comes only from (surface, provenance), and no user-words candidate can exist |
+| S3 | A candidate's tombstone carries `supersedes: []`. The file's status is known at forget time. | `partition.rs:1158-1169` | Today a forgotten candidate's tombstone is honoured by rank (`authority.rs:192-202`). A forgotten user-words suggestion (rank 4) would then retire an `external` target (rank 2). Dismissals no longer reach this path: they withdraw (§3.3). |
+| S4 | Exact dedup also covers candidates when `supersedes` is set: a pending candidate with equal kind, title, body, key, aliases, tags **and** `supersedes` answers `dedup`. | `partition.rs:985-1001` (dedup today is the no-`supersedes` branch) | A restated change must not mint a second identical suggestion |
+| S5 | **Confirm binds the target's revision.** `update(Confirm)` of a candidate that carries `supersedes` takes `target_revision`. A moved or missing target is `revision_conflict` or `not_found`, and the candidate is left as it is. | `partition.rs:1041-1122` (today only the candidate's revision is checked, `:1052-1057`) | A target edited after the suggestion would otherwise be retired unseen |
+| S6 | **Confirming a suggestion dismisses every other pending suggestion for the same target**, each as its own single-note **withdrawal** (§3.3: no links, no suppressed sources). They run **after** the confirm has been written, so a confirm that fails dismisses nothing. They run under the same user-directed actor, and the confirm result lists them in `dismissed`. | `memory/service/mutations.rs:18-105` | Several restatements of one change leave several pending suggestions (S4 answers only exact repeats), and after a confirm the others are moot. Each is an independent single-file mutation (03 §6). A dismissal that suppressed its sources would hide the note just confirmed whenever the two cite the same row: the confirm stamps `written_at = now` (`partition.rs:940`), the later tombstone's `forgotten_at` is not earlier, and `source_forgotten` holds when `written_at <= forgotten_at` (`authority.rs:245-253`), which automatic recall filters (`memory_index/search.rs:223`). |
+| S7 | `recently_learned` lists only **recallable** notes: it skips same-key losers and `source_forgotten`. Its items gain `supersedes`. | `memory/service/mod.rs:826-829`; `service/wire.rs:91-105` | A learned note that silently loses to a `user` note was listed as learned and never used |
+| S8 | List items (`memory_list`, `GET /v1/memories`, `recently-learned`) gain `supersedes: [uuid]` | `service/wire.rs:91-105` | The GUI row must say what B replaced |
+| S9 | **A suggestion is never archived.** `update(Archive)` of a candidate that carries `supersedes` is `invalid_input` on every surface ("a suggestion is replaced or kept, not archived"). A candidate without `supersedes` archives as today. | `partition.rs:1078-1091` | Derivation skips a link only while the note is a candidate (`authority.rs:171`). An archived former suggestion's link therefore counts, and archive records the actor's origin: a `ModelTool` archive records `extracted_user` (rank 4), which retires an `external` or `imported` target that LR9 meant to protect, and a raw API archive records `user`, which retires any target with no `target_revision` (S5). |
+| S10 | **A model tool never edits a suggestion.** `update(Edit)` of a candidate that carries `supersedes` from a non-user-directed actor is `authority_conflict`, naming the Memory view (P9). | `partition.rs:1092-1106` (today it refuses only a `user` note) | Such an edit would rewrite the text a confirmation card later shows and re-record the candidate as `extracted_user`, which would turn an inferred suggestion into one that §4 treats as the user's words. |
+
+### 3.3 Undo, dismiss and forget
+
+Three acts, two meanings. **Forget** means "forget what I said". **Undo** and **dismiss** mean "keep my note; take back what learning did". They must not share a tombstone.
+
+- **Forget is unchanged.** Its tombstone keeps the note's `supersedes`, so a forgotten replacement keeps retiring what it replaced, and fixtures 16 (steps 10–13) and 24 still pin that (`crates/openalpaca_storage/tests/fixtures/memory/24-forgotten-replacement-not-revived.json`). It suppresses every cited `message:<id>` (`memory_files/partition.rs:1156-1167`), so every note citing the same message becomes `source_forgotten` and leaves automatic recall (`authority.rs:245-253`; fixture 16 pins that for a sibling note, `tests/fixtures/memory/16-forget-suppression-and-replacement.json`). §1.4(d) then keeps the message from being re-learned. That is 03 §6's forget contract, and it is what an explicit forget asks for. A forgotten candidate's tombstone carries `supersedes: []` (S3).
+- **Withdraw (ruling LR12).** `Partition::forget` takes a `ForgetMode::{Forget, Withdraw}`. `Withdraw` writes a tombstone with **`supersedes: []` and `suppressed_sources: []`**, so no snapshot schema change is needed. It removes the one note and nothing else: X keeps its place, and every other note the same message taught stays learned and recallable.
+  - Take "I switched to Helix, and I moved to Berlin", then a Deny on the editor suggestion. Under a forget, the Berlin note would silently leave recall for good; under a withdrawal it stays.
+  - v2 makes shared citations the normal case, because one long user message yields several items. That is why every "reject this change" act withdraws.
+- **Undo withdraws.** Undoing B brings back what B replaced. In a chain A ← B ← C, undoing C brings B back, and A stays superseded by B.
+  - The precondition **widens** to: origin `extracted_user`, **or** status `candidate` of any origin. Otherwise it is `409 MEMORY_NOT_UNDOABLE` as today (`memory/service/mutations.rs:195-230`). A candidate is always something learning proposed, so undoing one is dismissing it.
+- **Dismiss is undo of a suggestion.** Several acts dismiss, and each is the same withdrawal: the Memory view's **Keep mine** and `openalpaca memory undo <id>` (both through the undo route), a **Deny** on the in-chat card (§4.3), and S6's dismissals (both through the service's withdrawal).
+  - A suggestion's cited rows are not suppressed. The cursor is already past them, so nothing re-reads them. The one exception is a crash re-run, stated in §1.4's residuals.
+  - A user who wants the words themselves gone uses **Forget**, which is unchanged.
+- **Restore after a confirmed replacement** is deferred (§0.3). The preview and the toasts therefore say that the old note is "kept as history", never that it can be brought back.
+
+### 3.4 The same-`fact_key` rule and R9
+
+- **A learned write with key K becomes a replacement of K's R9 winner** in either partition of its chunk, unless it only restates it (LR11, §2.5). Same-key conflicts between learned notes therefore arise only from `ModelTool` stores and hand edits.
+- **Learned notes carry `observed_at`** (§2.5), so among equal-authority learned notes R9's "newest `observed_at`" now decides (03 §7c R9). Before this, every learned note had `observed_at: None`, and ties in one batch fell to the lowest UUID (`authority.rs:311-313`).
+- **A suggestion does not enter the key group**, because candidates are never in a group (`authority.rs:215-223`). X stays the winner until the confirm. After the confirm, B is `user` and links to X, so X is superseded and leaves the group, with no conflict row.
+- **R9's documented consequence stays true.** A confirmed candidate keeps its `created_at`, so it loses a same-key tie to a `user` note written between the suggestion and the confirmation (03 §7c R9). S5 makes this visible: that newer user note must itself be the target for the confirm to succeed. When the target is an older note, the explicit link decides and R9 is not consulted.
+
+### 3.5 Surfaces
+
+- **API.** `GET /v1/memories/suggestions?limit` (default 20, max 100) answers `{ "items": [{ "id", "revision", "title", "reason", "created_at", "origin", "scope", "sources", "target": { "id", "revision", "title", "excerpt", "origin", "scope" } }] }`.
+  - It reads the index (`note.supersedes`, LR18) and verifies each listed file, as recall does. It parses no partition.
+  - The list is newest first. Where several suggestions name one target, only the newest is listed, and `older_count` says how many were hidden.
+  - `POST /v1/memories/{id}` with `action: confirm` takes `target_revision` in the body. It is **required** when the candidate carries `supersedes` (`400 MEMORY_INVALID_INPUT` otherwise) and checked by S5. The result gains `superseded` and `dismissed`.
+  - `POST /v1/memories/{id}/undo` also accepts a candidate (§3.3).
+  - `docs/api/` is regenerated.
+- **GUI** (`apps/openalpaca-gui/src/views/memory/`):
+  - **`Suggestions.tsx`** sits above `RecentlyLearned` in `MemoryView.tsx`. Each row reads "Replace “X” (saved by you) with “B”?", shows **both texts** (X's excerpt and B's knowledge), and gives the reason and "From what you said on <date>". Both texts matter because §2.5 case 3 can raise a suggestion that only restates X.
+    - **Replace** sends confirm with `If-Match` set to B's revision and `target_revision`.
+    - **Keep mine** sends `POST …/{B}/undo` with `If-Match` set to B's revision: a withdrawal, which forgets nothing else the user said (§3.3).
+    - The toasts read "Replaced — “X” is kept as history" and "Kept your note".
+    - The section hides when empty.
+  - **Candidate copy follows the origin** (`views/memory/copy.ts:41-43`, which says "not said by you" today): an `extracted_user` suggestion reads "From what you said — would replace “X”".
+  - **A replacement row in *recently learned*** reads "Learned from what you said · replaced “A” · Undo". Its undo toast reads "Undone — “A” is back".
+  - New hooks `useSuggestions`, `useConfirmSuggestion` and `useDismissSuggestion` (`hooks/useMemories.ts`), and a new query key `qk.memory.suggestions()`. `memory_changed` already invalidates `["memory"]` (`lib/query-client.ts:181-182`).
+  - DESIGN_SPEC §5.7 gains the section.
+- **CLI.**
+  - `openalpaca memory suggestions [--global|--project <p>] [--limit N]` prints `<id8>  replace “X” (saved by you) → “B”  from your words, 2026-09-24 — <reason>`.
+  - `openalpaca memory confirm <id>` fetches the candidate and, when it carries `supersedes`, its target's current revision. It sends both and prints what was replaced and dismissed.
+  - `openalpaca memory undo <id>` dismisses a suggestion (§3.3). `openalpaca memory forget <id>` keeps its meaning.
+  - `docs/CLI_Manual.md` gains these.
+
+---
+
+## 4. Confirming a suggestion in chat (MD-12)
+
+### 4.1 The mechanism: the model asks, and the human's card answers
+
+**Rejected — Option N, a card the daemon raises when extraction finds a suggestion.** Five reasons:
+- MD-10's triggers fire when the user is idle, switching away or stopping, so the card would arrive outside any turn. With no `stream_id` it reaches no SSE, and the CLI's `chat` never sees it (`apps/openalpaca/src/chat_stream/mod.rs:436-441`, `apps/openalpacad/src/event_bridge.rs:443-452`).
+- A card a window accepts blocks that window's composer (`apps/openalpaca-gui/src/lib/chat-stream.ts:313-315`). Every window accepts a `lane_key: null` card (`views/chat/useChatSession.ts:118-133`).
+- A shutdown flush cannot wait for an answer.
+- The request is tool-shaped (`crates/openalpaca_core/src/security/confirmation.rs:17-34`), so every consumer would print a pseudo-tool.
+- It does not match MD-12's "the assistant may raise a suggested replacement".
+
+**Adopted — Option T.** A new builtin **`memory_confirm`**, in `tools/builtins/memory_tools.rs`:
+
+| Property | Type | Required | Notes |
+|---|---|---|---|
+| `id` | uuid | yes | the suggestion: a candidate of origin `extracted_user` with non-empty `supersedes` and at least one user-authored cited row (§4.2 rule 5) |
+| `expected_revision` | revision | yes | the suggestion's revision, as listed |
+| `target_revision` | revision | yes | the target's revision, as listed (S5) |
+
+- **Result:** `{ "id", "revision", "status": "active", "superseded": [uuid], "dismissed": [uuid] }`. Refusals: `revision_conflict`, `not_found`, `not_a_suggestion` and `approval_required`. The schema is closed (`additionalProperties: false`).
+- **Annotations:** `destructive_local_annotations()`, so it prompts on an attended turn and is refused unattended (`tools/builtins/mod.rs:587-599`).
+- **Where it is offered.** Only on the **main loop's per-request surface** (`tools/builtins/main_loop.rs:164-190`), and only when the turn is attended and `ctx.source == Some("gui")`, the derived source the GUI and CLI chat share (`chat/service.rs:193`, `gateway/router/mod.rs:511-520`). It is never offered on connector lanes, unattended turns, the skill tier, the lead or subagents (ruling LR13).
+- **Its description** tells the model to call it for one suggestion listed in `<memory_suggestions>` (§4.5) when the conversation reaches the topic or a natural pause, at most one per turn, and never for a suggestion already raised in this conversation. An inferred suggestion (origin `extracted_other`) is never listed there, and the tool refuses one with `not_a_suggestion`, naming the Memory view and `openalpaca memory confirm`.
+
+`memory_update action: confirm` stays refused from a tool (G2). Today it raises a card and then refuses after the click (`builtins/mod.rs:596`, `partition.rs:1061-1068`), which wastes the click. §4.4's hook now refuses it **before** any card, with a message naming `memory_confirm` for a suggestion and the Memory view otherwise.
+
+### 4.2 Why the human's Approve, and not the model's call, mints `user`
+
+The sandbox can let a prompted call through with no click at all:
+- on an approval-cache hit (`security/sandbox/mod.rs:274-281`);
+- under `auto_approve` (`:282-307`), which comes from `[security] auto_approve_confirmations` (`orchestrator/query_handler/simple_query_handler.rs:335`);
+- and "Always allow" caches the whole tool (`security/confirmation.rs:198-208`).
+
+So "the tool ran after a prompt" proves nothing. Six rules make the click the only thing that can confirm:
+
+1. **The approval is a fact only one branch creates.** `ToolContext` gains `human_approval: Option<HumanApproval { request_id: String }>` (`tools/registry/mod.rs:57`).
+   - `SandboxManager::execute_tool` sets it **only** in the `ConfirmationResolution::Answered(resp) if resp.approved` branch (`sandbox/mod.rs:401-411`).
+   - It writes it onto the per-call context it finalizes before dispatch (`:460-470`), and **always overwrites** the field there. A caller that builds a context with it set gets `None`.
+   - It is never set on the cache-hit, `auto_approve`, unattended or no-broker branches (`:274-341`, `:427-441`).
+   - The model cannot supply it: tool schemas are closed, and `ToolContext` is not derived from arguments.
+2. **The approval is per call and never reused (ruling LR14).**
+   - `tools/builtins/mod.rs` gains `approval_is_per_call(name) -> bool`, which is true only for `memory_confirm`. It sits beside `annotations_for_builtin` and is static per tool name, like every annotation (03 §7).
+   - For such a tool the sandbox **skips the cache-hit and `auto_approve` branches** and **never records** into `ApprovalCache` (`sandbox/mod.rs:408-409`). An owner who set `auto_approve_confirmations` still gets the card: approving everything blindly must not mint `user` notes.
+   - `ToolConfirmationRequested` carries `per_call: true`, so the GUI offers no **Always allow** (`components/chat/Composer.tsx:291-303`) and the CLI refuses `--entire-tool` for it (`commands/confirmations.rs:62-78`). The server ignores the scope anyway.
+3. **Only a user-directed channel can deliver the Approve.** The card rides the turn's `{owner}:gui` lane. Connectors queue only confirmations whose lane ends in their own suffix (`crates/openalpaca_connectors/src/telegram/connector.rs:143-151`, `discord/connector.rs:234-240`, `imessage/connector.rs:198-204`), and their `/yes` pops only their own chat's queue (`common/mod.rs:110-172`). So the one way to answer is `POST /v1/chat/confirmations/{id}`, which builds the response server-side (`apps/openalpacad/src/routes/chat.rs:873-890`). The callers are the GUI card, the CLI's inline `[y/N]` and `openalpaca tasks confirmations approve`. That is the HTTP API, the CLI and the GUI, which is exactly 03 §4's user-directed surface.
+4. **The args bind what the human saw.** `args_hash` covers `id`, `expected_revision` and `target_revision` (`sandbox/mod.rs:268`). The preview (§4.4) is computed from exactly those revisions, and the service re-checks both (S5).
+5. **The service maps only this one act.** `MemoryService::confirm_suggestion(ctx, approval: &HumanApproval, id, expected_revision, target_revision)` requires:
+   - a `ModelTool` context;
+   - an approval;
+   - a candidate that carries `supersedes`, of origin **`extracted_user`**, with at least one cited `message` row that is user-authored (§1.2; one indexed lookup of the cited ids).
+
+   Anything else is `not_a_suggestion`. An inferred candidate (origin `extracted_other`: text from assistant replies and tools) is confirmable only in the Memory view and the CLI, so an in-chat card never presents the assistant's inference as the user's words. S10 keeps a model tool from editing a suggestion, so the text the card shows is the extractor's.
+
+   It performs the confirm as `Actor::UserSurface` for that one write, so origin is `user` and `memory_changed.surface` is `"user"`. It then runs S6's dismissals, as withdrawals after the write. Every other call from the same context stays `ModelTool`: `edit`, `archive` and `store` against a `user` note are still `authority_conflict` (`partition.rs:1078-1107`).
+6. **The model saying yes changes nothing.** Without the fact, `memory_confirm` answers `approval_required` and writes nothing. This is what a turn run with `auto_approve` would reach, if rule 2 did not already prevent it.
+
+03 §4's definition therefore gains one sentence (§11): *a confirm of a suggestion whose approval is the human's Approve on the confirmation card for that exact call, delivered through `POST /v1/chat/confirmations/{id}`, is a user-directed act.*
+
+### 4.3 Deny, timeout, cancel, unattended, connectors
+
+- **Deny** (recommended answer to LQ2): the suggestion is **dismissed durably**.
+  - `BuiltInTool` gains an optional hook, `on_confirmation_denied(&self, args, ctx)`, whose default does nothing (`tools/registry/mod.rs:222-230`).
+  - The sandbox calls it in the `Answered` not-approved branch, before returning `Err` (`sandbox/mod.rs:412-416`), with `ctx.human_denial = Some(..)` set under rule 1's discipline.
+  - `memory_confirm` implements it as a **withdrawal** of the candidate (§3.3): no links and no suppressed sources, so what else the same message taught stays learned. The model gets "The user declined; the suggestion was dismissed. Do not raise it again." X is untouched.
+  - If the owner picks LQ2(b), the hook is not built. Deny then leaves the candidate in the Memory view, and the lane's `raised` set (§4.5) keeps it out of this conversation.
+- **Timeout** (`confirmation_timeout_secs`, 300 s) and **Cancelled**: the candidate is left as it is, and the model gets the sandbox's existing message (`sandbox/mod.rs:417-425`). The suggestion is not raised again on that lane until the daemon restarts (§4.5).
+- **Unattended turns** (scheduled skills, piped or one-shot `chat`, flagged follow-ups): `memory_confirm` is not on the surface. The sandbox would refuse it anyway (`sandbox/mod.rs:308-340`). The suggestion waits in the Memory view and the CLI, which is MD-12's "the Memory view and the CLI keep it too".
+- **Connectors** (Telegram, Discord, iMessage): the tool is not offered and `<memory_suggestions>` is not rendered. A connector's `/yes` is keyed by chat and not by sender, and may land in a group (MD-4). It is not a user-directed surface by 03 §4's definition (G2). Connector-only users see suggestions in the app's Memory view.
+
+### 4.4 The preview on the card
+
+Today the card, the CLI prompt and the connector prompt show the literal arguments (`components/chat/ToolConfirmationBanner.tsx:9-10`, `chat_stream/mod.rs:462-475`). For `memory_confirm` those are three opaque ids. A title passed as an argument would be model-authored and could misdescribe the note. So the daemon writes the text.
+
+- **Hook.** `BuiltInTool` gains `confirmation_preview(&self, args, ctx) -> Result<Option<String>, String>`, whose default is `Ok(None)`. The sandbox calls it in the broker branch before `broker.request` (`sandbox/mod.rs:341-359`):
+  - `Err(reason)` returns `Err(reason)` with **no card**;
+  - `Ok(Some(text))` attaches the preview.
+- **`memory_confirm`'s preview.** It validates the suggestion and the target at the given revisions under §4.2 rule 5's conditions, and on a mismatch or a non-suggestion it refuses before any card. It renders at most 1 KiB, from the service's own read:
+
+  ```text
+  Replace your saved note “Editor preference” with “Editor preference”?
+  Yours: I use vim for everything.
+  New: Since June 2026 the user edits with Helix; before that, vim.
+  Why: The user said they switched from vim to Helix in June. (from what you said on 2026-09-24)
+  Your note is kept as history in the Memory view.
+  ```
+
+  The date in "(from what you said on …)" is the `created_at` of the newest **user-authored** row the suggestion cites, looked up from its `sources`, never fixed text. Rule 5 guarantees there is one.
+
+- **`memory_update`'s preview.** With `action: confirm` it returns `Err(confirm_refused …)`, which fixes the wasted click (§4.1).
+- **Wire.**
+  - `ConfirmationRequest`, `SystemEvent::ToolConfirmationRequested`, `ServerEvent::ToolConfirmationRequested`, SSE `ConfirmationRequested` and `PendingConfirmation` each gain optional `preview` and `per_call` (`events.rs:338-370`; `crates/openalpaca_api/src/events/mod.rs:239-266`; `chat/stream_manager/mod.rs:58`; `routes/chat_types.rs:172-189`). The bridge's and persistence's patterns already end in `..` (`event_bridge.rs:420-429`, `events/persistence.rs:301-306`). The literals that build these events, and the one pattern without `..` (the SSE serializer, `routes/chat.rs:604-615`), are listed in §8.10.
+  - **`event_log` keeps ids only** (`events/persistence.rs:301-321`). A test pins that the preview is never persisted: a later-forgotten note's title must not survive there (03 §6).
+  - The unscoped pending read `GET /v1/chat/confirmations` does carry the preview. That widens T22 (pending) with note text under the same bearer; §10 notes it.
+- **GUI.** `ToolConfirmationBanner` shows the preview above the literal arguments, labelled "From OpenAlpaca", and the arguments stay available. With `per_call` the composer drops **Always allow**. DESIGN_SPEC §3.14's "literal arguments, never summarised" rule gains the exception: *a daemon-authored preview, never the model's text*.
+- **CLI.** The inline prompt and `tasks confirmations list|watch` print the preview before the JSON arguments.
+
+### 4.5 How the assistant learns there is a suggestion
+
+On main-loop turns where `memory_confirm` is offered, the per-turn memory section appends a `<memory_suggestions>` block. It is built with the recall, outside the cached layer (03 §5), and delivered as quoted data under the trust label:
+- It holds at most **3** pending suggestions, newest first, one line each, in at most 1 KiB, and that counts against the 8 KiB memory budget.
+- Each line reads `[memory-suggestion id=<B> revision=<rB> replaces=<X> replaces_revision=<rX>] “<X title>” (saved by you) → “<B title>” (from what you said on <date>)`, with the date taken as in §4.4.
+- Only suggestions that `memory_confirm` would accept are listed: origin `extracted_user` and a user-authored cited row (§4.2 rule 5). An inferred suggestion never appears.
+- A suggestion already **raised on this lane** since the daemon started is left out. The queue keeps that set in memory, and `memory_confirm`'s preview hook adds to it. A timed-out or denied card is not re-raised in the same conversation.
+- The block carries no instructions. When to call is in `memory_confirm`'s description (§4.1), because instructions inside quoted data are ignored by design.
+
+It is read by a new `MemoryService::pending_suggestions(ctx, limit)`, which reads with the turn's `ModelTool` read context. It is not a recall, so it adds nothing to `memory_used`.
+
+**Its cost is on the reply path, so it reads the index, not the partition.** Candidates and `supersedes` are reachable today only through `Partition::load()` (`memory/service/mod.rs:751-757`, `:821-825`), while recall uses the index plus verification (`memory/service/recall.rs:172-220`). A parse on every attended GUI turn would grow with the note count. `pending_suggestions` therefore selects `effective_status = 'candidate' AND supersedes <> '[]' AND origin = 'extracted_user'` from the index's new `supersedes` column (LR18, §2.3), newest first. It then re-reads files until three qualify, reading at most ten. The service bench measures it (§6.4).
+
+---
+
+## 5. Search for every agent (`memory_read`)
+
+Six shipped templates grant `memory_read`: `lead_agent`, `general_agent`, `code_agent`, `planning_agent`, `review_agent` and `explore_agent` (`config/agents/lead_agent.md:8` and so on). **Three do not:** `writing_agent`, `research_agent` and `system_agent` (`config/agents/research_agent.md:5-9`). None denies it. The design is written for the recommended answer to LQ3:
+
+- **Shipped templates.** The three missing templates list `memory_read`, so all nine name it.
+- **An ambient grant covers the owner's install without a re-seed.** The owner's `config/agents/` is never re-seeded (`apps/openalpacad/src/bootstrap/content.rs:102-108`), and a factory reset does not touch it. So `AgentTemplate::to_subagent` appends `memory_read` to `capabilities` and `allowed_capabilities` for every **internal** template (`AgentSource::Internal`, `agent/template/mod.rs:21-28`, `:92`) that neither lists it nor names it in `denied_capabilities`.
+  - This is exactly the `workspace_read`/`workspace_write` precedent (`crates/openalpaca_core/src/agent/template/mod.rs:501-521`).
+  - `denied_capabilities` still wins (`tools/registry/mod.rs:894-900`).
+  - **A plugin-contributed template (`AgentSource::Plugin`) gets `memory_read` only when it names it.** A plugin-backed subagent runs as the run's owner (`runner/lead_agent/tools.rs:343`). Its proxied tool calls are checked against the same widened policy (`tools.rs:575-581`), and `run_plugin_agent_loop` sends each result back to the plugin's process (`runner/plugin_agent.rs:241-247`). An ambient grant would therefore hand every note the owner has to third-party code by default. The memory read tools never prompt (`tools/builtins/mod.rs:588-590`), so no card would stand in the way. A plugin template that names `memory_read` keeps getting it, exactly as today.
+- **Ownership is unchanged.** A subagent's reads use the run's owner (`runner/lead_agent/tools.rs:338-358`), and a `system` run refuses (03 §3).
+- **Exposure.** Notes arrive as trust-labelled quoted data. `research_agent` also has `web_access`, as `general_agent` and `planning_agent` already do.
+- **Cost.** Three read-only tool definitions per prompt, which never prompt (`builtins/mod.rs:588-590`). They count against small budgets such as research's 12 tool calls and 8 rounds (`research_agent.md:19-22`), but a call is spent only when the agent chooses to search.
+- **What 03 must say.** §7's "**no agent template changes**" (line 359) is revised (§11).
+
+---
+
+## 6. Smaller items
+
+### 6.1 Validity dates in the recall header
+
+`RecalledNote` and `VerifiedItem` gain `valid_from`, `valid_to` and `timing: Option<Timing::Upcoming>`. The bounds are filled from the re-read `Note` at both construction sites (`memory/service/recall.rs:254-272`, `:363-413`, `:565-581`); `timing` comes from the index (below). `render` (`types.rs:385-417`) appends ` valid_from=<ts|-> valid_to=<ts|->` **only when a bound is set**, followed by ` timing=upcoming` when the index says the window has not begun:
+
+```text
+[memory id=… revision=… path=notes/…md kind=episode scope=global heading="" lines=1-6 match=title freshness=verified sources=- reason=recall valid_from=2026-10-05T00:00:00Z valid_to=2026-10-20T00:00:00Z timing=upcoming]
+```
+
+- **Unwindowed notes.** They render byte-for-byte as today, so no existing expectation moves (`memory/service/tests.rs:1766-1781`, `prompt_ctx/sources/memory.rs:364`).
+- **Ended windows.** These never reach automatic recall (`memory_index/search.rs:186-228`, `memory_index/mod.rs:729-757`), so `upcoming` is the only non-current value the header carries.
+- **Clock.** "Upcoming" must use the index's clock, so the header and the filter agree. `MemoryIndex::now` is private to the storage crate (`memory_index/mod.rs:527-529`), and the header is built in core, so no visibility change could reach it. Instead each `SearchHit` and pinned row the index returns gains `upcoming: bool`, computed in the same query as the validity filter (`valid_from > instant`, `memory_index/search.rs:186-228`) and on the same clock. No new clock API is needed.
+- **Trust label.** `TRUST_LABEL` (`recall.rs:21`) gains: "`valid_from`/`valid_to` are a note's effective window (`valid_to` exclusive); `timing=upcoming` means the window has not begun, so the note describes a plan, not the present."
+- **Search results.** For parity, `memory_search` results gain `valid_from` and `valid_to` (RFC 3339 or null; §11).
+- **What is not shown.** `observed_at` and the title are not added to the header. The owner asked for validity. `observed_at` is now set for learned notes (§2.5), so a later revision can add it.
+
+### 6.2 A subagent's notes in *recently used*
+
+- **How a subagent reaches memory.** Only through its own `memory_search` and `memory_read` calls, and those already reach the ring with its `task_id`. `ToolContext.task_id` is set for every subagent (`runner/lead_agent/tools.rs:342`), `context_for_tool` copies it into the `Attribution` (`memory/service/mod.rs:302-325`), and a `ModelTool` search records what it returned (`recall.rs:530-543`; `read` records at `memory/service/mod.rs:700`). §5 gives every internal template those tools, which is what makes a subagent's notes reach *recently used*.
+- **The other path carries nothing.** A distilled package section would carry memory into a subagent's prompt, and it would not be recorded: `distill` drops the section key (`prompt_ctx/manager.rs:149-154`) and `to_bundle` re-keys it `Package` (`prompt_ctx/package.rs:120`). But the lead's parent bundle is `ContextBundle::empty()` (`runner/lead_agent/mod.rs:229-231`), and the spawn path says so (`tools.rs:427-430`). No production run puts memory in a package today.
+- **So nothing is edited (ruling LR15).** One test pins the owner's ask on the real path: a subagent's `memory_search` produces a ring row carrying its `task_id`. The package path is recorded as residue: whoever first fills the lead's parent bundle with memory must key the section and record its delivery then. Rev 1's three edits (`PackageSection.memory_used`, the `to_bundle` key, `SpawnSubagentTool::with_memory_service`) would have changed no production behaviour, and they are dropped.
+
+### 6.3 Parsed partitions: five quick wins, then a cache
+
+**Quick wins.** Each is independently testable and changes no output:
+1. `Partition::reconcile`'s "gone" check uses `HashSet`s and becomes O(N), where today it is O(N²) (`partition.rs:1358-1363`).
+2. `forget` does one `load_with` per call, not one per target (`partition.rs:1140-1141`).
+3. `commit_write` returns the post-write view, so `refresh_navigation`, the service's `reindex` and `update`'s origin read-back reuse it (`partition.rs:887-950`, `:1384-1389`; `memory/service/mutations.rs:79-87`). Full parses per call go from 3 to 1 for `store` and from 5–6 to 2 for `update`.
+4. `reindex(full = false)` builds `IndexRecord`s, and clones bodies, only for notes whose fingerprint changed (`memory/service/mod.rs:462-515`).
+5. Existing `fact_key`s come from the index, not from a partition parse (§2.3).
+
+**The cache.**
+- **Shape.** `memory_files::NoteParseCache` is owned by the service beside `fingerprints` and `last_scans` (`memory/service/mod.rs:155`, `:160`). It is handed to `Partition::open_*` and consulted in `parse_all` (`partition.rs:682-734`).
+  - **Key:** `(partition_key, file_name)`.
+  - **Valid while** the file's `(mtime_ns, size, inode, ctime)` are unchanged. These are the stat identity the reconciliation scan uses (`memory/service/mod.rs:1214-1224`), plus `ctime`, which no user tool can set back.
+  - **Value:** `Arc<(Note, revision)>`, the full parsed note, so `Note`, `NoteView` and every consumer stay as they are (`memory_files/note.rs:217-238`).
+- **Bound.** The cache holds at most **128 MiB**, the constant `NOTE_PARSE_CACHE_BYTES`, accounted as body bytes plus metadata. It works all-or-nothing per partition, with least-recently-used eviction across partitions. A partition that would not fit is parsed uncached, as today. Per-file LRU is avoided because a full load scans every file, which thrashes it. 128 MiB holds about 70K average notes (1.3 KB body) or about 180K learned-size notes (§6.4 measures both).
+- **Snapshot.** The parsed `ControlSnapshot` is cached, keyed by its file stat plus an in-process generation that every `save` bumps (`snapshot.rs:250-258`).
+- **Invalidation.**
+  - **Service writes** update the cache directly in `commit_write`: lstat the renamed file and insert. A retitle removes the old file name's entry (`partition.rs:916-929`), and `forget` removes entries.
+  - **External edits** show up as a stat mismatch, so that one file is re-read. This is 03 §5's "changed files are re-hashed".
+  - **A workspace move or an index rebuild** evicts the entries wherever `fingerprints` and `last_scans` are evicted (`memory/service/mod.rs:401-412`, `:623-626`).
+  - `doctor --repair` and `adopt` run with the daemon stopped, so no cache can be stale across them.
+- **The invariant.** **A mutation re-reads and re-hashes the file it changes before its revision check** (`partition.rs:970-984`, `:1050-1057`, `:1141-1156`). Otherwise a same-size, same-mtime external edit would match a cached revision and be overwritten.
+- **Testing the invariant.** A real edit cannot reproduce a same-stat change: writing a file and then setting its mtime back (`File::set_modified`) both move `ctime`, so the cache misses on `ctime` and the test would pass with the invariant reverted. The cache therefore takes its stat function as a parameter, `NoteParseCache::with_stat(fn(&Path) -> StatKey)`, defaulting to the real `lstat`. The test injects one that reports the pre-edit key after an external edit. It then shows that a mutation still re-hashes and refuses, and that the same test fails once the re-hash is removed.
+
+### 6.4 The 100K bench and the index size: measure first
+
+- **Bench.** `memory_index/bench.rs` gains `run_bench(n, mix)`, shared by today's 10K test and a new `#[ignore]`d `bench_search_100k_notes_with_verification`. Both run in release: `cargo test --release -p openalpaca_storage -- --ignored bench_ --nocapture`, the same as the existing test (`bench.rs:1-3`, `:27`, `:336-443`).
+- **What each run prints:**
+  - build time;
+  - cache MiB, with the **`dbstat`** breakdown (`SELECT name, SUM(pgsize) FROM dbstat GROUP BY name`, compiled into the bundled SQLite);
+  - search + verification p50/p95/max;
+  - the empty-query rate;
+  - the machine: `available_parallelism`, `std::env::consts` and the hostname via `Command`, as `memory_eval.rs:1312-1330` does.
+- **Mixes.** A second mix, `learned`, has 70 % of notes at 200–400 B, the shape of §2.6's bodies.
+- **RSS** is measured outside the process, as `/usr/bin/time -l target/release/deps/openalpaca_storage-<hash> --ignored bench_search_100k --nocapture`, so the compile is not counted.
+- **Service-level bench.** A new `#[ignore]`d `memory/service/bench.rs` in core seeds by writing files and building the snapshot in one pass, through `repair`'s path. It does not seed through `create`, which would make seeding quadratic.
+  - Sizes: 1K, 10K and 100K notes.
+  - What it measures:
+    - `open_default` with a valid cache and with a missing one (the boot path, `apps/openalpacad/src/services/mod.rs:218-221`);
+    - recall p50/p95, including `touch`'s stat scan;
+    - `store`, `update`, `forget`, `list` and `recently_learned` latency;
+    - `learning_view` for one chunk and `pending_suggestions`, the one learning read on the reply path (§4.5);
+    - the first reconciliation tick;
+    - snapshot and `MEMORY.md` sizes.
+  - Each is measured with the parse cache on and with it off (`cache_bytes = 0`).
+- **Proposed targets, not gates:** recall p95 ≤ 100 ms and learned-`store` p95 ≤ 100 ms at 100K notes on the M5 Max. 04 §5's 50 ms p95 target stays the 10K gate.
+
+**The index layout is not changed in this wave (ruling LR16).** The survey's replica of the index schema reproduced the reported 10K size within 2 % (105.4 MiB against 107.7 MiB). It projects today's layout at **1,020 MiB (8.2×) at 100K**. The trigram index is 48 % of that, and the `chunk` table, which holds the text twice plus title, aliases and tags on every chunk, is 33 %.
+- **The one candidate:** trigram only over title, aliases, tags and CJK-bearing chunks, with a `unicode61` prefix fallback; both FTS tables contentless; one copy of the chunk text. The replica gives about 352 MiB (2.8×).
+- **Why it waits.** It reverses 03 §5 step 4 and §7c Q9, which keep the trigram companion on every term of three or more characters (G23), so it is a design revision.
+- **Its cost on the fixtures:**
+  - **21:** step 1 would pass only through the title ("Editor preference") plus the prefix fallback, which would have to be reported as `trigram` unless a `prefix` `MatchReason` is added (§7a is frozen). The fixture's intent, `prefer` inside the body's `prefers`, would then rest on the prefix query, and a body-only variant would be added.
+  - **21 and 23:** the index-level `excerpt_contains` checks (`crates/openalpaca_storage/src/memory_index/fixture_tests.rs:568-573`) would need the index runner to read excerpts from the file, as the service already does (`recall.rs:386-393`).
+  - **23:** steps 5–6 (`简洁的回答`, `用户喜欢`) keep working, because CJK chunks keep trigram.
+  - **22 and 24:** unaffected.
+- **Why `detail=none/column` is out.** It breaks every phrase of four or more characters with "phrase queries are not supported (detail!=full)".
+- **The decision rule, run in L8:**
+  - If the 100K run shows search + verification p95 above 100 ms, the layout revision is written with its measured Rust numbers and taken to the owner.
+  - If only the size is large, the owner is shown the size table and the projected alternatives, and decides whether about 1 GiB of disposable cache at 100K notes needs the revision.
+
+---
+
+## 7. The learning evaluation
+
+### 7.1 The conversation corpus
+
+**File.** `scripts/eval/memory/conversations-learning.json`, beside `notes-gold.json`. It is JSON, so `.gitignore` needs nothing. The README runbook gains a section.
+
+**Authorship.**
+- It is written by a design session from `notes-gold.json`, the way 04 slice 1 had "the design's author" write v0 of the question set.
+- It is **never** written from `questions-heldout.json`, and it is tuned only against `questions-tuning.json`.
+- A second session reviews it for coverage and leakage before any run.
+
+**Format:**
+
+```json
+{
+  "schema": 1,
+  "sessions": [
+    {
+      "id": "cs-001",
+      "workspace": null,
+      "language": "en",
+      "narrative_date": "2026-03-02",
+      "turns": [
+        { "user": "…", "states": ["<gold note id>"], "mode": "explicit" }
+      ]
+    }
+  ],
+  "suggestion_sessions": ["cs-031", "cs-044"]
+}
+```
+
+- `workspace` is `null`, `"lantern"` or `"moss"`, and a project session runs with the scratch project's path as its workspace.
+- `mode` is one of `explicit`, `indirect`, `change`, `correction`, `restate`, `rejection` or `noise`.
+- `states` lists the gold ids the turn states, and is empty for noise.
+
+**Content**, drawn from the 83 gold notes (55 English, 28 Chinese; 46 global, 24 Lantern, 13 Moss; every note has a `fact_key`):
+- **Coverage.** Every gold note that some non-abstention held-out question relies on is stated in at least one turn. **At least 20** of them are stated only **indirectly**, for example "since I sold the Fit in April I take line 5 every morning".
+- **15 changed facts.**
+  - The **8 gold pairs** are stated old-then-new, in chronological sessions: the 4 `supersedes` pairs (`user.editor`, `user.laptop`, `user.commute`, `moss.output_dir`) and the 4 same-key conflict pairs (`lantern.staging.db`, `lantern.service.port`, `moss.python.version`, `user.weekly_review`).
+  - **At least 2 of the `user.*` pairs state the new value in a project session** while the old value was stated in a session with no project. That exercises the cross-partition key lookup and LR17 (§2.5). Without it, the result would depend on which workspace the corpus author happened to pick.
+  - **7 in-conversation corrections** follow a first statement that is not gold with the gold value ("Thursdays — sorry, I meant Tuesdays"), so the final truth is still gold.
+- **At least 10 restatements** (`restate`): a later session repeats a fact already stated, with the same value and in different words. At least 4 of them are about the 8 change pairs' *old* notes, so that L-S can check them against notes the user saved (§7.2).
+- **At least 10 rejections**: the assistant proposes something and the user turns it down, which is the *rejected/failed actions* category.
+- **At least 30 % noise turns**: questions, chit-chat and requests with no durable fact.
+- **Language by session**, in the questions' proportions (en 303, zh 125, mixed 42 of 470): about 64 % English, 27 % Chinese and 9 % mixed.
+- **Dates are in the text.** A learning run cannot backdate, because every write stamps the wall clock. Every dated gold fact states its dates in the conversation: "I switched to Helix in June", "Stockholm, 5 to 19 October".
+- **Size:** 40–60 sessions, 250–350 user turns.
+
+**Validation test.** A new file, `crates/openalpaca_core/tests/memory_eval_corpus.rs`, runs in default CI with no model and no feature. It checks:
+- the file parses;
+- every relied-on gold note is stated at least once;
+- every gold id is real;
+- every change pair's old turn precedes its new turn in session order, and at least 2 `user.*` pairs change across a project boundary;
+- the leakage check: no held-out question shares an 8-word shingle with any turn, **and** no question's CJK characters share a **12-character shingle** with any turn's. Both are NFKC-normalised and case-folded first, and for the second only Han, kana and Hangul characters are kept. The word check alone cannot see Chinese: 125 of the 470 held-out questions are `zh`, where a whole sentence is one whitespace token. Mixed questions get both checks;
+- the language shares are within ±5 pp;
+- the turn count is in range.
+
+### 7.2 The harness mode
+
+- **Systems.** `memory_eval.rs` gains systems `L`, `L0` and `L-S`, in the same file. It is 2,072 lines, so the shared data types move to `crates/openalpaca_core/tests/common/eval.rs`.
+- **Learning phase, through the front door.** `Orchestrator::handle_message` persists nothing (`gateway/router/mod.rs:267` is where rows are written).
+  - The harness builds `Gateway::new(shared, lanes, handler, bus, Some(db))` (`gateway/router/mod.rs:249-265`), with a thin `MessageHandler` over the orchestrator, copying the daemon's ten-line `OrchestratorHandler` (`apps/openalpacad/src/gateway_bridge.rs:73-79`). It adds `with_learning(queue)`.
+  - Each corpus session is `ConversationRepository::create_session` then `activate_session` (`repository/conversation/mod.rs:408`, `:439`), which is what "New chat" does. A project session sends the scratch project path.
+  - **The queue runs in `Manual` mode (§1.5)**: no sweeper, no quiet rule, and no trigger starts a flush on its own, so reader timing cannot change what is learned when. The harness replays the production triggers deterministically. After every 10th user-authored turn of a session it calls `flush_session` (labelled `turns`), and at the end of each session it calls it again (labelled `switch`). The idle trigger has no deterministic stand-in and is covered by L1's tests.
+  - **`flush_session(id)`** runs every chunk of the session in order until its cursor reaches the session's last row, with no `MAX_CHUNKS_PER_FLUSH` cap and no quiet rule. It returns the flush report: counts per §2.4 outcome, calls, tokens and latency. `wait_idle()` returns when no flush runs.
+  - **Counting the two learning paths.** The harness subscribes to the bus around each flush and counts `SystemEvent::MemoryChanged` by `surface` (`extraction` against `model_tool`). Today the harness's subscription is per question (`memory_eval.rs:1822-1885`), which never spans a flush. The reader's own `memory_store` calls are counted from its turns' subscriptions as before.
+- **Replay mode, for repeatable learning numbers.** The reader answers at its model's default temperature, because the main loop sends `temperature: None` (`runner/agentic_loop/backend.rs:52`, `:69`, `:146`). So the transcript the extractor reads differs from run to run. The learning phase therefore keeps its scratch database. `OPENALPACA_MEMORY_EVAL_LEARN_FROM=<scratch dir>` starts a fresh memory store, resets every cursor to 0 and flushes each stored session in order, with **no reader calls**. The extractor runs at temperature 0.0 (as now, `extraction.rs:232`), so a replay re-measures the learning side on a fixed transcript in about 30 minutes instead of 4 hours.
+- **Question phase.** `[orchestrator.learning] enabled = false` is swapped into the `ArcSwap` config, and questions are asked exactly as D asks them: fresh lanes, `handle_message`, no persistence (`memory_eval.rs:1822-1845`). The report records `conditions.learning`, which replaces the hard-coded `extraction_disabled: true` (`memory_eval.rs:1796`) and the `extract_every_n_turns` override (`:1682`).
+- **The systems:**
+  - **L:** conversations in, learning on.
+  - **L0:** conversations in, learning off. Only the model's own `memory_store` calls learn.
+  - **L-S**, the MD-11/MD-12 check: the 8 *old* notes of the change pairs are seeded as `user` notes through the existing `UserSurface` seeding path (`memory_eval.rs:359-430`), then `suggestion_sessions` are fed. They include the `restate` turns about those notes.
+    - Expected: 8 suggestions naming the right targets, **0** user notes retired, and the number of suggestions raised by restatements, reported per turn.
+    - Each suggestion is then confirmed through the service's user-directed confirm with `target_revision`, and each old note must become superseded. The in-chat card itself is covered by the deterministic L4 tests, because the harness runs unattended.
+- **A forced re-run check** inside L: after the learning phase, forget one learned note, reset its session's cursor, and flush again. The forgotten note must not come back (§1.4(d)).
+
+### 7.3 What is measured
+
+The learned store is dumped into the report with history and candidates.
+
+| Metric | Definition |
+|---|---|
+| **Fact coverage** | For each relied-on gold note, a historical `memory_search` on its title and aliases returns at most 5 notes, and the judge answers whether any of them states the gold knowledge. One judge call per gold note, with a **frozen `scripts/eval/memory/coverage-judge-prompt.md`** whose sha256 the report records beside `judge_prompt_sha256`, as it does for `judge-prompt.md`. |
+| **Noise** | Active learned notes never chosen as a coverage match, plus the candidates raised |
+| **Changed facts** (15) | Per pair, one of: new active and old superseded · new active and old a same-key loser · both active and unlinked · new missing · old never learned. Reported **per pair**, not only as a count. |
+| **Restatements** | Per `restate` turn: nothing written (`unchanged` or `already_learned`) · an automatic replacement · a suggestion (§2.5 case 3) · a duplicate note |
+| **Aliases** | Share of learned active notes with at least one alias in the other script (CJK against Latin, deterministic), and share with any alias |
+| **Fact keys** | Share with a `fact_key`; key reuse within each change pair |
+| **QA accuracy** | Per category, L against D′ paired with `compare.py`, and L against L0 |
+| **Invariants** (hard) | User notes retired without a confirm: 0. Forgotten notes resurrected by the forced re-run: 0. A violation blocks. |
+| **Cost** | Extraction calls, input and output tokens, per-flush latency p50/p95, and flushes by trigger |
+
+**Proposed targets, not release gates unless the owner asks:** coverage ≥ 80 %, changed facts ≥ 12 of 15 correct, other-script alias share ≥ 60 %, restatements raising a suggestion or a duplicate ≤ 2 of the `restate` turns, and L within −10 pp of D′ overall.
+
+**One sample is not a pass.** The learning side is reported as the spread over the live run plus **three replays** (§7.2): minimum, median and maximum for coverage, changed facts, restatements and aliases. A target is read against the median, and the spread is printed beside it. QA accuracy is measured once, on the live run's learned store, because each QA pass costs 470 reader turns.
+
+### 7.4 The judge (owner answer to LQ1: the reader judges, and the report says so)
+
+> **Owner, 2026-09-24 (LQ1):** the judge is the **same model as the reader** — `qwen3.8:27b-mlx` (owner, 2026-09-24: tests involving Ollama use this model). No cloud key, no second download. Every report records `judge_is_reader: true` and the report's text states plainly that the model graded its own answers. The guard below is therefore **not** a refusal: it keeps its routability check (`router.is_routable(judge)`) and its post-call assertion that the judge that answered is the model requested, and it **records** — instead of refusing — a judge equal to the reader or of the reader's family. `compare.py` still refuses to compare two reports graded by different judges unless `--allow-judge-mismatch`. The original rev-2 text follows for the record; where it says "refused", read "recorded".
+
+
+- **What is installed.** Only one model family is installed on this machine: `qwen3.8` in two builds, `27b-mlx` and `27b-mtp-q8_0` (`~/.ollama/models/manifests/registry.ollama.ai/library/qwen3.8/`). The archived D run used `qwen3.8:27b-mtp-q8_0` as both reader and judge ([08](08-evaluation-report.md) §1). The other build would be the same model grading itself. So "a different model" needs one of the two options in LQ1: a cloud judge from another vendor, or a one-time pull of a local model from a different family.
+- **Configuration.**
+  - The judge is `OPENALPACA_MEMORY_EVAL_JUDGE_MODEL` (`memory_eval.rs:1080`).
+  - Its provider sits in the scratch `llm.toml` with `secret_env`, so no key is written to disk.
+  - The reader's fallback chain and `[orchestrator] fallback_models` are empty, so the judge's provider can never become a reader rung.
+- **The guard runs before any call.** It asserts:
+  - `router.is_routable(judge)` (`crates/openalpaca_llm/src/routing/router/mod.rs:250`);
+  - `judge != router.effective_default_model()` (`:320`);
+  - `judge != extraction_model` when one is set;
+  - the judge's **family**, the id before `:`, differs from the reader's.
+
+  The ladder would otherwise silently substitute the reader, with only a one-time WARN (`router/mod.rs:356-405`). After the first judge call the guard asserts `response.model == judge`, and every row's `reader_models` must name the reader alone.
+- **Re-judge mode.** `OPENALPACA_MEMORY_EVAL_REJUDGE=<report.json>` re-grades an archived report's rows. Each row has `question`, `gold_answer`, `answer`, `category` and `expect_abstain` (`memory_eval.rs:1454-1471`). It makes no reader calls, and writes a new report with `rejudged_from`.
+- **`compare.py`** (`scripts/eval/memory/compare.py:22-58`) prints both reports' judge models and refuses a mismatch unless `--allow-judge-mismatch` is given.
+
+### 7.5 Runs, after everything is in place (L8)
+
+This follows the owner's instruction, read as follows:
+- **What waits:** the live evaluation and the benchmarks run once, after L1–L7 have landed.
+- **What does not:** every commit still keeps CI green with its deterministic tests, which is the house rule (04 §1).
+
+If the owner meant the unit tests too, only the "Evidence" rows of §8 move.
+
+On the final build, with the chosen judge:
+1. Re-judge the archived D report, which yields the self-grading bias of 94.3 % and judge agreement (raw and Cohen's κ).
+2. **D′**: the seeded run 08 left pending, graded by the new judge. It is the baseline L is compared with. **E′** (D′ plus follow-up searches) answers a slice-4 question, not whether learning works. It stays with plan slice 4 and is not part of L8.
+3. **L**, **L0** and **L-S**, then three replays of L's learning phase (§7.2).
+4. The 10K and 100K index benches, and the service bench at 1K, 10K and 100K.
+5. §6.4's layout decision rule.
+
+**Time on the local reader:**
+
+| Run | Estimate |
+|---|---|
+| D′ | ≈ 2.3 h |
+| L | ≈ 4 h (300 turns × ~12 s, plus about 40 flushes × 30–60 s, plus 470 questions) |
+| L replays (3) | ≈ 1.5 h (no reader calls) |
+| L0 | ≈ 3.3 h |
+| L-S | ≈ 0.5 h |
+| benches | ≈ 0.3 h |
+| **Total** | **about 12 h**, plus the judge's time or egress |
+
+The reader's temperature is not pinned, so each live run is one sample. The replays are what give the learning side a spread (§7.3). The results go to a new `tasks/memory-redesign/10-learning-evaluation.md`, which the `tasks/memory-redesign/*.md` whitelist already covers.
+
+---
+
+## 8. Implementation plan
+
+The order below gives each slice its own commits, CI gates green at each commit, and tests written before each behaviour change. Tests start as characterization against the unchanged code where the behaviour exists at HEAD, and otherwise as a new test shown to fail with the change reverted. The gates are 04 §6's commands:
+- `cargo test --offline -p openalpaca_storage`
+- `cargo test --offline -p openalpaca_core`
+- `cargo test --workspace --exclude openalpaca_gui`
+- `cargo clippy --workspace --exclude openalpaca_gui --all-targets`
+- `cargo check -p openalpaca_gui`
+- `python3 scripts/gen_api_docs.py --check`
+- the four `bun run` gates, for GUI commits
+
+| Slice | What lands | Depends on | Size |
+|---|---|---|---|
+| **L1** | Migration 044 (`request_id`, `workspace_root`, the cursor), the queue and triggers, the window, the budget, the rate-headroom rule, the durable daily gates, the retry and backoff rules, the shutdown drain and boot catch-up (§1) | — | L |
+| **L2** | Index schema 2 (`note.supersedes`, `note_source`), the extractor schema and its prompt fixture, the known-notes lookup, validation, the change test, `observed_at`, the note body, task extraction's shared fields (§2) | L1 | M |
+| **L3** | Replacement and suggestions: S1–S10, withdraw and the widened undo, the suggestions route, GUI and CLI (§3) | L2 | L |
+| **L4** | In-chat confirmation: `memory_confirm`, the approval fact, per-call approvals, the preview and deny hooks, the event fields, `<memory_suggestions>`, the GUI card and the CLI prompt (§4) | L3 | L |
+| **L5** | `memory_read` for every internal agent, validity in the header and in search, the subagent recently-used test (§5, §6.1, §6.2) | — (after L1 to avoid merge churn) | S |
+| **L6** | The five quick wins, the parse and snapshot caches, the 100K and service benches (§6.3, §6.4) | L3 (both touch `partition.rs`) | M |
+| **L7** | The corpus and its validation test; the learning harness mode (`Manual` queue, replay), the judge guard, re-judge mode, the coverage-judge prompt and the `compare.py` check (§7) | L1–L4 | M |
+| **L8** | The runs of §7.5 and the report; the index-layout decision | L1–L7 | M (mostly machine time) |
+
+### L1 — cadence (MD-10)
+
+**Files**
+- **Storage:**
+  - new `crates/openalpaca_storage/src/migrations/044_learning.sql`;
+  - `migrations/mod.rs`: the entry `Migration { version: 44, name: "learning", … }`, with `BASELINE_VERSION` staying 43;
+  - `models/conversation.rs` and `repository/conversation/mod.rs`: `request_id`, `workspace_root`, `learning_window`, and the cursor delete inside `delete_session`;
+  - new `repository/learning_cursor.rs`: `get`, `advance_cas`, `record_failure`, `sessions_with_unlearned_turns`;
+  - `repository/llm_usage/mod.rs`: `usage_today`.
+- **LLM:** `routing/router/mod.rs`: `LlmRouter::rate_headroom`, read-only, over the existing `TokenBucket::available()` (§1.7).
+- **Core:**
+  - `gateway/persistence.rs` and `gateway/router/mod.rs`: the `request_id` and `workspace_root` writes, `with_learning`, the turn guard before persistence;
+  - new `memory/learning/{mod.rs, queue.rs, window.rs, extractor.rs, tests.rs}`. The extractor in L1 keeps today's item fields plus `rows`, with §2.4 rules 1–6, 12 and 14; rule 13 needs L2's `note_source` and lands there;
+  - `orchestrator/extraction.rs` is deleted and its tests move;
+  - `orchestrator/handlers.rs:331-396` keeps only the summary;
+  - `orchestrator/mod.rs` loses `extraction_turn_counter`;
+  - `memory/task_extraction/mod.rs` reads the durable gate;
+  - `daemon_config/{orchestrator.rs, validation.rs, tests.rs}`.
+- **Daemon:**
+  - `main.rs`: build the queue, `with_learning` at `:518`, the drain before `:785`, and the boot catch-up;
+  - `background.rs`: the sweeper spawn (idle and switch) beside `:259`. No bus subscriber is added.
+- **Configuration:** `config_schema/registry.rs`, `apps/openalpaca/src/commands/daemon_config_cli/mod.rs` and `config/daemon.toml`.
+- **Docs:** CLAUDE.md, whose *Storage* section gains head 44 and the new table **in the migration commit** (CLAUDE.md "Keep this file current"); `docs/Daemon_Manual.md` (cadence and keys); `docs/api/` regenerated by **every** commit that changes the schema, a public item or a route, because `gen_api_docs.py --check` is a CI gate.
+
+**Evidence, tests first**
+- Characterization at HEAD, pinned and then flipped by the change:
+  - `default_cadence_extracts_one_turn_in_five`: four turns through `handle_message` reach the extractor stub 0 times.
+  - `a_long_message_is_cut_to_800_chars`: the tail of a 2,000-character message is absent from the prompt.
+  - `a_followup_row_mints_an_extracted_user_note`: F7.
+- New tests, each failing with its change reverted:
+  - `every_persisted_turn_is_learned_at_the_next_flush`
+  - `a_long_message_reaches_the_extractor_whole`
+  - `the_window_reads_content_never_content_json` (U2 re-expressed: an attachment turn's document text is absent from the prompt)
+  - `a_followup_row_is_assistant_written`
+  - `notices_post_updates_and_completion_reports_stay_out`
+  - `slash_turns_and_their_answers_stay_out`
+  - `an_unanswered_in_flight_turn_ends_the_window`
+  - `a_crash_before_the_cursor_moves_reruns_without_a_duplicate` (a fault injected after the store loop)
+  - `a_cancelled_flush_still_advances_after_its_store_loop` (the cancellation lands while the blocking closure runs)
+  - `a_rerun_never_resurrects_a_forgotten_note`
+  - `three_invalid_outputs_skip_the_chunk_with_one_warn`
+  - `an_unavailable_model_holds_the_window_and_backs_off` (no attempt counted, one WARN per outage; P10)
+  - `a_quarantined_partition_holds_the_window_before_any_model_call`
+  - `a_cap_leaves_the_window_queued`
+  - `the_daily_cap_counts_the_utc_day_from_llm_usage_daily`
+  - `a_local_model_flush_yields_to_a_chat_turn`, and `an_openai_provider_on_localhost_yields`
+  - `a_keyed_flush_leaves_half_the_rate_budget` (a router whose TPM makes a second chunk overdraw: the second chunk waits, and a chat request made then acquires with no wait)
+  - `a_turn_mid_flush_stops_it_at_the_next_chunk`
+  - `the_gateway_returns_while_a_flush_is_stuck` (a stub model that never answers)
+  - `a_turn_is_in_flight_before_its_row_exists` (a flush reading the window between persistence and the reply stops before the row)
+  - `a_projectless_turn_in_a_bound_session_learns_globally`, and `a_chunk_never_mixes_roots`
+  - `a_long_user_row_yields_only_candidates`
+  - the triggers, under `tokio::time::pause`: `idle_120s_makes_a_session_due`, `the_tenth_user_turn_makes_it_due`, `an_archived_session_with_pending_turns_is_due`, `drain_returns_within_its_budget`, `boot_catchup_finds_unlearned_sessions`
+  - the budget: `budget_for_an_8k_window` (7,201 B, 3,086 B, 9 items)
+  - storage: `migration_044_seeds_existing_sessions_at_their_last_message` (a 43 database with a session and messages opens at 44 with `extracted_through = MAX(id)`), `the_cursor_advances_only_from_the_expected_value`, `deleting_a_session_deletes_its_cursor`
+  - llm: `rate_headroom_reports_the_tightest_key_without_consuming`
+
+**Risk**
+- **Migration on the owner's live store.** It is additive, tested on a 43 database, and needs no reset. Once migrated, a 43 build refuses the database through slice 0.5's newer-schema guard (`database/mod.rs:175-185`), so a rollback needs a copy taken first. The L1 notes say so.
+- **A hook in the reply path.** It makes three in-memory updates and has a test.
+- **Contention with chat.** Handled by the quiet start, the per-chunk re-check, the local yield and the rate-headroom rule.
+- **A new read on the router.** `rate_headroom` is read-only and changes no provider table. The paused LLM-providers design (04 §7) is told in §8.10.
+
+### L2 — richer extraction
+
+**Files**
+- `memory/learning/extractor.rs` and new `memory/learning/extractor_prompt.txt`: the prompt, schema and validation, and the change test (§2.5);
+- new `memory/learning/lookup.rs`;
+- `memory/service/{mod.rs, types.rs}`: `learning_view`, `StoreInput.observed_at`, `ReplacePolicy` passed through;
+- `memory_files/partition.rs`: `NewNote.replace_policy`, the plumbing only; S2's behaviour lands in L3;
+- `memory_index/{mod.rs, search.rs}`: `SCHEMA_VERSION` 2 with `note.supersedes` and `note_source` (LR18), `fact_keys(partitions, limit)`, `notes_citing(partitions, source_keys)`;
+- `memory/task_extraction/mod.rs`: aliases and key through the shared validator.
+
+**Evidence**
+- Characterization at HEAD: `a_learned_note_has_no_aliases_key_or_observed_at`.
+- New:
+  - `the_extractor_prompt_matches_its_fixture` (byte for byte)
+  - `aliases_and_fact_key_reach_the_note`
+  - `an_invalid_fact_key_drops_the_key_not_the_item`
+  - `the_prompt_lists_known_keys_and_notes_within_budget`
+  - `a_long_row_is_searched_in_512_char_windows`
+  - `a_reused_key_is_kept`
+  - `an_unknown_replaces_ref_is_ignored`
+  - `rows_accept_3_and_r3_and_drop_context_rows`
+  - `stated_by_user_citing_an_assistant_row_is_other_output`
+  - `observed_at_is_the_newest_cited_rows_time`
+  - `a_date_only_valid_to_includes_that_day`
+  - `two_items_with_one_key_keep_the_latest`, and `two_items_reaching_one_target_by_different_routes_keep_one`
+  - `a_restated_listed_saved_fact_is_unchanged`, `a_learned_restatement_with_equal_content_is_unchanged`, and `a_change_against_an_unlisted_saved_note_is_a_suggestion`
+  - `a_global_fact_restated_in_a_project_session_replaces_it`, and `a_user_fact_first_learned_in_a_project_is_global`
+  - `already_learned_needs_equal_content_not_only_the_key`
+  - `a_rerun_never_duplicates_an_inferred_candidate`
+  - `learning_view_finds_this_windows_candidates_through_note_source`
+  - `learning_view_refuses_every_surface_but_extraction`
+  - `learning_view_records_nothing_in_recently_used`
+  - `an_index_at_schema_1_is_rebuilt`
+  - `the_note_body_has_knowledge_and_evidence_sections`
+  - `task_candidates_carry_aliases_and_fact_key`
+
+**Risk.** Output quality on a local model, which L8 measures. Prompt size on small windows, handled by the budget formula and its test.
+
+### L3 — replacement and suggestions (MD-11)
+
+**Files**
+- **Storage:** `memory_files/partition.rs` (S1–S5, S9, S10, `ForgetMode::{Forget, Withdraw}`), `memory_files/authority.rs` (unchanged rules; new tests), and a new fixture `crates/openalpaca_storage/tests/fixtures/memory/25-suggestion-lifecycle.json`, run by the existing runners.
+- **Service:** `memory/service/{mod.rs, mutations.rs, wire.rs}` (S6–S8, `suggestions` over the index, the widened `undo`), and `memory/learning/extractor.rs` (the §2.5 decision table).
+- **Daemon:** `apps/openalpacad/src/routes/memories.rs` and `router.rs` (the suggestions route, `target_revision`, undo of a candidate).
+- **CLI:** `apps/openalpaca/src/commands/memory.rs` (`suggestions`, `confirm` with the target, `undo` of a suggestion).
+- **GUI:** `views/memory/{Suggestions.tsx, MemoryView.tsx, RecentlyLearned.tsx, NoteTab.tsx, MemoryDetail.tsx, copy.ts}`, `hooks/useMemories.ts` and `lib/api/`.
+- **Docs:** `DESIGN_SPEC.md` §5.7, `docs/GUI_Manual.md`, `docs/CLI_Manual.md`, `docs/api/` and `API_MAP.md`.
+
+**Evidence**
+- Characterization at HEAD:
+  - `create_refuses_an_extraction_candidate_naming_a_user_note` (`partition.rs:982-984`)
+  - `undo_of_a_replacement_leaves_the_old_note_superseded` (§3.3)
+  - `a_forgotten_candidates_tombstone_is_honoured_by_rank` (S3)
+  - `recently_learned_lists_a_same_key_loser` (S7)
+  - `undo_makes_a_sibling_note_source_forgotten` (§3.3: at HEAD undo is a forget)
+  - `archiving_a_candidate_activates_its_link` (S9)
+  - `a_model_tool_edit_of_a_candidate_records_extracted_user` (S10)
+
+  Each is flipped.
+- New:
+  - `a_learned_statement_replaces_a_learned_note_automatically`
+  - `a_learned_statement_against_a_user_note_is_a_suggestion` (X is still recalled and B is not)
+  - `an_external_target_gets_a_suggestion`
+  - `a_replacement_is_written_in_its_targets_partition`
+  - `same_key_without_replaces_supersedes_the_key_winner`
+  - `an_active_model_tool_supersede_of_a_user_note_is_still_authority_conflict` (the G2 regression)
+  - `confirm_of_a_suggestion_requires_the_target_revision`
+  - `confirm_refuses_a_moved_target_and_leaves_the_candidate`
+  - `confirm_dismisses_the_other_suggestions_for_the_target`
+  - `confirming_one_of_two_suggestions_sharing_a_row_keeps_it_recallable` (rev 1's S6 would have hidden it)
+  - `withdrawals_leave_sibling_notes_recallable`, once each for Keep mine, Deny, S6 and undo: a sibling note citing the same message stays out of `source_forgotten` and in automatic recall
+  - `forget_still_suppresses_the_message_for_siblings` (fixture 16's reading, unchanged)
+  - `undo_brings_the_replaced_note_back`
+  - `undo_of_a_chain_revives_one_step`
+  - `undo_dismisses_a_candidate_of_either_origin`
+  - `archiving_a_suggestion_is_refused_on_every_surface`
+  - `a_model_tool_edit_of_a_suggestion_is_authority_conflict`
+  - `a_repeated_identical_suggestion_is_dedup`
+  - `list_items_carry_supersedes`
+  - route tests for `suggestions` (read from the index), confirm without the target (`400`), with a moved target (`409`), and undo of a candidate
+  - GUI tests: Suggestions renders both texts, Replace sends `If-Match` and `target_revision`, Keep mine sends undo, candidate copy follows the origin, the undo copy
+  - CLI tests for `suggestions`, `confirm` and `undo` of a suggestion
+  - fixtures 16 and 24 unchanged and passing
+
+**Risk.** Loosening a G2 guard. It is loosened for candidates only, the regression test stays, and a candidate retires nothing until a user-directed confirm: S9 and S10 close archive and model edits.
+
+### L4 — in-chat confirmation (MD-12)
+
+**Files**
+- **Core:**
+  - `tools/registry/mod.rs`: `ToolContext.human_approval` and `human_denial`, and `BuiltInTool::confirmation_preview` and `on_confirmation_denied`. `ToolContext` derives `Default` (`tools/registry/mod.rs:56`), but seven struct literals spell out every field and must gain the two: `runner/lead_agent/tools.rs:338`, `runner/lead_agent/mod.rs:268`, `orchestrator/skill/invocation.rs:748` and `:1252`, `orchestrator/query_handler/simple_query_handler.rs:140`, `tools/builtins/artifact_write.rs:539`, and the test literal `orchestrator/tests.rs:672`. L4's first commit converts them to `..Default::default()` before adding the fields;
+  - `tools/builtins/mod.rs`: `approval_is_per_call`, and the annotations for `memory_confirm`;
+  - `tools/builtins/memory_tools.rs`: `MemoryConfirmTool`, and `memory_update`'s preview refusal;
+  - `tools/builtins/main_loop.rs`: the surface rule;
+  - `security/sandbox/mod.rs`: the per-call branch, the preview, the fact, the denial hook;
+  - `security/confirmation.rs`: `preview` and `per_call` on the request;
+  - `events.rs`, `chat/stream_manager/mod.rs`;
+  - `memory/service/mutations.rs`: `confirm_suggestion`, `pending_suggestions` (over the index's `supersedes` column from L2; L3's suggestions route shares the query);
+  - `prompt_ctx/sources/memory.rs` and `orchestrator/query_handler/simple_query_handler.rs`: the `<memory_suggestions>` block;
+  - `memory/learning/queue.rs`: the `raised` set.
+- **API and daemon:** `crates/openalpaca_api/src/events/mod.rs`, `apps/openalpacad/src/{event_bridge.rs, events/persistence.rs, routes/chat.rs, routes/chat_types.rs}`.
+- **GUI:** `components/chat/{ToolConfirmationBanner.tsx, Composer.tsx}`, `lib/chat-stream.ts` and `views/chat/useChatSession.ts` (the fields).
+- **CLI:** `apps/openalpaca/src/chat_stream/mod.rs` and `commands/confirmations.rs`.
+- **Docs:** DESIGN_SPEC §3.14, `docs/GUI_Manual.md`, `docs/CLI_Manual.md`, `docs/Daemon_Manual.md`, `docs/api/` and `API_MAP.md`.
+
+**Evidence**
+- Characterization at HEAD: `an_approved_memory_update_confirm_is_refused_after_the_click`, the wasted click, flipped to "no card, refused before".
+- New, one per branch of the sandbox:
+  - `an_approved_memory_confirm_records_origin_user`
+  - `auto_approve_still_prompts_a_per_call_tool`
+  - `an_entire_tool_approval_is_not_cached_for_memory_confirm`
+  - `a_cache_hit_never_carries_an_approval`
+  - `a_caller_supplied_human_approval_is_discarded`
+  - `unattended_refuses_memory_confirm`
+  - `no_broker_refuses_it`
+  - `without_an_approval_the_tool_answers_approval_required`
+  - `deny_dismisses_the_suggestion_and_leaves_the_target`
+  - `timeout_leaves_the_suggestion`
+  - `a_stale_target_revision_raises_no_card`
+  - `an_inferred_suggestion_is_not_a_suggestion_in_chat` (the tool, the preview and `<memory_suggestions>` each refuse or skip an `extracted_other` candidate)
+  - `the_preview_date_comes_from_the_cited_user_row`
+  - `memory_confirm_is_absent_on_connector_and_unattended_surfaces`
+  - `the_preview_is_daemon_authored_and_bounded`
+  - `the_preview_never_reaches_event_log`
+  - `the_sse_frame_carries_preview_and_per_call`
+  - `memory_suggestions_block_lists_three_and_skips_raised_ones`
+  - `pending_suggestions_parses_no_partition` (a test-only parse counter, as in L6)
+  - GUI: the banner shows the preview, and there is no Always allow when `per_call`
+  - CLI: the inline prompt prints the preview, and `--entire-tool` is refused for a per-call tool
+
+**Risk.** This is a security-sensitive change to the sandbox. The approval fact is set on exactly one branch, and every branch has a test. SystemEvent and ServerEvent gain **no new variant**, so no new `event_bridge.rs` or `persistence.rs` arm is needed (CLAUDE.md *Gotchas*). The **patterns** that read the events already end in `..` (`event_bridge.rs:420-429`, `events/persistence.rs:301-306`, the three connector listeners), but every **struct literal** that builds one must gain the two fields: `security/sandbox/mod.rs:363`, `apps/openalpacad/src/events/handlers.rs:415-433` (the `tool_confirmation_requested` signature and literal, and its callers `event_bridge.rs:434` and the test at `events/persistence.rs:774`), the SSE literal `event_bridge.rs:447`, the test publish at `event_bridge.rs:1134`, and `PendingConfirmation` at `routes/chat.rs:858`. One pattern has no `..`: the SSE serializer `routes/chat.rs:604-615`, which must also emit the two fields (§8.10).
+
+### L5 — search for every agent, the header, subagent deliveries
+
+**Files**
+- `config/agents/{writing_agent,research_agent,system_agent}.md`;
+- `agent/template/mod.rs`: the ambient grant for internal templates, per LQ3;
+- `memory/service/{types.rs, recall.rs, wire.rs}` and `memory_index/{mod.rs, search.rs}` (`upcoming` on each hit and pinned row);
+- no `prompt_ctx` or `runner/lead_agent` change (§6.2).
+- **Docs:** 03 §7 line 359 (§11).
+
+**Evidence**
+- Characterization: `writing_research_and_system_lack_memory_read`, and `an_upcoming_note_renders_no_window`.
+- New:
+  - `all_nine_templates_name_memory_read`
+  - `an_ambient_grant_respects_denied_capabilities`
+  - `a_plugin_template_gets_no_ambient_memory_read`
+  - `a_windowed_note_renders_both_bounds`
+  - `an_unwindowed_header_is_byte_identical`
+  - `timing_upcoming_uses_the_index_clock` (an index with a pinned clock marks the hit, and the header prints it)
+  - `search_results_carry_validity`
+  - `a_subagents_memory_search_records_its_task_id_in_the_ring`
+  - `test_golden_lead_agent_spawn_subagent_byte_identical` unchanged
+
+**Risk.** Prompt growth for three templates. The ambient grant is LQ3.
+
+### L6 — parse cache and benches
+
+**Files:** `memory_files/{partition.rs, snapshot.rs}`, new `memory_files/cache.rs` (with the injectable stat function), `memory/service/mod.rs`, `memory_index/bench.rs`, and new `memory/service/bench.rs`.
+
+**Evidence**
+- A test-only parse counter on `Partition` pins the quick wins: `store` does 1 parse, `update` 2, and a 20-target `forget` 1 load.
+- New:
+  - `reconcile_outputs_are_unchanged_on_a_10k_partition`
+  - `a_cache_hit_skips_the_read`
+  - `a_service_write_updates_the_cache`
+  - `an_external_edit_invalidates_one_entry`
+  - `a_same_stat_external_edit_is_never_overwritten` (the injected stat function reports the pre-edit key; the mutation's re-hash catches the edit, and the test fails with the re-hash removed, §6.3)
+  - `a_partition_over_the_cap_is_parsed_uncached`
+  - `a_workspace_move_evicts_the_old_keys`
+  - both benches compile under `--no-run`
+
+**Risk.** Serving a stale cached parse to a mutation, which the invariant and its test cover.
+
+### L7 — the evaluation harness and corpus
+
+**Files:** `scripts/eval/memory/{conversations-learning.json, coverage-judge-prompt.md, README.md, compare.py}`, `crates/openalpaca_core/tests/{memory_eval.rs, memory_eval_corpus.rs, common/eval.rs}`, and core's public `LearningQueue::{new(.., QueueMode::Manual), flush_session, flush_all, wait_idle}`.
+
+**Evidence**
+- `memory_eval_corpus.rs` runs in default CI, including the CJK leakage check on a planted Chinese shingle.
+- Judge-guard unit tests, in the harness's non-ignored helpers: an unroutable judge is refused; a judge equal to the reader or of the reader's family is **accepted and recorded** as `judge_is_reader` / `judge_same_family` (LQ1).
+- `flush_session_runs_to_the_last_row_without_the_quiet_rule` and `a_manual_queue_never_flushes_on_its_own` (core, default CI).
+- Replay reads a fixture-sized scratch database and learns without a reader call.
+- Re-judge reads a fixture-sized archived report.
+- `compare.py` refuses mismatched judges, checked by a `--self-test` flag.
+- `cargo test -p openalpaca_core --features live-eval --test memory_eval --no-run` passes.
+
+**Risk.** Corpus leakage into the held-out set, handled by the shingle check and the review.
+
+### L8 — runs and report
+
+§7.5 in full. Its output is `10-learning-evaluation.md`, plus the archived reports in `scripts/eval/memory/reports/`, redacted as 08's were, and the layout decision (§6.4). Every run uses `OPENALPACA_HOME_STORE` and `OPENALPACA_CONFIG_DIR` in a scratch directory. `~/.openalpaca` is never read.
+
+### 8.9 Migration impact
+
+- **One migration, 044, in L1.** It adds `conversation_messages.request_id` and `conversation_messages.workspace_root` and creates `learning_cursor`, seeded at each session's newest message. `BASELINE_VERSION` stays 43 and goes on meaning "oldest openable schema". The index's own `SCHEMA_VERSION` 2 (L2) is not a database migration: the index is a disposable cache, rebuilt on a version mismatch.
+- **The five assertions that read a fresh database's version** move to `MIGRATIONS.last().version`: `database/tests.rs:11`, `:34`, `:50` (the whole `schema_version` list), `:375` and `:1036`. The test at `:369` keeps `BASELINE_VERSION == 43`, reads the fresh version from the last migration, and is renamed `a_fresh_database_opens_at_the_newest_version_with_no_memory_tables`. The new table's name keeps it passing (§1.3).
+- **No exact column-list assertion exists on `conversation_messages`.** `database/tests.rs:688` checks with `contains`.
+- **The generated schema doc** gains the column and the table. `scripts/gen_api_docs.py` already handles `ADD COLUMN` (`:1047`).
+- **Rollback.** The owner's live store migrates in place. A pre-L1 build refuses the migrated database rather than misreading it (slice 0.5), so keeping a copy before the first L1 start is the rollback.
+
+### 8.10 Collisions with existing tests and code
+
+| Where | What changes |
+|---|---|
+| `orchestrator/extraction.rs:586-844` (10 tests) | Move to `memory/learning/tests.rs`. The input becomes a persisted window; the MD-2, cap, threshold, no-owner, cancellation, source, dedup and thinking assertions keep their meaning. |
+| `orchestrator/tests.rs:7497-7600` (`extracting_orchestrator`, `a_preference_the_user_typed_becomes_a_note_after_the_turn`, the U2 attachment test) | Drive through a `Gateway` with persistence and a queue flush, because `handle_message` persists nothing |
+| `daemon_config/tests.rs:45`, `:54`, `:586-608`; `config_schema/tests.rs:156`, `:367`; `config_schema/registry.rs:308`, `:372`; `daemon_config_cli/mod.rs:103-110`, `:141-143`; `daemon_config_cli/tests.rs:80-82`; `config/daemon.toml:40`, `:45` | Keys removed or renamed (§1.10) |
+| `config_schema/tests.rs:101` (`assert_eq!(keys.len(), 43)`) | 48 after L1's config commit adds five rows, 47 once the extractor commit removes `extract_every_n_turns` (§1.10); the comment above it names each change |
+| `SystemEvent`/`ServerEvent::ToolConfirmationRequested`, `ChatStreamEvent::ConfirmationRequested`, `PendingConfirmation` literals: `security/sandbox/mod.rs:363`, `events/handlers.rs:415-433`, `event_bridge.rs:434`, `:447`, `:1134`, `events/persistence.rs:774`, `routes/chat.rs:604-615` (a pattern without `..`), `:858` | Gain `preview` and `per_call` in L4 (§4.4) |
+| The seven full `ToolContext` literals (L4's file list) | Converted to `..Default::default()` in L4's first commit |
+| `memory_index/mod.rs:44` (`SCHEMA_VERSION`) and the index tests that build a v1 cache | Version 2 in L2; a v1 cache is rebuilt |
+| `crates/openalpaca_llm` (`routing/router/mod.rs`) | Gains `rate_headroom`, read-only, in L1. The paused LLM-providers design (04 §7) reads no rate-limiter API, and this method changes no provider table. It is recorded there so the redesign keeps it. |
+| `crates/openalpaca_core/tests/memory_eval.rs:1682`, `:1796`; `scripts/eval/memory/README.md:113` | `[orchestrator.learning] enabled` replaces the override |
+| `database/tests.rs:11`, `:34`, `:50`, `:369-375`, `:1036` | §8.9 |
+| Fixtures 16 and 24 | Must pass unchanged (forget semantics) |
+| `memory/service/tests.rs:1766-1781`, `prompt_ctx/sources/memory.rs:364` | Unchanged (conditional rendering) |
+| `lead_agent/tests.rs` (nine `SpawnSubagentTool::new` sites) | Untouched: §6.2 edits nothing on the spawn path |
+| `ToolConfirmationBanner` tests, `useChatSession` tests | New optional fields; the existing cases are unchanged |
+| The paused LLM-providers design (04 §7) | The router APIs this design reads are `answering_model`, `is_routable`, `effective_default_model`, `provider_requires_key`, `runtime_config` and the new `rate_headroom` (row above) |
+
+### 8.11 Documents to change, with the slice that lands each
+
+| Document | Change | Slice |
+|---|---|---|
+| 03 | rev 6 folds §11 | each slice folds its own rows, and the revision log names the slice |
+| 04 | A pointer to 09 for the Learning v2 wave. S3-R3 and S3-R5 are marked as taken here. | L1 |
+| CLAUDE.md | Schema head 44, `learning_cursor`, the learning cadence | L1 |
+| `docs/Daemon_Manual.md`, `docs/CLI_Manual.md`, `docs/GUI_Manual.md`, `apps/openalpaca-gui/DESIGN_SPEC.md`, `API_MAP.md`, `docs/api/` | as listed per slice | per slice |
+| `tasks/api-fix-plan.md` §0 | MD-10–MD-12 as taken rows, by the commit that applies each (04 §7's convention) | the applying commit |
+| The owner's Obsidian decision log | Mirrored in the same session, per CLAUDE.md | the applying session |
+
+### 8.12 Commit boundaries
+
+- **L1:** seven commits, each building on the one before and green on its own. 04 §1 requires characterization tests written against the unchanged code *before* the change (`04-implementation-plan.md:15`), in commits of their own as slice 3 did (`:345`):
+  1. **The migration and repository.** 044, `learning_window`, the cursor repository, `usage_today`, and the cursor delete in `delete_session`. The same commit regenerates `docs/api/` and updates CLAUDE.md's schema head.
+  2. **The config keys, with no behaviour.** The `[orchestrator.learning]` struct and its validation, `extract_max_calls_per_day`, and the registry and CLI rows for these and `memory_confidence_threshold`, plus `config/daemon.toml`. Everything is parsed and unread. `extract_every_n_turns` and `extract_max_items_per_turn` stay, because the old extractor still reads them.
+  3. **The characterization tests alone**, green at HEAD: `default_cadence_extracts_one_turn_in_five`, `a_long_message_is_cut_to_800_chars`, `a_followup_row_mints_an_extracted_user_note`.
+  4. **The `LearningQueue` skeleton and the gateway.** The in-flight set, the per-session counters and `with_learning`, with no flushing; the gateway's `request_id` and `workspace_root` writes; the turn guard before persistence.
+  5. **The window and the extractor rewrite.** `flush_session`, the window, the budget, validation rules 1–6, 12 and 14, and the store-and-advance closure. `orchestrator/extraction.rs` is deleted and its tests move. `extract_every_n_turns` is removed and `extract_max_items_per_turn` renamed, with their §8.10 collisions. The three characterization tests flip.
+  6. **The triggers and gates.** `rate_headroom` in `openalpaca_llm`, the sweeper (idle and switch), the 10-turn trigger, the stop drain, the boot catch-up, the durable daily gates, and the retry and backoff rules.
+  7. **The manuals** (`docs/Daemon_Manual.md`).
+- **L2:** three commits: index schema 2 and the lookup, then the service plumbing, then the extractor schema, its prompt fixture, validation and the change test.
+- **L3:** three commits: storage and service with fixture 25, then routes and CLI, then GUI and docs.
+- **L4:** four commits: the `ToolContext` literals converted to `..Default::default()`, then the sandbox and tool with events, then the prompt block, then GUI, CLI and docs.
+- **L5:** two commits: templates and the ambient grant, then the header and search validity with the subagent ring test.
+- **L6:** two commits: the quick wins, then the cache and benches.
+- **L7:** two commits: the corpus and its test, then the harness.
+- **L8:** the report.
+
+Each substantial commit ends with a line naming what was verified (CLAUDE.md commit style).
+
+---
+
+## 9. Rulings taken in this design
+
+These are adopted on the same basis as 03 §7b and §7c: none reverses an owner decision or widens a component's job. The owner may send any back.
+
+| # | Ruling | Section |
+|---|---|---|
+| LR1 | Each user row learns into its **own turn's** root, stored on the row as `workspace_root`; a row with none learns into the home partition only; a chunk never mixes roots. This keeps 03 §7a's Extraction row and §3 rule 1 as written. | §1.1 |
+| LR2 | The window reads `content` only. Assistant rows with no `request_id` (notices, `post_update`, completion reports) and `/`-turns with their answers stay out; follow-up rows are assistant-written. | §1.2 |
+| LR3 | `stated_by: user` needs **every** cited non-context row to be user-authored; a mixed citation is `OtherOutput`. Provenance is checked, not trusted, and the check proves citations, not content. | §2.4 |
+| LR4 | The cursor is a sidecar table `learning_cursor`, seeded at `MAX(id)` for existing sessions; `request_id` and `workspace_root` join `conversation_messages` | §1.3 |
+| LR5 | At-least-once, with four guards (dedup, already-learned over active notes and candidates, same-key replacement, source suppression), and the store loop and cursor advance in one blocking task | §1.4 |
+| LR6 | Stop is a bounded drain (3 s, a constant). The durable guarantee is the boot catch-up. | §1.5 |
+| LR7 | Learning starts only after 20 s of quiet and re-checks before each chunk. On a local provider (keyless, or a loopback `base_url`) it yields to a chat turn; on a keyed remote one it starts a chunk only when half the key's RPM and TPM would remain. | §1.7 |
+| LR8 | The extraction daily caps read `llm_usage_daily` for the UTC date; a binding cap queues and never drops | §1.8 |
+| LR9 | Automatic replacement only over an `extracted_user` target. `user`, `external` and `imported` targets get a suggestion. | §2.5, §3.1 |
+| LR10 | A replacement is written in its target's partition | §2.5 |
+| LR11 | A learned write with a `fact_key` targets that key's R9 winner in either partition of its chunk. It is a change only when `replaces` says so, when T was never shown to the model, or when a learned T's knowledge differs; a restatement is `unchanged`. | §2.5, §3.4 |
+| LR12 | Undo, Keep mine, Deny and S6 **withdraw**: the tombstone carries no links and suppresses no source, so the replaced note comes back and sibling notes stay. Undo also dismisses any candidate. Forget is unchanged. A forgotten candidate's tombstone carries no links. | §3.3 |
+| LR13 | `memory_confirm` is offered only on attended `gui`-source main-loop turns, never on connectors (G2, 03 §4), and only for an `extracted_user` suggestion citing a user-authored row | §4.1, §4.2, §4.3 |
+| LR14 | A per-call approval is never cached and never auto-approved | §4.2 |
+| LR15 | A subagent's notes reach *recently used* through its own memory tools; the empty package path is not edited and is recorded as residue | §6.2 |
+| LR16 | The index's FTS layout is measured before it changes | §6.4 |
+| LR17 | A learned note whose `fact_key` subject is `user` and that replaces nothing is written to the global partition, whatever its kind | §2.5 |
+| LR18 | The index gains `note.supersedes` and `note_source` (schema 2), so learning's per-chunk and per-turn reads never parse a partition | §2.3, §4.5 |
+| LR19 | A suggestion is never archived, and never edited by a model tool (S9, S10) | §3.2 |
+| LR20 | Only a reachable model's bad output counts as a failed attempt; an unavailable model, a quarantined partition and a store I/O error hold the window with backoff | §1.4 |
+| LR21 | A user row over 8 KiB counts as possibly quoted text: an item it supports is `OtherOutput` | §1.2 |
+
+## 10. Owner questions
+
+Each question has a recommendation, and the design is written for it.
+
+> **Answered by the owner, 2026-09-24:** **LQ1 — the same model judges, marked as such** (not the recommendation; §7.4 rewritten). **LQ2 — Deny dismisses the suggestion for good** (recommended). **LQ3 — `memory_read` for every built-in agent by an ambient grant, plugin templates excluded** (recommended). **LQ4 — unlearned turns of a deleted or cleared conversation are dropped** (recommended). Everything below the table is written for these answers; LQ2(b) is not built.
+
+| Id | Question | Recommendation | Alternative and its cost |
+|---|---|---|---|
+| **LQ1** | Which judge grades the learning evaluation? This machine has only `qwen3.8` (§7.4), the reader's family. | **A cloud judge from another vendor**, keyed through `secret_env` in the scratch `llm.toml`. Independence from the reader is the point, and the corpus is fictional. This restores 04 slice 1's "cloud keys by default". About 0.4M input tokens per 470-question pass, plus about 83 coverage calls per learning run; the report records the actual cost. | A one-time pull of a local model from a **different family** into Ollama: no egress per run and no cost, but a download of tens of GB and about +1 h of local judge time per run |
+| **LQ2** | What does **Deny** on the in-chat card do to the suggestion? | **Dismiss it durably**: a withdrawal of the candidate, the same act as **Keep mine** (§3.3). It carries no links and suppresses no source, so whatever else the same message taught stays learned; the cursor is already past those rows, so they are not read again. The card asked "replace X with Y?", and No is an answer. A new optional sandbox hook does it (§4.3). | *Not now*: leave it in the Memory view and do not raise it again on that lane until restart. No hook is needed, but the suggestion comes back in later conversations until it is dismissed in the view. |
+| **LQ3** | Should `memory_read` reach every agent by an **ambient grant** in `to_subagent`? That covers the owner's installed templates without a re-seed, and widens the ambient capability set (T15's class). | **Yes, for internal templates only**, together with the shipped-template edits. The owner asked for "every agent template", and the installed `config/agents/` is never re-seeded. `denied_capabilities` still wins. **Plugin-contributed templates are excluded**: a plugin-backed subagent's tool results go back to the plugin's own process (`runner/plugin_agent.rs:241-247`), so an ambient grant would hand every note to third-party code by default. A plugin template that names `memory_read` gets it, as today. | Template edits only: fresh installs only, and the owner hand-edits three files. Or an ambient grant for plugin templates too, which exposes the owner's notes to every installed plugin agent without a prompt. |
+| **LQ4** | What happens to the unlearned turns of a conversation the user **deletes or clears**? | **Dropped.** The delete is the user's say, learning never delays a delete, and an in-flight flush that finds its session gone writes nothing (§1.5). MD-10's "nothing is skipped" then reads "nothing the user kept". | Extract first: the delete waits on a model call, tens of seconds on a local model, or races it |
+
+**Noted, not asked.**
+- L4 makes T22's unscoped `GET /v1/chat/confirmations` carry note titles and excerpts in a memory-confirm preview (§4.4). T22 stays pending as it is.
+- The stop drain stays. A review proposed replacing it with the boot catch-up alone, since the drain rarely finishes on a local model. MD-10 names "before the daemon stops", though, so removing the drain is the owner's call, not this design's. It costs one constant and a few lines once the queue exists.
+- Restoring a note that a *confirmed* suggestion retired stays unbuilt, as at HEAD (§0.3).
+
+## 11. What this changes in 03's frozen contracts (§7a) and rules
+
+These are design revisions. Each is folded into 03 by the slice that implements it, as rev 6 and onward.
+
+| Where in 03 | Change | Slice |
+|---|---|---|
+| §4 *Initial limits* | "Extracted notes per chat turn" becomes "per extraction call, `extract_max_items_per_call` (12)" | L1 |
+| §6 *Promotion and correction*, automatic extraction | The cadence (§1), the database window reading `content` only, each row learning into its own turn's root (stored as `workspace_root`, which keeps §7a's Extraction row true), the byte budget, the durable daily caps, and what holds a window (an unavailable model, a quarantined partition) | L1 |
+| §7a `MemoryAccessContext`, Extraction row | Adds: "reads through `learning_view` only: metadata and bounded excerpts, not tool-reachable, never recorded". Capabilities stay write-only. | L2 |
+| §3 rule 2 | Adds: "a learned note whose `fact_key` subject is `user` and that replaces nothing is global" (LR17) | L2 |
+| §4 origins; §6 derived supersession | A candidate may name a `user` target (S1). A user-words **suggestion** is a candidate of origin `extracted_user`. A candidate's tombstone carries no links (S3). A suggestion is never archived, and a model tool never edits one (S9, S10). | L3 |
+| §6 *Promotion and correction*, recently learned and undo | Recently learned lists recallable notes only. Undo **withdraws**: no links, no suppressed source, and the replaced note comes back (LR12). Undo also accepts a candidate of any origin, which is how a suggestion is dismissed. Forget is unchanged. | L3 |
+| §6 *Forget contract* | Adds: "a withdrawal (undo, dismissal) is not a forget: it suppresses no source" | L3 |
+| §7a list item; `memory_list`; `recently-learned` | `supersedes: [uuid]` | L3 |
+| §7a route table | `GET /v1/memories/suggestions`; confirm's `target_revision` (required for a suggestion); undo accepting a candidate; the confirm result's `superseded` and `dismissed` | L3 |
+| §7a `memory_update` refusals | `invalid_input` for an archive of a suggestion (every surface); `authority_conflict` for a `ModelTool` edit of one | L3 |
+| §4 user-directed surface; §7 tool table; §7a tool contracts | `memory_confirm` (§4.1), limited to `extracted_user` suggestions citing a user-authored row, and the one-sentence addition in §4.2 | L4 |
+| §7 *Tool annotations* | `approval_is_per_call`; the preview hook; `memory_update`'s confirm refused before the card | L4 |
+| §7 *Capabilities* (line 359) | "No agent template changes" becomes "all nine templates name `memory_read`, and `to_subagent` grants it ambiently to internal templates unless denied; a plugin-contributed template gets it only by naming it" | L5 |
+| §5 step 8, the header; §7a `memory_search` result | `valid_from`, `valid_to` and `timing=upcoming` in the header; `valid_from` and `valid_to` on search results | L5 |
+
+## Revision log
+
+- **rev 3 (2026-09-24):** the owner answered LQ1–LQ4; LQ1 (the reader judges, marked) rewrites §7.4 and the L7 guard tests from refusal to recording; the test model is `qwen3.8:27b-mlx`.
+- **rev 1 (2026-09-24):** initial design and plan for Learning v2, written for MD-10–MD-12, the adopted scope and the recommended answers to LQ1–LQ4. It is grounded in three read-only surveys at `bdfcf272`/`55a1dc4c`, whose citations are restated here, and it adds rulings LR1–LR16.
+- **rev 2 (2026-09-24):** applies a review of rev 1: 17 correctness findings (C1–C17) and 12 buildability findings (B1–B12). Each was checked against the code at `55a1dc4c`. All 29 are accepted, two of them in part (B1, B11); no finding is rejected whole. Rulings LR17–LR21 are added, and LR1, LR3, LR5, LR7, LR11–LR13 and LR15 are revised.
+  - **C1 (major), accepted.** S6's dismissals were source-suppressing forgets that ran after the confirm, so a dismissal citing the confirmed note's row made that note `source_forgotten` (`partition.rs:940`, `:1156-1167`; `authority.rs:252`; `search.rs:223`) while its target was superseded. Dismissals are now withdrawals that suppress nothing, run after the write (S6); rule 11 also runs after target resolution. Test: `confirming_one_of_two_suggestions_sharing_a_row_keeps_it_recallable`.
+  - **C2 (major), accepted.** Deny, Keep mine, S6 and undo were forgets, so they suppressed the whole message and silently retired sibling facts, which §1.4(d) then kept from being re-learned. `ForgetMode::Withdraw` now writes no links and no suppressed source. Undo widens to accept any candidate, and every "reject this change" act goes through it; explicit forget is unchanged (§3.3, LR12, LQ2). Sibling tests were added for each act.
+  - **C3 (major), accepted.** A router error counted as an attempt, so an outage skipped windows, and quarantine and I/O errors were unhandled. Only a reachable model's bad output counts now; unavailability, quarantine (checked before the call) and store errors hold the window with backoff and one WARN per outage (§1.4, LR20). This is reconciled with P10 and fixture 19.
+  - **C4 (major), accepted.** "A cloud call delays nothing" was false: the flush drains the key's shared TPM bucket (`retry.rs:36,64`, `rate_limiter/mod.rs:327-350`), and an `openai` provider on localhost never yielded. The design now has a quiet re-check before each chunk, local detection by a keyless provider or a loopback `base_url`, and a new read-only `LlmRouter::rate_headroom` that keeps half of each bucket for chat, with a budget cap at 40 % of TPM (§1.6, §1.7, LR7).
+  - **C5 (major), accepted.** An `extracted_other` candidate could be confirmed in chat and labelled "from what you said". `confirm_suggestion`, the preview and `<memory_suggestions>` now require origin `extracted_user` and a user-authored cited row, and the date comes from that row. S10 stops a model-tool edit from laundering an inferred candidate (§4.2 rule 5, §4.4, §4.5).
+  - **C6 (major), accepted.** One cited user row made an item `UserWords`. Now every cited non-context row must be user-authored, and the residual is stated (§2.4 rule 5, LR3; prompt rule 2).
+  - **C7 (major), accepted.** The ambient `memory_read` grant reached plugin templates, whose tool results go to third-party processes. It now covers `AgentSource::Internal` only (§5, LQ3). Test: `a_plugin_template_gets_no_ambient_memory_read`.
+  - **C8 (major), accepted, with the first fix offered.** LR1 filed project-less turns into the session's project, against 03 §7a and §3 rule 1. Migration 044 stores `workspace_root` per user row, and each row learns into its own root; a chunk never mixes roots (§1.1, §1.3, LR1). No 03 row changes for it.
+  - **C9 (minor), accepted.** A re-run duplicated candidates, and a cancellation could separate the writes from the cursor advance. Rule 13 now covers pending candidates through the index's `note_source`, and the store loop and the CAS run in one blocking closure (§1.4, §1.7).
+  - **C10 (minor), accepted.** Guard (b) needed an "Extraction surface" fact that nothing records, and it dropped a same-key correction. It is now defined by origin plus a cited chunk row (a `ModelTool` note counts), and it drops an item only when key or title **and** content match (§1.4(b)).
+  - **C11 (minor), accepted.** `turn_started` now runs before the user row is persisted (§1.5). Test: `a_turn_is_in_flight_before_its_row_exists`.
+  - **C12 (minor), accepted.** Piped or pasted text was the user's own words. Rows over 8 KiB now support only `OtherOutput` (LR21), the prompt tells the extractor that user rows may quote other text, and the residual is stated next to U2 (§1.2).
+  - **C13 (minor), accepted.** `pending_suggestions` would have parsed partitions on every attended turn. Index schema 2 adds `note.supersedes` and `note_source` (LR18), `learning_view` runs on `spawn_blocking`, and both are in the service bench (§2.3, §4.5, §6.4).
+  - **C14 (minor), accepted.** Archiving a suggestion activated its link. S9 refuses it on every surface.
+  - **C15 (minor), accepted.** §8.10 gains the config tests (`config_schema/tests.rs:101`, `:156`; `daemon_config/tests.rs:586-608`; `daemon_config_cli/tests.rs:80`) and the confirmation-event literals, including the one pattern without `..` (`routes/chat.rs:604-615`). The registry count is stated: 43 → 48 → 47.
+  - **C16 (minor), accepted.** A `user.*` fact learned in two projects piled up. The key lookup now spans the chunk's partitions, and `user.*` keys without a target are global (§2.5, LR17). The residual for other projects' keys is stated.
+  - **C17 (minor), accepted.** The connector filter now cites `telegram/connector.rs:143-151`, `discord/connector.rs:234-240` and `imessage/connector.rs:198-204`.
+  - **B1 (major), accepted in part.** A restated, unchanged fact became a suggestion or an automatic replacement. The deterministic change test is in §2.5. It differs from the proposed fix (suggest only on an explicit `replaces`) in one case: a saved note found by key that the model was **never shown** still yields a suggestion. There a real change ("switched to Helix") shares no term with the old note, and dropping it would lose exactly what MD-11 asks to surface; the suggestion shows both texts. The corpus gains `restate` turns and a restatement metric (§7.1, §7.3).
+  - **B2 (major), accepted.** The key lookup covered one partition. It now covers the chunk's project partition, then home, and at least 2 `user.*` change pairs cross a project boundary in the corpus (§2.5, §7.1).
+  - **B3 (major), accepted.** L1 is reordered into seven buildable commits, with the characterization tests alone in commit 3 and the key removal deferred to the extractor commit. The migration commit also regenerates `docs/api/` and CLAUDE.md, because `--check` is a CI gate (§8.12).
+  - **B4 (major), accepted.** The learning phase is sampled at the reader's default temperature (`backend.rs:52,69,146`). The harness now runs the queue in `Manual` mode with defined `flush_session` semantics, subscribes to the bus around each flush, and adds a replay mode. Results are reported per pair, with the spread over three replays (§7.2, §7.3, §7.5).
+  - **B5 (minor), accepted.** The lookup is now buildable: 512-character query windows (`query.rs:181-184`), step 2 through `note_source`, and rule 13 defined without a surface marker (§2.3).
+  - **B6 (minor), accepted.** The prompt text is a committed fixture with a byte-for-byte test, the `<output_schema>` is given verbatim, `rows` accepts `3` and `"R3"`, context rows are dropped from citations, and rule 11 ties go to model order (§2.1, §2.2, §2.4).
+  - **B7 (minor), accepted.** `MemoryIndex::now` stays private. Each hit carries `upcoming`, computed on the index's clock (§6.1).
+  - **B8 (minor), accepted.** L4's file list names the seven full `ToolContext` literals, not the ~20 the review estimated (`PersonaToolContext` is another type), and its first commit converts them to `..Default::default()`.
+  - **B9 (minor), accepted.** The same-stat test could not fail, because `ctime` moves. The cache takes an injectable stat function, and the test uses it (§6.3, L6).
+  - **B10 (minor), accepted.** The subagent package edits changed nothing in production. They are dropped; one ring test pins the real path, and the empty-bundle path is residue (§6.2, LR15).
+  - **B11 (minor), accepted in part.** Accepted: `restore_replaced` is deferred (§0.3); the switch trigger is derived in the sweeper from `session.status`, with no bus subscriber; five learning knobs become constants, leaving three `[orchestrator.learning]` keys plus `extract_max_calls_per_day`; E′ leaves L8. **Rejected: replacing the stop drain with the boot catch-up.** MD-10 is an owner decision that names "before the daemon stops", and removing it is the owner's call; the drain stays, as a constant (§10 *Noted*).
+  - **B12 (minor), accepted.** The leakage check adds CJK 12-character shingles beside the word check, and the coverage judge gets a frozen, hashed prompt (§7.1, §7.3).
