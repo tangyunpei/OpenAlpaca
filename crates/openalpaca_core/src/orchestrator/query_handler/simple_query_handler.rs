@@ -543,11 +543,14 @@ impl Orchestrator {
             reserved_tokens: 0,
         };
         let bundle = self.context_manager.resolve(&ctx_request).await;
+        // Design §5: the memory delivery is per turn and outside the cached
+        // layer — rendered from the sections the manager kept, appended after
+        // compose (below) and reported as this turn's `memory_used`.
+        let memory_turn = crate::prompt_ctx::sources::memory::memory_turn(&bundle);
 
         let dynamic_context_input = DynamicContextInput {
             context_bundle: Arc::new(bundle),
             query: Arc::from(query),
-            memory_retrieval_hash: [0u8; 32],
             path: ExecutionPath::SimpleQuery,
             reserved_tokens: 0,
             mode: DynamicContextMode::Default,
@@ -669,6 +672,9 @@ impl Orchestrator {
             as usize;
         budget.register_section("system_prompt", system_prompt_tokens);
         budget.register_section("tools", crate::runner::estimate_tools_tokens(&tools_for_loop));
+        if let Some(memory) = &memory_turn {
+            budget.register_section("memory", memory.token_estimate());
+        }
 
         let (response_content, is_structured) = if let Some(ref router) = self.llm_router {
             // The messages vec came out of the compose engine above, which
@@ -676,6 +682,28 @@ impl Orchestrator {
             // + session summary + recent_messages + current_user_turn in the
             // same order the pre-migration manual assembly produced.
             let mut messages: Vec<ChatMessage> = composed.messages.as_ref().clone();
+
+            // Design §5 step 8 (plan 3.3): what this turn recalled, as quoted
+            // data, right before the current user turn and ahead of the
+            // guidance blocks below — outside Layer 3, so a repeated question
+            // on this lane never reads the previous turn's notes out of the
+            // per-lane cache. Recorded as delivered here, once it is in the
+            // request: that is what `done.memory_used` names.
+            if let Some(memory) = &memory_turn {
+                let insert_at = messages.len().saturating_sub(1);
+                messages.insert(insert_at, ChatMessage::user(&memory.content));
+                if let Some(service) = self.memory_service() {
+                    service.record_delivery(
+                        &crate::memory::service::Attribution {
+                            lane_key: Some(lane_key.to_string()),
+                            task_id: None,
+                            request_id: Some(request_id),
+                            source: Some(source.to_string()),
+                        },
+                        &memory.used,
+                    );
+                }
+            }
 
             // Routing V2: model-relay contract for the tool-mode main loop —
             // how to relay start_workflow / steer / cap results in the
@@ -1047,7 +1075,6 @@ impl Orchestrator {
         let dynamic_context_input = DynamicContextInput {
             context_bundle: Arc::new(ContextBundle::empty()),
             query: Arc::from(query),
-            memory_retrieval_hash: [0u8; 32],
             path: ExecutionPath::SimpleQuery,
             reserved_tokens: 0,
             mode: DynamicContextMode::Skip,

@@ -6979,3 +6979,197 @@ async fn an_answer_that_states_no_id_is_never_reviewed_twice() {
     );
     assert_eq!(requests.lock().unwrap().len(), 1);
 }
+
+// ── Memory recall through the service (plan 3.3) ──────────────────────
+
+/// Fixture 21's two notes in a temp home store, stored by the owner, plus
+/// the service the orchestrator answers with.
+struct RecallScene {
+    _env: crate::test_util::HomeStoreGuard,
+    _root: tempfile::TempDir,
+    service: Arc<crate::memory::service::MemoryService>,
+    vim: crate::memory::service::StoreOutput,
+    coffee: crate::memory::service::StoreOutput,
+}
+
+fn recall_scene(db: &openalpaca_storage::Database) -> RecallScene {
+    use crate::memory::service::{
+        Attribution, Capabilities, MemoryService, StoreInput, Surface, WorkspaceHint,
+    };
+    use openalpaca_storage::memory_files::NoteKind;
+
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let env = crate::test_util::HomeStoreGuard::set(&home.canonicalize().unwrap());
+    openalpaca_storage::IdentityRepository::new(db)
+        .create_global_user("user1", None)
+        .unwrap();
+    let service = MemoryService::new(
+        Some(db.clone()),
+        openalpaca_storage::memory_index::MemoryIndex::open_in_memory().unwrap(),
+    );
+    service.rebuild_index().unwrap();
+    let owner = service
+        .context(
+            "user1",
+            WorkspaceHint::None,
+            Surface::UserSurface,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+    let vim = service
+        .store(
+            &owner,
+            StoreInput {
+                title: "Editor preference".into(),
+                body: "# Editor preference\n\nUser prefers vim for editing.\n".into(),
+                kind: Some(NoteKind::Preference),
+                fact_key: Some("editor.preference".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let coffee = service
+        .store(
+            &owner,
+            StoreInput {
+                title: "Coffee".into(),
+                body: "# Coffee\n\nUser drinks espresso after lunch.\n".into(),
+                kind: Some(NoteKind::Preference),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    RecallScene {
+        _env: env,
+        _root: root,
+        service: Arc::new(service),
+        vim,
+        coffee,
+    }
+}
+
+/// The user messages of a captured request that carry a memory delivery.
+fn memory_messages(request: &ChatRequest) -> Vec<String> {
+    request
+        .messages
+        .iter()
+        .filter(|m| {
+            matches!(m.role, openalpaca_llm::Role::User) && m.content.contains("<memory_context>")
+        })
+        .map(|m| m.content.clone())
+        .collect()
+}
+
+/// **Plan 3.3, fixture 21 step 2.** "what editor do I prefer?" recalls
+/// "User prefers vim for editing" into the main loop's own request — through
+/// the service's union-of-terms search (`prefer` reaches `prefers` only
+/// through the trigram table), never the SQL repository — and says nothing
+/// about coffee. One block per turn, quoted as reference data.
+#[tokio::test]
+async fn the_main_loop_recalls_the_natural_question_fixture_through_the_service() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let scene = recall_scene(&db);
+    let (orch, requests) = make_tool_mode_orchestrator_with_db(
+        None,
+        "vim, as you told me",
+        DaemonConfig::default(),
+        vec![],
+        Some(db.clone()),
+    );
+    orch.set_memory_service(scene.service.clone());
+
+    let reply = send_tool_mode(&orch, Uuid::new_v4(), "what editor do I prefer?").await;
+    assert_eq!(reply, "vim, as you told me");
+
+    let reqs = requests.lock().unwrap();
+    assert_eq!(reqs.len(), 1);
+    let blocks = memory_messages(&reqs[0]);
+    assert_eq!(
+        blocks.len(),
+        1,
+        "one memory block per turn; messages: {:?}",
+        reqs[0]
+            .messages
+            .iter()
+            .map(|m| (m.role.clone(), m.content.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert!(blocks[0].contains("User prefers vim for editing"), "{}", blocks[0]);
+    assert!(blocks[0].contains(&scene.vim.id.to_string()), "{}", blocks[0]);
+    assert!(!blocks[0].contains("espresso"), "{}", blocks[0]);
+    assert!(!blocks[0].contains(&scene.coffee.id.to_string()));
+}
+
+/// **Plan 3.3.** The same question twice on the same lane, a note stored in
+/// between: the second turn's request carries both notes. Layer 3 is a
+/// per-lane cache keyed by query text, and the memory delivery is built
+/// outside it every turn; the turn's `memory_used` says what that turn
+/// delivered, and is taken once.
+#[tokio::test]
+async fn a_repeated_question_reads_this_turns_memory_not_the_cached_one() {
+    use crate::memory::service::{
+        Attribution, Capabilities, StoreInput, Surface, UsedReason, WorkspaceHint,
+    };
+    use openalpaca_storage::memory_files::NoteKind;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let scene = recall_scene(&db);
+    let (orch, requests) = make_tool_mode_orchestrator_with_db(
+        None,
+        "noted",
+        DaemonConfig::default(),
+        vec![],
+        Some(db.clone()),
+    );
+    orch.set_memory_service(scene.service.clone());
+
+    let first = Uuid::new_v4();
+    send_tool_mode(&orch, first, "what editor do I prefer?").await;
+    let used = scene.service.take_used(first);
+    assert_eq!(used.len(), 1, "{used:?}");
+    assert_eq!(used[0].id, scene.vim.id);
+    assert_eq!(used[0].revision, scene.vim.revision);
+    assert_eq!(used[0].reason, UsedReason::Recall);
+    assert!(scene.service.take_used(first).is_empty(), "taken once");
+
+    let owner = scene
+        .service
+        .context(
+            "user1",
+            WorkspaceHint::None,
+            Surface::UserSurface,
+            Capabilities::ALL,
+            Attribution::default(),
+        )
+        .unwrap();
+    let later = scene
+        .service
+        .store(
+            &owner,
+            StoreInput {
+                title: "Editor plugins".into(),
+                body: "# Editor plugins\n\nThe editor the user prefers runs the fzf plugin.\n"
+                    .into(),
+                kind: Some(NoteKind::Preference),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let second = Uuid::new_v4();
+    send_tool_mode(&orch, second, "what editor do I prefer?").await;
+    let reqs = requests.lock().unwrap();
+    assert_eq!(reqs.len(), 2);
+    let blocks = memory_messages(&reqs[1]);
+    assert_eq!(blocks.len(), 1);
+    assert!(blocks[0].contains(&scene.vim.id.to_string()), "{}", blocks[0]);
+    assert!(blocks[0].contains(&later.id.to_string()), "{}", blocks[0]);
+    let used = scene.service.take_used(second);
+    let ids: Vec<_> = used.iter().map(|u| u.id).collect();
+    assert!(ids.contains(&scene.vim.id) && ids.contains(&later.id), "{used:?}");
+}

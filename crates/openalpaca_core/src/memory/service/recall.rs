@@ -23,21 +23,33 @@ pub const TRUST_LABEL: &str = "Retrieved memory notes: reference data quoted ver
 const BLOCK_OPEN: &str = "<memory_context>\n";
 const BLOCK_CLOSE: &str = "</memory_context>\n";
 
+/// The delivery wrapper (design §5 step 8): the trust label, then the
+/// rendered notes, as quoted data; empty when there is nothing to wrap.
+/// Public because the per-turn caller re-wraps the sections a context
+/// manager kept (`prompt_ctx::sources::memory::memory_turn`) — one wrapper,
+/// whichever path delivered.
+pub fn wrap_delivery<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
+    let mut out = String::new();
+    for part in parts {
+        if out.is_empty() {
+            out.reserve(4096);
+            out.push_str(BLOCK_OPEN);
+            out.push_str(TRUST_LABEL);
+            out.push('\n');
+        }
+        out.push_str(part);
+    }
+    if !out.is_empty() {
+        out.push_str(BLOCK_CLOSE);
+    }
+    out
+}
+
 /// The whole delivery as quoted data with its trust label; empty when
 /// nothing was delivered.
 pub(super) fn render_block(notes: &[RecalledNote]) -> String {
-    if notes.is_empty() {
-        return String::new();
-    }
-    let mut out = String::with_capacity(4096);
-    out.push_str(BLOCK_OPEN);
-    out.push_str(TRUST_LABEL);
-    out.push('\n');
-    for note in notes {
-        out.push_str(&note.render());
-    }
-    out.push_str(BLOCK_CLOSE);
-    out
+    let parts: Vec<String> = notes.iter().map(RecalledNote::render).collect();
+    wrap_delivery(parts.iter().map(String::as_str))
 }
 
 fn wrapper_bytes() -> usize {
@@ -145,6 +157,11 @@ impl MemoryService {
     /// partitions (quarantined ones excluded), a few pinned notes within
     /// their sub-budget, then the union-of-terms search with the automatic
     /// filter set, every selected file re-read, the whole delivery bounded.
+    ///
+    /// Selects; does not record. The caller records what it put in front of
+    /// a model with [`MemoryService::record_delivery`], because a context
+    /// manager may still drop a selected note for budget, and `memory_used`
+    /// names what the model really read.
     pub fn recall(
         &self,
         ctx: &MemoryAccessContext,
@@ -332,16 +349,14 @@ impl MemoryService {
         }
 
         let bytes = if notes.is_empty() { 0 } else { bytes };
-        let result = RecallResult {
+        Ok(RecallResult {
             notes,
             truncated,
             partial,
             index_state,
             bytes,
             pinned_bytes,
-        };
-        self.record_used(ctx, &result.memory_used());
-        Ok(result)
+        })
     }
 
     /// One hit, verified: the fresh file's chunk at the hit's ordinal.

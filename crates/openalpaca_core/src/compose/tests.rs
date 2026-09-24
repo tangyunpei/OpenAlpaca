@@ -56,7 +56,6 @@ fn empty_compose_inputs() -> (
         query: Arc::<str>::from("hi"),
         path: ExecutionPath::SimpleQuery,
         reserved_tokens: 0,
-        memory_retrieval_hash: [0u8; 32],
         context_bundle: Arc::new(ContextBundle::empty()),
         mode: DynamicContextMode::Default,
     };
@@ -788,12 +787,20 @@ use crate::prompt_ctx::{
 };
 use openalpaca_llm::{ChatMessage, Role};
 
+fn test_memory_used() -> crate::memory::service::MemoryUsed {
+    crate::memory::service::MemoryUsed {
+        id: openalpaca_storage::memory_files::NoteId::parse("00000021-0000-4000-8000-000000000001")
+            .unwrap(),
+        revision: "f".repeat(64),
+        reason: crate::memory::service::UsedReason::Recall,
+    }
+}
+
 fn make_dyn_ctx_input(mode: DynamicContextMode) -> DynamicContextInput {
     DynamicContextInput {
         query: Arc::from("test query"),
         path: ExecutionPath::SimpleQuery,
         reserved_tokens: 1000,
-        memory_retrieval_hash: [0u8; 32],
         context_bundle: Arc::new(ContextBundle::empty()),
         mode,
     }
@@ -810,9 +817,11 @@ fn make_history_input(mode: HistoryMode) -> HistoryInput {
     }
 }
 
-/// Construct a minimal `ContextBundle` with one UserMessage-mode section
-/// (memory) and one SystemMessage-mode section (user profile). Exercises
-/// both Layer 3 output paths (context_messages + additional_system_blocks).
+/// Construct a minimal `ContextBundle` with two UserMessage-mode sections
+/// (a memory note, which Layer 3 leaves out — plan 3.3 — and a workspace
+/// artifact, which it emits) and one SystemMessage-mode section (user
+/// profile). Exercises both Layer 3 output paths (context_messages +
+/// additional_system_blocks).
 fn make_test_bundle_with_memory_section() -> ContextBundle {
     ContextBundle {
         sections: vec![
@@ -823,9 +832,22 @@ fn make_test_bundle_with_memory_section() -> ContextBundle {
                 token_estimate: 10,
                 priority: SectionPriority::Normal,
                 relevance: 0.8,
-                key: ContextKey::Memory(42),
+                key: ContextKey::Memory(test_memory_used()),
                 injection: InjectionMode::UserMessage {
                     tag: "memory".to_string(),
+                    trust: TrustLevel::Untrusted,
+                },
+            },
+            ContextSection {
+                source: "workspace",
+                kind: ContextKind::WorkspaceArtifact,
+                content: "workspace artifact snippet".to_string(),
+                token_estimate: 10,
+                priority: SectionPriority::Normal,
+                relevance: 0.7,
+                key: ContextKey::WorkspaceArtifact("notes.md".to_string()),
+                injection: InjectionMode::UserMessage {
+                    tag: "workspace_artifact".to_string(),
                     trust: TrustLevel::Untrusted,
                 },
             },
@@ -872,15 +894,29 @@ fn test_dynamic_context_layer_fingerprint_busts_on_query_change() {
     );
 }
 
+/// Plan 3.3: the memory sections are not in Layer 3's output — the caller
+/// appends them per turn, outside the cache (`sources::memory::memory_turn`).
 #[test]
-fn test_dynamic_context_layer_fingerprint_busts_on_memory_change() {
-    let mut a = make_dyn_ctx_input(DynamicContextMode::Default);
-    a.memory_retrieval_hash = [1u8; 32];
-    let mut b = make_dyn_ctx_input(DynamicContextMode::Default);
-    b.memory_retrieval_hash = [2u8; 32];
-    assert_ne!(
-        super::dynamic_context::compute(&a).fingerprint,
-        super::dynamic_context::compute(&b).fingerprint,
+fn test_dynamic_context_layer_leaves_memory_sections_out() {
+    let mut input = make_dyn_ctx_input(DynamicContextMode::Default);
+    input.context_bundle = Arc::new(make_test_bundle_with_memory_section());
+    let output = super::dynamic_context::compute(&input);
+    assert_eq!(output.context_messages.len(), 1, "{:?}", output.context_messages);
+    assert!(output.context_messages[0].content.contains("workspace artifact snippet"));
+    let all: String = output
+        .context_messages
+        .iter()
+        .map(|m| m.content.clone())
+        .chain(
+            output
+                .additional_system_blocks
+                .iter()
+                .map(|b| b.content.to_string()),
+        )
+        .collect();
+    assert!(
+        !all.contains("retrieved memory snippet"),
+        "memory reached the cached layer: {all}"
     );
 }
 
@@ -918,13 +954,13 @@ fn test_dynamic_context_layer_default_untrusted_wraps_content() {
     let mut input = make_dyn_ctx_input(DynamicContextMode::Default);
     input.context_bundle = Arc::new(make_test_bundle_with_memory_section());
     let out = super::dynamic_context::compute(&input);
-    let memory_msg = out
+    let artifact_msg = out
         .context_messages
         .iter()
-        .find(|m| m.content.contains("retrieved memory snippet"))
-        .expect("should have a message mentioning the memory content");
+        .find(|m| m.content.contains("workspace artifact snippet"))
+        .expect("should have a message mentioning the artifact content");
     assert!(
-        memory_msg.content.contains("<context_data"),
+        artifact_msg.content.contains("<context_data"),
         "untrusted content should be wrapped in <context_data> envelope"
     );
 }
@@ -1569,7 +1605,6 @@ fn test_golden_social_fast_path_byte_identical() {
     let dynamic_context_input = DynamicContextInput {
         context_bundle: Arc::new(ContextBundle::empty()),
         query: Arc::from(query),
-        memory_retrieval_hash: [0u8; 32],
         path: ExecutionPath::SimpleQuery,
         reserved_tokens: 0,
         mode: DynamicContextMode::Skip,
@@ -1778,7 +1813,6 @@ fn test_golden_skill_invocation_byte_identical() {
     let dynamic_context_input = DynamicContextInput {
         context_bundle: Arc::new(ContextBundle::empty()),
         query: Arc::from(query),
-        memory_retrieval_hash: [0u8; 32],
         path: ExecutionPath::SkillInvocation {
             skill_id: "test_skill".to_string(),
         },
@@ -2006,7 +2040,6 @@ fn test_golden_simple_query_text_only_byte_identical() {
     let dynamic_context_input = DynamicContextInput {
         context_bundle: Arc::new(ContextBundle::empty()),
         query: Arc::from(query),
-        memory_retrieval_hash: [0u8; 32],
         path: ExecutionPath::SimpleQuery,
         reserved_tokens: 0,
         mode: DynamicContextMode::Default,
@@ -2219,7 +2252,6 @@ fn test_golden_simple_query_multimodal_byte_identical() {
     let dynamic_context_input = DynamicContextInput {
         context_bundle: Arc::new(ContextBundle::empty()),
         query: Arc::from(query),
-        memory_retrieval_hash: [0u8; 32],
         path: ExecutionPath::SimpleQuery,
         reserved_tokens: 0,
         mode: DynamicContextMode::Default,
@@ -2538,7 +2570,6 @@ fn test_golden_dag_node_byte_identical() {
     let dynamic_context_input = DynamicContextInput {
         context_bundle: Arc::new(ContextBundle::empty()),
         query: Arc::from(task_description),
-        memory_retrieval_hash: [0u8; 32],
         path: ExecutionPath::LeadAgent,
         reserved_tokens: 0,
         mode: DynamicContextMode::Default,
@@ -2881,7 +2912,6 @@ fn test_golden_lead_agent_byte_identical() {
     let dynamic_context_input = DynamicContextInput {
         context_bundle: Arc::new(ContextBundle::empty()),
         query: Arc::from(""),
-        memory_retrieval_hash: [0u8; 32],
         path: ExecutionPath::LeadAgent,
         reserved_tokens: 0,
         mode: DynamicContextMode::Skip,
@@ -3108,7 +3138,6 @@ fn test_golden_lead_agent_spawn_subagent_byte_identical() {
     let dynamic_context_input = DynamicContextInput {
         context_bundle: Arc::new(bundle),
         query: Arc::from(objective),
-        memory_retrieval_hash: [0u8; 32],
         path: ExecutionPath::LeadAgent,
         reserved_tokens: 0,
         mode: DynamicContextMode::Default,
@@ -3670,4 +3699,69 @@ fn test_per_lane_cache_busts_on_tip_advance_social() {
     );
     assert!(!composed.layer_trace.memo_hits.history, "L4 must bust when tip advances");
     assert!(composed.layer_trace.memo_hits.dynamic_context, "L3 stays hit");
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Plan 3.3 — the memory section lives outside the cached dynamic-context
+// layer
+// ──────────────────────────────────────────────────────────────────────────
+
+fn bundle_with_memory(text: &str) -> ContextBundle {
+    ContextBundle {
+        sections: vec![ContextSection {
+            source: "memory",
+            kind: ContextKind::Memory,
+            content: text.to_string(),
+            token_estimate: text.len() / 4,
+            priority: SectionPriority::Normal,
+            relevance: 1.0,
+            key: ContextKey::Memory(test_memory_used()),
+            injection: InjectionMode::UserMessage {
+                tag: "retrieved_memory".to_string(),
+                trust: TrustLevel::Untrusted,
+            },
+        }],
+        total_tokens: text.len() / 4,
+        available_budget: 10_000,
+    }
+}
+
+/// **Plan 3.3.** Two turns, the same query text, the same lane, a memory
+/// note written between them. Layer 3 is cached per lane by query text, so
+/// the second turn is a cache hit — which is fine only because the memory
+/// notes are not in the cached output at all: what the model reads about
+/// memory is what *this* turn recalled, appended outside the layer.
+#[test]
+fn a_repeated_identical_query_does_not_reuse_a_stale_memory_section() {
+    let engine = ComposeEngine::new(16);
+    let lane = ConversationLane::new(LaneKey::new("user", "gui"));
+
+    let mut first = make_dyn_ctx_input(DynamicContextMode::Default);
+    first.context_bundle = Arc::new(bundle_with_memory("note A: the user prefers vim"));
+    let mut second = make_dyn_ctx_input(DynamicContextMode::Default);
+    second.context_bundle = Arc::new(bundle_with_memory("note B: the user prefers emacs now"));
+
+    let out_a = engine.lookup_or_build_dynamic_context(&first, Some(&lane));
+    let out_b = engine.lookup_or_build_dynamic_context(&second, Some(&lane));
+    assert!(!out_a.hit);
+    assert!(out_b.hit, "same query, same lane: Layer 3 is a hit");
+
+    let served: String = out_b
+        .output
+        .context_messages
+        .iter()
+        .map(|m| m.content.clone())
+        .collect();
+    assert!(
+        !served.contains("prefers vim"),
+        "the cached layer served the first turn's memory: {served}"
+    );
+
+    // What the second turn appends is what the second turn recalled.
+    let turn = crate::prompt_ctx::sources::memory::memory_turn(&second.context_bundle)
+        .expect("the bundle carries a memory section");
+    assert!(turn.content.contains("prefers emacs now"), "{}", turn.content);
+    assert!(!turn.content.contains("prefers vim"), "{}", turn.content);
+    assert!(turn.content.starts_with("<memory_context>\n"), "{}", turn.content);
+    assert_eq!(turn.used, vec![test_memory_used()]);
 }

@@ -1372,6 +1372,10 @@ fn recall_and_search_stay_within_the_owners_partitions() {
             reason: UsedReason::Recall
         }]
     );
+    // Selecting is not delivering (plan 3.3): the ring fills when the caller
+    // says the notes went in front of a model.
+    assert!(h.service.recently_used(10).is_empty());
+    h.service.record_used(&connector, &recalled.memory_used());
     let ring = h.service.recently_used(10);
     assert_eq!(ring[0].id, theme.id);
     assert_eq!(ring[0].reason, UsedReason::Recall);
@@ -1637,6 +1641,7 @@ fn recall_delivers_quoted_data_with_provenance_within_the_budgets() {
         )
         .unwrap();
     assert!(for_lead.notes.len() <= RECALL_MAX_ITEMS && for_lead.bytes <= RECALL_TOTAL_BYTES);
+    h.service.record_used(&lead, &for_lead.memory_used());
     let ring = h.service.recently_used(50);
     assert!(ring.iter().any(|r| r.id == pinned_ids[0]
         && r.reason == UsedReason::Pinned
@@ -2556,4 +2561,151 @@ fn a_forgotten_replacement_does_not_revive_its_predecessor() {
     assert_eq!(old.effective_status, EffectiveStatus::Superseded);
     assert_eq!(old.superseded_by, vec![r.id]);
     assert!(search_ids(&search(&h, &tool, "office mondays")).is_empty());
+}
+
+// ── Deliveries per request (plan 3.3, design §7a `memory_used`) ───────────
+
+fn attributed(h: &Harness, request_id: uuid::Uuid) -> MemoryAccessContext {
+    h.service
+        .context(
+            ALICE,
+            WorkspaceHint::None,
+            Surface::ModelTool,
+            Capabilities::ALL,
+            Attribution {
+                lane_key: Some(format!("{ALICE}:gui")),
+                request_id: Some(request_id),
+                source: Some("gui".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+}
+
+/// A request's `memory_used` is what its caller delivered, in order — the
+/// automatic recall the handler recorded, then the notes the model fetched
+/// through `memory_search` / `memory_read`, which record themselves — taken
+/// once; a repeat within the request is not listed twice.
+#[test]
+fn a_requests_deliveries_are_taken_once_in_delivery_order() {
+    let h = Harness::new();
+    let request_id = uuid::Uuid::new_v4();
+    let ctx = attributed(&h, request_id);
+    let vim = h.store(
+        &ctx,
+        "Editor preference",
+        "# Editor preference\n\nUser prefers vim for editing.\n",
+        NoteKind::Preference,
+    );
+    let coffee = h.store(
+        &ctx,
+        "Coffee",
+        "# Coffee\n\nUser drinks espresso after lunch.\n",
+        NoteKind::Preference,
+    );
+
+    let recalled = h
+        .service
+        .recall(&ctx, "what editor do I prefer?", RecallBudget::default())
+        .unwrap();
+    assert_eq!(recall_ids(&recalled), HashSet::from([vim.id]));
+    assert!(
+        h.service.take_used(request_id).is_empty(),
+        "recall selects; nothing is delivered until the caller says so"
+    );
+    h.service.record_delivery(&ctx.attribution, &recalled.memory_used());
+    // The same recall recorded twice — the second is not listed twice.
+    h.service.record_delivery(&ctx.attribution, &recalled.memory_used());
+    // The model then fetches the other note itself.
+    let found = search(&h, &ctx, "espresso");
+    assert_eq!(search_ids(&found), vec![coffee.id]);
+
+    let used = h.service.take_used(request_id);
+    assert_eq!(
+        used,
+        vec![
+            MemoryUsed {
+                id: vim.id,
+                revision: vim.revision.clone(),
+                reason: UsedReason::Recall
+            },
+            MemoryUsed {
+                id: coffee.id,
+                revision: coffee.revision.clone(),
+                reason: UsedReason::Tool
+            },
+        ]
+    );
+    assert!(h.service.take_used(request_id).is_empty(), "taken once");
+    assert!(h.service.take_used(uuid::Uuid::new_v4()).is_empty());
+    // The ring saw both deliveries too, newest first.
+    let ring = h.service.recently_used(10);
+    assert_eq!(ring[0].id, coffee.id);
+    assert_eq!(ring[1].id, vim.id);
+    assert_eq!(ring[1].lane_key.as_deref(), Some("u_example_alice:gui"));
+}
+
+/// A delivery with no request behind it — the lead, a subagent, a tool
+/// context with `request_id: None` — reaches the ring and no request.
+#[test]
+fn a_delivery_without_a_request_id_reaches_only_the_ring() {
+    let h = Harness::new();
+    let lead = h
+        .service
+        .context(
+            ALICE,
+            WorkspaceHint::None,
+            Surface::ModelTool,
+            Capabilities::READ_ONLY,
+            Attribution {
+                task_id: Some("task-1".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let note = h.store(
+        &h.user(ALICE, None),
+        "Release note",
+        "# Release note\n\nTag before publishing.\n",
+        NoteKind::Reference,
+    );
+    h.service.record_used(
+        &lead,
+        &[MemoryUsed {
+            id: note.id,
+            revision: note.revision.clone(),
+            reason: UsedReason::Recall,
+        }],
+    );
+    let ring = h.service.recently_used(10);
+    assert_eq!(ring.len(), 1);
+    assert_eq!(ring[0].task_id.as_deref(), Some("task-1"));
+}
+
+/// A request nobody drains is forgotten once `USED_REQUESTS_CAPACITY` newer
+/// ones have recorded a delivery, so the service cannot grow without bound.
+#[test]
+fn undrained_requests_are_bounded() {
+    let h = Harness::new();
+    let note = h.store(
+        &h.user(ALICE, None),
+        "Release note",
+        "# Release note\n\nTag before publishing.\n",
+        NoteKind::Reference,
+    );
+    let used = [MemoryUsed {
+        id: note.id,
+        revision: note.revision.clone(),
+        reason: UsedReason::Recall,
+    }];
+    let first = uuid::Uuid::new_v4();
+    h.service.record_delivery(&attributed(&h, first).attribution, &used);
+    let mut last = first;
+    for _ in 0..USED_REQUESTS_CAPACITY {
+        last = uuid::Uuid::new_v4();
+        h.service
+            .record_delivery(&attributed(&h, last).attribution, &used);
+    }
+    assert!(h.service.take_used(first).is_empty(), "the oldest was dropped");
+    assert_eq!(h.service.take_used(last).len(), 1);
 }

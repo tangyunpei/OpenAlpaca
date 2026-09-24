@@ -287,7 +287,8 @@ pub struct DynamicContextInput {
     pub query: Arc<str>,
     pub path: ExecutionPath,
     pub reserved_tokens: usize,
-    pub memory_retrieval_hash: [u8; 32],
+    /// The resolved bundle. Its `ContextKind::Memory` sections are not part
+    /// of this layer's output — see `compose::dynamic_context`.
     pub context_bundle: Arc<ContextBundle>,
     pub mode: DynamicContextMode,
 }

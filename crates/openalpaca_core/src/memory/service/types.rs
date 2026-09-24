@@ -272,8 +272,11 @@ pub struct SearchOutput {
     pub index_state: IndexState,
 }
 
-/// `memory_used[].reason` (design §7a).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `memory_used[].reason` (design §7a): `pinned` and `recall` are the
+/// automatic path, `tool` a note the model fetched through `memory_search`
+/// or `memory_read` in that turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum UsedReason {
     Pinned,
     Recall,
@@ -290,8 +293,10 @@ impl UsedReason {
     }
 }
 
-/// One `memory_used` entry (design §5 step 8, §7a).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One `memory_used` entry (design §5 step 8, §7a): the wire form on
+/// `HandleResult`, `GatewayResponse` and the SSE `done` frame, and the key
+/// of a memory section in a context bundle (`prompt_ctx::ContextKey`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct MemoryUsed {
     pub id: NoteId,
     pub revision: String,

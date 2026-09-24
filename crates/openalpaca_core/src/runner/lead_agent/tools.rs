@@ -503,7 +503,6 @@ impl BuiltInTool for SpawnSubagentTool {
         let dynamic_context_input = DynamicContextInput {
             context_bundle: Arc::new(bundle),
             query: Arc::from(objective),
-            memory_retrieval_hash: [0u8; 32],
             path: ExecutionPath::LeadAgent,
             reserved_tokens: 0,
             mode: DynamicContextMode::Default,

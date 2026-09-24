@@ -302,11 +302,16 @@ impl Orchestrator {
         let connector_sender: Arc<RwLock<Option<Arc<dyn ConnectorSendProvider>>>> =
             Arc::new(RwLock::new(None));
         let user_document: Arc<RwLock<Option<UserDocument>>> = Arc::new(RwLock::new(None));
+        // The memory service's slot (design §7a): filled by the daemon after
+        // construction (`set_memory_service`), read by the per-turn recall
+        // source and the main loop's memory writers.
+        let memory_service: Arc<RwLock<Option<Arc<crate::memory::service::MemoryService>>>> =
+            Arc::new(RwLock::new(None));
 
-        let context_manager = Arc::new(if let Some(ref db_ref) = db {
+        let context_manager = Arc::new(if db.is_some() {
             let sources: Vec<Box<dyn crate::prompt_ctx::sources::ContextSource>> = vec![
                 Box::new(crate::prompt_ctx::sources::memory::MemorySource::new(
-                    Arc::new(db_ref.clone()),
+                    memory_service.clone(),
                 )),
                 Box::new(
                     crate::prompt_ctx::sources::conversation::ConversationSource::new(),
@@ -382,7 +387,7 @@ impl Orchestrator {
             delegation_map: DashMap::new(),
             attachments_skipped_map: DashMap::new(),
             confirmation_broker: Arc::new(RwLock::new(None)),
-            memory_service: Arc::new(RwLock::new(None)),
+            memory_service,
             context_manager,
             persona_version: Arc::new(AtomicU64::new(0)),
             compose_engine,

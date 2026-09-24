@@ -241,7 +241,6 @@ pub fn build_lead_agent_prompt_from_templates(
     let dynamic_context_input = DynamicContextInput {
         context_bundle: Arc::new(ContextBundle::empty()),
         query: Arc::from(""),
-        memory_retrieval_hash: [0u8; 32],
         path: ExecutionPath::LeadAgent,
         reserved_tokens: 0,
         mode: DynamicContextMode::Skip,

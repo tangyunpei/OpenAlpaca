@@ -36,7 +36,7 @@ pub use context::{
     Attribution, Capabilities, MemoryAccessContext, Surface, WorkspaceHint, resolve_project_root,
 };
 pub use error::MemoryError;
-pub use recall::TRUST_LABEL;
+pub use recall::{TRUST_LABEL, wrap_delivery};
 pub use types::{
     ExtractionProvenance, ForgetInput, ForgetItem, ForgetItemStatus, ForgetOutput, Freshness,
     ListInput, ListItem, ListOutput, MemoryChange, MemoryUsed, Patch, ReadInput, ReadOutput,
@@ -75,6 +75,10 @@ pub const RECALL_MAX_ITEMS: usize = 8;
 pub const READ_MAX_BYTES: usize = 32 * 1024;
 /// `GET /v1/memories/recently-used`: `limit` max 200, the ring's capacity.
 pub const RING_CAPACITY: usize = 200;
+/// How many requests' deliveries are held for [`MemoryService::take_used`]
+/// at once: a request that is never drained is forgotten once this many
+/// newer ones have recorded a delivery.
+pub const USED_REQUESTS_CAPACITY: usize = 256;
 /// `memory_list.limit`: 1–100, default 50.
 pub const LIST_DEFAULT_LIMIT: usize = 50;
 pub const LIST_MAX_LIMIT: usize = 100;
@@ -133,6 +137,10 @@ pub struct MemoryService {
     slots: WriteSlots,
     fingerprints: Mutex<HashMap<String, HashMap<NoteId, Fingerprint>>>,
     ring: Mutex<VecDeque<RecentlyUsedItem>>,
+    /// Per request, what it delivered so far in delivery order — the turn's
+    /// `memory_used` (design §7a), taken once by the bridge. Oldest first,
+    /// bounded by [`USED_REQUESTS_CAPACITY`].
+    used_by_request: Mutex<VecDeque<(uuid::Uuid, Vec<MemoryUsed>)>>,
 }
 
 impl std::fmt::Debug for MemoryService {
@@ -159,6 +167,7 @@ impl MemoryService {
             slots: WriteSlots::default(),
             fingerprints: Mutex::new(HashMap::new()),
             ring: Mutex::new(VecDeque::with_capacity(RING_CAPACITY)),
+            used_by_request: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -997,24 +1006,77 @@ impl MemoryService {
     // The recently-used ring (design §5 step 8)
     // ------------------------------------------------------------------------
 
-    pub(super) fn record_used(&self, ctx: &MemoryAccessContext, used: &[MemoryUsed]) {
+    /// [`MemoryService::record_delivery`] under a context's attribution —
+    /// what `search` and `read` call on the `ModelTool` surface, where the
+    /// tool result *is* the delivery.
+    pub fn record_used(&self, ctx: &MemoryAccessContext, used: &[MemoryUsed]) {
+        self.record_delivery(&ctx.attribution, used);
+    }
+
+    /// Records a delivery (design §5 step 8): into the ring that
+    /// `recently_used` reads and, when the attribution names a request, into
+    /// that request's `memory_used`. The caller records *after* the notes are
+    /// in front of a model — `recall` selects, it does not deliver — so the
+    /// turn reports what the model really read. A note already recorded for
+    /// the request under the same revision and reason is not repeated.
+    pub fn record_delivery(&self, attribution: &Attribution, used: &[MemoryUsed]) {
         if used.is_empty() {
             return;
         }
         let now = Utc::now();
-        let mut ring = self.ring.lock().unwrap_or_else(|e| e.into_inner());
-        for item in used {
-            if ring.len() >= RING_CAPACITY {
-                ring.pop_front();
+        {
+            let mut ring = self.ring.lock().unwrap_or_else(|e| e.into_inner());
+            for item in used {
+                if ring.len() >= RING_CAPACITY {
+                    ring.pop_front();
+                }
+                ring.push_back(RecentlyUsedItem {
+                    id: item.id,
+                    revision: item.revision.clone(),
+                    reason: item.reason,
+                    delivered_at: now,
+                    lane_key: attribution.lane_key.clone(),
+                    task_id: attribution.task_id.clone(),
+                });
             }
-            ring.push_back(RecentlyUsedItem {
-                id: item.id,
-                revision: item.revision.clone(),
-                reason: item.reason,
-                delivered_at: now,
-                lane_key: ctx.attribution.lane_key.clone(),
-                task_id: ctx.attribution.task_id.clone(),
-            });
+        }
+        let Some(request_id) = attribution.request_id else {
+            return;
+        };
+        let mut by_request = self
+            .used_by_request
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let slot = match by_request.iter().position(|(id, _)| *id == request_id) {
+            Some(i) => i,
+            None => {
+                if by_request.len() >= USED_REQUESTS_CAPACITY {
+                    by_request.pop_front();
+                }
+                by_request.push_back((request_id, Vec::new()));
+                by_request.len() - 1
+            }
+        };
+        let entry = &mut by_request[slot].1;
+        for item in used {
+            if !entry.contains(item) {
+                entry.push(item.clone());
+            }
+        }
+    }
+
+    /// The request's `memory_used` (design §7a) in delivery order — the
+    /// automatic recall first, then what the model fetched through
+    /// `memory_search` / `memory_read` — taken once: a second call, or a
+    /// request that delivered nothing, answers empty.
+    pub fn take_used(&self, request_id: uuid::Uuid) -> Vec<MemoryUsed> {
+        let mut by_request = self
+            .used_by_request
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match by_request.iter().position(|(id, _)| *id == request_id) {
+            Some(i) => by_request.remove(i).map(|(_, used)| used).unwrap_or_default(),
+            None => Vec::new(),
         }
     }
 

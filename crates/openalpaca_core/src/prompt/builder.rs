@@ -455,7 +455,14 @@ mod tests {
             token_estimate: 10,
             priority: SectionPriority::Normal,
             relevance: 0.9,
-            key: ContextKey::Memory(1),
+            key: ContextKey::Memory(crate::memory::service::MemoryUsed {
+                id: openalpaca_storage::memory_files::NoteId::parse(
+                    "00000021-0000-4000-8000-000000000001",
+                )
+                .unwrap(),
+                revision: "f".repeat(64),
+                reason: crate::memory::service::UsedReason::Recall,
+            }),
             injection: InjectionMode::UserMessage {
                 tag: "memory".to_string(),
                 trust: TrustLevel::Untrusted,
