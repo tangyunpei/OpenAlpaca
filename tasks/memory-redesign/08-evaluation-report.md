@@ -86,6 +86,7 @@ Run by the session lead at `8815b4cd` (slice 3 complete, the edit guard and the 
 - The CLI `memory edit` truncated-note guard (3.9 review finding 2, CLI half): **done** (`5aa4c1a5`, `d48e427a`) — the CLI refuses before the editor opens, and a route test pins that a note over 32 KiB never loads, so no cut body can reach the route.
 - `GET /v1/memories/recently-used` has no GUI reader (design §7c R8; DESIGN_SPEC §5.7).
 - Subagent deliveries never reach the recently-used ring (plan §7a S3-R3).
+- A note whose validity window has not begun is recalled automatically since `f2dbe1f9`, but the recall header (`RecalledNote::render`, `memory/service/types.rs`) carries no `valid_from`/`valid_to`, so the model has only the dates in the body to tell a planned fact from a current one. For slice 4 to consider; nothing is changed yet.
 - 100K-note stress and the startup timing at scale (above).
 - A live GUI click-through on an isolated store is the owner's check; the GUI's unit gates and the Vite build passed.
 
@@ -93,3 +94,4 @@ Run by the session lead at `8815b4cd` (slice 3 complete, the edit guard and the 
 
 - **draft 1 (2026-09-24):** baselines, invariants, gates, footprint; D/E pending.
 - **draft 2 (2026-09-24):** §3.3's source-conflict diagnosis corrected: file order wrote the March note *before* the June one, not after it, so March most likely won a same-second `updated_at` tie on the lower random id; the fixes paragraph names its commits and the same-second seeding fix.
+- **draft 3 (2026-09-24):** §6 records that the recall header carries no validity window.
