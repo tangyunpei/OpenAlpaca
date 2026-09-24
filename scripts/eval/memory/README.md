@@ -49,7 +49,11 @@ file order, and a replacing note only after the note it replaces. The gold
 `created_at` is not an input — the service stamps its own `created_at` and
 `updated_at` at write time — so the seed order is what those stamps say,
 and they decide a same-`fact_key` tie (design §3 rule 3, §7c R9) and the
-ranking's recency tie-break. Global notes land in the owner's home
+ranking's recency tie-break. The stamps are to the second, and two notes of
+one second tie on them and fall to the lowest of the two minted ids, so a
+note that shares its scope and `fact_key` with one already stored waits out
+the rest of the second that note was written in (at most a second per such
+note; the eight changed-fact and conflict pairs). Global notes land in the owner's home
 partition, project notes in the scratch project's partition. The service mints
 its own ids; the report maps them back (`conditions.seeded_ids`). Each run
 uses its own owner (`memory-eval-owner-<8 hex>`), so a reused scratch store

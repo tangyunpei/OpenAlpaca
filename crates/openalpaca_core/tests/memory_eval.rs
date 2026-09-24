@@ -327,6 +327,24 @@ fn store_input_for(
     })
 }
 
+/// The group a same-`fact_key` tie is decided in: one partition, one key.
+/// The harness has one workspace, so the scope names the partition.
+fn same_key(note: &GoldNote) -> Option<(String, String)> {
+    let key = note.fact_key.clone()?;
+    Some((note.scope.clone(), key))
+}
+
+/// How long to wait so the next write is stamped in a later second than
+/// `previous` — an instant taken after the previous write returned, so at or
+/// after its stamp. `None` once that second is over.
+fn wait_past_second(
+    previous: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<std::time::Duration> {
+    let next = chrono::DateTime::from_timestamp(previous.timestamp() + 1, 0)?;
+    (now < next).then(|| (next - now).to_std().expect("next is later than now"))
+}
+
 /// What seeding did: the gold id → the id the service minted, and the counts
 /// the report's conditions carry.
 #[derive(Debug, Default)]
@@ -360,9 +378,18 @@ fn seed_notes(
         .unwrap_or_else(|e| panic!("memory_eval: no memory context for {owner_id}: {e}"));
     let order = seed_order(notes).unwrap_or_else(|e| panic!("memory_eval: {e}"));
     let mut stored: BTreeMap<String, (NoteId, String)> = BTreeMap::new();
+    // When the last note of each same-`fact_key` group was written, so the
+    // next one is stamped in a later second (see `wait_past_second`).
+    let mut key_written: HashMap<(String, String), chrono::DateTime<chrono::Utc>> = HashMap::new();
     let mut out = SeedOutcome::default();
     for i in order {
         let note = &notes[i];
+        let key = same_key(note);
+        if let Some(previous) = key.as_ref().and_then(|k| key_written.get(k))
+            && let Some(wait) = wait_past_second(*previous, chrono::Utc::now())
+        {
+            std::thread::sleep(wait);
+        }
         let input = match store_input_for(note, &stored) {
             Ok(input) => input,
             Err(e) => {
@@ -386,6 +413,9 @@ fn seed_notes(
                 }
                 out.ids.insert(note.id.clone(), created.id.to_string());
                 stored.insert(note.id.clone(), (created.id, created.revision));
+                if let Some(key) = key {
+                    key_written.insert(key, chrono::Utc::now());
+                }
             }
             Err(e) => {
                 out.failed += 1;
@@ -709,6 +739,45 @@ fn gold_notes_are_seeded_oldest_first_and_after_what_they_replace() {
     ];
     assert_eq!(seed_order(&notes).unwrap(), vec![1, 2, 0, 3]);
     assert!(seed_order(&[dated("x", "June 2026", &[])]).is_err());
+}
+
+/// The service stamps `created_at` to the second, and design §3 rule 3
+/// breaks a same-`fact_key` tie by it: two notes written in one second tie,
+/// and the pair falls to the lowest of the two ids the service minted — a
+/// coin flip. A note sharing its `(scope, fact_key)` with one already stored
+/// therefore waits until the second that note was written in is over, and
+/// no longer.
+#[test]
+fn a_same_key_note_waits_for_the_next_second() {
+    let at = |s: &str| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    };
+    let previous = at("2026-09-24T10:00:00.300Z");
+    let ms = std::time::Duration::from_millis;
+    assert_eq!(
+        wait_past_second(previous, at("2026-09-24T10:00:00.300Z")),
+        Some(ms(700))
+    );
+    assert_eq!(
+        wait_past_second(previous, at("2026-09-24T10:00:00.999Z")),
+        Some(ms(1))
+    );
+    assert_eq!(wait_past_second(previous, at("2026-09-24T10:00:01Z")), None);
+    assert_eq!(
+        wait_past_second(previous, at("2026-09-24T10:00:02.5Z")),
+        None
+    );
+
+    let mut note = gold("n", &[]);
+    assert_eq!(same_key(&note), None, "no fact_key, nothing to order");
+    note.fact_key = Some("lantern.staging.db".to_string());
+    note.scope = "project".to_string();
+    assert_eq!(
+        same_key(&note),
+        Some(("project".to_string(), "lantern.staging.db".to_string()))
+    );
 }
 
 /// Every field the design's `memory_store` takes arrives natively — nothing
