@@ -156,6 +156,11 @@ pub struct MemoryService {
     /// `memory_used` (design §7a), taken once by the bridge. Oldest first,
     /// bounded by [`USED_REQUESTS_CAPACITY`].
     used_by_request: Mutex<VecDeque<(uuid::Uuid, Vec<MemoryUsed>)>>,
+    /// Where `memory_changed` goes (design §7a): every write the service
+    /// makes, whichever surface asked, and every change a reconciliation
+    /// scan detects. `None` in a test that has no bus; the daemon attaches
+    /// its bus with [`MemoryService::with_bus`].
+    bus: Option<crate::bus::EventBus>,
 }
 
 impl std::fmt::Debug for MemoryService {
@@ -183,6 +188,25 @@ impl MemoryService {
             fingerprints: Mutex::new(HashMap::new()),
             ring: Mutex::new(VecDeque::with_capacity(RING_CAPACITY)),
             used_by_request: Mutex::new(VecDeque::new()),
+            bus: None,
+        }
+    }
+
+    /// Attaches the bus every `memory_changed` is published on (design
+    /// §7a). One publish per write, from inside the service, so a tool call,
+    /// the extractor, a route and the reconciliation scan all announce a
+    /// change the same way without each remembering to.
+    pub fn with_bus(mut self, bus: crate::bus::EventBus) -> Self {
+        self.bus = Some(bus);
+        self
+    }
+
+    /// Publishes one change (design §7a `memory_changed`) when a bus is
+    /// attached. The `MemoryChange` stays on the operation's output too, so
+    /// a caller can read what it did without subscribing.
+    pub(super) fn publish(&self, change: &MemoryChange) {
+        if let Some(bus) = &self.bus {
+            bus.publish(change.to_event());
         }
     }
 
@@ -1032,6 +1056,9 @@ impl MemoryService {
             origin: created.origin,
             surface: Some(ctx.surface),
         });
+        if let Some(change) = &change {
+            self.publish(change);
+        }
         Ok(StoreOutput {
             id: created.id,
             revision: created.revision,
@@ -1064,14 +1091,16 @@ impl MemoryService {
             let fresh = Self::open_partition(p.scope(), &ctx.owner_id)?;
             scanned += fresh.scan()?.len();
             for change in fresh.reconcile()? {
-                changes.push(MemoryChange {
+                let change = MemoryChange {
                     partition_key: fresh.partition_key().to_string(),
                     note_id: change.id,
                     change: "external",
                     revision: change.revision,
                     origin: Origin::External,
                     surface: None,
-                });
+                };
+                self.publish(&change);
+                changes.push(change);
             }
             self.reindex(&fresh, false)?;
         }

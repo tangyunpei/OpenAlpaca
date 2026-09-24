@@ -17,6 +17,12 @@ impl EventBroadcaster {
                 // `Ok(0)` — a shutdown is not an `event_log` row, and the
                 // table is never pruned (CLAUDE.md, W6).
                 ServerEvent::DaemonShuttingDown { .. } => Ok(0),
+                // A memory note's change is the note file's and its control
+                // snapshot's to record (memory redesign, design §7a; G30):
+                // the frame exists so a client invalidates instead of
+                // polling, and `event_log` — never pruned (W6) — must not
+                // grow by one row per remembered fact.
+                ServerEvent::MemoryChanged { .. } => Ok(0),
                 ServerEvent::CommandReceived {
                     request_id,
                     command,
@@ -722,6 +728,31 @@ mod tests {
         assert!(
             rows.is_empty(),
             "a shutdown frame must not reach event_log, found {:?}",
+            rows.iter().map(|r| &r.event_type).collect::<Vec<_>>()
+        );
+    }
+
+    /// `memory_changed` is a client's cue to refetch, not history: it must
+    /// never become an `event_log` row (design §7a, G30; the table is never
+    /// pruned, W6).
+    #[test]
+    fn memory_changed_is_never_persisted() {
+        let (_dir, db) = test_db();
+        let eb = EventBroadcaster::new(16, "inst-1".to_string(), Some(db.clone()));
+
+        eb.memory_changed(
+            "home-32acea7eb739b08afd959db91e46d450",
+            "55e811b6-3220-4758-a47b-034bd1023f38",
+            "created",
+            Some("9f".repeat(32)),
+            "user",
+            Some("user".to_string()),
+        );
+
+        let rows = EventLogRepository::new(&db).recent(10).unwrap();
+        assert!(
+            rows.is_empty(),
+            "a memory_changed frame must not reach event_log, found {:?}",
             rows.iter().map(|r| &r.event_type).collect::<Vec<_>>()
         );
     }

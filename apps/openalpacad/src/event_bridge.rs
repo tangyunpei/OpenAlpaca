@@ -241,6 +241,27 @@ pub fn spawn_event_bridge(
                     );
                     eb.soul_updated(&actor, &mode, &content_sha256, backup_path);
                 }
+                // A memory note changed (memory redesign, design §7a; G30):
+                // forwarded so the Memory view invalidates instead of polling.
+                // The broadcaster does not persist it.
+                openalpaca_core::events::SystemEvent::MemoryChanged {
+                    partition_key,
+                    note_id,
+                    change,
+                    revision,
+                    origin,
+                    surface,
+                    ..
+                } => {
+                    eb.memory_changed(
+                        &partition_key,
+                        &note_id,
+                        &change,
+                        revision,
+                        &origin,
+                        surface,
+                    );
+                }
                 // ── Log-only (NOT forwarded to clients) ───────────────────
                 openalpaca_core::events::SystemEvent::ModelAccessDenied {
                     agent_id,
@@ -715,6 +736,65 @@ mod tests {
             }
             other => panic!("Expected WorkflowStarted, got {other:?}"),
         }
+        cancel.cancel();
+    }
+
+    /// `memory_changed` crosses the bridge with every field the service
+    /// published, `surface` included when it was set and absent — not
+    /// `null` — when a reconciliation scan published it (design §7a, §7b P13).
+    #[tokio::test]
+    async fn test_memory_changed_bridged_with_and_without_a_surface() {
+        let (bus, mut rx, cancel) = setup_bridge();
+        bus.publish(SystemEvent::MemoryChanged {
+            partition_key: "home-32acea7eb739b08afd959db91e46d450".into(),
+            note_id: "55e811b6-3220-4758-a47b-034bd1023f38".into(),
+            change: "created".into(),
+            revision: Some("9f".repeat(32)),
+            origin: "user".into(),
+            surface: Some("user".into()),
+            timestamp: chrono::Utc::now(),
+        });
+        let first = recv_event(&mut rx).await;
+        match &first {
+            ServerEvent::MemoryChanged {
+                partition_key,
+                note_id,
+                change,
+                revision,
+                origin,
+                surface,
+                instance_id,
+                ..
+            } => {
+                assert_eq!(partition_key, "home-32acea7eb739b08afd959db91e46d450");
+                assert_eq!(note_id, "55e811b6-3220-4758-a47b-034bd1023f38");
+                assert_eq!(change, "created");
+                assert_eq!(revision.as_deref(), Some("9f".repeat(32).as_str()));
+                assert_eq!(origin, "user");
+                assert_eq!(surface.as_deref(), Some("user"));
+                assert_eq!(instance_id, "test-instance");
+            }
+            other => panic!("Expected MemoryChanged, got {other:?}"),
+        }
+        let wire = serde_json::to_value(&first).unwrap();
+        assert_eq!(wire["type"], "memory_changed");
+        assert_eq!(wire["surface"], "user");
+
+        bus.publish(SystemEvent::MemoryChanged {
+            partition_key: "home-32acea7eb739b08afd959db91e46d450".into(),
+            note_id: "55e811b6-3220-4758-a47b-034bd1023f38".into(),
+            change: "external".into(),
+            revision: Some("ab".repeat(32)),
+            origin: "external".into(),
+            surface: None,
+            timestamp: chrono::Utc::now(),
+        });
+        let second = serde_json::to_value(recv_event(&mut rx).await).unwrap();
+        assert_eq!(second["change"], "external");
+        assert!(
+            second.get("surface").is_none(),
+            "a scan's finding carries no surface key at all: {second}"
+        );
         cancel.cancel();
     }
 

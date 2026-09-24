@@ -93,6 +93,9 @@ impl MemoryService {
             origin,
             surface: Some(ctx.surface),
         });
+        if let Some(change) = &change {
+            self.publish(change);
+        }
         Ok(UpdateOutput {
             id: updated.id,
             revision: updated.revision,
@@ -147,14 +150,16 @@ impl MemoryService {
                             .iter()
                             .any(|s| s.kind == SourceType::Message);
                         cited_tasks |= view.note.sources.iter().any(|s| s.kind == SourceType::Task);
-                        changes.push(MemoryChange {
+                        let change = MemoryChange {
                             partition_key: partition.partition_key().to_string(),
                             note_id: outcome.id,
                             change: "forgotten",
                             revision: None,
                             origin: view.derived.origin,
                             surface: Some(ctx.surface),
-                        });
+                        };
+                        self.publish(&change);
+                        changes.push(change);
                         ForgetItemStatus::Forgotten
                     }
                     ForgetStatus::RevisionConflict { current_revision } => {

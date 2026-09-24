@@ -53,6 +53,22 @@ pub struct MemoryChange {
     pub surface: Option<Surface>,
 }
 
+impl MemoryChange {
+    /// The bus event this change is published as (design §7a
+    /// `memory_changed`): the service's own words, stamped now.
+    pub fn to_event(&self) -> crate::events::SystemEvent {
+        crate::events::SystemEvent::MemoryChanged {
+            partition_key: self.partition_key.clone(),
+            note_id: self.note_id.to_string(),
+            change: self.change.to_string(),
+            revision: self.revision.clone(),
+            origin: self.origin.as_str().to_string(),
+            surface: self.surface.map(|s| s.as_str().to_string()),
+            timestamp: Utc::now(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StoreOutput {
     pub id: NoteId,

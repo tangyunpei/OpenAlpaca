@@ -74,6 +74,30 @@ impl EventBroadcaster {
         let _ = self.tx.send(event);
     }
 
+    /// Broadcast a `memory_changed` frame (memory redesign, design §7a). Not
+    /// persisted: `persist` answers `Ok(0)` for it, like a shutdown frame.
+    #[allow(clippy::too_many_arguments)]
+    pub fn memory_changed(
+        &self,
+        partition_key: &str,
+        note_id: &str,
+        change: &str,
+        revision: Option<String>,
+        origin: &str,
+        surface: Option<String>,
+    ) {
+        self.broadcast(ServerEvent::MemoryChanged {
+            partition_key: partition_key.to_string(),
+            note_id: note_id.to_string(),
+            change: change.to_string(),
+            revision,
+            origin: origin.to_string(),
+            surface,
+            ts: Utc::now(),
+            instance_id: self.instance_id.clone(),
+        });
+    }
+
     /// Broadcast a Wake event and persist it
     pub fn wake(&self, wake_event: openalpaca_api::events::WakeEvent) {
         let event = ServerEvent::Wake {

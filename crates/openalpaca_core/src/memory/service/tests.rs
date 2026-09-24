@@ -28,6 +28,8 @@ pub(super) struct Harness {
     pub root: tempfile::TempDir,
     pub db: Database,
     pub service: MemoryService,
+    /// The bus the service publishes `memory_changed` on (design §7a).
+    pub bus: crate::bus::EventBus,
 }
 
 impl Harness {
@@ -40,7 +42,9 @@ impl Harness {
         let identities = IdentityRepository::new(&db);
         identities.create_global_user(ALICE, None).unwrap();
         identities.create_global_user(BOB, None).unwrap();
-        let service = MemoryService::new(Some(db.clone()), MemoryIndex::open_in_memory().unwrap());
+        let bus = crate::bus::EventBus::new(64);
+        let service = MemoryService::new(Some(db.clone()), MemoryIndex::open_in_memory().unwrap())
+            .with_bus(bus.clone());
         // What the daemon's `open_default` does for a fresh cache — under
         // this test's own home store, never the real one.
         service.rebuild_index().unwrap();
@@ -49,6 +53,7 @@ impl Harness {
             root,
             db,
             service,
+            bus,
         }
     }
 
@@ -2852,4 +2857,93 @@ fn a_workspace_move_through_the_service_re_keys_and_re_indexes() {
     );
     // The old root is a directory with no marker now: global only.
     assert!(h.user(ALICE, Some(&old)).project_root.is_none());
+}
+
+// ============================================================================
+// `memory_changed` (design §7a; plan 3.8): one publish per service write,
+// one per change a reconciliation scan detects, none for a no-op
+// ============================================================================
+
+/// Every write the service makes — a user-directed create, an edit, a
+/// forget, and a `sync` that finds a file edited behind its back — publishes
+/// exactly one `SystemEvent::MemoryChanged`, carrying the change word, the
+/// note, the revision and the surface; the scan's finding carries no
+/// surface (§7b P13). An exact-duplicate store writes nothing and publishes
+/// nothing.
+#[test]
+fn every_service_write_and_a_detected_external_edit_publish_one_memory_changed() {
+    let h = Harness::new();
+    let mut rx = h.bus.subscribe();
+    let user = h.user(ALICE, None);
+    let tool = h.tool(ALICE, None);
+
+    let created = h.store(&user, "Editor", "# Editor\n\nvim.\n", NoteKind::Preference);
+    let again = h.store(&user, "Editor", "# Editor\n\nvim.\n", NoteKind::Preference);
+    assert_eq!(again.dedup, Dedup::Existing, "the second store is a dedup");
+    let by_tool = h.store(&tool, "Shell", "# Shell\n\nzsh.\n", NoteKind::Preference);
+    let edited = h
+        .service
+        .update(
+            &user,
+            UpdateInput {
+                id: created.id,
+                expected_revision: created.revision.clone(),
+                action: edit("# Editor\n\nneovim.\n"),
+                reason: None,
+            },
+        )
+        .unwrap();
+    h.service
+        .forget(
+            &user,
+            ForgetInput {
+                targets: vec![(created.id, edited.revision.clone())],
+                reason: None,
+            },
+        )
+        .unwrap();
+
+    // An edit behind the service's back, then the scan that finds it.
+    let notes = h.home_notes_dir(ALICE_KEY);
+    let file = note_file_for(&notes, by_tool.id).unwrap();
+    let mut text = fs::read_to_string(&file).unwrap();
+    text.push_str("\nHand-edited.\n");
+    fs::write(&file, text).unwrap();
+    let report = h.service.sync(&user).unwrap();
+    assert_eq!(report.changes.len(), 1);
+
+    let mut seen = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let crate::events::SystemEvent::MemoryChanged {
+            note_id,
+            change,
+            revision,
+            origin,
+            surface,
+            partition_key,
+            ..
+        } = event
+        {
+            seen.push((note_id, change, revision, origin, surface, partition_key));
+        }
+    }
+    let words: Vec<&str> = seen.iter().map(|e| e.1.as_str()).collect();
+    assert_eq!(
+        words,
+        ["created", "created", "updated", "forgotten", "external"],
+        "one event per write, none for the dedup: {seen:?}"
+    );
+    assert_eq!(seen[0].0, created.id.to_string());
+    assert_eq!(seen[0].2.as_deref(), Some(created.revision.as_str()));
+    assert_eq!(seen[0].3, "user");
+    assert_eq!(seen[0].4.as_deref(), Some("user"));
+    assert_eq!(seen[1].0, by_tool.id.to_string());
+    assert_eq!(seen[1].3, "extracted_user");
+    assert_eq!(seen[1].4.as_deref(), Some("model_tool"));
+    assert_eq!(seen[2].2.as_deref(), Some(edited.revision.as_str()));
+    assert_eq!(seen[3].2, None, "a forget has no revision");
+    assert_eq!(seen[4].0, by_tool.id.to_string());
+    assert_eq!(seen[4].3, "external");
+    assert_eq!(seen[4].4, None, "a scan's finding carries no surface (P13)");
+    assert!(seen.iter().all(|e| e.5 == format!("home-{ALICE_KEY}")));
 }

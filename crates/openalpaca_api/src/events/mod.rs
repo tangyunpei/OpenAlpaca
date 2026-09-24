@@ -465,6 +465,30 @@ pub enum ServerEvent {
         ts: DateTime<Utc>,
         instance_id: String,
     },
+    /// A memory note changed (memory redesign, design §7a; owner decision
+    /// G30). Broadcast for every write the memory service makes — through
+    /// `/v1/memories*`, a model tool call or the extractor — and for every
+    /// change a reconciliation scan finds behind the service's back
+    /// (`change: external`, with no `surface`; §7b P13). The GUI's Memory
+    /// view invalidates its queries on it instead of polling. Persisted
+    /// nowhere (`events/persistence.rs` answers `Ok(0)`), like
+    /// `daemon_shutting_down`.
+    MemoryChanged {
+        /// `home-<owner-key>` or `proj-<owner-key>-<dir-key>` (design §2).
+        partition_key: String,
+        note_id: String,
+        /// `created | updated | archived | confirmed | forgotten | external`.
+        change: String,
+        /// The revision written; `null` for a forget.
+        revision: Option<String>,
+        /// `user | extracted_user | extracted_other | imported | external`.
+        origin: String,
+        /// `user | model_tool | extraction`; absent for a scan's finding.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        surface: Option<String>,
+        ts: DateTime<Utc>,
+        instance_id: String,
+    },
 }
 
 /// The source of an event, identifying which connector or interface originated it.

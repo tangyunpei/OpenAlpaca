@@ -212,9 +212,13 @@ pub async fn initialize_services(
     // The memory service, before the tool registry that registers its read
     // surface. `open_default` opens (or recreates and rebuilds) the cache
     // under the home store; the owner check and source verification read
-    // this database.
-    let memory_service =
-        Arc::new(openalpaca_core::memory::service::MemoryService::open_default(Some(db.clone())));
+    // this database. The bus is where every `memory_changed` goes (design
+    // §7a): one publish per write, from inside the service, whichever
+    // surface asked.
+    let memory_service = Arc::new(
+        openalpaca_core::memory::service::MemoryService::open_default(Some(db.clone()))
+            .with_bus(bus.clone()),
+    );
 
     // Build ToolRegistry
     let (tool_registry, connector_send_lock, mcp_supervisor) = tools::build_tool_registry(

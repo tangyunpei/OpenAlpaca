@@ -594,4 +594,24 @@ pub enum SystemEvent {
         notice_lane: String,
         timestamp: DateTime<Utc>,
     },
+    /// A memory note changed (memory redesign, design §7a `memory_changed`;
+    /// plan 3.8). Published by the memory service on **every** write it
+    /// makes — through a user-directed surface, a model tool call or the
+    /// extractor — and by a reconciliation scan that found a file changed
+    /// behind its back (`change: external`, no `surface`; §7b P13). Bridged
+    /// to `ServerEvent::MemoryChanged`; persisted nowhere.
+    MemoryChanged {
+        /// `home-<owner-key>` or `proj-<owner-key>-<dir-key>` (design §2).
+        partition_key: String,
+        note_id: String,
+        /// `created | updated | archived | confirmed | forgotten | external`.
+        change: String,
+        /// The revision written; `None` for a forget.
+        revision: Option<String>,
+        /// `user | extracted_user | extracted_other | imported | external`.
+        origin: String,
+        /// `user | model_tool | extraction`; `None` for a scan's finding.
+        surface: Option<String>,
+        timestamp: DateTime<Utc>,
+    },
 }
