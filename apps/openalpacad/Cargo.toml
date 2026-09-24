@@ -36,12 +36,7 @@ toml_edit.workspace = true
 rand.workspace = true
 async-trait.workspace = true
 openalpaca_plugins = { workspace = true }
-openalpaca_llm = { workspace = true, features = [
-    "anthropic",
-    "openai",
-    "ollama",
-    "local-embeddings",
-] }
+openalpaca_llm = { workspace = true, features = ["anthropic", "openai", "ollama"] }
 teloxide = { workspace = true }
 twilight-http = { workspace = true }
 twilight-model = { workspace = true }

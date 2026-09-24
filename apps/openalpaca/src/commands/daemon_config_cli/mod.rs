@@ -147,38 +147,6 @@ static MAPPINGS: &[TomlMapping] = &[
         section: &["orchestrator", "costs"],
         field: "task_extract_max_items_per_run",
     },
-    // Orchestrator: Supersession
-    TomlMapping {
-        schema_key: "daemon.orchestrator.supersession_distance_threshold",
-        section: &["orchestrator", "memory"],
-        field: "supersession_distance_threshold",
-    },
-    TomlMapping {
-        schema_key: "daemon.orchestrator.fts_jaccard_threshold",
-        section: &["orchestrator", "memory"],
-        field: "fts_jaccard_threshold",
-    },
-    // Orchestrator: Decay
-    TomlMapping {
-        schema_key: "daemon.orchestrator.decay_poll_interval_secs",
-        section: &["orchestrator", "memory", "decay"],
-        field: "poll_interval_secs",
-    },
-    TomlMapping {
-        schema_key: "daemon.orchestrator.decay_half_life_days",
-        section: &["orchestrator", "memory", "decay"],
-        field: "half_life_days",
-    },
-    TomlMapping {
-        schema_key: "daemon.orchestrator.decay_min_importance",
-        section: &["orchestrator", "memory", "decay"],
-        field: "min_importance",
-    },
-    TomlMapping {
-        schema_key: "daemon.orchestrator.decay_soft_cap",
-        section: &["orchestrator", "memory", "decay"],
-        field: "soft_cap",
-    },
     // Execution: Agent Defaults (cont.)
     TomlMapping {
         schema_key: "daemon.execution.max_tools_per_round",
@@ -284,17 +252,6 @@ static MAPPINGS: &[TomlMapping] = &[
         schema_key: "daemon.server.stale_timeout_secs",
         section: &["server", "chat_streams"],
         field: "stale_timeout_secs",
-    },
-    // Server: Embedding Indexer
-    TomlMapping {
-        schema_key: "daemon.server.embedding_poll_interval_secs",
-        section: &["server", "embedding_indexer"],
-        field: "poll_interval_secs",
-    },
-    TomlMapping {
-        schema_key: "daemon.server.embedding_batch_size",
-        section: &["server", "embedding_indexer"],
-        field: "batch_size",
     },
 ];
 

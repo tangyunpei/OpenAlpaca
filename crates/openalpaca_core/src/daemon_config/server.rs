@@ -18,7 +18,6 @@ pub struct ServerConfig {
     /// SSE keep-alive interval in seconds.
     pub sse_keep_alive_secs: u64,
     pub chat_streams: ChatStreamsConfig,
-    pub embedding_indexer: EmbeddingIndexerConfig,
 }
 
 impl Default for ServerConfig {
@@ -30,7 +29,6 @@ impl Default for ServerConfig {
             heartbeat_interval_secs: 5,
             sse_keep_alive_secs: 15,
             chat_streams: ChatStreamsConfig::default(),
-            embedding_indexer: EmbeddingIndexerConfig::default(),
         }
     }
 }
@@ -49,24 +47,6 @@ impl Default for ChatStreamsConfig {
         Self {
             cleanup_interval_secs: 60,
             stale_timeout_secs: 30,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct EmbeddingIndexerConfig {
-    /// Interval in seconds between embedding indexer runs.
-    pub poll_interval_secs: u64,
-    /// Number of missing embeddings to process per batch.
-    pub batch_size: usize,
-}
-
-impl Default for EmbeddingIndexerConfig {
-    fn default() -> Self {
-        Self {
-            poll_interval_secs: 30,
-            batch_size: 50,
         }
     }
 }

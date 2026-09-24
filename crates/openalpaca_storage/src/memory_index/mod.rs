@@ -415,9 +415,7 @@ impl MemoryIndex {
     /// Creates `state/` (0700) like every other `state/` accessor; the
     /// `cache/` directory is created by [`MemoryIndex::open`].
     pub fn default_path() -> anyhow::Result<PathBuf> {
-        Ok(crate::store::state_dir()?
-            .join("cache")
-            .join(INDEX_FILE_NAME))
+        Ok(crate::store::cache_dir()?.join(INDEX_FILE_NAME))
     }
 
     /// Opens the cache at `path`, creating it when absent. A file that fails

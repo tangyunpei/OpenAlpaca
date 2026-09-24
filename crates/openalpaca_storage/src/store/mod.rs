@@ -326,24 +326,12 @@ fn strip_ansi(line: &str) -> String {
     out
 }
 
-/// `state/cache/fastembed` — the local embedding model's own cache, created if
-/// missing (L11).
-///
-/// fastembed defaults its cache to `./.fastembed_cache`, **relative to the
-/// process's working directory**: the daemon's ~1 GB model download landed
-/// wherever it happened to be started from, outside the store, and was
-/// downloaded again the next time that differed. Regenerable — deleting it
-/// costs one download and nothing else — so it belongs in `state/`, with the
-/// rest of what the machine can rebuild.
-pub fn embedding_cache_dir() -> Result<PathBuf> {
-    let dir = state_dir()?.join(CACHE_DIR).join("fastembed");
-    fs::create_dir_all(&dir).with_context(|| {
-        format!(
-            "Failed to create the embedding cache directory: {}",
-            dir.display()
-        )
-    })?;
-    Ok(dir)
+/// `state/cache` — derived data the machine can rebuild; today the memory
+/// search index, `memory-index-v1.sqlite`. A pure path query: the index opens
+/// it, and nothing else creates it. Deleting the directory costs one rebuild
+/// of the index from the notes on disk and nothing else.
+pub fn cache_dir() -> Result<PathBuf> {
+    Ok(state_dir()?.join(CACHE_DIR))
 }
 
 const CACHE_DIR: &str = "cache";

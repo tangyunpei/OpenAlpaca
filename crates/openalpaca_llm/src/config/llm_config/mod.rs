@@ -11,8 +11,8 @@ pub use migration::{
 };
 pub use router_builder::{build_router, build_router_with_secret_store};
 pub use router_config::{
-    EmbeddingsConfig, KeyConfig, LlmRouterConfig, ModelConfigEntry,
-    OrchestratorLlmConfig, ProviderConfig, SecurityConfig, WebSearchConfig,
+    KeyConfig, LlmRouterConfig, ModelConfigEntry, OrchestratorLlmConfig, ProviderConfig,
+    SecurityConfig, WebSearchConfig,
 };
 pub use runtime::{
     EndpointsConfig, EnvVarsConfig, LlmRuntimeConfig, ProviderDefaults, TimeoutsConfig,

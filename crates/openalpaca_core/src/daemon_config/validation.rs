@@ -42,53 +42,10 @@ impl DaemonConfig {
             "msg_trunc_chars",
         );
         clamp_val(
-            &mut self.orchestrator.memory.supersession_distance_threshold,
-            0.0,
-            10.0,
-            "supersession_distance_threshold",
-        );
-        clamp_val(
-            &mut self.orchestrator.memory.fts_jaccard_threshold,
-            0.0,
-            1.0,
-            "fts_jaccard_threshold",
-        );
-        clamp_val(
             &mut self.orchestrator.memory.memory_confidence_threshold,
             0.0,
             1.0,
             "memory_confidence_threshold",
-        );
-        // ── Orchestrator > Memory > Decay ──
-        clamp_val(
-            &mut self.orchestrator.memory.decay.poll_interval_secs,
-            60,
-            86400,
-            "decay.poll_interval_secs",
-        );
-        clamp_val(
-            &mut self.orchestrator.memory.decay.half_life_days,
-            1.0,
-            365.0,
-            "decay.half_life_days",
-        );
-        clamp_val(
-            &mut self.orchestrator.memory.decay.min_importance,
-            0.0,
-            1.0,
-            "decay.min_importance",
-        );
-        clamp_val(
-            &mut self.orchestrator.memory.decay.soft_cap,
-            10,
-            100_000,
-            "decay.soft_cap",
-        );
-        clamp_val(
-            &mut self.orchestrator.memory.decay.access_boost,
-            0.0,
-            1.0,
-            "decay.access_boost",
         );
         // ── Orchestrator > Costs ──
         clamp_val(

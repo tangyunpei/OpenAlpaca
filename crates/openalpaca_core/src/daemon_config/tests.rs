@@ -41,8 +41,8 @@ fn test_validate_clamps_out_of_range_values() {
     // Set some values out of range
     config.orchestrator.memory.prompt_recent_messages = 0; // min is 1
     config.orchestrator.memory.summary_max_chars = 999_999; // max is 32000
-    config.orchestrator.memory.fts_jaccard_threshold = 2.5; // max is 1.0
-    config.orchestrator.memory.decay.half_life_days = 0.0; // min is 1.0
+    config.orchestrator.memory.memory_confidence_threshold = 2.5; // max is 1.0
+    config.orchestrator.costs.extract_every_n_turns = 0; // min is 1
     config.security.max_input_length = 0; // min is 1024
     config.server.event_bus_capacity = 1; // min is 64
 
@@ -50,8 +50,8 @@ fn test_validate_clamps_out_of_range_values() {
 
     assert_eq!(config.orchestrator.memory.prompt_recent_messages, 1);
     assert_eq!(config.orchestrator.memory.summary_max_chars, 32000);
-    assert_eq!(config.orchestrator.memory.fts_jaccard_threshold, 1.0);
-    assert_eq!(config.orchestrator.memory.decay.half_life_days, 1.0);
+    assert_eq!(config.orchestrator.memory.memory_confidence_threshold, 1.0);
+    assert_eq!(config.orchestrator.costs.extract_every_n_turns, 1);
     assert_eq!(config.security.max_input_length, 1024);
     assert_eq!(config.server.event_bus_capacity, 64);
 }

@@ -1224,8 +1224,8 @@ async fn an_all_dry_run_names_the_home_stores_state_as_kept() {
     let retention = state["retention"].as_str().unwrap();
     assert!(retention.contains("factory reset"));
     // A factory reset deletes the database, not the directory: telling a user
-    // that deleting `state/` is one would cost them the master key and the
-    // embedding model too.
+    // that deleting `state/` is one would cost them the master key, the memory
+    // control snapshots and the search index too.
     assert!(
         retention.contains("only the database"),
         "the plan must say a factory reset deletes only the database: {retention}"

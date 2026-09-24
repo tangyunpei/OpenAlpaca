@@ -168,14 +168,13 @@ fn test_paths_are_consistent() {
     let db = database_path().unwrap();
     let logs = logs_dir().unwrap();
     let backups = backups_dir().unwrap();
-    // L11: the embedding model's ~1 GB of weights is regenerable machine
-    // state, so it belongs under `state/` — not in the daemon's CWD, which is
-    // where the library puts it when nobody says otherwise.
-    let embeddings = embedding_cache_dir().unwrap();
+    // The memory search index's directory: regenerable machine state, so it
+    // is under `state/` too — and a path query only, created by the index.
+    let cache = cache_dir().unwrap();
 
     assert_eq!(state, tmp.path().join("state"));
     assert!(state.is_dir(), "state_dir() creates the directory");
-    for p in [&discovery, &lock, &db, &logs, &backups, &embeddings] {
+    for p in [&discovery, &lock, &db, &logs, &backups, &cache] {
         assert!(p.starts_with(&state), "{} is not under state/", p.display());
     }
     assert!(discovery.ends_with("discovery.json"));
@@ -183,10 +182,10 @@ fn test_paths_are_consistent() {
     assert!(db.ends_with("openalpaca.db"));
     assert!(logs.is_dir() && logs.ends_with("logs"));
     assert!(backups.is_dir() && backups.ends_with("backups"));
-    assert_eq!(embeddings, state.join("cache").join("fastembed"));
+    assert_eq!(cache, state.join("cache"));
     assert!(
-        embeddings.is_dir(),
-        "embedding_cache_dir() creates it on demand"
+        !cache.exists(),
+        "cache_dir() is a path query and creates nothing"
     );
     assert_eq!(master_key_dir().unwrap(), state);
 

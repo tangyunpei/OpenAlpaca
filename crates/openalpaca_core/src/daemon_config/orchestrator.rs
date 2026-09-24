@@ -210,15 +210,6 @@ pub struct MemoryConfig {
     pub summary_max_chars: usize,
     /// Character limit for message truncation in summary input.
     pub msg_trunc_chars: usize,
-    /// L2 distance threshold for semantic supersession. Parsed and clamped,
-    /// then read by nothing: a new memory no longer retires look-alikes, so
-    /// setting it changes nothing.
-    pub supersession_distance_threshold: f64,
-    /// Jaccard word-overlap threshold for the FTS supersession fallback.
-    /// Read by nothing, like `supersession_distance_threshold`. Range: 0.0–1.0.
-    pub fts_jaccard_threshold: f64,
-    /// Decay and pruning configuration.
-    pub decay: MemoryDecayConfig,
     /// The extractor's acceptance floor (design §6): an item the model
     /// scores under this is dropped and counted; the number is never stored.
     /// Range: 0.0–1.0.
@@ -232,42 +223,7 @@ impl Default for MemoryConfig {
             summary_min_new_older_messages: 12,
             summary_max_chars: 4000,
             msg_trunc_chars: 1500,
-            supersession_distance_threshold: 1.0,
-            fts_jaccard_threshold: 0.4,
-            decay: MemoryDecayConfig::default(),
             memory_confidence_threshold: 0.65,
-        }
-    }
-}
-
-/// Configuration for memory importance decay and pruning.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct MemoryDecayConfig {
-    /// How often to run the decay task (seconds).
-    pub poll_interval_secs: u64,
-    /// Half-life in days: after this many days without access, importance drops by 50%.
-    pub half_life_days: f64,
-    /// Minimum importance floor: decay never takes a memory below it. Nothing
-    /// prunes at it — the decay task decays and deletes nothing.
-    pub min_importance: f64,
-    /// Soft cap on total non-KbChunk memories per owner. Parsed and clamped,
-    /// then read by nothing: the decay task no longer prunes, so setting it
-    /// changes nothing.
-    pub soft_cap: usize,
-    /// Small importance boost applied each time a memory is accessed.
-    /// Reinforces frequently-used memories. Capped at 1.0 to prevent unbounded growth.
-    pub access_boost: f64,
-}
-
-impl Default for MemoryDecayConfig {
-    fn default() -> Self {
-        Self {
-            poll_interval_secs: 3600,
-            half_life_days: 30.0,
-            min_importance: 0.05,
-            soft_cap: 500,
-            access_boost: 0.05,
         }
     }
 }
