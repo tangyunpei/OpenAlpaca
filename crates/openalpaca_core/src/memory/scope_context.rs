@@ -110,10 +110,11 @@ impl MemoryScopeContext {
     /// launchers run the daemon with its CWD at `~/.openalpaca`, so without the
     /// fold every turn that carried no workspace — every connector lane, every
     /// scheduled skill — scoped its memory to `Workspace($HOME)`: a scope no
-    /// project turn's cascade ever reads again (the workflow-memory extraction
-    /// at `dispatcher/lead_agent.rs` writes into exactly this id). R22 chose the
-    /// CWD fallback for a *project* turn; `$HOME` is not one
-    /// (see [`resolves_to_the_home_store`]).
+    /// project turn's cascade ever reads again. R22 chose the CWD fallback for
+    /// a *project* turn; `$HOME` is not one (see
+    /// [`resolves_to_the_home_store`]). Nothing that writes a file reads this
+    /// field: the task-output extraction at `dispatcher/lead_agent.rs` takes
+    /// `request_workspace_root`, like `task.workspace_id`.
     pub fn for_request(workspace_path: Option<&str>) -> Self {
         Self::for_request_with_cwd(workspace_path, || std::env::current_dir().ok())
     }

@@ -1102,7 +1102,10 @@ impl TaskDispatcher {
 
             // Memory extraction from the lead agent's output: a tracked job
             // on the orchestrator's `BackgroundJobs`, candidates only (MD-2),
-            // nothing for a failed or cancelled run.
+            // nothing for a failed or cancelled run. Its project is the
+            // request's root — the same field `task.workspace_id` above
+            // records — never `workspace_id`, which a request with no
+            // workspace fills from the daemon CWD (design §3 rule 1, MD-5).
             if let Some(ref db) = db {
                 spawn_task_memory_extraction(
                     &background,
@@ -1116,7 +1119,7 @@ impl TaskDispatcher {
                     &final_content,
                     "lead_agent",
                     result.success,
-                    workspace.workspace_id,
+                    workspace.request_workspace_root,
                 );
             }
 

@@ -78,6 +78,19 @@ fn setup_with_specific_router_and_db(
     db: Database,
     router: Arc<openalpaca_llm::LlmRouter>,
 ) -> TaskDispatcher {
+    setup_with_router_db_and_memory(agents, config, db, router, None)
+}
+
+/// [`setup_with_specific_router_and_db`] with the memory service's slot
+/// filled, so the lead's recall and the run's extraction have somewhere to
+/// read and write.
+fn setup_with_router_db_and_memory(
+    agents: Vec<SubAgent>,
+    config: DaemonConfig,
+    db: Database,
+    router: Arc<openalpaca_llm::LlmRouter>,
+    memory_service: Option<Arc<crate::memory::service::MemoryService>>,
+) -> TaskDispatcher {
     let ctx = Arc::new(SharedContext::new());
     for a in &agents {
         ctx.agent_registry.register_template(template_from_agent(a));
@@ -106,7 +119,7 @@ fn setup_with_specific_router_and_db(
         Arc::new(crate::prompt_ctx::ContextManager::noop()),
         Arc::new(crate::compose::ComposeEngine::new(16)),
         Arc::new(std::sync::RwLock::new(None)),
-        Arc::new(std::sync::RwLock::new(None)),
+        Arc::new(std::sync::RwLock::new(memory_service)),
         Arc::new(crate::orchestrator::BackgroundJobs::new()),
     )
 }
@@ -512,6 +525,11 @@ mod e2e_mock {
                 responses,
                 call_count: AtomicUsize::new(0),
             }
+        }
+
+        /// How many requests the router has routed here so far.
+        pub fn calls(&self) -> usize {
+            self.call_count.load(Ordering::SeqCst)
         }
     }
 
@@ -1495,6 +1513,235 @@ fn dispatch_without_a_request_workspace_leaves_workspace_id_null() {
     assert_eq!(
         task.workspace_id, None,
         "the daemon CWD must never be recorded as the run's project"
+    );
+}
+
+// ── Plan 3.4 / MD-5: what a run learns goes where the request pointed ──
+
+/// A lead run whose provider answers the loop's one round with a report and
+/// the task-output extractor with one `basis: evidence` item, over a memory
+/// service on a temp home store. `run` dispatches with the given workspace
+/// context and returns once the extraction has been written.
+struct ExtractionScene {
+    _env: crate::test_util::HomeStoreGuard,
+    root: tempfile::TempDir,
+    db: Database,
+    service: Arc<crate::memory::service::MemoryService>,
+    provider: Arc<e2e_mock::MockProvider>,
+    dispatcher: TaskDispatcher,
+}
+
+impl ExtractionScene {
+    const OWNER: &str = "user1";
+    const REPORT: &str = "Report: the store keeps its database under state/ and its notes \
+                          under memory/; every content directory is created with mode 0700.";
+    const EXTRACTION: &str = r#"{"extractions": [
+        {"title": "Store layout", "content": "The database lives under state/ and notes under memory/.",
+         "kind": "fact", "basis": "evidence", "confidence": 0.9}
+    ]}"#;
+
+    fn new() -> Self {
+        use crate::memory::service::MemoryService;
+        use openalpaca_llm::{ChatResponse, FinishReason, ProviderType, Usage};
+        use openalpaca_storage::IdentityRepository;
+        use openalpaca_storage::memory_index::MemoryIndex;
+
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let env = crate::test_util::HomeStoreGuard::set(&home.canonicalize().unwrap());
+
+        let db = Database::open(&root.path().join("test.db")).unwrap();
+        IdentityRepository::new(&db)
+            .create_global_user(Self::OWNER, None)
+            .unwrap();
+        let service = MemoryService::new(Some(db.clone()), MemoryIndex::open_in_memory().unwrap());
+        service.rebuild_index().unwrap();
+        let service = Arc::new(service);
+
+        // Two calls: the lead's one round, then the extractor. The report is
+        // long enough for `task_extract_min_content_len`.
+        let response = |content: &str| ChatResponse {
+            content: content.to_string(),
+            tool_calls: vec![],
+            model: "claude-sonnet-4-5-20250929".to_string(),
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        };
+        let provider = Arc::new(e2e_mock::MockProvider::new(vec![
+            response(Self::REPORT),
+            response(Self::EXTRACTION),
+        ]));
+        let router = Arc::new(openalpaca_llm::LlmRouter::single_provider(
+            provider.clone(),
+            ProviderType::Anthropic,
+            "claude-sonnet-4-5-20250929".to_string(),
+        ));
+        let dispatcher = setup_with_router_db_and_memory(
+            vec![make_agent("lead-01", vec!["orchestration"])],
+            DaemonConfig::default(),
+            db.clone(),
+            router,
+            Some(service.clone()),
+        );
+        Self {
+            _env: env,
+            root,
+            db,
+            service,
+            provider,
+            dispatcher,
+        }
+    }
+
+    /// A directory under the temp root with a `.git` marker: a project.
+    fn project(&self, name: &str) -> std::path::PathBuf {
+        let dir = self.root.path().join(name);
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        dir.canonicalize().unwrap()
+    }
+
+    async fn run(&self, workspace: MemoryScopeContext) {
+        self.dispatcher
+            .dispatch_lead_agent(
+                "Survey the store layout",
+                "Survey the store layout".to_string(),
+                Self::OWNER,
+                "user1:telegram",
+                "telegram",
+                workspace,
+                None,
+                false,
+            )
+            .unwrap();
+        let msg = wait_for_conversation_message(&self.db, "user1:telegram").await;
+        assert_eq!(
+            msg.content,
+            Self::REPORT,
+            "the lead's one round is the report"
+        );
+        // The extractor's request is the provider's second call, made from
+        // inside the tracked job — so once it has been seen the job is in the
+        // tracker and `wait_idle` covers its write.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while self.provider.calls() < 2 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the task extraction never asked the model"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        self.dispatcher.background.wait_idle().await;
+    }
+
+    /// The candidates' titles in the partitions a context over `workspace`
+    /// reads: the home partition alone for `None`.
+    fn candidate_titles(&self, workspace: Option<&std::path::Path>) -> Vec<String> {
+        use crate::memory::service::{
+            Attribution, Capabilities, ListInput, Surface, WorkspaceHint,
+        };
+        use openalpaca_storage::memory_files::NoteStatus;
+
+        let ctx = self
+            .service
+            .context(
+                Self::OWNER,
+                workspace.map_or(WorkspaceHint::None, WorkspaceHint::Root),
+                Surface::UserSurface,
+                Capabilities::ALL,
+                Attribution::default(),
+            )
+            .unwrap();
+        self.service
+            .list(
+                &ctx,
+                ListInput {
+                    status: Some(NoteStatus::Candidate),
+                    include_candidates: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|c| c.title)
+            .collect()
+    }
+}
+
+/// The same rule for what the run **learns** as for `task.workspace_id`
+/// (design §3 rule 1, MD-5, §7a's task-output row): a run whose request
+/// named no workspace writes its `extracted_other` candidates into the
+/// owner's home partition — never into the project the daemon happens to be
+/// running in. The connector shape again: `workspace_id` CWD-derived for
+/// memory scoping (R22), `request_workspace_root` empty; the extraction must
+/// read the second field, or a Telegram run's findings land under whatever
+/// checkout started the daemon — a partition the run itself never read.
+#[tokio::test]
+async fn task_extraction_of_a_run_without_a_request_workspace_lands_in_the_home_partition() {
+    let scene = ExtractionScene::new();
+    let daemon_cwd = scene.project("checkout");
+
+    scene
+        .run(MemoryScopeContext {
+            workspace_id: Some(daemon_cwd.to_string_lossy().into_owned()),
+            request_workspace_root: None,
+        })
+        .await;
+
+    assert_eq!(
+        scene.candidate_titles(None),
+        vec!["Store layout"],
+        "the run's candidate belongs to the owner's home partition"
+    );
+    let cwd_store = daemon_cwd.join(".openalpaca");
+    assert!(
+        !cwd_store.exists(),
+        "the daemon's CWD selected the project: {} exists",
+        cwd_store.display()
+    );
+}
+
+/// And the request's root, when there is one, is where the candidates go:
+/// the project's own partition, not the home one — the field reaches the
+/// extractor rather than being dropped.
+#[tokio::test]
+async fn task_extraction_of_a_run_with_a_request_workspace_lands_in_that_project() {
+    let scene = ExtractionScene::new();
+    let project = scene.project("project_a");
+
+    scene
+        .run(MemoryScopeContext {
+            workspace_id: Some(project.to_string_lossy().into_owned()),
+            request_workspace_root: Some(project.to_string_lossy().into_owned()),
+        })
+        .await;
+
+    assert_eq!(
+        scene.candidate_titles(Some(&project)),
+        vec!["Store layout"],
+        "the run's candidate belongs to the request's project"
+    );
+    assert!(
+        scene.candidate_titles(None).is_empty(),
+        "nothing was written to the home partition"
+    );
+    assert!(
+        project
+            .join(".openalpaca")
+            .join("memory")
+            .join("owners")
+            .join(openalpaca_storage::memory_files::owner_key(
+                ExtractionScene::OWNER
+            ))
+            .join("notes")
+            .is_dir()
     );
 }
 
