@@ -13,7 +13,9 @@
 //!   nothing. A lower-authority link is not honored and is reported as a
 //!   `supersedes_authority` conflict on the note that carries it (P3).
 //! - **Same `fact_key`**: among the notes that are still effectively active,
-//!   the highest authority wins, ties by newest `updated_at`; every other note
+//!   the highest authority wins; a tie goes to the newest `observed_at` when
+//!   every tied note has one, else to the newest `created_at` (an edit never
+//!   flips it), then `updated_at`, then the lowest id (R9); every other note
 //!   in the group is a loser — out of automatic recall, `conflict: true` in a
 //!   search (P4). `doctor` reports the pair as `same_fact_key` unless the
 //!   loser's own un-honored link to the winner already reports it (one
@@ -64,7 +66,8 @@ pub enum ConflictKind {
     /// not honored and both notes stay active.
     SupersedesAuthority,
     /// `note` and `target` share a `fact_key` with no link between them;
-    /// `target` won by authority (then recency) and `note` is the loser.
+    /// `target` won by authority (then the tie-break of R9) and `note` is
+    /// the loser.
     SameFactKey,
 }
 
@@ -222,16 +225,7 @@ pub fn derive(inputs: &[NoteInput<'_>], snapshot: &ControlSnapshot) -> Derivatio
         if ids.len() < 2 {
             continue;
         }
-        let winner = *ids
-            .iter()
-            .max_by(|a, b| {
-                origin[a]
-                    .rank()
-                    .cmp(&origin[b].rank())
-                    .then_with(|| by_id[a].updated_at.cmp(&by_id[b].updated_at))
-                    .then_with(|| b.cmp(a)) // lowest id wins a full tie: deterministic
-            })
-            .expect("a group has at least two ids");
+        let winner = same_key_winner(ids, &by_id, &origin);
         for loser in ids.iter().filter(|id| **id != winner) {
             loser_to.insert(*loser, winner);
             let already_reported = by_id[loser].supersedes.contains(&winner);
@@ -278,4 +272,44 @@ pub fn derive(inputs: &[NoteInput<'_>], snapshot: &ControlSnapshot) -> Derivatio
     }
 
     Derivation { notes, conflicts }
+}
+
+/// The same-`fact_key` winner of one group (design §3 rule 3, §7c R9): the
+/// highest authority; among the notes tied on it, the newest `observed_at`
+/// when **every** one of them has one, otherwise the newest `created_at` —
+/// the note first written most recently, which an edit does not move — then
+/// the newest `updated_at`, then the lowest id. Deciding the clock once for
+/// the tied set keeps this an order: "`observed_at` when both have one" is
+/// not transitive over three notes, and the winner would then depend on the
+/// order the files were listed in.
+fn same_key_winner(
+    ids: &[NoteId],
+    by_id: &HashMap<NoteId, &Note>,
+    origin: &HashMap<NoteId, Origin>,
+) -> NoteId {
+    let top = ids
+        .iter()
+        .map(|id| origin[id].rank())
+        .max()
+        .expect("a group has at least two ids");
+    let tied: Vec<NoteId> = ids
+        .iter()
+        .copied()
+        .filter(|id| origin[id].rank() == top)
+        .collect();
+    let observed = tied.iter().all(|id| by_id[id].observed_at.is_some());
+    tied.into_iter()
+        .max_by(|a, b| {
+            let (na, nb) = (by_id[a], by_id[b]);
+            let by_observation = if observed {
+                na.observed_at.cmp(&nb.observed_at)
+            } else {
+                std::cmp::Ordering::Equal
+            };
+            by_observation
+                .then_with(|| na.created_at.cmp(&nb.created_at))
+                .then_with(|| na.updated_at.cmp(&nb.updated_at))
+                .then_with(|| b.cmp(a)) // lowest id wins a full tie: deterministic
+        })
+        .expect("the top rank has at least one note")
 }

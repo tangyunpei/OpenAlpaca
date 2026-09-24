@@ -2549,7 +2549,7 @@ fn a_same_key_loser_with_an_unhonored_link_is_reported_once() {
             target: u.id
         }]
     );
-    // Equal authority: ties go to the newest updated_at, and the link is honored.
+    // Equal authority: the link is honored, so no same-key tie is left to break.
     snapshot.notes.insert(
         m1.id,
         NoteRecord {
@@ -2573,6 +2573,182 @@ fn a_same_key_loser_with_an_unhonored_link_is_reported_once() {
     );
     assert_eq!(d.notes[&u.id].effective_status, EffectiveStatus::Superseded);
     assert!(d.conflicts.is_empty());
+}
+
+/// Design §3 rule 3 (§7c R9): two active `user` notes on one `fact_key`
+/// tie on authority, so the note **written last** wins — and editing the
+/// older one afterwards (a typo fix) does not flip it back, because the tie
+/// reads `created_at`, not `updated_at`.
+#[test]
+fn a_same_key_tie_goes_to_the_note_written_last_and_an_edit_does_not_flip_it() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let port = |body: &str| NewNote {
+        fact_key: Some("lantern.service.port".into()),
+        ..new_note("Lantern port", body, NoteKind::Fact)
+    };
+    let old = p
+        .create(
+            port("# Port\n\nLantern listens on 8080.\n"),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let new = p
+        .create(
+            port("# Port\n\nLantern listens on 8790.\n"),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    assert_eq!(
+        p.read(&old.id).unwrap().derived.same_key_loser_to,
+        Some(new.id)
+    );
+    assert_eq!(p.read(&new.id).unwrap().derived.same_key_loser_to, None);
+
+    let edited = p
+        .update(
+            &old.id,
+            &old.revision,
+            UpdateAction::Edit(NotePatch {
+                body: Some("# Port\n\nLantern listens on port 8080.\n".into()),
+                ..Default::default()
+            }),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    assert!(edited.written);
+    let old_view = p.read(&old.id).unwrap();
+    assert!(old_view.note.updated_at > p.read(&new.id).unwrap().note.updated_at);
+    assert_eq!(
+        old_view.derived.same_key_loser_to,
+        Some(new.id),
+        "an edit of the older note does not make it the newer knowledge"
+    );
+    assert_eq!(p.read(&new.id).unwrap().derived.same_key_loser_to, None);
+}
+
+/// Design §3 rule 3 (§7c R9): when both tied notes say when their fact was
+/// observed, the newer observation wins even if it was written first.
+#[test]
+fn a_same_key_tie_goes_to_the_newer_observation_when_both_have_one() {
+    let sb = Sandbox::new();
+    let p = sb.open_home(ALICE);
+    let db = |body: &str, observed: chrono::DateTime<Utc>| NewNote {
+        fact_key: Some("lantern.staging.db".into()),
+        observed_at: Some(observed),
+        ..new_note("Staging database", body, NoteKind::Fact)
+    };
+    let june = p
+        .create(
+            db(
+                "# DB\n\nlantern_stg on pg-staging-2\n",
+                ts(2026, 6, 20, 10, 0, 0),
+            ),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    let march = p
+        .create(
+            db(
+                "# DB\n\nlantern_staging on pg-staging-1\n",
+                ts(2026, 3, 2, 10, 0, 0),
+            ),
+            Actor::UserSurface,
+        )
+        .unwrap();
+    assert_eq!(
+        p.read(&march.id).unwrap().derived.same_key_loser_to,
+        Some(june.id)
+    );
+    assert_eq!(p.read(&june.id).unwrap().derived.same_key_loser_to, None);
+}
+
+/// The observation clock is read only when **every** note tied on authority
+/// has an `observed_at`; otherwise the group is read on `created_at`. A
+/// pairwise rule ("observed_at when both have one") is not an order over
+/// three notes — here it would cycle — so the winner would depend on the
+/// order the partition listed its files.
+#[test]
+fn a_same_key_group_reads_one_clock_whatever_the_input_order() {
+    let at = |day: u32| ts(2026, 9, day, 10, 0, 0);
+    let note = |id: u8, observed: Option<u32>, created: u32, updated: u32| {
+        let mut n = mk(
+            id,
+            NoteStatus::Active,
+            Some("team.meeting_day"),
+            &[],
+            updated,
+        );
+        n.observed_at = observed.map(|d| ts(2026, d, 1, 0, 0, 0));
+        n.created_at = at(created);
+        n
+    };
+    let derive_all = |notes: &[Note]| {
+        let mut snapshot = ControlSnapshot::new(
+            "home-x",
+            SnapshotScope::Home,
+            "x",
+            "u",
+            "/r",
+            ts(2026, 9, 1, 0, 0, 0),
+        );
+        for n in notes {
+            snapshot.notes.insert(
+                n.id,
+                NoteRecord {
+                    revision: n.revision(),
+                    origin: Origin::User,
+                    written_at: n.updated_at,
+                },
+            );
+        }
+        let revisions: Vec<String> = notes.iter().map(Note::revision).collect();
+        let inputs: Vec<NoteInput<'_>> = notes
+            .iter()
+            .zip(&revisions)
+            .map(|(note, revision)| NoteInput { note, revision })
+            .collect();
+        let d = derive(&inputs, &snapshot);
+        let winners: Vec<NoteId> = d
+            .notes
+            .values()
+            .filter(|n| n.same_key_loser_to.is_none())
+            .map(|n| n.id)
+            .collect();
+        assert_eq!(winners.len(), 1, "one winner per group");
+        winners[0]
+    };
+    // One note has no observation: created_at decides — 0x02, written last
+    // — although 0x01 was observed later and 0x03 was edited last.
+    let mixed = [
+        note(0x01, Some(8), 1, 0),
+        note(0x02, Some(1), 3, 1),
+        note(0x03, None, 2, 9),
+    ];
+    for order in [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ] {
+        let notes: Vec<Note> = order.iter().map(|&i| mixed[i].clone()).collect();
+        assert_eq!(derive_all(&notes), id_of(0x02), "input order {order:?}");
+    }
+    // Every note observed: the newest observation decides.
+    let observed = [
+        note(0x01, Some(8), 1, 0),
+        note(0x02, Some(1), 3, 1),
+        note(0x03, Some(5), 2, 9),
+    ];
+    assert_eq!(derive_all(&observed), id_of(0x01));
+    // Written in the same second and never observed: the newer edit, then
+    // the lowest id.
+    let same_second = [note(0x04, None, 1, 2), note(0x05, None, 1, 7)];
+    assert_eq!(derive_all(&same_second), id_of(0x05));
+    let full_tie = [note(0x07, None, 1, 3), note(0x06, None, 1, 3)];
+    assert_eq!(derive_all(&full_tie), id_of(0x06));
 }
 
 #[test]
