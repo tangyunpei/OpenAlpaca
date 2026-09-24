@@ -47,6 +47,8 @@ interface FakeNote {
   sources: { type: string; id: string; observed_at: string | null }[];
   /** Older kept copies, newest first, each `{revision, title, body}`. */
   history: { revision: string; title: string; body: string }[];
+  /** The file is longer than the 32 KiB a read serves (external files only). */
+  truncated?: boolean;
 }
 
 interface Recorded {
@@ -114,7 +116,7 @@ function readOutput(n: FakeNote, kept?: { title: string; body: string }) {
     title: kept?.title ?? n.title,
     body: kept?.body ?? n.body,
     frontmatter: { updated_at: n.updated_at },
-    truncated: false,
+    truncated: n.truncated ?? false,
     path: `notes/${n.id}--${n.title.toLowerCase().replace(/\W+/g, "-")}.md`,
     sources: n.sources,
     sources_status: "intact",
@@ -624,6 +626,28 @@ describe("the Memory view", () => {
     });
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
     expect(notes[0]?.body).toBe("Uses helix.");
+  });
+
+  it("will not edit a note cut at 32 KiB, and names the one safe place to edit it", async () => {
+    note({
+      id: "n-1",
+      title: "Long log",
+      body: "# Long log\n\nThe first 32 KiB of it.\n",
+      origin: "external",
+      truncated: true,
+    });
+    renderView();
+    const user = await openNote("Long log");
+
+    await user.click(screen.getByRole("tab", { name: "Raw" }));
+    const edit = await screen.findByRole("button", { name: "Edit" });
+    expect(edit).toBeDisabled();
+    // Saving the cut would write it over the whole file, and the CLI's
+    // `memory edit` reads the same cut — only the file itself is safe.
+    expect(edit).toHaveAttribute(
+      "title",
+      "Longer than 32 KiB — edit the file itself.",
+    );
   });
 
   it("compares the current note with a kept revision", async () => {

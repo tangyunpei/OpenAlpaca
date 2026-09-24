@@ -80,12 +80,14 @@ export function RawTab({
           <span className="min-w-0 flex-1 truncate font-mono text-2xs-plus text-faint">
             {note.path}
           </span>
+          {/* A save would send the 32 KiB cut back over the whole file. The
+              CLI's `memory edit` reads the same cut, so it is not named. */}
           <Button
             variant="ghostSm"
             disabled={note.truncated}
             title={
               note.truncated
-                ? "Longer than 32 KiB — edit the file itself, or with `openalpaca memory edit`."
+                ? "Longer than 32 KiB — edit the file itself."
                 : undefined
             }
             onClick={() =>
