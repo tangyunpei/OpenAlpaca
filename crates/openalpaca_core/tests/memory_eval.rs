@@ -1,13 +1,16 @@
-//! Live memory-quality eval harness (memory redesign — plan slice 1, §5).
+//! Live memory-quality eval harness (memory redesign — plan slice 1, §5;
+//! rewritten for the new engine by plan commit 3.11).
 //!
 //! Seeds the gold notes of `scripts/eval/memory/notes-gold.json` through the
-//! `memory_store` tool path, asks every question of the held-out set through
-//! the front door (`Orchestrator::handle_message`, the entry `POST /v1/chat`
-//! uses) and judges each answer against its gold answer with the frozen judge
-//! prompt, through the configured model at temperature 0. One system under
-//! test per run, chosen by `OPENALPACA_MEMORY_EVAL_SYSTEM`; the report is one
-//! JSON file at `OPENALPACA_MEMORY_EVAL_REPORT`, and the paired comparison
-//! across two reports is `scripts/eval/memory/compare.py`.
+//! memory service on the user-directed surface (`MemoryService::store` with a
+//! `Surface::UserSurface` context — the call `POST /v1/memories` and
+//! `openalpaca memory add` make), asks every question of the held-out set
+//! through the front door (`Orchestrator::handle_message`, the entry
+//! `POST /v1/chat` uses) and judges each answer against its gold answer with
+//! the frozen judge prompt, through the configured model at temperature 0.
+//! One system under test per run, chosen by `OPENALPACA_MEMORY_EVAL_SYSTEM`;
+//! the report is one JSON file at `OPENALPACA_MEMORY_EVAL_REPORT`, and the
+//! paired comparison across two reports is `scripts/eval/memory/compare.py`.
 //!
 //! This whole file compiles only with `--features live-eval`, and the live
 //! test is `#[ignore]`d AND gated on `OPENALPACA_LIVE_EVAL=1`, so plain
@@ -18,32 +21,45 @@
 //! Run (see `scripts/eval/memory/README.md` for the full runbook):
 //!
 //! ```sh
-//! OPENALPACA_LIVE_EVAL=1 OPENALPACA_MEMORY_EVAL_SYSTEM=A \
-//! OPENALPACA_MEMORY_EVAL_REPORT=/path/to/report-A.json \
+//! OPENALPACA_LIVE_EVAL=1 OPENALPACA_MEMORY_EVAL_SYSTEM=D \
+//! OPENALPACA_MEMORY_EVAL_REPORT=/path/to/report-D.json \
 //! OPENALPACA_HOME_STORE=/path/to/scratch/store \
 //! OPENALPACA_CONFIG_DIR=/path/to/scratch/config \
 //!     cargo test -p openalpaca_core --features live-eval \
 //!     --test memory_eval -- --ignored memory_eval --nocapture
 //! ```
 //!
-//! Systems today: `none` (no notes seeded — the context-cost reference), `A`
-//! (the per-turn FTS path, `prompt_ctx::sources::memory::MemorySource`) and
-//! `B` (the `memory_search` tool path, hybrid FTS + E5, `--features
-//! live-eval-e5`). `C`, `D` and `E` arrive with slice 3 and are recorded as
-//! `unavailable`. The harness is engine-agnostic on purpose: it drives the
-//! store tool and the chat entry, never a repository, so the same file
-//! measures D/E in slice 4.
+//! Systems: `none` (no memory service — the context-cost reference), `D`
+//! (the new service as the daemon runs it: the per-turn recall on, the read
+//! tools `memory_search`/`memory_read`/`memory_list` registered the way the
+//! daemon registers them, under the main loop's shipped round and tool caps)
+//! and `E` (D under design §5's bound — the per-turn recall plus at most two
+//! model-directed follow-up searches — expressed with the main loop's
+//! existing tool budget; see [`MainLoopBudget`] for the approximation). `A`
+//! and `B` measured the engine slice 3 deleted: their reports are archived
+//! in `scripts/eval/memory/reports/`, and a D or E report is compared against
+//! them with `compare.py` as before — the report schema is unchanged, only
+//! added to.
 #![cfg(feature = "live-eval")]
 
+use openalpaca_core::daemon_config::RoutingConfig;
+use openalpaca_core::memory::service::{
+    Attribution, Capabilities, MemoryService, RecallBudget, StoreInput, Surface, UsedReason,
+    WorkspaceHint,
+};
+use openalpaca_storage::memory_files::{Dedup, NoteId, NoteKind, NoteScope};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-/// The one owner every note is stored under and every question is asked as.
-const OWNER_ID: &str = "memory-eval-owner";
+/// The prefix of the one owner every note is stored under and every
+/// question is asked as. Each run appends its own suffix, so a scratch store
+/// reused across runs never lets one run's notes (or the notes a model
+/// stored during it) into another's partition.
+const OWNER_PREFIX: &str = "memory-eval-owner";
 /// The router-side agent id of the judge calls (cost accounting).
 const JUDGE_AGENT_ID: &str = "memory_eval_judge";
 const JUDGE_MAX_TOKENS: u32 = 400;
@@ -51,7 +67,28 @@ const JUDGE_TEMPERATURE: f32 = 0.0;
 /// An answer longer than this is cut before it reaches the judge (bounds the
 /// judge's cost; the full answer is still in the report).
 const JUDGE_ANSWER_CAP_CHARS: usize = 6_000;
+/// Unchanged from the slice-1 reports: every field they carry is still here
+/// with the same meaning, so `compare.py` pairs a D or E report with the
+/// archived A and B ones. New fields are additions only.
 const REPORT_SCHEMA: u32 = 1;
+/// Design §5: "the running agent may issue up to two revised searches".
+const FOLLOW_UP_SEARCHES: usize = 2;
+/// The memory tools the main loop offers when a service is installed: the
+/// three read tools the daemon registers globally
+/// (`apps/openalpacad/src/services/tools.rs`, `memory_read_tools`) and the
+/// three writers `main_loop_tool_set` adds per request.
+const MEMORY_TOOLS: [&str; 6] = [
+    "memory_search",
+    "memory_read",
+    "memory_list",
+    "memory_store",
+    "memory_update",
+    "memory_forget",
+];
+/// Tool calls that change memory. A model that stores or edits a note
+/// during the run changes what later questions can recall, so every row
+/// records its tool calls and the totals count these.
+const MEMORY_WRITE_TOOLS: [&str; 3] = ["memory_store", "memory_update", "memory_forget"];
 
 // ─── Data files ─────────────────────────────────────────────────────────────
 
@@ -139,15 +176,6 @@ struct GoldNote {
     created_at: String,
 }
 
-const NOTE_KINDS: [&str; 6] = [
-    "fact",
-    "preference",
-    "decision",
-    "procedure",
-    "reference",
-    "episode",
-];
-
 #[derive(Debug, Clone, Deserialize)]
 struct Question {
     id: String,
@@ -189,6 +217,326 @@ fn load_json<T: serde::de::DeserializeOwned>(path: &Path) -> (T, String) {
 
 fn is_uuid(s: &str) -> bool {
     uuid::Uuid::parse_str(s).is_ok_and(|u| u.hyphenated().to_string() == s)
+}
+
+fn parse_instant(
+    field: &str,
+    value: &Option<String>,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, String> {
+    value
+        .as_deref()
+        .map(|v| {
+            chrono::DateTime::parse_from_rfc3339(v)
+                .map(|t| t.with_timezone(&chrono::Utc))
+                .map_err(|e| format!("{field} {v:?} is not RFC 3339: {e}"))
+        })
+        .transpose()
+}
+
+// ─── Seeding through the service ────────────────────────────────────────────
+
+/// The order the gold notes are stored in: file order, except that a note
+/// whose `supersedes` names another comes after it — the service's
+/// `supersedes` needs the target's id and revision, which exist only once
+/// the target is stored. `Err` names a link that can never be satisfied
+/// (an unknown target, or a cycle).
+fn seed_order(notes: &[GoldNote]) -> Result<Vec<usize>, String> {
+    let index: HashMap<&str, usize> = notes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.id.as_str(), i))
+        .collect();
+    for n in notes {
+        for target in &n.supersedes {
+            if !index.contains_key(target.as_str()) {
+                return Err(format!("note {} supersedes unknown note {target}", n.id));
+            }
+        }
+    }
+    let mut placed = vec![false; notes.len()];
+    let mut order = Vec::with_capacity(notes.len());
+    while order.len() < notes.len() {
+        let before = order.len();
+        for (i, n) in notes.iter().enumerate() {
+            if !placed[i] && n.supersedes.iter().all(|t| placed[index[t.as_str()]]) {
+                placed[i] = true;
+                order.push(i);
+            }
+        }
+        if order.len() == before {
+            return Err("the supersedes links form a cycle".to_string());
+        }
+    }
+    Ok(order)
+}
+
+/// A gold note as the service's store input, every field native (design
+/// §7a `memory_store`): kind, scope, aliases, tags, `fact_key`, the validity
+/// bounds, and `supersedes` resolved to the stored target's id and current
+/// revision. `created_at` is not an input — the service stamps its own —
+/// and `project` has no field: the harness has one workspace, so both
+/// fictional projects' notes share its partition (see the README).
+fn store_input_for(
+    note: &GoldNote,
+    stored: &BTreeMap<String, (NoteId, String)>,
+) -> Result<StoreInput, String> {
+    let kind = NoteKind::parse(&note.kind).ok_or_else(|| format!("kind {:?}", note.kind))?;
+    let scope = NoteScope::parse(&note.scope).ok_or_else(|| format!("scope {:?}", note.scope))?;
+    let supersedes = match note.supersedes.as_slice() {
+        [] => None,
+        [target] => {
+            let (id, revision) = stored
+                .get(target)
+                .ok_or_else(|| format!("supersedes {target}, which is not stored yet"))?;
+            Some((*id, revision.clone()))
+        }
+        more => {
+            return Err(format!(
+                "supersedes {} notes; the service's `supersedes` names one",
+                more.len()
+            ));
+        }
+    };
+    Ok(StoreInput {
+        title: note.title.clone(),
+        body: note.body.clone(),
+        kind: Some(kind),
+        scope: Some(scope),
+        aliases: note.aliases.clone(),
+        tags: note.tags.clone(),
+        fact_key: note.fact_key.clone(),
+        valid_from: parse_instant("valid_from", &note.valid_from)?,
+        valid_to: parse_instant("valid_to", &note.valid_to)?,
+        supersedes,
+        ..Default::default()
+    })
+}
+
+/// What seeding did: the gold id → the id the service minted, and the counts
+/// the report's conditions carry.
+#[derive(Debug, Default)]
+struct SeedOutcome {
+    ids: BTreeMap<String, String>,
+    seeded: usize,
+    duplicate: usize,
+    failed: usize,
+    superseding: usize,
+}
+
+fn seed_notes(
+    service: &MemoryService,
+    owner_id: &str,
+    project: &Path,
+    notes: &[GoldNote],
+) -> SeedOutcome {
+    // The user-directed surface: origin `user`, status `active` — gold notes
+    // are what the user said, not what a model inferred.
+    let ctx = service
+        .context(
+            owner_id,
+            WorkspaceHint::Root(project),
+            Surface::UserSurface,
+            Capabilities::ALL,
+            Attribution {
+                source: Some("memory_eval".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("memory_eval: no memory context for {owner_id}: {e}"));
+    let order = seed_order(notes).unwrap_or_else(|e| panic!("memory_eval: {e}"));
+    let mut stored: BTreeMap<String, (NoteId, String)> = BTreeMap::new();
+    let mut out = SeedOutcome::default();
+    for i in order {
+        let note = &notes[i];
+        let input = match store_input_for(note, &stored) {
+            Ok(input) => input,
+            Err(e) => {
+                out.failed += 1;
+                eprintln!("memory_eval: note {}: {e}", note.id);
+                continue;
+            }
+        };
+        let superseding = input.supersedes.is_some();
+        match service.store(&ctx, input) {
+            Ok(created) => {
+                if created.dedup == Dedup::Existing {
+                    out.duplicate += 1;
+                    eprintln!(
+                        "memory_eval: note {} is an exact duplicate of {} — not stored twice",
+                        note.id, created.id
+                    );
+                } else {
+                    out.seeded += 1;
+                    out.superseding += usize::from(superseding);
+                }
+                out.ids.insert(note.id.clone(), created.id.to_string());
+                stored.insert(note.id.clone(), (created.id, created.revision));
+            }
+            Err(e) => {
+                out.failed += 1;
+                eprintln!("memory_eval: note {}: store refused: {e}", note.id);
+            }
+        }
+    }
+    out
+}
+
+/// Always runs under `cargo test --features live-eval` (no model, no
+/// network, no keys): the set v0 must load and be structurally sound — and
+/// storable by the service as it is — so a bad edit is caught long before a
+/// paid run.
+#[test]
+fn memory_eval_set_v0_is_well_formed() {
+    let dir = eval_dir();
+    let (notes, _) = load_json::<Vec<GoldNote>>(&dir.join("notes-gold.json"));
+    let (heldout, _) = load_json::<Vec<Question>>(&dir.join("questions-heldout.json"));
+    let (tuning, _) = load_json::<Vec<Question>>(&dir.join("questions-tuning.json"));
+    let judge = String::from_utf8(read_bytes(&dir.join("judge-prompt.md"))).expect("utf-8");
+
+    // Notes: unique UUID ids, known kinds and scopes, a project only on a
+    // project note, every supersedes link resolvable, a fact_key in grammar.
+    assert!(
+        notes.len() >= 60,
+        "gold set should hold >= 60 notes (got {})",
+        notes.len()
+    );
+    let mut note_ids = BTreeSet::new();
+    for n in &notes {
+        assert!(
+            is_uuid(&n.id),
+            "note {}: id is not a hyphenated lowercase UUID",
+            n.id
+        );
+        assert!(note_ids.insert(n.id.clone()), "duplicate note id {}", n.id);
+        assert!(!n.title.trim().is_empty(), "note {}: empty title", n.id);
+        assert!(!n.body.trim().is_empty(), "note {}: empty body", n.id);
+        assert!(
+            NoteKind::parse(&n.kind).is_some(),
+            "note {}: kind {}",
+            n.id,
+            n.kind
+        );
+        assert!(
+            NoteScope::parse(&n.scope).is_some(),
+            "note {}: scope {}",
+            n.id,
+            n.scope
+        );
+        assert_eq!(
+            n.project.is_some(),
+            n.scope == "project",
+            "note {}: a project is named exactly when scope is project",
+            n.id
+        );
+        assert!(
+            !n.created_at.trim().is_empty(),
+            "note {}: empty created_at",
+            n.id
+        );
+        if let Some(key) = &n.fact_key {
+            let ok = key.len() <= 64
+                && key.bytes().enumerate().all(|(i, b)| {
+                    b.is_ascii_lowercase()
+                        || b.is_ascii_digit()
+                        || (i > 0 && (b == b'.' || b == b'_' || b == b'-'))
+                });
+            assert!(
+                ok,
+                "note {}: fact_key {key:?} is outside the §4 grammar",
+                n.id
+            );
+        }
+        assert!(n.aliases.len() <= 16, "note {}: more than 16 aliases", n.id);
+        assert!(n.tags.len() <= 16, "note {}: more than 16 tags", n.id);
+        parse_instant("valid_from", &n.valid_from).unwrap_or_else(|e| panic!("note {}: {e}", n.id));
+        parse_instant("valid_to", &n.valid_to).unwrap_or_else(|e| panic!("note {}: {e}", n.id));
+    }
+    let by_id: HashMap<&str, &GoldNote> = notes.iter().map(|n| (n.id.as_str(), n)).collect();
+    for n in &notes {
+        // The service's `supersedes` names one note, in the same partition
+        // (design §6), so a gold link must too.
+        assert!(
+            n.supersedes.len() <= 1,
+            "note {}: supersedes more than one note",
+            n.id
+        );
+        for s in &n.supersedes {
+            assert!(
+                note_ids.contains(s),
+                "note {}: supersedes unknown note {s}",
+                n.id
+            );
+            assert_ne!(s, &n.id, "note {}: supersedes itself", n.id);
+            let target = by_id[s.as_str()];
+            assert_eq!(
+                (&target.scope, &target.project),
+                (&n.scope, &n.project),
+                "note {}: supersedes a note in another scope or project",
+                n.id
+            );
+        }
+    }
+    for lang in [Language::En, Language::Zh] {
+        assert!(
+            notes.iter().filter(|n| n.language == lang).count() >= 10,
+            "gold set needs >= 10 {} notes",
+            lang.as_str()
+        );
+    }
+    // Every note maps to a store input once the notes it supersedes are
+    // stored (the ids and revisions here stand in for the service's).
+    let order = seed_order(&notes).expect("a seed order exists");
+    assert_eq!(order.len(), notes.len());
+    let mut stored = BTreeMap::new();
+    for i in order {
+        store_input_for(&notes[i], &stored).unwrap_or_else(|e| panic!("note {}: {e}", notes[i].id));
+        stored.insert(notes[i].id.clone(), (NoteId::new(), "0".repeat(64)));
+    }
+
+    // Questions: ids unique across both splits, categories stratified, every
+    // language present, abstention rows marked and nothing else.
+    let mut seen = BTreeSet::new();
+    let held_counts = validate_questions("heldout", &heldout, &note_ids, &mut seen);
+    let tune_counts = validate_questions("tuning", &tuning, &note_ids, &mut seen);
+    assert!(
+        heldout.len() >= 450,
+        "held-out set should stay near 470 questions (got {})",
+        heldout.len()
+    );
+    assert!(
+        tuning.len() >= 120,
+        "tuning set should stay near 150 questions (got {})",
+        tuning.len()
+    );
+    for cat in Category::ALL {
+        assert!(
+            held_counts.get(&cat).copied().unwrap_or(0) >= 30,
+            "held-out needs >= 30 {} questions (got {held_counts:?})",
+            cat.as_str()
+        );
+        assert!(
+            tune_counts.get(&cat).copied().unwrap_or(0) >= 8,
+            "tuning needs >= 8 {} questions (got {tune_counts:?})",
+            cat.as_str()
+        );
+    }
+    for lang in [Language::En, Language::Zh, Language::Mixed] {
+        assert!(
+            heldout.iter().filter(|q| q.language == lang).count() >= 40,
+            "held-out needs >= 40 {} questions",
+            lang.as_str()
+        );
+    }
+
+    // Judge prompt: every placeholder present exactly once, verdict words named.
+    for p in JUDGE_PLACEHOLDERS {
+        assert_eq!(
+            judge.matches(p).count(),
+            1,
+            "judge prompt must contain {p} exactly once"
+        );
+    }
+    assert!(judge.contains("CORRECT") && judge.contains("INCORRECT"));
 }
 
 /// The judge prompt's placeholders. The validation test pins them so a prompt
@@ -250,135 +598,75 @@ fn validate_questions(
     counts
 }
 
-/// Always runs under `cargo test --features live-eval` (no model, no
-/// network, no keys): the set v0 must load and be structurally sound, so a bad
-/// edit is caught long before a paid run.
+fn gold(id: &str, supersedes: &[&str]) -> GoldNote {
+    GoldNote {
+        id: id.to_string(),
+        title: format!("title {id}"),
+        kind: "fact".to_string(),
+        scope: "global".to_string(),
+        project: None,
+        language: Language::En,
+        fact_key: None,
+        aliases: vec![],
+        tags: vec![],
+        body: format!("body {id}"),
+        valid_from: None,
+        valid_to: None,
+        supersedes: supersedes.iter().map(|s| s.to_string()).collect(),
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+    }
+}
+
+/// A replacement listed before the note it replaces is stored after it; a
+/// link to nothing, or a cycle, is an error rather than a silent skip.
 #[test]
-fn memory_eval_set_v0_is_well_formed() {
-    let dir = eval_dir();
-    let (notes, _) = load_json::<Vec<GoldNote>>(&dir.join("notes-gold.json"));
-    let (heldout, _) = load_json::<Vec<Question>>(&dir.join("questions-heldout.json"));
-    let (tuning, _) = load_json::<Vec<Question>>(&dir.join("questions-tuning.json"));
-    let judge = String::from_utf8(read_bytes(&dir.join("judge-prompt.md"))).expect("utf-8");
+fn a_superseded_note_is_seeded_before_its_successor() {
+    let notes = vec![gold("new", &["old"]), gold("plain", &[]), gold("old", &[])];
+    assert_eq!(seed_order(&notes).unwrap(), vec![1, 2, 0]);
+    let chain = vec![gold("c", &["b"]), gold("b", &["a"]), gold("a", &[])];
+    assert_eq!(seed_order(&chain).unwrap(), vec![2, 1, 0]);
+    assert!(seed_order(&[gold("x", &["missing"])]).is_err());
+    assert!(seed_order(&[gold("x", &["y"]), gold("y", &["x"])]).is_err());
+}
 
-    // Notes: unique UUID ids, known kinds and scopes, a project only on a
-    // project note, every supersedes link resolvable, a fact_key in grammar.
-    assert!(
-        notes.len() >= 60,
-        "gold set should hold >= 60 notes (got {})",
-        notes.len()
-    );
-    let mut note_ids = BTreeSet::new();
-    for n in &notes {
-        assert!(
-            is_uuid(&n.id),
-            "note {}: id is not a hyphenated lowercase UUID",
-            n.id
-        );
-        assert!(note_ids.insert(n.id.clone()), "duplicate note id {}", n.id);
-        assert!(!n.title.trim().is_empty(), "note {}: empty title", n.id);
-        assert!(!n.body.trim().is_empty(), "note {}: empty body", n.id);
-        assert!(
-            NOTE_KINDS.contains(&n.kind.as_str()),
-            "note {}: kind {}",
-            n.id,
-            n.kind
-        );
-        assert!(
-            n.scope == "global" || n.scope == "project",
-            "note {}: scope {}",
-            n.id,
-            n.scope
-        );
-        assert_eq!(
-            n.project.is_some(),
-            n.scope == "project",
-            "note {}: a project is named exactly when scope is project",
-            n.id
-        );
-        assert!(
-            !n.created_at.trim().is_empty(),
-            "note {}: empty created_at",
-            n.id
-        );
-        if let Some(key) = &n.fact_key {
-            let ok = key.len() <= 64
-                && key.bytes().enumerate().all(|(i, b)| {
-                    b.is_ascii_lowercase()
-                        || b.is_ascii_digit()
-                        || (i > 0 && (b == b'.' || b == b'_' || b == b'-'))
-                });
-            assert!(
-                ok,
-                "note {}: fact_key {key:?} is outside the §4 grammar",
-                n.id
-            );
-        }
-        assert!(n.aliases.len() <= 16, "note {}: more than 16 aliases", n.id);
-        assert!(n.tags.len() <= 16, "note {}: more than 16 tags", n.id);
-    }
-    for n in &notes {
-        for s in &n.supersedes {
-            assert!(
-                note_ids.contains(s),
-                "note {}: supersedes unknown note {s}",
-                n.id
-            );
-            assert_ne!(s, &n.id, "note {}: supersedes itself", n.id);
-        }
-    }
-    for lang in [Language::En, Language::Zh] {
-        assert!(
-            notes.iter().filter(|n| n.language == lang).count() >= 10,
-            "gold set needs >= 10 {} notes",
-            lang.as_str()
-        );
-    }
+/// Every field the design's `memory_store` takes arrives natively — nothing
+/// is flattened into the body the way the old one-string tool needed.
+#[test]
+fn a_gold_note_maps_to_the_store_input_field_by_field() {
+    let mut note = gold("new", &["old"]);
+    note.kind = "procedure".to_string();
+    note.scope = "project".to_string();
+    note.project = Some("moss".to_string());
+    note.fact_key = Some("moss.output_dir".to_string());
+    note.aliases = vec!["build dir".to_string()];
+    note.tags = vec!["moss".to_string()];
+    note.valid_from = Some("2026-05-10T00:00:00Z".to_string());
+    let old_id = NoteId::new();
+    let old_rev = "a".repeat(64);
+    let stored = BTreeMap::from([("old".to_string(), (old_id, old_rev.clone()))]);
 
-    // Questions: ids unique across both splits, categories stratified, every
-    // language present, abstention rows marked and nothing else.
-    let mut seen = BTreeSet::new();
-    let held_counts = validate_questions("heldout", &heldout, &note_ids, &mut seen);
-    let tune_counts = validate_questions("tuning", &tuning, &note_ids, &mut seen);
-    assert!(
-        heldout.len() >= 450,
-        "held-out set should stay near 470 questions (got {})",
-        heldout.len()
+    let input = store_input_for(&note, &stored).unwrap();
+    assert_eq!(input.title, "title new");
+    assert_eq!(input.body, "body new");
+    assert_eq!(input.kind, Some(NoteKind::Procedure));
+    assert_eq!(input.scope, Some(NoteScope::Project));
+    assert_eq!(input.fact_key.as_deref(), Some("moss.output_dir"));
+    assert_eq!(input.aliases, vec!["build dir".to_string()]);
+    assert_eq!(input.tags, vec!["moss".to_string()]);
+    assert_eq!(
+        input.valid_from.map(|t| t.to_rfc3339()),
+        Some("2026-05-10T00:00:00+00:00".to_string())
     );
-    assert!(
-        tuning.len() >= 120,
-        "tuning set should stay near 150 questions (got {})",
-        tuning.len()
-    );
-    for cat in Category::ALL {
-        assert!(
-            held_counts.get(&cat).copied().unwrap_or(0) >= 30,
-            "held-out needs >= 30 {} questions (got {held_counts:?})",
-            cat.as_str()
-        );
-        assert!(
-            tune_counts.get(&cat).copied().unwrap_or(0) >= 8,
-            "tuning needs >= 8 {} questions (got {tune_counts:?})",
-            cat.as_str()
-        );
-    }
-    for lang in [Language::En, Language::Zh, Language::Mixed] {
-        assert!(
-            heldout.iter().filter(|q| q.language == lang).count() >= 40,
-            "held-out needs >= 40 {} questions",
-            lang.as_str()
-        );
-    }
+    assert_eq!(input.valid_to, None);
+    assert_eq!(input.supersedes, Some((old_id, old_rev)));
+    assert!(input.sources.is_empty() && input.provenance.is_none());
 
-    // Judge prompt: every placeholder present exactly once, verdict words named.
-    for p in JUDGE_PLACEHOLDERS {
-        assert_eq!(
-            judge.matches(p).count(),
-            1,
-            "judge prompt must contain {p} exactly once"
-        );
-    }
-    assert!(judge.contains("CORRECT") && judge.contains("INCORRECT"));
+    assert!(
+        store_input_for(&note, &BTreeMap::new()).is_err(),
+        "target not stored yet"
+    );
+    note.kind = "memo".to_string();
+    assert!(store_input_for(&note, &stored).is_err(), "unknown kind");
 }
 
 // ─── Settings ───────────────────────────────────────────────────────────────
@@ -387,35 +675,147 @@ fn memory_eval_set_v0_is_well_formed() {
 enum System {
     #[serde(rename = "none")]
     NoMemory,
-    A,
-    B,
-    C,
     D,
     E,
 }
 
 impl System {
-    fn from_label(s: &str) -> Option<Self> {
+    fn from_label(s: &str) -> Result<Self, String> {
         match s.trim() {
-            "none" | "NONE" | "None" => Some(System::NoMemory),
-            "A" | "a" => Some(System::A),
-            "B" | "b" => Some(System::B),
-            "C" | "c" => Some(System::C),
-            "D" | "d" => Some(System::D),
-            "E" | "e" => Some(System::E),
-            _ => None,
+            "none" | "NONE" | "None" => Ok(System::NoMemory),
+            "D" | "d" => Ok(System::D),
+            "E" | "e" => Ok(System::E),
+            label @ ("A" | "a" | "B" | "b") => {
+                let upper = label.to_ascii_uppercase();
+                Err(format!(
+                    "system {upper} measured the memory engine slice 3 deleted; its report is \
+                     archived at scripts/eval/memory/reports/baseline-{upper}-2026-09-24.json — \
+                     compare a D or E report against it with compare.py"
+                ))
+            }
+            "C" | "c" => Err(
+                "system C (one bounded MEMORY.md) was never built; nothing measures it".to_string(),
+            ),
+            other => Err(format!("{other:?} is not one of none | D | E")),
         }
     }
 
     fn as_str(self) -> &'static str {
         match self {
             System::NoMemory => "none",
-            System::A => "A",
-            System::B => "B",
-            System::C => "C",
             System::D => "D",
             System::E => "E",
         }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            System::NoMemory => {
+                "no memory service: no recall, no memory tool — the context-cost reference"
+            }
+            System::D => {
+                "the memory service as the daemon runs it: the per-turn recall on, the read \
+                 tools and the main loop's writers offered, under the shipped main-loop caps"
+            }
+            System::E => {
+                "D bounded to the per-turn recall plus at most two model-directed follow-up \
+                 searches, expressed with the main loop's existing caps: 3 rounds, 1 tool call \
+                 per round (the bound counts every tool call; the model is not told it)"
+            }
+        }
+    }
+}
+
+/// The main loop's round and per-round tool caps a system runs under, and
+/// the follow-up search bound they express.
+///
+/// D runs the shipped caps (`[orchestrator.routing]`, 8 rounds × 4 tool
+/// calls), so its model-directed searches are bounded only by them. E
+/// narrows the same two caps to design §5's bound — no new mechanism, the
+/// main loop's existing tool budget: one tool call per round and
+/// `FOLLOW_UP_SEARCHES + 1` rounds, so at most two tool calls can inform an
+/// answer written in the last round. The approximation, recorded in every E
+/// report:
+///
+/// - the bound counts **every** tool call (`memory_read`, `task_status`, …),
+///   not only `memory_search`;
+/// - nothing tells the model which round is its last, so a model that spends
+///   the third round on a tool exits `MaxRounds` and the turn answers with
+///   the runtime's no-answer line (V3), which the judge scores like any
+///   other answer;
+/// - a second tool call in one round is answered "max tools per round
+///   exceeded" instead of running;
+/// - the answer guard's one corrective round (round 13, H3) can add a round
+///   to a turn that states a task id nothing answers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MainLoopBudget {
+    max_rounds: usize,
+    max_tools_per_round: usize,
+    follow_up_search_bound: Option<usize>,
+}
+
+impl MainLoopBudget {
+    fn for_system(system: System, shipped: &RoutingConfig) -> Self {
+        match system {
+            System::NoMemory | System::D => Self {
+                max_rounds: shipped.main_loop_max_rounds,
+                max_tools_per_round: shipped.main_loop_max_tools_per_round,
+                follow_up_search_bound: None,
+            },
+            System::E => Self {
+                max_rounds: FOLLOW_UP_SEARCHES + 1,
+                max_tools_per_round: 1,
+                follow_up_search_bound: Some(FOLLOW_UP_SEARCHES),
+            },
+        }
+    }
+}
+
+#[test]
+fn e_bounds_follow_up_searches_with_the_main_loops_own_caps() {
+    let shipped = RoutingConfig::default();
+    for system in [System::NoMemory, System::D] {
+        let budget = MainLoopBudget::for_system(system, &shipped);
+        assert_eq!(budget.max_rounds, shipped.main_loop_max_rounds);
+        assert_eq!(
+            budget.max_tools_per_round,
+            shipped.main_loop_max_tools_per_round
+        );
+        assert_eq!(budget.follow_up_search_bound, None);
+    }
+    let e = MainLoopBudget::for_system(System::E, &shipped);
+    // Every round but the last may carry one tool call; the last answers.
+    assert_eq!(e.max_tools_per_round, 1);
+    assert_eq!(
+        (e.max_rounds - 1) * e.max_tools_per_round,
+        FOLLOW_UP_SEARCHES
+    );
+    assert_eq!(e.follow_up_search_bound, Some(2));
+    assert!(e.max_rounds < shipped.main_loop_max_rounds);
+}
+
+#[test]
+fn the_old_engines_systems_point_at_their_archived_reports() {
+    assert_eq!(System::from_label("none"), Ok(System::NoMemory));
+    assert_eq!(System::from_label(" d "), Ok(System::D));
+    assert_eq!(System::from_label("E"), Ok(System::E));
+    for label in ["A", "b"] {
+        let err = System::from_label(label).unwrap_err();
+        assert!(err.contains("reports/baseline-"), "{err}");
+        assert!(err.contains("compare.py"), "{err}");
+    }
+    assert!(System::from_label("C").unwrap_err().contains("never built"));
+    assert!(System::from_label("F").is_err());
+    for (label, dir) in [("A", "A"), ("B", "B")] {
+        let err = System::from_label(label).unwrap_err();
+        let path = err
+            .split_whitespace()
+            .find(|w| w.starts_with("scripts/eval/memory/reports/"))
+            .unwrap();
+        assert!(
+            repo_root().join(path).is_file(),
+            "{dir}: {path} is not archived"
+        );
     }
 }
 
@@ -428,7 +828,6 @@ struct Settings {
     limit: Option<usize>,
     category: Option<Category>,
     judge_model: Option<String>,
-    allow_download: bool,
     keep_scratch: bool,
 }
 
@@ -444,13 +843,10 @@ impl Settings {
     /// Every pre-flight check happens here, before a router exists, so a
     /// misconfigured run refuses without a single model call.
     fn from_env() -> Self {
-        let system = env_nonempty("OPENALPACA_MEMORY_EVAL_SYSTEM")
-            .and_then(|s| System::from_label(&s))
-            .unwrap_or_else(|| {
-                panic!(
-                    "memory_eval: OPENALPACA_MEMORY_EVAL_SYSTEM must be one of none | A | B | C | D | E"
-                )
-            });
+        let label = env_nonempty("OPENALPACA_MEMORY_EVAL_SYSTEM").unwrap_or_else(|| {
+            panic!("memory_eval: OPENALPACA_MEMORY_EVAL_SYSTEM must be one of none | D | E")
+        });
+        let system = System::from_label(&label).unwrap_or_else(|e| panic!("memory_eval: {e}"));
         let report_path = PathBuf::from(
             env_nonempty("OPENALPACA_MEMORY_EVAL_REPORT").unwrap_or_else(|| {
                 panic!(
@@ -463,8 +859,9 @@ impl Settings {
             "memory_eval: OPENALPACA_MEMORY_EVAL_REPORT must be an absolute path"
         );
 
-        // The scratch store: the only place the embedder cache may go. It has
-        // to be named explicitly, absolute, and must not be the real one.
+        // The scratch store: where the memory partitions, their control
+        // snapshots and the index cache go. It has to be named explicitly,
+        // absolute, and must not be the real one.
         let home_store =
             PathBuf::from(env_nonempty("OPENALPACA_HOME_STORE").unwrap_or_else(|| {
                 panic!(
@@ -530,7 +927,6 @@ impl Settings {
             limit,
             category,
             judge_model: env_nonempty("OPENALPACA_MEMORY_EVAL_JUDGE_MODEL"),
-            allow_download: env_flag("OPENALPACA_MEMORY_EVAL_ALLOW_DOWNLOAD"),
             keep_scratch: env_flag("OPENALPACA_MEMORY_EVAL_KEEP"),
         }
     }
@@ -556,7 +952,7 @@ struct Build {
 
 #[derive(Debug, Serialize)]
 struct Conditions {
-    owner_id: &'static str,
+    owner_id: String,
     llm_toml: String,
     llm_toml_sha256: String,
     reader_default_model: String,
@@ -569,17 +965,17 @@ struct Conditions {
     /// applies `orchestrator.routing`'s caps in place of the `LoopConfig`
     /// defaults (`simple_query_handler.rs`, `override_max_rounds`), so these
     /// two are the reader's real round and tool-call caps and
-    /// `reader_max_rounds` is the default they replace.
+    /// `reader_max_rounds` is the default they replace. E narrows both
+    /// ([`MainLoopBudget`]).
     main_loop_max_rounds: usize,
     main_loop_max_tools_per_round: usize,
     /// The byte cap on a tool result handed to the model
-    /// (`orchestrator.sessions.tool_result_inline_bytes`): B's
-    /// `memory_search` answer is cut here.
+    /// (`orchestrator.sessions.tool_result_inline_bytes`): a `memory_search`
+    /// answer is cut here.
     tool_result_inline_bytes: usize,
     /// The per-turn context assembly's budget is the model window minus the
     /// reserved tokens minus `window × this ratio`
-    /// (`execution.context.autocompact_buffer_ratio`, `prompt_ctx/manager.rs`);
-    /// the per-turn memory sections fill it greedily.
+    /// (`execution.context.autocompact_buffer_ratio`, `prompt_ctx/manager.rs`).
     autocompact_buffer_ratio: f64,
     judge_model_requested: Option<String>,
     judge_temperature: f32,
@@ -598,24 +994,42 @@ struct Conditions {
     questions_selected: usize,
     limit: Option<usize>,
     category_filter: Option<Category>,
+    /// The automatic per-turn recall (`prompt_ctx::sources::memory::MemorySource`
+    /// over `MemoryService::recall` — lexical FTS5, no model) is on.
     per_turn_fts_active: bool,
     memory_search_tool_offered: bool,
     unattended: bool,
     extraction_disabled: bool,
     workflow_cap: usize,
-    /// The scratch store (`OPENALPACA_HOME_STORE`) — where B's E5 cache lives.
+    /// The scratch store (`OPENALPACA_HOME_STORE`): the home partition, the
+    /// control snapshots and the index cache.
     home_store: String,
     scratch_dir: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct EmbedderInfo {
-    provider: String,
-    model: Option<String>,
-    dimensions: u32,
-    cache_dir: String,
-    cache_was_empty: bool,
-    download_authorized: bool,
+    // ── Added with the new engine (plan 3.11) ─────────────────────────────
+    /// What the system is, in one sentence.
+    system_description: &'static str,
+    /// The memory tools on the main loop's surface.
+    memory_tools_offered: Vec<&'static str>,
+    /// E: the model-directed follow-up searches the main-loop caps allow
+    /// before the answering round; `null` when only the shipped caps bound
+    /// them.
+    follow_up_search_bound: Option<usize>,
+    /// The retrieved byte budget (plan §5 control; design §4): the per-turn
+    /// recall's total and pinned bytes and item cap, and a `memory_read`'s
+    /// body cap.
+    recall_total_bytes: usize,
+    recall_pinned_bytes: usize,
+    recall_max_items: usize,
+    read_max_bytes: usize,
+    /// Gold notes carry `scope` natively: global notes in the owner's home
+    /// partition, project notes in the scratch project's partition (both
+    /// fictional projects share it — the harness asks from one workspace).
+    notes_scope_applied: bool,
+    /// Stored as a `supersedes` successor of an earlier gold note.
+    notes_superseding: usize,
+    /// Gold id → the id the service minted, so a row's `memory_used` reads
+    /// back as gold ids.
+    seeded_ids: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -657,6 +1071,24 @@ struct Totals {
     rows_with_per_turn_fts_hits: usize,
     latency: Latency,
     wall_ms: u64,
+    // ── Added with the new engine (plan 3.11) ─────────────────────────────
+    /// Rows with a non-empty `relies_on` whose every relied-on note reached
+    /// the model (recall or tool) — retrieval, separately from the answer.
+    rows_with_every_relied_note_delivered: usize,
+    /// Tool calls that changed memory mid-run (`memory_store`,
+    /// `memory_update`, `memory_forget`); non-zero means later questions saw
+    /// a store the gold set does not describe.
+    memory_write_calls: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct UsedNote {
+    /// The gold id when the note is a seeded one, else the service's id (a
+    /// note a model stored during the run).
+    note: String,
+    gold: bool,
+    /// `recall` | `pinned` | `tool` (design §7a `memory_used`).
+    reason: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -691,16 +1123,21 @@ struct Row {
     reader_cost_usd: f64,
     tools: Vec<String>,
     memory_search_calls: u32,
-    /// What the per-turn FTS path found for this question, measured with the
-    /// same repository call `MemorySource` makes (observability only).
+    /// How many notes the automatic per-turn recall delivered for this
+    /// question (`memory_used` entries with reason `recall` or `pinned`).
     per_turn_fts_hits: usize,
+    // ── Added with the new engine (plan 3.11) ─────────────────────────────
+    /// The turn's `memory_used` (design §7a), as `take_memory_used` hands it
+    /// to the daemon's bridge: every note delivered, by recall or by tool.
+    memory_used: Vec<UsedNote>,
+    /// How many of `relies_on` are in `memory_used`.
+    relied_notes_delivered: usize,
 }
 
 #[derive(Debug, Serialize)]
 struct Report {
     schema: u32,
-    /// `running` while rows are still being added, then `complete`; or
-    /// `unavailable` when the system cannot be measured by this build.
+    /// `running` while rows are still being added, then `complete`.
     status: &'static str,
     system: System,
     unavailable_reason: Option<String>,
@@ -709,7 +1146,10 @@ struct Report {
     machine: Machine,
     build: Build,
     conditions: Option<Conditions>,
-    embedder: Option<EmbedderInfo>,
+    /// Baseline B's E5 record in the archived reports. The new engine has no
+    /// embedder, so it is always `null` here; kept so every report has the
+    /// same keys.
+    embedder: Option<serde_json::Value>,
     totals: Option<Totals>,
     rows: Vec<Row>,
 }
@@ -740,15 +1180,11 @@ fn build_info() -> Build {
     let root = repo_root();
     let root_str = root.to_string_lossy().into_owned();
     let lockfile = read_bytes(&root.join("Cargo.lock"));
-    let mut features = vec!["live-eval"];
-    if cfg!(feature = "live-eval-e5") {
-        features.push("live-eval-e5");
-    }
     Build {
         git_head: command_stdout("git", &["-C", &root_str, "rev-parse", "HEAD"]),
         lockfile_sha256: sha256_hex(&lockfile),
         crate_version: env!("CARGO_PKG_VERSION"),
-        features,
+        features: vec!["live-eval"],
     }
 }
 
@@ -850,35 +1286,16 @@ fn totals(rows: &[Row], judge_cost_usd: f64, wall_ms: u64) -> Totals {
             max_ms: latencies.last().copied().unwrap_or(0),
         },
         wall_ms,
+        rows_with_every_relied_note_delivered: rows
+            .iter()
+            .filter(|r| !r.relies_on.is_empty() && r.relied_notes_delivered == r.relies_on.len())
+            .count(),
+        memory_write_calls: rows
+            .iter()
+            .flat_map(|r| r.tools.iter())
+            .filter(|t| MEMORY_WRITE_TOOLS.contains(&t.as_str()))
+            .count() as u32,
     }
-}
-
-// ─── The old engine's flat note text ────────────────────────────────────────
-
-/// What a gold note becomes on the way into today's `memory_store`, which
-/// takes one `content` string: the title as a heading, the body as written,
-/// then the aliases, tags and validity bounds as labelled lines — every field
-/// the new service indexes, so B is not handicapped by the flattening. Slice 4
-/// passes the fields natively once the tool takes them (design §7a).
-fn flatten_for_store(note: &GoldNote) -> String {
-    let mut text = format!("# {}\n{}", note.title.trim(), note.body.trim());
-    if !note.aliases.is_empty() {
-        text.push_str("\nAliases: ");
-        text.push_str(&note.aliases.join(", "));
-    }
-    if !note.tags.is_empty() {
-        text.push_str("\nTags: ");
-        text.push_str(&note.tags.join(", "));
-    }
-    if let Some(from) = &note.valid_from {
-        text.push_str("\nValid from: ");
-        text.push_str(from);
-    }
-    if let Some(to) = &note.valid_to {
-        text.push_str("\nValid to: ");
-        text.push_str(to);
-    }
-    text
 }
 
 // ─── Judge ──────────────────────────────────────────────────────────────────
@@ -983,7 +1400,7 @@ struct TurnObservation {
 /// (without spending money) unless `OPENALPACA_LIVE_EVAL=1`.
 ///
 /// Requires the eval's own `llm.toml` under `OPENALPACA_CONFIG_DIR`, a scratch
-/// `OPENALPACA_HOME_STORE`, and `--features live-eval` (`live-eval-e5` for B).
+/// `OPENALPACA_HOME_STORE`, and `--features live-eval`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "live LLM eval — set OPENALPACA_LIVE_EVAL=1, OPENALPACA_MEMORY_EVAL_SYSTEM, OPENALPACA_MEMORY_EVAL_REPORT, a scratch OPENALPACA_HOME_STORE and OPENALPACA_CONFIG_DIR; build with --features live-eval (runbook: scripts/eval/memory/README.md)"]
 async fn memory_eval() {
@@ -994,17 +1411,17 @@ async fn memory_eval() {
     use openalpaca_core::events::SystemEvent;
     use openalpaca_core::gateway::HandleRequest;
     use openalpaca_core::lane::LaneManager;
-    use openalpaca_core::memory::scope_context::MemoryScopeContext;
     use openalpaca_core::middleware::prompt::SystemPersona;
-    use openalpaca_core::orchestrator::{Orchestrator, skill_catalog, skill_router};
+    use openalpaca_core::orchestrator::{
+        MAIN_LOOP_AGENT_ID, Orchestrator, skill_catalog, skill_router,
+    };
     use openalpaca_core::runner::LoopConfig;
     use openalpaca_core::security::gate::SecurityGate;
     use openalpaca_core::security::policy::{Principal, Scope};
     use openalpaca_core::security::sandbox::SandboxManager;
     use openalpaca_core::tools::ToolRegistry;
-    use openalpaca_core::tools::builtins::{MemoryStoreTool, builtin_tools};
-    use openalpaca_core::tools::registry::{BuiltInTool, ToolContext};
-    use openalpaca_storage::repository::MemoryRepository;
+    use openalpaca_core::tools::builtins::memory_read_tools;
+    use openalpaca_storage::IdentityRepository;
     use tokio::sync::broadcast::error::TryRecvError;
     use uuid::Uuid;
 
@@ -1032,24 +1449,6 @@ async fn memory_eval() {
         totals: None,
         rows: Vec::new(),
     };
-
-    // C, D and E are the new service (slice 3) and cannot be measured by
-    // this build: an explicit `unavailable` report, no model call.
-    if matches!(settings.system, System::C | System::D | System::E) {
-        report.status = "unavailable";
-        report.unavailable_reason = Some(format!(
-            "system {} arrives with slice 3 (the new MemoryService); this build has no such system",
-            settings.system.as_str()
-        ));
-        report.run_finished_at = Some(now_rfc3339());
-        write_report(&settings.report_path, &report);
-        eprintln!(
-            "memory_eval: system {} is unavailable in this build — report written to {}",
-            settings.system.as_str(),
-            settings.report_path.display()
-        );
-        return;
-    }
 
     // ── Data ────────────────────────────────────────────────────────────
     let dir = eval_dir();
@@ -1096,89 +1495,7 @@ async fn memory_eval() {
             .unwrap_or_else(|| "none".to_string())
     );
 
-    // ── Embedder (B only) ───────────────────────────────────────────────
-    let embedder: Option<Arc<dyn openalpaca_llm::Embedder>> = if settings.system == System::B {
-        let llm_config = openalpaca_llm::read_config(&settings.llm_toml).unwrap_or_else(|e| {
-            panic!(
-                "memory_eval: cannot re-read {}: {e}",
-                settings.llm_toml.display()
-            )
-        });
-        let emb_cfg = llm_config
-            .embeddings
-            .clone()
-            .unwrap_or(openalpaca_llm::EmbeddingsConfig {
-                enabled: true,
-                provider: "local".to_string(),
-                model: None,
-                dimensions: None,
-            });
-        let provider_cfg = llm_config
-            .providers
-            .as_ref()
-            .and_then(|p| p.get(&emb_cfg.provider).cloned());
-        // G12: the cache lives in the scratch store, and a download into it
-        // is a one-time, explicitly authorized step — never a side effect.
-        let cache_dir = openalpaca_storage::store::embedding_cache_dir()
-            .unwrap_or_else(|e| panic!("memory_eval: cannot create the embedding cache: {e}"));
-        let cache_was_empty = std::fs::read_dir(&cache_dir)
-            .map(|d| d.count() == 0)
-            .unwrap_or(true);
-        let info = EmbedderInfo {
-            provider: emb_cfg.provider.clone(),
-            model: emb_cfg.model.clone(),
-            dimensions: emb_cfg.dimensions.unwrap_or(768),
-            cache_dir: cache_dir.to_string_lossy().into_owned(),
-            cache_was_empty,
-            download_authorized: settings.allow_download,
-        };
-        let built: Result<Arc<dyn openalpaca_llm::Embedder>, String> = if emb_cfg.provider
-            == "local"
-            && cache_was_empty
-            && !settings.allow_download
-        {
-            Err(format!(
-                "the E5 model is not in {} and OPENALPACA_MEMORY_EVAL_ALLOW_DOWNLOAD=1 was not set \
-                     (G12: the download must be authorized explicitly)",
-                cache_dir.display()
-            ))
-        } else {
-            let cfg = emb_cfg.clone();
-            let dir = cache_dir.clone();
-            // Loading (or downloading) the model is blocking work.
-            tokio::task::spawn_blocking(move || {
-                    openalpaca_llm::build_embedder(&cfg, None, provider_cfg.as_ref(), Some(&dir))
-                })
-                .await
-                .expect("embedder builder task")
-                .map_err(|e| {
-                    format!(
-                        "cannot build the {} embedder: {e} (a `local` provider needs `--features live-eval-e5`)",
-                        emb_cfg.provider
-                    )
-                })
-        };
-        report.embedder = Some(info);
-        match built {
-            Ok(embedder) => Some(embedder),
-            Err(reason) => {
-                report.status = "unavailable";
-                report.unavailable_reason = Some(reason.clone());
-                report.run_finished_at = Some(now_rfc3339());
-                write_report(&settings.report_path, &report);
-                eprintln!(
-                    "memory_eval: baseline B is unavailable — {reason}; report written to {} \
-                     (plan §5: the gate is then against A at −10 pp)",
-                    settings.report_path.display()
-                );
-                return;
-            }
-        }
-    } else {
-        None
-    };
-
-    // ── Scratch DB + a scratch project (so the turn's workspace is never
+    // ── Scratch DB, owner and project (so the turn's workspace is never
     //    this checkout, whatever the test process's CWD is) ──────────────
     let tmp = tempfile::tempdir().expect("tempdir");
     let scratch_project = tmp.path().join("project");
@@ -1187,7 +1504,15 @@ async fn memory_eval() {
         .canonicalize()
         .expect("canonical scratch project");
     let db = openalpaca_storage::Database::open(&tmp.path().join("eval.db")).expect("open db");
-    let scope_ctx = MemoryScopeContext::for_request(scratch_project.to_str());
+    // The service answers only for a `global_user` row (design §3); a fresh
+    // owner per run keeps a reused scratch store's earlier partitions out.
+    let owner_id = format!(
+        "{OWNER_PREFIX}-{}",
+        &Uuid::new_v4().simple().to_string()[..8]
+    );
+    IdentityRepository::new(&db)
+        .create_global_user(&owner_id, None)
+        .expect("create the eval owner");
 
     // ── Orchestrator ────────────────────────────────────────────────────
     let shared = Arc::new(SharedContext::new());
@@ -1205,30 +1530,29 @@ async fn memory_eval() {
     // writes memories of its own; the eval measures recall, not learning.
     cfg.orchestrator.costs.extract_every_n_turns = usize::MAX;
     cfg.orchestrator.costs.task_extract_enabled = false;
+    let budget = MainLoopBudget::for_system(settings.system, &cfg.orchestrator.routing);
+    cfg.orchestrator.routing.main_loop_max_rounds = budget.max_rounds;
+    cfg.orchestrator.routing.main_loop_max_tools_per_round = budget.max_tools_per_round;
     let workflow_cap = cfg.orchestrator.routing.max_workflows_per_lane;
-    let main_loop_max_rounds = cfg.orchestrator.routing.main_loop_max_rounds;
-    let main_loop_max_tools_per_round = cfg.orchestrator.routing.main_loop_max_tools_per_round;
     let tool_result_inline_bytes = cfg.orchestrator.sessions.tool_result_inline_bytes;
     let autocompact_buffer_ratio = cfg.execution.context.autocompact_buffer_ratio;
     let daemon_config = Arc::new(ArcSwap::from_pointee(cfg));
 
-    // B: the `memory_search` tool, exactly as the daemon registers it
-    // (`builtin_tools`), joins the global registry; A and `none` offer no
-    // search tool, so the per-turn path is the only recall.
-    let memory_search_offered = settings.system == System::B;
-    if memory_search_offered {
-        for tool in builtin_tools(
-            Some(db.clone()),
-            embedder.clone(),
-            Some(daemon_config.clone()),
-            None,
-            Some(scratch_project.clone()),
-        ) {
-            if tool.definition.name == "memory_search" {
-                registry.register(tool).expect("register memory_search");
-            }
+    // D and E: the daemon's own service (`MemoryService::open_default`,
+    // `apps/openalpacad/src/services/mod.rs` — the index cache under the
+    // scratch store) and its read tools registered exactly as the daemon
+    // registers them (`services/tools.rs`); the orchestrator then runs the
+    // per-turn recall and offers the main loop's writers. `none` installs
+    // nothing: no recall, no memory tool.
+    let service = (settings.system != System::NoMemory).then(|| {
+        let service = Arc::new(MemoryService::open_default(Some(db.clone())).with_bus(bus.clone()));
+        for tool in memory_read_tools(service.clone()) {
+            registry
+                .register(tool)
+                .expect("register a memory read tool");
         }
-    }
+        service
+    });
 
     let loop_config = LoopConfig::default();
     let reader_max_rounds = loop_config.max_rounds;
@@ -1243,64 +1567,59 @@ async fn memory_eval() {
         gate,
         registry,
         Some(db.clone()),
-        embedder.clone(),
         Arc::new(skill_catalog::SkillCatalog::new()),
         Arc::new(skill_router::SkillRouter::new(0.65, 0.45)),
         daemon_config,
     );
-
-    // ── Seed the gold notes through the store tool path ─────────────────
-    let (mut seeded, mut duplicate, mut failed) = (0usize, 0usize, 0usize);
-    if settings.system != System::NoMemory {
-        let store = MemoryStoreTool::new(Some(db.clone()), embedder.clone());
-        let ctx = ToolContext {
-            owner_id: Some(OWNER_ID.to_string()),
-            source: Some("cli".to_string()),
-            ..Default::default()
-        };
-        for note in &notes {
-            let content = flatten_for_store(note);
-            match store
-                .execute_with_context(&serde_json::json!({ "content": content }), &ctx)
-                .await
-            {
-                Ok(reply) if reply.starts_with("Got it") => seeded += 1,
-                Ok(reply) if reply.starts_with("I already have") => {
-                    duplicate += 1;
-                    eprintln!(
-                        "memory_eval: note {} is an exact duplicate — not seeded twice",
-                        note.id
-                    );
-                }
-                Ok(other) => {
-                    failed += 1;
-                    eprintln!(
-                        "memory_eval: note {}: unexpected store reply: {other}",
-                        note.id
-                    );
-                }
-                Err(e) => {
-                    failed += 1;
-                    eprintln!("memory_eval: note {}: store failed: {e}", note.id);
-                }
-            }
-        }
-        eprintln!(
-            "memory_eval: seeded {seeded} of {} notes ({duplicate} duplicate, {failed} failed)",
-            notes.len()
-        );
+    if let Some(service) = &service {
+        orch.set_memory_service(service.clone());
     }
 
+    // ── Seed the gold notes through the service ─────────────────────────
+    let seed = match &service {
+        Some(service) => {
+            let (service, owner, project, gold_notes) = (
+                service.clone(),
+                owner_id.clone(),
+                scratch_project.clone(),
+                notes.clone(),
+            );
+            // The service's file work is synchronous (it says so); an async
+            // caller runs it on the blocking pool, as the tools do.
+            let seed = tokio::task::spawn_blocking(move || {
+                seed_notes(&service, &owner, &project, &gold_notes)
+            })
+            .await
+            .expect("seeding task");
+            eprintln!(
+                "memory_eval: seeded {} of {} notes ({} as a replacement, {} duplicate, {} failed)",
+                seed.seeded,
+                notes.len(),
+                seed.superseding,
+                seed.duplicate,
+                seed.failed
+            );
+            seed
+        }
+        None => SeedOutcome::default(),
+    };
+    let gold_by_service_id: HashMap<String, String> = seed
+        .ids
+        .iter()
+        .map(|(gold, service)| (service.clone(), gold.clone()))
+        .collect();
+
+    let recall = RecallBudget::default();
     report.conditions = Some(Conditions {
-        owner_id: OWNER_ID,
+        owner_id: owner_id.clone(),
         llm_toml: settings.llm_toml.to_string_lossy().into_owned(),
         llm_toml_sha256,
         reader_default_model: router.default_model(),
         reader_temperature: None,
         reader_max_rounds,
         reader_max_cost_usd: reader_max_cost,
-        main_loop_max_rounds,
-        main_loop_max_tools_per_round,
+        main_loop_max_rounds: budget.max_rounds,
+        main_loop_max_tools_per_round: budget.max_tools_per_round,
         tool_result_inline_bytes,
         autocompact_buffer_ratio,
         judge_model_requested: settings.judge_model.clone(),
@@ -1311,21 +1630,17 @@ async fn memory_eval() {
         notes_path: notes_path.to_string_lossy().into_owned(),
         notes_sha256,
         notes_total: notes.len(),
-        notes_seeded: seeded,
-        notes_duplicate: duplicate,
-        notes_failed: failed,
+        notes_seeded: seed.seeded,
+        notes_duplicate: seed.duplicate,
+        notes_failed: seed.failed,
         questions_path: settings.questions_path.to_string_lossy().into_owned(),
         questions_sha256,
         questions_total: all_questions.len(),
         questions_selected: questions.len(),
         limit: settings.limit,
         category_filter: settings.category,
-        // The orchestrator builds `MemorySource` whenever it has a database
-        // (`orchestrator/mod.rs`, `Orchestrator::new`); nothing switches it
-        // off, so B runs with it live too — `per_turn_fts_hits` says how often
-        // it found anything.
-        per_turn_fts_active: true,
-        memory_search_tool_offered: memory_search_offered,
+        per_turn_fts_active: service.is_some(),
+        memory_search_tool_offered: service.is_some(),
         unattended: true,
         extraction_disabled: true,
         workflow_cap,
@@ -1333,12 +1648,24 @@ async fn memory_eval() {
         scratch_dir: settings
             .keep_scratch
             .then(|| tmp.path().to_string_lossy().into_owned()),
+        system_description: settings.system.description(),
+        memory_tools_offered: if service.is_some() {
+            MEMORY_TOOLS.to_vec()
+        } else {
+            Vec::new()
+        },
+        follow_up_search_bound: budget.follow_up_search_bound,
+        recall_total_bytes: recall.total_bytes,
+        recall_pinned_bytes: recall.pinned_bytes,
+        recall_max_items: recall.max_items,
+        read_max_bytes: openalpaca_core::memory::service::READ_MAX_BYTES,
+        notes_scope_applied: service.is_some(),
+        notes_superseding: seed.superseding,
+        seeded_ids: seed.ids.clone(),
     });
     write_report(&settings.report_path, &report);
 
     // ── Ask every question through the front door ───────────────────────
-    let repo = MemoryRepository::new(&db);
-    let cascade = scope_ctx.cascade_scopes();
     for (i, q) in questions.iter().enumerate() {
         // A fresh lane per question: no cross-question history, one owner.
         let lane_key = format!("memory-eval-q{i:04}:cli");
@@ -1356,7 +1683,7 @@ async fn memory_eval() {
                     "cli",
                     q.question.clone(),
                     Principal::User {
-                        global_id: OWNER_ID.to_string(),
+                        global_id: owner_id.clone(),
                     },
                     Scope::Global,
                     lane_key,
@@ -1364,6 +1691,9 @@ async fn memory_eval() {
             })
             .await;
         let latency_ms = t0.elapsed().as_millis() as u64;
+        // What the turn delivered — the daemon's bridge takes exactly this
+        // after `handle_message` (`apps/openalpacad/src/gateway_bridge.rs`).
+        let used = orch.take_memory_used(request_id);
 
         let mut obs = TurnObservation {
             mode: "?".to_string(),
@@ -1384,7 +1714,7 @@ async fn memory_eval() {
                     agent_id,
                     tool_name,
                     ..
-                }) if agent_id == "orchestrator" => obs.tools.push(tool_name),
+                }) if agent_id == MAIN_LOOP_AGENT_ID => obs.tools.push(tool_name),
                 Ok(SystemEvent::LlmCallCompleted {
                     agent_id,
                     model,
@@ -1392,7 +1722,7 @@ async fn memory_eval() {
                     output_tokens,
                     cost_usd,
                     ..
-                }) if agent_id == "orchestrator" => {
+                }) if agent_id == MAIN_LOOP_AGENT_ID => {
                     obs.llm_calls += 1;
                     obs.tokens_in += u64::from(input_tokens);
                     obs.tokens_out += u64::from(output_tokens);
@@ -1405,14 +1735,29 @@ async fn memory_eval() {
             }
         }
 
-        // The per-turn path's own reading of this question — the same
-        // repository call `MemorySource::resolve` makes (FTS only, limit 10,
-        // the turn's cascade) — so a B row can say whether the per-turn path
-        // contributed beside the tool.
-        let per_turn_fts_hits = repo
-            .search_hybrid_cascade(OWNER_ID, &q.question, None, 10, None, &cascade)
-            .map(|v| v.len())
-            .unwrap_or(0);
+        let memory_used: Vec<UsedNote> = used
+            .iter()
+            .map(|u| {
+                let id = u.id.to_string();
+                let gold = gold_by_service_id.get(&id);
+                UsedNote {
+                    gold: gold.is_some(),
+                    note: gold.cloned().unwrap_or(id),
+                    reason: u.reason.as_str(),
+                }
+            })
+            .collect();
+        let per_turn_fts_hits = used
+            .iter()
+            .filter(|u| u.reason != UsedReason::Tool)
+            .map(|u| u.id)
+            .collect::<BTreeSet<_>>()
+            .len();
+        let relied_notes_delivered = q
+            .relies_on
+            .iter()
+            .filter(|r| memory_used.iter().any(|u| u.gold && &u.note == *r))
+            .count();
 
         // `handle_message` answers with the turn's text — the daemon's
         // `OrchestratorHandler::handle` calls exactly this and wraps it.
@@ -1453,6 +1798,8 @@ async fn memory_eval() {
                 .count() as u32,
             tools: obs.tools,
             per_turn_fts_hits,
+            memory_used,
+            relied_notes_delivered,
         };
 
         // A turn that errored still gets judged: an empty answer to a
@@ -1486,7 +1833,7 @@ async fn memory_eval() {
         }
 
         println!(
-            "[{}] {:<10} {:<24} {:<5} latency={:<6}ms llm_calls={} tokens={}/{} tools={:?} fts_hits={}{}",
+            "[{}] {:<10} {:<24} {:<5} latency={:<6}ms llm_calls={} tokens={}/{} tools={:?} recalled={} relied={}/{}{}",
             match row.correct {
                 Some(true) => " OK ",
                 Some(false) => "MISS",
@@ -1501,6 +1848,8 @@ async fn memory_eval() {
             row.reader_tokens_out,
             row.tools,
             row.per_turn_fts_hits,
+            row.relied_notes_delivered,
+            row.relies_on.len(),
             match (&row.turn_error, &row.judge_error) {
                 (Some(e), _) => format!(" (turn returned Err: {e})"),
                 (None, Some(e)) => format!(" (judge failed: {e})"),
@@ -1540,7 +1889,8 @@ async fn memory_eval() {
     }
     println!(
         "reader: {} calls, {} in / {} out tokens, ${:.4}; judge: {} in / {} out tokens, ${:.4}; \
-         latency p50={}ms p95={}ms; memory_search calls={}; rows with per-turn FTS hits={}; wall {}s",
+         latency p50={}ms p95={}ms; memory_search calls={}; rows with per-turn recall hits={}; \
+         rows with every relied-on note delivered={}; memory writes={}; wall {}s",
         t.reader_llm_calls,
         t.reader_tokens_in,
         t.reader_tokens_out,
@@ -1552,6 +1902,8 @@ async fn memory_eval() {
         t.latency.p95_ms,
         t.memory_search_calls,
         t.rows_with_per_turn_fts_hits,
+        t.rows_with_every_relied_note_delivered,
+        t.memory_write_calls,
         t.wall_ms / 1000,
     );
     report.totals = Some(t);

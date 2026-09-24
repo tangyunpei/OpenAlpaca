@@ -7,10 +7,11 @@ publish.workspace = true
 license.workspace = true
 
 [features]
-# Live steer-routing eval harness (tests/steer_routing_eval.rs): compiles the
-# real LLM providers into the test binary so `openalpaca_llm::build_router`
-# can serve a production llm.toml. Never enabled by default — the eval is
-# additionally #[ignore]d and gated on OPENALPACA_LIVE_EVAL=1.
+# The live eval harnesses (tests/steer_routing_eval.rs, tests/memory_eval.rs):
+# compiles the real LLM providers into the test binary so
+# `openalpaca_llm::build_router` can serve a production llm.toml. Never
+# enabled by default — each eval is additionally #[ignore]d and gated on
+# OPENALPACA_LIVE_EVAL=1.
 live-eval = ["openalpaca_llm/anthropic", "openalpaca_llm/openai", "openalpaca_llm/ollama"]
 
 [dependencies]
