@@ -19,6 +19,8 @@
 - `daemon_lifecycle` (crates/openalpaca_storage/src/daemon_lifecycle.rs)
 - `database` (crates/openalpaca_storage/src/database/mod.rs)
 - `discovery` (crates/openalpaca_storage/src/discovery/mod.rs)
+- `memory_files` (crates/openalpaca_storage/src/memory_files/mod.rs)
+- `memory_index` (crates/openalpaca_storage/src/memory_index/mod.rs)
 - `migrations` (crates/openalpaca_storage/src/migrations/mod.rs)
 - `models` (crates/openalpaca_storage/src/models/mod.rs)
 - `repository` (crates/openalpaca_storage/src/repository/mod.rs)
