@@ -16,7 +16,6 @@ mod extraction;
 mod handler_attachments;
 mod handler_helpers;
 mod handlers;
-mod memory_ops;
 mod query_handler;
 mod summary;
 mod task_launch;
@@ -24,9 +23,7 @@ mod task_ops;
 
 pub use task_launch::{RerunOutcome, StartOutcome, TaskLaunchError};
 pub use task_ops::{TaskActionError, apply_task_action};
-// Routing V2 shared cores, re-exported for the main-loop builtin tools
-// (`memory_store` / `memory_forget` / `task_status`).
-pub(crate) use memory_ops::{forget_memory, store_memory};
+// Routing V2 shared core, re-exported for the main-loop `task_status` tool.
 pub(crate) use task_ops::task_status_query;
 
 pub use skill::catalog as skill_catalog;
@@ -224,6 +221,10 @@ pub struct Orchestrator {
     pub attachments_skipped_map: DashMap<Uuid, Vec<crate::gateway::SkippedAttachment>>,
     /// Optional broker for interactive tool confirmation (set post-construction via `set_confirmation_broker()`).
     pub confirmation_broker: Arc<RwLock<Option<Arc<crate::security::confirmation::ConfirmationBroker>>>>,
+    /// The memory service (design §7a), set post-construction by the daemon
+    /// via `set_memory_service()`; `None` where no store exists (tests).
+    /// The main loop builds its memory writers from it.
+    memory_service: Arc<RwLock<Option<Arc<crate::memory::service::MemoryService>>>>,
     /// Context manager for resolving dynamic context (memory, user profile, etc.) via PromptBuilder.
     context_manager: Arc<ContextManager>,
     /// Monotonic counter bumped on every persona-doc (SOUL / USER / IDENTITY)
@@ -381,10 +382,27 @@ impl Orchestrator {
             delegation_map: DashMap::new(),
             attachments_skipped_map: DashMap::new(),
             confirmation_broker: Arc::new(RwLock::new(None)),
+            memory_service: Arc::new(RwLock::new(None)),
             context_manager,
             persona_version: Arc::new(AtomicU64::new(0)),
             compose_engine,
         }
+    }
+
+    /// Installs the memory service (design §7a). Called once by the daemon
+    /// after construction, like `set_confirmation_broker`.
+    pub fn set_memory_service(&self, service: Arc<crate::memory::service::MemoryService>) {
+        if let Ok(mut guard) = self.memory_service.write() {
+            *guard = Some(service);
+        }
+    }
+
+    /// The memory service, when the daemon installed one.
+    pub fn memory_service(&self) -> Option<Arc<crate::memory::service::MemoryService>> {
+        self.memory_service
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
     }
 
     /// Set the confirmation broker for interactive tool approval.

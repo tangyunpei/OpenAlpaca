@@ -1,9 +1,12 @@
 //! Main-loop tool registration policy (Routing V2, Phase 2).
 //!
 //! Builds the per-request tool set for the tool-mode main loop:
-//! - **Always-core**: `start_workflow`, `task_status`, `memory_store`,
-//!   `memory_forget`, plus the globally-registered `memory_search` (definition
-//!   only — its backend already lives in the shared registry).
+//! - **Always-core**: `start_workflow`, `task_status`, and — when the daemon
+//!   has a `MemoryService` — the three memory writers `memory_store`,
+//!   `memory_update`, `memory_forget` (design §7: only the main conversation
+//!   writes), plus the globally-registered read surface `memory_search`,
+//!   `memory_read`, `memory_list` (definitions only — their backends already
+//!   live in the shared registry).
 //! - **Extension tools** (tool/skill wiring, Chunk 2): every MCP-bridged
 //!   (`<server>__<tool>`) and plugin-provided (`<plugin>::<tool>`) tool in the
 //!   global registry whose extension is enabled (definitions only — backends
@@ -30,12 +33,14 @@ use openalpaca_llm::{LlmRouter, ToolDefinition};
 use std::sync::Arc;
 
 use super::invoke_skill::{InvokeSkillTool, invoke_skill_tool_definition};
-use super::memory_ops::{
-    MemoryForgetTool, MemoryStoreTool, memory_forget_tool_definition, memory_store_tool_definition,
+use super::memory_tools::{
+    MemoryForgetTool, MemoryStoreTool, MemoryUpdateTool, memory_forget_tool_definition,
+    memory_store_tool_definition, memory_update_tool_definition,
 };
 use super::start_workflow::{StartWorkflowTool, start_workflow_tool_definition};
 use super::steer_workflow::{SteerWorkflowTool, steer_workflow_tool_definition};
 use super::task_status::{TaskStatusTool, task_status_tool_definition};
+use crate::memory::service::MemoryService;
 
 /// The per-request main-loop tool set produced by [`main_loop_tool_set`].
 pub struct MainLoopToolSet {
@@ -43,8 +48,8 @@ pub struct MainLoopToolSet {
     /// tools ∪ `invoke_skill`; the caller unions these with its base picks).
     pub definitions: Vec<ToolDefinition>,
     /// Per-request instances to inject into the per-request registry,
-    /// paired with their definitions. Excludes `memory_search`, whose
-    /// backend is already globally registered.
+    /// paired with their definitions. Excludes the memory read tools, whose
+    /// backends are already globally registered.
     pub instances: Vec<(ToolDefinition, Arc<dyn BuiltInTool>)>,
     /// Kept for result-cell readback after the loop (structured delegation).
     pub start_workflow: Arc<StartWorkflowTool>,
@@ -62,12 +67,15 @@ impl MainLoopToolSet {
             // Known-good builtin definitions — a name collision with the
             // global registry would only shadow a stale entry, so log and
             // continue rather than fail the request.
+            // With the annotations the name carries: the sandbox derives the
+            // confirmation set from what is registered, so this is what makes
+            // `memory_forget` and `memory_update` prompt (design §7).
             if let Err(e) = registry.register(crate::tools::registry::RegisteredTool {
                 definition: definition.clone(),
                 backend: crate::tools::registry::ToolBackend::BuiltIn(backend.clone()),
                 provides_capabilities: vec![],
                 exempt_from_timeout: false,
-                annotations: None,
+                annotations: super::annotations_for_builtin(&definition.name),
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 author: "builtin".to_string(),
                 created_at: chrono::Utc::now(),
@@ -118,7 +126,7 @@ pub fn main_loop_tool_set(
     bus: EventBus,
     routing: &RoutingConfig,
     db: Option<openalpaca_storage::Database>,
-    embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
+    memory_service: Option<Arc<MemoryService>>,
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
     skill_catalog: Arc<SkillCatalog>,
     llm_router: Option<Arc<LlmRouter>>,
@@ -154,29 +162,40 @@ pub fn main_loop_tool_set(
             as Arc<dyn BuiltInTool>,
     ));
 
-    // Memory tools need a database; without one they'd only ever error
-    // ("Memory system is not available"), so keep them off the surface.
-    if db.is_some() {
+    // The memory writers need the service; without one (tests, a daemon
+    // with no store) they stay off the surface. `ModelTool` calls all
+    // (design §7a): a store records `extracted_user`.
+    if let Some(service) = memory_service {
         let store_def = memory_store_tool_definition();
         definitions.push(store_def.clone());
         instances.push((
             store_def,
-            Arc::new(MemoryStoreTool::new(db.clone(), embedder)) as Arc<dyn BuiltInTool>,
+            Arc::new(MemoryStoreTool::new(service.clone())) as Arc<dyn BuiltInTool>,
+        ));
+
+        let update_def = memory_update_tool_definition();
+        definitions.push(update_def.clone());
+        instances.push((
+            update_def,
+            Arc::new(MemoryUpdateTool::new(service.clone())) as Arc<dyn BuiltInTool>,
         ));
 
         let forget_def = memory_forget_tool_definition();
         definitions.push(forget_def.clone());
         instances.push((
             forget_def,
-            Arc::new(MemoryForgetTool::new(db.clone())) as Arc<dyn BuiltInTool>,
+            Arc::new(MemoryForgetTool::new(service)) as Arc<dyn BuiltInTool>,
         ));
     }
 
-    // `memory_search` is globally registered (when a DB is configured) — the
-    // per-request registry clone already carries its backend; only the
-    // definition joins the core surface.
-    if let Some(search) = global_registry.get("memory_search") {
-        definitions.push(search.definition.clone());
+    // The memory read surface is globally registered (`memory_read_tools`,
+    // when the daemon has a service) — the per-request registry clone
+    // already carries the backends; only the definitions join the core
+    // surface.
+    for name in ["memory_search", "memory_read", "memory_list"] {
+        if let Some(tool) = global_registry.get(name) {
+            definitions.push(tool.definition.clone());
+        }
     }
 
     // ── read_result (only where a spill can happen) ─────────────────────
@@ -338,6 +357,7 @@ mod tests {
             lane_key,
             Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
             None,
+            None,
         )
     }
 
@@ -352,6 +372,7 @@ mod tests {
         lane_key: &str,
         daemon_config: Arc<ArcSwap<DaemonConfig>>,
         llm_router: Option<Arc<LlmRouter>>,
+        memory_service: Option<Arc<crate::memory::service::MemoryService>>,
     ) -> MainLoopToolSet {
         main_loop_tool_set(
             dispatcher,
@@ -359,7 +380,7 @@ mod tests {
             bus,
             routing_cfg,
             db,
-            None,
+            memory_service,
             daemon_config,
             Arc::new(SkillCatalog::new()),
             llm_router,
@@ -424,7 +445,7 @@ mod tests {
         let set = build(
             shared, dispatcher, bus, &registry, &routing(true), None, "user1:cli",
         );
-        // No db → memory tools (and the global memory_search) absent.
+        // No service → the memory writers (and the global read tools) absent.
         assert_eq!(names(&set.definitions), vec!["start_workflow", "task_status"]);
         assert_eq!(set.instances.len(), 2);
         assert!(set.steer_workflow.is_none());
@@ -432,26 +453,30 @@ mod tests {
     }
 
     #[test]
-    fn test_core_set_with_db_includes_memory_tools_and_search_def() {
+    fn test_core_set_with_service_includes_memory_writers_and_read_defs() {
         let dir = tempfile::tempdir().unwrap();
         let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
-        let (shared, dispatcher, bus, registry) = setup();
-        // memory_search is globally registered in production; mirror that.
-        let daemon_config = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
-        for tool in super::super::builtin_tools(
+        let service = Arc::new(crate::memory::service::MemoryService::new(
             Some(db.clone()),
-            None,
-            Some(daemon_config),
-            None,
-            None,
-        ) {
-            if tool.definition.name == "memory_search" {
-                registry.register(tool).unwrap();
-            }
+            openalpaca_storage::memory_index::MemoryIndex::open_in_memory().unwrap(),
+        ));
+        let (shared, dispatcher, bus, registry) = setup();
+        // The read surface is globally registered in production; mirror that.
+        for tool in crate::tools::builtins::memory_read_tools(service.clone()) {
+            registry.register(tool).unwrap();
         }
 
-        let set = build(
-            shared, dispatcher, bus, &registry, &routing(false), Some(db), "user1:cli",
+        let set = build_with(
+            shared,
+            dispatcher,
+            bus,
+            &registry,
+            &routing(false),
+            Some(db),
+            "user1:cli",
+            Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+            None,
+            Some(service),
         );
         assert_eq!(
             names(&set.definitions),
@@ -459,12 +484,15 @@ mod tests {
                 "start_workflow",
                 "task_status",
                 "memory_store",
+                "memory_update",
                 "memory_forget",
                 "memory_search",
+                "memory_read",
+                "memory_list",
             ]
         );
-        // memory_search has no per-request instance (global backend).
-        assert_eq!(set.instances.len(), 4);
+        // The read tools have no per-request instance (global backends).
+        assert_eq!(set.instances.len(), 5);
         assert!(set.steer_workflow.is_none());
     }
 
@@ -689,6 +717,7 @@ mod tests {
             "user1:cli",
             Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
             None,
+            None,
         );
         let names = names(&set.definitions);
         assert!(names.contains(&"srv__echo"), "MCP tool missing: {names:?}");
@@ -743,6 +772,7 @@ mod tests {
             "user1:cli",
             Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
             Some(stub_router()),
+            None,
         );
         assert!(names(&set.definitions).contains(&"invoke_skill"));
         // invoke_skill is a per-request instance (start, status, invoke_skill).
@@ -751,5 +781,82 @@ mod tests {
         let per_request = (*registry).clone();
         set.register_into(&per_request);
         assert!(per_request.get("invoke_skill").is_some());
+    }
+
+    use crate::security::sandbox::effective_confirmation_set;
+    use crate::security::sandbox::SandboxPolicy;
+
+    /// Design §7, *Capabilities*: the sandbox derives the main loop's
+    /// confirmation set from the annotations of what is registered, so the
+    /// per-request instances must be registered with theirs — before this,
+    /// `register_into` registered every instance with `annotations: None` and
+    /// no memory tool could ever prompt.
+    #[test]
+    fn the_main_loop_confirmation_set_names_forget_and_update_and_not_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+        let service = Arc::new(crate::memory::service::MemoryService::new(
+            Some(db.clone()),
+            openalpaca_storage::memory_index::MemoryIndex::open_in_memory().unwrap(),
+        ));
+        let (shared, dispatcher, bus, registry) = setup();
+        for tool in crate::tools::builtins::memory_read_tools(service.clone()) {
+            registry.register(tool).unwrap();
+        }
+        let set = main_loop_tool_set(
+            dispatcher,
+            shared,
+            bus,
+            &RoutingConfig::default(),
+            Some(db),
+            Some(service),
+            Arc::new(ArcSwap::from_pointee(DaemonConfig::default())),
+            Arc::new(SkillCatalog::new()),
+            None,
+            1.0,
+            &registry,
+            "user1:cli",
+            &ToolContext {
+                owner_id: Some("user1".to_string()),
+                lane_key: Some("user1:cli".to_string()),
+                ..Default::default()
+            },
+            false,
+        );
+        let per_request = (*registry).clone();
+        set.register_into(&per_request);
+        let policy = SandboxPolicy {
+            agent_id: crate::orchestrator::MAIN_LOOP_AGENT_ID.to_string(),
+            allowed_capabilities: crate::security::capabilities::Allowlist::Unrestricted,
+            denied_capabilities: vec![],
+            require_confirmation_for: vec![],
+            max_tool_calls: None,
+            max_tool_runtime_secs: 60,
+            stream_id: None,
+            lane_key: None,
+            confirmation_timeout_secs: None,
+            auto_approve: false,
+            unattended: false,
+        };
+        let confirmation_set = effective_confirmation_set(&policy, &per_request);
+        for name in ["memory_forget", "memory_update"] {
+            assert!(
+                confirmation_set.contains(&name.to_string()),
+                "{name} prompts: {confirmation_set:?}"
+            );
+        }
+        for name in [
+            "memory_store",
+            "memory_search",
+            "memory_read",
+            "memory_list",
+            "start_workflow",
+            "task_status",
+        ] {
+            assert!(
+                !confirmation_set.contains(&name.to_string()),
+                "{name} never prompts: {confirmation_set:?}"
+            );
+        }
     }
 }

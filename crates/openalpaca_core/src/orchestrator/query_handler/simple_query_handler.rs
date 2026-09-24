@@ -197,7 +197,7 @@ impl Orchestrator {
                         self.bus.clone(),
                         &routing,
                         self.db.clone(),
-                        self.embedder.clone(),
+                        self.memory_service(),
                         self.daemon_config.clone(),
                         self.skill_catalog.clone(),
                         self.llm_router.clone(),

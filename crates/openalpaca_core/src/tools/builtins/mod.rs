@@ -3,8 +3,7 @@ mod file_ops;
 mod helpers;
 mod invoke_skill;
 mod main_loop;
-mod memory_ops;
-mod memory_search;
+mod memory_tools;
 mod read_result;
 mod send;
 mod shell_execute;
@@ -17,12 +16,16 @@ mod web_search;
 
 // Routing V2: these tools are constructed per-request by the tool-mode
 // main loop (via `main_loop_tool_set`) and injected into its per-request
-// registry — never registered globally via `builtin_tools()`.
+// registry — never registered globally via `builtin_tools()`. The memory
+// read surface (`memory_read_tools`: search, read, list) is the exception
+// the daemon registers globally, so every agent granted `memory_read` has
+// it; the three memory writers stay per-request on the main loop.
 pub use invoke_skill::{invoke_skill_tool_definition, InvokeSkillTool};
 pub use main_loop::{main_loop_relay_guidance, main_loop_tool_set, MainLoopToolSet};
-pub use memory_ops::{
-    memory_forget_tool_definition, memory_store_tool_definition, MemoryForgetTool,
-    MemoryStoreTool,
+pub use memory_tools::{
+    MemoryForgetTool, MemoryStoreTool, MemoryUpdateTool, memory_forget_tool_definition,
+    memory_list_tool_definition, memory_read_tool_definition, memory_read_tools,
+    memory_search_tool_definition, memory_store_tool_definition, memory_update_tool_definition,
 };
 pub use start_workflow::{start_workflow_tool_definition, StartWorkflowTool};
 pub use steer_workflow::{steer_workflow_tool_definition, SteerWorkflowTool};
@@ -44,7 +47,6 @@ pub type ConnectorSendLock = Arc<RwLock<Option<Arc<dyn ConnectorSendProvider>>>>
 
 use self::artifact_write::artifact_write_tool;
 use self::file_ops::{file_read_tool, file_write_tool};
-use self::memory_search::memory_search_tool;
 use self::read_result::read_result_tool;
 use self::shell_execute::shell_execute_tool;
 use self::update_persona::update_persona_tool;
@@ -302,15 +304,18 @@ impl BuiltInTool for WorkspaceWriteTool {
 }
 
 /// Return all built-in tool definitions and implementations.
-/// When `db` is provided, memory-backed tools (memory_search) are included.
-/// When `embedder` is provided, memory_search uses hybrid (FTS + vector) search.
+///
+/// The memory tools are not among them: the read surface is
+/// [`memory_read_tools`] over the daemon's `MemoryService`, and the writers
+/// are per-request (`main_loop_tool_set`). `_embedder` is kept for the
+/// call sites that still pass one; nothing here reads it any more.
 ///
 /// `workspace_root` is the explicit workspace directory for file tools.
 /// If `None`, falls back to `std::env::current_dir()` (for backward
 /// compatibility in tests and CLI).
 pub fn builtin_tools(
     db: Option<openalpaca_storage::Database>,
-    embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
+    _embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
     web_search_config: Option<Arc<ArcSwap<WebSearchConfig>>>,
     workspace_root: Option<PathBuf>,
@@ -321,11 +326,9 @@ pub fn builtin_tools(
     let ws_root = workspace_root
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    // Clone db before memory_search consumes it — the workspace and artifact
-    // tools need it too.
-    let ws_db = db.clone();
+    let ws_db = db;
     // The daemon config the file, artifact and workspace tools share.
-    let tool_cfg = daemon_config.clone();
+    let tool_cfg = daemon_config;
 
     let mut tools = vec![
         web_search_tool(ws_cfg),
@@ -346,10 +349,6 @@ pub fn builtin_tools(
         // wired (tests, the CLI), and the tool refuses at call time instead.
         artifact_write_tool(ws_db.clone(), tool_cfg.clone()),
     ];
-    if let (Some(db), Some(dc)) = (db, daemon_config) {
-        tools.push(memory_search_tool(db, embedder, dc));
-    }
-
     // Always register workspace tools — definitions needed for capability resolution.
     for def in workspace_tool_definitions() {
         let cap = if def.name == "workspace_read" {
@@ -577,13 +576,14 @@ impl BuiltInTool for ScriptToolBuiltIn {
 /// Returns `None` for unknown names; callers default to `None` (no special treatment).
 pub(crate) fn annotations_for_builtin(name: &str) -> Option<openalpaca_mcp::ToolAnnotations> {
     match name {
-        "file_read" | "workspace_read" | "memory_search" | "read_result" => {
-            Some(read_only_annotations())
-        }
+        "file_read" | "workspace_read" | "read_result" | "memory_search" | "memory_read"
+        | "memory_list" => Some(read_only_annotations()),
         "web_fetch" | "web_search" => Some(read_only_open_world_annotations()),
-        "file_write" | "workspace_write" | "artifact_write" | "update_persona" => {
-            Some(destructive_local_annotations())
-        }
+        // Design §7, *Capabilities*: the two memory tools that prompt;
+        // `memory_store` deliberately carries none — a plain save never
+        // prompts, and a tool-issued supersede is bounded by authority.
+        "file_write" | "workspace_write" | "artifact_write" | "update_persona"
+        | "memory_forget" | "memory_update" => Some(destructive_local_annotations()),
         "shell_execute" | "send" => Some(destructive_open_world_annotations()),
         _ => None,
     }

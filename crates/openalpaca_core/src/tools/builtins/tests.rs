@@ -13,8 +13,9 @@ fn test_builtin_tools_count_with_db() {
     let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
     let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
     let tools = builtin_tools(Some(db), None, Some(dc), None, None);
-    // 8 base tools (with memory_search) + 2 workspace tools
-    assert_eq!(tools.len(), 10);
+    // 7 base tools + 2 workspace tools: the memory tools are the service's
+    // (`memory_read_tools`), not this list's.
+    assert_eq!(tools.len(), 9);
 }
 
 #[test]
@@ -42,8 +43,8 @@ fn test_builtin_tools_with_persona_context_includes_update_persona() {
     };
     let dc = Arc::new(ArcSwap::from_pointee(DaemonConfig::default()));
     let tools = builtin_tools_with_persona_context(Some(db), None, ctx, Some(dc), None, None, None);
-    // 10 base (8 + 2 workspace) + 1 update_persona = 11 (no send since connector_send_provider is None)
-    assert_eq!(tools.len(), 11, "Should have 11 tools (10 base + update_persona)");
+    // 9 base (7 + 2 workspace) + 1 update_persona = 10 (no send since connector_send_provider is None)
+    assert_eq!(tools.len(), 10, "Should have 10 tools (9 base + update_persona)");
     assert!(
         tools.iter().any(|t| t.definition.name == "update_persona"),
         "update_persona tool must be present"
@@ -1145,5 +1146,70 @@ mod read_result {
             Some(true),
             "paging a spilled result reads and nothing more"
         );
+    }
+}
+
+// --- Memory redesign (plan slice 3, row 3.2): annotations and descriptions ---
+
+/// Design §7, *Capabilities*: `memory_forget` and `memory_update` carry
+/// `destructive_local_annotations()` so the sandbox derives its confirmation
+/// set from them; `memory_store`, `memory_search`, `memory_read` and
+/// `memory_list` do not prompt.
+#[test]
+fn memory_tool_annotations_decide_the_confirmation_prompt() {
+    for name in ["memory_forget", "memory_update"] {
+        let ann = annotations_for_builtin(name).unwrap_or_else(|| panic!("{name} has annotations"));
+        assert_eq!(ann.destructive_hint, Some(true), "{name} prompts");
+        assert_eq!(ann.open_world_hint, Some(false));
+    }
+    for name in ["memory_search", "memory_read", "memory_list"] {
+        let ann = annotations_for_builtin(name).unwrap_or_else(|| panic!("{name} has annotations"));
+        assert_eq!(ann.read_only_hint, Some(true), "{name} is read-only");
+        assert_ne!(ann.destructive_hint, Some(true));
+    }
+    assert!(
+        !annotations_for_builtin("memory_store")
+            .and_then(|a| a.destructive_hint)
+            .unwrap_or(false),
+        "a plain save never prompts (design §7: a tool-issued supersede is bounded by authority instead)"
+    );
+}
+
+/// `memory_search.rs:140` used to promise "hybrid search combining full-text
+/// search and vector similarity"; the redesign is lexical (design §1, §5)
+/// and the description must not claim more.
+#[test]
+fn memory_tool_descriptions_promise_no_semantic_search() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("test.db")).unwrap();
+    let service = std::sync::Arc::new(crate::memory::service::MemoryService::new(
+        Some(db),
+        openalpaca_storage::memory_index::MemoryIndex::open_in_memory().unwrap(),
+    ));
+    let mut definitions: Vec<ToolDefinition> = memory_read_tools(service.clone())
+        .into_iter()
+        .map(|t| t.definition)
+        .collect();
+    definitions.push(memory_store_tool_definition());
+    definitions.push(memory_update_tool_definition());
+    definitions.push(memory_forget_tool_definition());
+    assert_eq!(definitions.len(), 6);
+    for def in &definitions {
+        let text = def.description.to_lowercase();
+        for banned in ["semantic", "vector", "hybrid", "similarity", "embedding"] {
+            assert!(
+                !text.contains(banned),
+                "{} promises {banned:?}: {}",
+                def.name,
+                def.description
+            );
+        }
+        assert_eq!(
+            def.parameters.get("additionalProperties"),
+            Some(&serde_json::json!(false)),
+            "{} must close its schema (design §3 rule 6)",
+            def.name
+        );
+        assert_eq!(def.strict, Some(true), "{}", def.name);
     }
 }
