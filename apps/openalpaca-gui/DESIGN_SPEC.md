@@ -1714,7 +1714,7 @@ The rest are this build's: the project-scope empty state ("Nothing remembered fo
 
 **Notes used in this answer.** Under a live assistant answer whose `done` frame carried `memory_used`, a muted card in `SkippedAttachmentsNote`'s shape (§3.15): an eyebrow `NOTES USED IN THIS ANSWER` and one row per note — its title (read through the same query key the view uses, an 8-character id when the note is gone) as a link that opens it here, then `— recalled`, `— pinned` or `— looked up`. **Live only**, like `attachments_skipped`: nothing persists `memory_used`, so a reload drops it (`components/chat/MemoryUsedNote.tsx`, `views/chat/TranscriptMemoryUsed.tsx`).
 
-**Not built.** `GET /v1/memories/recently-used` has no reader in this build: the *notes used* card comes from the live `done.memory_used` frame only, so a reload loses it (memory redesign design §7c R8; the route stays for a later follow-up).
+**Not built.** `GET /v1/memories/recently-used` has no reader in this build: the _notes used_ card comes from the live `done.memory_used` frame only, so a reload loses it (memory redesign design §7c R8; the route stays for a later follow-up).
 
 **Freshness.** Nothing here polls. A `memory_changed` WebSocket frame invalidates every `["memory"]` query — list, search, recently learned, a note, its history — whichever surface made the change (§7).
 
