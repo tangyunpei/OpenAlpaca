@@ -4,7 +4,7 @@
 //! gets a unique stream_id with a broadcast channel for SSE delivery.
 
 use crate::events::ConfirmationOutcome;
-use crate::gateway::{DelegationInfo, SkippedAttachment};
+use crate::gateway::{DelegationInfo, MemoryUsed, SkippedAttachment};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -44,6 +44,11 @@ pub enum ChatStreamEvent {
         /// a reason. Omitted when there are none, like `attachments_used`.
         #[serde(skip_serializing_if = "Option::is_none")]
         attachments_skipped: Option<Vec<SkippedAttachment>>,
+        /// Plan 3.3 (design §7a) — the memory notes the turn delivered,
+        /// `[{id, revision, reason}]`. Omitted when there are none, and live
+        /// only: nothing persists it and the history route never serves it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        memory_used: Option<Vec<MemoryUsed>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         delegation: Option<DelegationInfo>,
     },
@@ -123,17 +128,19 @@ impl StreamSink {
             duration_ms,
             Vec::new(),
             Vec::new(),
+            Vec::new(),
             delegation,
         );
     }
 
-    /// Send the final Done event with attachment info.
+    /// Send the final Done event with attachment and memory info.
     ///
     /// U3: `attachments_skipped` travels beside `attachments_used` and is
     /// omitted from the frame the same way — a turn that withheld nothing is
     /// byte-identical to what it always was. A turn whose *every* attachment
     /// was withheld has an empty `used` and a non-empty `skipped`, which is
-    /// why the two are one call rather than two.
+    /// why the two are one call rather than two. `memory_used` (plan 3.3) is
+    /// omitted the same way when the turn delivered no note.
     #[allow(clippy::too_many_arguments)]
     pub fn send_done_with_attachments(
         &self,
@@ -144,6 +151,7 @@ impl StreamSink {
         duration_ms: u64,
         attachments_used: Vec<String>,
         attachments_skipped: Vec<SkippedAttachment>,
+        memory_used: Vec<MemoryUsed>,
         delegation: Option<DelegationInfo>,
     ) {
         self.send_event(ChatStreamEvent::Done {
@@ -154,6 +162,7 @@ impl StreamSink {
             duration_ms,
             attachments_used: (!attachments_used.is_empty()).then_some(attachments_used),
             attachments_skipped: (!attachments_skipped.is_empty()).then_some(attachments_skipped),
+            memory_used: (!memory_used.is_empty()).then_some(memory_used),
             delegation,
         });
     }

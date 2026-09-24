@@ -682,6 +682,7 @@ The `done` payload:
 | `duration_ms` | yes | Wall-clock time of the turn. |
 | `attachments_used` | no | Ids of the turn's files that the model's request really carried. |
 | `attachments_skipped` | no | `[{"id", "reason"}]` — the turn's files that did not reach the model, each with a sentence saying why. |
+| `memory_used` | no | `[{"id", "revision", "reason"}]` — the memory notes the turn delivered to the model: `reason` is `pinned` or `recall` for the automatic per-turn recall, `tool` for a note the model fetched itself through `memory_search` or `memory_read`. Live only: nothing persists it, and `GET /v1/chat/history` does not serve it. |
 | `delegation` | no | `{"task_id", "title"}` when the turn started a background workflow, so a client can track the run without parsing prose. |
 
 Optional fields are omitted when they are empty.

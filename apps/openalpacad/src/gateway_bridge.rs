@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 use openalpaca_core::{
-    gateway::{HandleRequest, HandleResult, MessageHandler, ResolvedAttachment, SkippedAttachment},
+    gateway::{
+        HandleRequest, HandleResult, MemoryUsed, MessageHandler, ResolvedAttachment,
+        SkippedAttachment,
+    },
     orchestrator::Orchestrator,
 };
 use std::sync::Arc;
@@ -23,7 +26,8 @@ impl OrchestratorHandler {
     /// `attachments_skipped` instead. The map is drained on every turn, with
     /// or without attachments, so nothing is left behind for the next request
     /// that happens to reuse a id (it cannot — ids are v4 — but the drain is
-    /// unconditional for the same reason the other two are).
+    /// unconditional for the same reason the other two are). `memory_used`
+    /// (plan 3.3) is drained the same way, from the memory service.
     fn build_result(
         &self,
         request_id: Uuid,
@@ -46,6 +50,7 @@ impl OrchestratorHandler {
             .remove(&request_id)
             .map(|(_, v)| v)
             .unwrap_or_default();
+        let memory_used: Vec<MemoryUsed> = self.orchestrator.take_memory_used(request_id);
 
         let content = content?;
 
@@ -58,6 +63,7 @@ impl OrchestratorHandler {
             tokens_out: meta.as_ref().map(|m| m.tokens_out),
             attachments_used,
             attachments_skipped,
+            memory_used,
             delegation,
         })
     }

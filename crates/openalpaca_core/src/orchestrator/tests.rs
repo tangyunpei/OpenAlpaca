@@ -7130,12 +7130,13 @@ async fn a_repeated_question_reads_this_turns_memory_not_the_cached_one() {
 
     let first = Uuid::new_v4();
     send_tool_mode(&orch, first, "what editor do I prefer?").await;
-    let used = scene.service.take_used(first);
+    // What the bridge reads into `HandleResult.memory_used`.
+    let used = orch.take_memory_used(first);
     assert_eq!(used.len(), 1, "{used:?}");
     assert_eq!(used[0].id, scene.vim.id);
     assert_eq!(used[0].revision, scene.vim.revision);
     assert_eq!(used[0].reason, UsedReason::Recall);
-    assert!(scene.service.take_used(first).is_empty(), "taken once");
+    assert!(orch.take_memory_used(first).is_empty(), "taken once");
 
     let owner = scene
         .service
@@ -7169,7 +7170,7 @@ async fn a_repeated_question_reads_this_turns_memory_not_the_cached_one() {
     assert_eq!(blocks.len(), 1);
     assert!(blocks[0].contains(&scene.vim.id.to_string()), "{}", blocks[0]);
     assert!(blocks[0].contains(&later.id.to_string()), "{}", blocks[0]);
-    let used = scene.service.take_used(second);
+    let used = orch.take_memory_used(second);
     let ids: Vec<_> = used.iter().map(|u| u.id).collect();
     assert!(ids.contains(&scene.vim.id) && ids.contains(&later.id), "{used:?}");
 }

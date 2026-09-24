@@ -1671,10 +1671,12 @@ lane_key, raised_at }] }`, oldest first, RFC 3339 `raised_at`, an empty list (no
    read is unscoped (R40), so filter it to your own lane exactly as you filter the WS
    frames. Answering stays owner-scoped on the unchanged `POST` sibling.
 6. **Terminal:** exactly one of
-   - `done` — `{ content, model, tokens_in, tokens_out, duration_ms, attachments_used?, attachments_skipped?, delegation? }`.
+   - `done` — `{ content, model, tokens_in, tokens_out, duration_ms, attachments_used?, attachments_skipped?, memory_used?, delegation? }`.
      `content` is the **full** text (not the tail) — prefer it over the accumulated
-     deltas as the source of truth. `attachments_used`, `attachments_skipped` and
-     `delegation` are omitted entirely when absent
+     deltas as the source of truth. `attachments_used`, `attachments_skipped`,
+     `memory_used` (`[{ id, revision, reason: "pinned" | "recall" | "tool" }]`, the
+     memory notes the turn delivered — live only, never served by the history route)
+     and `delegation` are omitted entirely when absent
      (`skip_serializing_if = "Option::is_none"`), and the SSE payload strips the serde
      `"event"` tag (`done_event_data`). `attachments_skipped: [{ id, reason }]` (U3) is
      every attachment the model that answered never received — no vision, no native

@@ -409,6 +409,17 @@ impl Orchestrator {
             .and_then(|guard| guard.clone())
     }
 
+    /// The memory notes this request delivered (design §7a `memory_used`):
+    /// the automatic recall the handler recorded, then what the model
+    /// fetched through `memory_search`/`memory_read`. Taken once, by the
+    /// bridge, on every turn — like `attachments_skipped_map`. Empty with no
+    /// service, or for a turn that delivered nothing.
+    pub fn take_memory_used(&self, request_id: Uuid) -> Vec<crate::memory::service::MemoryUsed> {
+        self.memory_service()
+            .map(|service| service.take_used(request_id))
+            .unwrap_or_default()
+    }
+
     /// Set the confirmation broker for interactive tool approval.
     /// Also propagates to the TaskDispatcher for pipeline/DAG/lead-agent execution.
     pub fn set_confirmation_broker(&self, broker: Arc<crate::security::confirmation::ConfirmationBroker>) {

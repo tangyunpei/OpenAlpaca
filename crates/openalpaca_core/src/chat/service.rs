@@ -233,7 +233,8 @@ impl ChatService {
                 let delegation = response.delegation.clone();
                 // U3: one call — an all-withheld turn has an empty
                 // `attachments_used` and a non-empty `attachments_skipped`,
-                // and both are omitted from the frame when empty.
+                // and both are omitted from the frame when empty; so is
+                // `memory_used` (plan 3.3), the notes this turn delivered.
                 sink.send_done_with_attachments(
                     &response.content,
                     model,
@@ -242,6 +243,7 @@ impl ChatService {
                     duration_ms,
                     response.attachments_used,
                     response.attachments_skipped,
+                    response.memory_used,
                     delegation,
                 );
             }

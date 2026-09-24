@@ -631,8 +631,8 @@ fn sse_frame(event: &openalpaca_core::chat::ChatStreamEvent) -> (&'static str, S
 }
 
 /// SSE data payload for a `done` event: the serde form of the event minus the
-/// `"event"` tag. Optional fields (attachments_used, delegation) appear only
-/// when present.
+/// `"event"` tag. Optional fields (`attachments_used`, `attachments_skipped`,
+/// `memory_used`, `delegation`) appear only when present.
 fn done_event_data(event: &openalpaca_core::chat::ChatStreamEvent) -> String {
     let mut value = serde_json::to_value(event).unwrap_or_default();
     if let Some(obj) = value.as_object_mut() {
@@ -1057,8 +1057,45 @@ mod tests {
             duration_ms: 42,
             attachments_used: None,
             attachments_skipped: None,
+            memory_used: None,
             delegation,
         }
+    }
+
+    /// **Plan 3.3 (design §7a).** The `done` payload names the memory notes
+    /// the turn delivered — id, the revision read, and why — and omits the
+    /// field when none was, so every existing client is unchanged. Live only:
+    /// nothing persists it and `GET /v1/chat/history` never serves it.
+    #[test]
+    fn done_names_the_memory_notes_the_turn_used() {
+        let id = openalpaca_storage::memory_files::NoteId::parse(
+            "00000021-0000-4000-8000-000000000001",
+        )
+        .unwrap();
+        let event = openalpaca_core::chat::ChatStreamEvent::Done {
+            content: "vim".to_string(),
+            model: "qwen3:8b".to_string(),
+            tokens_in: 10,
+            tokens_out: 5,
+            duration_ms: 90,
+            attachments_used: None,
+            attachments_skipped: None,
+            memory_used: Some(vec![openalpaca_core::gateway::MemoryUsed {
+                id,
+                revision: "a".repeat(64),
+                reason: openalpaca_core::memory::service::UsedReason::Recall,
+            }]),
+            delegation: None,
+        };
+        let data: serde_json::Value = serde_json::from_str(&done_event_data(&event)).unwrap();
+        assert_eq!(data["memory_used"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            data["memory_used"][0]["id"],
+            "00000021-0000-4000-8000-000000000001"
+        );
+        assert_eq!(data["memory_used"][0]["revision"], "a".repeat(64));
+        assert_eq!(data["memory_used"][0]["reason"], "recall");
+        assert_eq!(data["memory_used"][0].as_object().map(|o| o.len()), Some(3));
     }
 
     /// **U3(c).** The `done` payload names what the turn answered *without*.
@@ -1076,6 +1113,7 @@ mod tests {
                 id: "img-1".to_string(),
                 reason: "the answering model does not support image input".to_string(),
             }]),
+            memory_used: None,
             delegation: None,
         };
         let data: serde_json::Value = serde_json::from_str(&done_event_data(&event)).unwrap();
@@ -1256,6 +1294,7 @@ mod tests {
         assert!(data.get("delegation").is_none());
         assert!(data.get("attachments_used").is_none());
         assert!(data.get("attachments_skipped").is_none());
+        assert!(data.get("memory_used").is_none());
     }
 
     #[test]

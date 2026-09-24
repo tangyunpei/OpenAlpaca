@@ -2,6 +2,7 @@ use crate::bus::EventBus;
 use crate::context::SharedContext;
 use crate::gateway::persistence::GatewayPersistence;
 use crate::lane::{LaneKey, LaneManager};
+use crate::memory::service::MemoryUsed;
 use crate::security::policy::{Principal, Scope};
 use async_trait::async_trait;
 use openalpaca_api::events::EventSource;
@@ -57,6 +58,11 @@ pub struct HandleResult {
     pub attachments_used: Vec<String>,
     /// U3 — the turn's attachments that never reached the model, with a reason.
     pub attachments_skipped: Vec<SkippedAttachment>,
+    /// Plan 3.3 (design §7a) — the memory notes the turn delivered: the
+    /// automatic recall (`pinned`, `recall`) and what the model fetched
+    /// through `memory_search`/`memory_read` (`tool`). Live only, like
+    /// `attachments_skipped`: nothing persists it.
+    pub memory_used: Vec<MemoryUsed>,
     /// Set when handling delegated the message to a background task.
     pub delegation: Option<DelegationInfo>,
 }
@@ -71,6 +77,7 @@ impl HandleResult {
             tokens_out: None,
             attachments_used: Vec::new(),
             attachments_skipped: Vec::new(),
+            memory_used: Vec::new(),
             delegation: None,
         }
     }
@@ -223,6 +230,8 @@ pub struct GatewayResponse {
     pub attachments_used: Vec<String>,
     /// U3 — the turn's attachments that never reached the model, with a reason.
     pub attachments_skipped: Vec<SkippedAttachment>,
+    /// Plan 3.3 — the memory notes the turn delivered; empty when none.
+    pub memory_used: Vec<MemoryUsed>,
     /// Set when handling delegated the message to a background task.
     pub delegation: Option<DelegationInfo>,
 }
@@ -467,6 +476,7 @@ impl Gateway {
                     tokens_out: result.tokens_out,
                     attachments_used: result.attachments_used,
                     attachments_skipped: result.attachments_skipped,
+                    memory_used: result.memory_used,
                     delegation: result.delegation,
                 }
             }
@@ -479,6 +489,7 @@ impl Gateway {
                 tokens_out: None,
                 attachments_used: Vec::new(),
                 attachments_skipped: Vec::new(),
+                memory_used: Vec::new(),
                 delegation: None,
             },
         }
