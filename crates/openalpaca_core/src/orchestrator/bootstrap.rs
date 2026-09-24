@@ -1,17 +1,27 @@
 use super::Orchestrator;
 use crate::events::SystemEvent;
-use crate::middleware::identity::identity_document_has_content;
-use crate::middleware::user::user_document_has_content;
+use crate::middleware::identity::{identity_document_has_content, parse_identity_markdown};
+use crate::middleware::user::{parse_user_markdown, user_document_has_content};
 use chrono::Utc;
+use std::path::PathBuf;
+use std::sync::RwLock;
 use std::sync::atomic::Ordering;
 
 impl Orchestrator {
     /// Check if IDENTITY.md and USER.md have been populated; if so, finalize bootstrap.
     ///
-    /// Runs post-response (like `extract_user_traits_background`) and:
+    /// Runs post-response and:
     /// 1. Checks if `bootstrap_document` is Some (bootstrap mode active)
-    /// 2. Checks if `identity_document` has content AND `user_document` has content
+    /// 2. Checks if IDENTITY.md has content AND USER.md has content
     /// 3. If both populated: delete BOOTSTRAP.md, clear state, publish event
+    ///
+    /// **The files are the evidence (MD-3).** The in-memory documents are
+    /// consulted first, and when either says *not yet* the file on disk is
+    /// read and parsed — that is what `update_persona` writes during
+    /// onboarding, and it is the whole of what completion depends on. The
+    /// background extractor used to be the other writer of the in-memory
+    /// `USER.md`; it writes memory notes now, and onboarding must not wait
+    /// for a reload that races the turn.
     ///
     /// An `AtomicBool` guard ensures only one concurrent caller can proceed
     /// past the check-then-act boundary, preventing duplicate completion events.
@@ -28,19 +38,29 @@ impl Orchestrator {
             return;
         }
 
-        // Check identity
+        // Check identity: the live document, else the file.
         let identity_populated = self
             .identity_document
             .read()
             .map(|g| g.as_ref().is_some_and(identity_document_has_content))
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || file_has_content(&self.identity_path, |text| {
+                parse_identity_markdown(text)
+                    .map(|doc| identity_document_has_content(&doc))
+                    .unwrap_or(false)
+            });
 
-        // Check user
+        // Check user: the live document, else the file.
         let user_populated = self
             .user_document
             .read()
             .map(|g| g.as_ref().is_some_and(user_document_has_content))
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || file_has_content(&self.user_path, |text| {
+                parse_user_markdown(text)
+                    .map(|doc| user_document_has_content(&doc))
+                    .unwrap_or(false)
+            });
 
         if !identity_populated || !user_populated {
             tracing::debug!(
@@ -88,5 +108,27 @@ impl Orchestrator {
 
         // Note: bootstrap_completing stays true — bootstrap is done, no further
         // attempts should proceed even if is_bootstrapping() check were racy.
+    }
+}
+
+/// Whether the persona file at `path` — when one is set and readable — is
+/// populated by `is_populated`'s reading of its text.
+fn file_has_content(
+    path: &RwLock<Option<PathBuf>>,
+    is_populated: impl FnOnce(&str) -> bool,
+) -> bool {
+    let path = match path.read() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    };
+    let Some(path) = path else {
+        return false;
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(text) => is_populated(&text),
+        Err(e) => {
+            tracing::debug!("Bootstrap check: cannot read {}: {e}", path.display());
+            false
+        }
     }
 }

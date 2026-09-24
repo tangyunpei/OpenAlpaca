@@ -54,18 +54,6 @@ impl DaemonConfig {
             "fts_jaccard_threshold",
         );
         clamp_val(
-            &mut self.orchestrator.memory.profile_confidence_threshold,
-            0.0,
-            1.0,
-            "profile_confidence_threshold",
-        );
-        clamp_val(
-            &mut self.orchestrator.memory.profile_update_confidence_threshold,
-            0.0,
-            1.0,
-            "profile_update_confidence_threshold",
-        );
-        clamp_val(
             &mut self.orchestrator.memory.memory_confidence_threshold,
             0.0,
             1.0,

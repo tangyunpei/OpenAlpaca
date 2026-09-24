@@ -328,73 +328,69 @@ impl Orchestrator {
         // Emit OrchestrationStage event + persist the latency record
         self.record_orchestration_stage(request_id, mode, ack_ms, None, None);
 
-        // 6 + 7. Summary update and user trait extraction run concurrently
-        // in a background spawn (fire-and-forget, never blocks the response).
+        // 6 + 7. The summary update and the memory extraction run after the
+        // answer, as one tracked background job (`BackgroundJobs`): never on
+        // the response path, stopped by the shutdown token, and waited for
+        // by whoever needs the turn's extraction to have landed.
         {
-            use super::extraction::extract_user_traits_background;
+            use super::extraction::{ExtractionTurn, TurnExtractionDeps, extract_turn_memories};
             use super::summary::update_summary_background;
 
-            let needs_extraction = owner_id.is_some() && result.is_ok();
+            let summary = match (self.db.clone(), self.llm_router.clone()) {
+                (Some(db), Some(router)) => {
+                    Some((db, router, self.daemon_config.clone(), lane_key.clone()))
+                }
+                _ => None,
+            };
 
-            // Shared fields (both tasks need these)
-            let bg_db = self.db.clone();
-            let bg_router = self.llm_router.clone();
-            let bg_config = self.daemon_config.clone();
-            let bg_lane = lane_key.to_string();
+            // MD-2, plan 3.4: the extractor's input is the message **as
+            // typed** (`intent_source_content`), never `model_input_content`
+            // — on an attachment turn that carries the files' text, and an
+            // uploaded document must not mint an `extracted_user` note.
+            let extraction = match (
+                &result,
+                owner_id,
+                self.db.clone(),
+                self.llm_router.clone(),
+                self.memory_service(),
+            ) {
+                (Ok(response), Some(owner), Some(db), Some(router), Some(service)) => Some((
+                    TurnExtractionDeps {
+                        db,
+                        router,
+                        daemon_config: self.daemon_config.clone(),
+                        memory_service: service,
+                        turn_counter: self.extraction_turn_counter.clone(),
+                        cancel: self.background.cancel_token(),
+                    },
+                    ExtractionTurn {
+                        owner_id: owner.to_string(),
+                        lane_key: lane_key.clone(),
+                        source: source.clone(),
+                        request_id,
+                        project_root: scope_ctx
+                            .request_workspace_root
+                            .as_deref()
+                            .map(std::path::PathBuf::from),
+                        user_message: intent_source_content.clone(),
+                        assistant_response: response.clone(),
+                    },
+                )),
+                _ => None,
+            };
 
-            // Extraction-only fields (clone only when needed)
-            let bg_counter = if needs_extraction { Some(self.extraction_turn_counter.clone()) } else { None };
-            let bg_embedder = if needs_extraction { self.embedder.clone() } else { None };
-            let bg_user_path = if needs_extraction { Some(self.user_path.clone()) } else { None };
-            let bg_user_doc = if needs_extraction { Some(self.user_document.clone()) } else { None };
-            let bg_persona_version = if needs_extraction { Some(self.persona_version.clone()) } else { None };
-            let bg_bus = if needs_extraction { Some(self.bus.clone()) } else { None };
-            let bg_intent = if needs_extraction { Some(intent_source_content.to_string()) } else { None };
-            let bg_owner = owner_id.map(|s| s.to_string());
-            let bg_response = result.as_ref().ok().cloned();
-
-            // NOTE: ctx is intentionally moved into this spawn — do not reference it after this block
-            tokio::spawn(async move {
-                // Clone shared fields for summary (extraction consumes the originals)
-                let sum_db = bg_db.clone();
-                let sum_router = bg_router.clone();
-                let sum_config = bg_config.clone();
-                let sum_lane = bg_lane.clone();
-
+            // NOTE: ctx is intentionally moved into this job — do not reference it after this block
+            self.background.spawn(async move {
                 let summary_fut = async {
-                    if let (Some(db), Some(router)) = (sum_db, sum_router) {
-                        update_summary_background(db, router, sum_config, sum_lane, ctx).await;
+                    if let Some((db, router, config, lane)) = summary {
+                        update_summary_background(db, router, config, lane, ctx).await;
                     }
                 };
-
                 let extract_fut = async {
-                    if let (Some(response_text), Some(owner)) = (&bg_response, &bg_owner)
-                        && let (Some(db), Some(router)) = (bg_db, bg_router)
-                        && let (
-                            Some(counter),
-                            Some(user_path),
-                            Some(user_doc),
-                            Some(persona_ver),
-                            Some(bus),
-                            Some(intent),
-                        ) = (
-                            bg_counter,
-                            bg_user_path,
-                            bg_user_doc,
-                            bg_persona_version,
-                            bg_bus,
-                            bg_intent,
-                        )
-                    {
-                        extract_user_traits_background(
-                            db, router, bg_config, counter, bg_embedder,
-                            user_path, user_doc, persona_ver, bus,
-                            bg_lane, intent, response_text.clone(), owner.clone(),
-                        )
-                        .await;
+                    if let Some((deps, turn)) = extraction {
+                        extract_turn_memories(&deps, turn).await;
                     }
                 };
-
                 tokio::join!(summary_fut, extract_fut);
             });
         }

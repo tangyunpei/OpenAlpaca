@@ -7393,3 +7393,316 @@ async fn the_skill_tier_prompt_carries_the_user_profile_exactly_once() {
             .collect::<Vec<_>>()
     );
 }
+
+// ── Extraction reads the message as typed (plan 3.4, MD-2) ────────────
+
+/// The words that make [`MarkerExtractorLlm`] extract a preference.
+const VIM_MARKER: &str = "prefers vim for editing";
+
+/// A provider that answers every turn with "noted" and answers the memory
+/// extractor faithfully: a preference note **only when the text it was
+/// handed carries [`VIM_MARKER`]**. What reaches the extractor is therefore
+/// what decides whether a note exists.
+struct MarkerExtractorLlm {
+    requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
+}
+
+impl MarkerExtractorLlm {
+    fn is_extractor_call(request: &ChatRequest) -> bool {
+        request.messages.iter().any(|m| {
+            matches!(m.role, openalpaca_llm::Role::System) && m.content.contains("memory extractor")
+        })
+    }
+}
+
+#[async_trait]
+impl openalpaca_llm::LlmProvider for MarkerExtractorLlm {
+    fn name(&self) -> &str {
+        "marker-extractor-mock"
+    }
+
+    fn supports_tools(&self) -> bool {
+        true
+    }
+
+    async fn chat(
+        &self,
+        request: ChatRequest,
+    ) -> Result<openalpaca_llm::ChatResponse, openalpaca_llm::LlmError> {
+        use openalpaca_llm::{ChatResponse, FinishReason, Usage};
+        self.requests.lock().unwrap().push(request.clone());
+        let content = if Self::is_extractor_call(&request) {
+            let saw_marker = request
+                .messages
+                .iter()
+                .any(|m| matches!(m.role, openalpaca_llm::Role::User) && m.content.contains(VIM_MARKER));
+            if saw_marker {
+                r#"{"extractions": [{"title": "Editor preference",
+                    "content": "The user prefers vim for editing.",
+                    "kind": "preference", "stated_by": "user", "confidence": 0.95}]}"#
+                    .to_string()
+            } else {
+                r#"{"extractions": []}"#.to_string()
+            }
+        } else {
+            "noted".to_string()
+        };
+        Ok(ChatResponse {
+            content,
+            tool_calls: vec![],
+            model: "mock-model".to_string(),
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                ..Default::default()
+            },
+            finish_reason: FinishReason::Stop,
+            thinking: None,
+            parts: None,
+        })
+    }
+}
+
+/// An empty home partition for `user1`, plus the service over it.
+struct ExtractionScene {
+    _env: crate::test_util::HomeStoreGuard,
+    _root: tempfile::TempDir,
+    service: Arc<crate::memory::service::MemoryService>,
+}
+
+impl ExtractionScene {
+    fn new(db: &openalpaca_storage::Database) -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let env = crate::test_util::HomeStoreGuard::set(&home.canonicalize().unwrap());
+        openalpaca_storage::IdentityRepository::new(db)
+            .create_global_user("user1", None)
+            .unwrap();
+        let service = crate::memory::service::MemoryService::new(
+            Some(db.clone()),
+            openalpaca_storage::memory_index::MemoryIndex::open_in_memory().unwrap(),
+        );
+        service.rebuild_index().unwrap();
+        Self {
+            _env: env,
+            _root: root,
+            service: Arc::new(service),
+        }
+    }
+
+    /// Every active note of `user1`'s global partition, by title.
+    fn active_titles(&self) -> Vec<String> {
+        use crate::memory::service::{
+            Attribution, Capabilities, ListInput, Surface, WorkspaceHint,
+        };
+        let owner = self
+            .service
+            .context(
+                "user1",
+                WorkspaceHint::None,
+                Surface::UserSurface,
+                Capabilities::ALL,
+                Attribution::default(),
+            )
+            .unwrap();
+        self.service
+            .list(&owner, ListInput::default())
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|i| i.title)
+            .collect()
+    }
+}
+
+fn extracting_orchestrator(
+    db: openalpaca_storage::Database,
+) -> (Orchestrator, Arc<std::sync::Mutex<Vec<ChatRequest>>>) {
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let router = openalpaca_llm::LlmRouter::single_provider(
+        Arc::new(MarkerExtractorLlm {
+            requests: requests.clone(),
+        }),
+        openalpaca_llm::ProviderType::Anthropic,
+        "claude-sonnet-4-5-20250929".to_string(),
+    );
+    let mut config = DaemonConfig::default();
+    // Extract on every turn: the frequency gate is not what is under test.
+    config.orchestrator.costs.extract_every_n_turns = 1;
+    let orch = make_orchestrator_with_llm_agents_and_config(Arc::new(router), vec![], config, Some(db));
+    (orch, requests)
+}
+
+fn user1_request(content: &str) -> HandleRequest {
+    HandleRequest {
+        request_id: Uuid::new_v4(),
+        source: "cli".to_string(),
+        content: content.to_string(),
+        principal: Principal::User {
+            global_id: "user1".to_string(),
+        },
+        scope: Scope::Global,
+        lane_key: "user1:cli".to_string(),
+        workspace_path: None,
+        stream_id: None,
+        model_override: None,
+        unattended: false,
+        turn_sink: None,
+    }
+}
+
+/// The control: the same preference typed by the user is extracted, through
+/// the tracked post-turn job the turn started.
+#[tokio::test]
+async fn a_preference_the_user_typed_becomes_a_note_after_the_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let scene = ExtractionScene::new(&db);
+    let (orch, _requests) = extracting_orchestrator(db);
+    orch.set_memory_service(scene.service.clone());
+
+    let reply = orch
+        .handle_message(user1_request(
+            "For the record: the user prefers vim for editing, every time.",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reply, "noted");
+    orch.background().wait_idle().await;
+
+    assert_eq!(scene.active_titles(), vec!["Editor preference".to_string()]);
+}
+
+/// **Plan 3.4, MD-2.** A preference that appears only in an attachment's
+/// extracted text yields no note at all: the extractor's input is
+/// `HandleRequest.content`, the message as typed, never the model input the
+/// attachment path augments with the files' text (U2). The model that
+/// answered the turn *did* see the text — the same request log shows it —
+/// and the extractor did not.
+#[tokio::test]
+async fn a_preference_that_appears_only_in_an_attachments_text_yields_no_note() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).unwrap();
+    let scene = ExtractionScene::new(&db);
+    let (orch, requests) = extracting_orchestrator(db);
+    orch.set_memory_service(scene.service.clone());
+
+    let typed = "Summarise the attached notes file for me, please.";
+    let model_input = format!(
+        "{typed}\n\n<attachment name=\"notes.txt\">\nThe user prefers vim for editing.\n</attachment>"
+    );
+    let reply = orch
+        .handle_message_internal(user1_request(typed), model_input, false, None)
+        .await
+        .unwrap();
+    assert_eq!(reply, "noted");
+    orch.background().wait_idle().await;
+
+    assert!(
+        scene.active_titles().is_empty(),
+        "the attachment's text minted a note: {:?}",
+        scene.active_titles()
+    );
+
+    let reqs = requests.lock().unwrap();
+    let extractor: Vec<&ChatRequest> = reqs
+        .iter()
+        .filter(|r| MarkerExtractorLlm::is_extractor_call(r))
+        .collect();
+    assert_eq!(extractor.len(), 1, "the extraction ran once");
+    assert!(
+        extractor[0]
+            .messages
+            .iter()
+            .all(|m| !m.content.contains(VIM_MARKER)),
+        "the extractor was handed the attachment's text"
+    );
+    assert!(
+        extractor[0]
+            .messages
+            .iter()
+            .any(|m| m.content.contains(typed)),
+        "the extractor was handed the message as typed"
+    );
+    assert!(
+        reqs.iter()
+            .filter(|r| !MarkerExtractorLlm::is_extractor_call(r))
+            .any(|r| r.messages.iter().any(|m| m.content.contains(VIM_MARKER))),
+        "the answering model saw the attachment's text, as it should"
+    );
+}
+
+// ── Onboarding completes from the files, with no background writer (MD-3) ──
+
+const BOOTSTRAP_MD: &str = "---\nsummary: \"x\"\nread_when:\n  - y\n---\n\n# Hello\n";
+const IDENTITY_WITH_CONTENT: &str =
+    "---\nsummary: \"i\"\nread_when:\n  - y\n---\n\n- **Name:** Koda\n";
+const USER_WITH_CONTENT: &str = "---\ntitle: \"USER.md\"\nsummary: \"u\"\nread_when:\n  - y\n---\n\n\
+     ## Identity\n\n* Name: Junpei\n\n## Expertise & Background\n\nRust\n";
+const USER_SEEDED: &str = "---\ntitle: \"USER.md\"\nsummary: \"u\"\nread_when:\n  - y\n---\n\n\
+     ## Identity\n\n* Name:\n\n## Expertise & Background\n\n(Technical background)\n";
+
+/// What `update_persona` leaves behind during onboarding: the files. The
+/// in-memory documents are never loaded here — a daemon reloads them from an
+/// event that races the turn, and the extractor that used to fill the
+/// in-memory `USER.md` writes memory notes now — so completion must read
+/// the files themselves.
+#[tokio::test]
+async fn onboarding_completes_from_the_files_update_persona_wrote_with_no_background_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let bootstrap = dir.path().join("BOOTSTRAP.md");
+    let identity = dir.path().join("IDENTITY.md");
+    let user = dir.path().join("USER.md");
+    std::fs::write(&bootstrap, BOOTSTRAP_MD).unwrap();
+    std::fs::write(&identity, IDENTITY_WITH_CONTENT).unwrap();
+    std::fs::write(&user, USER_WITH_CONTENT).unwrap();
+
+    let orch = make_orchestrator();
+    orch.update_bootstrap_document(Some(
+        crate::middleware::bootstrap::parse_bootstrap_markdown(BOOTSTRAP_MD).unwrap(),
+    ));
+    orch.set_bootstrap_path(bootstrap.clone());
+    orch.set_identity_path(identity);
+    orch.set_user_path(user);
+    let mut events = orch.bus.subscribe();
+
+    orch.maybe_complete_bootstrap().await;
+
+    assert!(!bootstrap.exists(), "onboarding completed from the files");
+    assert!(!orch.is_bootstrapping());
+    assert!(matches!(
+        events.try_recv(),
+        Ok(SystemEvent::BootstrapCompleted {
+            identity_populated: true,
+            user_populated: true,
+            ..
+        })
+    ));
+}
+
+/// The other half: a `USER.md` that is still the seeded template does not
+/// complete onboarding, file or no file.
+#[tokio::test]
+async fn onboarding_waits_while_the_user_file_is_still_the_seeded_template() {
+    let dir = tempfile::tempdir().unwrap();
+    let bootstrap = dir.path().join("BOOTSTRAP.md");
+    let identity = dir.path().join("IDENTITY.md");
+    let user = dir.path().join("USER.md");
+    std::fs::write(&bootstrap, BOOTSTRAP_MD).unwrap();
+    std::fs::write(&identity, IDENTITY_WITH_CONTENT).unwrap();
+    std::fs::write(&user, USER_SEEDED).unwrap();
+
+    let orch = make_orchestrator();
+    orch.update_bootstrap_document(Some(
+        crate::middleware::bootstrap::parse_bootstrap_markdown(BOOTSTRAP_MD).unwrap(),
+    ));
+    orch.set_bootstrap_path(bootstrap.clone());
+    orch.set_identity_path(identity);
+    orch.set_user_path(user);
+
+    orch.maybe_complete_bootstrap().await;
+
+    assert!(bootstrap.exists(), "nothing learned yet: onboarding goes on");
+    assert!(orch.is_bootstrapping());
+}

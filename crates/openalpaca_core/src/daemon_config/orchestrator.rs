@@ -219,11 +219,9 @@ pub struct MemoryConfig {
     pub fts_jaccard_threshold: f64,
     /// Decay and pruning configuration.
     pub decay: MemoryDecayConfig,
-    /// Minimum confidence for profile trait extraction (set action). Range: 0.0–1.0.
-    pub profile_confidence_threshold: f64,
-    /// Minimum confidence for profile trait update action. Range: 0.0–1.0.
-    pub profile_update_confidence_threshold: f64,
-    /// Minimum confidence for memory item extraction. Range: 0.0–1.0.
+    /// The extractor's acceptance floor (design §6): an item the model
+    /// scores under this is dropped and counted; the number is never stored.
+    /// Range: 0.0–1.0.
     pub memory_confidence_threshold: f64,
 }
 
@@ -237,8 +235,6 @@ impl Default for MemoryConfig {
             supersession_distance_threshold: 1.0,
             fts_jaccard_threshold: 0.4,
             decay: MemoryDecayConfig::default(),
-            profile_confidence_threshold: 0.8,
-            profile_update_confidence_threshold: 0.9,
             memory_confidence_threshold: 0.65,
         }
     }

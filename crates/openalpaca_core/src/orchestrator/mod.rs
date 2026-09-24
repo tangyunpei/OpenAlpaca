@@ -9,6 +9,7 @@ pub mod skill;
 pub mod task_state;
 
 mod attachment_adapt;
+mod background_jobs;
 mod bootstrap;
 mod context_builder;
 mod direct_send;
@@ -21,6 +22,7 @@ mod summary;
 mod task_launch;
 mod task_ops;
 
+pub use background_jobs::BackgroundJobs;
 pub use task_launch::{RerunOutcome, StartOutcome, TaskLaunchError};
 pub use task_ops::{TaskActionError, apply_task_action};
 // Routing V2 shared core, re-exported for the main-loop `task_status` tool.
@@ -176,10 +178,14 @@ pub struct Orchestrator {
     /// reference into the dispatch family (Routing V2).
     task_dispatcher: Arc<TaskDispatcher>,
     db: Option<Database>,
-    embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     /// Per-lane turn counter for extraction frequency gating.
     extraction_turn_counter: Arc<Mutex<HashMap<String, usize>>>,
-    /// Path to USER.md for writing extraction results. Set via `set_user_path()`.
+    /// The post-turn jobs (summary, memory extraction): tracked and
+    /// cancellable, never fire-and-forget (design §6).
+    background: Arc<BackgroundJobs>,
+    /// Path to USER.md, read by the onboarding check (MD-3: nothing here
+    /// writes it — `update_persona` and the persona routes do). Set via
+    /// `set_user_path()`.
     user_path: Arc<RwLock<Option<std::path::PathBuf>>>,
     /// Path to IDENTITY.md for writing identity updates. Set via `set_identity_path()`.
     identity_path: Arc<RwLock<Option<std::path::PathBuf>>>,
@@ -341,7 +347,7 @@ impl Orchestrator {
             security_gate.clone(),
             tool_registry.clone(),
             db.clone(),
-            embedder.clone(),
+            embedder,
             daemon_config.clone(),
             connector_status.clone(),
             skill_catalog.clone(),
@@ -369,8 +375,8 @@ impl Orchestrator {
             intent_parser: IntentParser,
             task_dispatcher,
             db,
-            embedder,
             extraction_turn_counter: Arc::new(Mutex::new(HashMap::new())),
+            background: Arc::new(BackgroundJobs::new()),
             user_path: Arc::new(RwLock::new(None)),
             identity_path: Arc::new(RwLock::new(None)),
             skill_catalog,
@@ -399,6 +405,12 @@ impl Orchestrator {
         if let Ok(mut guard) = self.memory_service.write() {
             *guard = Some(service);
         }
+    }
+
+    /// The post-turn jobs (design §6): the daemon cancels and drains them at
+    /// shutdown; a test waits on them for a turn's extraction to land.
+    pub fn background(&self) -> &BackgroundJobs {
+        &self.background
     }
 
     /// The memory service, when the daemon installed one.
@@ -437,7 +449,7 @@ impl Orchestrator {
         self.task_dispatcher.set_followup_runner(runner);
     }
 
-    /// Set the path to USER.md for extraction writes.
+    /// Set the path to USER.md the onboarding check reads.
     pub fn set_user_path(&self, path: std::path::PathBuf) {
         if let Ok(mut guard) = self.user_path.write() {
             *guard = Some(path);

@@ -777,6 +777,19 @@ async fn async_main(
         error!("Server error: {e}");
     }
 
+    // Stop the orchestrator's post-turn jobs — the conversation summary and
+    // the memory extraction — before the cost tracker is flushed, so what
+    // they billed is in the flush and no note is written under a daemon that
+    // is going away (design §6: no fire-and-forget jobs). They stop on the
+    // token; the wait is for a write already in flight.
+    if !orchestrator
+        .background()
+        .shutdown(Duration::from_secs(3))
+        .await
+    {
+        warn!("Post-turn jobs did not stop within 3s; a summary or extraction may be lost");
+    }
+
     // Flush CostTracker to DB (defense-in-depth)
     if let Some(ref router) = llm_router_for_shutdown {
         services::flush_cost_tracker(router, &db_for_shutdown, &cost_tracker_date).await;

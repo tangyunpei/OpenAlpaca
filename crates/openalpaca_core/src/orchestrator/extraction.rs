@@ -1,214 +1,307 @@
-use crate::bus::EventBus;
+//! Automatic memory extraction from a chat turn (design §6 *Promotion and
+//! correction*, owner decision MD-2; plan 3.4).
+//!
+//! After a turn is answered, the configured conversation model is asked what
+//! durable knowledge the turn carried, and each item is written through
+//! [`MemoryService`] on the `Extraction` surface:
+//!
+//! - what the **user said in their own words** becomes an **active** note
+//!   with origin `extracted_user` — the *recently learned* list, one-step
+//!   undo;
+//! - what was **inferred from the assistant's reply** becomes a
+//!   **candidate** with origin `extracted_other`, outside recall until it is
+//!   confirmed.
+//!
+//! **The input is the message as typed** — `HandleRequest.content`, never the
+//! model input, which on an attachment turn carries the files' extracted
+//! text (U2). An uploaded document therefore cannot mint an
+//! `extracted_user` note: the extractor never sees it.
+//!
+//! Bounded per turn by count (`[orchestrator.costs]
+//! extract_max_items_per_turn`, the items past it dropped and counted) and by
+//! cost (the existing frequency gate and daily cap); an item under
+//! `memory_confidence_threshold` is dropped and the number is never stored.
+//! It runs as a tracked job that stops on the orchestrator's shutdown token,
+//! attributed to the lane, the request and the source.
+//!
+//! What this file used to do — write "profile" traits into `USER.md` — is
+//! gone (MD-3): `USER.md` is the owner's to edit, through `update_persona`
+//! during onboarding and `openalpaca persona edit user` / Settings → Persona
+//! after it.
+
 use crate::daemon_config::DaemonConfig;
-use crate::events::SystemEvent;
-use crate::memory::task_extraction::{PersistResult, persist_memory_item};
-use crate::middleware::user::{
-    UserDocument, parse_user_markdown, render_user_markdown, section_is_unset,
+use crate::memory::service::{
+    Attribution, Capabilities, ExtractionProvenance, MemoryError, MemoryService, StoreInput,
+    Surface, WorkspaceHint,
 };
+use crate::memory::task_extraction::parse_json_response;
 use arc_swap::ArcSwap;
-use chrono::Utc;
 use openalpaca_llm::{ChatMessage, LlmRouter, RequestContext, RouterRequest};
 use openalpaca_storage::Database;
-use openalpaca_storage::repository::{LlmUsageRepository, MemoryRepository};
+use openalpaca_storage::memory_files::{Dedup, NoteKind, NoteSource, SourceType};
+use openalpaca_storage::repository::LlmUsageRepository;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
-/// Automatically extract user traits from a conversation turn.
-///
-/// Runs post-response in a background spawn — never adds latency to user-facing
-/// responses. Guarded by frequency (every N turns), daily cost cap, and
-/// content length filter.
-///
-/// Standalone function (not on `&self`) so it can be called from a `tokio::spawn` block.
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn extract_user_traits_background(
-    db: Database,
-    router: Arc<LlmRouter>,
-    daemon_config: Arc<ArcSwap<DaemonConfig>>,
-    extraction_turn_counter: Arc<Mutex<HashMap<String, usize>>>,
-    embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
-    user_path: Arc<RwLock<Option<PathBuf>>>,
-    user_document: Arc<RwLock<Option<UserDocument>>>,
-    persona_version: Arc<AtomicU64>,
-    bus: EventBus,
-    lane_key: String,
-    user_message: String,
-    assistant_response: String,
-    owner_id: String,
-) {
-    let dcfg = daemon_config.load();
+/// The usage label the extractor's calls are billed and gated under.
+pub(crate) const AGENT_LABEL: &str = "orchestrator_user_extract";
 
-    // Content filter: skip short messages and slash commands
-    if user_message.len() < dcfg.orchestrator.costs.extract_min_content_len
-        || user_message.starts_with('/')
+/// What the extractor needs from the orchestrator.
+pub(crate) struct TurnExtractionDeps {
+    pub db: Database,
+    pub router: Arc<LlmRouter>,
+    pub daemon_config: Arc<ArcSwap<DaemonConfig>>,
+    pub memory_service: Arc<MemoryService>,
+    /// Per-lane turn counter for the frequency gate.
+    pub turn_counter: Arc<Mutex<HashMap<String, usize>>>,
+    /// The orchestrator's shutdown token: a cancelled extraction writes
+    /// nothing.
+    pub cancel: CancellationToken,
+}
+
+/// One answered turn, as the extractor sees it.
+pub(crate) struct ExtractionTurn {
+    /// The turn's owner: a `global_user` row, or the service refuses.
+    pub owner_id: String,
+    pub lane_key: String,
+    pub source: String,
+    pub request_id: Uuid,
+    /// The MD-5 root the request resolved, never the daemon's CWD.
+    pub project_root: Option<PathBuf>,
+    /// The message **as typed** (`HandleRequest.content`).
+    pub user_message: String,
+    pub assistant_response: String,
+}
+
+/// What one extraction did, counted without note bodies (design §8).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ExtractionReport {
+    /// Notes written: `active + candidates`.
+    pub stored: usize,
+    /// Active `extracted_user` notes — the user's own words.
+    pub active: usize,
+    /// `extracted_other` candidates — inferred from the assistant's reply.
+    pub candidates: usize,
+    /// Items an existing note already held byte for byte.
+    pub deduplicated: usize,
+    /// Items past `extract_max_items_per_turn`.
+    pub dropped_over_cap: usize,
+    /// Items under `memory_confidence_threshold`.
+    pub dropped_below_threshold: usize,
+    /// Items with no content or an unknown kind.
+    pub dropped_invalid: usize,
+    /// Items the service refused.
+    pub failed: usize,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ExtractionOutcome {
+    /// A gate closed before any model call: the reason names it.
+    Skipped(&'static str),
+    /// No model could answer (§7b P10): one WARN, the turn is unaffected.
+    Unavailable,
+    /// The shutdown token fired before the answer was written.
+    Cancelled,
+    Extracted(ExtractionReport),
+}
+
+/// Runs one turn's extraction. Every failure is logged, none propagates.
+pub(crate) async fn extract_turn_memories(
+    deps: &TurnExtractionDeps,
+    turn: ExtractionTurn,
+) -> ExtractionOutcome {
+    let dcfg = deps.daemon_config.load();
+
+    // Content filter: skip short messages and slash commands.
+    if turn.user_message.len() < dcfg.orchestrator.costs.extract_min_content_len
+        || turn.user_message.starts_with('/')
     {
-        return;
+        return ExtractionOutcome::Skipped("content_filter");
     }
 
-    // Frequency gate: only extract every N turns per lane
+    // Frequency gate: only extract every N turns per lane.
     {
-        let mut counter = match extraction_turn_counter.lock() {
-            Ok(c) => c,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        let count = counter.entry(lane_key.to_string()).or_insert(0);
+        let mut counter = deps
+            .turn_counter
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let count = counter.entry(turn.lane_key.clone()).or_insert(0);
         *count += 1;
         if *count < dcfg.orchestrator.costs.extract_every_n_turns {
-            return;
+            return ExtractionOutcome::Skipped("frequency_gate");
         }
         *count = 0;
     }
 
-    // Budget pre-check — agent-specific cost for "orchestrator_user_extract"
-    let extract_cost = router
+    // The owner must be a `global_user` row (design §3): a `system` turn or
+    // an unlinked external identity has no partition, and no model call is
+    // spent finding that out.
+    let hint = match &turn.project_root {
+        Some(root) => WorkspaceHint::Root(root.as_path()),
+        None => WorkspaceHint::None,
+    };
+    let ctx = match deps.memory_service.context(
+        &turn.owner_id,
+        hint,
+        Surface::Extraction,
+        Capabilities::EXTRACTION,
+        Attribution {
+            lane_key: Some(turn.lane_key.clone()),
+            task_id: None,
+            request_id: Some(turn.request_id),
+            source: Some(turn.source.clone()),
+        },
+    ) {
+        Ok(ctx) => ctx,
+        Err(MemoryError::NoOwner(_)) => {
+            tracing::debug!(lane_key = %turn.lane_key, "memory extraction: no owner, nothing to extract");
+            return ExtractionOutcome::Skipped("no_owner");
+        }
+        Err(e) => {
+            tracing::warn!("memory extraction: context refused: {e}");
+            return ExtractionOutcome::Skipped("context_refused");
+        }
+    };
+
+    // Budget pre-check — agent-specific cost under `AGENT_LABEL`.
+    let extract_cost = deps
+        .router
         .cost_tracker
-        .get_agent_usage("orchestrator_user_extract")
+        .get_agent_usage(AGENT_LABEL)
         .await
         .map(|s| s.total_cost_usd)
         .unwrap_or(0.0);
     if extract_cost > dcfg.orchestrator.costs.extract_max_daily_cost_usd {
-        tracing::debug!("User extraction skipped: cost ${extract_cost:.2} exceeds cap");
-        return;
+        tracing::debug!("memory extraction skipped: cost ${extract_cost:.2} exceeds cap");
+        return ExtractionOutcome::Skipped("cost_cap");
     }
 
-    // Truncate inputs to keep extraction prompt small
-    let user_trunc: String = user_message.chars().take(800).collect();
-    let asst_trunc: String = assistant_response.chars().take(400).collect();
+    let max_items = dcfg.orchestrator.costs.extract_max_items_per_turn.max(1);
+    let threshold = dcfg.orchestrator.memory.memory_confidence_threshold;
+
+    // Truncate inputs to keep the prompt small.
+    let user_trunc: String = turn.user_message.chars().take(800).collect();
+    let asst_trunc: String = turn.assistant_response.chars().take(400).collect();
 
     let user_prompt = format!(
-        "<conversation_turn>\nUser: {}\nAssistant: {}\n</conversation_turn>\n\n\
-         Analyze this conversation turn and extract any user traits.\n\n\
+        "<conversation_turn>\nUser: {user_trunc}\nAssistant: {asst_trunc}\n</conversation_turn>\n\n\
+         Extract the durable knowledge this turn carries about the user: their \
+         preferences, facts about them or their work, decisions they made, procedures \
+         they follow, references they gave, or an episode worth remembering.\n\n\
          <output_schema>\n\
          {{\n\
            \"extractions\": [\n\
              {{\n\
-               \"target\": \"profile\" or \"memory\",\n\
-               \"field\": \"identity.Name\" | \"identity.Timezone\" | \"identity.Pronouns\" | \
-         \"communication_style\" | \"expertise\" | \"projects\" | \"preferences\" | \"notes\",\n\
-               \"value\": \"the extracted value\",\n\
-               \"confidence\": 0.0 to 1.0,\n\
-               \"action\": \"set\" or \"update\"\n\
+               \"title\": \"a short title, at most 80 characters\",\n\
+               \"content\": \"one concise statement\",\n\
+               \"kind\": \"preference\" | \"fact\" | \"decision\" | \"procedure\" | \"reference\" | \"episode\",\n\
+               \"stated_by\": \"user\" | \"assistant\",\n\
+               \"confidence\": 0.0 to 1.0\n\
              }}\n\
            ]\n\
          }}\n\
          </output_schema>\n\n\
          <extraction_rules>\n\
-         - \"target\": \"profile\" for stable identity traits (name, timezone, expertise, style). Requires confidence >= 0.8.\n\
-         - \"target\": \"memory\" for situational preferences. Confidence >= 0.5.\n\
-         - For identity fields, use \"identity.<Key>\" (e.g. \"identity.Name\").\n\
-         - \"action\": \"set\" (default) fills only empty profile fields. \"action\": \"update\" replaces existing values.\n\
-         - Use \"update\" ONLY when the user explicitly states a change to something previously known \
-         (e.g. \"I moved to Tokyo\", \"call me Alex now\", \"I switched to vim\"). Requires confidence >= 0.9.\n\
-         - Only extract information that is clearly stated or strongly implied in the conversation.\n\
-         - Be conservative. Prefer fewer high-confidence extractions over many low-confidence ones.\n\
+         - \"stated_by\": \"user\" ONLY when the user said it in their own words in this turn.\n\
+         - \"stated_by\": \"assistant\" when it is inferred from the assistant's reply or from \
+         anything the user did not say themselves.\n\
+         - Only extract what is clearly stated or strongly implied. Do not invent.\n\
+         - Skip pleasantries, the question itself, and anything true only for this one reply.\n\
+         - Be conservative: prefer fewer high-confidence extractions over many low-confidence ones.\n\
+         - At most {max_items} extractions, most important first.\n\
          - If nothing can be extracted, return {{\"extractions\": []}}.\n\
-         </extraction_rules>",
-        user_trunc, asst_trunc
+         </extraction_rules>"
     );
 
     if let Some(ref m) = dcfg.orchestrator.costs.extraction_model {
-        tracing::debug!(model = %m, "extraction using configured model");
+        tracing::debug!(model = %m, "memory extraction using configured model");
     }
     let request = RouterRequest {
         model: dcfg.orchestrator.costs.extraction_model.clone(),
         messages: Arc::new(vec![
             ChatMessage::system(
-                "<role>You are a user trait extractor for OpenAlpaca.</role>\n\
+                "<role>You are the memory extractor for OpenAlpaca.</role>\n\
                  <output_format>Output ONLY valid JSON matching the schema. No markdown fences, no commentary.</output_format>",
             ),
             ChatMessage::user(&user_prompt),
         ]),
         tools: Arc::new(vec![]),
         temperature: Some(0.0),
-        max_tokens: Some(256),
+        max_tokens: Some(512),
         context: RequestContext {
-            agent_id: Some("orchestrator_user_extract".to_string()),
+            agent_id: Some(AGENT_LABEL.to_string()),
             task_id: None,
         },
         tool_choice: None,
         tools_token_estimate: None,
         enable_caching: false,
-        // M2: 256 tokens is a JSON object's worth of budget, and a local
-        // thinking model spends all of it reasoning before it writes a
-        // character — the answer came back empty and was reported as
-        // malformed JSON. An internal utility call wants no reasoning.
+        // M2: a JSON object's worth of budget, and a local thinking model
+        // spends all of it reasoning before it writes a character. An
+        // internal utility call wants no reasoning.
         thinking: Some(openalpaca_llm::ThinkingConfig::Disabled),
         context_management: None,
         fallback_models: Vec::new(),
         ephemeral_system_notice: None,
     };
+    drop(dcfg);
 
     let call_start = std::time::Instant::now();
-    let response = match router.complete(request).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("User extraction LLM call failed: {e}");
-            return;
+    let response = tokio::select! {
+        biased;
+        _ = deps.cancel.cancelled() => {
+            tracing::debug!(lane_key = %turn.lane_key, "memory extraction cancelled before the model answered");
+            return ExtractionOutcome::Cancelled;
         }
+        result = deps.router.complete(request) => match result {
+            Ok(r) => r,
+            Err(e) => {
+                // §7b P10: one WARN, the turn is unaffected.
+                tracing::warn!("memory extraction unavailable: {e}");
+                return ExtractionOutcome::Unavailable;
+            }
+        },
     };
     let latency_ms = call_start.elapsed().as_millis() as i64;
 
-    // Record LLM usage
+    // Record LLM usage.
     let actual_model = response.model.as_str();
-    let resolved_provider = router
+    let resolved_provider = deps
+        .router
         .model_registry()
         .resolve_provider(actual_model)
         .map(|p| p.to_string())
         .unwrap_or_else(|| "unknown".to_string());
-    let call_cost = router.cost_tracker.calculate_cost(
+    let call_cost = deps.router.cost_tracker.calculate_cost(
         actual_model,
         response.usage.input_tokens as u32,
         response.usage.output_tokens as u32,
     );
-    let usage_repo = LlmUsageRepository::new(&db);
+    let usage_repo = LlmUsageRepository::new(&deps.db);
 
-    // Parse response JSON (try raw, then ```json fence)
-    let parsed: serde_json::Value = match serde_json::from_str(response.content.trim()) {
-        Ok(v) => v,
-        Err(_) => {
-            let trimmed = response.content.trim();
-            let json_str = if let Some(start) = trimmed.find("```json") {
-                let after = &trimmed[start + 7..];
-                after
-                    .find("```")
-                    .map(|end| &after[..end])
-                    .unwrap_or(trimmed)
-            } else if let Some(start) = trimmed.find("```") {
-                let after = &trimmed[start + 3..];
-                after
-                    .find("```")
-                    .map(|end| &after[..end])
-                    .unwrap_or(trimmed)
-            } else {
-                trimmed
-            };
-            match serde_json::from_str(json_str.trim()) {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!("User extraction: malformed JSON from LLM: {e}");
-                    let _ = usage_repo.record_and_log(
-                        "orchestrator_user_extract",
-                        None,
-                        &resolved_provider,
-                        actual_model,
-                        response.usage.input_tokens as i32,
-                        response.usage.output_tokens as i32,
-                        call_cost,
-                        latency_ms,
-                        "error",
-                        Some(&format!("JSON parse: {e}")),
-                    );
-                    return;
-                }
-            }
+    let parsed = match parse_json_response(&response.content) {
+        Some(v) => v,
+        None => {
+            tracing::warn!("memory extraction: malformed JSON from the model");
+            let _ = usage_repo.record_and_log(
+                AGENT_LABEL,
+                None,
+                &resolved_provider,
+                actual_model,
+                response.usage.input_tokens as i32,
+                response.usage.output_tokens as i32,
+                call_cost,
+                latency_ms,
+                "error",
+                Some("JSON parse failure"),
+            );
+            return ExtractionOutcome::Extracted(ExtractionReport::default());
         }
     };
-
-    // Log successful usage
     if let Err(e) = usage_repo.record_and_log(
-        "orchestrator_user_extract",
+        AGENT_LABEL,
         None,
         &resolved_provider,
         actual_model,
@@ -222,452 +315,549 @@ pub(super) async fn extract_user_traits_background(
         tracing::warn!("Failed to persist extraction LLM usage: {e}");
     }
 
-    // Process extractions
-    let extractions = match parsed.get("extractions").and_then(|v| v.as_array()) {
-        Some(arr) => arr,
-        None => {
-            tracing::debug!("User extraction: no extractions array in response");
-            return;
-        }
-    };
-
-    if extractions.is_empty() {
-        return;
+    if deps.cancel.is_cancelled() {
+        return ExtractionOutcome::Cancelled;
     }
 
-    // Collect profile-level patches and memory-level items separately
-    let mut profile_patches: HashMap<String, serde_json::Value> = HashMap::new();
-    let mut memory_items: Vec<String> = Vec::new();
+    let extractions = parsed
+        .get("extractions")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
 
-    let mem_cfg = &daemon_config.load().orchestrator.memory;
-    let profile_threshold = mem_cfg.profile_confidence_threshold;
-    let profile_update_threshold = mem_cfg.profile_update_confidence_threshold;
-    let memory_threshold = mem_cfg.memory_confidence_threshold;
+    // Source evidence: the typed message's own row, when the gateway has
+    // persisted it (design §4: `sources` cite DB ids).
+    let sources = message_row(&deps.db, &turn.lane_key, &turn.user_message)
+        .map(|id| {
+            vec![NoteSource {
+                kind: SourceType::Message,
+                id: id.to_string(),
+                observed_at: None,
+            }]
+        })
+        .unwrap_or_default();
 
-    for extraction in extractions {
-        let target = extraction
-            .get("target")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let field = extraction
-            .get("field")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let value = extraction
-            .get("value")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let confidence = extraction
-            .get("confidence")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-
-        if value.is_empty() || field.is_empty() {
+    let mut report = ExtractionReport::default();
+    for extraction in &extractions {
+        let Some(item) = read_item(extraction) else {
+            report.dropped_invalid += 1;
+            continue;
+        };
+        if item.confidence < threshold {
+            report.dropped_below_threshold += 1;
             continue;
         }
-
-        match target {
-            "profile" => {
-                if confidence < profile_threshold {
-                    continue;
-                }
-                let action = extraction
-                    .get("action")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("set");
-                // "update" requires higher confidence than "set"
-                if action == "update" && confidence < profile_update_threshold {
-                    tracing::debug!(
-                        "Extraction: skipping update action for '{}' (confidence {:.2} < {:.1})",
-                        field,
-                        confidence,
-                        profile_update_threshold
-                    );
-                    continue;
-                }
-                // Route identity fields into the identity object
-                if let Some(key) = field.strip_prefix("identity.") {
-                    let identity_obj = profile_patches
-                        .entry("identity".to_string())
-                        .or_insert_with(|| serde_json::json!({}));
-                    if let Some(obj) = identity_obj.as_object_mut() {
-                        obj.insert(
-                            key.to_string(),
-                            serde_json::json!({
-                                "value": value,
-                                "action": action,
-                            }),
-                        );
-                    }
+        if report.stored + report.deduplicated + report.failed >= max_items {
+            report.dropped_over_cap += 1;
+            continue;
+        }
+        let provenance = if item.stated_by_user {
+            ExtractionProvenance::UserWords
+        } else {
+            ExtractionProvenance::OtherOutput
+        };
+        let input = StoreInput {
+            title: item.title,
+            body: item.body,
+            kind: Some(item.kind),
+            sources: sources.clone(),
+            provenance: Some(provenance),
+            ..Default::default()
+        };
+        match deps.memory_service.store(&ctx, input) {
+            Ok(out) if out.dedup == Dedup::Existing => report.deduplicated += 1,
+            Ok(_) => {
+                report.stored += 1;
+                if item.stated_by_user {
+                    report.active += 1;
                 } else {
-                    // Direct section field (e.g. "expertise", "preferences")
-                    profile_patches.insert(
-                        field.to_string(),
-                        serde_json::json!({
-                            "value": value,
-                            "action": action,
-                        }),
-                    );
+                    report.candidates += 1;
                 }
             }
-            "memory" => {
-                if confidence < memory_threshold {
-                    continue;
-                }
-                memory_items.push(value.to_string());
-            }
-            _ => {
-                tracing::debug!("User extraction: unknown target '{target}', skipping");
+            Err(e) => {
+                tracing::warn!("memory extraction: the service refused a note: {e}");
+                report.failed += 1;
             }
         }
     }
-
-    // Write memory-level items to Memory v2
-    if !memory_items.is_empty() {
-        let repo = MemoryRepository::new(&db);
-
-        for item in &memory_items {
-            // User trait memories use Global scope intentionally:
-            // user preferences and personality traits are universal,
-            // not workspace-specific (e.g., "prefers dark mode" applies everywhere).
-            let result = persist_memory_item(
-                &repo,
-                &embedder,
-                &owner_id,
-                item,
-                openalpaca_storage::models::memory::MemoryKind::Preference,
-                openalpaca_storage::models::memory::MemoryScope::Global,
-                "",
-                openalpaca_storage::models::memory::MemorySource::Conversation,
-                0.6,
-                0.7,
-                None,
-            )
-            .await;
-            if let PersistResult::Error(e) = &result {
-                tracing::warn!("Failed to persist extracted memory item: {e}");
-            }
-        }
-    }
-
-    // Write profile-level patches to USER.md
-    if !profile_patches.is_empty() {
-        apply_profile_patches(
-            &user_path,
-            &user_document,
-            &persona_version,
-            &bus,
-            &profile_patches,
-        )
-        .await;
-    }
-}
-
-/// Apply extracted profile patches to USER.md using the sections-mode pattern.
-async fn apply_profile_patches(
-    user_path: &Arc<RwLock<Option<PathBuf>>>,
-    user_document: &Arc<RwLock<Option<UserDocument>>>,
-    persona_version: &Arc<AtomicU64>,
-    bus: &EventBus,
-    patches: &HashMap<String, serde_json::Value>,
-) {
-    let path = match user_path.read() {
-        Ok(guard) => match guard.clone() {
-            Some(p) => p,
-            None => {
-                tracing::debug!("Extraction: no user_path set, skipping profile patches");
-                return;
-            }
-        },
-        Err(_) => return,
-    };
-
-    // Read current USER.md
-    let current_content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("Extraction: failed to read USER.md: {e}");
-            return;
-        }
-    };
-
-    let mut doc = match parse_user_markdown(&current_content) {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!("Extraction: failed to parse USER.md: {e}");
-            return;
-        }
-    };
-
-    let mut modified_sections: Vec<String> = Vec::new();
-
-    for (field, value) in patches {
-        match field.as_str() {
-            "identity" => {
-                if let Some(obj) = value.as_object() {
-                    for (key, val) in obj {
-                        let v = val
-                            .get("value")
-                            .and_then(|v| v.as_str())
-                            .or_else(|| val.as_str()) // backward compat: bare string
-                            .unwrap_or("");
-                        let action =
-                            val.get("action").and_then(|a| a.as_str()).unwrap_or("set");
-                        if v.is_empty() {
-                            continue;
-                        }
-                        let existing = doc.identity.get(key).cloned().unwrap_or_default();
-                        if existing.is_empty() || action == "update" {
-                            doc.identity.insert(key.clone(), v.to_string());
-                            modified_sections.push(format!("identity.{}", key));
-                        }
-                    }
-                }
-            }
-            "communication_style" => {
-                let v = value
-                    .get("value")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| value.as_str())
-                    .unwrap_or("");
-                let action = value
-                    .get("action")
-                    .and_then(|a| a.as_str())
-                    .unwrap_or("set");
-                if !v.is_empty() && (section_is_unset(&doc.communication_style) || action == "update") {
-                    doc.communication_style = v.to_string();
-                    modified_sections.push("communication_style".to_string());
-                }
-            }
-            "expertise" => {
-                let v = value
-                    .get("value")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| value.as_str())
-                    .unwrap_or("");
-                let action = value
-                    .get("action")
-                    .and_then(|a| a.as_str())
-                    .unwrap_or("set");
-                if !v.is_empty() && (section_is_unset(&doc.expertise) || action == "update") {
-                    doc.expertise = v.to_string();
-                    modified_sections.push("expertise".to_string());
-                }
-            }
-            "projects" => {
-                let v = value
-                    .get("value")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| value.as_str())
-                    .unwrap_or("");
-                let action = value
-                    .get("action")
-                    .and_then(|a| a.as_str())
-                    .unwrap_or("set");
-                if !v.is_empty() && (section_is_unset(&doc.projects) || action == "update") {
-                    doc.projects = v.to_string();
-                    modified_sections.push("projects".to_string());
-                }
-            }
-            "preferences" => {
-                let v = value
-                    .get("value")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| value.as_str())
-                    .unwrap_or("");
-                let action = value
-                    .get("action")
-                    .and_then(|a| a.as_str())
-                    .unwrap_or("set");
-                if !v.is_empty() && (section_is_unset(&doc.preferences) || action == "update") {
-                    doc.preferences = v.to_string();
-                    modified_sections.push("preferences".to_string());
-                }
-            }
-            "notes" => {
-                let v = value
-                    .get("value")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| value.as_str())
-                    .unwrap_or("");
-                let action = value
-                    .get("action")
-                    .and_then(|a| a.as_str())
-                    .unwrap_or("set");
-                if !v.is_empty() && (section_is_unset(&doc.notes) || action == "update") {
-                    doc.notes = v.to_string();
-                    modified_sections.push("notes".to_string());
-                }
-            }
-            _ => {
-                tracing::debug!("Extraction: unknown profile field '{field}', skipping");
-            }
-        }
-    }
-
-    if modified_sections.is_empty() {
-        // S6: an extraction that passed every threshold and still changed
-        // nothing is the state that hid the bug for the life of the install.
-        // It is legitimate — `set` does not overwrite what is already known —
-        // but it must be legible, so the fields are named rather than
-        // silently dropped.
-        let fields: Vec<&str> = patches.keys().map(String::as_str).collect();
-        tracing::info!(
-            fields = ?fields,
-            "Extraction: nothing written to USER.md — every extracted field is already set \
-             (a 'set' action fills only unset sections; 'update' replaces)"
-        );
-        return;
-    }
-
-    // Render and atomic-write
-    let new_content = render_user_markdown(&doc);
-
-    // Validate round-trip
-    if parse_user_markdown(&new_content).is_err() {
-        tracing::warn!("Extraction: rendered USER.md failed round-trip validation, aborting");
-        return;
-    }
-
-    // Atomic write: temp file → rename
-    let tmp_path = path.with_extension("md.tmp");
-    if let Err(e) = std::fs::write(&tmp_path, &new_content) {
-        tracing::warn!("Extraction: failed to write temp file: {e}");
-        return;
-    }
-    if let Err(e) = std::fs::rename(&tmp_path, &path) {
-        tracing::warn!("Extraction: failed to rename temp file: {e}");
-        let _ = std::fs::remove_file(&tmp_path);
-        return;
-    }
-
-    // Update in-memory document
-    if let Ok(new_doc) = parse_user_markdown(&new_content) {
-        {
-            let lock = user_document.write();
-            match lock {
-                Ok(mut guard) => {
-                    *guard = Some(new_doc);
-                }
-                Err(poisoned) => {
-                    tracing::warn!(
-                        "User document lock poisoned during extraction update; recovering"
-                    );
-                    let mut guard = poisoned.into_inner();
-                    *guard = Some(new_doc);
-                }
-            }
-        }
-        // Bump persona version so Layer 1 memoization picks up the change
-        // (spec section Component 1). Bump AFTER the lock is released.
-        persona_version.fetch_add(1, Ordering::Relaxed);
-    }
-
-    // Publish event
-    let content_sha256 = {
-        use sha2::Digest;
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(new_content.as_bytes());
-        format!("{:x}", hasher.finalize())
-    };
-
-    bus.publish(SystemEvent::UserProfileUpdated {
-        actor: "extraction".to_string(),
-        mode: "sections".to_string(),
-        content_sha256,
-        modified_sections: modified_sections.clone(),
-        backup_path: None,
-        timestamp: Utc::now(),
-    });
 
     tracing::info!(
-        "Extraction: updated USER.md sections: {:?}",
-        modified_sections
+        lane_key = %turn.lane_key,
+        request_id = %turn.request_id,
+        stored = report.stored,
+        active = report.active,
+        candidates = report.candidates,
+        deduplicated = report.deduplicated,
+        dropped_over_cap = report.dropped_over_cap,
+        dropped_below_threshold = report.dropped_below_threshold,
+        dropped_invalid = report.dropped_invalid,
+        failed = report.failed,
+        cost_usd = call_cost,
+        "memory extraction finished"
     );
+    ExtractionOutcome::Extracted(report)
+}
+
+/// One item of the model's answer, validated.
+struct Item {
+    title: String,
+    body: String,
+    kind: NoteKind,
+    stated_by_user: bool,
+    confidence: f64,
+}
+
+/// Reads one `extractions[]` entry. `None` is an invalid item: no content,
+/// or a kind that is not one of the six. A missing kind is a `fact`.
+fn read_item(value: &serde_json::Value) -> Option<Item> {
+    let content = value.get("content")?.as_str()?.trim();
+    if content.is_empty() {
+        return None;
+    }
+    let kind = match value.get("kind").and_then(|v| v.as_str()) {
+        None | Some("") => NoteKind::Fact,
+        Some(k) => NoteKind::parse(k.trim())?,
+    };
+    let stated_by_user = value
+        .get("stated_by")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s.trim().eq_ignore_ascii_case("user"));
+    let confidence = value
+        .get("confidence")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let title = value
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(|t| t.chars().take(80).collect::<String>())
+        .unwrap_or_else(|| content.chars().take(80).collect());
+    Some(Item {
+        body: format!("# {title}\n\n{content}\n"),
+        title,
+        kind,
+        stated_by_user,
+        confidence,
+    })
+}
+
+/// The newest `conversation_messages` row that is this lane's user message
+/// with exactly this content — the row the gateway wrote for the turn — or
+/// `None` when nothing matches (a caller that never persisted the turn).
+fn message_row(db: &Database, lane_key: &str, content: &str) -> Option<i64> {
+    db.with_connection(|conn| {
+        let id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM conversation_messages \
+                 WHERE lane_key = ?1 AND role = 'user' AND content = ?2 \
+                 ORDER BY id DESC LIMIT 1",
+                (lane_key, content),
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(id)
+    })
+    .ok()
+    .flatten()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::{RecordingProvider, router_recording};
+    use crate::memory::service::{ListInput, ReadInput};
+    use crate::test_util::{HomeStoreGuard, RecordingProvider, router_recording};
     use openalpaca_llm::ThinkingConfig;
+    use openalpaca_storage::IdentityRepository;
+    use openalpaca_storage::memory_files::{NoteStatus, Origin};
+    use openalpaca_storage::memory_index::MemoryIndex;
 
-    /// **M2.** The user-trait extractor asks the model for 256 tokens. On a
-    /// thinking model that whole budget went into reasoning and the answer
-    /// came back empty — reported, wrongly, as "malformed JSON". The call now
-    /// says it wants no reasoning.
+    const OWNER: &str = "user1";
+
+    /// A temp home store, a database with the owner's `global_user` row,
+    /// a service over an in-memory index, and a recording router.
+    struct Scene {
+        _env: HomeStoreGuard,
+        _root: tempfile::TempDir,
+        db: Database,
+        service: Arc<MemoryService>,
+        provider: Arc<RecordingProvider>,
+        cancel: CancellationToken,
+    }
+
+    impl Scene {
+        fn new(reply: &str) -> Self {
+            let root = tempfile::tempdir().unwrap();
+            let home = root.path().join("home");
+            std::fs::create_dir_all(&home).unwrap();
+            let env = HomeStoreGuard::set(&home.canonicalize().unwrap());
+            let db = Database::open(&root.path().join("t.db")).unwrap();
+            IdentityRepository::new(&db)
+                .create_global_user(OWNER, None)
+                .unwrap();
+            let service =
+                MemoryService::new(Some(db.clone()), MemoryIndex::open_in_memory().unwrap());
+            service.rebuild_index().unwrap();
+            Self {
+                _env: env,
+                _root: root,
+                db,
+                service: Arc::new(service),
+                provider: RecordingProvider::new(reply),
+                cancel: CancellationToken::new(),
+            }
+        }
+
+        fn deps(&self) -> TurnExtractionDeps {
+            let mut cfg = DaemonConfig::default();
+            // One turn is enough for these tests; the frequency gate is not
+            // what is under test.
+            cfg.orchestrator.costs.extract_every_n_turns = 1;
+            TurnExtractionDeps {
+                db: self.db.clone(),
+                router: router_recording(self.provider.clone()),
+                daemon_config: Arc::new(ArcSwap::from_pointee(cfg)),
+                memory_service: self.service.clone(),
+                turn_counter: Arc::new(Mutex::new(HashMap::new())),
+                cancel: self.cancel.clone(),
+            }
+        }
+
+        fn turn(&self, owner: &str, message: &str) -> ExtractionTurn {
+            ExtractionTurn {
+                owner_id: owner.to_string(),
+                lane_key: format!("{owner}:cli"),
+                source: "cli".to_string(),
+                request_id: Uuid::new_v4(),
+                project_root: None,
+                user_message: message.to_string(),
+                assistant_response: "Noted.".to_string(),
+            }
+        }
+
+        fn user_ctx(&self) -> crate::memory::service::MemoryAccessContext {
+            self.service
+                .context(
+                    OWNER,
+                    WorkspaceHint::None,
+                    Surface::UserSurface,
+                    Capabilities::ALL,
+                    Attribution::default(),
+                )
+                .unwrap()
+        }
+
+        fn active(&self) -> Vec<crate::memory::service::ListItem> {
+            self.service
+                .list(&self.user_ctx(), ListInput::default())
+                .unwrap()
+                .items
+        }
+
+        fn candidates(&self) -> Vec<crate::memory::service::ListItem> {
+            self.service
+                .list(
+                    &self.user_ctx(),
+                    ListInput {
+                        status: Some(NoteStatus::Candidate),
+                        include_candidates: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+                .items
+        }
+    }
+
+    const USER_ITEM: &str = r#"{"extractions": [
+        {"title": "Editor preference", "content": "The user prefers vim for editing.",
+         "kind": "preference", "stated_by": "user", "confidence": 0.9}
+    ]}"#;
+
+    const ASSISTANT_ITEM: &str = r#"{"extractions": [
+        {"title": "Probably uses Rust", "content": "The user's project is probably written in Rust.",
+         "kind": "fact", "stated_by": "assistant", "confidence": 0.8}
+    ]}"#;
+
+    /// **MD-2.** A preference stated in the user's own words becomes an
+    /// active note with origin `extracted_user`, in recall and on the
+    /// recently-learned list.
     #[tokio::test]
-    async fn the_user_trait_extractor_asks_for_no_reasoning() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).expect("db");
-        let provider = RecordingProvider::new(r#"{"extractions": []}"#);
-        let router = router_recording(provider.clone());
-
-        let mut cfg = DaemonConfig::default();
-        // One turn is enough for this test; the frequency gate is not what is
-        // under test.
-        cfg.orchestrator.costs.extract_every_n_turns = 1;
-
-        extract_user_traits_background(
-            db,
-            router,
-            Arc::new(ArcSwap::from_pointee(cfg)),
-            Arc::new(Mutex::new(HashMap::new())),
-            None,
-            Arc::new(RwLock::new(None)),
-            Arc::new(RwLock::new(None)),
-            Arc::new(AtomicU64::new(0)),
-            crate::bus::EventBus::new(16),
-            "owner:cli".to_string(),
-            "I moved to Tokyo last week and I prefer concise answers.".to_string(),
-            "Noted.".to_string(),
-            "owner".to_string(),
+    async fn a_user_stated_preference_becomes_an_active_extracted_user_note() {
+        let scene = Scene::new(USER_ITEM);
+        let outcome = extract_turn_memories(
+            &scene.deps(),
+            scene.turn(OWNER, "I prefer vim for editing, always have."),
         )
         .await;
+        assert_eq!(
+            outcome,
+            ExtractionOutcome::Extracted(ExtractionReport {
+                stored: 1,
+                active: 1,
+                ..Default::default()
+            })
+        );
 
-        let request = provider.first_request();
+        let active = scene.active();
+        assert_eq!(active.len(), 1, "{active:?}");
+        assert_eq!(active[0].title, "Editor preference");
+        assert_eq!(active[0].status, NoteStatus::Active);
+        assert_eq!(active[0].origin, Origin::ExtractedUser);
+        assert_eq!(active[0].kind, NoteKind::Preference);
+        assert!(scene.candidates().is_empty());
+
+        let learned = scene
+            .service
+            .recently_learned(&scene.user_ctx(), None, None)
+            .unwrap();
+        assert_eq!(learned.len(), 1);
+        assert_eq!(learned[0].id, active[0].id);
+    }
+
+    /// **MD-2.** Something inferred from the assistant's reply is a
+    /// candidate — outside the active list until it is confirmed.
+    #[tokio::test]
+    async fn an_assistant_claim_becomes_a_candidate() {
+        let scene = Scene::new(ASSISTANT_ITEM);
+        let outcome = extract_turn_memories(
+            &scene.deps(),
+            scene.turn(
+                OWNER,
+                "Can you look at my project and tell me what it does?",
+            ),
+        )
+        .await;
+        assert_eq!(
+            outcome,
+            ExtractionOutcome::Extracted(ExtractionReport {
+                stored: 1,
+                candidates: 1,
+                ..Default::default()
+            })
+        );
+        assert!(scene.active().is_empty(), "a candidate is not active");
+        let candidates = scene.candidates();
+        assert_eq!(candidates.len(), 1, "{candidates:?}");
+        assert_eq!(candidates[0].status, NoteStatus::Candidate);
+        assert_eq!(candidates[0].origin, Origin::ExtractedOther);
+        assert!(
+            scene
+                .service
+                .recently_learned(&scene.user_ctx(), None, None)
+                .unwrap()
+                .is_empty(),
+            "recently learned lists the user's own words only"
+        );
+    }
+
+    /// **Design §4 *Initial limits*.** Five notes per turn: the sixth item
+    /// the model returns is dropped and counted, never stored.
+    #[tokio::test]
+    async fn the_sixth_item_of_a_turn_is_dropped_and_counted() {
+        let items: Vec<String> = (1..=6)
+            .map(|i| {
+                format!(
+                    r#"{{"title": "Preference {i}", "content": "The user prefers option {i}.",
+                        "kind": "preference", "stated_by": "user", "confidence": 0.9}}"#
+                )
+            })
+            .collect();
+        let reply = format!(r#"{{"extractions": [{}]}}"#, items.join(","));
+        let scene = Scene::new(&reply);
+        let deps = scene.deps();
+        assert_eq!(
+            deps.daemon_config
+                .load()
+                .orchestrator
+                .costs
+                .extract_max_items_per_turn,
+            5
+        );
+
+        let outcome = extract_turn_memories(
+            &deps,
+            scene.turn(OWNER, "Here are the six things I prefer, in order."),
+        )
+        .await;
+        assert_eq!(
+            outcome,
+            ExtractionOutcome::Extracted(ExtractionReport {
+                stored: 5,
+                active: 5,
+                dropped_over_cap: 1,
+                ..Default::default()
+            })
+        );
+        let titles: Vec<String> = scene.active().into_iter().map(|i| i.title).collect();
+        assert_eq!(titles.len(), 5, "{titles:?}");
+        assert!(!titles.contains(&"Preference 6".to_string()), "{titles:?}");
+    }
+
+    /// The acceptance floor: an item under `memory_confidence_threshold` is
+    /// dropped and counted, and the number itself is never stored.
+    #[tokio::test]
+    async fn an_item_under_the_confidence_floor_is_dropped_and_counted() {
+        let scene = Scene::new(
+            r#"{"extractions": [
+                {"title": "Maybe tea", "content": "The user might like tea.",
+                 "kind": "preference", "stated_by": "user", "confidence": 0.3}
+            ]}"#,
+        );
+        let outcome = extract_turn_memories(
+            &scene.deps(),
+            scene.turn(OWNER, "I had a cup of something warm this morning."),
+        )
+        .await;
+        assert_eq!(
+            outcome,
+            ExtractionOutcome::Extracted(ExtractionReport {
+                dropped_below_threshold: 1,
+                ..Default::default()
+            })
+        );
+        assert!(scene.active().is_empty());
+        assert!(scene.candidates().is_empty());
+    }
+
+    /// Design §3: the owner is a `global_user` row. A `system` turn has no
+    /// partition, so nothing is extracted and no model call is spent.
+    #[tokio::test]
+    async fn a_turn_with_no_owner_extracts_nothing_and_calls_no_model() {
+        let scene = Scene::new(USER_ITEM);
+        let outcome = extract_turn_memories(
+            &scene.deps(),
+            scene.turn("system", "I prefer vim for editing, always have."),
+        )
+        .await;
+        assert_eq!(outcome, ExtractionOutcome::Skipped("no_owner"));
+        assert!(scene.provider.first_request_opt().is_none());
+        assert!(scene.active().is_empty());
+    }
+
+    /// A cancelled extraction writes nothing — the shutdown token is
+    /// observed before the model is asked.
+    #[tokio::test]
+    async fn a_cancelled_extraction_writes_nothing() {
+        let scene = Scene::new(USER_ITEM);
+        scene.cancel.cancel();
+        let outcome = extract_turn_memories(
+            &scene.deps(),
+            scene.turn(OWNER, "I prefer vim for editing, always have."),
+        )
+        .await;
+        assert_eq!(outcome, ExtractionOutcome::Cancelled);
+        assert!(scene.provider.first_request_opt().is_none());
+        assert!(scene.active().is_empty());
+    }
+
+    /// The typed message's own row is the note's source (design §4:
+    /// `sources` cite DB ids, never session-log offsets).
+    #[tokio::test]
+    async fn the_note_cites_the_typed_messages_row_when_the_turn_was_persisted() {
+        let scene = Scene::new(USER_ITEM);
+        let message = "I prefer vim for editing, always have.";
+        let row: i64 = scene
+            .db
+            .with_connection(|c| {
+                c.execute(
+                    "INSERT INTO conversation_messages (lane_key, role, content) VALUES (?1, 'user', ?2)",
+                    (format!("{OWNER}:cli"), message),
+                )?;
+                Ok(c.last_insert_rowid())
+            })
+            .unwrap();
+
+        extract_turn_memories(&scene.deps(), scene.turn(OWNER, message)).await;
+
+        let active = scene.active();
+        assert_eq!(active.len(), 1);
+        let note = scene
+            .service
+            .read(
+                &scene.user_ctx(),
+                ReadInput {
+                    id: active[0].id,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(note.sources.len(), 1, "{:?}", note.sources);
+        assert_eq!(note.sources[0].kind, SourceType::Message);
+        assert_eq!(note.sources[0].id, row.to_string());
+    }
+
+    /// The exact-dedup rule (§7b P8): the same item twice is one note, and
+    /// the second is counted as deduplicated.
+    #[tokio::test]
+    async fn the_same_item_twice_is_one_note() {
+        let scene = Scene::new(USER_ITEM);
+        let deps = scene.deps();
+        extract_turn_memories(
+            &deps,
+            scene.turn(OWNER, "I prefer vim for editing, always have."),
+        )
+        .await;
+        let outcome = extract_turn_memories(
+            &deps,
+            scene.turn(OWNER, "I prefer vim for editing, always have."),
+        )
+        .await;
+        assert_eq!(
+            outcome,
+            ExtractionOutcome::Extracted(ExtractionReport {
+                deduplicated: 1,
+                ..Default::default()
+            })
+        );
+        assert_eq!(scene.active().len(), 1);
+    }
+
+    /// **M2.** The extractor asks for no reasoning: on a thinking model the
+    /// whole small budget went into reasoning and the answer came back
+    /// empty — reported, wrongly, as "malformed JSON".
+    #[tokio::test]
+    async fn the_extractor_asks_for_no_reasoning() {
+        let scene = Scene::new(r#"{"extractions": []}"#);
+        extract_turn_memories(
+            &scene.deps(),
+            scene.turn(
+                OWNER,
+                "I moved to Tokyo last week and I prefer concise answers.",
+            ),
+        )
+        .await;
+        let request = scene.provider.first_request();
         assert!(
             matches!(request.thinking, Some(ThinkingConfig::Disabled)),
             "the extractor must ask for no reasoning, got {:?}",
             request.thinking
         );
-        assert_eq!(request.max_tokens, Some(256), "the small budget is intact");
+        assert_eq!(request.max_tokens, Some(512), "the small budget is intact");
     }
 
     /// **M2, second half.** When the budget really is spent before an answer
     /// is written, the router says so (`LlmError::EmptyCompletion`) and the
-    /// extractor reports *that* — it no longer runs the empty string through
-    /// `serde_json` and files "malformed JSON … EOF at column 0" against the
-    /// model.
+    /// extractor reports *that* rather than filing "malformed JSON" against
+    /// the model.
     #[tokio::test]
     async fn an_answer_the_reasoning_ate_is_not_filed_as_malformed_json() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).expect("db");
-        let provider = RecordingProvider::spent_budget();
-        let router = router_recording(provider.clone());
-
-        let mut cfg = DaemonConfig::default();
-        cfg.orchestrator.costs.extract_every_n_turns = 1;
-
-        extract_user_traits_background(
-            db.clone(),
-            router,
-            Arc::new(ArcSwap::from_pointee(cfg)),
-            Arc::new(Mutex::new(HashMap::new())),
-            None,
-            Arc::new(RwLock::new(None)),
-            Arc::new(RwLock::new(None)),
-            Arc::new(AtomicU64::new(0)),
-            crate::bus::EventBus::new(16),
-            "owner:cli".to_string(),
-            "I moved to Tokyo last week and I prefer concise answers.".to_string(),
-            "Noted.".to_string(),
-            "owner".to_string(),
+        let scene = Scene::new("");
+        let deps = TurnExtractionDeps {
+            router: router_recording(RecordingProvider::spent_budget()),
+            ..scene.deps()
+        };
+        let outcome = extract_turn_memories(
+            &deps,
+            scene.turn(
+                OWNER,
+                "I moved to Tokyo last week and I prefer concise answers.",
+            ),
         )
         .await;
-
-        let logs = LlmUsageRepository::new(&db)
-            .get_agent_usage("orchestrator_user_extract", 10)
+        assert_eq!(outcome, ExtractionOutcome::Unavailable);
+        let logs = LlmUsageRepository::new(&scene.db)
+            .get_agent_usage(AGENT_LABEL, 10)
             .expect("read the call log");
         assert!(
             logs.iter().all(|l| l
@@ -675,162 +865,9 @@ mod tests {
                 .as_deref()
                 .is_none_or(|m| !m.contains("JSON parse"))),
             "an empty completion must not be filed as malformed JSON: {:?}",
-            logs.iter().map(|l| l.error_message.clone()).collect::<Vec<_>>()
+            logs.iter()
+                .map(|l| l.error_message.clone())
+                .collect::<Vec<_>>()
         );
-    }
-
-    /// The seeded `USER.md`, verbatim (the daemon's `DEFAULT_USER_TEMPLATE`
-    /// and the tracked `config/orchestrator/templates/USER_temp.md` are the
-    /// same bytes; `a_seeded_user_profile_parses_as_unset` in the daemon
-    /// crate pins that copy to this behaviour).
-    const SEEDED_USER_MD: &str = r#"---
-title: "USER.md"
-summary: "User profile record"
-read_when:
-  - Bootstrapping a workspace manually
----
-
-# USER.md -- About Your Human
-
-Learn about the person you're helping. Update this as you go.
-
-## Identity
-
-* Name:
-* What to call them:
-* Pronouns:
-* Timezone:
-
-## Communication Style
-
-(How they like to communicate -- terse vs verbose, formal vs casual, etc.)
-
-## Expertise & Background
-
-(Technical background, domains of expertise, skill level in various areas)
-
-## Projects & Context
-
-(Current projects, tools they use, stack preferences)
-
-## Preferences
-
-(Likes, dislikes, pet peeves, formatting preferences, etc.)
-
-## Notes
-
-(Anything else. Build this over time. The more you know, the better you can help -- but remember, you're learning about a person, not building a dossier. Respect the difference.)
-"#;
-
-    /// **S6.** The live run's turn — "I am a Rust developer based in Taipei
-    /// and I prefer terse answers" — extracted successfully (553 in / 99 out,
-    /// status `success`) and `USER.md` was still the untouched template
-    /// afterwards. The seeded file is not an empty profile: every section
-    /// holds a parenthetical hint, `set` fills only *empty* fields, and so
-    /// nothing was ever written on any install.
-    #[tokio::test]
-    async fn an_extracted_trait_reaches_a_freshly_seeded_user_profile() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).expect("db");
-        let user_md = dir.path().join("USER.md");
-        std::fs::write(&user_md, SEEDED_USER_MD).expect("seed USER.md");
-
-        // The model's own answer shape, from the documented schema.
-        let provider = RecordingProvider::new(
-            r#"{"extractions": [
-                 {"target": "profile", "field": "expertise",
-                  "value": "Rust developer", "confidence": 0.95, "action": "set"},
-                 {"target": "profile", "field": "communication_style",
-                  "value": "Prefers terse answers", "confidence": 0.9, "action": "set"},
-                 {"target": "profile", "field": "identity.Timezone",
-                  "value": "Asia/Taipei", "confidence": 0.9, "action": "set"}
-               ]}"#,
-        );
-        let router = router_recording(provider.clone());
-
-        let mut cfg = DaemonConfig::default();
-        cfg.orchestrator.costs.extract_every_n_turns = 1;
-
-        let persona_version = Arc::new(AtomicU64::new(0));
-        let user_document = Arc::new(RwLock::new(None));
-
-        extract_user_traits_background(
-            db,
-            router,
-            Arc::new(ArcSwap::from_pointee(cfg)),
-            Arc::new(Mutex::new(HashMap::new())),
-            None,
-            Arc::new(RwLock::new(Some(user_md.clone()))),
-            user_document.clone(),
-            persona_version.clone(),
-            crate::bus::EventBus::new(16),
-            "owner:cli".to_string(),
-            "I am a Rust developer based in Taipei and I prefer terse answers".to_string(),
-            "Noted.".to_string(),
-            "owner".to_string(),
-        )
-        .await;
-
-        let written = std::fs::read_to_string(&user_md).expect("read back USER.md");
-        let doc = parse_user_markdown(&written).expect("the written file parses");
-        assert_eq!(doc.expertise, "Rust developer");
-        assert_eq!(doc.communication_style, "Prefers terse answers");
-        assert_eq!(doc.identity.get("Timezone").map(String::as_str), Some("Asia/Taipei"));
-        assert!(
-            !written.contains("terse vs verbose"),
-            "the hint the section held is replaced, not appended to"
-        );
-
-        // …and the live document the prompt reads is the new one.
-        assert_eq!(persona_version.load(Ordering::Relaxed), 1);
-        let live = user_document.read().unwrap_or_else(|e| e.into_inner()).clone();
-        assert_eq!(live.expect("the in-memory copy is refreshed").expertise, "Rust developer");
-    }
-
-    /// The other half of the contract: what the person already told the agent
-    /// is not overwritten by a `set`.
-    #[tokio::test]
-    async fn a_set_does_not_overwrite_what_is_already_known() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = openalpaca_storage::Database::open(&dir.path().join("t.db")).expect("db");
-        let user_md = dir.path().join("USER.md");
-        std::fs::write(
-            &user_md,
-            SEEDED_USER_MD.replace(
-                "(Technical background, domains of expertise, skill level in various areas)",
-                "Haskell, twenty years of it",
-            ),
-        )
-        .expect("seed USER.md");
-
-        let provider = RecordingProvider::new(
-            r#"{"extractions": [
-                 {"target": "profile", "field": "expertise",
-                  "value": "Rust developer", "confidence": 0.95, "action": "set"}
-               ]}"#,
-        );
-        let router = router_recording(provider.clone());
-        let mut cfg = DaemonConfig::default();
-        cfg.orchestrator.costs.extract_every_n_turns = 1;
-
-        extract_user_traits_background(
-            db,
-            router,
-            Arc::new(ArcSwap::from_pointee(cfg)),
-            Arc::new(Mutex::new(HashMap::new())),
-            None,
-            Arc::new(RwLock::new(Some(user_md.clone()))),
-            Arc::new(RwLock::new(None)),
-            Arc::new(AtomicU64::new(0)),
-            crate::bus::EventBus::new(16),
-            "owner:cli".to_string(),
-            "I am a Rust developer based in Taipei and I prefer terse answers".to_string(),
-            "Noted.".to_string(),
-            "owner".to_string(),
-        )
-        .await;
-
-        let doc = parse_user_markdown(&std::fs::read_to_string(&user_md).unwrap()).unwrap();
-        assert_eq!(doc.expertise, "Haskell, twenty years of it");
     }
 }
