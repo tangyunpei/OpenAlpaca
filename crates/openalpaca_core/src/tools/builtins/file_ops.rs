@@ -996,4 +996,60 @@ mod tests {
             "written through the link"
         );
     }
+
+    /// **S3-R1 (plan §7a), the probe.** A link into `state/` followed by a
+    /// directory that does not exist yet: the write resolver's absent-parent
+    /// branch used to return the joined path unresolved, so the string check
+    /// saw `link/…`, the resolved-path check saw `link/…` too, and
+    /// `create_dir_all` followed the link — the write landed in
+    /// `state/newdir/x.json`. The nearest existing ancestor is resolved now,
+    /// and the store check runs on what it resolved to.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_link_into_state_before_a_new_directory_is_refused() {
+        let b = bench();
+        let root = b.work.path().to_path_buf();
+        fs::create_dir_all(root.join("state")).unwrap();
+        std::os::unix::fs::symlink("state", root.join("link")).unwrap();
+
+        let err = b
+            .tool(None)
+            .write(
+                &serde_json::json!({"path": "link/newdir/x.json", "content": "{}"}),
+                &ToolContext::default(),
+            )
+            .await
+            .expect_err("a link into state/ before a new directory is refused");
+        assert!(err.contains("state/"), "{err}");
+        assert!(
+            !root.join("state/newdir").exists(),
+            "a directory was created through the link"
+        );
+    }
+
+    /// **S3-R1, the other half.** The same branch let a link to anywhere
+    /// leave the workspace, as long as the directory after it was new: its
+    /// boundary check compared the unresolved join with the root, which it
+    /// always starts with.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_link_out_of_the_workspace_before_a_new_directory_is_refused() {
+        let b = bench();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), b.work.path().join("link")).unwrap();
+
+        let err = b
+            .tool(None)
+            .write(
+                &serde_json::json!({"path": "link/newdir/x.json", "content": "escaped"}),
+                &ToolContext::default(),
+            )
+            .await
+            .expect_err("a link out of the workspace before a new directory is refused");
+        assert!(err.contains("outside the workspace boundary"), "{err}");
+        assert!(
+            !outside.path().join("newdir").exists(),
+            "a directory was created outside the workspace"
+        );
+    }
 }

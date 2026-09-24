@@ -59,9 +59,26 @@ pub(super) fn resolve_workspace_path(
     Ok(canonical)
 }
 
-/// Like `resolve_workspace_path` but for write targets where the file may not
-/// yet exist. Canonicalizes the parent directory and verifies it is within
-/// the workspace, then appends the file name.
+/// Like `resolve_workspace_path` but for write targets where the file, and
+/// any of the directories above it, may not exist yet (the caller creates
+/// them).
+///
+/// Resolves the **nearest existing ancestor** of the parent directory — the
+/// parent itself when it exists — and re-appends the missing directories and
+/// the file name, so the path returned is where `create_dir_all` and the
+/// write will actually land. A link on the way is therefore followed here,
+/// not only later by the caller: `link -> state` plus `link/newdir/x.json`
+/// resolves to `<root>/state/newdir/x.json`, which the boundary check below
+/// and the caller's store check (`is_store_owned_resolved`) both see, and
+/// `link -> /anywhere` plus a new directory resolves outside the root and is
+/// refused (S3-R1, plan §7a). The missing directories cannot redirect
+/// anything: they do not exist, and `validate_workspace_path` refused `..`.
+///
+/// "Exists" means a directory entry is there — `symlink_metadata`, not
+/// `exists`, which answers no for a dangling link and would let the walk
+/// step past it; a dangling link then fails to canonicalize and the write
+/// is refused. The leaf itself is not resolved (a pre-existing behaviour
+/// `file_ops.rs`'s `a_symlink_out_of_the_workspace_is_not_imaged` pins).
 pub(super) fn resolve_workspace_path_for_write(
     relative_path: &str,
     workspace_root: &Path,
@@ -69,51 +86,50 @@ pub(super) fn resolve_workspace_path_for_write(
     validate_workspace_path(relative_path)?;
 
     let full_path = workspace_root.join(relative_path);
-
-    // For new files, canonicalize the parent directory
     let parent = full_path
         .parent()
         .ok_or_else(|| "Invalid path: no parent directory".to_string())?;
+    let file_name = full_path
+        .file_name()
+        .ok_or_else(|| "Invalid path: no file name".to_string())?;
 
     let canonical_root = workspace_root
         .canonicalize()
         .map_err(|e| format!("Workspace root canonicalization failed: {}", e))?;
 
-    // If parent exists, canonicalize it; otherwise fall back to the joined path
-    // (parent dirs will be created by the caller)
-    if parent.exists() {
-        let canonical_parent = parent.canonicalize().map_err(|e| {
-            format!(
-                "Parent directory resolution failed for '{}': {}",
-                relative_path, e
-            )
-        })?;
-
-        if !canonical_parent.starts_with(&canonical_root) {
-            return Err(format!(
-                "Path '{}' resolves outside the workspace boundary",
-                relative_path
-            ));
+    let resolution_failed = |e: std::io::Error| {
+        format!(
+            "Parent directory resolution failed for '{}': {}",
+            relative_path, e
+        )
+    };
+    let mut existing = parent;
+    loop {
+        match std::fs::symlink_metadata(existing) {
+            Ok(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                existing = existing
+                    .parent()
+                    .ok_or_else(|| "Invalid path: no existing ancestor".to_string())?;
+            }
+            Err(e) => return Err(resolution_failed(e)),
         }
-
-        // Re-append the file name to the canonical parent
-        let file_name = full_path
-            .file_name()
-            .ok_or_else(|| "Invalid path: no file name".to_string())?;
-        Ok(canonical_parent.join(file_name))
-    } else {
-        // Parent doesn't exist yet — the caller will create it.
-        // Since validate_workspace_path already rejected .. components,
-        // and the parent hasn't been created yet (so no symlinks to resolve),
-        // we can use the non-canonical path. Double-check it starts with the root.
-        if !full_path.starts_with(workspace_root) {
-            return Err(format!(
-                "Path '{}' resolves outside the workspace boundary",
-                relative_path
-            ));
-        }
-        Ok(full_path)
     }
+    let missing = parent
+        .strip_prefix(existing)
+        .map_err(|_| "Invalid path: ancestor is not a prefix".to_string())?;
+    let resolved_parent = existing
+        .canonicalize()
+        .map_err(resolution_failed)?
+        .join(missing);
+
+    if !resolved_parent.starts_with(&canonical_root) {
+        return Err(format!(
+            "Path '{}' resolves outside the workspace boundary",
+            relative_path
+        ));
+    }
+    Ok(resolved_parent.join(file_name))
 }
 
 /// Check if a path refers to SOUL.md (case-insensitive filename check).

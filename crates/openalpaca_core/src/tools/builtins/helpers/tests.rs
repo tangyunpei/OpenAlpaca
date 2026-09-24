@@ -247,3 +247,80 @@ fn partition_control_files_are_refused_on_write_only() {
     }
 }
 
+// --- resolve_workspace_path_for_write (S3-R1, plan §7a) ---
+
+/// A workspace root with a `state/` directory beside an ordinary one, as the
+/// home store the daemon runs in has.
+#[cfg(unix)]
+fn write_resolution_root() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("state")).unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    let canonical = dir.path().canonicalize().unwrap();
+    (dir, canonical)
+}
+
+/// The nearest existing ancestor is what gets resolved: a link into
+/// `state/` followed by directories that do not exist yet resolves under
+/// `state/`, where the store check can see it.
+#[cfg(unix)]
+#[test]
+fn a_new_directory_behind_a_link_resolves_through_the_link() {
+    let (dir, root) = write_resolution_root();
+    std::os::unix::fs::symlink("state", dir.path().join("link")).unwrap();
+
+    let resolved = resolve_workspace_path_for_write("link/newdir/deeper/x.json", dir.path())
+        .expect("a link inside the workspace stays inside it");
+    assert_eq!(resolved, root.join("state/newdir/deeper/x.json"));
+    assert!(
+        is_store_owned_resolved(&resolved, dir.path(), StoreAccess::Write).is_some(),
+        "the resolved path is the store's"
+    );
+}
+
+/// The same walk refuses a link out of the workspace before a new
+/// directory, and a dangling link (nothing to resolve it to).
+#[cfg(unix)]
+#[test]
+fn a_new_directory_behind_an_escaping_or_dangling_link_is_refused() {
+    let (dir, _root) = write_resolution_root();
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), dir.path().join("out")).unwrap();
+    std::os::unix::fs::symlink(outside.path().join("missing"), dir.path().join("dangling"))
+        .unwrap();
+
+    let err = resolve_workspace_path_for_write("out/newdir/x.json", dir.path())
+        .expect_err("a link out of the workspace is refused");
+    assert!(err.contains("outside the workspace boundary"), "{err}");
+    let err = resolve_workspace_path_for_write("out/x.json", dir.path())
+        .expect_err("with an existing parent too");
+    assert!(err.contains("outside the workspace boundary"), "{err}");
+    resolve_workspace_path_for_write("dangling/newdir/x.json", dir.path())
+        .expect_err("a dangling link resolves to nothing");
+    assert!(!outside.path().join("missing").exists());
+}
+
+/// No link on the way: a new nested path resolves under the canonical root
+/// (on macOS a tempdir's `/var` is itself a link to `/private/var`), and an
+/// existing parent keeps resolving as it did.
+#[cfg(unix)]
+#[test]
+fn a_plain_new_path_resolves_under_the_canonical_root() {
+    let (dir, root) = write_resolution_root();
+    assert_eq!(
+        resolve_workspace_path_for_write("a/b/c.txt", dir.path()).unwrap(),
+        root.join("a/b/c.txt")
+    );
+    assert_eq!(
+        resolve_workspace_path_for_write("src/main.rs", dir.path()).unwrap(),
+        root.join("src/main.rs")
+    );
+    assert_eq!(
+        resolve_workspace_path_for_write("./src/new/x.rs", dir.path()).unwrap(),
+        root.join("src/new/x.rs")
+    );
+    assert_eq!(
+        resolve_workspace_path_for_write("top.txt", dir.path()).unwrap(),
+        root.join("top.txt")
+    );
+}
