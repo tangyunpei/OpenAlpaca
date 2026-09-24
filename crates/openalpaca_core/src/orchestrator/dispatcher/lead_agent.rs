@@ -486,7 +486,7 @@ impl TaskDispatcher {
         let ctx = self.shared_context.clone();
         let lane_manager = self.lane_manager.clone();
         let db = self.db.clone();
-        let embedder = self.embedder.clone();
+        let background = self.background.clone();
         let tool_registry = self.tool_registry.clone();
         let daemon_config = self.daemon_config.clone();
         let connector_block = self.connector_guidance_block();
@@ -664,7 +664,7 @@ impl TaskDispatcher {
                 ctx.clone(),
                 bus.clone(),
                 db.clone(),
-                memory_service,
+                memory_service.clone(),
                 user_document,
                 &task_id,
                 &created_by,
@@ -1100,12 +1100,15 @@ impl TaskDispatcher {
                 }
             }
 
-            // Memory extraction from lead agent output (non-blocking)
+            // Memory extraction from the lead agent's output: a tracked job
+            // on the orchestrator's `BackgroundJobs`, candidates only (MD-2),
+            // nothing for a failed or cancelled run.
             if let Some(ref db) = db {
                 spawn_task_memory_extraction(
+                    &background,
+                    memory_service.clone(),
                     db,
                     &router,
-                    &embedder,
                     &daemon_config,
                     &created_by,
                     &task_id,

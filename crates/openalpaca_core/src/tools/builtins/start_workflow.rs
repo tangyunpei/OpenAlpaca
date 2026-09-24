@@ -253,6 +253,7 @@ mod tests {
             Arc::new(crate::compose::ComposeEngine::new(16)),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
+            Arc::new(crate::orchestrator::BackgroundJobs::new()),
         ));
         (ctx, dispatcher, bus)
     }

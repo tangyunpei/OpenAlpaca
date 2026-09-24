@@ -63,7 +63,6 @@ pub struct TaskDispatcher {
     _security_gate: Arc<SecurityGate>,
     tool_registry: Arc<ToolRegistry>,
     db: Option<Database>,
-    embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
     daemon_config: Arc<ArcSwap<DaemonConfig>>,
     connector_status: Arc<RwLock<Option<Arc<dyn ConnectorStatusProvider>>>>,
     /// Cached connector guidance with 10s TTL (Opt-8b).
@@ -85,8 +84,11 @@ pub struct TaskDispatcher {
     user_document: Arc<RwLock<Option<UserDocument>>>,
     /// The memory service's slot, shared with the owning `Orchestrator` and
     /// filled by the daemon after construction (`set_memory_service`): the
-    /// lead's opening recall (design §7a).
+    /// lead's opening recall (design §7a) and the task-output extraction.
     memory_service: Arc<RwLock<Option<Arc<crate::memory::service::MemoryService>>>>,
+    /// The orchestrator's post-turn jobs: a finished run's memory extraction
+    /// runs on it, tracked and cancellable (design §6).
+    background: Arc<crate::orchestrator::BackgroundJobs>,
 }
 
 impl TaskDispatcher {
@@ -99,7 +101,10 @@ impl TaskDispatcher {
         security_gate: Arc<SecurityGate>,
         tool_registry: Arc<ToolRegistry>,
         db: Option<Database>,
-        embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
+        // Read by nothing since the task-output extraction moved to the
+        // memory service (plan 3.4); the parameter goes with the embedder
+        // itself in 3.5, when `Orchestrator::new` loses it too.
+        _embedder: Option<Arc<dyn openalpaca_llm::Embedder>>,
         daemon_config: Arc<ArcSwap<DaemonConfig>>,
         connector_status: Arc<RwLock<Option<Arc<dyn ConnectorStatusProvider>>>>,
         skill_catalog: Arc<crate::orchestrator::skill_catalog::SkillCatalog>,
@@ -107,6 +112,7 @@ impl TaskDispatcher {
         compose_engine: Arc<crate::compose::ComposeEngine>,
         user_document: Arc<RwLock<Option<UserDocument>>>,
         memory_service: Arc<RwLock<Option<Arc<crate::memory::service::MemoryService>>>>,
+        background: Arc<crate::orchestrator::BackgroundJobs>,
     ) -> Self {
         Self {
             shared_context,
@@ -116,7 +122,6 @@ impl TaskDispatcher {
             _security_gate: security_gate,
             tool_registry,
             db,
-            embedder,
             daemon_config,
             connector_status,
             skill_catalog,
@@ -127,6 +132,7 @@ impl TaskDispatcher {
             compose_engine,
             user_document,
             memory_service,
+            background,
         }
     }
 

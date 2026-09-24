@@ -313,6 +313,9 @@ impl Orchestrator {
         // source and the main loop's memory writers.
         let memory_service: Arc<RwLock<Option<Arc<crate::memory::service::MemoryService>>>> =
             Arc::new(RwLock::new(None));
+        // The post-turn jobs (design §6), shared with the dispatcher so a
+        // finished run's extraction is tracked and cancelled with the rest.
+        let background = Arc::new(BackgroundJobs::new());
 
         let context_manager = Arc::new(if db.is_some() {
             let sources: Vec<Box<dyn crate::prompt_ctx::sources::ContextSource>> = vec![
@@ -355,6 +358,7 @@ impl Orchestrator {
             compose_engine.clone(),
             user_document.clone(),
             memory_service.clone(),
+            background.clone(),
         ));
         let loop_config = {
             let mut lc = loop_config;
@@ -376,7 +380,7 @@ impl Orchestrator {
             task_dispatcher,
             db,
             extraction_turn_counter: Arc::new(Mutex::new(HashMap::new())),
-            background: Arc::new(BackgroundJobs::new()),
+            background,
             user_path: Arc::new(RwLock::new(None)),
             identity_path: Arc::new(RwLock::new(None)),
             skill_catalog,
