@@ -1,6 +1,6 @@
 # Evaluation report — the Markdown memory replacement
 
-**Status: DRAFT (2026-09-24), systems D and E still running.** Plan slice 4 ([04-implementation-plan.md](04-implementation-plan.md) §2, §5). Every number below is a measurement with its conditions, or is marked *pending*. No claim in this report exceeds the measurements.
+**Status: DRAFT (2026-09-24): D measured and the gate passed; post-fix D′/E′ pending.** Plan slice 4 ([04-implementation-plan.md](04-implementation-plan.md) §2, §5). Every number below is a measurement with its conditions, or is marked *pending*. No claim in this report exceeds the measurements.
 
 ## 1. What was measured, and how
 
@@ -34,14 +34,33 @@ Per category, A vs B: abstention 93.3 % vs 95.6 %; changed facts/time 0 % vs 92.
 
 ### 3.2 The new engine
 
-*Pending — D and E are running (`memeval/run-DE.sh`; each run is about 2–2.5 h on this machine).* The 3-question smoke of D scored 3/3 with per-turn recall hits in 2 rows and `memory_search` called in 2 (the harness logs `recalled=` and `relied=` per row).
+**D at `8815b4cd` (the build as implemented, before any change prompted by this evaluation) — the gate-deciding run.**
 
 | System | Correct | Accuracy | Per-turn recall rows | `memory_search` calls | Reader p50 / p95 | Wall |
 |---|---|---|---|---|---|---|
-| D | pending | | | | | |
-| E | pending | | | | | |
+| D (`8815b4cd`) | 443 / 470 | **94.3 %** | 393 | 185 | 11.5 s / 32.7 s | 136 min |
 
-Comparison D vs B (`compare.py`): *pending*.
+**D vs B** (`compare.py`, archived as `scripts/eval/memory/reports/compare-D-prefix-vs-B-2026-09-24.txt`): paired difference **+3.6 pp, 95 % CI [+0.5, +6.7]**, SE 1.60 pp; 57 discordant pairs (12.1 %): D-only correct 37, B-only 20. **Gate: CI lower bound +0.5 pp > −5 pp → PASS.** Because the CI excludes zero, the plan's rule allows the claim *more accurate* — on this corpus, this reader/judge model and this machine, and no further.
+
+Per category, D vs B: abstention 97.8 % vs 95.6 % (+2.2); changed facts/time 87.3 % vs 92.7 % (**−5.5**); cross-language 92.9 % vs 90.0 % (+2.9); exact recall 98.8 % vs 92.5 % (+6.2); paraphrase 97.5 % vs 88.8 % (+8.8); project procedures 98.2 % vs 96.4 % (+1.8); rejected/failed actions 95.6 % vs 77.8 % (+17.8); source conflicts 80.0 % vs 90.0 % (**−10.0**). No category is *worse than* −10 pp, so none blocks under plan §5; the two regressions are explained in §3.3.
+
+D also changes *how* memory reaches the answer: the per-turn recall delivered notes in 393 of 470 rows (A: 1 row, B: 1 row), and the model called `memory_search` 185 times against B's 492 — fewer tool rounds, lower reader p50 (11.5 s vs 12.6 s), more input tokens per turn (the recalled notes ride in the prompt).
+
+### 3.3 The two regressions, diagnosed
+
+Every miss in the two regressed categories was read against the gold notes and the notes D actually delivered (`memory_used` per row):
+
+1. **Source conflicts (8 misses, one question family).** Two gold notes share `fact_key: lantern.staging.db`: *lantern_staging on pg-staging-1* (observed March) and *lantern_stg on pg-staging-2* (observed June), no `supersedes` link. Design §3 rule 3 resolves such a pair by authority, then **newest `updated_at`**; the loser is hidden from automatic recall. The harness seeded notes in file order, so the June note was written first and the March note "won" — D delivered only the stale note and answered from it every time. Two defects: the harness's seed order does not follow how a user would have told the assistant (fidelity), and the rule itself is fragile — **editing the older note, even a typo, flips the winner** (a real product defect, independent of the eval).
+2. **Changed facts/time (7 misses).** (a) A planned trip note with a validity window of 5–19 October 2026 was **never returned, even to a search for "Stockholm"**: current search filters `valid_from <= now`, hiding a window that has not started yet, while design §4 only excludes a window that has *ended* — a conformance bug. (b) A note about a car sold in April has an *ended* window, so it is hidden unless the model searches with `historical: true`; that is the design working as written, but the tool's description never tells the model when to use the flag.
+
+**Fixes** (Opus implements, Fable reviews; in progress): the validity filter excludes only ended windows on the current path; the same-`fact_key` tie-break uses observation or first-write time so an edit cannot flip it (design §3 rule 3, §7c R9); the harness seeds in chronological order; the `historical` flag's description says what it includes and when to use it. Because these were prompted by held-out misses, the post-fix runs below are **optimistic** and are reported beside, never in place of, the gate-deciding D above.
+
+| System | Correct | Accuracy | Notes |
+|---|---|---|---|
+| D′ (post-fix) | pending | | same held-out set; optimistic |
+| E′ (post-fix) | pending | | D′ + at most two follow-up searches |
+
+A partial pre-fix E (13 rows) was stopped when the fixes started and is not reported.
 
 ## 4. Hard invariants (plan §5 "Targets")
 

@@ -1,0 +1,19 @@
+candidate: scripts/eval/memory/reports/system-D-prefix-2026-09-24.json (system D)
+baseline:  scripts/eval/memory/reports/baseline-B-2026-09-24.json (system B)
+paired questions: 470  (candidate judged 470, baseline judged 470)
+accuracy: candidate 94.3%  baseline 90.6%
+paired difference: +3.6 pp  95% CI [+0.5, +6.7]  SE 1.60 pp
+discordant pairs: 57 (12.1%): candidate-only 37, baseline-only 20, both 406
+
+per category (candidate vs baseline, point difference):
+  abstention               n=45    97.8% vs  95.6%  +2.2 pp
+  changed_facts_time       n=55    87.3% vs  92.7%  -5.5 pp
+  cross_language           n=70    92.9% vs  90.0%  +2.9 pp
+  exact_recall             n=80    98.8% vs  92.5%  +6.2 pp
+  paraphrase               n=80    97.5% vs  88.8%  +8.8 pp
+  project_procedures       n=55    98.2% vs  96.4%  +1.8 pp
+  rejected_failed_actions  n=45    95.6% vs  77.8%  +17.8 pp
+  source_conflicts         n=40    80.0% vs  90.0%  -10.0 pp
+
+gate: CI lower bound +0.5 pp > margin -5.0 pp -> PASS
+claim allowed: 'more accurate' (positive difference, CI excludes zero)
