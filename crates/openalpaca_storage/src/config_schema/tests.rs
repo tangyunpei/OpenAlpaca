@@ -94,8 +94,9 @@ fn test_daemon_keys_in_category() {
     let keys = keys_in_category("Daemon");
     // 41 keys plus the 8 [orchestrator.routing] keys (2026-08-30 wiring audit)
     // plus the 2 [execution.artifacts] keys (plan §4.6), less the 2
-    // simulated-chunking keys the real chat stream retired (S1).
-    assert_eq!(keys.len(), 49);
+    // simulated-chunking keys the real chat stream retired (S1), plus the 2
+    // extraction count keys (memory redesign, plan 3.4).
+    assert_eq!(keys.len(), 51);
     assert!(
         keys.iter()
             .any(|d| d.key == "daemon.execution.artifacts.max_artifact_bytes")
@@ -150,6 +151,15 @@ fn test_daemon_keys_in_category() {
     assert!(
         keys.iter()
             .any(|d| d.key == "daemon.orchestrator.task_extract_enabled")
+    );
+    // The two extraction count keys (memory redesign, plan 3.4)
+    assert!(
+        keys.iter()
+            .any(|d| d.key == "daemon.orchestrator.extract_max_items_per_turn")
+    );
+    assert!(
+        keys.iter()
+            .any(|d| d.key == "daemon.orchestrator.task_extract_max_items_per_run")
     );
     assert!(
         keys.iter()

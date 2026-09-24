@@ -575,3 +575,36 @@ fn test_artifacts_validate_clamps() {
     assert_eq!(config.execution.artifacts.max_artifact_bytes, 100 * 1024 * 1024);
     assert_eq!(config.execution.artifacts.max_versions_per_artifact, 200);
 }
+
+// ── The two extraction count keys (memory redesign, plan 3.4) ────────
+
+/// Design §4 *Initial limits*: extracted notes per chat turn / per task run
+/// are 5 / 10, under `[orchestrator.costs]`.
+#[test]
+fn extraction_count_keys_default_to_five_and_ten() {
+    let config = DaemonConfig::default();
+    assert_eq!(config.orchestrator.costs.extract_max_items_per_turn, 5);
+    assert_eq!(config.orchestrator.costs.task_extract_max_items_per_run, 10);
+
+    let parsed: DaemonConfig = toml::from_str("").unwrap();
+    assert_eq!(parsed.orchestrator.costs.extract_max_items_per_turn, 5);
+    assert_eq!(parsed.orchestrator.costs.task_extract_max_items_per_run, 10);
+}
+
+/// A zero would switch extraction off by the back door and an absurd count
+/// would let one turn flood a partition: both keys are clamped to 1..=50 and
+/// 1..=100, as the registry rows say.
+#[test]
+fn extraction_count_keys_are_clamped() {
+    let mut config: DaemonConfig = toml::from_str(
+        r#"
+[orchestrator.costs]
+extract_max_items_per_turn = 0
+task_extract_max_items_per_run = 5000
+"#,
+    )
+    .unwrap();
+    config.validate();
+    assert_eq!(config.orchestrator.costs.extract_max_items_per_turn, 1);
+    assert_eq!(config.orchestrator.costs.task_extract_max_items_per_run, 100);
+}

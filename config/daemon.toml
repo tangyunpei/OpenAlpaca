@@ -40,10 +40,15 @@ min_recent_messages = 4
 extract_every_n_turns = 5
 extract_max_daily_cost_usd = 0.25
 extract_min_content_len = 20
+# Memory notes one chat turn's extraction may write at most; the model's items
+# past this count are dropped and counted, never stored (design §4).
+extract_max_items_per_turn = 5
 summary_max_daily_cost_usd = 0.5
 task_extract_enabled = true
 task_extract_max_daily_cost_usd = 0.5
 task_extract_min_content_len = 100
+# Memory candidates one task run's extraction may write at most.
+task_extract_max_items_per_run = 10
 # summary_model = "claude-haiku-4-5-20251001"
 # extraction_model = "claude-haiku-4-5-20251001"
 

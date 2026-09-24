@@ -127,6 +127,18 @@ impl DaemonConfig {
             100.0,
             "task_extract_max_daily_cost_usd",
         );
+        clamp_val(
+            &mut self.orchestrator.costs.extract_max_items_per_turn,
+            1,
+            50,
+            "extract_max_items_per_turn",
+        );
+        clamp_val(
+            &mut self.orchestrator.costs.task_extract_max_items_per_run,
+            1,
+            100,
+            "task_extract_max_items_per_run",
+        );
         // ── Orchestrator > Prompt Budgets ──
         clamp_val(
             &mut self.orchestrator.prompt_budgets.identity_budget,

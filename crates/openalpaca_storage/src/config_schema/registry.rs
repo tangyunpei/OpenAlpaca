@@ -367,6 +367,33 @@ pub static CONFIG_KEYS: &[ConfigKeyDef] = &[
         sensitive: false,
         backend: ConfigBackend::DaemonToml,
     },
+    // -- Daemon: Orchestrator – Extraction counts (memory redesign, plan 3.4) --
+    ConfigKeyDef {
+        key: "daemon.orchestrator.extract_max_items_per_turn",
+        kind: ConfigKind::Int {
+            min: Some(1),
+            max: Some(50),
+        },
+        default: Some("5"),
+        description: "Max memory notes one chat turn's extraction may write; items past it are dropped and counted",
+        category: "Daemon",
+        subcategory: Some("Orchestrator"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
+    ConfigKeyDef {
+        key: "daemon.orchestrator.task_extract_max_items_per_run",
+        kind: ConfigKind::Int {
+            min: Some(1),
+            max: Some(100),
+        },
+        default: Some("10"),
+        description: "Max memory candidates one task run's extraction may write; items past it are dropped and counted",
+        category: "Daemon",
+        subcategory: Some("Orchestrator"),
+        sensitive: false,
+        backend: ConfigBackend::DaemonToml,
+    },
     // -- Daemon: Orchestrator – Background Models --
     ConfigKeyDef {
         key: "daemon.orchestrator.summary_model",

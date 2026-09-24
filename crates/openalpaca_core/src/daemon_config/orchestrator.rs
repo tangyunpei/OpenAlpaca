@@ -293,6 +293,12 @@ pub struct CostsConfig {
     pub task_extract_max_daily_cost_usd: f64,
     /// Minimum content length (chars) for task output to trigger extraction.
     pub task_extract_min_content_len: usize,
+    /// Notes one chat turn's extraction may write at most (design §4
+    /// *Initial limits*: 5). The model's items past this count are dropped
+    /// and counted, never stored.
+    pub extract_max_items_per_turn: usize,
+    /// Notes one task run's extraction may write at most (design §4: 10).
+    pub task_extract_max_items_per_run: usize,
     /// Model ID for background summary generation (e.g. claude-haiku-4-5-20251001).
     /// If None, falls back to the router's default model.
     #[serde(default)]
@@ -313,6 +319,8 @@ impl Default for CostsConfig {
             task_extract_enabled: true,
             task_extract_max_daily_cost_usd: 0.50,
             task_extract_min_content_len: 100,
+            extract_max_items_per_turn: 5,
+            task_extract_max_items_per_run: 10,
             summary_model: None,
             extraction_model: None,
         }

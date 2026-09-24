@@ -72,3 +72,15 @@ fn test_navigate_to_section_missing() {
     let root: toml::Value = toml::from_str("").unwrap();
     assert!(navigate_to_section(&root, &["execution", "agent_defaults"]).is_none());
 }
+
+/// Plan 3.4: the two extraction count keys live under `[orchestrator.costs]`
+/// beside the cost caps they bound with.
+#[test]
+fn test_find_mapping_extraction_count_keys() {
+    let per_turn = find_mapping("daemon.orchestrator.extract_max_items_per_turn").unwrap();
+    assert_eq!(per_turn.section, &["orchestrator", "costs"]);
+    assert_eq!(per_turn.field, "extract_max_items_per_turn");
+    let per_run = find_mapping("daemon.orchestrator.task_extract_max_items_per_run").unwrap();
+    assert_eq!(per_run.section, &["orchestrator", "costs"]);
+    assert_eq!(per_run.field, "task_extract_max_items_per_run");
+}
