@@ -426,6 +426,56 @@ async fn a_refused_edit_and_an_unchanged_one_send_nothing() {
     assert_eq!(server.join().unwrap().len(), 1);
 }
 
+/// A read marked `truncated` — a note longer than the 32 KiB a read serves —
+/// is refused before the editor opens: the editor never runs, no temp file
+/// is made, nothing but the GET reaches the daemon, and the refusal names
+/// the note's file from the read's `path` (its id when there is none).
+/// Saving the cut body would have replaced the whole file with its first
+/// 32 KiB.
+#[tokio::test]
+async fn a_note_cut_at_32_kib_is_refused_before_the_editor_opens() {
+    let path = read_answer()["path"].as_str().unwrap().to_string();
+    for (with_path, expected) in [(true, path.as_str()), (false, ID)] {
+        let mut answer = read_answer();
+        answer["truncated"] = serde_json::json!(true);
+        if !with_path {
+            answer.as_object_mut().unwrap().remove("path");
+        }
+        // One answer only: a second request would find the port closed.
+        let (addr, server) = serve(vec![json_answer("200 OK", OLD_REV, &answer.to_string())]);
+        let api = Api::for_tests(DaemonClient::for_tests(&format!("http://{addr}"), "token"));
+        let opened = std::sync::atomic::AtomicBool::new(false);
+        // What a user trimming the cut body would do: the data-loss save.
+        let editor = |p: &Path| {
+            opened.store(true, std::sync::atomic::Ordering::SeqCst);
+            change_body(p)
+        };
+        let result = edit_note(&api, NoteId::parse(ID).unwrap(), &editor).await;
+        assert!(
+            !opened.load(std::sync::atomic::Ordering::SeqCst),
+            "the editor must not open on a body cut at 32 KiB (with_path: {with_path})"
+        );
+        let outcome = result.expect("a refusal is an outcome, not an error");
+        assert_eq!(
+            outcome,
+            EditOutcome::TooLong {
+                path: expected.to_string()
+            }
+        );
+        let requests = server.join().expect("the server finishes");
+        assert_eq!(requests.len(), 1, "only the GET: {requests:?}");
+        assert!(
+            requests[0].starts_with(&format!("GET /v1/memories/{ID} ")),
+            "{}",
+            requests[0]
+        );
+    }
+    assert_eq!(
+        too_long_to_edit(&path),
+        "This note is longer than 32 KiB, so `openalpaca memory edit` would save only its first 32 KiB. Edit the file itself: notes/55e811b6-3220-4758-a47b-034bd1023f38--build-and-test-commands-for-this-workspace.md"
+    );
+}
+
 // ── The local verbs ──────────────────────────────────────────────
 
 /// The sandboxed store's database with the owner the daemon would have

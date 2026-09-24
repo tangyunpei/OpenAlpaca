@@ -684,6 +684,15 @@ Notes:
   named temp file** (`openalpaca-memory-<id8>-….md`); run `show`, merge, and edit
   again. An editor session that changes nothing sends nothing. An edit through
   this verb re-records the note as yours (`user`), whatever wrote it before.
+  A note file holds at most 32 KiB, frontmatter included, so a read always
+  carries the whole body: a file you have made longer by hand does not parse,
+  `doctor` lists it as malformed (`oversized`), and every other verb treats its
+  id as unknown until you shorten the file. Should a read ever come back cut
+  (`truncated`), `edit` refuses before the editor opens — saving would replace
+  the whole note with its first 32 KiB — prints
+  ``This note is longer than 32 KiB, so `openalpaca memory edit` would save only its first 32 KiB. Edit the file itself: <path>``
+  (the note's file, relative to its partition's directory) and exits 1, having
+  sent nothing.
 - `confirm` makes a candidate (something the extractor inferred from assistant or
   tool output) an active note of yours. It is refused for a note that is not a
   candidate.

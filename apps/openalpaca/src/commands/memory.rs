@@ -478,6 +478,10 @@ pub async fn run(args: MemoryArgs) -> Result<()> {
                     eprintln!("Your text is kept at {}.", kept_at.display());
                     std::process::exit(1);
                 }
+                EditOutcome::TooLong { path } => {
+                    eprintln!("{}", too_long_to_edit(&path));
+                    std::process::exit(1);
+                }
             }
         }
         MemoryCommands::Confirm { id, at } => {
@@ -759,6 +763,20 @@ pub(crate) enum EditOutcome {
     /// it changes a field an edit cannot (`kind`, `status`, the sources…);
     /// nothing was sent and the text is kept.
     Refused { reason: String, kept_at: PathBuf },
+    /// The read came back `truncated`: the note's body is longer than the
+    /// 32 KiB a read serves, so the editor would hold only the first 32 KiB
+    /// and a save would replace the whole file with them. Refused before
+    /// the editor opens; nothing was written and nothing sent. `path` is
+    /// the read's own `path` (the note's file, relative to its partition),
+    /// or the id when the answer carries none.
+    TooLong { path: String },
+}
+
+/// What `edit` prints, verbatim, when it refuses a note cut at 32 KiB.
+pub(crate) fn too_long_to_edit(path: &str) -> String {
+    format!(
+        "This note is longer than 32 KiB, so `openalpaca memory edit` would save only its first 32 KiB. Edit the file itself: {path}"
+    )
 }
 
 /// `GET` → the note as a file → `open_editor` → the changed fields as a
@@ -767,13 +785,23 @@ pub(crate) enum EditOutcome {
 /// The editor sees the note exactly as the service writes it (design §4's
 /// canon) — title, aliases, tags, `fact_key`, the validity bounds and the
 /// body are the patchable fields; a change to any other is refused before
-/// anything is sent, with the text kept.
+/// anything is sent, with the text kept. A read marked `truncated` is
+/// [`EditOutcome::TooLong`] before the editor opens: the editor would hold
+/// a cut body, and saving it would replace the whole file.
 pub(crate) async fn edit_note(
     api: &Api,
     id: NoteId,
     open_editor: &dyn Fn(&Path) -> Result<()>,
 ) -> Result<EditOutcome> {
     let read = api.get(&format!("/v1/memories/{id}")).await?;
+    if read["truncated"].as_bool().unwrap_or(false) {
+        return Ok(EditOutcome::TooLong {
+            path: read["path"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| id.to_string()),
+        });
+    }
     let before = note_from_read(&read)?;
     let revision = revision_of(&read)?;
     let text = before.serialize();
