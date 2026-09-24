@@ -1,6 +1,6 @@
 # Implementation, removal and evaluation plan
 
-**Status: rev 4.2 (2026-09-24): the owner has answered MD-1…MD-9 and the audit's three decisions (design §0); slices 0–3 are implemented (see the revision log), slice 4 is not started.** Rev 4 applies the [audit of rev 3](07-audit-gaps.md) — 49 verified gaps, G1–G49 — to rev 3, which applied the owner's answers to rev 2, which applied the [review](05-review.md). Two of those answers reshape the plan:
+**Status: rev 4.3 (2026-09-24): the owner has answered MD-1…MD-9 and the audit's three decisions (design §0); slices 0–3 are implemented (see the revision log), slice 4 is not started.** Rev 4 applies the [audit of rev 3](07-audit-gaps.md) — 49 verified gaps, G1–G49 — to rev 3, which applied the owner's answers to rev 2, which applied the [review](05-review.md). Two of those answers reshape the plan:
 - **MD-6, refuse and reset:** existing schema-42 databases are **refused**, not converted, the way 1–41 already are. The conversion machinery is gone.
 - **MD-9, everything at once:** the GUI ships **with** the cutover.
 
@@ -83,7 +83,7 @@ Exit: the fixtures are committed, and the baseline numbers are recorded with the
 - [ ] A heading- and paragraph-aware chunker with line spans, byte-bounded and cut on char boundaries.
 - [ ] A **literal query builder**: AST to escaped terms, a union of terms with BM25, plus exact identifier and alias matches, with **design §5's term routing** — every normalized term of three or more characters ORed against **both** tables, trigram-only hits weighted lower, no stemmer. The slice-2 query fixture ("what editor do I prefer?" → "User prefers vim for editing") passes only because `prefer` reaches the trigram table (07 G23's probe: 0 rows under `unicode61` alone); it is the test of the routing rule, not just of the fixture.
 - [ ] A bounded short-CJK substring pass that sets `partial`.
-- [ ] Derived-supersession (same partition, at-least-equal authority), tombstone, `source_forgotten`, **same-`fact_key` loser** (highest authority, then newest `updated_at`), status, kind and validity filters, applied **before** the limit.
+- [ ] Derived-supersession (same partition, at-least-equal authority), tombstone, `source_forgotten`, **same-`fact_key` loser** (highest authority, then the tie-break of design §3 rule 3 and §7c R9 — not `updated_at` first, which an edit moves), status, kind and validity filters, applied **before** the limit.
 - [ ] A reconciliation stat scan, a full rebuild, and `index_state` reporting.
 
 Tests, written with the code, no model, no network:
@@ -363,6 +363,7 @@ Each substantial commit ends with a line naming what was verified (`CLAUDE.md` c
   - **Where rev 4 departs from 07:** G28 (one commit, not the reorder), G43 (the consumers move with the SQL to 3.5), G31 (the release template needs nothing), and G11's shape (see design §7: `memory_store` cannot prompt on `supersedes` alone, because annotations are per tool name).
 - **rev 4.1 (2026-09-24):** §7a records the residue of slice 3 part 1 (S3-R1…R6) and adds commits 3.11 (eval harness rewrite for D/E) and 3.12 (the resolver hole) to part 2.
 - **rev 4.2 (2026-09-24):** slice 3 is landed — part 1 `37a8fe8b..2a25b47a` (3.1–3.4), part 2 `2a25b47a..HEAD`: 3.5 `d4be1e54`, 3.6 `ed1b659f`, 3.7 `a7b9e94a` (+ review fixes `dc0bfcd0`, `2b150088`), 3.8 `15bbcee9..dd7ace3d`, 3.9 `bda825b9..20c83071`, 3.12 `06a0782f`, 3.11 `6737d344`, and 3.10's documentation (`6ad6313a`, `5ba558d0`, `e4016e88`, `6d464d95`, `f97b4765`, and the §0 rows of `tasks/api-fix-plan.md` rev 3.10). The slice-3 table has no checkboxes, so nothing is ticked; the status line says it instead. Not recorded in any commit: the slice-3 gate's isolated-store, network-denied daemon start with a CLI and GUI memory round-trip (§2, *Gates*). The switch-over note (§4) ships as `docs/Installation_Manual.md` → *Switching to the Markdown Memory Build*.
+- **rev 4.3 (2026-09-24):** slice 2's same-`fact_key` loser bullet no longer states the tie-break as "then newest `updated_at`"; it points at design §3 rule 3 and §7c R9 (design rev 4.5–4.6), which break an authority tie on `observed_at` when every tied note has one, then `created_at`, then `updated_at`, then the id.
 - **rev 3 (2026-09-23):** applies the owner's answers to MD-1…MD-9.
   - **MD-6 (refuse and reset).** §4 is rewritten: the baseline is re-squashed to 43 without memory tables, and 42 is refused like 1–41, with a refusal text and a switch-over note that name everything the factory reset removes, API keys included. Migration 043's exporter, receipt, backup, stub `vec0` module, `migrate --dry-run` and the `rusqlite` `vtab`/`backup` and `uuid` `v5` features are all removed. Slice 1's fixture shrinks to a minimal real schema-42 file for the refusal test.
   - **MD-9 (everything at once).** The GUI (the former slice 4) joins the cutover as commit 3.9; the former slice 5 becomes slice 4.
