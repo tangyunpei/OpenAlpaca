@@ -11,6 +11,7 @@ export * from "./useEventHistory";
 export * from "./useExtensions";
 export * from "./useFiles";
 export * from "./useFollowups";
+export * from "./useMemories";
 export * from "./useOrchestrator";
 export * from "./useSettings";
 export * from "./useSkills";

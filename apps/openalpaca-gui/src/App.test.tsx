@@ -57,8 +57,38 @@ function installFetch() {
         });
       }
       if (url.includes("/v1/settings/llm")) return json({ providers: {} });
+      // A status body the Connection panel can read. `[]` used to stand in
+      // for it and only passed because nothing cached it before Settings
+      // mounted; the Memory view (a project-root read) now does.
+      if (url.includes("/v1/status")) {
+        return json({
+          home_root: "/Users/dev/.openalpaca",
+          state_dir: "/Users/dev/.openalpaca/state",
+          db_path: "/Users/dev/.openalpaca/state/openalpaca.db",
+          project_root: null,
+          started_at: "2026-09-24T09:00:00Z",
+          uptime_secs: 60,
+          schema_version: 43,
+          log_path: null,
+          upload_bytes: 0,
+          produced_bytes: 0,
+          retention: {
+            log_max_session_bytes: 268435456,
+            log_max_total_bytes: 2147483648,
+            log_retention_days: 0,
+          },
+          sessions: { last_sweep: null, dropped_records: 0 },
+          routing: { resume_enabled: false },
+        });
+      }
       if (url.includes("/v1/sessions")) {
         return json({ sessions: [], total: 0 });
+      }
+      if (url.includes("/v1/memories/recently-learned")) {
+        return json({ items: [] });
+      }
+      if (url.includes("/v1/memories")) {
+        return json({ items: [], next_cursor: null });
       }
       // tasks, models, connectors, plugins, skills, templates, usage — all lists
       return json([]);
@@ -128,6 +158,9 @@ describe("AppFrame", () => {
     fireEvent.click(screen.getByRole("button", { name: "Library" }));
     expect(await screen.findByRole("region", { name: "Library" })).toBeTruthy();
 
+    fireEvent.click(screen.getByRole("button", { name: "Memory" }));
+    expect(await screen.findByRole("region", { name: "Memory" })).toBeTruthy();
+
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     expect(
       await screen.findByRole("region", { name: "Settings" }),
@@ -136,6 +169,39 @@ describe("AppFrame", () => {
     expect(
       screen.getByRole("navigation", { name: "Primary" }),
     ).toBeInTheDocument();
+  });
+
+  /**
+   * Memory redesign G30 (owner decision): Memory is the fifth top-level view,
+   * after Library and before Settings — in the rail's list with the other
+   * three, while Settings keeps its place at the foot.
+   */
+  it("puts Memory in the rail after Library, with Settings at the foot", async () => {
+    renderFrame();
+    await screen.findByRole("heading", { name: "Chat", level: 1 });
+
+    const rail = screen.getByRole("navigation", { name: "Primary" });
+    const views = within(rail)
+      .getAllByRole("button")
+      .map((button) => button.textContent?.replace(/\d+$/, "").trim())
+      .filter((name) =>
+        ["Chat", "Work", "Library", "Memory", "Settings"].includes(name ?? ""),
+      );
+    expect(views).toEqual(["Chat", "Work", "Library", "Memory", "Settings"]);
+
+    fireEvent.click(within(rail).getByRole("button", { name: "Memory" }));
+    expect(useUiStore.getState().view).toBe("memory");
+    expect(
+      within(rail).getByRole("button", { name: "Memory" }),
+    ).toHaveAttribute("aria-current", "page");
+  });
+
+  it("reaches Memory from ⌘4, like the other views' shortcuts", async () => {
+    renderFrame();
+    await screen.findByRole("heading", { name: "Chat", level: 1 });
+
+    fireEvent.keyDown(window, { key: "4", metaKey: true });
+    expect(useUiStore.getState().view).toBe("memory");
   });
 
   it("opens the real palette from ⌘K and closes it from Escape", async () => {

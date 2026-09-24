@@ -54,6 +54,24 @@ describe("pane widths", () => {
   });
 });
 
+describe("the Memory view", () => {
+  it("opens a note from anywhere on its Note tab", () => {
+    useUiStore.setState({ memoryTab: "history" });
+    useUiStore.getState().openMemory("55e811b6-3220-4758-a47b-034bd1023f38");
+    const state = useUiStore.getState();
+    expect(state.view).toBe("memory");
+    expect(state.openMemoryId).toBe("55e811b6-3220-4758-a47b-034bd1023f38");
+    expect(state.memoryTab).toBe("note");
+  });
+
+  it("drops the selection when a note goes away", () => {
+    useUiStore.getState().openMemory("n-1");
+    useUiStore.getState().clearMemory();
+    expect(useUiStore.getState().openMemoryId).toBeNull();
+    expect(useUiStore.getState().view).toBe("memory");
+  });
+});
+
 describe("aside modes", () => {
   it("makes the work pane and the file panel mutually exclusive", () => {
     useUiStore.getState().openSidePanel("findings");

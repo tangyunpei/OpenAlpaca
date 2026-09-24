@@ -10,9 +10,18 @@
  * The Library count is **omitted**, not zeroed: there is no artifact listing
  * route on the rail's own budget, and a `0` beside Library would be a claim about
  * the user's library that this app cannot make. The count returns with the API.
+ *
+ * Memory is the fifth view (memory redesign G30, owner decision), after
+ * Library and before Settings, and carries no count for the same reason.
  */
 
-import { ChatIcon, LibraryIcon, SettingsIcon, WorkIcon } from "@/lib/icons";
+import {
+  ChatIcon,
+  LibraryIcon,
+  MemoryIcon,
+  SettingsIcon,
+  WorkIcon,
+} from "@/lib/icons";
 import { toUiStatus } from "@/components/ui";
 import { useTasks } from "@/hooks/useTasks";
 import { useUiStore } from "@/stores/ui";
@@ -70,6 +79,12 @@ export function NavRail({ blockedRunId = null }: NavRailProps) {
           label="Library"
           active={view === "library"}
           onSelect={() => setView("library")}
+        />
+        <NavItem
+          icon={<MemoryIcon />}
+          label="Memory"
+          active={view === "memory"}
+          onSelect={() => setView("memory")}
         />
       </div>
 

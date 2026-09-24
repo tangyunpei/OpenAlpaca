@@ -50,8 +50,8 @@ describe("AppShell", () => {
    * detail beside the rail, Settings a 220px nav over a 660px body — so the
    * chat floor made all three scroll sideways in a window they fit in.
    */
-  it("holds the other three views to the floor they actually need", () => {
-    for (const view of ["work", "library", "settings"] as const) {
+  it("holds the other four views to the floor they actually need", () => {
+    for (const view of ["work", "library", "memory", "settings"] as const) {
       const { container } = render(
         <AppShell view={view}>
           <div />

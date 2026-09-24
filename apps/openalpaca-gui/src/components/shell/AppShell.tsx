@@ -50,6 +50,8 @@ export const MIN_WINDOW_CLASS: Record<View, string> = {
   chat: "min-w-[700px]",
   work: "min-w-[1000px]",
   library: "min-w-[1000px]",
+  // A list and a note beside the rail — the Library's shape and floor.
+  memory: "min-w-[1000px]",
   settings: "min-w-[1000px]",
 };
 

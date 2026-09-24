@@ -81,6 +81,10 @@ export function useCommandCatalog(
           setPaletteOpen(false);
           setView("library");
         },
+        goMemory: () => {
+          setPaletteOpen(false);
+          setView("memory");
+        },
         goSettingsSection: (sectionId) => {
           setPaletteOpen(false);
           setView("settings");

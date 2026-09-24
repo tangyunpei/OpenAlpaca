@@ -85,6 +85,7 @@ export interface CommandCatalogInput {
   goChat: () => void;
   goWork: () => void;
   goLibrary: () => void;
+  goMemory: () => void;
   goSettingsSection: (sectionId: string) => void;
   steerRun: (runId: string) => void;
   toggleDense: () => void;
@@ -151,6 +152,15 @@ export function buildCommands(input: CommandCatalogInput): Command[] {
       label: "Library — artifacts",
       shortcut: { key: "3", meta: true },
       run: input.goLibrary,
+    },
+    // The fifth view (memory redesign G30) takes the next numeral: a Go group
+    // that reaches four views of five has the same hole ⌘1 once filled.
+    {
+      id: "go.memory",
+      group: "Go",
+      label: "Memory — notes",
+      shortcut: { key: "4", meta: true },
+      run: input.goMemory,
     },
     {
       id: "view.density",

@@ -15,6 +15,8 @@
 
 import { create } from "zustand";
 
+import type { NoteScope, NoteStatus } from "@/lib/api/memories";
+
 import {
   clampPaneWidth,
   loadPaneWidths,
@@ -24,8 +26,14 @@ import {
   type PaneWidths,
 } from "./pane-widths";
 
-export type View = "chat" | "work" | "library" | "settings";
+/**
+ * The five top-level views. `memory` is the fifth (memory redesign G30, owner
+ * decision): after Library, before Settings.
+ */
+export type View = "chat" | "work" | "library" | "memory" | "settings";
 export type ArtifactTab = "preview" | "diff" | "history";
+/** The Memory detail's tabs: the note rendered, its raw Markdown, and history. */
+export type MemoryTab = "note" | "raw" | "diff" | "history";
 export type ComposerMode = "steer" | "queue";
 
 /** Toast auto-dismiss, straight from the design. */
@@ -74,6 +82,16 @@ export interface UiState {
   libraryTab: ArtifactTab;
   libraryKind: string;
   settingsSectionId: string;
+  /** Selected note in the Memory view. */
+  openMemoryId: string | null;
+  memoryTab: MemoryTab;
+  /**
+   * Which partition the Memory list shows. `project` is a *wish*: the view
+   * honours it only while the window's project resolves to a root, and shows
+   * the global partition otherwise.
+   */
+  memoryScope: NoteScope;
+  memoryStatus: NoteStatus;
 
   // Chat aside — `workOpen` and `panelArtifactId` are mutually exclusive modes
   workOpen: boolean;
@@ -115,6 +133,13 @@ export interface UiState {
   setLibraryTab: (tab: ArtifactTab) => void;
   setLibraryKind: (kind: string) => void;
   setSettingsSection: (sectionId: string) => void;
+  /** From anywhere — a chat turn's "notes used", a link — onto its Note tab. */
+  openMemory: (noteId: string) => void;
+  /** The selected note went away (forgotten, undone). */
+  clearMemory: () => void;
+  setMemoryTab: (tab: MemoryTab) => void;
+  setMemoryScope: (scope: NoteScope) => void;
+  setMemoryStatus: (status: NoteStatus) => void;
 
   openWorkPane: () => void;
   closeWorkPane: () => void;
@@ -172,6 +197,10 @@ export const useUiStore = create<UiState>((set, get) => ({
   libraryTab: "preview",
   libraryKind: "All",
   settingsSectionId: "connection",
+  openMemoryId: null,
+  memoryTab: "note",
+  memoryScope: "global",
+  memoryStatus: "active",
 
   workOpen: true,
   panelArtifactId: null,
@@ -198,6 +227,12 @@ export const useUiStore = create<UiState>((set, get) => ({
   setLibraryTab: (libraryTab) => set({ libraryTab }),
   setLibraryKind: (libraryKind) => set({ libraryKind }),
   setSettingsSection: (settingsSectionId) => set({ settingsSectionId }),
+  openMemory: (noteId) =>
+    set({ view: "memory", openMemoryId: noteId, memoryTab: "note" }),
+  clearMemory: () => set({ openMemoryId: null }),
+  setMemoryTab: (memoryTab) => set({ memoryTab }),
+  setMemoryScope: (memoryScope) => set({ memoryScope }),
+  setMemoryStatus: (memoryStatus) => set({ memoryStatus }),
 
   openWorkPane: () => set({ workOpen: true, panelArtifactId: null }),
   closeWorkPane: () => set({ workOpen: false }),

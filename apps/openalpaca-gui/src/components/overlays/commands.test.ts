@@ -17,6 +17,7 @@ function input(
     goChat: vi.fn(),
     goWork: vi.fn(),
     goLibrary: vi.fn(),
+    goMemory: vi.fn(),
     goSettingsSection: vi.fn(),
     steerRun: vi.fn(),
     toggleDense: vi.fn(),
@@ -83,6 +84,12 @@ describe("filterCommands (§3.33)", () => {
   it("matches the group as well as the label", () => {
     const byGroup = filterCommands(commands, "view");
     expect(byGroup.map((command) => command.id)).toEqual(["view.density"]);
+  });
+
+  it("reaches the fifth view, Memory, from its own Go row on ⌘4", () => {
+    const memory = filterCommands(commands, "memory");
+    expect(memory.map((command) => command.id)).toEqual(["go.memory"]);
+    expect(shortcutLabel(memory[0] as never)).toBe("⌘4");
   });
 
   it("is case-insensitive over group + label", () => {
