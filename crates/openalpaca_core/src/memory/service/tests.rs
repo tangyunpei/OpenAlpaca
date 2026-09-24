@@ -34,6 +34,12 @@ pub(super) struct Harness {
 
 impl Harness {
     pub(super) fn new() -> Self {
+        Self::with_index(MemoryIndex::open_in_memory().unwrap())
+    }
+
+    /// The harness over a given in-memory index — one whose clock a test
+    /// pinned with `MemoryIndex::with_clock`.
+    pub(super) fn with_index(index: MemoryIndex) -> Self {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("home");
         fs::create_dir_all(&home).unwrap();
@@ -43,8 +49,7 @@ impl Harness {
         identities.create_global_user(ALICE, None).unwrap();
         identities.create_global_user(BOB, None).unwrap();
         let bus = crate::bus::EventBus::new(64);
-        let service = MemoryService::new(Some(db.clone()), MemoryIndex::open_in_memory().unwrap())
-            .with_bus(bus.clone());
+        let service = MemoryService::new(Some(db.clone()), index).with_bus(bus.clone());
         // What the daemon's `open_default` does for a fresh cache — under
         // this test's own home store, never the real one.
         service.rebuild_index().unwrap();
@@ -1415,6 +1420,85 @@ fn recall_and_search_stay_within_the_owners_partitions() {
             .join("bbc5e661e106c6dcd8dc6dd186454c2f")
             .exists()
     );
+}
+
+/// Design §4 *Times* on the service's two current paths: a note whose
+/// window has not begun yet (a trip planned for next month) is current
+/// knowledge — `memory_search` and the per-turn recall both find it — while
+/// one whose window has ended is not. `as_of` evaluates the whole half-open
+/// interval. "Now" is pinned on the index, the one place validity is read.
+#[test]
+fn a_planned_window_is_current_and_an_ended_one_is_not() {
+    let at = |s: &str| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    };
+    let now = at("2026-09-24T12:00:00Z");
+    let h = Harness::with_index(
+        MemoryIndex::open_in_memory()
+            .unwrap()
+            .with_clock(move || now),
+    );
+    let user = h.user(ALICE, None);
+    let store = |title: &str, body: &str, from: &str, to: &str| {
+        h.service
+            .store(
+                &user,
+                StoreInput {
+                    title: title.into(),
+                    body: body.into(),
+                    kind: Some(NoteKind::Episode),
+                    valid_from: Some(at(from)),
+                    valid_to: Some(at(to)),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+    };
+    let planned = store(
+        "Lisbon trip",
+        "# Lisbon trip\n\nThe user travels to Lisbon for a conference, 5 to 19 October.\n",
+        "2026-10-05T00:00:00Z",
+        "2026-10-20T00:00:00Z",
+    );
+    let ended = store(
+        "Porto trip",
+        "# Porto trip\n\nThe user travelled to Porto for a conference, 1 to 5 September.\n",
+        "2026-09-01T00:00:00Z",
+        "2026-09-06T00:00:00Z",
+    );
+    let tool = h.tool(ALICE, None);
+
+    assert_eq!(
+        search_ids(&search(&h, &tool, "conference trip")),
+        vec![planned.id]
+    );
+    let recalled = h
+        .service
+        .recall(
+            &tool,
+            "when is my conference trip?",
+            RecallBudget::default(),
+        )
+        .unwrap();
+    assert_eq!(recall_ids(&recalled), HashSet::from([planned.id]));
+
+    let as_of = |instant: &str| {
+        h.service
+            .search(
+                &tool,
+                SearchInput {
+                    query: "conference trip".into(),
+                    as_of: Some(at(instant)),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+    };
+    assert_eq!(search_ids(&as_of("2026-10-10T00:00:00Z")), vec![planned.id]);
+    assert!(search_ids(&as_of("2026-10-20T00:00:00Z")).is_empty());
+    assert_eq!(search_ids(&as_of("2026-09-03T00:00:00Z")), vec![ended.id]);
 }
 
 /// Fixture 13: read-after-write, and freshness by verification before any

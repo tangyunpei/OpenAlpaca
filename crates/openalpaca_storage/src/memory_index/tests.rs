@@ -1071,6 +1071,66 @@ fn validity_is_a_half_open_interval_evaluated_at_as_of_or_now() {
     assert!(hit(&r, "y").matches.contains(&MatchReason::Term));
 }
 
+/// Design §4 *Times*: current recall excludes a note whose interval has
+/// **ended**; one that has not begun yet — a trip planned for next month —
+/// is still what the user told us, and a current search finds it. `as_of`
+/// evaluates the whole half-open interval at that instant.
+#[test]
+fn a_current_search_keeps_a_note_whose_window_has_not_started() {
+    let at = |s: &str| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    };
+    let now = at("2026-09-24T12:00:00Z");
+    let index = MemoryIndex::open_in_memory()
+        .unwrap()
+        .with_clock(move || now);
+    index.rebuild(&[]).unwrap();
+    let mut planned = record(
+        "planned",
+        "Lisbon trip",
+        "The user travels to Lisbon for a conference, 5 to 19 October.\n",
+    );
+    planned.valid_from = Some("2026-10-05T00:00:00Z".into());
+    planned.valid_to = Some("2026-10-20T00:00:00Z".into());
+    let mut ended = record(
+        "ended",
+        "Porto trip",
+        "The user travelled to Porto for a conference, 1 to 5 September.\n",
+    );
+    ended.valid_from = Some("2026-09-01T00:00:00Z".into());
+    ended.valid_to = Some("2026-09-06T00:00:00Z".into());
+    index.upsert_many(&[planned, ended]).unwrap();
+
+    // Now is 24 September: the planned trip is current, the ended one is not.
+    assert_eq!(
+        ids(&index.search(&q("conference trip")).unwrap()),
+        vec!["planned"]
+    );
+    let mut automatic = q("conference trip");
+    automatic.mode = SearchMode::Automatic;
+    assert_eq!(ids(&index.search(&automatic).unwrap()), vec!["planned"]);
+    // `as_of` inside the window finds it; at its (exclusive) end it is gone.
+    let mut during = q("conference trip");
+    during.as_of = Some(at("2026-10-10T00:00:00Z"));
+    assert_eq!(ids(&index.search(&during).unwrap()), vec!["planned"]);
+    let mut after = q("conference trip");
+    after.as_of = Some(at("2026-10-20T00:00:00Z"));
+    assert_eq!(index.search(&after).unwrap().count, 0);
+    // `as_of` before the window still evaluates the whole interval.
+    let mut before = q("conference trip");
+    before.as_of = Some(at("2026-09-24T12:00:00Z"));
+    assert_eq!(index.search(&before).unwrap().count, 0);
+    // `historical` with no `as_of` applies no validity filter at all.
+    let mut all = q("conference trip");
+    all.historical = true;
+    let r = index.search(&all).unwrap();
+    let mut got = ids(&r);
+    got.sort();
+    assert_eq!(got, vec!["ended", "planned"]);
+}
+
 #[test]
 fn authority_orders_notes_with_equal_lexical_evidence() {
     let index = ready_index();

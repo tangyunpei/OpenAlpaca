@@ -29,7 +29,7 @@ mod search;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -287,10 +287,15 @@ impl ReconcileReport {
 // The index
 // ============================================================================
 
+/// What "now" is to the index: the instant a search without `as_of`
+/// evaluates validity at, and the time a stat scan is recorded at.
+type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
+
 /// The cache database. One connection behind a mutex, like [`crate::Database`].
 pub struct MemoryIndex {
     conn: Mutex<Connection>,
     path: Option<PathBuf>,
+    clock: Clock,
 }
 
 impl fmt::Debug for MemoryIndex {
@@ -446,6 +451,7 @@ impl MemoryIndex {
         Ok(Self {
             conn: Mutex::new(conn),
             path: Some(path.to_path_buf()),
+            clock: Arc::new(Utc::now),
         })
     }
 
@@ -458,6 +464,7 @@ impl MemoryIndex {
         Ok(Self {
             conn: Mutex::new(conn),
             path: None,
+            clock: Arc::new(Utc::now),
         })
     }
 
@@ -501,12 +508,24 @@ impl MemoryIndex {
         Ok(Self {
             conn: Mutex::new(conn),
             path: Some(path.to_path_buf()),
+            clock: Arc::new(Utc::now),
         })
     }
 
     /// The path this index was opened at; `None` in memory.
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
+    }
+
+    /// Replaces the clock (default [`Utc::now`]) — tests pin "now" the way
+    /// `memory_files::Partition::with_clock` does.
+    pub fn with_clock(mut self, clock: impl Fn() -> DateTime<Utc> + Send + Sync + 'static) -> Self {
+        self.clock = Arc::new(clock);
+        self
+    }
+
+    fn now(&self) -> DateTime<Utc> {
+        (self.clock)()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -1148,7 +1167,7 @@ impl MemoryIndex {
                  last_scan_files = excluded.last_scan_files",
             params![
                 partition_key,
-                canon_timestamp(&Utc::now()),
+                canon_timestamp(&self.now()),
                 entries.len() as i64
             ],
         )?;

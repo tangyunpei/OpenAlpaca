@@ -68,11 +68,14 @@ pub struct SearchQuery {
     pub kind: Option<String>,
     /// 1–20.
     pub limit: usize,
-    /// `true` includes superseded and archived notes. Candidates are never
+    /// `true` includes superseded and archived notes and, with no `as_of`,
+    /// notes whose validity interval has ended. Candidates are never
     /// returned.
     pub historical: bool,
-    /// Evaluate effective validity at this instant. Absent: at now, unless
-    /// `historical`, which then applies no validity filter.
+    /// Evaluate the half-open validity interval at this instant. Absent: a
+    /// note whose interval ended by now is dropped and one that has not
+    /// begun is kept (design §4 *Times*), unless `historical`, which then
+    /// applies no validity filter.
     pub as_of: Option<DateTime<Utc>>,
     pub mode: SearchMode,
 }
@@ -181,7 +184,7 @@ struct Filter {
 }
 
 impl Filter {
-    fn build(q: &SearchQuery) -> Self {
+    fn build(q: &SearchQuery, now: DateTime<Utc>) -> Self {
         let mut clause = format!(
             "n.partition_key IN ({})",
             placeholders_unnumbered(q.partition_keys.len())
@@ -200,14 +203,20 @@ impl Filter {
         } else {
             clause.push_str(" AND n.effective_status = 'active'");
         }
-        let now = canon_timestamp(&chrono::Utc::now());
+        let now = canon_timestamp(&now);
         let instant = q.as_of.map(|t| canon_timestamp(&t)).unwrap_or(now);
-        let filter_validity = q.as_of.is_some() || !q.historical;
-        if filter_validity {
+        // Design §4 *Times*: a historical query evaluates the requested
+        // instant — the whole half-open interval; current recall excludes a
+        // note whose interval has **ended**, and keeps one that has not begun
+        // (a trip planned for next month is current knowledge).
+        if q.as_of.is_some() {
             clause.push_str(
                 " AND (n.valid_from IS NULL OR n.valid_from <= ?) AND (n.valid_to IS NULL OR n.valid_to > ?)",
             );
             params.push(Value::Text(instant.clone()));
+            params.push(Value::Text(instant.clone()));
+        } else if !q.historical {
+            clause.push_str(" AND (n.valid_to IS NULL OR n.valid_to > ?)");
             params.push(Value::Text(instant.clone()));
         }
         if q.mode == SearchMode::Automatic {
@@ -303,7 +312,7 @@ impl MemoryIndex {
                 index_state,
             });
         }
-        let filter = Filter::build(q);
+        let filter = Filter::build(q, self.now());
         let mut partial = false;
         let mut chunks: HashMap<i64, ChunkEvidence> = HashMap::new();
         let mut exact: HashMap<i64, ExactEvidence> = HashMap::new();
