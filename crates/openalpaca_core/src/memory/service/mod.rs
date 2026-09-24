@@ -376,15 +376,19 @@ impl MemoryService {
         Ok(())
     }
 
-    /// The project roots the control snapshots know (plan 3.7): a project can
-    /// be known by its memory partition alone, with no row in any database
-    /// member, and the workspace listing adds these to the roots the database
-    /// names. Only a snapshot whose partition directory exists counts — one
-    /// bound to a missing directory is a stale, abandoned or orphaned move
-    /// snapshot, which is `doctor`'s to name — and each root is listed once,
-    /// however many owners have a partition in it. Sorted, as the snapshots
-    /// record them (canonical). Unreadable snapshots are skipped.
-    pub fn known_project_roots(&self) -> Vec<PathBuf> {
+    /// The project roots `owner_id`'s control snapshots know (plan 3.7): a
+    /// project can be known by its memory partition alone, with no row in
+    /// any database member, and the workspace listing adds these to the
+    /// roots the database names. Scoped to the owner like every other
+    /// workspace answer (design §3, R40): another owner's partition in a
+    /// project of its own must not name that root to this one. Only a
+    /// snapshot whose partition directory exists counts — one bound to a
+    /// missing directory is a stale, abandoned or orphaned move snapshot,
+    /// which is `doctor`'s to name — and each root is listed once. Sorted,
+    /// as the snapshots record them (canonical). Unreadable snapshots are
+    /// skipped.
+    pub fn known_project_roots(&self, owner_id: &str) -> Vec<PathBuf> {
+        let owner_key = files::owner_key(owner_id);
         let snapshots = match files::list_snapshots() {
             Ok(list) => list,
             Err(e) => {
@@ -397,7 +401,7 @@ impl MemoryService {
         let mut roots: Vec<PathBuf> = snapshots
             .into_iter()
             .filter_map(|(_, parsed)| parsed.ok())
-            .filter(|s| s.scope == files::SnapshotScope::Project)
+            .filter(|s| s.scope == files::SnapshotScope::Project && s.owner_key == owner_key)
             .filter(|s| Path::new(&s.root).is_dir())
             .filter_map(|s| Path::new(&s.root).ancestors().nth(4).map(Path::to_path_buf))
             .collect();

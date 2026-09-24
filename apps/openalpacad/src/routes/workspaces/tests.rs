@@ -108,9 +108,14 @@ impl Fixture {
 
     /// A user-directed context on `root` — what `/v1/memories` builds.
     fn memory_ctx(&self, root: &str) -> MemoryAccessContext {
+        self.memory_ctx_as(OWNER, root)
+    }
+
+    /// The same, for `owner` — who must be a `global_user` row.
+    fn memory_ctx_as(&self, owner: &str, root: &str) -> MemoryAccessContext {
         self.memory
             .context(
-                OWNER,
+                owner,
                 WorkspaceHint::Path(std::path::Path::new(root)),
                 Surface::UserSurface,
                 Capabilities::ALL,
@@ -119,12 +124,24 @@ impl Fixture {
             .expect("the owner is a global_user row")
     }
 
+    /// Another `global_user` row, so the service takes `id` as an owner.
+    fn global_user(&self, id: &str) {
+        IdentityRepository::new(&self.db)
+            .create_global_user(id, None)
+            .expect("owner row");
+    }
+
     /// One project note under `root`, through the service: the partition,
     /// its snapshot and the index row all exist afterwards.
     fn note(&self, root: &str, title: &str) -> StoreOutput {
+        self.note_as(OWNER, root, title)
+    }
+
+    /// One project note under `root` in `owner`'s partition.
+    fn note_as(&self, owner: &str, root: &str, title: &str) -> StoreOutput {
         self.memory
             .store(
-                &self.memory_ctx(root),
+                &self.memory_ctx_as(owner, root),
                 StoreInput {
                     title: title.to_string(),
                     body: format!("# {title}\n\nTag, then run the release script.\n"),
@@ -1478,7 +1495,7 @@ async fn a_move_re_keys_the_projects_memory_partition() {
     assert_eq!(read.revision, note.revision);
     assert_eq!(f.note_files(&new).len(), 1);
     assert_eq!(
-        f.memory.known_project_roots(),
+        f.memory.known_project_roots(OWNER),
         [std::path::PathBuf::from(&new)]
     );
 }
@@ -1692,4 +1709,37 @@ async fn a_purge_lists_and_keeps_a_project_known_only_by_its_memory() {
     after.sort_by(|a, b| a.partition_key.cmp(&b.partition_key));
     before.sort_by(|a, b| a.partition_key.cmp(&b.partition_key));
     assert_eq!(after, before, "a purge never touches a control snapshot");
+}
+
+/// The partition roots the listing adds are the **caller's**: a project
+/// another owner knows only by their memory partition is not named in this
+/// owner's `--all` plan, and purging it by path answers the same `404` a
+/// root holding somebody else's rows does (R40) — the row path never names
+/// a foreign root, and the partition path must not either.
+#[tokio::test]
+async fn an_all_purge_lists_only_the_callers_memory_roots() {
+    let f = Fixture::new();
+    let mine = f.project("mine");
+    f.note(&mine, "Mine");
+    f.global_user("owner-2");
+    let theirs = f.project("theirs");
+    f.note_as("owner-2", &theirs, "Theirs");
+
+    let (status, body) = f.purge(None, true, true).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let paths: Vec<&str> = body["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        paths,
+        [mine.as_str()],
+        "the plan names a root only another owner's partition knows"
+    );
+
+    let (status, body) = f.purge(Some(&theirs), false, true).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(error_code(&body), "WORKSPACE_NOT_FOUND");
 }

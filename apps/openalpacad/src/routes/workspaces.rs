@@ -828,10 +828,11 @@ fn purge_counts_json(counts: &openalpaca_storage::PurgeCounts) -> serde_json::Va
 /// written a transcript yet, and the very next purge attempt against `root`,
 /// once registration has caught up, refuses like any other in-flight run.
 ///
-/// `memory_roots` are the roots the memory service knows
-/// ([`MemoryService::known_project_roots`]): a project with notes and no row
-/// in any member is still a project, so it gets its plan — `memory/` kept,
-/// nothing counted — instead of the `404` a root nothing names.
+/// `memory_roots` are the roots the memory service knows for this owner
+/// ([`MemoryService::known_project_roots`]): a project with the caller's
+/// notes and no row in any member is still a project, so it gets its plan —
+/// `memory/` kept, nothing counted — instead of the `404` a root nothing
+/// names. A root only another owner's partition knows is that `404`.
 #[allow(clippy::result_large_err)]
 fn preflight(
     deps: &PurgeDeps<'_>,
@@ -998,11 +999,12 @@ fn announce_purged_sessions(
 /// check against the outcome.
 pub(crate) async fn purge_workspaces(deps: &PurgeDeps<'_>, request: PurgeRequest) -> Response {
     let store = ArtifactStore::new(deps.db);
-    // The roots the control snapshots know: where the `memory` table's UNION
-    // used to be in the listing, now the memory service's knowledge.
+    // The roots the caller's control snapshots know: where the `memory`
+    // table's UNION used to be in the listing, now the memory service's
+    // knowledge — scoped to the owner, as the row path is.
     let memory_roots: HashSet<String> = deps
         .memory
-        .known_project_roots()
+        .known_project_roots(deps.owner)
         .into_iter()
         .map(|p| p.to_string_lossy().into_owned())
         .collect();

@@ -2722,7 +2722,7 @@ fn undrained_requests_are_bounded() {
 #[test]
 fn known_project_roots_are_the_partitions_whose_directory_exists() {
     let h = Harness::new();
-    assert!(h.service.known_project_roots().is_empty());
+    assert!(h.service.known_project_roots(ALICE).is_empty());
     h.store(
         &h.user(ALICE, None),
         "Global",
@@ -2730,7 +2730,7 @@ fn known_project_roots_are_the_partitions_whose_directory_exists() {
         NoteKind::Preference,
     );
     assert!(
-        h.service.known_project_roots().is_empty(),
+        h.service.known_project_roots(ALICE).is_empty(),
         "the home partition is not a project"
     );
 
@@ -2741,21 +2741,44 @@ fn known_project_roots_are_the_partitions_whose_directory_exists() {
         "# Release step\n\nTag first.\n",
         NoteKind::Procedure,
     );
-    assert_eq!(h.service.known_project_roots(), std::slice::from_ref(&repo));
+    assert_eq!(
+        h.service.known_project_roots(ALICE),
+        std::slice::from_ref(&repo)
+    );
 
-    // Bob's partition in the same project is the same root, once.
+    // Bob's partition in the same project is the same root in his listing;
+    // his partition in a second project is his listing's alone — the roots
+    // an owner is told about are the owner's own (R40).
     h.store(
         &h.user(BOB, Some(&repo)),
         "Bob's note",
         "# Bob's note\n\nBody.\n",
         NoteKind::Fact,
     );
-    assert_eq!(h.service.known_project_roots(), std::slice::from_ref(&repo));
+    let other = h.workspace("other", Some(".git"));
+    h.store(
+        &h.user(BOB, Some(&other)),
+        "Bob's other note",
+        "# Bob's other note\n\nBody.\n",
+        NoteKind::Fact,
+    );
+    assert_eq!(
+        h.service.known_project_roots(ALICE),
+        std::slice::from_ref(&repo),
+        "Alice's listing names a root only Bob's partition knows"
+    );
+    let mut bobs = vec![repo.clone(), other.clone()];
+    bobs.sort();
+    assert_eq!(h.service.known_project_roots(BOB), bobs);
 
     // Gone from disk: the snapshot stays for doctor, the listing drops it.
     let parked = h.root.path().join("ws").join("parked");
     fs::rename(&repo, &parked).unwrap();
-    assert!(h.service.known_project_roots().is_empty());
+    assert!(h.service.known_project_roots(ALICE).is_empty());
+    assert_eq!(
+        h.service.known_project_roots(BOB),
+        std::slice::from_ref(&other)
+    );
 }
 
 /// Steps 2 and 5 through the service: the twin snapshot is written before
@@ -2823,7 +2846,10 @@ fn a_workspace_move_through_the_service_re_keys_and_re_indexes() {
     assert_eq!(found.results.len(), 1);
     assert_eq!(found.results[0].id, note.id);
     assert_eq!(found.results[0].revision, note.revision);
-    assert_eq!(h.service.known_project_roots(), std::slice::from_ref(&new));
+    assert_eq!(
+        h.service.known_project_roots(ALICE),
+        std::slice::from_ref(&new)
+    );
     // The old root is a directory with no marker now: global only.
     assert!(h.user(ALICE, Some(&old)).project_root.is_none());
 }
