@@ -24,6 +24,7 @@ import type { ArtifactKind } from "@/lib/api/artifacts";
 import { useUiStore } from "@/stores/ui";
 
 import { TranscriptArtifact } from "./TranscriptArtifact";
+import { TranscriptMemoryUsed } from "./TranscriptMemoryUsed";
 import type { TranscriptItem } from "./transcript-model";
 
 export interface TranscriptProps {
@@ -88,6 +89,11 @@ export function Transcript({ items, dense }: TranscriptProps) {
                 {/* U3: what the model never received, and why. Below the
                     chips, because the chips are what it *did* get. */}
                 <SkippedAttachmentsNote items={item.skipped} />
+                {/* Memory redesign 3.9: the notes this answer used — live
+                    only, like the note above. */}
+                {item.memoryUsed.length > 0 && (
+                  <TranscriptMemoryUsed items={item.memoryUsed} />
+                )}
               </AssistantMessage>
             );
 

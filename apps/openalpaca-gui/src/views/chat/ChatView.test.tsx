@@ -163,6 +163,12 @@ let agentTemplateRows: Record<string, unknown>[] = [];
  * to be a promise so a test can hold an upload open and watch Send stay off.
  */
 let uploadReply: (form: FormData) => Response | Promise<Response>;
+/**
+ * The memory notes `GET /v1/memories/{id}` knows, `id → title` — what the
+ * "notes used in this answer" rows are named from. An id absent here is a
+ * `404`, as a note forgotten since the turn would be.
+ */
+let memoryTitles: Record<string, string> = {};
 
 /** `limit`/`offset`, exactly as the route pages. */
 function pageOfSessions(url: string): Response {
@@ -210,6 +216,19 @@ function installFetch() {
 
     if (url.includes("/v1/files/upload")) {
       return await uploadReply(form ?? new FormData());
+    }
+    const memory = /\/v1\/memories\/([^/?]+)/.exec(url);
+    if (memory !== null) {
+      const id = decodeURIComponent(memory[1] ?? "");
+      const title = memoryTitles[id];
+      return title === undefined
+        ? new Response(
+            JSON.stringify({
+              error: { code: "MEMORY_NOT_FOUND", message: `no note ${id}` },
+            }),
+            { status: 404 },
+          )
+        : json({ id, revision: "a".repeat(64), title });
     }
     if (url.includes("/v1/status")) {
       return await statusReply(new Headers(init?.headers));
@@ -449,6 +468,7 @@ beforeEach(() => {
     effective_default_model: "claude-sonnet-4-6",
   };
   agentTemplateRows = [{ id: "lead_agent", name: "Lead Agent" }];
+  memoryTitles = {};
   pendingConfirmationRows = [];
   pendingConfirmationsReply = () =>
     json({ confirmations: pendingConfirmationRows });
@@ -3556,6 +3576,92 @@ describe("ChatView — composer attachments (U5, U3)", () => {
     expect(
       screen.getByText("photo.png — qwen3.8:27b does not accept images"),
     ).toBeInTheDocument();
+  });
+
+  /**
+   * Memory redesign 3.9: the notes an answer used, from `done.memory_used` —
+   * live only, like the skipped-attachment note above — named by their titles
+   * where the note is still there, and a way into the Memory view.
+   */
+  it("says which memory notes an answer used, and opens one in Memory", async () => {
+    memoryTitles = { "55e811b6-3220-4758-a47b-034bd1023f38": "Prefers tabs" };
+    renderChat();
+    fireEvent.change(await screen.findByLabelText("Message"), {
+      target: { value: "tabs or spaces?" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    });
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    const source = FakeEventSource.instances[0];
+    if (source === undefined) throw new Error("no stream opened");
+
+    await act(async () => {
+      source.emit("done", {
+        content: "Tabs, width 4.",
+        model: "qwen3.8:27b",
+        tokens_in: 10,
+        tokens_out: 6,
+        duration_ms: 900,
+        memory_used: [
+          {
+            id: "55e811b6-3220-4758-a47b-034bd1023f38",
+            revision: "a".repeat(64),
+            reason: "recall",
+          },
+          {
+            id: "0c7b2e4a-9d13-4c8e-b1f5-6a2d3e4f5a6b",
+            revision: "b".repeat(64),
+            reason: "tool",
+          },
+        ],
+      });
+    });
+
+    const note = await screen.findByRole("region", {
+      name: "Notes used in this answer",
+    });
+    const open = await within(note).findByRole("button", {
+      name: "Prefers tabs",
+    });
+    expect(note).toHaveTextContent("Prefers tabs — recalled");
+    // A note that is gone since is named by its id, never guessed.
+    await waitFor(() =>
+      expect(note).toHaveTextContent("note 0c7b2e4a — looked up"),
+    );
+
+    fireEvent.click(open);
+    expect(useUiStore.getState().view).toBe("memory");
+    expect(useUiStore.getState().openMemoryId).toBe(
+      "55e811b6-3220-4758-a47b-034bd1023f38",
+    );
+  });
+
+  it("says nothing about memory for an answer that used none", async () => {
+    renderChat();
+    fireEvent.change(await screen.findByLabelText("Message"), {
+      target: { value: "hello" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    });
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    const source = FakeEventSource.instances[0];
+    if (source === undefined) throw new Error("no stream opened");
+    await act(async () => {
+      source.emit("done", {
+        content: "Hi.",
+        model: "qwen3.8:27b",
+        tokens_in: 1,
+        tokens_out: 1,
+        duration_ms: 10,
+      });
+    });
+
+    expect(await screen.findByText("Hi.")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "Notes used in this answer" }),
+    ).toBeNull();
   });
 
   it("drops a chip the user removed before it is sent", async () => {

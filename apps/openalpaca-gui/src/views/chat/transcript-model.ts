@@ -25,7 +25,7 @@ import type { SteerRef } from "@/components/chat";
 import type { Resolution } from "@/components/chat";
 import type { RunReportStatus } from "@/components/chat";
 import type { ChatMessage, MessageArtifact } from "@/lib/api/types";
-import type { ChatStreamState } from "@/lib/chat-stream";
+import type { ChatStreamState, MemoryUsedRef } from "@/lib/chat-stream";
 import { timestampMs } from "@/lib/time";
 
 /**
@@ -203,6 +203,14 @@ export type TranscriptItem =
        * every stored row.
        */
       skipped: SkippedAttachment[];
+      /**
+       * The memory notes the turn delivered to the model (memory redesign
+       * 3.3/3.9), from `done.memory_used`.
+       *
+       * Live only, like `skipped`: nothing persists it, so this is `[]` for
+       * every stored row and a reload drops the note.
+       */
+      memoryUsed: MemoryUsedRef[];
       /** Files the turn's run produced (`role='artifact'`, GAP-23). */
       artifacts: AttachmentInfo[];
       /** The run this turn started or reported on — `null` for plain chat. */
@@ -428,6 +436,8 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
       attachments: attachmentsFromContent(message.content_json),
       // Nothing persists a skip, so a stored row can only ever say "none".
       skipped: [],
+      // Nor `memory_used`: which notes shaped a stored answer is not recorded.
+      memoryUsed: [],
       artifacts: toArtifacts(message.artifacts),
       runId: message.task_id ?? null,
     });
@@ -531,6 +541,7 @@ export function buildTranscript(input: TranscriptInput): TranscriptItem[] {
       reasoning: stream.reasoning,
       attachments,
       skipped,
+      memoryUsed: stream.result?.memory_used ?? [],
       // The live turn's own delegation reaches the transcript as a report card,
       // and the pill arrives with the row when history catches up.
       artifacts: [],

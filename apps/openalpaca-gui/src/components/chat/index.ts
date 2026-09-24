@@ -6,6 +6,7 @@ export * from "./Composer";
 export * from "./DensityToggle";
 export * from "./FilePanel";
 export * from "./FollowupQueue";
+export * from "./MemoryUsedNote";
 export * from "./format";
 export * from "./MessageBody";
 export * from "./MessageRow";

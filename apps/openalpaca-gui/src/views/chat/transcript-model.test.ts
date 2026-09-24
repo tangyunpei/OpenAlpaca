@@ -181,6 +181,55 @@ describe("the live turn's reasoning (S2)", () => {
   });
 });
 
+/**
+ * Memory redesign 3.3/3.9: `done.memory_used` names the notes a turn
+ * delivered. Live only, like `attachments_skipped` — nothing persists it — so
+ * the live row carries it and a stored row never can.
+ */
+describe("the notes a turn used (memory_used)", () => {
+  const used = [
+    {
+      id: "55e811b6-3220-4758-a47b-034bd1023f38",
+      revision: "a".repeat(64),
+      reason: "recall",
+    },
+  ];
+
+  it("rides on the live row once `done` lands, and on no stored one", () => {
+    const stream = drive(OPEN, {
+      type: "done",
+      data: {
+        content: "Tabs, width 4.",
+        model: "m",
+        tokens_in: 1,
+        tokens_out: 1,
+        duration_ms: 1,
+        memory_used: used,
+      },
+    });
+    const rows = buildTranscript(
+      input({
+        history: [
+          message({ id: 1, role: "assistant", content: "An older answer." }),
+        ],
+        stream,
+      }),
+    ).filter((item) => item.kind === "assistant");
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ memoryUsed: [] });
+    expect(rows[1]).toMatchObject({ memoryUsed: used });
+  });
+
+  it("is empty while the turn streams and when `done` names none", () => {
+    const streaming = drive(OPEN, { type: "delta", content: "Tabs" });
+    expect(buildTranscript(input({ stream: streaming })).at(-1)).toMatchObject({
+      kind: "assistant",
+      memoryUsed: [],
+    });
+  });
+});
+
 describe("parseUserContent — the chat prefix in stored history", () => {
   it("recognises the `/steer ` prefix and strips it for display", () => {
     expect(parseUserContent("/steer keep going")).toEqual({
