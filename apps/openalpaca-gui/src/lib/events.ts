@@ -106,7 +106,15 @@ export type ServerEvent =
   // (the former GAP-22), so extension rows in the event log are orderable.
   | { type: "extension_state_changed"; kind: string; id: string; state: string; generation: number; tools_changed: boolean; ts: string; instance_id: string; _id: number }
   | { type: "extension_capability_withheld"; kind: string; id: string; subject: string; moment: string; state: string; scope: string; stale: boolean; ts: string; instance_id: string; _id: number }
-  | { type: "extension_capability_withdrawn"; kind: string; id: string; state: string; cause: string; capabilities: string[]; tools: string[]; affected_templates: string[]; affected_skills: string[]; affected_cron_skills: string[]; notice_lane: string; ts: string; instance_id: string; _id: number };
+  | { type: "extension_capability_withdrawn"; kind: string; id: string; state: string; cause: string; capabilities: string[]; tools: string[]; affected_templates: string[]; affected_skills: string[]; affected_cron_skills: string[]; notice_lane: string; ts: string; instance_id: string; _id: number }
+  // A memory note changed (memory redesign G30): every service write — this
+  // window's, a model tool call's, the extractor's — and every change a
+  // reconciliation scan finds behind the service's back. `change` is
+  // `created | updated | archived | confirmed | forgotten | external`;
+  // `revision` is `null` for a forget; `surface` (`user | model_tool |
+  // extraction`) is absent for a scan's finding. Persisted nowhere, so it is
+  // an invalidation and never a row.
+  | { type: "memory_changed"; partition_key: string; note_id: string; change: string; revision: string | null; origin: string; surface?: string; ts: string; instance_id: string; _id: number };
 
 export type ServerEventType = ServerEvent["type"];
 

@@ -323,6 +323,37 @@ describe("attachChatStream", () => {
     expect(actions.at(-1)).toEqual({ type: "done", data: doneData });
   });
 
+  /**
+   * Memory redesign 3.3/3.9: `done.memory_used` names the notes the turn
+   * delivered. Live only — nothing persists it — so the `done` frame is the one
+   * place this client can learn it, and the state keeps it on `result`.
+   */
+  it("keeps `memory_used` from the done frame on the result", () => {
+    const fake = fakeSource();
+    let state = initialChatStreamState;
+    attachChatStream(fake.source, {
+      streamId: "s1",
+      laneKey: "local:gui",
+      onAction: (a) => {
+        state = chatStreamReducer(state, a);
+      },
+    });
+
+    const used: ChatStreamDone = {
+      ...doneData,
+      memory_used: [
+        {
+          id: "55e811b6-3220-4758-a47b-034bd1023f38",
+          revision: "a".repeat(64),
+          reason: "recall",
+        },
+      ],
+    };
+    fake.emit("done", JSON.stringify(used));
+
+    expect(state.result?.memory_used).toEqual(used.memory_used);
+  });
+
   it("distinguishes a named server error from a transport failure", () => {
     const withData = fakeSource();
     const dataActions: ChatStreamAction[] = [];

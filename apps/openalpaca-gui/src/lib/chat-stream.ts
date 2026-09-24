@@ -51,8 +51,19 @@ export interface SkippedAttachmentRef {
 }
 
 /**
- * SSE `done`. `attachments_used`/`attachments_skipped`/`delegation` are
- * omitted when absent.
+ * One memory note the turn delivered (memory redesign, design §5 step 8): an
+ * automatic recall (`recall`), a pinned note (`pinned`), or one the model
+ * fetched with `memory_search`/`memory_read` in that turn (`tool`).
+ */
+export interface MemoryUsedRef {
+  id: string;
+  revision: string;
+  reason: "pinned" | "recall" | "tool" | (string & {});
+}
+
+/**
+ * SSE `done`. `attachments_used`/`attachments_skipped`/`memory_used`/
+ * `delegation` are omitted when absent.
  *
  * Since U3 the two attachment lists are disjoint and `attachments_used` is
  * truthful: an attachment the adaptation withheld leaves it and appears in
@@ -66,6 +77,13 @@ export interface ChatStreamDone {
   duration_ms: number;
   attachments_used?: string[];
   attachments_skipped?: SkippedAttachmentRef[];
+  /**
+   * The memory notes this turn delivered. **Live only**, like
+   * `attachments_skipped`: nothing persists it and `GET /v1/chat/history`
+   * never serves it, so a reloaded transcript cannot say which notes an answer
+   * used — `GET /v1/memories/recently-used` is the after-the-fact read.
+   */
+  memory_used?: MemoryUsedRef[];
   delegation?: DelegationInfo;
 }
 
