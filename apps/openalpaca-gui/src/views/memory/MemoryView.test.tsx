@@ -20,7 +20,11 @@ import { resetConnection } from "@/lib/connection";
 import { useProjectStore } from "@/stores/project";
 import { useUiStore } from "@/stores/ui";
 
-import { MEMORY_CONFLICT_COPY, MEMORY_EMPTY_COPY } from "./copy";
+import {
+  MEMORY_ACTION_CONFLICT,
+  MEMORY_CONFLICT_COPY,
+  MEMORY_EMPTY_COPY,
+} from "./copy";
 import MemoryView from "./MemoryView";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -62,6 +66,17 @@ let requests: Recorded[] = [];
 let notes: FakeNote[] = [];
 let projectRoot: string | null = null;
 let revisionCounter = 0;
+/** How the next search answers when it cannot promise the whole answer. */
+let searchShape: { partial: boolean; index_state: "ready" | "rebuilding" } = {
+  partial: false,
+  index_state: "ready",
+};
+/** While set, `GET /v1/status` waits on it — the daemon has not answered yet. */
+let statusGate: Promise<void> | null = null;
+
+/** The daemon's own account of a forget with nothing cited (`retained_note`). */
+const RETAINED_NOTE =
+  "The note files, their history and their index rows are gone, and the sources they cited will not be re-extracted. Session logs and any external backup are separate data and are not touched by a forget.";
 
 function nextRevision(): string {
   revisionCounter += 1;
@@ -163,6 +178,26 @@ function daemon(url: URL, method: string, headers: Headers, body: unknown) {
     if (input.scope === "project" && projectRoot === null) {
       return refusal(400, "MEMORY_INVALID_INPUT", "no project partition");
     }
+    // Exact dedup (§7b P8): an active note of the same kind, title and body
+    // in the same partition is answered, not written again.
+    const same = visible(headers).find(
+      (n) =>
+        n.status === "active" &&
+        n.scope === (input.scope ?? "global") &&
+        n.kind === (input.kind ?? "fact") &&
+        n.title === input.title &&
+        n.body === input.body,
+    );
+    if (same !== undefined) {
+      return json({
+        id: same.id,
+        revision: same.revision,
+        scope: same.scope,
+        origin: same.origin,
+        superseded: [],
+        dedup: "existing",
+      });
+    }
     const created = note({
       id: `n-${notes.length + 1}`,
       title: input.title ?? "",
@@ -198,12 +233,7 @@ function daemon(url: URL, method: string, headers: Headers, body: unknown) {
         match: ["term"],
         same_key_loser: false,
       }));
-    return json({
-      results,
-      count: results.length,
-      partial: false,
-      index_state: "ready",
-    });
+    return json({ results, count: results.length, ...searchShape });
   }
   if (path === "/v1/memories/recently-learned") {
     const items = visible(headers)
@@ -246,6 +276,14 @@ function daemon(url: URL, method: string, headers: Headers, body: unknown) {
   if (expected === null) {
     return refusal(428, "MEMORY_IF_MATCH_REQUIRED", "send If-Match");
   }
+  // `MemoryService::undo` reads the origin before it compares revisions.
+  if (tail === "/undo" && found.origin !== "extracted_user") {
+    return refusal(
+      409,
+      "MEMORY_NOT_UNDOABLE",
+      `note ${id} is no longer undoable: its origin is \`${found.origin}\`, not \`extracted_user\`; forget it instead`,
+    );
+  }
   if (expected !== found.revision) {
     return refusal(
       409,
@@ -253,11 +291,12 @@ function daemon(url: URL, method: string, headers: Headers, body: unknown) {
       `note ${id} is at revision ${found.revision}`,
     );
   }
-  const retained = { transcript: true, session_logs: true, note: "kept" };
+  const retained = {
+    transcript: false,
+    session_logs: true,
+    note: RETAINED_NOTE,
+  };
   if (tail === "/undo") {
-    if (found.origin !== "extracted_user") {
-      return refusal(409, "MEMORY_NOT_UNDOABLE", "no longer learned");
-    }
     notes = notes.filter((n) => n.id !== id);
     return json({ id, status: "forgotten", retained });
   }
@@ -317,6 +356,8 @@ beforeEach(() => {
   notes = [];
   projectRoot = null;
   revisionCounter = 0;
+  searchShape = { partial: false, index_state: "ready" };
+  statusGate = null;
   resetConnection();
   useProjectStore.setState({ path: null });
   useUiStore.setState({
@@ -340,6 +381,9 @@ beforeEach(() => {
           ? (JSON.parse(init.body) as Record<string, unknown>)
           : null;
       requests.push({ url, method, body, headers });
+      if (url.pathname === "/v1/status" && statusGate !== null) {
+        await statusGate;
+      }
       return daemon(url, method, headers, body);
     }),
   );
@@ -452,6 +496,41 @@ describe("the Memory view", () => {
     expect(list?.headers.get("x-workspace-path")).toBe("/Users/me/repo");
   });
 
+  it("waits for the daemon's project before honouring This project, and says nothing meanwhile", async () => {
+    projectRoot = "/Users/me/repo";
+    useProjectStore.setState({ path: "/Users/me/repo" });
+    useUiStore.setState({ memoryScope: "project" });
+    note({ id: "n-1", title: "Prefers tabs" });
+    note({ id: "n-2", title: "Build with bun", scope: "project" });
+    let answer: () => void = () => undefined;
+    statusGate = new Promise((resolve) => {
+      answer = resolve;
+    });
+    renderView();
+
+    // Not answered yet is not "no project": Global is listed, and the line
+    // that says the window has none is not drawn.
+    expect(
+      await screen.findByRole("button", { name: "Prefers tabs" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/This window has no project/)).toBeNull();
+    expect(sent("GET", "/v1/memories")[0]?.url.searchParams.get("scope")).toBe(
+      "global",
+    );
+
+    await act(async () => {
+      answer();
+      await Promise.resolve();
+    });
+    expect(
+      await screen.findByRole("button", { name: "Build with bun" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/This window has no project/)).toBeNull();
+    expect(
+      sent("GET", "/v1/memories").at(-1)?.url.searchParams.get("scope"),
+    ).toBe("project");
+  });
+
   it("renders a note's Markdown as elements and never as HTML", async () => {
     note({
       id: "n-1",
@@ -468,6 +547,20 @@ describe("the Memory view", () => {
     expect(
       screen.getByText("<img src=x onerror=alert(1)>"),
     ).toBeInTheDocument();
+  });
+
+  it("shows the Markdown as written on the Raw tab", async () => {
+    const body = "Hello **there**\n\n- one\n- two\n";
+    note({ id: "n-1", title: "Plain", body });
+    renderView();
+    const user = await openNote("Plain");
+
+    await user.click(screen.getByRole("tab", { name: "Raw" }));
+    const raw = await screen.findByLabelText("Raw Markdown");
+    expect(raw.tagName).toBe("PRE");
+    expect(raw.textContent).toBe(body);
+    expect(raw.querySelector("strong")).toBeNull();
+    expect(screen.getByRole("button", { name: "Edit" })).toBeEnabled();
   });
 
   it("names where a note came from, and opens the run it cites", async () => {
@@ -563,6 +656,101 @@ describe("the Memory view", () => {
     );
   });
 
+  it("says why an undo was refused once the note was made yours elsewhere", async () => {
+    note({
+      id: "n-1",
+      title: "Prefers espresso",
+      kind: "preference",
+      origin: "extracted_user",
+    });
+    renderView();
+    const user = userEvent.setup();
+    const section = await screen.findByRole("region", {
+      name: "Recently learned",
+    });
+
+    // Edited in another window: a new revision, and the note is the owner's.
+    editBehindTheViewsBack("n-1", "Prefers a flat white.\n");
+    const moved = notes[0];
+    if (moved !== undefined) moved.origin = "user";
+    await user.click(
+      within(section).getByRole("button", { name: "Undo Prefers espresso" }),
+    );
+
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toMatch(
+        /^Could not undo — note n-1 is no longer undoable/,
+      ),
+    );
+    expect(sent("POST", "/v1/memories/n-1/undo")).toHaveLength(1);
+    expect(notes.map((n) => n.id)).toEqual(["n-1"]);
+  });
+
+  it("says the note moved when an undo is sent against an old revision", async () => {
+    note({
+      id: "n-1",
+      title: "Prefers espresso",
+      kind: "preference",
+      origin: "extracted_user",
+    });
+    renderView();
+    const user = userEvent.setup();
+    const section = await screen.findByRole("region", {
+      name: "Recently learned",
+    });
+
+    // Rewritten by the learner itself: still learned, at a new revision.
+    editBehindTheViewsBack("n-1", "Prefers a double espresso.\n");
+    await user.click(
+      within(section).getByRole("button", { name: "Undo Prefers espresso" }),
+    );
+
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toBe(MEMORY_ACTION_CONFLICT),
+    );
+    expect(sent("POST", "/v1/memories/n-1/undo")).toHaveLength(1);
+    expect(notes.map((n) => n.id)).toEqual(["n-1"]);
+  });
+
+  it("says the note moved when an archive is sent against an old revision", async () => {
+    note({ id: "n-1", title: "Old address" });
+    renderView();
+    const user = await openNote("Old address");
+    editBehindTheViewsBack("n-1", "# Old address\n\nMoved in May.\n");
+    const current = notes[0]?.revision ?? "";
+
+    await user.click(screen.getByRole("button", { name: "Archive" }));
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toBe(MEMORY_ACTION_CONFLICT),
+    );
+    expect(notes[0]?.status).toBe("active");
+    expect(sent("POST", "/v1/memories/n-1")).toHaveLength(1);
+
+    // Never retried behind the owner's back: the view re-reads the note, and
+    // the owner's next click is sent against the version now on screen.
+    await user.click(screen.getByRole("button", { name: "Archive" }));
+    await waitFor(() => expect(notes[0]?.status).toBe("archived"));
+    const [refused, again] = sent("POST", "/v1/memories/n-1");
+    expect(refused?.headers.get("If-Match")).not.toBe(`"${current}"`);
+    expect(again?.headers.get("If-Match")).toBe(`"${current}"`);
+  });
+
+  it("says the note moved when a forget is sent against an old revision", async () => {
+    note({ id: "n-1", title: "Old address" });
+    renderView();
+    const user = await openNote("Old address");
+    editBehindTheViewsBack("n-1", "# Old address\n\nMoved in May.\n");
+
+    await user.click(screen.getByRole("button", { name: "Forget" }));
+    await user.click(screen.getByRole("button", { name: "Confirm forget" }));
+    await waitFor(() =>
+      expect(useUiStore.getState().toast).toBe(MEMORY_ACTION_CONFLICT),
+    );
+    expect(sent("DELETE", "/v1/memories/n-1")).toHaveLength(1);
+    expect(notes.map((n) => n.id)).toEqual(["n-1"]);
+    expect(screen.queryByText(/is forgotten/)).toBeNull();
+  });
+
   it("forgets only on the second click", async () => {
     const n = note({ id: "n-1", title: "Old address" });
     renderView();
@@ -578,6 +766,12 @@ describe("the Memory view", () => {
     expect(sent("DELETE", "/v1/memories/n-1")[0]?.headers.get("If-Match")).toBe(
       `"${n.revision}"`,
     );
+    // Where the note was, what the forget did and did not erase — the
+    // daemon's own words.
+    expect(
+      await screen.findByText("“Old address” is forgotten."),
+    ).toBeInTheDocument();
+    expect(screen.getByText(RETAINED_NOTE)).toBeInTheDocument();
   });
 
   it("keeps the draft and says so when the note changed underneath the editor", async () => {
@@ -704,6 +898,28 @@ describe("the Memory view", () => {
     const search = sent("GET", "/v1/memories/search").at(-1);
     expect(search?.url.searchParams.get("q")).toBe("helix");
     expect(search?.url.searchParams.get("scope")).toBe("global");
+    expect(screen.queryByText(/index is rebuilding/)).toBeNull();
+    expect(screen.queryByText(/stopped at its limit/)).toBeNull();
+  });
+
+  it("says when a search answer is partial or came from a file scan", async () => {
+    note({ id: "n-1", title: "Editor", body: "Prefers helix.\n" });
+    searchShape = { partial: true, index_state: "rebuilding" };
+    renderView();
+    const user = userEvent.setup();
+
+    await user.type(await screen.findByLabelText("Search memory"), "helix");
+    expect(
+      await screen.findByText(
+        "The search index is rebuilding; these come from a slower file scan.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /The search stopped at its limit, so there may be more; a narrower\s+query finds them\./,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Prefers helix.")).toBeInTheDocument();
   });
 
   it("adds a note to the scope on screen and opens it", async () => {
@@ -727,6 +943,33 @@ describe("the Memory view", () => {
     expect(
       await screen.findByRole("heading", { name: "Standup at nine", level: 2 }),
     ).toBeInTheDocument();
+  });
+
+  it("opens the note already there when the same note is added again", async () => {
+    note({
+      id: "n-1",
+      title: "Standup at nine",
+      body: "Daily, 09:00.",
+      kind: "procedure",
+    });
+    renderView();
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole("button", { name: "Add note" }));
+    const form = screen.getByRole("region", { name: "Add a note" });
+    await user.type(within(form).getByLabelText("Title"), "Standup at nine");
+    await user.selectOptions(within(form).getByLabelText("Kind"), "procedure");
+    await user.type(within(form).getByLabelText("Body"), "Daily, 09:00.");
+    await user.click(within(form).getByRole("button", { name: "Save note" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Standup at nine", level: 2 }),
+    ).toBeInTheDocument();
+    expect(useUiStore.getState().toast).toBe(
+      "Already remembered — opened the note that says so",
+    );
+    expect(useUiStore.getState().openMemoryId).toBe("n-1");
+    expect(notes).toHaveLength(1);
   });
 
   it("refetches on memory_changed instead of polling", async () => {
