@@ -8,6 +8,7 @@ export * from "./ConversationsSection";
 export * from "./EventLogSection";
 export * from "./ExtensionsSection";
 export * from "./ModelsSection";
+export * from "./PersonaSection";
 export * from "./ToolsSection";
 export * from "./extension-row";
 export * from "./format";

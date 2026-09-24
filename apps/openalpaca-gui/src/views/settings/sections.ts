@@ -1,5 +1,7 @@
 /**
- * The eight Settings sections (DESIGN_SPEC §5.4).
+ * The Settings sections (DESIGN_SPEC §5.4): the design's eight, and Persona as
+ * the ninth — the `USER.md` editor the memory redesign ships with the cutover
+ * (MD-3, MD-9).
  *
  * The blurbs are the design's own copy, verbatim, with **three** corrections
  * the system itself calls for. A blurb is the first sentence a user reads about
@@ -23,6 +25,9 @@
  * Two ids changed with ADR-030 §9.1 and still count eight: `skills` → `tools`
  * (the design's "Skills" rows are tools) and `plugins` → `extensions` (MCP
  * servers and plugins are one list under one ENABLE axis).
+ *
+ * Persona has no design copy; its blurb says the one thing the section must
+ * not get wrong since the cutover — the learner no longer writes here.
  */
 
 export const SETTINGS_SECTION_IDS = [
@@ -34,6 +39,7 @@ export const SETTINGS_SECTION_IDS = [
   "agents",
   "conversations",
   "events",
+  "persona",
 ] as const;
 
 export type SettingsSectionId = (typeof SETTINGS_SECTION_IDS)[number];
@@ -101,6 +107,12 @@ export const SETTINGS_SECTIONS: readonly SettingsSectionMeta[] = [
     id: "events",
     label: "Event log",
     blurb: "Everything the daemon emitted, newest first.",
+  },
+  {
+    id: "persona",
+    label: "Persona",
+    blurb:
+      "Your USER.md — the standing instructions about you that every conversation carries. Things Alpaca learns go to Memory, not here.",
   },
 ];
 

@@ -6,7 +6,7 @@
  * of them is real — a section whose count has not loaded shows none rather than
  * a zero, because a zero is a claim.
  *
- * The eight section bodies live one file each; this only routes between them.
+ * The nine section bodies live one file each; this only routes between them.
  */
 
 import { useAgentTemplates } from "@/hooks/useAgents";
@@ -24,6 +24,7 @@ import { ConversationsSection } from "./ConversationsSection";
 import { EventLogSection } from "./EventLogSection";
 import { ExtensionsSection } from "./ExtensionsSection";
 import { ModelsSection } from "./ModelsSection";
+import { PersonaSection } from "./PersonaSection";
 import { ToolsSection } from "./ToolsSection";
 import { PageHead, SectionNavItem } from "./primitives";
 import {
@@ -51,6 +52,8 @@ function renderSection(id: SettingsSectionId) {
       return <ConversationsSection />;
     case "events":
       return <EventLogSection />;
+    case "persona":
+      return <PersonaSection />;
   }
 }
 
