@@ -592,6 +592,56 @@ An upload is refused with the reason in the error code: `NO_FILE`,
 | `GET /v1/daemon/config/providers` | The web-search provider configuration. |
 | `PUT /v1/daemon/config/providers/web-search` | Update it (written to `llm.toml`). |
 
+### Memory
+
+The memory notes (Markdown files under the home store's `memory/` and a
+project's `.openalpaca/memory/`), through the one memory service the model's
+tools and the automatic per-turn recall also use. These are the **user-directed**
+surface: a write here records origin `user`, the highest authority, which a
+model's tool call can never edit, archive or replace. `x-workspace-path` selects
+the project partition exactly as on `POST /v1/chat` (the nearest
+`.openalpaca`/`.git` root above it); absent, the global partition alone is
+addressed. Bodies and queries are closed objects — an unknown key is a `400`.
+
+| Method and path | Purpose |
+|---|---|
+| `GET /v1/memories` | List notes: `kind`, `status` (default `active`), `scope`, `include_history`, `include_candidates`, `limit` (1–100, default 50) and `cursor`. Answers `{items, next_cursor}`; a cursor is valid for the filter set that issued it, and one from another filter set is `400 MEMORY_INVALID_INPUT`. |
+| `GET /v1/memories/search` | Literal search: `q` (1–512 chars), `kind`, `scope`, `limit` (1–20, default 8), `historical`, `as_of`. Answers cited results with `freshness`, `conflict`, `same_key_loser`, `sources_status`, plus `partial` and `index_state`. Candidates are never returned. |
+| `GET /v1/memories/recently-learned` | The extractor's active `extracted_user` notes, newest first — `since` (RFC 3339, or a window like `7d`, `24h`, `30m`; default 7 days) and `limit`. An edit through this surface re-records a note as `user` and it leaves the list. |
+| `GET /v1/memories/recently-used` | The in-memory ring of notes delivered to a model since the daemon started (`limit`, default 50, max 200): `{id, revision, reason, delivered_at, lane_key, task_id}`. Cleared at restart. |
+| `GET /v1/memories/doctor` | The read-only report: every partition with its health, counts, malformed files, duplicate ids and conflicts, other owners' partitions as orphans, and stale/abandoned/orphaned move snapshots. Changes nothing. |
+| `POST /v1/memories` | Save a note: `title`, `body`, `kind`, and optionally `scope`, `aliases`, `tags`, `fact_key`, `sources` (`[{type: message\|task, id}]`, verified against the database), `valid_from`, `valid_to`, and `supersedes: {id, expected_revision}` to replace a note. `201` with the `memory_store` result and `ETag`; an exact duplicate is `200` with the existing id and `dedup: existing`; a moved `supersedes` target is `409`. |
+| `POST /v1/memories/forget` | Forget several: `{targets: [{id, expected_revision}], reason?}`, per-id status plus what is retained. |
+| `POST /v1/memories/sync` | One reconciliation scan now: `{scanned, changed, index_state, changes}`. |
+| `GET /v1/memories/{id}` | One note with its frontmatter, body (≤ 32 KiB), provenance and `ETag: "<revision>"`. `?section=<heading>` for one section; `?revision=<rev>` for one of the last five daemon-written revisions. |
+| `GET /v1/memories/{id}/history` | Those revisions, newest first: `{revisions: [{revision, written_at}]}`. |
+| `POST /v1/memories/{id}` | Update under `If-Match`: `{action: edit\|archive\|confirm, patch?, reason?}`. `edit` takes a `patch` of `title`, `body`, `aliases`, `tags`, `fact_key`, `valid_from`, `valid_to`, `review_after` (an explicit `null` clears a nullable one); `confirm` makes a candidate active. Answers the new revision, as body and `ETag`. |
+| `POST /v1/memories/{id}/undo` | Forget a recently learned note under `If-Match`; `409 MEMORY_NOT_UNDOABLE` once its origin is no longer `extracted_user`. |
+| `DELETE /v1/memories/{id}` | Forget one note under `If-Match`: `{id, status: "forgotten", retained}`. |
+
+**A revision travels in `If-Match` and nowhere else.** The three single-note
+mutations take `If-Match: "<revision>"` — the `ETag` a read answered. Absent is
+`428 MEMORY_IF_MATCH_REQUIRED`; a revision that is not the note's current one is
+`409 MEMORY_REVISION_CONFLICT`, with the current revision in the message and as
+`ETag`, and nothing written; `If-Match: *` names no revision and is `400`; a body
+`expected_revision` on an update or a create is `400 MEMORY_INVALID_INPUT`, so
+two revisions can never disagree silently. (`POST /v1/memories/forget` carries
+its targets' revisions in the body by contract, one per id, and a create's
+`supersedes.expected_revision` is the *target's*.) The other codes: `404
+MEMORY_NOT_FOUND` (an unknown id, or a revision the history does not keep), `409
+MEMORY_QUARANTINED` (the partition's control snapshot is missing or invalid —
+`openalpaca memory doctor --repair`, with the daemon stopped, is the only way
+out), `400 MEMORY_INVALID_INPUT` (a limit, a grammar, a shape, an unknown key, a
+cursor from another filter set).
+
+Every write through these routes — like every write the model's tools and the
+extractor make — is announced as one `memory_changed` frame on `/v1/events`
+(see [Event Taxonomy](#event-taxonomy)), and so is every file the reconciliation
+scan finds edited behind the daemon's back (`change: external`, no `surface`).
+The daemon scans every 30 s on its own and before every read; `sync` is for a
+client that wants the answer now. `openalpaca memory …` is the CLI over these
+routes; `doctor --repair` and `adopt` are local verbs with no route.
+
 ### Extensions, tools and skills
 
 | Method and path | Purpose |
@@ -891,6 +941,13 @@ list is the whole union. Every frame also carries `ts` and `instance_id`.
 - `llm_call_completed`, `skill_catalog_updated`, `soul_updated`
 - `skill_invocation_started`, `skill_completed`, `skill_failed`
 - `extension_state_changed` (an MCP server or plugin changed state), `extension_capability_withheld` (a surface asked for a tool a disabled extension owns), `extension_capability_withdrawn` (a disable/crash took tools away, with the affected templates, skills and cron skills)
+- `memory_changed` (`partition_key`, `note_id`, `change` — `created`,
+  `updated`, `archived`, `confirmed`, `forgotten` or `external` —, `revision`
+  (`null` for a forget), `origin`, and `surface` — `user`, `model_tool` or
+  `extraction`, **absent** when the daemon's reconciliation scan found the change
+  on disk): one frame per write the memory service makes, whichever surface
+  asked, and per external change it detects. A client that shows memory
+  invalidates on it instead of polling. Never written to `event_log`
 
 `dag_node_status` was **deleted**: `subagent_span` describes the same spawns,
 and emitting both meant two frames for one transition. Rows an older daemon
@@ -899,8 +956,8 @@ already wrote keep their `event_type` and still list from
 that name.
 
 Persisted rows use the same words with two exceptions: `agent_status` is
-logged as `agent_status_change`, and neither `heartbeat` nor
-`daemon_shutting_down` is persisted at all
+logged as `agent_status_change`, and none of `heartbeat`,
+`daemon_shutting_down` and `memory_changed` is persisted at all
 (`apps/openalpacad/src/events/persistence.rs`).
 
 ## Background Tasks
@@ -908,8 +965,7 @@ logged as `agent_status_change`, and neither `heartbeat` nor
 The daemon runs periodic workers, all cancelled together on shutdown (intervals are read from `daemon.toml` and hot-reloadable unless noted):
 
 - heartbeat event emitter
-- embedding indexer (only when an embedder is configured)
-- memory importance decay
+- memory reconciliation (fixed 30 s interval): a stat scan of every memory partition the owner's control snapshots know; a note file edited, added or removed behind the daemon's back is re-recorded as `external`, the search index follows, and each finding is one `memory_changed` frame
 - file-processing worker and asset cleanup (upload governance)
 - telemetry cleanup (fixed daily interval)
 - chat-stream cleanup (stale SSE streams)

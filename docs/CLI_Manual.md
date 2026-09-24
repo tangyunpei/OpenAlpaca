@@ -106,6 +106,7 @@ openalpaca llm status                        # shows which model will answer
 | [`plugin`](#plugin) | Plugin-only shortcut over `ext` |
 | [`sessions`](#sessions) | Stored conversations |
 | [`store`](#store) | Project history: re-base or purge |
+| [`memory`](#memory) | Memory notes: list, search, add, edit, confirm, undo, forget, sync, doctor, adopt |
 | [`chat`](#chat) | Talk to the orchestrator |
 
 ### `daemon`
@@ -609,6 +610,126 @@ Nothing was deleted. Re-run with -y to carry this out.
 
 - The daemon refuses rather than guesses, the same way the re-base does: nothing of yours recorded under the path is a `404`, and so is a root holding rows that belong to another owner; a run there that is queued, running or paused — or a conversation with a run in flight — is a `409` `WORKSPACE_BUSY` (a queued run has not started yet, but it already named this root and is about to resolve the store the moment it does), and with `--all` one busy root refuses the whole call rather than purging the others; a path resolving to the home store is a `409` `WORKSPACE_IS_HOME` (the home store is not a project, and a factory reset is `openalpaca config reset --factory`, a separate deliberate act); a relative path is a `400`.
 - A purge is not reversible and there is no undo. Back up `<project>/.openalpaca` first if you might want the transcripts again.
+
+### `memory`
+
+The memory notes — the Markdown files under `~/.openalpaca/memory/owners/<owner-key>/notes/`
+and, for a project, `<project>/.openalpaca/memory/owners/<owner-key>/notes/` — from
+the command line. Every verb but the two local ones goes through the daemon's
+`/v1/memories*` routes, so it sees exactly what the app and the model see.
+
+```bash
+openalpaca memory list    [--kind K] [--status S] [--scope global|project] [--history] [--candidates] [--limit N] [--format json]
+openalpaca memory search  <query> [--kind K] [--scope S] [--limit N] [--historical] [--as-of RFC3339] [--format json]
+openalpaca memory show    <id> [--revision <rev>] [--raw]
+openalpaca memory add     --kind K --title T [--scope S] [--alias A]... [--tag T]... [--fact-key KEY] [--supersedes <id>] [BODY | -]
+openalpaca memory edit    <id>
+openalpaca memory confirm <id>
+openalpaca memory undo    <id>
+openalpaca memory forget  <id>... [--yes]
+openalpaca memory sync
+openalpaca memory doctor  [--repair]
+openalpaca memory adopt   <owner-key>
+```
+
+**Which project.** Every daemon-backed verb sends the CLI's working directory as
+the project, exactly as `chat` does, and the daemon resolves it to the nearest
+`.openalpaca`/`.git` root — so `openalpaca memory list` inside a repository shows
+that project's notes beside your global ones, and outside any project shows the
+global ones alone. `--global` sends no project (the global partition only);
+`--project <path>` names one instead of the working directory.
+
+**Ids.** A note's id is a UUID; every verb that takes one accepts a unique
+prefix (at least four hex characters). `show`, `list` and `search` print the
+first eight.
+
+Notes:
+- `list` is the active notes by default. `--status candidate|archived` lists those
+  instead; `--history` adds notes a newer note replaced; `--candidates` adds the
+  extractor's unconfirmed inferences. The table's STATUS column is the *effective*
+  status (a note listed as `superseded` still says `active` in its own file — being
+  replaced is derived from the replacement, never written into the old note).
+- `search` is literal: every term of three or more characters is matched whole and
+  as a substring, so `prefer` finds `prefers`; a one- or two-character query (a
+  short Chinese term) is a substring scan. Results are cited — the heading and line
+  range the excerpt came from, why it matched, and its freshness — and a result
+  flagged `conflict` or `same-key loser` is one `doctor` also names. Candidates are
+  never returned. `--historical` includes replaced and archived notes; `--as-of`
+  evaluates validity at that instant.
+- `show` prints the note with its provenance; `--raw` prints the note *file* as the
+  daemon holds it, frontmatter and all; `--revision <rev>` reads one of the last
+  five revisions the daemon wrote (a hand edit is not one of them) — `--raw` of a
+  revision is that revision's file.
+- `add` saves a note **as you**: its origin is `user`, the highest authority, and a
+  tool call can never edit, archive or replace it (the model can only *forget* it,
+  under the ordinary confirmation card). The body is the last argument, `-` for
+  stdin, or — with neither — an editor (`$VISUAL`, else `$EDITOR`, else `vi`) opened
+  on a blank body; an empty body saves nothing. `--scope` defaults by kind: a
+  `preference` is global, everything else goes to the project when there is one.
+  `--supersedes <id>` replaces a note: the target's current revision is fetched
+  first and sent with the new note, so a target that changed meanwhile is a `409`,
+  never an overwrite; the old note is untouched and reads as superseded from then
+  on. An exact duplicate (same kind, title, body, fact key, aliases and tags) is
+  answered with the existing note's id, not saved twice.
+- `edit` opens the note file in the editor — the same bytes `show --raw` prints —
+  and sends back only the fields that changed: the title, the body, `aliases`,
+  `tags`, `fact_key`, `valid_from`, `valid_to`, `review_after`. Changing anything
+  else (`kind`, `status`, the timestamps, `pinned`, `sources`, `supersedes`, or a key
+  the note did not have) is refused by name before anything is sent, and your text
+  is kept. The save carries the revision that was fetched: if the note changed
+  while the editor was open — the app, a chat turn, the extractor — the daemon
+  answers `409`, the command prints both revisions and **keeps your text in a
+  named temp file** (`openalpaca-memory-<id8>-….md`); run `show`, merge, and edit
+  again. An editor session that changes nothing sends nothing. An edit through
+  this verb re-records the note as yours (`user`), whatever wrote it before.
+- `confirm` makes a candidate (something the extractor inferred from assistant or
+  tool output) an active note of yours. It is refused for a note that is not a
+  candidate.
+- `undo` forgets a *recently learned* note — one the extractor wrote from your own
+  words (origin `extracted_user`), which the app lists under "Learned from what you
+  said". Once you have edited such a note it is yours, `undo` is refused
+  (`409 MEMORY_NOT_UNDOABLE`), and `forget` is the verb.
+- `forget` prints the title and revision of every note named, asks once (off a
+  terminal it refuses and says to pass `--yes`), then forgets each with the
+  revision it printed. A forgotten note's files, history copies and index rows are
+  gone and its sources are never re-extracted; the transcript messages it cited
+  stay in the conversation, and the command says so. There is no undo.
+- `sync` runs one reconciliation scan now: the daemon re-hashes the note files,
+  records any edited, added or removed behind its back as `external`, and prints
+  what changed. The daemon also scans every 30 s on its own, and before every read,
+  so `sync` is for when you want the answer now.
+- `doctor` reports every partition the store knows: yours (global and the current
+  project), every other owner key's as an **orphan**, health (`ready`, `absent`, or
+  `quarantined` with why), note, unverified and tombstone counts, malformed files,
+  duplicate ids, conflicts (two active notes with the same fact key, or a
+  replacement link the replacing note lacks the authority for), and move snapshots
+  left by an unfinished project move (`stale`, `abandoned`, `orphaned`). With a
+  daemon running it asks the daemon; with none it reads the store directly (and
+  opens the database for your owner id). Either way it changes nothing.
+- `doctor --repair` is **local and takes the store lock**: it refuses while a daemon
+  runs (`openalpaca daemon stop` first). It rebuilds a missing or invalid control
+  snapshot from the note files of your global partition and the current project's,
+  lifting the quarantine — every note is recorded at its current bytes as
+  `external`, tombstones are empty, and a duplicate id refuses the repair naming
+  both files — and deletes stale and abandoned move snapshots. It never rewrites,
+  moves or deletes a note file. Another owner key's partition is an orphan and not
+  repaired; `adopt` is the verb for that.
+- `adopt <owner-key>` is likewise local and takes the lock. After a factory reset
+  the next daemon start mints a new owner id, and every partition of the old key —
+  the global one and each project's — is left as an orphan with its notes,
+  tombstones and revisions intact. `adopt` re-binds all of them to the current
+  owner in one command, renaming each `owners/<old-key>` directory and its control
+  snapshot; if the current owner already has a partition where one would land, the
+  whole command is refused naming the collision, and nothing is partially adopted
+  (merging two owners' notes is not an operation). A stale or abandoned move
+  snapshot of the old key must be settled by `doctor --repair` first. The daemon
+  rebuilds its search index for the adopted partitions at its next start.
+
+Refusals come from the daemon in its own words: `404 MEMORY_NOT_FOUND`,
+`409 MEMORY_REVISION_CONFLICT` (the note changed since it was read; the current
+revision is in the message), `409 MEMORY_QUARANTINED` (its partition's snapshot is
+missing or invalid — `doctor --repair`), `409 MEMORY_NOT_UNDOABLE`,
+`400 MEMORY_INVALID_INPUT`.
 
 ### `chat`
 
