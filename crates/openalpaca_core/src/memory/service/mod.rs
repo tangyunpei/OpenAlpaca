@@ -958,7 +958,10 @@ impl MemoryService {
     /// *Freshness*): the snapshot re-records what changed behind the
     /// service's back, the index follows, and each change is reported as a
     /// `memory_changed` with `change: external` and no surface (§7b P13).
+    /// It re-records the snapshot, so it needs the write capability like
+    /// every other mutation.
     pub fn sync(&self, ctx: &MemoryAccessContext) -> Result<SyncReport, MemoryError> {
+        Self::require(ctx.capabilities.write, "memory_write")?;
         let resolved = self.resolve(ctx)?;
         let mut scanned = 0;
         let mut changes = Vec::new();

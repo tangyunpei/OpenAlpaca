@@ -731,6 +731,25 @@ fn a_write_needs_the_write_capability_and_a_read_the_read_one() {
     assert!(err.to_string().contains("memory_read"), "{err}");
 }
 
+/// `sync` re-records the snapshot and re-indexes, so it is a write: a
+/// read-only context is refused `memory_write` and nothing is laid out; a
+/// user-directed context with the write capability runs it.
+#[test]
+fn sync_needs_the_write_capability() {
+    let h = Harness::new();
+    let reader = h
+        .ctx(ALICE, None, Surface::ModelTool, Capabilities::READ_ONLY)
+        .unwrap();
+    let err = h.service.sync(&reader).unwrap_err();
+    assert_eq!(err.class(), "fixture:capability_denied");
+    assert!(err.to_string().contains("memory_write"), "{err}");
+    assert!(
+        !h.home_notes_dir(ALICE_KEY).exists(),
+        "nothing was laid out"
+    );
+    h.service.sync(&h.user(ALICE, None)).unwrap();
+}
+
 #[test]
 fn sources_must_exist_in_the_database() {
     let h = Harness::new();
