@@ -346,9 +346,13 @@ fn ensure_store_replaces_an_unedited_superseded_home_readme() {
     let readme = root.join("README.md");
 
     for (n, old) in SUPERSEDED_HOME_READMES.iter().enumerate() {
+        // Texts 1–5 called deleting `state/` a factory reset; text 6 told
+        // the reader `state/cache/` held the local embedding model, which
+        // the memory redesign removed.
         assert!(
-            old.contains("Deleting `state/` is a factory reset"),
-            "superseded text {n} is the one this replaces"
+            old.contains("Deleting `state/` is a factory reset")
+                || old.contains("`fastembed/` holds the local embedding model"),
+            "superseded text {n} is one of the texts this replaces"
         );
         fs::write(&readme, old).unwrap();
         ensure_store(&StoreScope::Home).unwrap();
@@ -388,6 +392,44 @@ fn a_readme_refresh_that_fails_does_not_fail_ensure_store() {
     );
 }
 
+/// The memory redesign's rows (plan 3.7): the home README names the control
+/// snapshots and the search index under `state/` and the notes under
+/// `memory/`, and says nothing of an embedding model; the project README
+/// says owner memory is git-ignored by its own `.gitignore` (MD-7) — the
+/// opposite of what it said while memory lived in the database.
+#[test]
+fn the_readmes_describe_markdown_memory() {
+    for needle in [
+        "| `state/memory-control/` |",
+        "`memory-index-v1.sqlite`",
+        "| `memory/` |",
+        "`owners/<owner-key>/",
+    ] {
+        assert!(
+            HOME_README.contains(needle),
+            "the home README must contain {needle:?}"
+        );
+    }
+    for stale in ["embedding", "fastembed", "~1 GB", "`memory/`, `skills/`"] {
+        assert!(
+            !HOME_README.contains(stale),
+            "the home README must not say {stale:?}"
+        );
+    }
+    let memory_row = PROJECT_README
+        .lines()
+        .find(|line| line.starts_with("| `memory/`"))
+        .expect("the project README has its own memory/ row");
+    assert!(
+        memory_row.contains("git-ignored by its own `.gitignore`"),
+        "the project README must say owner memory is git-ignored by its own file: {memory_row}"
+    );
+    assert!(
+        !PROJECT_README.contains("| `memory/`, `skills/`, `config/` |"),
+        "the old shared row said memory was deliberately not git-ignored"
+    );
+}
+
 /// A tripwire, not a spec: the refresh above only reaches stores seeded by a
 /// text listed in `SUPERSEDED_HOME_READMES`. Changing `HOME_README` without
 /// listing the text it replaces would strand every store seeded by this build.
@@ -396,7 +438,7 @@ fn a_changed_home_readme_lists_the_text_it_replaces() {
     use sha2::{Digest, Sha256};
     assert_eq!(
         format!("{:x}", Sha256::digest(HOME_README.as_bytes())),
-        "eceb21d5c6376fbcf29b09ab5e0774d3f62ace62a82468fad3ff257d2cc2a9a5",
+        "12c0b62e1d61383cb72ba02eb6e01e62464dd5f17e4c0820291a184d8365c247",
         "HOME_README changed: save its previous text as \
          store/superseded_readmes/home-<next>.txt, list it in \
          SUPERSEDED_HOME_READMES, then update this digest"

@@ -14,7 +14,11 @@
 //! if re-basing is **one transaction**, which is what
 //! `ArtifactStore::rebase_project` is. (A project's memory notes are files
 //! inside the directory that moves, not rows keyed by its path, so they are
-//! not a member of the transaction.)
+//! not a member of the transaction — but their control snapshot is keyed by
+//! the directory, so the memory service is threaded through the move in
+//! design §3's five-step order: quiesce, the new-key snapshot, the
+//! transaction, the rename, the old-key snapshot deleted. A crash between
+//! any two leaves a state `memory doctor` names.)
 //!
 //! **A root a project came *from* is resolved the way a turn's
 //! `x-workspace-path` is** (R22, `request_project_root_uncached` — the same
@@ -56,6 +60,7 @@
 //! `purge /repo/src` is a `422` `WORKSPACE_NOT_A_ROOT` naming `/repo` rather
 //! than a purge of the whole project for a path that named one file of it.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -71,6 +76,7 @@ use serde::Deserialize;
 
 use openalpaca_core::context::SharedContext;
 use openalpaca_core::memory::scope_context::resolves_to_the_home_store;
+use openalpaca_core::memory::service::MemoryService;
 
 use super::{api_error, request_project_root_uncached};
 use crate::AppState;
@@ -403,7 +409,45 @@ fn workspace_json(
 /// than a transaction over rows the caller cannot see. `session` and `task`
 /// carry no owner column, which is precisely why the answer is a refusal and
 /// not a half-scoped update.
-pub(crate) fn rebase_workspace(db: &Database, owner_id: &str, request: RebaseRequest) -> Response {
+pub(crate) fn rebase_workspace(
+    db: &Database,
+    memory: &MemoryService,
+    owner_id: &str,
+    request: RebaseRequest,
+) -> Response {
+    rebase_workspace_with(db, memory, owner_id, request, &mut |_| true)
+}
+
+/// The five steps of design §3's workspace move, in order. `checkpoint` in
+/// [`rebase_workspace_with`] runs after each one, and a `false` abandons the
+/// move right there with the disk exactly as that step left it — what a
+/// crash between two steps leaves, and what fixture 17 injects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MoveStep {
+    /// 1: the memory service refuses while a write for the project is in
+    /// flight, else holds new writes until the guard drops.
+    Quiesce,
+    /// 2: the control snapshot under the new partition key, `moved_from`
+    /// naming the old one.
+    NewKeySnapshot,
+    /// 3: the four members, one transaction.
+    DbTransaction,
+    /// 4: `rename(2)` of the store directory.
+    Rename,
+    /// 5: the old-key snapshot deleted, `moved_from` cleared, the old key's
+    /// index rows dropped.
+    OldKeySnapshotDeleted,
+}
+
+/// [`rebase_workspace`] with the crash injection hook fixture 17 requires.
+/// Production passes `|_| true`.
+pub(crate) fn rebase_workspace_with(
+    db: &Database,
+    memory: &MemoryService,
+    owner_id: &str,
+    request: RebaseRequest,
+    checkpoint: &mut dyn FnMut(MoveStep) -> bool,
+) -> Response {
     let store = ArtifactStore::new(db);
     let old_root = match resolve_root(&store, &request.old_path) {
         Ok(root) => root,
@@ -497,11 +541,55 @@ pub(crate) fn rebase_workspace(db: &Database, owner_id: &str, request: RebaseReq
         }
     }
 
+    // Step 1 (design §3): refused while a memory write for the project is in
+    // flight; otherwise every new write waits until this guard drops, which
+    // is when this function returns — after step 5, or after any refusal.
+    let _quiesced = match memory.quiesce(Path::new(&old_root)) {
+        Ok(guard) => guard,
+        Err(e) => {
+            return api_error(
+                StatusCode::CONFLICT,
+                "WORKSPACE_BUSY",
+                format!(
+                    "a memory write under {old_root} is still in flight ({e}); re-basing now \
+                     would move the directory out from under it. Try again in a moment"
+                ),
+            );
+        }
+    };
+    if !checkpoint(MoveStep::Quiesce) {
+        return interrupted(MoveStep::Quiesce);
+    }
+
+    // Step 2: the snapshot under the new partition key, before a row or a
+    // byte moves. Nothing is re-based if it cannot be written.
+    let partitions = match memory.begin_project_move(Path::new(&old_root), Path::new(&new_root)) {
+        Ok(partitions) => partitions,
+        Err(e) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "WORKSPACE_MOVE_FAILED",
+                format!(
+                    "the memory partitions under {old_root} could not be re-keyed onto \
+                     {new_root}: {e}. Nothing was re-based"
+                ),
+            );
+        }
+    };
+    if !checkpoint(MoveStep::NewKeySnapshot) {
+        return interrupted(MoveStep::NewKeySnapshot);
+    }
+
+    // Step 3: the four members, one transaction.
     let counts = match store.rebase_project(&old_root, &new_root) {
         Ok(counts) => counts,
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string()),
     };
+    if !checkpoint(MoveStep::DbTransaction) {
+        return interrupted(MoveStep::DbTransaction);
+    }
 
+    // Step 4: the directory.
     let store_moved = match project_move::move_project_store(Path::new(&old_root), Path::new(&new_root))
     {
         Ok(moved) => moved,
@@ -530,6 +618,24 @@ pub(crate) fn rebase_workspace(db: &Database, owner_id: &str, request: RebaseReq
             new_store_root.display()
         );
     }
+    if !checkpoint(MoveStep::Rename) {
+        return interrupted(MoveStep::Rename);
+    }
+
+    // Step 5: the old-key snapshot goes, the twin forgets where it came from,
+    // the old key's index rows go. A failure here is the state `memory
+    // doctor` names *stale* and `--repair` deletes: the rows and the
+    // directory are already where they should be, so the move is reported
+    // done and the residue logged, not the move refused.
+    if let Err(e) = memory.finish_project_move(partitions) {
+        tracing::warn!(
+            "Re-based onto {new_root}, but the old memory snapshots could not be retired: {e}; \
+             `openalpaca memory doctor` will name them stale"
+        );
+    }
+    if !checkpoint(MoveStep::OldKeySnapshotDeleted) {
+        return interrupted(MoveStep::OldKeySnapshotDeleted);
+    }
 
     Json(serde_json::json!({
         "old_path": old_root,
@@ -538,6 +644,17 @@ pub(crate) fn rebase_workspace(db: &Database, owner_id: &str, request: RebaseReq
         "store_moved": store_moved,
     }))
     .into_response()
+}
+
+/// The answer to a checkpoint that said stop: only a test's crash injection
+/// ever produces it, and it names the step so the caller knows what the disk
+/// holds.
+fn interrupted(after: MoveStep) -> Response {
+    api_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "WORKSPACE_MOVE_INTERRUPTED",
+        format!("the move stopped after {after:?}"),
+    )
 }
 
 // ── POST /v1/workspaces/purge ────────────────────────────────────
@@ -556,6 +673,10 @@ pub(crate) struct PurgeDeps<'a> {
     pub bus: &'a openalpaca_core::bus::EventBus,
     /// The local user; every write is scoped to it (R40).
     pub owner: &'a str,
+    /// The memory service: a project known by its memory partition alone is
+    /// still a project the `--all` listing names, and one whose memory a
+    /// purge keeps.
+    pub memory: &'a MemoryService,
     /// The home store's `sessions/`, where every session directory lives.
     /// `None` when the store could not be resolved at boot: the rows still go,
     /// and the directories are reported as not removed rather than guessed at.
@@ -706,8 +827,17 @@ fn purge_counts_json(counts: &openalpaca_storage::PurgeCounts) -> serde_json::Va
 /// within milliseconds — and is accepted rather than closed: nothing has
 /// written a transcript yet, and the very next purge attempt against `root`,
 /// once registration has caught up, refuses like any other in-flight run.
+///
+/// `memory_roots` are the roots the memory service knows
+/// ([`MemoryService::known_project_roots`]): a project with notes and no row
+/// in any member is still a project, so it gets its plan — `memory/` kept,
+/// nothing counted — instead of the `404` a root nothing names.
 #[allow(clippy::result_large_err)]
-fn preflight(deps: &PurgeDeps<'_>, root: &str) -> Result<PurgePlan, Response> {
+fn preflight(
+    deps: &PurgeDeps<'_>,
+    root: &str,
+    memory_roots: &HashSet<String>,
+) -> Result<PurgePlan, Response> {
     refuse_the_home_root("path", root)?;
 
     let store = ArtifactStore::new(deps.db);
@@ -720,7 +850,7 @@ fn preflight(deps: &PurgeDeps<'_>, root: &str) -> Result<PurgePlan, Response> {
         // exists not to confirm.
         return Err(owner_mismatch(root, rows.other_owners));
     }
-    if rows.counts.is_empty() {
+    if rows.counts.is_empty() && !memory_roots.contains(root) {
         return Err(api_error(
             StatusCode::NOT_FOUND,
             "WORKSPACE_NOT_FOUND",
@@ -868,13 +998,26 @@ fn announce_purged_sessions(
 /// check against the outcome.
 pub(crate) async fn purge_workspaces(deps: &PurgeDeps<'_>, request: PurgeRequest) -> Response {
     let store = ArtifactStore::new(deps.db);
+    // The roots the control snapshots know: where the `memory` table's UNION
+    // used to be in the listing, now the memory service's knowledge.
+    let memory_roots: HashSet<String> = deps
+        .memory
+        .known_project_roots()
+        .into_iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
     let roots = match (request.path.as_deref(), request.all) {
         (Some(path), false) => match resolve_purge_root(&store, path) {
             Ok(root) => vec![root],
             Err(response) => return response,
         },
         (None, true) => match store.project_roots() {
-            Ok(roots) => roots,
+            Ok(mut roots) => {
+                roots.extend(memory_roots.iter().cloned());
+                roots.sort();
+                roots.dedup();
+                roots
+            }
             Err(e) => {
                 return api_error(StatusCode::INTERNAL_SERVER_ERROR, "DB_ERROR", e.to_string());
             }
@@ -894,7 +1037,7 @@ pub(crate) async fn purge_workspaces(deps: &PurgeDeps<'_>, request: PurgeRequest
     // the others and reporting the failure afterwards.
     let mut plans = Vec::with_capacity(roots.len());
     for root in &roots {
-        match preflight(deps, root) {
+        match preflight(deps, root, &memory_roots) {
             Ok(plan) => plans.push(plan),
             Err(response) => return response,
         }
@@ -993,7 +1136,12 @@ pub async fn rebase_workspace_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<RebaseRequest>,
 ) -> Response {
-    rebase_workspace(&state.db, &state.local_user_id, request)
+    rebase_workspace(
+        &state.db,
+        &state.memory_service,
+        &state.local_user_id,
+        request,
+    )
 }
 
 /// Delete a project's conversations, runs and uploads, or report the plan.
@@ -1018,6 +1166,7 @@ pub async fn purge_workspace_handler(
             ctx: &state.gateway.shared_context,
             bus: &state.gateway.bus,
             owner: &state.local_user_id,
+            memory: &state.memory_service,
             sessions_root: session_log
                 .as_ref()
                 .map(|service| service.root().to_path_buf()),

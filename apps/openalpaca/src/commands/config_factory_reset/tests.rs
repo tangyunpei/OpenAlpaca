@@ -229,15 +229,30 @@ fn the_reset_holds_the_daemon_lock_while_the_prompt_is_open() {
     );
 }
 
+/// Design §2: a factory reset does not touch memory. The notes, their control
+/// snapshots (the owner-id mapping and the tombstones `adopt` needs) and the
+/// search index survive byte for byte, beside the master key, the logs, the
+/// backups and the content directories.
 #[test]
-fn the_embedding_cache_and_the_master_key_survive_a_factory_reset() {
+fn the_memory_snapshots_the_index_and_the_master_key_survive_a_factory_reset() {
     let tmp = tempdir().unwrap();
     let _env = EnvSandbox::enter(tmp.path());
     assert_sandboxed(tmp.path());
     let root = home(tmp.path());
     seed_trio(&root);
     let survivors: BTreeMap<&str, &[u8]> = BTreeMap::from([
-        ("state/cache/fastembed/model.onnx", b"weights".as_slice()),
+        (
+            "state/memory-control/home-32acea7eb739b08afd959db91e46d450.json",
+            br#"{"schema":1,"partition_key":"home-32acea7eb739b08afd959db91e46d450"}"#.as_slice(),
+        ),
+        (
+            "state/cache/memory-index-v1.sqlite",
+            b"SQLite format 3\0not really".as_slice(),
+        ),
+        (
+            "memory/owners/32acea7eb739b08afd959db91e46d450/notes/00000000-0000-4000-8000-000000000001--a-note.md",
+            b"---\nschema: 1\n---\n# A note\n".as_slice(),
+        ),
         ("state/.master_key", b"key material".as_slice()),
         ("state/logs/daemon.log", b"a log line".as_slice()),
         ("state/backups/llm.toml.bak.1", b"[providers]".as_slice()),
@@ -288,6 +303,11 @@ fn the_confirmation_names_the_root_and_what_survives() {
         "artifacts/",
         "uploads/",
         "sessions/",
+        // Design §2: a factory reset does not touch memory, and the preview
+        // names the two `state/` entries it leaves and the notes it orphans.
+        "/tmp/oa-test-root/memory/",
+        "/tmp/oa-test-root/state/memory-control/",
+        "/tmp/oa-test-root/state/cache/memory-index-v1.sqlite",
         "state/cache/",
         ".master_key",
         "state/logs/",
@@ -296,6 +316,27 @@ fn the_confirmation_names_the_root_and_what_survives() {
         assert!(
             warning.contains(needle),
             "the warning must mention {needle:?}:\n{warning}"
+        );
+    }
+    // Memory is files now, not rows: the database's loss is not memory's, and
+    // there is no embedding model in `state/cache/` any more.
+    for stale in ["every memory", "~1 GB", "embedding"] {
+        assert!(
+            !warning.contains(stale),
+            "the warning must not say {stale:?}:\n{warning}"
+        );
+    }
+    let untouched = warning
+        .split("Untouched:")
+        .nth(1)
+        .expect("an Untouched list");
+    for entry in [
+        "state/memory-control/",
+        "state/cache/memory-index-v1.sqlite",
+    ] {
+        assert!(
+            untouched.contains(entry),
+            "{entry} must be listed as untouched:\n{untouched}"
         );
     }
     assert_eq!(CONFIRM_WORD, "factory-reset");

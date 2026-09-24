@@ -873,23 +873,25 @@ Created and maintained by OpenAlpaca. The rule for this directory: **`state/` is
 the machine's; everything else here is yours.**
 
 A factory reset (`openalpaca config reset --factory`) deletes the database
-inside `state/` and nothing else there — the master key, the embedding cache,
-the logs and the backups stay. Deleting a content directory loses those files
-only.
+inside `state/` and nothing else there — the master key, the memory control
+snapshots, the search index, the logs and the backups stay. Deleting a content
+directory loses those files only.
 
 | Entry | Holds | Retention class |
 |---|---|---|
 | `state/` | database (+ WAL/SHM), `discovery.json`, `openalpacad.lock`, `.master_key` | never swept — a factory reset deletes the database here and leaves the rest |
+| `state/memory-control/` | one control snapshot per memory partition: the revision the service last wrote, each note's origin, the tombstones of forgotten notes | never swept — the notes' authority and forget history; a backup of `memory/` includes it |
 | `state/backups/` | rotated copies of hand-edited config (`<name>.bak.<ts>`, `<name>.unparseable-<ts>`) | regenerable — swept freely; never user-edited |
 | `state/logs/` | `daemon.log`, `gui.log` | regenerable — swept freely |
-| `state/cache/` | derived data the machine can rebuild — `fastembed/` holds the local embedding model (~1 GB) | regenerable — deleting it costs a re-download |
+| `state/cache/` | derived data the machine can rebuild — `memory-index-v1.sqlite`, the memory search index | regenerable — deleting it costs one rebuild from the notes on the next start |
 | `config/` | your runtime config: `llm.toml`, `daemon.toml`, `mcp.toml`, `agents/`, `skills/`, `orchestrator/`, `tools/` | yours — never swept |
 | `plugins/` | plugin directories you dropped in, `.permissions.toml`, `.config/<name>.toml`, `.data/<name>/` | yours — never swept |
 | `artifacts/` | files produced by tasks that had no project | never garbage-collected |
 | `uploads/` | files you uploaded that carried no project signal | swept: an upload attached to no message is deleted once past the grace period |
 | `sessions/` | session event logs — all sessions live here, never in a project | size-capped; no age sweep yet (owner decision T12) |
+| `memory/` | your memory notes, per owner: `owners/<owner-key>/notes/*.md`, with `.history/` (the last five service-written revisions) and `MEMORY.md` (a rebuildable index) beside them | yours — never swept; a factory reset leaves them, orphaned until the new owner adopts them |
 | `scratch/`, `cache/` | reserved; agent working space and derived data | swept freely |
-| `memory/`, `skills/` | reserved; not created until used | yours — never swept |
+| `skills/` | reserved; not created until used | yours — never swept |
 
 Directories OpenAlpaca did not create are never touched and never swept.
 
@@ -910,7 +912,8 @@ Deleting a directory below loses those files only.
 | `artifacts/**/.versions/` | previous versions of a produced file | OpenAlpaca's private history; git-ignored |
 | `uploads/` | copies of files you uploaded here | swept: an upload attached to no message is deleted once past the grace period; git-ignored |
 | `sessions/` | reserved, deliberately unused — session logs live in the home store | — |
-| `memory/`, `skills/`, `config/` | reserved; not created until used | yours — never swept, and deliberately *not* git-ignored |
+| `memory/` | this project's memory notes, per owner (`owners/<owner-key>/notes/*.md`) | yours — never swept; git-ignored by its own `.gitignore` inside `memory/`, which OpenAlpaca re-asserts, so notes never travel with the repository |
+| `skills/`, `config/` | reserved; not created until used | yours — never swept, and deliberately *not* git-ignored |
 | `scratch/`, `cache/` | reserved; agent working space and derived data | swept freely; git-ignored |
 
 Directories OpenAlpaca did not create are never touched and never swept.
@@ -921,20 +924,24 @@ store's layout version — do not edit it.
 "#;
 
 /// Every home README an earlier build seeded, byte for byte, oldest first —
-/// recovered from the history of [`HOME_README`]. Each one says that deleting
-/// `state/` is a factory reset, which taken literally destroys `.master_key`
-/// and the ~1 GB embedding model; `openalpaca config reset --factory` deletes
-/// the database and nothing else there. A seeded README is written only when
-/// absent, so without this every existing store would keep that sentence.
+/// recovered from the history of [`HOME_README`]. The first five say that
+/// deleting `state/` is a factory reset, which taken literally destroys
+/// `.master_key`; `openalpaca config reset --factory` deletes the database
+/// and nothing else there. The sixth describes `state/cache/` as the local
+/// embedding model's ~1 GB cache, which the memory redesign removed along
+/// with the SQL memory engine, and says nothing of `state/memory-control/`
+/// or the notes under `memory/`. A seeded README is written only when
+/// absent, so without this every existing store would keep those sentences.
 ///
 /// When [`HOME_README`] changes, its previous text is appended here, so a
 /// store seeded by the build before keeps being refreshed.
-const SUPERSEDED_HOME_READMES: [&str; 5] = [
+const SUPERSEDED_HOME_READMES: [&str; 6] = [
     include_str!("superseded_readmes/home-1.txt"),
     include_str!("superseded_readmes/home-2.txt"),
     include_str!("superseded_readmes/home-3.txt"),
     include_str!("superseded_readmes/home-4.txt"),
     include_str!("superseded_readmes/home-5.txt"),
+    include_str!("superseded_readmes/home-6.txt"),
 ];
 
 /// Whether `path` holds exactly one of [`SUPERSEDED_HOME_READMES`]. Anything

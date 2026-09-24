@@ -9,6 +9,16 @@
 use super::*;
 
 use axum::body::to_bytes;
+use openalpaca_core::memory::service::{
+    Attribution, Capabilities, MemoryAccessContext, ReadInput, StoreInput, StoreOutput, Surface,
+    WorkspaceHint,
+};
+use openalpaca_storage::IdentityRepository;
+use openalpaca_storage::memory_files::{
+    ControlSnapshot, MoveSnapshotState, NoteKind, Partition, PartitionHealth,
+    classify_move_snapshots, list_snapshots,
+};
+use openalpaca_storage::memory_index::MemoryIndex;
 use openalpaca_storage::store::StoreScope;
 use openalpaca_storage::{ArtifactKind, NewArtifact};
 use tempfile::TempDir;
@@ -41,6 +51,9 @@ struct Fixture {
     /// The live writers, as the daemon holds them: the purge stands each purged
     /// session's writer down before removing its directory.
     log: std::sync::Arc<openalpaca_core::session_log::SessionLogService>,
+    /// The memory service the move quiesces and re-keys through, over this
+    /// fixture's home store and an in-memory index.
+    memory: MemoryService,
 }
 
 impl Fixture {
@@ -59,6 +72,15 @@ impl Fixture {
         let projects = tempfile::tempdir().expect("projects");
         let db_dir = tempfile::tempdir().expect("db dir");
         let db = Database::open(&db_dir.path().join("test.db")).expect("open db");
+        // The memory service takes an owner only from a `global_user` row.
+        IdentityRepository::new(&db)
+            .create_global_user(OWNER, None)
+            .expect("owner row");
+        let memory = MemoryService::new(
+            Some(db.clone()),
+            MemoryIndex::open_in_memory().expect("in-memory index"),
+        );
+        memory.rebuild_index().expect("rebuild an empty index");
         let sessions_root = home_store.join("sessions");
         std::fs::create_dir_all(&sessions_root).expect("sessions root");
         let log = openalpaca_core::session_log::SessionLogService::new(
@@ -78,7 +100,59 @@ impl Fixture {
             bus: openalpaca_core::bus::EventBus::default(),
             sessions_root,
             log,
+            memory,
         }
+    }
+
+    // ── memory fixtures ──────────────────────────────────────────
+
+    /// A user-directed context on `root` — what `/v1/memories` builds.
+    fn memory_ctx(&self, root: &str) -> MemoryAccessContext {
+        self.memory
+            .context(
+                OWNER,
+                WorkspaceHint::Path(std::path::Path::new(root)),
+                Surface::UserSurface,
+                Capabilities::ALL,
+                Attribution::default(),
+            )
+            .expect("the owner is a global_user row")
+    }
+
+    /// One project note under `root`, through the service: the partition,
+    /// its snapshot and the index row all exist afterwards.
+    fn note(&self, root: &str, title: &str) -> StoreOutput {
+        self.memory
+            .store(
+                &self.memory_ctx(root),
+                StoreInput {
+                    title: title.to_string(),
+                    body: format!("# {title}\n\nTag, then run the release script.\n"),
+                    kind: Some(NoteKind::Procedure),
+                    ..Default::default()
+                },
+            )
+            .expect("store a project note")
+    }
+
+    /// The owner's partition snapshot at `root`, if the partition has one.
+    fn project_snapshot(&self, root: &str) -> Option<ControlSnapshot> {
+        self.partition(root).snapshot()
+    }
+
+    fn partition(&self, root: &str) -> Partition {
+        Partition::open(&StoreScope::Project(std::path::PathBuf::from(root)), OWNER)
+            .expect("open the partition")
+    }
+
+    /// The note files under `root`'s partition, sorted.
+    fn note_files(&self, root: &str) -> Vec<std::path::PathBuf> {
+        let dir = self.partition(root).notes_dir().to_path_buf();
+        let mut files: Vec<_> = std::fs::read_dir(dir)
+            .map(|d| d.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default();
+        files.sort();
+        files
     }
 
     /// A project directory carrying a real `.openalpaca` store — seeded through
@@ -152,11 +226,33 @@ impl Fixture {
     async fn patch_as(&self, owner: &str, old: &str, new: &str) -> (StatusCode, serde_json::Value) {
         split(rebase_workspace(
             &self.db,
+            &self.memory,
             owner,
             RebaseRequest {
                 old_path: old.to_string(),
                 new_path: new.to_string(),
             },
+        ))
+        .await
+    }
+
+    /// A move that crashes right after `stop_after` — the checkpoint answers
+    /// `false` there — leaving the disk as that step left it.
+    async fn patch_crashing_after(
+        &self,
+        old: &str,
+        new: &str,
+        stop_after: MoveStep,
+    ) -> (StatusCode, serde_json::Value) {
+        split(rebase_workspace_with(
+            &self.db,
+            &self.memory,
+            OWNER,
+            RebaseRequest {
+                old_path: old.to_string(),
+                new_path: new.to_string(),
+            },
+            &mut |step| step != stop_after,
         ))
         .await
     }
@@ -243,6 +339,7 @@ impl Fixture {
             ctx: &self.ctx,
             bus: &self.bus,
             owner: OWNER,
+            memory: &self.memory,
             sessions_root: Some(self.sessions_root.clone()),
             session_log: Some(self.log.clone()),
         }
@@ -290,6 +387,22 @@ fn action(body: &serde_json::Value, name: &str) -> String {
         .as_str()
         .unwrap_or("<none>")
         .to_string()
+}
+
+/// Every control snapshot that parses.
+fn snapshots() -> Vec<ControlSnapshot> {
+    list_snapshots()
+        .expect("list the control snapshots")
+        .into_iter()
+        .filter_map(|(_, parsed)| parsed.ok())
+        .collect()
+}
+
+/// What `doctor` would say about the move snapshots, sorted.
+fn move_states() -> Vec<(String, MoveSnapshotState)> {
+    let mut states = classify_move_snapshots(&snapshots());
+    states.sort();
+    states
 }
 
 /// Split a `Response` into its status and its JSON body.
@@ -1258,4 +1371,325 @@ async fn a_purge_with_no_dry_run_field_is_a_dry_run() {
         serde_json::from_value(serde_json::json!({ "path": "/somewhere" })).expect("parse");
     assert!(request.dry_run);
     assert!(!request.all);
+}
+
+// ============================================================================
+// PATCH /v1/workspaces and the memory partition (design §3, five steps;
+// fixture 17 steps 1–12)
+// ============================================================================
+
+/// Step 1: a move is refused while a memory write for the project is in
+/// flight, and nothing — rows, directory, snapshot — changes. A held quiesce
+/// stands in for the write here: the slot is taken either way, and the
+/// service answers the same `write_pending`. Once it lands, the same move
+/// goes through.
+#[tokio::test]
+async fn a_move_while_a_memory_write_is_pending_is_refused() {
+    let f = Fixture::new();
+    let old = f.project("old-project");
+    let new = f.bare_dir("new-project");
+    f.artifact(&old, "Notes");
+    f.note(&old, "Release step");
+
+    let pending = f
+        .memory
+        .quiesce(std::path::Path::new(&old))
+        .expect("nothing is writing yet");
+    let (status, body) = f.patch(&old, &new).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(error_code(&body), "WORKSPACE_BUSY");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("memory"),
+        "the refusal names the memory write: {message}"
+    );
+    // Refused before a row or a byte changed.
+    let (_, before) = f.get(Some(&old)).await;
+    assert_eq!(before["rows"]["artifacts"], 1);
+    assert!(
+        std::path::Path::new(&old)
+            .join(store::STORE_DIR_NAME)
+            .is_dir()
+    );
+    assert!(
+        !std::path::Path::new(&new)
+            .join(store::STORE_DIR_NAME)
+            .exists()
+    );
+    assert_eq!(f.project_snapshot(&old).unwrap().moved_from, None);
+    assert!(move_states().is_empty());
+
+    drop(pending);
+    let (status, body) = f.patch(&old, &new).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// Steps 2–5 in one call, the store still at the old root: afterwards the
+/// old-key snapshot is gone, the new-key snapshot binds the new directory
+/// with `moved_from` cleared, the note reads back at the same revision from
+/// the new root, and `doctor` has nothing to say.
+#[tokio::test]
+async fn a_move_re_keys_the_projects_memory_partition() {
+    let f = Fixture::new();
+    let old = f.project("old-project");
+    let new = f.bare_dir("new-project");
+    f.artifact(&old, "Notes");
+    let note = f.note(&old, "Release step");
+    let old_key = f.project_snapshot(&old).unwrap().partition_key;
+    let old_snapshot_path = openalpaca_storage::memory_files::snapshot_path_for(&old_key).unwrap();
+    assert!(old_snapshot_path.is_file());
+
+    let (status, body) = f.patch(&old, &new).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["store_moved"], true);
+
+    assert!(
+        !old_snapshot_path.exists(),
+        "step 5 deleted the old-key snapshot"
+    );
+    let moved = f
+        .project_snapshot(&new)
+        .expect("the new-key snapshot binds the moved directory");
+    assert_ne!(moved.partition_key, old_key);
+    assert_eq!(moved.moved_from, None, "step 5 cleared moved_from");
+    assert!(moved.notes.contains_key(&note.id));
+    assert_eq!(
+        std::path::Path::new(&moved.root)
+            .ancestors()
+            .nth(4)
+            .map(|p| p.to_string_lossy().into_owned())
+            .as_deref(),
+        Some(new.as_str())
+    );
+    assert!(move_states().is_empty(), "{:?}", move_states());
+    assert_eq!(f.partition(&new).health(), PartitionHealth::Ready);
+
+    let read = f
+        .memory
+        .read(
+            &f.memory_ctx(&new),
+            ReadInput {
+                id: note.id,
+                expected_revision: None,
+                section: None,
+            },
+        )
+        .expect("the note reads from the new root");
+    assert_eq!(read.revision, note.revision);
+    assert_eq!(f.note_files(&new).len(), 1);
+    assert_eq!(
+        f.memory.known_project_roots(),
+        [std::path::PathBuf::from(&new)]
+    );
+}
+
+/// The ordinary way a project moves: the directory went first, by hand, and
+/// the partition inside it is quarantined at the new root until the re-base
+/// re-keys its snapshot. Step 4 has nothing to rename; steps 2 and 5 still
+/// run.
+#[tokio::test]
+async fn a_project_moved_by_hand_gets_its_snapshot_re_keyed_too() {
+    let f = Fixture::new();
+    let old = f.project("old-project");
+    let new_dir = f.projects.path().join("new-project");
+    f.artifact(&old, "Notes");
+    let note = f.note(&old, "Release step");
+    let old_key = f.project_snapshot(&old).unwrap().partition_key;
+
+    move_the_store_by_hand(&old, &new_dir.to_string_lossy());
+    let new = new_dir
+        .canonicalize()
+        .expect("canonicalize")
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        matches!(f.partition(&new).health(), PartitionHealth::Quarantined(_)),
+        "notes with no snapshot under the new key: quarantined until re-keyed"
+    );
+
+    let (status, body) = f.patch(&old, &new).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["store_moved"], false);
+
+    assert_eq!(f.partition(&new).health(), PartitionHealth::Ready);
+    let moved = f.project_snapshot(&new).unwrap();
+    assert_ne!(moved.partition_key, old_key);
+    assert_eq!(moved.moved_from, None);
+    assert!(
+        !openalpaca_storage::memory_files::snapshot_path_for(&old_key)
+            .unwrap()
+            .exists()
+    );
+    assert!(move_states().is_empty());
+    let read = f
+        .memory
+        .read(
+            &f.memory_ctx(&new),
+            ReadInput {
+                id: note.id,
+                expected_revision: None,
+                section: None,
+            },
+        )
+        .expect("the note reads from the new root");
+    assert_eq!(read.revision, note.revision);
+}
+
+/// A crash injected after each of the five steps (fixture 17 steps 6–11)
+/// leaves the one state `doctor` names for it: nothing after step 1; the
+/// twin *abandoned* after steps 2 and 3 (the directory never moved); the old
+/// snapshot *stale* after step 4 (it did); nothing after step 5. The rows
+/// follow the transaction: untouched through step 2, re-based from step 3.
+#[tokio::test]
+async fn a_crash_after_each_move_step_leaves_a_state_doctor_names() {
+    for stop_after in [
+        MoveStep::Quiesce,
+        MoveStep::NewKeySnapshot,
+        MoveStep::DbTransaction,
+        MoveStep::Rename,
+        MoveStep::OldKeySnapshotDeleted,
+    ] {
+        let f = Fixture::new();
+        let old = f.project("old-project");
+        let new = f.bare_dir("new-project");
+        f.artifact(&old, "Notes");
+        let note = f.note(&old, "Release step");
+        let old_key = f.project_snapshot(&old).unwrap().partition_key;
+        let old_snapshot_path =
+            openalpaca_storage::memory_files::snapshot_path_for(&old_key).unwrap();
+
+        let (status, body) = f.patch_crashing_after(&old, &new, stop_after).await;
+        let old_store = std::path::Path::new(&old).join(store::STORE_DIR_NAME);
+        let new_store = std::path::Path::new(&new).join(store::STORE_DIR_NAME);
+        let twin = snapshots()
+            .into_iter()
+            .find(|s| s.moved_from.as_deref() == Some(old_key.as_str()));
+        let rows_at_new = f.get(Some(&new)).await.1["rows"]["artifacts"].clone();
+
+        match stop_after {
+            MoveStep::Quiesce => {
+                assert_ne!(status, StatusCode::OK, "{stop_after:?}: {body}");
+                assert!(twin.is_none(), "{stop_after:?}: nothing written yet");
+                assert!(old_snapshot_path.is_file());
+                assert!(old_store.is_dir() && !new_store.exists());
+                assert_eq!(rows_at_new, 0, "{stop_after:?}");
+                assert!(move_states().is_empty(), "{stop_after:?}");
+            }
+            MoveStep::NewKeySnapshot | MoveStep::DbTransaction => {
+                assert_ne!(status, StatusCode::OK, "{stop_after:?}: {body}");
+                let twin = twin.unwrap_or_else(|| panic!("{stop_after:?}: the twin exists"));
+                assert!(twin.notes.contains_key(&note.id), "{stop_after:?}");
+                assert!(old_snapshot_path.is_file(), "{stop_after:?}");
+                assert!(old_store.is_dir() && !new_store.exists(), "{stop_after:?}");
+                assert_eq!(
+                    rows_at_new,
+                    if stop_after == MoveStep::DbTransaction {
+                        1
+                    } else {
+                        0
+                    },
+                    "{stop_after:?}"
+                );
+                assert_eq!(
+                    move_states(),
+                    [(twin.partition_key.clone(), MoveSnapshotState::Abandoned)],
+                    "{stop_after:?}: the directory never moved"
+                );
+                // The old root still works as it did.
+                assert_eq!(f.partition(&old).health(), PartitionHealth::Ready);
+            }
+            MoveStep::Rename => {
+                assert_ne!(status, StatusCode::OK, "{stop_after:?}: {body}");
+                assert!(!old_store.exists() && new_store.is_dir(), "{stop_after:?}");
+                assert!(
+                    old_snapshot_path.is_file(),
+                    "{stop_after:?}: step 5 never ran"
+                );
+                assert_eq!(rows_at_new, 1, "{stop_after:?}");
+                assert_eq!(
+                    move_states(),
+                    [(old_key.clone(), MoveSnapshotState::Stale)],
+                    "{stop_after:?}: the directory moved, the old snapshot is bound to nothing"
+                );
+                // The moved partition already opens under its twin.
+                assert_eq!(f.partition(&new).health(), PartitionHealth::Ready);
+            }
+            MoveStep::OldKeySnapshotDeleted => {
+                assert_ne!(status, StatusCode::OK, "{stop_after:?}: {body}");
+                assert!(!old_snapshot_path.exists(), "{stop_after:?}");
+                assert_eq!(f.project_snapshot(&new).unwrap().moved_from, None);
+                assert!(move_states().is_empty(), "{stop_after:?}");
+                assert_eq!(rows_at_new, 1);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// POST /v1/workspaces/purge and the memory partition (plan 3.7)
+// ============================================================================
+
+/// A project the database has no row for is still a project when its memory
+/// partition exists: `--all` lists it (where the `memory` UNION used to),
+/// its plan keeps `memory/` and counts nothing, and a real purge — of it, or
+/// of a project with rows — leaves every note file and its snapshot byte for
+/// byte.
+#[tokio::test]
+async fn a_purge_lists_and_keeps_a_project_known_only_by_its_memory() {
+    let f = Fixture::new();
+    let with_rows = f.project("with-rows");
+    f.session_with_log("s-rows", &with_rows);
+    f.note(&with_rows, "Rows note");
+    let notes_only = f.project("notes-only");
+    f.note(&notes_only, "Notes only");
+    let files_before: Vec<(std::path::PathBuf, Vec<u8>)> = [&with_rows, &notes_only]
+        .into_iter()
+        .flat_map(|root| f.note_files(root))
+        .map(|p| (p.clone(), std::fs::read(&p).unwrap()))
+        .collect();
+    assert_eq!(files_before.len(), 2);
+    let snapshots_before = snapshots();
+    assert_eq!(snapshots_before.len(), 2);
+
+    // A single-root purge of the notes-only project answers a plan, not a 404.
+    let (status, body) = f.purge(Some(&notes_only), false, true).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(action(&body, "memory/"), "keep");
+    assert_eq!(body["projects"][0]["counts"]["sessions"], 0);
+
+    let (status, body) = f.purge(None, true, false).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let mut paths: Vec<&str> = body["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["path"].as_str().unwrap())
+        .collect();
+    paths.sort();
+    let mut expected = [with_rows.as_str(), notes_only.as_str()];
+    expected.sort();
+    assert_eq!(paths, expected);
+    for project in body["projects"].as_array().unwrap() {
+        let memory = project["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["entry"] == "memory/")
+            .expect("memory/ is in every plan");
+        assert_eq!(memory["action"], "keep");
+    }
+
+    // The rows went; the memory stayed, byte for byte.
+    assert_eq!(f.row_count("SELECT COUNT(*) FROM session"), 0);
+    for (path, bytes) in &files_before {
+        assert_eq!(
+            std::fs::read(path).unwrap_or_else(|e| panic!("{} is gone: {e}", path.display())),
+            *bytes
+        );
+    }
+    let mut after = snapshots();
+    let mut before = snapshots_before;
+    after.sort_by(|a, b| a.partition_key.cmp(&b.partition_key));
+    before.sort_by(|a, b| a.partition_key.cmp(&b.partition_key));
+    assert_eq!(after, before, "a purge never touches a control snapshot");
 }

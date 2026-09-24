@@ -106,7 +106,8 @@ pub(super) fn run(env: &dyn ConfigEnv) -> Result<()> {
     );
     println!(
         "Your files under artifacts/, uploads/ and sessions/ are still on disk, \
-         with nothing pointing at them."
+         with nothing pointing at them; your memory notes under memory/ keep their \
+         control snapshots and can be adopted by the new owner."
     );
     Ok(())
 }
@@ -187,7 +188,6 @@ empty database at the current schema version.
 Gone for good:
   - every conversation, message and session row
   - every task, every run and its history
-  - every memory
   - the rows that index your artifacts and uploads
   - {llm}
   - {daemon}
@@ -199,8 +199,17 @@ Left on disk, and from now on unreferenced:
 The files stay exactly where they are; nothing in the new database points at
 them any more. Delete them yourself if you want the space back.
 
+Left on disk, and orphaned until adopted:
+  - {root}/memory/ — your memory notes, per owner. The next start mints a new
+    owner id, so `openalpaca memory doctor` lists them as orphaned; nothing is
+    reassigned for you — `openalpaca memory adopt <owner-key>` re-binds them.
+
 Untouched:
-  - {root}/state/cache/ — the local embedding model (~1 GB)
+  - {root}/state/memory-control/ — the memory partitions' control snapshots
+    (revisions, origins, tombstones), kept so the notes can be adopted
+  - {root}/state/cache/memory-index-v1.sqlite — the memory search index,
+    checked and rebuilt on the next start
+  - the rest of {root}/state/cache/
   - {root}/state/.master_key
   - {root}/state/logs/
   - {root}/state/backups/

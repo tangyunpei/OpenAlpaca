@@ -83,6 +83,21 @@ pub const USED_REQUESTS_CAPACITY: usize = 256;
 pub const LIST_DEFAULT_LIMIT: usize = 50;
 pub const LIST_MAX_LIMIT: usize = 100;
 
+/// What a workspace move carries from step 2 to step 5 (design §3): the
+/// snapshots [`MemoryService::begin_project_move`] re-keyed, for
+/// [`MemoryService::finish_project_move`].
+#[derive(Debug)]
+pub struct ProjectMove {
+    moves: Vec<files::SnapshotMove>,
+}
+
+impl ProjectMove {
+    /// How many partitions (one per owner) the move re-keys.
+    pub fn partitions(&self) -> usize {
+        self.moves.len()
+    }
+}
+
 /// One reconciliation's account (`POST /v1/memories/sync`).
 #[derive(Debug, Clone)]
 pub struct SyncReport {
@@ -328,6 +343,67 @@ impl MemoryService {
         self.slots
             .quiesce(&key)
             .map_err(|()| MemoryError::WritePending { key })
+    }
+
+    /// Design §3, *Workspace move*, step 2: before anything is renamed,
+    /// every partition of `old_project` gets its control snapshot written
+    /// under the new partition key — bound to the directory the rename will
+    /// create, `moved_from` naming the old key — with the old snapshot left
+    /// in place ([`files::begin_project_move`]). The caller holds the
+    /// [`QuiesceGuard`] meanwhile.
+    pub fn begin_project_move(
+        &self,
+        old_project: &Path,
+        new_project: &Path,
+    ) -> Result<ProjectMove, MemoryError> {
+        let moves = files::begin_project_move(old_project, new_project, Utc::now())?;
+        Ok(ProjectMove { moves })
+    }
+
+    /// Design §3, *Workspace move*, step 5: deletes the old-key snapshots and
+    /// clears `moved_from` on their twins ([`files::finish_project_move`]),
+    /// then drops the old keys' rows from the index and this process's
+    /// fingerprints — the moved partition is re-indexed under its new key on
+    /// its first use, like any partition the index has no rows for. The
+    /// caller releases the hold by dropping its guard.
+    pub fn finish_project_move(&self, mv: ProjectMove) -> Result<(), MemoryError> {
+        files::finish_project_move(&mv.moves, Utc::now())?;
+        let mut fingerprints = self.fingerprints.lock().unwrap_or_else(|e| e.into_inner());
+        for m in &mv.moves {
+            self.index.remove_partition(&m.old_key)?;
+            fingerprints.remove(&m.old_key);
+        }
+        Ok(())
+    }
+
+    /// The project roots the control snapshots know (plan 3.7): a project can
+    /// be known by its memory partition alone, with no row in any database
+    /// member, and the workspace listing adds these to the roots the database
+    /// names. Only a snapshot whose partition directory exists counts — one
+    /// bound to a missing directory is a stale, abandoned or orphaned move
+    /// snapshot, which is `doctor`'s to name — and each root is listed once,
+    /// however many owners have a partition in it. Sorted, as the snapshots
+    /// record them (canonical). Unreadable snapshots are skipped.
+    pub fn known_project_roots(&self) -> Vec<PathBuf> {
+        let snapshots = match files::list_snapshots() {
+            Ok(list) => list,
+            Err(e) => {
+                tracing::warn!(
+                    "memory: control snapshots unreadable, listing no project roots: {e:#}"
+                );
+                return Vec::new();
+            }
+        };
+        let mut roots: Vec<PathBuf> = snapshots
+            .into_iter()
+            .filter_map(|(_, parsed)| parsed.ok())
+            .filter(|s| s.scope == files::SnapshotScope::Project)
+            .filter(|s| Path::new(&s.root).is_dir())
+            .filter_map(|s| Path::new(&s.root).ancestors().nth(4).map(Path::to_path_buf))
+            .collect();
+        roots.sort();
+        roots.dedup();
+        roots
     }
 
     // ------------------------------------------------------------------------

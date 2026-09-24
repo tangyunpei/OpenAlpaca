@@ -2709,3 +2709,121 @@ fn undrained_requests_are_bounded() {
     assert!(h.service.take_used(first).is_empty(), "the oldest was dropped");
     assert_eq!(h.service.take_used(last).len(), 1);
 }
+
+// ============================================================================
+// The workspace move (design §3, five steps) and the listing's partition
+// roots (plan 3.7; fixture 17)
+// ============================================================================
+
+/// A project the database has no row for is still a project when its memory
+/// partition exists: that is the memory service's knowledge, and the
+/// workspace listing reads it here. The home partition is not a project, and
+/// a snapshot whose directory is gone is `doctor`'s to name, not a root.
+#[test]
+fn known_project_roots_are_the_partitions_whose_directory_exists() {
+    let h = Harness::new();
+    assert!(h.service.known_project_roots().is_empty());
+    h.store(
+        &h.user(ALICE, None),
+        "Global",
+        "# Global\n\nBody.\n",
+        NoteKind::Preference,
+    );
+    assert!(
+        h.service.known_project_roots().is_empty(),
+        "the home partition is not a project"
+    );
+
+    let repo = h.workspace("repo", Some(".git"));
+    h.store(
+        &h.user(ALICE, Some(&repo)),
+        "Release step",
+        "# Release step\n\nTag first.\n",
+        NoteKind::Procedure,
+    );
+    assert_eq!(h.service.known_project_roots(), std::slice::from_ref(&repo));
+
+    // Bob's partition in the same project is the same root, once.
+    h.store(
+        &h.user(BOB, Some(&repo)),
+        "Bob's note",
+        "# Bob's note\n\nBody.\n",
+        NoteKind::Fact,
+    );
+    assert_eq!(h.service.known_project_roots(), std::slice::from_ref(&repo));
+
+    // Gone from disk: the snapshot stays for doctor, the listing drops it.
+    let parked = h.root.path().join("ws").join("parked");
+    fs::rename(&repo, &parked).unwrap();
+    assert!(h.service.known_project_roots().is_empty());
+}
+
+/// Steps 2 and 5 through the service: the twin snapshot is written before
+/// the rename and the old one deleted after it, and the search index follows
+/// — the old key's rows go, the new root is searchable, and the note keeps
+/// its revision.
+#[test]
+fn a_workspace_move_through_the_service_re_keys_and_re_indexes() {
+    let h = Harness::new();
+    let old = h.workspace("old", Some(".openalpaca"));
+    let new = h.root.path().join("ws").join("new");
+    let note = h.store(
+        &h.user(ALICE, Some(&old)),
+        "Release step",
+        "# Release step\n\nTag, then run the release script.\n",
+        NoteKind::Procedure,
+    );
+    let old_key = h
+        .snapshot(&StoreScope::Project(old.clone()), ALICE)
+        .unwrap()
+        .partition_key;
+    assert_eq!(
+        search(&h, &h.user(ALICE, Some(&old)), "release script").results[0].id,
+        note.id
+    );
+    assert!(
+        h.service
+            .index()
+            .get(&old_key, &note.id.to_string())
+            .unwrap()
+            .is_some()
+    );
+
+    // Step 2, then the rename (step 4), then step 5.
+    let mv = h.service.begin_project_move(&old, &new).unwrap();
+    assert_eq!(mv.partitions(), 1);
+    fs::create_dir_all(&new).unwrap();
+    fs::rename(old.join(".openalpaca"), new.join(".openalpaca")).unwrap();
+    h.service.finish_project_move(mv).unwrap();
+    let new = new.canonicalize().unwrap();
+
+    assert!(
+        h.service
+            .index()
+            .get(&old_key, &note.id.to_string())
+            .unwrap()
+            .is_none(),
+        "the old key's rows are gone from the index"
+    );
+    let moved = h
+        .snapshot(&StoreScope::Project(new.clone()), ALICE)
+        .expect("the twin binds the new directory");
+    assert_ne!(moved.partition_key, old_key);
+    assert_eq!(moved.moved_from, None);
+    assert!(
+        !h.home()
+            .join("state")
+            .join("memory-control")
+            .join(format!("{old_key}.json"))
+            .exists()
+    );
+
+    let at_new = h.user(ALICE, Some(&new));
+    let found = search(&h, &at_new, "release script");
+    assert_eq!(found.results.len(), 1);
+    assert_eq!(found.results[0].id, note.id);
+    assert_eq!(found.results[0].revision, note.revision);
+    assert_eq!(h.service.known_project_roots(), std::slice::from_ref(&new));
+    // The old root is a directory with no marker now: global only.
+    assert!(h.user(ALICE, Some(&old)).project_root.is_none());
+}
