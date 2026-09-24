@@ -847,6 +847,121 @@ async fn undo_is_refused_once_the_origin_moved() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+// ── A note longer than a read serves ───────────────────────────────────
+
+/// Why an edit can never send back a body cut at 32 KiB. The note limit
+/// covers the whole file, frontmatter included (design §4), so a note that
+/// parses has a body under the 32 KiB a read serves: a read at the limit is
+/// whole and `truncated: false`. One byte over, the file does not parse — it
+/// is malformed, left on disk and excluded — so every route answers `404
+/// MEMORY_NOT_FOUND` for it, a body edit included, nothing is written, and
+/// `doctor` lists the file as `oversized`. The CLI's and the app's
+/// `truncated` refusals stand behind this; raising the parse limit above the
+/// read limit fails here.
+#[tokio::test]
+async fn a_note_file_over_32_kib_is_not_found_so_no_edit_can_cut_it() {
+    use openalpaca_storage::memory_files::MAX_NOTE_BYTES;
+    let f = Fixture::new();
+    let (id, created) = f
+        .create("Long log", "# Long log\n\nThe start.\n", "reference")
+        .await;
+    let sid = id.to_string();
+    let file = f.note_file(id);
+    let original = std::fs::read_to_string(&file).unwrap();
+    let tail = "The tail.\n";
+    let fill = |bytes: usize| {
+        format!(
+            "{original}{}{tail}",
+            "y".repeat(bytes - original.len() - tail.len())
+        )
+    };
+
+    // At the limit: the whole body is read, nothing is cut.
+    let at_limit = fill(MAX_NOTE_BYTES);
+    std::fs::write(&file, &at_limit).unwrap();
+    let (status, json) = split(f.api.sync(&Fixture::headers()).await).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let (status, read) = split(
+        f.api
+            .read(&Fixture::headers(), &sid, ReadMemoryQuery::default())
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(read["truncated"], false);
+    let body = read["body"].as_str().unwrap();
+    assert!(
+        body.ends_with(tail) && at_limit.ends_with(body),
+        "the read holds the whole body"
+    );
+    let revision = read["revision"].as_str().unwrap().to_string();
+    assert_ne!(revision, created, "the hand edit was picked up");
+
+    // One byte over: malformed, so not found — to a read, an edit, a DELETE.
+    let over = fill(MAX_NOTE_BYTES + 1);
+    std::fs::write(&file, &over).unwrap();
+    let (status, json) = split(f.api.sync(&Fixture::headers()).await).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let (status, json) = split(
+        f.api
+            .read(&Fixture::headers(), &sid, ReadMemoryQuery::default())
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{json}");
+    assert_eq!(code(&json), "MEMORY_NOT_FOUND");
+    let (status, json) = split(
+        f.api
+            .update(
+                &Fixture::with_if_match(&revision),
+                &sid,
+                update_body("edit", Some("# Long log\n\nThe start.\n")),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{json}");
+    assert_eq!(code(&json), "MEMORY_NOT_FOUND");
+    let (status, json) = split(f.api.delete(&Fixture::with_if_match(&revision), &sid).await).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{json}");
+    assert_eq!(code(&json), "MEMORY_NOT_FOUND");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        over,
+        "nothing was written"
+    );
+
+    let (status, report) = split(f.api.doctor(&Fixture::headers()).await).await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    let name = file.file_name().unwrap().to_string_lossy().into_owned();
+    let malformed: Vec<&serde_json::Value> = report["partitions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|p| p["malformed"].as_array().unwrap())
+        .collect();
+    assert!(
+        malformed.iter().any(|m| {
+            m["path"].as_str().unwrap().ends_with(&name)
+                && m["reason"].as_str().unwrap().contains("oversized")
+        }),
+        "doctor names the file: {malformed:?}"
+    );
+
+    // Shortened by hand, it is a note again at the next scan.
+    std::fs::write(&file, &at_limit).unwrap();
+    let (status, json) = split(f.api.sync(&Fixture::headers()).await).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let (status, read) = split(
+        f.api
+            .read(&Fixture::headers(), &sid, ReadMemoryQuery::default())
+            .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    assert_eq!(read["truncated"], false);
+}
+
 // ── memory_changed ─────────────────────────────────────────────────────
 
 /// Every write through the routes is one `memory_changed` on the bus with

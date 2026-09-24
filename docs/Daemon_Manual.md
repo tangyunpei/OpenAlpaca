@@ -696,6 +696,19 @@ model's tool-surface refusals — a tool call editing, archiving or replacing a
 `user` note, a confirm from a tool call — and this user-directed surface never
 produces them.
 
+**A note is at most 32 KiB, so a read is never cut.** The limit covers the whole
+file, frontmatter included, and it is no larger than what a read serves, so
+every note a route can reach comes back whole, with `truncated: false`. A note
+file made longer by hand does not parse: it is malformed, left on disk and
+excluded, so the daemon answers for its id exactly as for an unknown one — a
+read, an `edit` and a `DELETE` are `404 MEMORY_NOT_FOUND`, and nothing is
+written — while `GET /v1/memories/doctor` lists the file under `malformed` with
+the reason `oversized`. Shortened by hand, it is a note again at the next
+scan. That is why an edit can never send back a body cut short (a `patch`
+body is capped at 32 KiB as well), and why no separate refusal exists for one.
+A client that ever reads `truncated: true` must not offer that body for
+editing; `openalpaca memory edit` and the app both refuse.
+
 Every write through these routes — like every write the model's tools and the
 extractor make — is announced as one `memory_changed` frame on `/v1/events`
 (see [Event Taxonomy](#event-taxonomy)), and so is every file the reconciliation
