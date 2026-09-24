@@ -3119,3 +3119,74 @@ fn reconcile_owner_scans_every_known_partition_and_publishes_external_changes() 
         .unwrap();
     assert_eq!(view.origin, Origin::External);
 }
+
+/// One partition the timer cannot open does not stop the tick: it is
+/// skipped with a WARN and every partition after it is still scanned. Here
+/// project `a`'s `memory/` is read-only and holds a `.gitignore` the open
+/// must rewrite (MD-7), so its open fails with an I/O error — neither a
+/// refused path nor a quarantine, the two the scan already skips — and
+/// project `b`'s hand edit is still found and published.
+#[cfg(unix)]
+#[test]
+fn a_partition_that_fails_to_open_is_skipped_and_the_rest_are_still_scanned() {
+    use std::os::unix::fs::PermissionsExt;
+    struct RestorePerms(PathBuf);
+    impl Drop for RestorePerms {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    let h = Harness::new();
+    let ws_a = h.workspace("a", Some(".openalpaca"));
+    let ws_b = h.workspace("b", Some(".openalpaca"));
+    h.store(
+        &h.user(ALICE, Some(&ws_a)),
+        "A",
+        "# A\n\nin a.\n",
+        NoteKind::Fact,
+    );
+    let in_b = h.store(
+        &h.user(ALICE, Some(&ws_b)),
+        "B",
+        "# B\n\nin b.\n",
+        NoteKind::Fact,
+    );
+    assert!(h.service.reconcile_owner(ALICE).unwrap().changes.is_empty());
+
+    let memory_a = ws_a.join(".openalpaca").join("memory");
+    fs::write(memory_a.join(".gitignore"), "!*\n").unwrap();
+    fs::set_permissions(&memory_a, fs::Permissions::from_mode(0o555)).unwrap();
+    let _restore = RestorePerms(memory_a);
+    assert!(
+        matches!(
+            Partition::open(&StoreScope::Project(ws_a.clone()), ALICE),
+            Err(openalpaca_storage::memory_files::MemoryFilesError::Io(_))
+        ),
+        "the injection is an I/O failure at open"
+    );
+
+    let notes_b = ws_b
+        .join(".openalpaca")
+        .join("memory")
+        .join("owners")
+        .join(ALICE_KEY)
+        .join("notes");
+    let file = note_file_for(&notes_b, in_b.id).unwrap();
+    let mut text = fs::read_to_string(&file).unwrap();
+    text.push_str("\nEdited by hand.\n");
+    fs::write(&file, text).unwrap();
+    let mut rx = h.bus.subscribe();
+
+    let report = h
+        .service
+        .reconcile_owner(ALICE)
+        .expect("a partition that fails is skipped, not fatal");
+    assert_eq!(report.scanned, 1, "b's one note; a was skipped");
+    assert_eq!(report.changes.len(), 1);
+    assert_eq!(report.changes[0].note_id, in_b.id);
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(crate::events::SystemEvent::MemoryChanged { .. })
+    ));
+}

@@ -112,7 +112,10 @@ impl MemoryService {
     /// service's back is re-recorded `external` and published as
     /// `memory_changed` with no surface (§7b P13), and the index follows.
     /// Needs no context: nothing here is on a caller's behalf. A partition
-    /// that is quarantined, absent or refused (a link on its path) is skipped.
+    /// that is quarantined, absent or refused (a link on its path) is
+    /// skipped, and so — with one WARN — is one whose open or scan fails
+    /// for any other reason: one broken partition never stops the tick for
+    /// the partitions after it.
     pub fn reconcile_owner(&self, owner_id: &str) -> Result<SyncReport, MemoryError> {
         let owner_key = files::owner_key(owner_id);
         let mut scopes = vec![StoreScope::Home];
@@ -135,31 +138,59 @@ impl MemoryService {
                     );
                     continue;
                 }
-                Err(e) => return Err(e.into()),
+                Err(e) => {
+                    tracing::warn!(
+                        scope = ?scope,
+                        "memory: partition skipped by the reconciliation scan, it did not open: {e}"
+                    );
+                    continue;
+                }
             };
             if partition.health() != PartitionHealth::Ready {
                 continue;
             }
-            scanned += partition.scan()?.len();
-            for change in partition.reconcile()? {
-                let change = MemoryChange {
-                    partition_key: partition.partition_key().to_string(),
-                    note_id: change.id,
-                    change: "external",
-                    revision: change.revision,
-                    origin: Origin::External,
-                    surface: None,
-                };
-                self.publish(&change);
-                changes.push(change);
+            match self.reconcile_partition(&partition) {
+                Ok((count, found)) => {
+                    scanned += count;
+                    changes.extend(found);
+                }
+                Err(e) => tracing::warn!(
+                    partition = partition.partition_key(),
+                    "memory: partition skipped by the reconciliation scan: {e}"
+                ),
             }
-            self.reindex(&partition, false)?;
         }
         Ok(SyncReport {
             scanned,
             changes,
             index_state: self.index.index_state()?.state,
         })
+    }
+
+    /// One tick's work on one ready partition, under its write slot: the
+    /// stat scan, the re-hash of what changed behind the service's back
+    /// (published as it is found) and the index's catch-up. Answers how
+    /// many files the scan listed and the external changes it recorded.
+    fn reconcile_partition(
+        &self,
+        partition: &files::Partition,
+    ) -> Result<(usize, Vec<MemoryChange>), MemoryError> {
+        let scanned = partition.scan()?.len();
+        let mut changes = Vec::new();
+        for change in partition.reconcile()? {
+            let change = MemoryChange {
+                partition_key: partition.partition_key().to_string(),
+                note_id: change.id,
+                change: "external",
+                revision: change.revision,
+                origin: Origin::External,
+                surface: None,
+            };
+            self.publish(&change);
+            changes.push(change);
+        }
+        self.reindex(partition, false)?;
+        Ok((scanned, changes))
     }
 }
 
