@@ -193,6 +193,23 @@ pub(super) fn is_store_owned_path(path: &str, access: StoreAccess) -> Option<&'s
     }
 }
 
+/// [`is_store_owned_path`] over the path a resolution landed on, relative
+/// to the workspace root. The argument check runs first, on the string;
+/// this one runs after `resolve_workspace_path[_for_write]`, because a
+/// symlink inside the workspace that points at `state/` (or at a
+/// partition's control files) canonicalizes under the root and would
+/// otherwise pass. A resolved path that is not under the canonical root —
+/// the resolvers refuse that already — matches nothing here.
+pub(super) fn is_store_owned_resolved(
+    resolved: &Path,
+    workspace_root: &Path,
+    access: StoreAccess,
+) -> Option<&'static str> {
+    let root = workspace_root.canonicalize().ok()?;
+    let relative = resolved.strip_prefix(&root).ok()?;
+    is_store_owned_path(&relative.to_string_lossy(), access)
+}
+
 /// Check if a path refers to IDENTITY.md (case-insensitive filename check).
 pub(super) fn is_identity_path(path: &str) -> bool {
     std::path::Path::new(path)

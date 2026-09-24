@@ -10,8 +10,8 @@ use std::sync::Arc;
 use super::annotations_for_builtin;
 use super::helpers::{
     MAX_FILE_READ_SIZE, StoreAccess, is_identity_path, is_soul_path, is_store_owned_path,
-    is_user_path, resolve_workspace_path, resolve_workspace_path_for_write,
-    validate_workspace_path,
+    is_store_owned_resolved, is_user_path, resolve_workspace_path,
+    resolve_workspace_path_for_write, validate_workspace_path,
 };
 
 // --- file_read ---
@@ -30,15 +30,25 @@ impl BuiltInTool for FileReadTool {
 
         // The store's `state/` is the daemon's, never the model's to read
         // (design §2): the control snapshots there map owner keys to ids.
-        if let Some(what) = is_store_owned_path(path, StoreAccess::Read) {
-            return Err(format!(
+        let refuse = |what: &str| {
+            format!(
                 "Reading '{path}' is refused: it is inside {what}, which belongs to the daemon's \
                  own state/ and is not workspace content."
-            ));
+            )
+        };
+        if let Some(what) = is_store_owned_path(path, StoreAccess::Read) {
+            return Err(refuse(what));
         }
 
         // Security: resolve path, reject traversal and symlink escapes
         let full_path = resolve_workspace_path(path, &self.workspace_root)?;
+        // Again on the resolved path: a symlink inside the workspace that
+        // points at `state/` passes the string check above.
+        if let Some(what) =
+            is_store_owned_resolved(&full_path, &self.workspace_root, StoreAccess::Read)
+        {
+            return Err(refuse(what));
+        }
 
         // Guard against OOM: reject files larger than 10 MB
         let metadata = tokio::fs::metadata(&full_path)
@@ -285,17 +295,28 @@ impl FileWriteTool {
 
         // The store's own files (design §2, plan 3.2): `state/` and a memory
         // partition's control files are the service's, never file_write's.
-        if let Some(what) = is_store_owned_path(path, StoreAccess::Write) {
-            return Err(format!(
+        let refuse = |what: &str| {
+            format!(
                 "Writing '{path}' is refused: it is {what}, which the daemon owns. Memory notes \
                  are written with memory_store and memory_update; nothing under state/ is \
                  workspace content."
-            ));
+            )
+        };
+        if let Some(what) = is_store_owned_path(path, StoreAccess::Write) {
+            return Err(refuse(what));
         }
 
         // Security: resolve path, reject symlink escapes BEFORE creating directories.
         // This prevents out-of-workspace directory creation via symlinked intermediates.
         let full_path = resolve_workspace_path_for_write(path, &self.workspace_root)?;
+        // Again on the resolved path: a symlink inside the workspace that
+        // points at `state/` or a partition's control files passes the
+        // string check above.
+        if let Some(what) =
+            is_store_owned_resolved(&full_path, &self.workspace_root, StoreAccess::Write)
+        {
+            return Err(refuse(what));
+        }
 
         // §5.7: the bytes this write is about to destroy are imaged first, and
         // the write does not happen unless that succeeded. Everything above is
@@ -932,5 +953,47 @@ mod tests {
                 .await
                 .unwrap_or_else(|e| panic!("{path}: {e}"));
         }
+    }
+
+    /// Defence in depth: the argument check reads the string, and a symlink
+    /// inside the workspace that points at `state/` canonicalizes under the
+    /// root, so both tools run the check again on the path the resolution
+    /// landed on. Unix only: the test needs a symlink.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlink_into_the_store_state_is_refused_after_resolution() {
+        let b = bench();
+        let root = b.work.path().to_path_buf();
+        fs::create_dir_all(root.join("state/memory-control")).unwrap();
+        fs::write(
+            root.join("state/memory-control/home.json"),
+            "{\"owner_id\":\"secret\"}",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(root.join("state"), root.join("link")).unwrap();
+
+        let read = FileReadTool {
+            workspace_root: root.clone(),
+        };
+        let err = read
+            .execute(&serde_json::json!({"path": "link/memory-control/home.json"}))
+            .await
+            .expect_err("a symlink into state/ is refused on read");
+        assert!(err.contains("state/"), "{err}");
+        assert!(!err.contains("secret"), "{err}");
+
+        let write = b.tool(None);
+        let err = write
+            .write(
+                &serde_json::json!({"path": "link/memory-control/x.json", "content": "{}"}),
+                &ToolContext::default(),
+            )
+            .await
+            .expect_err("a symlink into state/ is refused on write");
+        assert!(err.contains("state/"), "{err}");
+        assert!(
+            !root.join("state/memory-control/x.json").exists(),
+            "written through the link"
+        );
     }
 }
