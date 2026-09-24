@@ -24,6 +24,7 @@
 
 mod context;
 mod error;
+mod mutations;
 pub mod recall;
 mod types;
 mod write_slot;

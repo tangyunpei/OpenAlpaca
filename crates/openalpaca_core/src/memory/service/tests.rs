@@ -1858,3 +1858,639 @@ fn search_input_is_validated() {
         .unwrap();
     assert!(empty.is_empty() && empty.render().is_empty() && empty.bytes == 0);
 }
+
+// ============================================================================
+// Mutations (design §4 G2, §6; fixtures 10, 14, 16, 18, 24)
+// ============================================================================
+
+fn read(h: &Harness, ctx: &MemoryAccessContext, id: NoteId) -> ReadOutput {
+    h.service
+        .read(
+            ctx,
+            ReadInput {
+                id,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+}
+
+fn edit(body: &str) -> UpdateAction {
+    UpdateAction::Edit(Patch {
+        body: Some(body.into()),
+        ..Default::default()
+    })
+}
+
+/// Fixture 10 steps 3–7 and 18 steps 6–9: similarity replaces nothing; a
+/// tool call may neither edit, archive nor supersede a `user` note, and the
+/// refusal names the note, the Memory view and the CLI verb; the same edit
+/// through a user-directed surface succeeds and keeps the note `user`.
+#[test]
+fn a_tool_call_may_not_edit_archive_or_supersede_a_user_note() {
+    let h = Harness::new();
+    let tool = h.tool(ALICE, None);
+    let user = h.user(ALICE, None);
+    let u = h
+        .service
+        .store(
+            &user,
+            StoreInput {
+                title: "Editor preference".into(),
+                body: "# Editor preference\n\n## Knowledge\nThe user prefers vim for editing, not emacs.\n".into(),
+                kind: Some(NoteKind::Preference),
+                fact_key: Some("editor.preference".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(u.origin, Origin::User);
+
+    let similar = h.store(
+        &tool,
+        "Editor keybindings",
+        "# Editor keybindings\n\nThe user prefers vim keybindings inside VS Code.\n",
+        NoteKind::Preference,
+    );
+    assert_eq!(similar.origin, Origin::ExtractedUser);
+    assert!(similar.superseded.is_empty());
+    assert_eq!(
+        read(&h, &user, u.id).revision,
+        u.revision,
+        "nothing was replaced by similarity"
+    );
+
+    let err = h
+        .service
+        .store(
+            &tool,
+            StoreInput {
+                title: "Editor preference".into(),
+                body: "# Editor preference\n\nThe user prefers helix.\n".into(),
+                kind: Some(NoteKind::Preference),
+                fact_key: Some("editor.preference".into()),
+                supersedes: Some((u.id, u.revision.clone())),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(err.class(), "authority_conflict");
+    let text = err.to_string();
+    assert!(
+        text.contains(&u.id.to_string())
+            && text.contains("Memory view")
+            && text.contains("openalpaca memory"),
+        "{text}"
+    );
+    assert_eq!(read(&h, &user, u.id).revision, u.revision);
+
+    let err = h
+        .service
+        .update(
+            &tool,
+            UpdateInput {
+                id: u.id,
+                expected_revision: u.revision.clone(),
+                action: edit("# Editor preference\n\nThe user prefers helix.\n"),
+                reason: None,
+            },
+        )
+        .unwrap_err();
+    assert_eq!(err.class(), "authority_conflict");
+    let err = h
+        .service
+        .update(
+            &tool,
+            UpdateInput {
+                id: u.id,
+                expected_revision: u.revision.clone(),
+                action: UpdateAction::Archive,
+                reason: Some("model thinks it is stale".into()),
+            },
+        )
+        .unwrap_err();
+    assert_eq!(err.class(), "authority_conflict");
+    let current = read(&h, &user, u.id);
+    assert_eq!(current.revision, u.revision);
+    assert_eq!(current.status, NoteStatus::Active);
+
+    let updated = h
+        .service
+        .update(
+            &user,
+            UpdateInput {
+                id: u.id,
+                expected_revision: u.revision.clone(),
+                action: UpdateAction::Edit(Patch {
+                    aliases: Some(vec!["vi".into(), "neovim".into()]),
+                    ..Default::default()
+                }),
+                reason: None,
+            },
+        )
+        .unwrap();
+    assert_ne!(updated.revision, u.revision);
+    assert_eq!(updated.status, NoteStatus::Active);
+    assert_eq!(updated.change.as_ref().map(|c| c.change), Some("updated"));
+    let snapshot = h.snapshot(&StoreScope::Home, ALICE).unwrap();
+    assert_eq!(snapshot.notes[&u.id].origin, Origin::User);
+    assert_eq!(snapshot.notes[&u.id].revision, updated.revision);
+    let history = Partition::open(&StoreScope::Home, ALICE)
+        .unwrap()
+        .history(&u.id)
+        .unwrap();
+    assert!(history.iter().any(|(rev, _)| *rev == updated.revision));
+    assert_eq!(search_ids(&search(&h, &tool, "neovim")), vec![u.id]);
+
+    // Fixture 18 step 9: a supersede of an id nobody has is `not_found`.
+    let err = h
+        .service
+        .store(
+            &tool,
+            StoreInput {
+                title: "Deploy approval".into(),
+                body: "# Deploy approval\n\nNo approval needed.\n".into(),
+                kind: Some(NoteKind::Decision),
+                supersedes: Some((
+                    NoteId::parse("00000018-0000-4000-8000-0000000000ee").unwrap(),
+                    "f".repeat(64),
+                )),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(err.class(), "not_found");
+}
+
+/// Fixture 18 step 5: `confirm` from a tool call is refused with the
+/// message naming the Memory view and `openalpaca memory confirm <id>`; the
+/// candidate stays one; a user-directed confirm makes it active and `user`.
+#[test]
+fn confirm_is_refused_from_a_tool_call_and_accepted_from_a_user_surface() {
+    let h = Harness::new();
+    let extractor = h
+        .ctx(ALICE, None, Surface::Extraction, Capabilities::EXTRACTION)
+        .unwrap();
+    let candidate = h
+        .service
+        .store(
+            &extractor,
+            StoreInput {
+                title: "Candidate from a tool result".into(),
+                body: "# Candidate from a tool result\n\nAn MCP tool claimed the staging URL changed.\n".into(),
+                kind: Some(NoteKind::Fact),
+                provenance: Some(ExtractionProvenance::OtherOutput),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let tool = h.tool(ALICE, None);
+    let err = h
+        .service
+        .update(
+            &tool,
+            UpdateInput {
+                id: candidate.id,
+                expected_revision: candidate.revision.clone(),
+                action: UpdateAction::Confirm,
+                reason: None,
+            },
+        )
+        .unwrap_err();
+    assert_eq!(err.class(), "confirm_refused");
+    let text = err.to_string();
+    assert!(text.contains("Memory view"), "{text}");
+    assert!(
+        text.contains(&format!("openalpaca memory confirm {}", candidate.id)),
+        "{text}"
+    );
+    let user = h.user(ALICE, None);
+    let still = read(&h, &user, candidate.id);
+    assert_eq!(still.status, NoteStatus::Candidate);
+    assert_eq!(still.revision, candidate.revision);
+
+    let confirmed = h
+        .service
+        .update(
+            &user,
+            UpdateInput {
+                id: candidate.id,
+                expected_revision: candidate.revision.clone(),
+                action: UpdateAction::Confirm,
+                reason: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(confirmed.status, NoteStatus::Active);
+    assert_eq!(
+        confirmed.change.as_ref().map(|c| c.change),
+        Some("confirmed")
+    );
+    let now = read(&h, &user, candidate.id);
+    assert_eq!(now.origin, Origin::User);
+    assert_eq!(now.effective_status, EffectiveStatus::Active);
+    let again = h
+        .service
+        .update(
+            &user,
+            UpdateInput {
+                id: candidate.id,
+                expected_revision: confirmed.revision.clone(),
+                action: UpdateAction::Confirm,
+                reason: None,
+            },
+        )
+        .unwrap_err();
+    assert_eq!(again.class(), "invalid_input", "not a candidate any more");
+}
+
+/// Fixture 14 steps 2–5: a stale `expected_revision` is `revision_conflict`
+/// carrying the current revision and touches nothing; the second of two
+/// racing edits loses visibly; a read shows the first edit.
+#[test]
+fn a_stale_expected_revision_is_a_visible_conflict_and_the_second_racing_edit_loses() {
+    let h = Harness::new();
+    let one = h.tool(ALICE, None);
+    let two = h.tool(ALICE, None);
+    let standup = h.store(
+        &one,
+        "Standup time",
+        "# Standup time\n\nStandup is at 09:30.\n",
+        NoteKind::Fact,
+    );
+
+    let err = h
+        .service
+        .update(
+            &one,
+            UpdateInput {
+                id: standup.id,
+                expected_revision: "f".repeat(64),
+                action: edit("# Standup time\n\nStandup is at 10:00.\n"),
+                reason: None,
+            },
+        )
+        .unwrap_err();
+    match &err {
+        MemoryError::RevisionConflict {
+            current_revision, ..
+        } => assert_eq!(*current_revision, standup.revision),
+        other => panic!("{other}"),
+    }
+    assert_eq!(read(&h, &one, standup.id).revision, standup.revision);
+    assert!(
+        h.snapshot(&StoreScope::Home, ALICE)
+            .unwrap()
+            .pending
+            .is_none()
+    );
+
+    let first = h
+        .service
+        .update(
+            &one,
+            UpdateInput {
+                id: standup.id,
+                expected_revision: standup.revision.clone(),
+                action: edit("# Standup time\n\nStandup is at 10:00.\n"),
+                reason: None,
+            },
+        )
+        .unwrap();
+    assert_ne!(first.revision, standup.revision);
+    let err = h
+        .service
+        .update(
+            &two,
+            UpdateInput {
+                id: standup.id,
+                expected_revision: standup.revision.clone(),
+                action: edit("# Standup time\n\nStandup is at 09:45.\n"),
+                reason: None,
+            },
+        )
+        .unwrap_err();
+    assert_eq!(err.class(), "revision_conflict");
+    let now = read(&h, &two, standup.id);
+    assert!(now.body.contains("10:00"), "{}", now.body);
+    assert_eq!(now.revision, first.revision);
+}
+
+/// Fixture 16 steps 2–5 and §7b P12: forget takes ids with revisions; the
+/// tombstone carries the suppressed source; the result names the transcript
+/// copy that remains; a note citing the forgotten source is out of recall
+/// and searchable flagged; a missing id is `not_found` whatever revision.
+#[test]
+fn forget_takes_ids_with_revisions_and_records_a_tombstone() {
+    let h = Harness::new();
+    let tool = h.tool(ALICE, None);
+    let rowid = h.message_row("My favourite colour is green and my sister's birthday is 12 May");
+    let source = NoteSource {
+        kind: SourceType::Message,
+        id: rowid.to_string(),
+        observed_at: None,
+    };
+    let f = h
+        .service
+        .store(
+            &tool,
+            StoreInput {
+                title: "Favourite colour".into(),
+                body: "# Favourite colour\n\nThe user's favourite colour is green.\n".into(),
+                kind: Some(NoteKind::Preference),
+                sources: vec![source.clone()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let c = h
+        .service
+        .store(
+            &tool,
+            StoreInput {
+                title: "Sister's birthday".into(),
+                body: "# Sister's birthday\n\nThe user's sister's birthday is 12 May.\n".into(),
+                kind: Some(NoteKind::Fact),
+                sources: vec![source.clone()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let no_forget = h
+        .ctx(ALICE, None, Surface::ModelTool, Capabilities::READ_WRITE)
+        .unwrap();
+    let err = h
+        .service
+        .forget(
+            &no_forget,
+            ForgetInput {
+                targets: vec![(f.id, f.revision.clone())],
+                reason: None,
+            },
+        )
+        .unwrap_err();
+    assert_eq!(err.class(), "fixture:capability_denied");
+    assert!(err.to_string().contains("memory_forget"), "{err}");
+
+    let stale = h
+        .service
+        .forget(
+            &tool,
+            ForgetInput {
+                targets: vec![(f.id, "f".repeat(64))],
+                reason: None,
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        stale.results[0].status,
+        ForgetItemStatus::RevisionConflict { .. }
+    ));
+
+    let out = h
+        .service
+        .forget(
+            &tool,
+            ForgetInput {
+                targets: vec![(f.id, f.revision.clone())],
+                reason: Some("the user asked to forget their favourite colour".into()),
+            },
+        )
+        .unwrap();
+    assert_eq!(out.results[0].status, ForgetItemStatus::Forgotten);
+    assert!(out.retained.transcript);
+    assert!(
+        out.retained.note.contains("transcript"),
+        "{}",
+        out.retained.note
+    );
+    assert_eq!(out.changes.len(), 1);
+    assert_eq!(out.changes[0].change, "forgotten");
+    assert_eq!(out.changes[0].surface, Some(Surface::ModelTool));
+    assert_eq!(out.changes[0].origin, Origin::ExtractedUser);
+    let notes = h.home_notes_dir(ALICE_KEY);
+    assert!(note_file_for(&notes, f.id).is_none());
+    assert!(
+        !h.home()
+            .join("memory")
+            .join("owners")
+            .join(ALICE_KEY)
+            .join(".history")
+            .join(f.id.to_string())
+            .exists()
+    );
+    let snapshot = h.snapshot(&StoreScope::Home, ALICE).unwrap();
+    assert!(!snapshot.notes.contains_key(&f.id));
+    let tomb = snapshot.tombstone(&f.id).expect("a tombstone");
+    assert_eq!(tomb.origin, Origin::ExtractedUser);
+    assert_eq!(tomb.suppressed_sources, vec![format!("message:{rowid}")]);
+
+    let historical = h
+        .service
+        .search(
+            &tool,
+            SearchInput {
+                query: "favourite colour".into(),
+                historical: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(!search_ids(&historical).contains(&f.id));
+    let recalled = h
+        .service
+        .recall(
+            &tool,
+            "when is my sister's birthday?",
+            RecallBudget::default(),
+        )
+        .unwrap();
+    assert!(
+        !recall_ids(&recalled).contains(&c.id),
+        "a note citing a forgotten source is out of recall"
+    );
+    let found = search(&h, &tool, "sister birthday");
+    assert_eq!(search_ids(&found), vec![c.id]);
+    assert!(found.results[0].source_forgotten);
+    assert_eq!(found.results[0].status, NoteStatus::Active);
+
+    // P12: a target that no longer exists is `not_found`, whatever revision.
+    let again = h
+        .service
+        .forget(
+            &tool,
+            ForgetInput {
+                targets: vec![(f.id, f.revision.clone())],
+                reason: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(again.results[0].status, ForgetItemStatus::NotFound);
+    assert!(!again.retained.transcript);
+}
+
+/// Design §6, *recently learned*: `undo` is a forget by id and revision,
+/// refused once the origin is no longer `extracted_user`.
+#[test]
+fn undo_forgets_a_recently_learned_note_and_refuses_once_it_is_the_users() {
+    let h = Harness::new();
+    let tool = h.tool(ALICE, None);
+    let user = h.user(ALICE, None);
+    let learned = h.store(
+        &tool,
+        "Learned",
+        "# Learned\n\nFrom what you said.\n",
+        NoteKind::Fact,
+    );
+    let undone = h
+        .service
+        .undo(&user, learned.id, &learned.revision)
+        .unwrap();
+    assert_eq!(undone.results[0].status, ForgetItemStatus::Forgotten);
+    assert!(h.list_ids(&user, ListInput::default()).is_empty());
+
+    let mine = h.store(&user, "Mine", "# Mine\n\nSaved by hand.\n", NoteKind::Fact);
+    let err = h.service.undo(&user, mine.id, &mine.revision).unwrap_err();
+    assert_eq!(err.class(), "not_undoable");
+    assert!(err.to_string().contains("user"), "{err}");
+
+    let learned = h.store(
+        &tool,
+        "Learned again",
+        "# Learned again\n\nOne more.\n",
+        NoteKind::Fact,
+    );
+    let edited = h
+        .service
+        .update(
+            &user,
+            UpdateInput {
+                id: learned.id,
+                expected_revision: learned.revision.clone(),
+                action: edit("# Learned again\n\nNow mine.\n"),
+                reason: None,
+            },
+        )
+        .unwrap();
+    assert!(
+        !h.service
+            .recently_learned(&user, None, None)
+            .unwrap()
+            .iter()
+            .any(|i| i.id == learned.id)
+    );
+    let err = h
+        .service
+        .undo(&user, learned.id, &edited.revision)
+        .unwrap_err();
+    assert_eq!(err.class(), "not_undoable");
+    let err = h.service.undo(&user, mine.id, &"f".repeat(64)).unwrap_err();
+    assert_eq!(err.class(), "not_undoable", "the origin check comes first");
+}
+
+#[test]
+fn archive_hides_a_note_from_the_active_list_and_history_shows_it() {
+    let h = Harness::new();
+    let tool = h.tool(ALICE, None);
+    let note = h.store(
+        &tool,
+        "Old habit",
+        "# Old habit\n\nThe user used to deploy on Fridays.\n",
+        NoteKind::Fact,
+    );
+    let archived = h
+        .service
+        .update(
+            &tool,
+            UpdateInput {
+                id: note.id,
+                expected_revision: note.revision.clone(),
+                action: UpdateAction::Archive,
+                reason: Some("no longer true".into()),
+            },
+        )
+        .unwrap();
+    assert_eq!(archived.status, NoteStatus::Archived);
+    assert_eq!(archived.change.as_ref().map(|c| c.change), Some("archived"));
+    assert!(h.list_ids(&tool, ListInput::default()).is_empty());
+    assert_eq!(
+        h.list_ids(
+            &tool,
+            ListInput {
+                status: Some(NoteStatus::Archived),
+                ..Default::default()
+            }
+        ),
+        HashSet::from([note.id])
+    );
+    assert!(search_ids(&search(&h, &tool, "deploy fridays")).is_empty());
+    let historical = h
+        .service
+        .search(
+            &tool,
+            SearchInput {
+                query: "deploy fridays".into(),
+                historical: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(search_ids(&historical), vec![note.id]);
+    let recalled = h
+        .service
+        .recall(&tool, "when do we deploy?", RecallBudget::default())
+        .unwrap();
+    assert!(recalled.is_empty());
+}
+
+/// Fixture 24 and 16 steps 10–13: a forgotten replacement does not revive
+/// what it replaced — the tombstone keeps its `supersedes` and origin.
+#[test]
+fn a_forgotten_replacement_does_not_revive_its_predecessor() {
+    let h = Harness::new();
+    let tool = h.tool(ALICE, None);
+    let o = h.store(
+        &tool,
+        "Office day",
+        "# Office day\n\nThe user comes in on Mondays.\n",
+        NoteKind::Fact,
+    );
+    let r = h
+        .service
+        .store(
+            &tool,
+            StoreInput {
+                title: "Office day".into(),
+                body: "# Office day\n\nThe user comes in on Tuesdays now.\n".into(),
+                kind: Some(NoteKind::Fact),
+                supersedes: Some((o.id, o.revision.clone())),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(r.superseded, vec![o.id]);
+    assert_eq!(
+        h.list_ids(&tool, ListInput::default()),
+        HashSet::from([r.id])
+    );
+    let forgotten = h
+        .service
+        .forget(
+            &tool,
+            ForgetInput {
+                targets: vec![(r.id, r.revision.clone())],
+                reason: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(forgotten.results[0].status, ForgetItemStatus::Forgotten);
+    assert!(
+        h.list_ids(&tool, ListInput::default()).is_empty(),
+        "O stays superseded"
+    );
+    let old = read(&h, &tool, o.id);
+    assert_eq!(old.effective_status, EffectiveStatus::Superseded);
+    assert_eq!(old.superseded_by, vec![r.id]);
+    assert!(search_ids(&search(&h, &tool, "office mondays")).is_empty());
+}
