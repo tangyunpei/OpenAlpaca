@@ -4,7 +4,10 @@
 > `crates/openalpaca_core/src/security`, `crates/openalpaca_core/src/runner`,
 > `crates/openalpaca_core/src/orchestrator/skill`, `apps/openalpacad/src/services`,
 > `apps/openalpacad/src/managers` and the shipped `config/`. Workspace version 0.1.0,
-> schema version 42 (the `001_baseline.sql` baseline).
+> schema version 43 (the `001_baseline.sql` baseline). The memory-tool rows
+> were rewritten for the Markdown memory redesign on 2026-09-24, against
+> `feat/markdown-memory`; the rest of the page stands on the 2026-09-20
+> verification.
 >
 > Code-level reference for the OpenAlpaca tool system.  For architecture
 > and design rationale see the companion [DESIGN.md](./DESIGN.md).  Struct
@@ -91,12 +94,12 @@ under `crates/openalpaca_core/src/`.
 | `tools/builtins/artifact_write.rs` | `artifact_write`, the `workspace_write` artifact spill |
 | `tools/builtins/read_result.rs` | `read_result` |
 | `tools/builtins/shell_execute.rs` | `shell_execute` |
-| `tools/builtins/memory_search.rs` | `memory_search` |
+| `tools/builtins/memory_tools.rs` | The six memory tools — `memory_search`, `memory_read`, `memory_list` (the read surface, `memory_read_tools()`) and `memory_store`, `memory_update`, `memory_forget` (per request, main loop only) — thin, strictly validated adapters over `memory::service::MemoryService` |
 | `tools/builtins/update_persona/` | `update_persona` (`mod.rs` dispatcher; `soul.rs`, `user.rs`, `identity.rs`, `common.rs`) |
 | `tools/builtins/send.rs` | `send` (connector message/file delivery) |
 | `tools/builtins/helpers/mod.rs` | Workspace path validation, backup management |
 | `tools/builtins/main_loop.rs` | `main_loop_tool_set()` — the chat loop's per-request tools |
-| `tools/builtins/start_workflow.rs`, `task_status.rs`, `steer_workflow.rs`, `memory_ops.rs`, `invoke_skill.rs` | The per-request tools themselves |
+| `tools/builtins/start_workflow.rs`, `task_status.rs`, `steer_workflow.rs`, `invoke_skill.rs`, and the writers in `memory_tools.rs` | The per-request tools themselves |
 | `tools/builtins/tests.rs`, `helpers/tests.rs`, `update_persona/tests.rs` | Tests |
 
 ### Security
@@ -201,7 +204,7 @@ holds no database handle.
 | `task_id` | `Option<String>` | The workflow run; `None` outside one |
 | `owner_id` | `Option<String>` | The owning user |
 | `principal`, `scope` | `Option<…>` | The requesting principal and resource scope, where threaded |
-| `workspace_id` | `Option<String>` | Workspace root for **memory scoping**; derived from the daemon's current directory when the request carried none |
+| `workspace_id` | `Option<String>` | The resolved workspace root, derived from the daemon's current directory when the request carried none. **No memory path reads it** — the memory tools and the per-turn recall take `request_workspace_root`, so the daemon's CWD never selects a memory partition (memory redesign MD-5); `start_workflow` still forwards it into the run it starts, where nothing reads it |
 | `request_workspace_root` | `Option<String>` | The project root the *request* supplied, resolved.  Never derived from the current directory.  The only field that may place content on disk (`artifact_write`, the workspace spill) |
 | `workspace_path` | `Option<String>` | The path as sent; persisted with steering and follow-up items |
 | `skill_stack` | `Vec<String>` | Skill invocation chain, oldest first |
@@ -300,7 +303,7 @@ pub trait BuiltInTool: Send + Sync {
 }
 ```
 
-Context-dependent tools (`memory_search`, `update_persona`,
+Context-dependent tools (the six memory tools, `update_persona`,
 `workspace_read`, `workspace_write`, `artifact_write`, `read_result`,
 `file_write`, `send`, and every per-request tool) override
 `execute_with_context()`.  Several of them return an error from plain
@@ -652,12 +655,14 @@ All of these are registered in the shared `ToolRegistry` at daemon startup.
 |------|-----------|------------|-----------------|
 | `web_search` | `query` (required), `count` (default 5, max 20) | `web_access` | Brave Search API; requires `web_search.api_key` in `llm.toml` |
 | `web_fetch` | `url` (required) | `web_access` | SSRF-protected; response cap 1 MB |
-| `file_read` | `path` (required) | `file_read` | Workspace-scoped (relative paths only); max 10 MB |
-| `file_write` | `path`, `content` (required) | `file_write` | Workspace-scoped; max 10 MB; blocks SOUL.md/USER.md/IDENTITY.md (use `update_persona`); inside a session it snapshots a file before overwriting it and refuses the write if the snapshot cannot be kept |
+| `file_read` | `path` (required) | `file_read` | Workspace-scoped (relative paths only); max 10 MB; refuses any path whose first component is `state` — the store's machine state, memory control snapshots included — checked on the argument and again on the resolved path |
+| `file_write` | `path`, `content` (required) | `file_write` | Workspace-scoped; max 10 MB; blocks SOUL.md/USER.md/IDENTITY.md (use `update_persona`), `state/`, and a memory partition's own files — any `.history/` component, `MEMORY.md`, `memory/.gitignore` (`is_store_owned_path`, `helpers/mod.rs`); inside a session it snapshots a file before overwriting it and refuses the write if the snapshot cannot be kept |
 | `artifact_write` | `name`, `kind`, `content` (required); `note`, `summary`, `metadata` | `artifact_write` | `kind` ∈ `markdown`, `code`, `terminal`, `table`, `plan`, `image`, `html`, `binary`; versioned; max `max_artifact_bytes` (10 MB); store chosen from `request_workspace_root`, else the home store; needs a database |
 | `read_result` | `result_ref` (required), `offset`, `limit` | `read_result` | Reads only inside the calling session's `results/`; page 8 KB default, 64 KB max; needs `ToolContext.session_id` |
 | `shell_execute` | `command` (required) | `shell_execute` | 300s internal safety timeout; output cap 512 KB; injection patterns blocked by sanitizer |
-| `memory_search` | `query` (required), `limit` | `memory_read` | Registered only when DB + daemon config provided; hybrid FTS5 + sqlite-vec when an embedder is present; cascading workspace → global scope; owner from `ToolContext` |
+| `memory_search` | `query` (required, 1–512 chars); `kind`, `scope`, `limit` (1–20, default 8), `historical`, `as_of` | `memory_read` | Lexical only: every term of ≥ 3 characters against a `unicode61` and a trigram FTS5 table, a bounded substring scan for a 1–2 character query, no model; filters (status, supersession, tombstones, same-`fact_key` losers, validity) before the limit; every hit re-read and re-hashed; cited by heading and line range with `freshness`, `conflict`, `partial`, `index_state` |
+| `memory_read` | `id` (required); `expected_revision`, `section` | `memory_read` | One note, ≤ 32 KiB, with provenance; the service re-checks owner and scope |
+| `memory_list` | `kind`, `status` (default `active`), `scope`, `cursor`, `limit` (1–100), `include_history`, `include_candidates` | `memory_read` | Metadata only, paged by an opaque cursor |
 | `workspace_read` | `key` (optional) | `workspace_read` | Reads shared task workspace; requires `ToolContext.task_id` |
 | `workspace_write` | `key`, `content` (required), `entry_type`, `file_asset_id` | `workspace_write` | 32 KB content cap; optimistic locking with up to 5 jittered-backoff retries; an `artifact` entry is also saved to the artifact store and keeps a 512-character preview |
 | `update_persona` | `target` (`soul`/`user`/`identity`), `mode` (`replace`/`sections`), `content_b64`, `sections` | `persona_write` | Edits persona docs with validation + timestamped backups |
@@ -666,9 +671,10 @@ All of these are registered in the shared `ToolRegistry` at daemon startup.
 Built-in tools also carry MCP-style annotations
 (`annotations_for_builtin()` in `builtins/mod.rs`):
 
-- read-only, closed-world: `file_read`, `workspace_read`, `memory_search`, `read_result`
+- read-only, closed-world: `file_read`, `workspace_read`, `memory_search`, `memory_read`, `memory_list`, `read_result`
 - read-only, open-world: `web_fetch`, `web_search`
-- destructive, closed-world: `file_write`, `workspace_write`, `artifact_write`, `update_persona`
+- destructive, closed-world: `file_write`, `workspace_write`, `artifact_write`, `update_persona`, `memory_update`, `memory_forget`
+- none: `memory_store` — deliberately, so a plain save never prompts; what bounds a tool-issued `supersedes` is authority (a tool call can never retire a note the user wrote), not a card
 - destructive, open-world: `shell_execute`, `send`
 
 The destructive annotations feed the default confirmation set
@@ -683,19 +689,21 @@ capabilities.
 /// Core built-in tools (no persona context needed)
 pub fn builtin_tools(
     db: Option<Database>,
-    embedder: Option<Arc<dyn Embedder>>,
     daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
     web_search_config: Option<Arc<ArcSwap<WebSearchConfig>>>,
     workspace_root: Option<PathBuf>,
 ) -> Vec<RegisteredTool>
 // Returns: web_search, web_fetch, file_read, file_write, shell_execute,
 //          read_result, artifact_write, workspace_read, workspace_write (always)
-//          + memory_search (only if db + daemon_config provided)
+
+/// The memory read surface, registered by the daemon over its one service
+/// (`apps/openalpacad/src/services/tools.rs`, `register_memory_read_tools`)
+pub fn memory_read_tools(service: Arc<MemoryService>) -> Vec<RegisteredTool>
+// Returns: memory_search, memory_read, memory_list — each providing `memory_read`
 
 /// Full built-in tools with persona and connector context
 pub fn builtin_tools_with_persona_context(
     db: Option<Database>,
-    embedder: Option<Arc<dyn Embedder>>,
     persona_ctx: PersonaToolContext,
     daemon_config: Option<Arc<ArcSwap<DaemonConfig>>>,
     web_search_config: Option<Arc<ArcSwap<WebSearchConfig>>>,
@@ -767,7 +775,9 @@ the registry made for that one invocation:
 
 These tools are **not in the shared registry**.  Each caller value-clones
 the registry, registers its own instances into the clone, and builds its
-`SandboxManager` over that clone.  None carries annotations, and only the
+`SandboxManager` over that clone.  None carries annotations — except the
+chat loop's `memory_update` and `memory_forget`, registered with their
+built-in destructive profile so they prompt — and only the
 lead's own tools (the coordination tools, `post_update`, `queue_followup`)
 declare a capability, `orchestration`.  They reach the model because the
 caller lists them, and the caller's allow list is built from that same list.
@@ -780,9 +790,10 @@ caller lists them, and the caller's allow list is built from that same list.
 |------|-----------|--------------|
 | `start_workflow` | `goal` (required), `title` | Always |
 | `task_status` | `task_id` (optional) | Always |
-| `memory_store` | `content` (required) | With a database |
-| `memory_forget` | `query` (required) | With a database |
-| `memory_search` | see 6.1 (definition only; the backend is shared) | When registered |
+| `memory_store` | `title`, `body`, `kind` (required); `scope`, `aliases`, `tags`, `fact_key`, `sources`, `valid_from`, `valid_to`, `supersedes: {id, expected_revision}` | When the daemon has a memory service. Records origin `extracted_user`, never `user`; an exact duplicate answers the existing id; a `supersedes` whose target is a `user` note is `authority_conflict` |
+| `memory_update` | `id`, `expected_revision`, `action` (`edit` \| `archive` \| `confirm`) (required); `patch`, `reason` | Same. Prompts (destructive); refused on an `unattended` turn. `confirm` is always refused from a tool call — the refusal names the Memory view and `openalpaca memory confirm`; `edit`/`archive` of a `user` note is `authority_conflict` |
+| `memory_forget` | `targets: [{id, expected_revision}]` (1–20, required); `reason` | Same. Prompts (destructive); refused on an `unattended` turn. Forgets by id and revision only — never "the best match" |
+| `memory_search`, `memory_read`, `memory_list` | see 6.1 (definitions only; the backends are shared) | When registered |
 | `read_result` | see 6.1 (definition only) | With a session log **and** a database |
 | every `<server>__<tool>` / `<plugin>::<tool>` | — | When its extension is enabled (`extension_tool_defs()`) |
 | `invoke_skill` | `skill`, `query` (both required) | With an LLM router |
@@ -1212,7 +1223,7 @@ called **tool's name**.  The two are the same word for `file_read`,
 `file_write`, `artifact_write`, `shell_execute`, `read_result`, the
 workspace tools and any `<server>__<tool>`, and different words wherever
 one capability is served by tools with names of their own: `web_access`
-is `web_search` and `web_fetch`, `memory_read` is `memory_search`,
+is `web_search` and `web_fetch`, `memory_read` is `memory_search`, `memory_read` and `memory_list`,
 `messaging` is `send`.  So one rule holds for every row: **the allow list
 admits the tools the loop was handed.**  The first three rows build their
 list from the exposed definitions directly.  The lead and the subagent
@@ -1560,7 +1571,6 @@ pub(super) fn format_tool_error_with_hint(tool_name: &str, msg: &str) -> String
 | `web_fetch` | "timeout" | the URL may be unreachable; try a different source |
 | `shell_execute` | "timed out" | break the command into smaller steps or increase timeout |
 | `shell_execute` | "not found" | check if the command is installed or use the full path |
-| `memory_search` | "no results" | try broader search terms or check workspace_read for shared context |
 
 ---
 
@@ -1568,7 +1578,7 @@ pub(super) fn format_tool_error_with_hint(tool_name: &str, msg: &str) -> String
 
 ### Database Tables
 
-Defined in `crates/openalpaca_storage/src/migrations/001_baseline.sql` (schema version 42).
+Defined in `crates/openalpaca_storage/src/migrations/001_baseline.sql` (schema version 43).
 The generated [schema reference](../api/database/schema.md) is
 authoritative.
 

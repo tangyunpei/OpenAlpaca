@@ -3,7 +3,9 @@
 > **Last verified against the code on 2026-09-20** — `crates/openalpaca_core/src/tools`,
 > `crates/openalpaca_core/src/security`, `crates/openalpaca_core/src/runner`,
 > `apps/openalpacad/src/services`, `apps/openalpacad/src/managers` and the shipped
-> `config/`. Workspace version 0.1.0.
+> `config/`. Workspace version 0.1.0. The memory rows (§2.2, §3.1, §4.1,
+> §4.4, §6, §8.1) were rewritten for the Markdown memory redesign on
+> 2026-09-24, against `feat/markdown-memory`.
 >
 > Covers the architecture, design decisions, and conceptual model of the
 > OpenAlpaca tool system.  For implementation details, API surfaces, and
@@ -92,8 +94,8 @@ Every registered tool has a `ToolBackend` that executes its logic:
 
 | Backend | Examples | Source | Notes |
 |---------|----------|--------|-------|
-| **BuiltIn** | `shell_execute`, `file_read`, `file_write`, `artifact_write`, `read_result`, `web_search`, `web_fetch`, `memory_search`, `workspace_read`/`workspace_write`, `update_persona`, `send` | Rust code, registered at startup | Tools needing identity override `execute_with_context()` |
-| **BuiltIn (per request)** | Chat: `start_workflow`, `task_status`, `memory_store`, `memory_forget`, `invoke_skill`, `steer_workflow`, `queue_followup`. Lead agent: `spawn_subagent`, `spawn_subagents_batch`, `check_subagent_status`, `wait_for_subagents`, `post_update`, `queue_followup`, `invoke_skill` | Built fresh for one chat turn or one lead-agent run | Registered into a per-request copy of the registry, never the shared one (§4.2) |
+| **BuiltIn** | `shell_execute`, `file_read`, `file_write`, `artifact_write`, `read_result`, `web_search`, `web_fetch`, `memory_search`/`memory_read`/`memory_list`, `workspace_read`/`workspace_write`, `update_persona`, `send` | Rust code, registered at startup | Tools needing identity override `execute_with_context()` |
+| **BuiltIn (per request)** | Chat: `start_workflow`, `task_status`, `memory_store`, `memory_update`, `memory_forget`, `invoke_skill`, `steer_workflow`, `queue_followup`. Lead agent: `spawn_subagent`, `spawn_subagents_batch`, `check_subagent_status`, `wait_for_subagents`, `post_update`, `queue_followup`, `invoke_skill` | Built fresh for one chat turn or one lead-agent run | Registered into a per-request copy of the registry, never the shared one (§4.2) |
 | **BuiltIn (skill scripts)** | `skill_script:analyze`, `invoke_skill:<id>` | Skill `SKILL.md` frontmatter | Available only during that skill's invocation |
 | **Http** | User-defined REST API wrappers | `config/tools/*.toml` | SSRF-validated, response capped |
 | **Command** | User-defined CLI wrappers | `config/tools/*.toml` | Treated as shell-like for injection sanitization |
@@ -151,7 +153,7 @@ struct built by the sandbox caller (never by the LLM).  It carries:
 |-------|--------|
 | Who | `agent_id`, `agent_instance_id`, `owner_id`, `principal` |
 | Which run | `task_id`, `request_id`, `session_id`, `lane_key`, `source` |
-| Which workspace | `workspace_id` (memory scoping), `request_workspace_root` (the only field that may place files on disk), `workspace_path` (as sent by the client) |
+| Which workspace | `workspace_id` (CWD-derived when the request sent none; no memory path reads it), `request_workspace_root` (the only field that may place files on disk, and the one the memory tools resolve a project partition from), `workspace_path` (as sent by the client) |
 | Skill nesting | `skill_stack`, `effective_constraints` |
 | Side channels | `session_log` (for `file_write`'s pre-edit snapshot), `event_bus` (filled in by the sandbox so a tool can announce what it produced) |
 
@@ -205,7 +207,7 @@ of its capabilities matches any agent capability and none is denied.
   `denied_capabilities: [web_access]` for an offline coding agent).
 
 **Built-in capability names:** `file_read`, `file_write`, `artifact_write`,
-`shell_execute`, `memory_read` (memory_search), `read_result`,
+`shell_execute`, `memory_read` (memory_search, memory_read, memory_list), `read_result`,
 `web_access` (web_search, web_fetch), `workspace_read`, `workspace_write`,
 `persona_write` (update_persona), `messaging` (send), `orchestration`
 (lead-agent coordination tools).
@@ -292,10 +294,15 @@ registered outside the supervisors keeps working.
 ### 4.4 Trusted-Context Identity Injection (Anti-Spoofing)
 
 **Decision:** Owner-scoped tools take identity exclusively from the
-`ToolContext` constructed by the sandbox caller.  `memory_search`
-*overwrites* any LLM-supplied `owner_id`/`workspace_id` arguments with the
-context values inside its `execute_with_context()` implementation, and
-errors if the context carries no owner.  `update_persona` writes only to
+`ToolContext` constructed by the sandbox caller.  The six memory tools
+have closed schemas and **refuse** any argument they do not name —
+`owner_id`, `workspace_id`, a path, an origin — as `invalid_input` before
+anything is read or written; the owner, the project and the surface come
+from `MemoryService::context_for_tool`, and a context whose owner is not a
+real user (`system`, an unlinked identity) gets no memory at all.  A tool
+call is never a user-directed surface: what it stores records origin
+`extracted_user`, and it can neither confirm a candidate nor edit, archive
+or replace a note the user wrote.  `update_persona` writes only to
 the paths in its `PersonaToolContext`, configured at startup.
 `artifact_write` chooses its store from `request_workspace_root` alone, so
 a chat turn that carried no project lands its deliverable in the home store
@@ -584,15 +591,18 @@ Tools carry optional MCP-style annotations (`read_only_hint`,
 `destructive_hint`, `idempotent_hint`, `open_world_hint`).  They come from
 three places: `annotations_for_builtin()` for built-ins, the optional
 `annotations` table in TOML tool configs, and the MCP server itself for
-imported tools.  Plugin tools and the per-request tools carry none.
+imported tools.  Plugin tools carry none, and so do the per-request
+tools — except that the chat loop registers its instances with the profile
+their *name* has in `annotations_for_builtin()`, which is how
+`memory_update` and `memory_forget` prompt on the main loop.
 
 **Built-in annotation profiles:**
 
 | Tools | Profile |
 |-------|---------|
-| `file_read`, `workspace_read`, `memory_search`, `read_result` | read-only, idempotent, closed-world |
+| `file_read`, `workspace_read`, `memory_search`, `memory_read`, `memory_list`, `read_result` | read-only, idempotent, closed-world |
 | `web_fetch`, `web_search` | read-only, idempotent, open-world |
-| `file_write`, `workspace_write`, `artifact_write`, `update_persona` | destructive, closed-world |
+| `file_write`, `workspace_write`, `artifact_write`, `update_persona`, `memory_update`, `memory_forget` | destructive, closed-world |
 | `shell_execute`, `send` | destructive, open-world |
 
 Annotations feed three mechanisms:
@@ -787,7 +797,7 @@ reference is [Skill_Template_Reference.md](../Skill_Template_Reference.md)
 
 | Caller | Tool surface | Allow list |
 |--------|--------------|------------|
-| **Chat main loop** | `start_workflow`, `task_status`, `memory_store`/`memory_forget`/`memory_search` (with a database), `read_result` (with a session log), every tool of every enabled extension, `invoke_skill`, keyword-suggested built-ins; plus `steer_workflow` and `queue_followup` while the lane has a running workflow and steering is on | Exactly the surface it was handed |
+| **Chat main loop** | `start_workflow`, `task_status`, the six memory tools (with a memory service), `read_result` (with a session log), every tool of every enabled extension, `invoke_skill`, keyword-suggested built-ins; plus `steer_workflow` and `queue_followup` while the lane has a running workflow and steering is on | Exactly the surface it was handed |
 | **Lead agent** | `spawn_subagent`, `spawn_subagents_batch` (when `batch_spawn_enabled`, the default), `check_subagent_status`, `wait_for_subagents`, `post_update` and `queue_followup` (when steering is on), workspace tools, `memory_search`, `artifact_write` and `read_result` (when its template grants them), every tool of every enabled extension, `invoke_skill` | The template's capabilities plus the assembled surface; template denials still win |
 | **Subagents** | `resolve_agent_tools()` — the template's capabilities resolved to tools, plus the workspace tools | The template's capabilities plus the workspace tools, plus the surface those capabilities resolved to — a template that grants `web_access` admits `web_search` and `web_fetch`. The widening adds that surface and nothing else, and template denials still win — see [TECHNICAL.md §11.2](./TECHNICAL.md#112-sandboxpolicy) |
 | **Skills** | `requires_capabilities` or `tools.allow` resolved to tools, minus `tools.deny`, plus the skill's own `skill_script:*` and `invoke_skill:*` | Exactly the resolved surface |
